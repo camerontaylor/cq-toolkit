@@ -14,6 +14,10 @@
 //      `.strict()`, so a WorkerResult-shaped object polluted with an extra
 //      key named for a vendor message type (SDKMessage, BaseMessage,
 //      RunState) FAILS parsing.
+//   4. Encoded couplings (review round 3): `earlyStopReason` is present
+//      exactly when `stoppedEarly` is true (RunReportSchema and
+//      RunFinishedJournalEventSchema), and `attempt` is 1-based
+//      (JobStartedJournalEventSchema).
 //
 // Determinism: hand-rolled mulberry32 PRNG, fixed seeds derived from test
 // names. No Date.now(), no Math.random(), no new dependencies — vitest only.
@@ -581,4 +585,103 @@ describe('vendor-vocabulary frozen claim (strict persisted shapes)', () => {
       expect(JSON.stringify(result.error.issues)).toContain(vendorKey);
     },
   );
+});
+
+// ---------------------------------------------------------------------------
+// 4. Encoded couplings (review round 3): honest-stop pairing, 1-based attempts
+// ---------------------------------------------------------------------------
+
+/** Minimal valid RunReport with stoppedEarly=false and no optional fields. */
+function validRunReportBase(): RunReport {
+  return {
+    runId: 'run-coupling',
+    stoppedEarly: false,
+    counts: {
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 0,
+      failed: 0,
+      'budget-exhausted': 0,
+    },
+    jobs: [],
+  };
+}
+
+/** Asserts the instance FAILS schema.parse, naming the expectation on failure. */
+function failsParse(schema: z.ZodType<unknown>, instance: unknown, why: string): void {
+  const result = schema.safeParse(instance);
+  if (result.success) {
+    throw new Error(`${why} must fail parsing`);
+  }
+}
+
+describe('encoded couplings (honest-stop pairing, 1-based attempts)', () => {
+  test('RunReportSchema: stoppedEarly=true WITH earlyStopReason parses and round-trips', () => {
+    const instance: RunReport = {
+      ...validRunReportBase(),
+      stoppedEarly: true,
+      earlyStopReason: 'budget',
+    };
+    roundTripsThrough(kernelSchema.RunReportSchema, instance);
+  });
+
+  test('RunReportSchema: stoppedEarly=true WITHOUT earlyStopReason fails', () => {
+    failsParse(
+      kernelSchema.RunReportSchema,
+      { ...validRunReportBase(), stoppedEarly: true },
+      'stoppedEarly=true without earlyStopReason',
+    );
+  });
+
+  test('RunReportSchema: stoppedEarly=false WITH earlyStopReason fails', () => {
+    failsParse(
+      kernelSchema.RunReportSchema,
+      { ...validRunReportBase(), earlyStopReason: 'budget' },
+      'stoppedEarly=false with earlyStopReason',
+    );
+  });
+
+  test('RunFinishedJournalEventSchema mirrors the honest-stop coupling (both directions, incl. via the union)', () => {
+    const base = {
+      type: 'run-finished' as const,
+      runId: 'run-x',
+      at: '2026-01-01T00:00:00.000Z',
+    };
+    const good: RunFinishedJournalEvent = {
+      ...base,
+      stoppedEarly: true,
+      earlyStopReason: 'budget',
+    };
+    roundTripsThrough(kernelSchema.RunFinishedJournalEventSchema, good);
+    failsParse(
+      kernelSchema.RunFinishedJournalEventSchema,
+      { ...base, stoppedEarly: true },
+      'run-finished stoppedEarly=true without earlyStopReason',
+    );
+    failsParse(
+      kernelSchema.RunFinishedJournalEventSchema,
+      { ...base, stoppedEarly: false, earlyStopReason: 'budget' },
+      'run-finished stoppedEarly=false with earlyStopReason',
+    );
+    // The coupling holds when the event is routed through the union too.
+    failsParse(
+      kernelSchema.JournalEventSchema,
+      { ...base, stoppedEarly: true },
+      'JournalEventSchema stoppedEarly=true without earlyStopReason',
+    );
+  });
+
+  test('JobStartedJournalEventSchema: attempt is 1-based (attempt=0 fails, attempt=1 parses)', () => {
+    const base = {
+      type: 'job-started' as const,
+      runId: 'run-x',
+      at: '2026-01-01T00:00:00.000Z',
+      jobId: 'job-x',
+      op: 'op-x',
+    };
+    failsParse(kernelSchema.JobStartedJournalEventSchema, { ...base, attempt: 0 }, 'attempt=0');
+    const one: JobStartedJournalEvent = { ...base, attempt: 1 };
+    roundTripsThrough(kernelSchema.JobStartedJournalEventSchema, one);
+  });
 });

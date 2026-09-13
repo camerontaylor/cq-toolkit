@@ -17,6 +17,11 @@
 // (for instance a key named for a vendor message type) FAIL parsing instead
 // of being silently stripped. This backs the vendor-vocabulary frozen claim
 // exercised in test/kernel/types.test.ts.
+//
+// Documented couplings are encoded as refinements, not just prose:
+// `earlyStopReason` is present exactly when `stoppedEarly` is true
+// (RunReportSchema, RunFinishedJournalEventSchema) and `attempt` is 1-based
+// (JobStartedJournalEventSchema).
 import { z } from 'zod';
 import type {
   Budget,
@@ -216,7 +221,25 @@ export const RunReportSchema: z.ZodType<RunReport> = z.object({
   jobs: z.array(JobOutcomeSchema),
   usage: UsageSchema.optional(),
   costUSD: z.number().optional(),
-}).strict();
+}).strict()
+  // Honest-stop coupling (frozen): `earlyStopReason` is present exactly when
+  // `stoppedEarly` is true.
+  .superRefine((report, ctx) => {
+    if (report.stoppedEarly && report.earlyStopReason === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'earlyStopReason is required when stoppedEarly is true',
+        path: ['earlyStopReason'],
+      });
+    }
+    if (!report.stoppedEarly && report.earlyStopReason !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'earlyStopReason must be omitted when stoppedEarly is false',
+        path: ['earlyStopReason'],
+      });
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Kernel: journal events
@@ -239,7 +262,8 @@ export const JobStartedJournalEventSchema = z.object({
   at: z.string(),
   jobId: z.string(),
   op: z.string(),
-  attempt: z.number().int(),
+  // 1-based (frozen): the first dispatch of a job is attempt 1.
+  attempt: z.number().int().min(1),
 }).strict();
 
 export const JobFinishedJournalEventSchema = z.object({
@@ -259,7 +283,25 @@ export const RunFinishedJournalEventSchema = z.object({
   at: z.string(),
   stoppedEarly: z.boolean(),
   earlyStopReason: RunEarlyStopReasonSchema.optional(),
-}).strict();
+}).strict()
+  // Honest-stop coupling (frozen), mirroring RunReportSchema:
+  // `earlyStopReason` is present exactly when `stoppedEarly` is true.
+  .superRefine((event, ctx) => {
+    if (event.stoppedEarly && event.earlyStopReason === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'earlyStopReason is required when stoppedEarly is true',
+        path: ['earlyStopReason'],
+      });
+    }
+    if (!event.stoppedEarly && event.earlyStopReason !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'earlyStopReason must be omitted when stoppedEarly is false',
+        path: ['earlyStopReason'],
+      });
+    }
+  });
 
 export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion('type', [
   RunStartedJournalEventSchema,

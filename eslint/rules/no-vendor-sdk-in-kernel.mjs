@@ -1,7 +1,8 @@
 // no-vendor-sdk-in-kernel — boundary rule backing invariant I10: the kernel
 // stays vendor-neutral. The rule CORE reports every vendor-SDK-shaped module
-// source it sees; the kernel-only scoping lives in eslint.config.js (the rule
-// is registered under the "cq" plugin and applied to src/kernel/** only).
+// source it sees; the scoping lives in eslint.config.js (the rule is
+// registered under the "cq" plugin and applied to src/kernel/** and to the
+// driver seam types, src/driver/types.ts).
 // Stub in T0.2; becomes load-bearing in phase 1.
 
 // Vendor SDK sources the kernel must never import: the unscoped SDK
