@@ -38,5 +38,17 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
       code: 'import w from "openai";',
       errors: [{ messageId: 'vendorSdk' }],
     },
+    {
+      code: 'import p from "ai/provider";',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: 'import q from "openai/resources";',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: 'export * from "ai";',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
   ],
 });

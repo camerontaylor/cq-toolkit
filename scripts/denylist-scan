@@ -28,10 +28,11 @@
 //                                      must still fire on its own probe, and
 //                                      the clean probes and the copy must
 //                                      produce ZERO findings;
-//                                      (4) workflow-I4 — the CI workflow must
-//                                      trigger on push and pull_request with
-//                                      no path/branch/tag filtering. Exit 0
-//                                      only if all legs pass.
+//                                      (4) workflow-I4 — EVERY workflow in
+//                                      .github/workflows/ must trigger on
+//                                      push and pull_request with no path/
+//                                      branch/tag filtering. Exit 0 only if
+//                                      all legs pass.
 //
 // Zero npm dependencies: node:fs, node:path, node:child_process, node:os.
 // The gitleaks binary comes from $GITLEAKS_BIN if set, else from PATH; the
@@ -54,7 +55,7 @@ const PATTERNS_PATH = path.join(REPO_ROOT, 'policy', 'denylist', 'patterns.yml')
 // the leak filter, and its allowlist regex all come from PATTERNS_REL.
 const PATTERNS_REL = path.relative(REPO_ROOT, PATTERNS_PATH);
 const PATTERNS_ALLOW_RE = '(^|/)' + PATTERNS_REL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
-const WORKFLOW_PATH = path.join(REPO_ROOT, '.github', 'workflows', 'denylist.yml');
+const WORKFLOWS_DIR = path.join(REPO_ROOT, '.github', 'workflows');
 
 const TOP_KEYS = ['rules', 'clean_probes'];
 const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'];
@@ -512,13 +513,13 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
   return true;
 }
 
-// Leg 4: mechanically enforce invariant I4 by parsing the CI workflow as
-// TEXT. Fails unless denylist.yml has a `push:` trigger, a `pull_request:`
-// trigger, and none of paths/paths-ignore/branches/branches-ignore/tags/
-// tags-ignore filter keys anywhere outside comments. Comment-only lines are
-// dropped and inline comments (an unquoted `#` preceded by whitespace, to
-// end of line) are stripped BEFORE the checks, so `push:  # every push` is
-// valid (#3).
+// Leg 4: mechanically enforce invariant I4 by parsing the CI workflows as
+// TEXT. EVERY *.yml file under .github/workflows/ must have a `push:`
+// trigger, a `pull_request:` trigger, and none of paths/paths-ignore/
+// branches/branches-ignore/tags/tags-ignore filter keys anywhere outside
+// comments. Comment-only lines are dropped and inline comments (an unquoted
+// `#` preceded by whitespace, to end of line) are stripped BEFORE the
+// checks, so `push:  # every push` is valid (#3).
 function stripInlineComment(line) {
   let quote = null;
   for (let i = 0; i < line.length; i++) {
@@ -535,29 +536,53 @@ function stripInlineComment(line) {
 }
 
 function selfTestWorkflowI4() {
-  let text;
+  let entries;
   try {
-    text = fs.readFileSync(WORKFLOW_PATH, 'utf8');
+    entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
   } catch (e) {
-    console.error(`FAIL workflow-I4: cannot read ${WORKFLOW_PATH}: ${e.message}`);
+    console.error(`FAIL workflow-I4: cannot read ${WORKFLOWS_DIR}: ${e.message}`);
     return false;
   }
-  const code = text.split(/\r?\n/).map(stripInlineComment).filter((l) => l.trim() !== '');
-  if (!code.some((l) => /^\s*push:\s*$/.test(l))) {
-    console.error('FAIL workflow-I4: no `push:` trigger key in denylist.yml');
+  const workflows = entries
+    .filter((e) => e.isFile() && /\.yml$/.test(e.name))
+    .map((e) => e.name)
+    .sort();
+  if (workflows.length === 0) {
+    console.error(`FAIL workflow-I4: no *.yml workflows found in ${WORKFLOWS_DIR}`);
     return false;
   }
-  if (!code.some((l) => /^\s*pull_request:\s*$/.test(l))) {
-    console.error('FAIL workflow-I4: no `pull_request:` trigger key in denylist.yml');
-    return false;
-  }
-  for (const l of code) {
-    if (I4_BANNED_KEY.test(l)) {
-      console.error(`FAIL workflow-I4: trigger filter key violates invariant I4: "${l.trim()}"`);
-      return false;
+  let ok = true;
+  for (const name of workflows) {
+    const workflowPath = path.join(WORKFLOWS_DIR, name);
+    const rel = path.join('.github', 'workflows', name);
+    let text;
+    try {
+      text = fs.readFileSync(workflowPath, 'utf8');
+    } catch (e) {
+      console.error(`FAIL workflow-I4: cannot read ${workflowPath}: ${e.message}`);
+      ok = false;
+      continue;
+    }
+    const code = text.split(/\r?\n/).map(stripInlineComment).filter((l) => l.trim() !== '');
+    if (!code.some((l) => /^\s*push:\s*$/.test(l))) {
+      console.error(`FAIL workflow-I4: no \`push:\` trigger key in ${rel}`);
+      ok = false;
+      continue;
+    }
+    if (!code.some((l) => /^\s*pull_request:\s*$/.test(l))) {
+      console.error(`FAIL workflow-I4: no \`pull_request:\` trigger key in ${rel}`);
+      ok = false;
+      continue;
+    }
+    for (const l of code) {
+      if (I4_BANNED_KEY.test(l)) {
+        console.error(`FAIL workflow-I4: trigger filter key violates invariant I4 in ${rel}: "${l.trim()}"`);
+        ok = false;
+        break;
+      }
     }
   }
-  return true;
+  return ok;
 }
 
 function selfTest() {

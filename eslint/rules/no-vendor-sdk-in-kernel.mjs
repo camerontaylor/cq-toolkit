@@ -4,7 +4,7 @@
 // is registered under the "cq" plugin and applied to src/kernel/** only).
 // Stub in T0.2; becomes load-bearing in phase 1.
 
-const VENDOR_SDK_SOURCE = /^(?:@anthropic-ai\/|ai$|@ai-sdk\/|openai$)/;
+const VENDOR_SDK_SOURCE = /^(?:@anthropic-ai\/|@ai-sdk\/|ai(?:\/|$)|openai(?:\/|$))/;
 
 function checkSource(context, sourceNode, reportNode) {
   if (!sourceNode || sourceNode.type !== 'Literal' || typeof sourceNode.value !== 'string') return;
@@ -39,6 +39,9 @@ export default {
       },
       ExportNamedDeclaration(node) {
         if (node.source) checkSource(context, node.source, node);
+      },
+      ExportAllDeclaration(node) {
+        checkSource(context, node.source, node);
       },
       CallExpression(node) {
         if (

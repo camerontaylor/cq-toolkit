@@ -21,7 +21,7 @@ export default [
   // overlay), scoped to TS files under src/ and eslint/rules/.
   ...tseslint.configs.recommended.map((config) => ({
     ...config,
-    files: ['src/**/*.ts', 'eslint/rules/**/*.ts'],
+    files: ['src/**/*.ts', 'test/**/*.ts', 'eslint/rules/**/*.ts'],
   })),
   {
     files: ['src/kernel/**'],

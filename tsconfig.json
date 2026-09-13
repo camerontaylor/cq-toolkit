@@ -6,10 +6,8 @@
     "target": "ES2023",
     "lib": ["ES2023"],
     "types": ["node"],
-    "outDir": "dist",
-    "rootDir": "src",
-    "declaration": true,
+    "noEmit": true,
     "skipLibCheck": true
   },
-  "include": ["src"]
+  "include": ["src", "test", "eslint/rules", "vitest.config.ts"]
 }

@@ -24,8 +24,10 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Typecheck
-        run: npm run typecheck
+      # The typecheck gate IS this ratchet step: it runs the full
+      # `tsc --noEmit` and then enforces the error-count baseline, so no
+      # separate Typecheck step is needed (a second one would be a redundant
+      # full typecheck).
       - name: Typecheck ratchet
         run: node scripts/ratchet-typecheck.mjs
       - name: Lint
