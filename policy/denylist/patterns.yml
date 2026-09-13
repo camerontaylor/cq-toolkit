@@ -14,6 +14,11 @@
 # `id`, `description`, `regex`, `sample`, and optional `path`; values are
 # single-quoted or plain scalars. scripts/denylist-scan parses this with a
 # fail-closed hand-written parser and rejects any deviation.
+#
+# The tree scan deliberately overlays gitleaks' DEFAULT rules on top of these
+# classes (belt-and-braces, plan-sanctioned). To tune out a single default
+# rule, allowlist it by rule id — an [[rules.allowlists]] entry with
+# targetRules = ["<default-rule-id>"] — rather than dropping the overlay.
 
 rules:
   - id: class:webfront-hostnames

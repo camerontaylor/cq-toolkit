@@ -16,13 +16,17 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v5
-      - name: Install pinned gitleaks v8.30.1
+      - name: Install pinned gitleaks v8.30.1 (checksum-verified)
         run: |
           set -euo pipefail
-          curl -fsSL -o /tmp/gitleaks.tar.gz \
-            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz"
-          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
-          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          cd "${RUNNER_TEMP:-/tmp}"
+          base="https://github.com/gitleaks/gitleaks/releases/download/v8.30.1"
+          curl -fsSL -o gitleaks.tar.gz "${base}/gitleaks_8.30.1_linux_x64.tar.gz"
+          curl -fsSL -o checksums.txt "${base}/gitleaks_8.30.1_checksums.txt"
+          grep ' gitleaks_8.30.1_linux_x64\.tar\.gz$' checksums.txt > gitleaks.sha256
+          sha256sum -c gitleaks.sha256
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - name: Denylist tree scan
         run: ./scripts/denylist-scan
