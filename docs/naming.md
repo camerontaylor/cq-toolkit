@@ -1,5 +1,10 @@
 # Package-name record — cq-toolkit (T0.5)
 
+> **Plan identifiers:** `T0.5` and `plan §6` come from the toolkit's development
+> plan, maintained outside this repo (private research notes). Inlined rule:
+> plan §6 = "the publication checklist, which allows an early 0.0.0
+> name-reservation publish shipping only LICENSE + README".
+
 Decision record for the npm package name. All availability checks below were made
 2026-09-14 against the public npm registry (https://registry.npmjs.org) and GitHub
 repository search; the lane leader verified the same facts the same day, and this

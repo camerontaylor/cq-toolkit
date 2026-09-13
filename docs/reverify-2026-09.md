@@ -1,5 +1,11 @@
 # Dependency re-verification — 2026-09 (T0.5, DD-8)
 
+> **Plan identifiers:** `T0.5`, `DD-3`, `DD-8`, `R1`/`R2`, and `T1.4` come from
+> the toolkit's development plan, maintained outside this repo (private research
+> notes). Inlined rules: DD-8 = "re-verify dependency versions and licenses
+> before implementation starts (6-week staleness rule)"; DD-3 = "verify the
+> models.dev pricing-data license before vendoring the price map".
+
 This document is the re-verification required by the 6-week staleness rule
 (DD-8): the R1/R2 dependency research was current as of 2026-09-12, and this
 record re-checks every fact below directly at its source. Source of truth for
@@ -18,9 +24,16 @@ this record is the input to that confirmation, not a substitute for it.
 | `@ai-sdk/zai` | 3.0.10 | Apache-2.0 | 3.0.10 |
 | `@ai-sdk/deepseek` | 3.0.44 | Apache-2.0 | 3.0.44 |
 | `p-limit` | 7.3.2 | MIT | 7.3.2 |
+| `zod` | 4.6.4 | MIT | 4.6.4 |
+| `proper-lockfile` | 4.1.2 | MIT | 4.1.2 |
+| `@ast-grep/napi` | 0.45.3 | MIT | 0.45.3 |
 
 Every pin is at the registry-current version as of 2026-09-14 — nothing is
-stale; the leader saw the same 7.0.99 for `ai` at pin time. Authoritative full
+stale; the leader saw the same 7.0.99 for `ai` at pin time. The nine rows
+above cover every runtime dependency in package.json; the devDependencies
+(the `typescript` 6 alias chain, `vitest`, and the eslint set) were pinned at
+install time and are re-verified by `npm ci` in CI on every run, so they are
+out of scope for this table. Authoritative full
 license texts: Apache-2.0 at https://spdx.org/licenses/Apache-2.0.html, MIT at
 https://spdx.org/licenses/MIT.html (each package also ships the text in its
 published tarball).
