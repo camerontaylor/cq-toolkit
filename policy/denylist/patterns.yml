@@ -1,0 +1,57 @@
+# cq-toolkit denylist — single source of truth for must-never-publish content
+# classes. This file is the pattern source; scripts/denylist-scan consumes it,
+# converts the rules below into a gitleaks config, and runs the scan (plus a
+# --self-test that proves every class is non-vacuous in isolation and that the
+# clean probes stay clean). The samples below are intentionally dirty, so the
+# scan allowlists this exact file: it is the corpus, not a violation.
+#
+# Matching is case-sensitive by design: rules are lowercase so capitalized
+# ordinary words (Pluto, Ceres, "VP of Engineering") never trip. Bare names are
+# word-bounded (\b...\b) by design so substrings of ordinary words (phoenixes,
+# plutocracy, neutrons, extravagant) never trip either.
+#
+# Constrained format: top-level keys `rules` and `clean_probes`; rule keys
+# `id`, `description`, `regex`, `sample`, and optional `path`; values are
+# single-quoted or plain scalars. scripts/denylist-scan parses this with a
+# fail-closed hand-written parser and rejects any deviation.
+
+rules:
+  - id: class:webfront-hostnames
+    description: legacy internal hostnames
+    regex: '\b(ceres|pluto)\b|\b[a-z0-9-]+\.webfront\.app\b'
+    sample: 'redeploy ceres and pluto.webfront.app tonight'
+  - id: class:client-names
+    description: client names
+    regex: '\b(beedee|greenbooks|dahlsens|phoenix|flagstaff|map72|extrava|neutron)\b|\bmetal\.one\b'
+    sample: 'dashboard for beedee (metal.one brand family)'
+  - id: class:personal-paths
+    description: personal machine paths and bundle ids
+    regex: '/home/ctaylor\b|/home/app/webfront\b|\.pnpm-store\b|com\.webfront\.reap\b'
+    sample: 'cwd=/home/ctaylor store=$HOME/repos/.pnpm-store'
+  - id: class:portkey-config
+    description: portkey instance config and route/key material
+    regex: '\bportkey\b|\bpk-[A-Za-z0-9_-]{16,}\b'
+    sample: 'portkey route pk-live-abc123def456ghi789'
+  - id: class:agent-memory
+    description: agent memory corpus paths
+    regex: '\.om[cx]\b'
+    sample: 'sync .omc/memory daily; skip .omx'
+  - id: class:token-ssh-plumbing
+    description: token and ssh plumbing
+    regex: '-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----|\bssh-(rsa|ed25519|ecdsa|dsa) AAAA[A-Za-z0-9+/]{32,}|\bGH_FOR_FA\b|\bid_(rsa|ed25519)\b'
+    sample: 'key: -----BEGIN OPENSSH PRIVATE KEY-----'
+  - id: class:webfront-package-names
+    description: webfront package scope and vp CLI invocations
+    regex: '\bvp\s+(test|run|build|dev|exec|watch|preview)\b|@webfront/'
+    sample: 'vp test --changed origin/main'
+  - id: class:key-material-env
+    description: any content in a *.env* path is treated as key material
+    regex: '.+'
+    path: '(^|/)[^/]*\.env'
+    sample: 'API_KEY=sk-1234567890abcdef'
+clean_probes:
+  - 'phoenixes rise over plutocracy: extravagant mappings for the masses'
+  - 'VP of Engineering and the vp of operations both approved'
+  - 'astronomy notes: Ceres and Pluto are dwarf planets; neutrons spin'
+  - 'see the *.env* handling docs before rotating any key'
+  - 'map the strategy; flag the staff rota; extra values everywhere'

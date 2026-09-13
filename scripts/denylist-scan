@@ -1,0 +1,391 @@
+#!/usr/bin/env node
+// denylist-scan — the cq-toolkit publish gate for must-never-publish content.
+//
+// Reads policy/denylist/patterns.yml (the single source of truth for denylist
+// classes), converts it into a gitleaks TOML config in a temp directory
+// outside the repo (so the generated regexes themselves are never scanned),
+// and runs gitleaks over the repo working tree.
+//
+// Modes:
+//   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
+//   scripts/denylist-scan --self-test  positive probe per rule class (each rule
+//                                      must fire on its own sample in
+//                                      isolation) plus a clean-probe negative
+//                                      check; exit 0 only if everything passes
+//
+// Zero npm dependencies: node:fs, node:path, node:child_process, node:os.
+// The gitleaks binary comes from $GITLEAKS_BIN if set, else from PATH.
+// Repo root is resolved from this script's location: the script lives at
+// <root>/scripts/denylist-scan, so "../.." relative to the script file (or
+// ".." relative to its directory) is the repo root.
+
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const { spawnSync } = require('node:child_process');
+
+const REPO_ROOT = path.resolve(__filename, '..', '..');
+const PATTERNS_PATH = path.join(REPO_ROOT, 'policy', 'denylist', 'patterns.yml');
+
+const TOP_KEYS = ['rules', 'clean_probes'];
+const RULE_KEYS = ['id', 'description', 'regex', 'sample', 'path'];
+const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'];
+const TREE_ALLOWLIST_PATHS = [
+  '^\\.git/',
+  '(^|/)node_modules/',
+  '(^|/)dist/',
+  '(^|/)policy/denylist/patterns\\.yml$',
+];
+
+// ---------------------------------------------------------------------------
+// Hand-written parser for the constrained patterns.yml format (~40 lines).
+// Fail closed: unexpected keys, malformed nesting, duplicate keys, missing or
+// empty required keys, or zero rules all throw. A guard that cannot fail is a
+// no-op, so this parser is deliberately strict about the shape it accepts.
+// ---------------------------------------------------------------------------
+
+function parseScalar(raw, where) {
+  const s = raw.trim();
+  if (s === '') throw new Error(`${where}: empty value`);
+  if (s.startsWith('"')) throw new Error(`${where}: double-quoted values are not part of the constrained format`);
+  if (s.startsWith("'")) {
+    if (!/^'(?:[^']|'')*'$/s.test(s)) throw new Error(`${where}: unterminated single-quoted value`);
+    return s.slice(1, -1).replace(/''/g, "'");
+  }
+  if (/:\s|\s#/.test(s)) throw new Error(`${where}: plain value contains reserved characters`);
+  return s;
+}
+
+function splitKeyValue(s, where) {
+  const m = /^([A-Za-z_][A-Za-z0-9_]*):(?:[ \t]+(.*))?$/.exec(s);
+  if (!m) throw new Error(`${where}: expected "key: value"`);
+  return { key: m[1], value: parseScalar(m[2] || '', where) };
+}
+
+function parsePatterns(text) {
+  const rules = [];
+  const cleanProbes = [];
+  let section = null;
+  let rule = null;
+
+  text.split(/\r?\n/).forEach((raw, idx) => {
+    const where = `patterns.yml:${idx + 1}`;
+    if (raw.includes('\t')) throw new Error(`${where}: tab indentation is not part of the constrained format`);
+    const t = raw.trim();
+    if (t === '' || t.startsWith('#')) return;
+
+    // Top-level "key:" line: column 0, nothing after the colon.
+    if (/^[A-Za-z_][A-Za-z0-9_]*:$/.test(t)) {
+      const key = t.slice(0, -1);
+      if (!TOP_KEYS.includes(key)) throw new Error(`${where}: unexpected top-level key "${key}"`);
+      section = key;
+      rule = null;
+      return;
+    }
+    if (section === null) throw new Error(`${where}: content before the first section`);
+
+    // List item: exactly two spaces of indentation.
+    if (/^ {2}- /.test(raw) || raw === '  -') {
+      const rest = raw.slice(4);
+      if (section === 'clean_probes') {
+        cleanProbes.push(parseScalar(rest, where));
+      } else {
+        const kv = splitKeyValue(rest.trim(), where);
+        if (kv.key !== 'id') throw new Error(`${where}: rule item must start with "id", got "${kv.key}"`);
+        rule = { id: kv.value };
+        rules.push(rule);
+      }
+      return;
+    }
+
+    // Key inside a rule item: exactly four spaces of indentation.
+    if (/^ {4}[A-Za-z_]/.test(raw)) {
+      if (section !== 'rules' || rule === null) throw new Error(`${where}: nested key outside a rule item`);
+      const kv = splitKeyValue(raw.trim(), where);
+      if (!RULE_KEYS.includes(kv.key)) throw new Error(`${where}: unexpected rule key "${kv.key}"`);
+      if (Object.hasOwn(rule, kv.key)) throw new Error(`${where}: duplicate rule key "${kv.key}"`);
+      rule[kv.key] = kv.value;
+      return;
+    }
+
+    throw new Error(`${where}: malformed line (unexpected indentation or structure)`);
+  });
+
+  if (rules.length === 0) throw new Error('patterns.yml: zero rules parsed');
+  if (cleanProbes.length === 0) throw new Error('patterns.yml: clean_probes missing or empty');
+  for (const r of rules) {
+    for (const k of REQUIRED_RULE_KEYS) {
+      if (typeof r[k] !== 'string' || r[k].length === 0) throw new Error(`rule "${r.id}": missing or empty "${k}"`);
+    }
+  }
+  if (new Set(rules.map((r) => r.id)).size !== rules.length) throw new Error('patterns.yml: duplicate rule ids');
+  return { rules, cleanProbes };
+}
+
+function loadPatterns() {
+  let text;
+  try {
+    text = fs.readFileSync(PATTERNS_PATH, 'utf8');
+  } catch (e) {
+    console.error(`error: cannot read ${PATTERNS_PATH}: ${e.message}`);
+    process.exit(2);
+  }
+  try {
+    return parsePatterns(text);
+  } catch (e) {
+    console.error(`error: ${e.message}`);
+    process.exit(2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TOML generation. Regexes and paths go into TOML literal multi-line strings
+// ('''...''') so backslashes survive verbatim.
+// ---------------------------------------------------------------------------
+
+function tomlBasic(s, where) {
+  if (/["\\\r\n]/.test(s)) throw new Error(`${where}: value has characters unsupported in a TOML basic string`);
+  return `"${s}"`;
+}
+
+function tomlLiteral(s, where) {
+  if (s.includes("'")) throw new Error(`${where}: value contains a single quote; unsupported in a TOML literal string`);
+  return `'''${s}'''`;
+}
+
+function rulesToml(rules, where) {
+  let out = '';
+  for (const r of rules) {
+    out += '[[rules]]\n';
+    out += `id = ${tomlBasic(r.id, where)}\n`;
+    out += `description = ${tomlBasic(r.description, where)}\n`;
+    out += `regex = ${tomlLiteral(r.regex, where)}\n`;
+    if (r.path !== undefined) out += `path = ${tomlLiteral(r.path, where)}\n`;
+    out += 'tags = ["denylist"]\n\n';
+  }
+  return out;
+}
+
+function treeConfigToml(rules) {
+  let out = '# Generated by scripts/denylist-scan from policy/denylist/patterns.yml -- do not edit.\n\n';
+  out += '[extend]\nuseDefault = true\n\n';
+  out += rulesToml(rules, PATTERNS_PATH);
+  out += '[allowlist]\npaths = [\n';
+  out += TREE_ALLOWLIST_PATHS.map((p) => `  ${tomlLiteral(p, PATTERNS_PATH)},`).join('\n');
+  out += '\n]\n';
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// gitleaks plumbing
+// ---------------------------------------------------------------------------
+
+function gitleaksArgs(source, configPath, reportPath) {
+  return [
+    'detect',
+    '--source', source,
+    '--no-git',
+    '--config', configPath,
+    '--report-format', 'json',
+    '--report-path', reportPath,
+    '--redact',
+  ];
+}
+
+function runGitleaks(source, configPath, reportPath, label) {
+  const bin = process.env.GITLEAKS_BIN || 'gitleaks';
+  const res = spawnSync(bin, gitleaksArgs(source, configPath, reportPath), { encoding: 'utf8' });
+  if (res.error) {
+    if (res.error.code === 'ENOENT') {
+      console.error(`error: gitleaks executable not found (${bin}).`);
+      console.error('       Install gitleaks (e.g. brew install gitleaks) or point GITLEAKS_BIN at it.');
+      process.exit(127);
+    }
+    throw new Error(`${label}: could not run gitleaks: ${res.error.message}`);
+  }
+  return res;
+}
+
+function readReport(reportPath) {
+  try {
+    const raw = fs.readFileSync(reportPath, 'utf8').trim();
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function makeTempDir(prefix) {
+  try {
+    return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  } catch (e) {
+    console.error(`error: cannot create temp dir: ${e.message}`);
+    process.exit(2);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mode 1: tree scan
+// ---------------------------------------------------------------------------
+
+function treeScan() {
+  const { rules } = loadPatterns();
+  const tmp = makeTempDir('denylist-tree-');
+  try {
+    const configPath = path.join(tmp, 'gitleaks.toml');
+    const reportPath = path.join(tmp, 'report.json');
+    fs.writeFileSync(configPath, treeConfigToml(rules));
+    const res = runGitleaks(REPO_ROOT, configPath, reportPath, 'tree scan');
+    if (res.status === 0) {
+      console.log(`denylist: tree scan clean (${rules.length} rule classes active)`);
+      return 0;
+    }
+    if (res.status === 1) {
+      const findings = readReport(reportPath);
+      if (findings.length === 0) {
+        console.error('error: gitleaks exited 1 but its report contains no findings; gitleaks stderr follows');
+        if (res.stderr) process.stderr.write(res.stderr);
+        return 2;
+      }
+      for (const f of findings) console.error(`denylist finding: ${f.File}:${f.StartLine} [${f.RuleID}]`);
+      console.error(`denylist: ${findings.length} finding(s); tree is dirty`);
+      return 1;
+    }
+    console.error(`error: gitleaks exited ${res.status} during tree scan`);
+    if (res.stderr) process.stderr.write(res.stderr);
+    return 2;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Mode 2: --self-test
+// ---------------------------------------------------------------------------
+
+function slug(id) {
+  return id.replace(/[^A-Za-z0-9]+/g, '-');
+}
+
+function selfTestRule(tmpRoot, rule) {
+  // Scanned fixture dir lives under the self-test temp root, outside the repo;
+  // the config and report sit beside (not inside) the scanned dir so the
+  // generated regex text is never scanned.
+  const dir = fs.mkdtempSync(path.join(tmpRoot, `${slug(rule.id)}-`));
+  const configPath = path.join(tmpRoot, `${slug(rule.id)}.toml`);
+  const reportPath = path.join(tmpRoot, `${slug(rule.id)}.json`);
+  const probeName = rule.path !== undefined ? 'probe.env' : 'probe.txt';
+
+  if (rule.path !== undefined) {
+    let re;
+    try {
+      re = new RegExp(rule.path);
+    } catch (e) {
+      console.error(`FAIL ${rule.id}: path regex does not compile: ${e.message}`);
+      return false;
+    }
+    if (!re.test(probeName)) {
+      console.error(`FAIL ${rule.id}: probe file "${probeName}" does not match the rule's own path regex /${rule.path}/`);
+      return false;
+    }
+  }
+
+  fs.writeFileSync(path.join(dir, probeName), `${rule.sample}\n`);
+  fs.writeFileSync(configPath, rulesToml([rule], PATTERNS_PATH));
+
+  const res = runGitleaks(dir, configPath, reportPath, `self-test ${rule.id}`);
+  if (res.status !== 1) {
+    console.error(`FAIL ${rule.id}: expected gitleaks exit 1 on the sample probe, got ${res.status ?? `signal ${res.signal}`}`);
+    if (res.stderr) process.stderr.write(res.stderr);
+    return false;
+  }
+  const findings = readReport(reportPath);
+  if (!findings.some((f) => f.RuleID === rule.id)) {
+    const got = findings.map((f) => f.RuleID).join(', ') || 'none';
+    console.error(`FAIL ${rule.id}: exit 1 but report has no finding with RuleID "${rule.id}" (got: ${got})`);
+    return false;
+  }
+  return true;
+}
+
+function selfTestCleanProbes(tmpRoot, rules, cleanProbes) {
+  const dir = fs.mkdtempSync(path.join(tmpRoot, 'clean-'));
+  const configPath = path.join(tmpRoot, 'clean.toml');
+  const reportPath = path.join(tmpRoot, 'clean.json');
+  fs.writeFileSync(path.join(dir, 'clean-probes.txt'), `${cleanProbes.join('\n')}\n`);
+  fs.writeFileSync(configPath, rulesToml(rules, PATTERNS_PATH));
+  const res = runGitleaks(dir, configPath, reportPath, 'self-test clean-probes');
+  if (res.status === 0) return true;
+  const findings = readReport(reportPath);
+  for (const f of findings) console.error(`FAIL clean-probes: line ${f.StartLine} of the probe file tripped [${f.RuleID}]`);
+  if (findings.length === 0) {
+    console.error(`FAIL clean-probes: expected gitleaks exit 0, got ${res.status}`);
+    if (res.stderr) process.stderr.write(res.stderr);
+  }
+  return false;
+}
+
+function selfTest() {
+  const { rules, cleanProbes } = loadPatterns();
+  const tmp = makeTempDir('denylist-selftest-');
+  let passed = 0;
+  let failed = 0;
+  try {
+    // (a) every rule carries a non-empty sample. The parser already enforces
+    // presence; this re-asserts so the failure names the requirement.
+    for (const r of rules) {
+      if (r.sample.length === 0) {
+        console.error(`FAIL ${r.id}: rule has no non-empty "sample"`);
+        failed++;
+      }
+    }
+
+    // (b) each rule class is non-vacuous in isolation: custom-only config
+    // (no default-rules extension), only that rule, over the sample probe.
+    for (const r of rules) {
+      if (selfTestRule(tmp, r)) {
+        console.log(`PASS ${r.id}`);
+        passed++;
+      } else {
+        failed++;
+      }
+    }
+
+    // (c) false-positive tuning proof: all clean probes under ALL rules at
+    // once (again custom-only) must produce zero findings.
+    if (selfTestCleanProbes(tmp, rules, cleanProbes)) {
+      console.log('PASS clean-probes');
+      passed++;
+    } else {
+      failed++;
+    }
+
+    const total = rules.length + 1;
+    console.log(`total: ${passed}/${total} checks passed`);
+    return failed === 0 ? 0 : 1;
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+function main(argv) {
+  if (argv.length === 0) return treeScan();
+  if (argv.length === 1 && argv[0] === '--self-test') return selfTest();
+  console.error('usage: scripts/denylist-scan [--self-test]');
+  console.error('  (no flags)   scan the repo tree with the denylist rules');
+  console.error('  --self-test  prove each rule fires on its sample and clean probes stay clean');
+  return 2;
+}
+
+try {
+  process.exit(main(process.argv.slice(2)));
+} catch (e) {
+  console.error(`error: ${e && e.stack ? e.stack : e}`);
+  process.exit(2);
+}
