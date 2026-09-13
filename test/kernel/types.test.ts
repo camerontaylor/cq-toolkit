@@ -353,7 +353,7 @@ function genJobStarted(r: Rng): JobStartedJournalEvent {
 }
 
 function genJobFinished(r: Rng): JobFinishedJournalEvent {
-  return {
+  const event: JobFinishedJournalEvent = {
     type: 'job-finished',
     runId: id(r, 'run-'),
     at: isoTimestamp(r),
@@ -362,6 +362,11 @@ function genJobFinished(r: Rng): JobFinishedJournalEvent {
     inputsHash: id(r, 'hash-'),
     result: genOpResult(r),
   };
+  // Sometimes carry the optional usage rollup so the seeded property
+  // round-trip and the plain-data walk exercise both shapes.
+  const usage = sometimes(r, () => genUsage(r));
+  if (usage !== undefined) event.usage = usage;
+  return event;
 }
 
 function genRunFinished(r: Rng): RunFinishedJournalEvent {
@@ -732,11 +737,18 @@ describe('bogus discriminant rejection (VB1A)', () => {
     );
   });
 
-  test('JobStateSchema rejects a bogus state (success)', () => {
+  test('JobStateSchema rejects a bogus state string (success)', () => {
+    // JobStateSchema validates the BARE state string (a zod enum), so the
+    // rejection must be exercised with the string itself — an object payload
+    // would fail on shape, not on the bogus value.
+    failsParse(kernelSchema.JobStateSchema, 'success', "bogus JobState 'success'");
+  });
+
+  test('JobStatusSchema rejects an object carrying a bogus state (success)', () => {
     failsParse(
-      kernelSchema.JobStateSchema,
+      kernelSchema.JobStatusSchema,
       { jobId: 'job-x', state: 'success' },
-      "bogus JobState 'success'",
+      "bogus JobState 'success' on JobStatus",
     );
   });
 });

@@ -1,8 +1,9 @@
 // cq-toolkit flat ESLint config (T0.2 skeleton).
 // Scope: src/ and eslint/rules/. The custom boundary rule no-vendor-sdk-in-kernel
-// (invariant I10: kernel stays vendor-neutral) is stubbed here and becomes
-// load-bearing in phase 1 — it is applied as an error to src/kernel/** and
-// to the driver seam types (src/driver/types.ts).
+// (invariant I10: kernel stays vendor-neutral) is already load-bearing — it
+// fires as an error on src/kernel/** and on the driver seam types
+// (src/driver/types.ts), which hold the frozen types and zod schema mirrors;
+// kernel implementation code lands in phase 1.
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 import noVendorSdkInKernel from './eslint/rules/no-vendor-sdk-in-kernel.mjs';
