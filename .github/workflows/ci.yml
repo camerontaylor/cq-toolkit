@@ -1,0 +1,40 @@
+name: ci
+
+# Invariant I4: required checks never get paths-ignore — nor any path, branch,
+# or tag filter at all. This workflow triggers on every push and on every
+# pull_request, without exception. Skips, if ever needed, belong in job-level
+# `if:` conditions only; no `if:` is needed here.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # The typecheck gate IS this ratchet step: it runs the full
+      # `tsc6 --noEmit` over the whole repo config and then enforces the
+      # error-count baseline, so no separate Typecheck step is needed.
+      - name: Typecheck ratchet
+        run: node scripts/ratchet-typecheck.mjs
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm run test
+      # Emit gate: the ratchet step above is the typecheck gate; this step
+      # emits dist/ and recompiles (checked emit, no --noCheck) — the
+      # deliberate, boring-safe choice.
+      - name: Build
+        run: npm run build

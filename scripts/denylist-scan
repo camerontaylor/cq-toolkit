@@ -8,7 +8,9 @@
 //
 // Modes:
 //   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
-//   scripts/denylist-scan --self-test  four legs, three gitleaks runs:
+//   scripts/denylist-scan --self-test  four legs, three gitleaks runs; the
+//                                      pure-text (4) leg runs FIRST so its
+//                                      verdict never depends on gitleaks:
 //                                      (1) dirty fixture — every rule class
 //                                      must fire on ITS OWN sample probe
 //                                      (per-rule probe files, one scan,
@@ -26,10 +28,12 @@
 //                                      must still fire on its own probe, and
 //                                      the clean probes and the copy must
 //                                      produce ZERO findings;
-//                                      (4) workflow-I4 — the CI workflow must
-//                                      trigger on push and pull_request with
-//                                      no path/branch/tag filtering. Exit 0
-//                                      only if all legs pass.
+//                                      (4) workflow-I4 — EVERY workflow
+//                                      (*.yml and *.yaml, denylist.yml
+//                                      included) in .github/workflows/ must
+//                                      trigger on push and pull_request
+//                                      with no path/branch/tag filtering.
+//                                      Exit 0 only if all legs pass.
 //
 // Zero npm dependencies: node:fs, node:path, node:child_process, node:os.
 // The gitleaks binary comes from $GITLEAKS_BIN if set, else from PATH; the
@@ -52,7 +56,7 @@ const PATTERNS_PATH = path.join(REPO_ROOT, 'policy', 'denylist', 'patterns.yml')
 // the leak filter, and its allowlist regex all come from PATTERNS_REL.
 const PATTERNS_REL = path.relative(REPO_ROOT, PATTERNS_PATH);
 const PATTERNS_ALLOW_RE = '(^|/)' + PATTERNS_REL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$';
-const WORKFLOW_PATH = path.join(REPO_ROOT, '.github', 'workflows', 'denylist.yml');
+const WORKFLOWS_DIR = path.join(REPO_ROOT, '.github', 'workflows');
 
 const TOP_KEYS = ['rules', 'clean_probes'];
 const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'];
@@ -71,8 +75,10 @@ const TREE_ALLOWLIST_PATHS = [
   '(^|/)\\.gjc/',
   '(^|/)\\.DS_Store$',
 ];
-// Trigger-filter keys banned by invariant I4 (workflow leg).
-const I4_BANNED_KEY = /^\s*(paths|paths-ignore|branches|branches-ignore|tags|tags-ignore)\s*:/;
+// Trigger-filter keys banned by invariant I4 (workflow leg). Matched
+// MID-LINE (word-bounded) on comment-stripped lines, not just at line
+// start, so flow-style `on:` maps cannot hide a filter key.
+const I4_BANNED_KEY = /\b(paths|paths-ignore|branches|branches-ignore|tags|tags-ignore)\b\s*:/;
 
 // Known, expected failure (bad patterns.yml, bad environment): printed as a
 // one-line diagnostic without a stack trace.
@@ -510,13 +516,17 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
   return true;
 }
 
-// Leg 4: mechanically enforce invariant I4 by parsing the CI workflow as
-// TEXT. Fails unless denylist.yml has a `push:` trigger, a `pull_request:`
-// trigger, and none of paths/paths-ignore/branches/branches-ignore/tags/
-// tags-ignore filter keys anywhere outside comments. Comment-only lines are
-// dropped and inline comments (an unquoted `#` preceded by whitespace, to
-// end of line) are stripped BEFORE the checks, so `push:  # every push` is
-// valid (#3).
+// Leg 4: mechanically enforce invariant I4 by parsing the CI workflows as
+// TEXT. EVERY *.yml or *.yaml file under .github/workflows/ (GitHub
+// executes both) must be present in the first place — including
+// denylist.yml, the gate's own workflow — and each must have a `push:`
+// trigger, a `pull_request:` trigger, and none of paths/paths-ignore/
+// branches/branches-ignore/tags/tags-ignore filter keys anywhere outside
+// comments. Filter keys are matched mid-line (word-bounded), and the
+// flow-style trigger list `on: [push, pull_request]` is accepted; any flow
+// list line must carry both triggers. Comment-only lines are dropped and
+// inline comments (an unquoted `#` preceded by whitespace, to end of line)
+// are stripped BEFORE the checks, so `push:  # every push` is valid (#3).
 function stripInlineComment(line) {
   let quote = null;
   for (let i = 0; i < line.length; i++) {
@@ -532,30 +542,77 @@ function stripInlineComment(line) {
   return line;
 }
 
-function selfTestWorkflowI4() {
-  let text;
-  try {
-    text = fs.readFileSync(WORKFLOW_PATH, 'utf8');
-  } catch (e) {
-    console.error(`FAIL workflow-I4: cannot read ${WORKFLOW_PATH}: ${e.message}`);
-    return false;
-  }
-  const code = text.split(/\r?\n/).map(stripInlineComment).filter((l) => l.trim() !== '');
-  if (!code.some((l) => /^\s*push:\s*$/.test(l))) {
-    console.error('FAIL workflow-I4: no `push:` trigger key in denylist.yml');
-    return false;
-  }
-  if (!code.some((l) => /^\s*pull_request:\s*$/.test(l))) {
-    console.error('FAIL workflow-I4: no `pull_request:` trigger key in denylist.yml');
-    return false;
-  }
+// Per-workflow I4 checks over comment-stripped, non-empty lines; prints a
+// FAIL line naming the file and returns false on the first violation.
+// Filter keys are checked FIRST and mid-line so a flow-style `on:` map with
+// a filter (e.g. branches) is named for the filter, not just missing
+// triggers; a flow-style trigger list satisfies trigger presence only if it
+// carries both push and pull_request.
+function workflowI4Checks(rel, code) {
   for (const l of code) {
     if (I4_BANNED_KEY.test(l)) {
-      console.error(`FAIL workflow-I4: trigger filter key violates invariant I4: "${l.trim()}"`);
+      console.error(`FAIL workflow-I4: trigger filter key violates invariant I4 in ${rel}: "${l.trim()}"`);
+      return false;
+    }
+  }
+  const flowOn = code.filter((l) => /^\s*on:\s*\[[^\]]*\]/.test(l));
+  for (const l of flowOn) {
+    if (!/\bpush\b/.test(l) || !/\bpull_request\b/.test(l)) {
+      console.error(`FAIL workflow-I4: flow-style \`on:\` list in ${rel} must contain both push and pull_request: "${l.trim()}"`);
+      return false;
+    }
+  }
+  if (flowOn.length === 0) {
+    if (!code.some((l) => /^\s*push:\s*$/.test(l))) {
+      console.error(`FAIL workflow-I4: no \`push:\` trigger key in ${rel}`);
+      return false;
+    }
+    if (!code.some((l) => /^\s*pull_request:\s*$/.test(l))) {
+      console.error(`FAIL workflow-I4: no \`pull_request:\` trigger key in ${rel}`);
       return false;
     }
   }
   return true;
+}
+
+function selfTestWorkflowI4() {
+  let entries;
+  try {
+    entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
+  } catch (e) {
+    console.error(`FAIL workflow-I4: cannot read ${WORKFLOWS_DIR}: ${e.message}`);
+    return false;
+  }
+  const workflows = entries
+    .filter((e) => e.isFile() && /\.ya?ml$/.test(e.name))
+    .map((e) => e.name)
+    .sort();
+  if (workflows.length === 0) {
+    console.error(`FAIL workflow-I4: no *.yml or *.yaml workflows found in ${WORKFLOWS_DIR}`);
+    return false;
+  }
+  // The gate's own workflow must exist and be policed like every other one;
+  // a rename or delete during a refactor must not silently shrink the leg.
+  if (!workflows.includes('denylist.yml')) {
+    console.error(`FAIL workflow-I4: denylist.yml is missing from ${WORKFLOWS_DIR} (the gate's own workflow must be present and policed)`);
+    return false;
+  }
+  let ok = true;
+  for (const name of workflows) {
+    const workflowPath = path.join(WORKFLOWS_DIR, name);
+    const rel = path.join('.github', 'workflows', name);
+    let text;
+    try {
+      text = fs.readFileSync(workflowPath, 'utf8');
+    } catch (e) {
+      console.error(`FAIL workflow-I4: cannot read ${workflowPath}: ${e.message}`);
+      ok = false;
+      continue;
+    }
+    const code = text.split(/\r?\n/).map(stripInlineComment).filter((l) => l.trim() !== '');
+    if (!workflowI4Checks(rel, code)) ok = false;
+  }
+  return ok;
 }
 
 function selfTest() {
@@ -564,6 +621,17 @@ function selfTest() {
   let failed = 0;
   let checks = 0;
   try {
+    // Leg 4 FIRST: it is pure text (no gitleaks), so a machine without an
+    // 8.x gitleaks still gets the I4 leg verdict before the version gate
+    // below can throw.
+    checks++;
+    if (selfTestWorkflowI4()) console.log('PASS workflow-I4');
+    else failed++;
+
+    // Every remaining leg runs gitleaks, so the 8.x major gate belongs here
+    // — after the pure-text leg, before the first gitleaks invocation.
+    checkGitleaksMajorVersion();
+
     // Leg 1 — one dirty-fixture run; each rule class must fire on ITS OWN
     // sample probe. An infra failure counts as ONE failed check (#10).
     const dirty = selfTestDirtyFixture(tmp, rules);
@@ -593,11 +661,6 @@ function selfTest() {
     if (selfTestTreeConfig(tmp, rules, cleanProbes)) console.log('PASS tree-config');
     else failed++;
 
-    // Leg 4 — the CI workflow's triggers are unfiltered (invariant I4).
-    checks++;
-    if (selfTestWorkflowI4()) console.log('PASS workflow-I4');
-    else failed++;
-
     console.log(`total: ${checks - failed}/${checks} checks passed`);
     return failed === 0 ? 0 : 1;
   } finally {
@@ -615,7 +678,8 @@ function main(argv) {
     return treeScan();
   }
   if (argv.length === 1 && argv[0] === '--self-test') {
-    checkGitleaksMajorVersion();
+    // No version gate here: selfTest() runs the pure-text I4 leg first and
+    // gates the gitleaks-major check itself, after that leg.
     return selfTest();
   }
   console.error('usage: scripts/denylist-scan [--self-test]');
