@@ -30,6 +30,7 @@ export type {
   OpResult,
   Plan,
   PlanRegistryEntry,
+  RunCounts,
   RunEarlyStopReason,
   RunFinishedJournalEvent,
   RunOptions,

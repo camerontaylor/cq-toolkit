@@ -53,6 +53,9 @@ export type OpResult<R> =
  */
 export type JobState = 'queued' | 'running' | 'blocked' | 'done' | 'failed' | 'budget-exhausted';
 
+/** Job counts by state — all six states present, zeros included. */
+export type RunCounts = Record<JobState, number>;
+
 /** Point-in-time status of one job, derived at read time (e.g. statusOf(runId)). */
 export interface JobStatus {
   jobId: string;
@@ -79,7 +82,16 @@ export interface Plan {
   jobs: Job[];
 }
 
-/** Options for the plan runner (implemented in the next goal; frozen here). */
+/**
+ * Options for the plan runner (implemented in the next goal; frozen here).
+ *
+ * Cap precedence: where a RunOptions cap and a Limits cap overlap, the
+ * EFFECTIVE cap is the min of the two — effective USD cap =
+ * min(RunOptions.maxUsd, Limits.maxUsd); effective in-flight parallelism =
+ * min(RunOptions.concurrency, Limits.inFlightCeiling); effective per-job
+ * attempt cap = min(Budget.maxAttempts on the invocation (the
+ * RunOptions-equivalent), Limits.maxAttemptsPerJob).
+ */
 export interface RunOptions {
   /** Max jobs in flight — the ONE integer concurrency knob. */
   concurrency: number;
@@ -115,7 +127,7 @@ export interface RunReport {
   /** Why the run stopped early; present only when `stoppedEarly` is true. */
   earlyStopReason?: RunEarlyStopReason;
   /** Job counts by state (all six states, zeros included). */
-  counts: Record<JobState, number>;
+  counts: RunCounts;
   /** Per-job outcome rows, one per job in the plan. */
   jobs: JobOutcome[];
   /** Run-level token usage rollup, when available. */
@@ -128,6 +140,13 @@ export interface RunReport {
  * Per-run caps mirror. Dual caps are intentional and both stay:
  * `inFlightCeiling` bounds concurrent executions, while
  * `runDispatchQuota` bounds total dispatches per run.
+ *
+ * Cap precedence: when both RunOptions.maxUsd and Limits.maxUsd are set, the
+ * EFFECTIVE USD cap is min(RunOptions.maxUsd, Limits.maxUsd); effective
+ * in-flight parallelism is min(RunOptions.concurrency,
+ * Limits.inFlightCeiling); effective per-job attempt cap =
+ * min(Budget.maxAttempts on the invocation (the RunOptions-equivalent),
+ * Limits.maxAttemptsPerJob).
  */
 export interface Limits {
   maxUsd?: number;
@@ -162,7 +181,8 @@ export interface JobStartedJournalEvent {
 /**
  * Journal: one job reached a terminal outcome. Carries the frozen replay
  * record verbatim — `opId` + `inputsHash` + `result` — which identifies the
- * op and its input and reproduces the outcome on resume.
+ * op and its input and reproduces the outcome on resume. The optional
+ * `usage` rollup lets a resumed run keep per-job usage/cost accounting.
  */
 export interface JobFinishedJournalEvent {
   type: 'job-finished';
@@ -172,6 +192,8 @@ export interface JobFinishedJournalEvent {
   opId: string;
   inputsHash: string;
   result: OpResult<unknown>;
+  /** Per-job token usage rollup, when the driver reported it (USD stays derived-only downstream). */
+  usage?: Usage;
 }
 
 /** Journal: run finished (all jobs terminal, or stopped early). */

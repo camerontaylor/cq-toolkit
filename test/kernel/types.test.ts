@@ -530,6 +530,10 @@ describe('JSON round-trip serializability (seeded property)', () => {
 // ---------------------------------------------------------------------------
 
 describe('plain-data invariant', () => {
+  // Honest scope note (VB1A): this walk covers generator-emitted fields only —
+  // it is a generator-drift tripwire, not a proof of the plain-data invariant.
+  // The proof is the type system (persisted types declare no functions) plus
+  // the strict zod mirrors rejecting unexpected keys.
   test('no generated persisted instance contains a function-valued field', () => {
     for (const [name, , gen] of ROUND_TRIP_CASES) {
       const r = mulberry32(seedFor(`functions:${name}`));
@@ -683,5 +687,56 @@ describe('encoded couplings (honest-stop pairing, 1-based attempts)', () => {
     failsParse(kernelSchema.JobStartedJournalEventSchema, { ...base, attempt: 0 }, 'attempt=0');
     const one: JobStartedJournalEvent = { ...base, attempt: 1 };
     roundTripsThrough(kernelSchema.JobStartedJournalEventSchema, one);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 5. VB1A: resumed-run usage rollup + bogus-discriminant rejection
+// ---------------------------------------------------------------------------
+
+describe('JobFinishedJournalEvent optional usage (VB1A: resumed-run rollups)', () => {
+  const base = {
+    type: 'job-finished' as const,
+    runId: 'run-x',
+    at: '2026-01-01T00:00:00.000Z',
+    jobId: 'job-x',
+    opId: 'op-x',
+    inputsHash: 'hash-x',
+    result: { status: 'ok' as const, value: 42 },
+  };
+
+  test('job-finished WITH usage parses and round-trips', () => {
+    const event: JobFinishedJournalEvent = {
+      ...base,
+      usage: { input: 11, output: 7, cacheRead: 2, cacheWrite: 0, reasoning: 1 },
+    };
+    roundTripsThrough(kernelSchema.JobFinishedJournalEventSchema, event);
+    const parsed = kernelSchema.JournalEventSchema.parse(JSON.parse(JSON.stringify(event)));
+    expect(parsed).toEqual(event);
+  });
+
+  test('job-finished WITHOUT usage parses and round-trips (usage stays optional)', () => {
+    const event: JobFinishedJournalEvent = { ...base };
+    roundTripsThrough(kernelSchema.JobFinishedJournalEventSchema, event);
+    const parsed = kernelSchema.JournalEventSchema.parse(JSON.parse(JSON.stringify(event)));
+    expect(parsed).toEqual(event);
+  });
+});
+
+describe('bogus discriminant rejection (VB1A)', () => {
+  test('OpResultSchema rejects a bogus status (cancelled)', () => {
+    failsParse(
+      kernelSchema.OpResultSchema,
+      { status: 'cancelled', value: 1 },
+      "bogus OpResult status 'cancelled'",
+    );
+  });
+
+  test('JobStateSchema rejects a bogus state (success)', () => {
+    failsParse(
+      kernelSchema.JobStateSchema,
+      { jobId: 'job-x', state: 'success' },
+      "bogus JobState 'success'",
+    );
   });
 });

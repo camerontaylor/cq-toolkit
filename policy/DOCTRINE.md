@@ -162,8 +162,9 @@ vendor; kernel types referencing a vendor SDK make the core unportable and push 
 dependency churn onto every adopter.
 
 **Enforcement.** The boundary rule `eslint/rules/no-vendor-sdk-in-kernel.mjs` runs in
-lint today as an error scoped to `src/kernel/**` (`eslint.config.js`); that tree is
-still empty of code, so it turns load-bearing in phase 1. Vendor SDKs live only in
+lint today as an error scoped to `src/kernel/**` and the seam types file
+`src/driver/types.ts` (`eslint.config.js`); that tree is still empty of code, so it
+turns load-bearing in phase 1. Vendor SDKs live only in
 `src/driver/drivers/`; persisted-data neutrality lands with the phase-1 schemas.
 
 ## I11 — GitHub facts are carried as tests

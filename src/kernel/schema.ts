@@ -45,6 +45,7 @@ import type {
   Limits,
   OpResult,
   Plan,
+  RunCounts,
   RunEarlyStopReason,
   RunOptions,
   RunReport,
@@ -195,8 +196,8 @@ export const LimitsSchema: z.ZodType<Limits> = z.object({
 
 export const RunEarlyStopReasonSchema: z.ZodType<RunEarlyStopReason> = z.literal('budget');
 
-/** Mirrors `Record<JobState, number>`: all six states required, so a missing key fails the ZodType annotation. */
-export const RunCountsSchema: z.ZodType<Record<JobState, number>> = z.object({
+/** Mirrors `RunCounts`: all six states required, so a missing key fails the ZodType annotation. */
+export const RunCountsSchema: z.ZodType<RunCounts> = z.object({
   queued: z.number(),
   running: z.number(),
   blocked: z.number(),
@@ -275,6 +276,8 @@ export const JobFinishedJournalEventSchema = z.object({
   opId: z.string(),
   inputsHash: z.string(),
   result: OpResultSchema,
+  // Per-job usage rollup for resumed runs (USD stays derived-only downstream).
+  usage: UsageSchema.optional(),
 }).strict();
 
 export const RunFinishedJournalEventSchema = z.object({
