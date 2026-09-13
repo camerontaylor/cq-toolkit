@@ -39,6 +39,14 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
       errors: [{ messageId: 'vendorSdk' }],
     },
     {
+      code: 'import codex from "@openai/codex-sdk";',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: 'import mistral from "@mistralai/sdk";',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
       code: 'import p from "ai/provider";',
       errors: [{ messageId: 'vendorSdk' }],
     },

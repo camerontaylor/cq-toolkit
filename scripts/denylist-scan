@@ -29,10 +29,15 @@
 //                                      the clean probes and the copy must
 //                                      produce ZERO findings;
 //                                      (4) workflow-I4 — every workflow
-//                                      named in REQUIRED_WORKFLOW_FILES
-//                                      (the repo's required checks;
-//                                      denylist.yml included) must exist
-//                                      and its top-level `on:` block must
+//                                      named in REQUIRED_WORKFLOW_CHECKS
+//                                      (the repo's required checks, each
+//                                      entry pairing a workflow FILE with
+//                                      the CHECK NAME of its producing
+//                                      job; denylist.yml included) must
+//                                      exist, declare a job with exactly
+//                                      its paired check name at the first
+//                                      indent level under `jobs:`, and
+//                                      its top-level `on:` block must
 //                                      carry BOTH push and pull_request
 //                                      as TOP-LEVEL entries with NO
 //                                      filter keys (paths, paths-ignore,
@@ -92,15 +97,26 @@ const TREE_ALLOWLIST_PATHS = [
   '(^|/)\\.gjc/',
   '(^|/)\\.DS_Store$',
 ];
-// I4 binds to required checks; these are the repo's required-check
-// workflows — extend when a new required check lands. Each listed file must
-// exist (a missing one fails the workflow-I4 leg by name, which also keeps
-// the denylist.yml-presence requirement alive) and its `on:` block must be
-// unfiltered. Queue-mechanics workflows (init/gate/sync: dispatch-only,
+// I4 binds to required checks; these pairs are the repo's required-check
+// LINKAGE — each entry names the workflow FILE that produces a required
+// check and the CHECK NAME that branch protection, the gate's wait list,
+// and the check-run API all key on. That name is the producing job's id
+// (GitHub reports a job's check run under the job id), so the workflow-I4
+// leg asserts the file declares a job with exactly that id at the first
+// indent level under `jobs:` — without the pairing, a job rename leaves
+// every I4 leg green while PRs hang unmergeable and the gate times out
+// waiting for a check name nothing produces. Extend when a new required
+// check lands. Each listed file must exist (a missing one fails the
+// workflow-I4 leg by name, which also keeps the denylist.yml-presence
+// requirement alive) and its `on:` block must be unfiltered.
+// Queue-mechanics workflows (init/gate/sync: dispatch-only,
 // merge-queue-only, main-only triggers) are deliberately NOT listed — they
-// filter by design and get the sanity check instead. An empty list fails
-// the leg closed: I4 must never become vacuous.
-const REQUIRED_WORKFLOW_FILES = ['denylist.yml', 'ci.yml'];
+// filter by design and get the sanity check instead. An empty or malformed
+// list fails the leg closed: I4 must never become vacuous.
+const REQUIRED_WORKFLOW_CHECKS = [
+  { workflow: 'denylist.yml', check: 'denylist' },
+  { workflow: 'ci.yml', check: 'static' },
+];
 // Trigger-filter keys banned by invariant I4 inside a REQUIRED workflow's
 // `on:` block. Matched MID-LINE (word-bounded) on comment-stripped lines of
 // that block only, with an optional quote on either side of the key, so
@@ -549,7 +565,9 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
 // EVERY pull request, so its workflow must never filter its triggers — no
 // paths, no paths-ignore, no branch or tag filters of any kind; a job-level
 // `if:` is the only sanctioned skip mechanism. Every file named in
-// REQUIRED_WORKFLOW_FILES must exist and its top-level `on:` block must
+// REQUIRED_WORKFLOW_CHECKS must exist, declare a job with exactly its
+// paired check name at the first indent level under `jobs:`, and its
+// top-level `on:` block must
 // carry BOTH a `push` and a `pull_request` trigger — each as a TOP-LEVEL
 // entry of the `on:` value, so a name merely nested inside another
 // trigger's payload (an input named `push`, say) never satisfies presence —
@@ -723,22 +741,56 @@ function onBlockHasTrigger(block, trigger) {
   return false;
 }
 
+// The `jobs:` key line at column 0 (workflows are block-style YAML; a
+// flow-style `jobs: {a: {...}}` mapping has never appeared here and is not
+// parsed — the same constrained-text stance as the `on:` parser above).
+const JOBS_KEY_LINE = /^jobs:/;
+
+// Does the workflow text declare a job with EXACTLY this id at the first
+// indent level under the column-0 `jobs:` key? Parsed as comment-stripped
+// text: the block starts at the `jobs:` key line and ends at the next
+// column-0 content line; the base indent is the first indented line's, and
+// a job id is a base-indent line whose key spelling (before the colon) is
+// exactly the wanted name. Deeper lines are job bodies, not job ids.
+function workflowDeclaresJob(text, jobName) {
+  const stripped = text.split(/\r?\n/).map(stripInlineComment);
+  const start = stripped.findIndex((l) => JOBS_KEY_LINE.test(l));
+  if (start === -1) return false;
+  let base = null;
+  for (let i = start + 1; i < stripped.length; i++) {
+    const line = stripped[i];
+    if (line.trim() === '') continue;
+    if (!line.startsWith(' ')) break; // column-0 content: end of jobs:
+    const ind = line.match(/^ */)[0].length;
+    if (base === null) base = ind;
+    if (ind !== base) continue; // deeper: job body, not a job id
+    const kv = /^([A-Za-z_][A-Za-z0-9_-]*):/.exec(line.trim());
+    if (kv && kv[1] === jobName) return true;
+  }
+  return false;
+}
+
 // Per-workflow checks over the extracted, comment-stripped `on:` block;
 // prints a FAIL line naming the file and the reason and returns false on
-// the first violation. REQUIRED files: no filter keys anywhere in the block
+// the first violation. REQUIRED files (found by pairing the file name
+// against REQUIRED_WORKFLOW_CHECKS): no filter keys anywhere in the block
 // (checked first, mid-line, so a filtered flow map is named for the filter,
-// not just missing triggers) and both triggers present as top-level entries
-// — which also means a null/empty or scalar `on:` hard-fails required
-// entries. Other files: the block merely has to parse (any trigger shape —
-// filtered, scalar, or null); the strict obligation belongs to required
-// checks only, because queue mechanics legitimately filter their triggers.
+// not just missing triggers), both triggers present as top-level entries —
+// which also means a null/empty or scalar `on:` hard-fails required
+// entries — and the file must declare a job with exactly the paired check
+// name at the first indent level under `jobs:`, so a job rename can never
+// silently orphan the branch-protection context it feeds. Other files: the
+// block merely has to parse (any trigger shape — filtered, scalar, or
+// null); the strict obligation belongs to required checks only, because
+// queue mechanics legitimately filter their triggers.
 function workflowI4Checks(rel, name, text) {
   const block = extractOnBlock(text);
   if (block === null) {
     console.error(`FAIL workflow-I4: no top-level \`on:\` block in ${rel}`);
     return false;
   }
-  if (!REQUIRED_WORKFLOW_FILES.includes(name)) {
+  const pair = REQUIRED_WORKFLOW_CHECKS.find((p) => p.workflow === name);
+  if (pair === undefined) {
     return true;
   }
   for (const l of block) {
@@ -755,14 +807,60 @@ function workflowI4Checks(rel, name, text) {
     console.error(`FAIL workflow-I4: no \`pull_request\` trigger in the \`on:\` block of ${rel}`);
     return false;
   }
+  if (!workflowDeclaresJob(text, pair.check)) {
+    console.error(`FAIL workflow-I4: required workflow ${rel} does not declare a job "${pair.check}" at the first indent level under \`jobs:\` — the "${pair.check}" required check name would dangle (restore the job id, or rename the check everywhere at once: the pairing, branch protection, and the gate's wait list)`);
+    return false;
+  }
   return true;
 }
 
-function selfTestWorkflowI4() {
-  if (REQUIRED_WORKFLOW_FILES.length === 0) {
-    console.error('FAIL workflow-I4: REQUIRED_WORKFLOW_FILES is empty — I4 would police nothing (fail-closed)');
-    return false;
+// Fail-closed gate on the pairing data itself: every entry must be an
+// object carrying non-empty string `workflow` and `check` values, with no
+// duplicated workflow file or check name. Returns FAIL diagnostics (an
+// empty array means the data is sound).
+function requiredWorkflowChecksProblems() {
+  const problems = [];
+  if (REQUIRED_WORKFLOW_CHECKS.length === 0) {
+    problems.push('REQUIRED_WORKFLOW_CHECKS is empty — I4 would police nothing (fail-closed)');
   }
+  const files = new Set();
+  const checks = new Set();
+  for (const pair of REQUIRED_WORKFLOW_CHECKS) {
+    const wellFormed =
+      pair !== null &&
+      typeof pair === 'object' &&
+      !Array.isArray(pair) &&
+      typeof pair.workflow === 'string' &&
+      pair.workflow.length > 0 &&
+      typeof pair.check === 'string' &&
+      pair.check.length > 0;
+    if (!wellFormed) {
+      problems.push(`malformed required-check pair ${JSON.stringify(pair) ?? String(pair)} — expected { workflow: <file>, check: <job id> } with non-empty strings`);
+      continue;
+    }
+    if (files.has(pair.workflow)) {
+      problems.push(`duplicate workflow "${pair.workflow}" in REQUIRED_WORKFLOW_CHECKS`);
+    }
+    if (checks.has(pair.check)) {
+      problems.push(`duplicate check name "${pair.check}" in REQUIRED_WORKFLOW_CHECKS`);
+    }
+    files.add(pair.workflow);
+    checks.add(pair.check);
+  }
+  return problems;
+}
+
+function selfTestWorkflowI4() {
+  // Fail closed on the pairing data FIRST: empty or malformed entries mean
+  // I4 would police nothing or police it against garbage, so the leg never
+  // gets to trust the data.
+  let ok = true;
+  const problems = requiredWorkflowChecksProblems();
+  for (const problem of problems) {
+    console.error(`FAIL workflow-I4: ${problem}`);
+    ok = false;
+  }
+  if (!ok) return false;
   let entries;
   try {
     entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
@@ -780,12 +878,13 @@ function selfTestWorkflowI4() {
   }
   // Fail closed on the policy data itself: a listed required workflow that
   // has gone missing (rename or delete during a refactor) fails the leg by
-  // name — this is also what keeps the denylist.yml-presence requirement
-  // alive, since the gate's own workflow is in the list.
-  let ok = true;
-  for (const required of REQUIRED_WORKFLOW_FILES) {
-    if (!workflows.includes(required)) {
-      console.error(`FAIL workflow-I4: required workflow "${required}" is missing from ${WORKFLOWS_DIR}`);
+  // name — this is what keeps the denylist.yml-presence requirement alive:
+  // denylist.yml is the required file the list carries.
+  // merge-queue-gate.yml deliberately is NOT in the list (queue mechanics
+  // filter their triggers by design and get the sanity check only).
+  for (const { workflow } of REQUIRED_WORKFLOW_CHECKS) {
+    if (!workflows.includes(workflow)) {
+      console.error(`FAIL workflow-I4: required workflow "${workflow}" is missing from ${WORKFLOWS_DIR}`);
       ok = false;
     }
   }

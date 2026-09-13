@@ -15,10 +15,12 @@ A filtered trigger means the workflow simply does not run for some PRs — a
 docs-only PR, say. The required check then never reports, GitHub waits
 forever, and the PR hangs unmergeable with no red check to point at: the
 check is silently absent, which is much worse than a failing check. The
-self-test in `scripts/denylist-scan` enforces this mechanically: every file
-listed in `REQUIRED_WORKFLOW_FILES` must exist and its top-level `on:` block
-must carry both `push` and `pull_request` with zero filter keys inside that
-block (fail-closed on an empty list or a missing listed file).
+self-test in `scripts/denylist-scan` enforces this mechanically: every
+entry in `REQUIRED_WORKFLOW_CHECKS` (each pairing a required workflow file
+with the check name of the job that must produce it) must exist, declare a
+job with exactly that paired name, and carry both `push` and `pull_request`
+in its top-level `on:` block with zero filter keys inside that block
+(fail-closed on an empty or malformed list or a missing listed file).
 
 ## Worked example — this repo's static job
 
@@ -76,5 +78,5 @@ jobs:
 When adopting for another repository: keep the `on:` block and the
 permissions shape exactly as shown, swap the tokens, and replace the four
 command steps with your own `{{COMMANDS...}}` — then add the resulting
-workflow's file name to `REQUIRED_WORKFLOW_FILES` so the I4 self-test polices
-it.
+workflow's file name and job id (the check name) as a pair in
+`REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.

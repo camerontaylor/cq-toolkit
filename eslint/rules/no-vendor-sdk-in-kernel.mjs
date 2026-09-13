@@ -4,7 +4,13 @@
 // is registered under the "cq" plugin and applied to src/kernel/** only).
 // Stub in T0.2; becomes load-bearing in phase 1.
 
-const VENDOR_SDK_SOURCE = /^(?:@anthropic-ai\/|@ai-sdk\/|ai(?:\/|$)|openai(?:\/|$))/;
+// Vendor SDK sources the kernel must never import: the unscoped SDK
+// families (ai, openai) plus every scoped vendor family in play —
+// @anthropic-ai/, @ai-sdk/, and the scoped vendors tracked as prospective
+// drivers (@openai/, @mistralai/, @google/). Scoped families ban by
+// PREFIX so every package under the scope is covered (@openai/codex-sdk
+// and friends), matching how the driver lane adopts them.
+const VENDOR_SDK_SOURCE = /^(?:@anthropic-ai\/|@ai-sdk\/|@openai\/|@mistralai\/|@google\/|ai(?:\/|$)|openai(?:\/|$))/;
 
 // Module-source text: plain string literals, or template literals with no
 // substitutions (import(`ai`) parses as a TemplateLiteral, not a Literal).
