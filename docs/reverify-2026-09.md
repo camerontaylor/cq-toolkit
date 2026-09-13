@@ -10,9 +10,12 @@ This document is the re-verification required by the 6-week staleness rule
 (DD-8): the R1/R2 dependency research was current as of 2026-09-12, and this
 record re-checks every fact below directly at its source. Source of truth for
 versions is the npm registry (https://registry.npmjs.org) plus, for gitleaks,
-the GitHub release. All checks dated 2026-09-14. Per the lane brief's dependency
-rule, T1.4 re-confirms the `ai` / `@ai-sdk/*` pins before driver work begins —
-this record is the input to that confirmation, not a substitute for it.
+the GitHub release. The "this repo's pin" column below mirrors this repo's
+authoritative pin sources — package.json for the npm pins and
+.github/workflows/denylist.yml for the gitleaks version-and-digest pin. All
+checks dated 2026-09-14. Per the lane brief's dependency rule, T1.4
+re-confirms the `ai` / `@ai-sdk/*` pins before driver work begins — this
+record is the input to that confirmation, not a substitute for it.
 
 ## Runtime dependencies (npm registry, checked 2026-09-14)
 
@@ -31,10 +34,11 @@ this record is the input to that confirmation, not a substitute for it.
 Every pin is at the registry-current version as of 2026-09-14 — nothing is
 stale; the leader saw the same 7.0.99 for `ai` at pin time. The nine rows
 above cover every runtime dependency in package.json; the devDependencies
-(the `typescript` 6 alias chain, `vitest`, and the eslint set) were pinned at
-install time and are re-verified by `npm ci` in CI on every run, so they are
-out of scope for this table. Authoritative full
-license texts: Apache-2.0 at https://spdx.org/licenses/Apache-2.0.html, MIT at
+(the `typescript` 6 alias chain, `vitest`, the eslint set, and `@types/node`)
+are installed from the lockfile by `npm ci` (lockfile/manifest consistency
+only — not registry currency), so they are out of scope for this table.
+Authoritative full license texts: Apache-2.0 at
+https://spdx.org/licenses/Apache-2.0.html, MIT at
 https://spdx.org/licenses/MIT.html (each package also ships the text in its
 published tarball).
 
@@ -83,7 +87,7 @@ any way — the tool comes from the digest-pinned GitHub release only.
 | trigger | status | evidence |
 | --- | --- | --- |
 | AI SDK HarnessAgent stabilizes | not fired | docs still say "Harness packages are experimental. Expect breaking changes between releases as this early API gets further refined." — https://ai-sdk.dev/docs/ai-sdk-harnesses/overview (2026-09-14) |
-| pi publishes a stability/semver statement | not fired | pi coding agent still 0.x (0.73.1) with breaking changes documented in its changelog; no statement found — https://www.npmjs.com/package/@mariozechner/pi-coding-agent and https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md (2026-09-14) |
+| pi publishes a stability/semver statement | not fired | pi coding agent still 0.x — 0.85.1 at `@earendil-works/pi-coding-agent` (MIT, registry), the maintained name; the original `@mariozechner/pi-coding-agent` (0.73.1) is deprecated at the registry in its favor ("please use @earendil-works/pi-coding-agent instead going forward"); breaking changes documented in its changelog, no stability statement found — https://www.npmjs.com/package/@earendil-works/pi-coding-agent and https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md (2026-09-14) |
 | models.dev license verified | fired — answered by this document | MIT; see the verdict above. T1.4 may vendor the data with the copyright notice preserved |
 | Anthropic blesses non-Claude routing through the Agent SDK | not fired | no such statement found in the 0.3.270 README or the official docs — https://code.claude.com/docs/en/agent-sdk/overview (2026-09-14) |
 | codex-sdk matures | not fired | `@openai/codex-sdk` remains pre-1.0 (0.154.0, https://registry.npmjs.org/@openai/codex-sdk, 2026-09-14); no stability statement found |
