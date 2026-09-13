@@ -1,0 +1,41 @@
+# Template: init-merge-queue — one-time (and forever-idempotent) bootstrap of
+# the merge-queue branch at origin/main HEAD. See policy/templates/README.md
+# for the token table and the entitlement facts behind the queue design.
+#
+# Instantiate: replace {{PROMOTE_SECRET}} with the NAME of the repo secret
+# holding a PAT with contents:write (creating a branch is a write), then drop
+# the result into .github/workflows/ and run it once from the Actions tab.
+# The first bootstrap can equally be a plain
+#   git push origin origin/main:refs/heads/merge-queue
+# by an admin — this workflow exists so the bootstrap is repeatable and
+# auditable instead. Edit the template, not the instantiation.
+name: init-merge-queue
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      # The checkout remote carries the promote PAT, so the branch-creating
+      # push below authenticates with it (a write needs more than
+      # GITHUB_TOKEN's default contents:read grant here).
+      - name: Check out the repo (full history, promote-token remote)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.{{PROMOTE_SECRET}} }}
+      - name: Bootstrap merge-queue at origin/main HEAD (idempotent)
+        run: |
+          set -euo pipefail
+          if [ -n "$(git ls-remote --heads origin merge-queue)" ]; then
+            echo "merge-queue already exists at origin — no-op"
+            exit 0
+          fi
+          sha="$(git rev-parse origin/main)"
+          git push origin "${sha}:refs/heads/merge-queue"
+          echo "created merge-queue at origin/main HEAD (${sha})"

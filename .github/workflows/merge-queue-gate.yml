@@ -1,0 +1,102 @@
+# instantiated from policy/templates/merge-queue-gate.yml — edit the template, not this file
+name: merge-queue-gate
+
+on:
+  push:
+    branches: [merge-queue]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: merge-queue commit to gate and promote (defaults to the branch head)
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# Promotions serialize; only the latest matters, but a running promotion is
+# never cancelled mid-push.
+concurrency:
+  group: merge-queue-gate
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      # Full history so both merge-base guards see real ancestry; the token
+      # input re-keys the origin remote to the promote PAT so the ff-push
+      # authenticates with it.
+      - name: Check out the merge-queue head (full history, promote-token remote)
+        uses: actions/checkout@v5
+        with:
+          ref: merge-queue
+          fetch-depth: 0
+          token: ${{ secrets.PROMOTE_TOKEN }}
+      - name: Resolve the gated sha
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.sha }}" ]; then
+            sha="${{ inputs.sha }}"
+          else
+            sha="$(git rev-parse origin/merge-queue)"
+          fi
+          echo "gating ${sha}"
+          echo "SHA=${sha}" >> "$GITHUB_ENV"
+      - name: Wait for required checks on the gated sha
+        env:
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+        run: |
+          set -euo pipefail
+          checks="$(echo 'static,denylist' | tr -d ' ' | tr ',' ' ')"
+          deadline=$(( $(date +%s) + 20 * 60 ))
+          while :; do
+            failing=0
+            waiting=0
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+              --paginate \
+              --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
+            for check in ${checks}; do
+              match="$(printf '%s\n' "${runs}" | awk -F'\t' -v c="${check}" '$1 == c' | tail -n 1)"
+              if [ -z "${match}" ]; then
+                echo "waiting: ${check} has not reported on ${SHA} yet"
+                waiting=1
+                continue
+              fi
+              status="$(printf '%s\n' "${match}" | cut -f2)"
+              conclusion="$(printf '%s\n' "${match}" | cut -f3)"
+              if [ "${status}" != "completed" ]; then
+                echo "waiting: ${check} is ${status} on ${SHA}"
+                waiting=1
+              elif [ "${conclusion}" != "success" ]; then
+                echo "refusing: ${check} completed with conclusion ${conclusion} on ${SHA}"
+                failing=1
+              fi
+            done
+            if [ "${failing}" -ne 0 ]; then
+              exit 1
+            fi
+            if [ "${waiting}" -eq 0 ]; then
+              echo "all required checks succeeded on ${SHA}"
+              exit 0
+            fi
+            if [ "$(date +%s)" -ge "${deadline}" ]; then
+              echo "refusing: timed out after 20 minutes waiting for required checks on ${SHA} — never promote unchecked"
+              exit 1
+            fi
+            sleep 30
+          done
+      - name: Fast-forward promote the gated sha to main (guarded)
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          if git merge-base --is-ancestor "${SHA}" origin/main; then
+            echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
+            exit 0
+          fi
+          if ! git merge-base --is-ancestor origin/main "${SHA}"; then
+            echo "refusing: main has diverged from merge-queue (origin/main is not an ancestor of ${SHA}) — merge main into merge-queue and let the gate re-run"
+            exit 1
+          fi
+          git push origin "${SHA}:refs/heads/main"
+          echo "promoted ${SHA} to main by pure fast-forward"
