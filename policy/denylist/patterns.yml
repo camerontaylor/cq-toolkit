@@ -14,6 +14,16 @@
 # `id`, `description`, `regex`, `sample`, and optional `path`; values are
 # single-quoted or plain scalars. scripts/denylist-scan parses this with a
 # fail-closed hand-written parser and rejects any deviation.
+#
+# The tree scan deliberately overlays gitleaks' DEFAULT rules on top of these
+# classes (belt-and-braces, plan-sanctioned). To tune out a single rule (one
+# of these or a default one), follow the recipe in scripts/denylist-scan's
+# allowlistsToml(): a TOP-LEVEL [[allowlists]] entry with
+# targetRules = ["<rule-id>"] plus a paths/regexes condition in the generated
+# config. gitleaks 8.30.x honors targetRules only on top-level [[allowlists]]
+# (per-rule [[rules.allowlists]] silently ignores it), the legacy [allowlist]
+# table cannot be mixed with [[allowlists]], and a targetRules id that does
+# not exist makes gitleaks refuse the config outright.
 
 rules:
   - id: class:webfront-hostnames
