@@ -8,7 +8,9 @@
 //
 // Modes:
 //   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
-//   scripts/denylist-scan --self-test  four legs, three gitleaks runs:
+//   scripts/denylist-scan --self-test  four legs, three gitleaks runs; the
+//                                      pure-text (4) leg runs FIRST so its
+//                                      verdict never depends on gitleaks:
 //                                      (1) dirty fixture — every rule class
 //                                      must fire on ITS OWN sample probe
 //                                      (per-rule probe files, one scan,
@@ -564,6 +566,17 @@ function selfTest() {
   let failed = 0;
   let checks = 0;
   try {
+    // Leg 4 FIRST: it is pure text (no gitleaks), so a machine without an
+    // 8.x gitleaks still gets the I4 leg verdict before the version gate
+    // below can throw.
+    checks++;
+    if (selfTestWorkflowI4()) console.log('PASS workflow-I4');
+    else failed++;
+
+    // Every remaining leg runs gitleaks, so the 8.x major gate belongs here
+    // — after the pure-text leg, before the first gitleaks invocation.
+    checkGitleaksMajorVersion();
+
     // Leg 1 — one dirty-fixture run; each rule class must fire on ITS OWN
     // sample probe. An infra failure counts as ONE failed check (#10).
     const dirty = selfTestDirtyFixture(tmp, rules);
@@ -593,11 +606,6 @@ function selfTest() {
     if (selfTestTreeConfig(tmp, rules, cleanProbes)) console.log('PASS tree-config');
     else failed++;
 
-    // Leg 4 — the CI workflow's triggers are unfiltered (invariant I4).
-    checks++;
-    if (selfTestWorkflowI4()) console.log('PASS workflow-I4');
-    else failed++;
-
     console.log(`total: ${checks - failed}/${checks} checks passed`);
     return failed === 0 ? 0 : 1;
   } finally {
@@ -615,7 +623,8 @@ function main(argv) {
     return treeScan();
   }
   if (argv.length === 1 && argv[0] === '--self-test') {
-    checkGitleaksMajorVersion();
+    // No version gate here: selfTest() runs the pure-text I4 leg first and
+    // gates the gitleaks-major check itself, after that leg.
     return selfTest();
   }
   console.error('usage: scripts/denylist-scan [--self-test]');
