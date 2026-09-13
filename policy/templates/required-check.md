@@ -1,0 +1,80 @@
+# The required-check pattern (invariant I4)
+
+## The rule
+
+A required check must report a status on EVERY pull request. Therefore the
+workflow behind a required check never filters its triggers: no `paths`, no
+`paths-ignore`, no `branches`/`branches-ignore`, no `tags`/`tags-ignore` —
+nothing that could leave a PR without a status from this workflow. The only
+sanctioned skip mechanism is a job-level `if:`; when in doubt, use not even
+that.
+
+## Why
+
+A filtered trigger means the workflow simply does not run for some PRs — a
+docs-only PR, say. The required check then never reports, GitHub waits
+forever, and the PR hangs unmergeable with no red check to point at: the
+check is silently absent, which is much worse than a failing check. The
+self-test in `scripts/denylist-scan` enforces this mechanically: every file
+listed in `REQUIRED_WORKFLOW_FILES` must exist and its top-level `on:` block
+must carry both `push` and `pull_request` with zero filter keys inside that
+block (fail-closed on an empty list or a missing listed file).
+
+## Worked example — this repo's static job
+
+`{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
+instantiation tokens; the four command steps below are this repo's
+`{{COMMANDS...}}` slot — typecheck ratchet first (that step IS the
+typecheck gate: full `tsc6 --noEmit` plus the error-count baseline), then
+lint, test, build. This repo's `.github/workflows/ci.yml` IS this template
+instantiated — nothing hand-carried; regenerate it by substituting the
+tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
+
+```yaml
+name: ci
+
+# Invariant I4: required checks never get paths-ignore — nor any path, branch,
+# or tag filter at all. This workflow triggers on every push and on every
+# pull_request, without exception. Skips, if ever needed, belong in job-level
+# `if:` conditions only; no `if:` is needed here.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    runs-on: {{RUNNER}}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+      - name: Set up Node {{NODE_VERSION}}
+        uses: actions/setup-node@v5
+        with:
+          node-version: {{NODE_VERSION}}
+          cache: npm
+      - name: Install dependencies
+        run: {{INSTALL_CMD}}
+      # The typecheck gate IS this ratchet step: it runs the full
+      # `tsc6 --noEmit` over the whole repo config and then enforces the
+      # error-count baseline, so no separate Typecheck step is needed.
+      - name: Typecheck ratchet
+        run: node scripts/ratchet-typecheck.mjs
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm run test
+      # Emit gate: the ratchet step above is the typecheck gate; this step
+      # emits dist/ and recompiles (checked emit, no --noCheck) — the
+      # deliberate, boring-safe choice.
+      - name: Build
+        run: npm run build
+```
+
+When adopting for another repository: keep the `on:` block and the
+permissions shape exactly as shown, swap the tokens, and replace the four
+command steps with your own `{{COMMANDS...}}` — then add the resulting
+workflow's file name to `REQUIRED_WORKFLOW_FILES` so the I4 self-test polices
+it.

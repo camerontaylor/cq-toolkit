@@ -1,0 +1,146 @@
+# instantiated from policy/templates/sync-merge-queue.yml — edit the template, not this file
+name: sync-merge-queue
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Triage runs serialize so two concurrent syncs cannot race each other into
+# a spurious conflict issue; a running sync is never cancelled mid-PATCH.
+concurrency:
+  group: merge-queue-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Triage main vs merge-queue (API only, zero clone)
+        env:
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          compare_api="repos/${repo}/compare/main...merge-queue"
+          compare_html="https://github.com/${repo}/compare/main...merge-queue"
+
+          # gh api -i prints "HTTP/x.y CODE", headers, a blank line, then
+          # the response body — for success AND error statuses alike. Read
+          # the REAL status code; the callers below exit 1 on any status
+          # that is not the one predicted case (a rotated PAT, a missing
+          # scope, a rate limit, or a 5xx must fail loudly, never
+          # masquerade as non-ff/conflict and never open the divergence
+          # issue). Returning nonzero here means gh produced no HTTP
+          # response at all — a loud failure too.
+          API_CODE=""
+          api_call() {
+            local raw
+            raw="$(gh api -i "$@")" || true
+            API_CODE="$(printf '%s\n' "${raw}" | sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*$|\1|p')"
+            if [ -z "${API_CODE}" ]; then
+              echo "gh api returned no HTTP response ($*) — failing loudly" >&2
+              return 1
+            fi
+          }
+
+          open_divergence_issue() {
+            gh issue create \
+              --repo "${repo}" \
+              --title "merge-queue diverged from main — needs merge/conflict resolution" \
+              --body "sync-merge-queue could not reconcile the branches automatically.
+
+          Compare: ${compare_html}
+
+          Merge main into merge-queue (merge commit, never squash) and
+          resolve any conflicts; the gate will fast-forward main afterwards."
+          }
+
+          merge_main_into_merge_queue() {
+            # I3: the only reconciliation is a merge commit of main into
+            # merge-queue (merge method merge, base merge-queue, head main).
+            api_call -X POST "repos/${repo}/merges" \
+              -f base="merge-queue" \
+              -f head="main" \
+              -f merge_method="merge" \
+              -f commit_message="Merge main into merge-queue (sync-merge-queue)"
+            case "${API_CODE}" in
+              201)
+                echo "merged main into merge-queue with a merge commit (I3)"
+                ;;
+              409)
+                # 409 is the ONE predicted failure: the merge API created
+                # nothing because the branches conflict — surface it.
+                echo "merge API refused with 409 (conflict) — opening the divergence issue"
+                open_divergence_issue
+                ;;
+              *)
+                echo "unexpected HTTP ${API_CODE} from the merge API (only 409 means conflict) — failing loudly, never opening the divergence issue on an unpredicted status"
+                exit 1
+                ;;
+            esac
+          }
+
+          main_sha="$(gh api "repos/${repo}/git/ref/heads/main" --jq .object.sha)"
+          queue_sha="$(gh api "repos/${repo}/git/ref/heads/merge-queue" --jq .object.sha)"
+          status="$(gh api "${compare_api}" --jq .status)"
+          echo "triage: status=${status} main=${main_sha} merge-queue=${queue_sha}"
+
+          case "${status}" in
+            identical)
+              echo "main and merge-queue are identical — nothing to do"
+              ;;
+            behind)
+              # merge-queue is behind main: fast-forward it to main's HEAD.
+              # force=false is the server-side ff invariant: the refs API
+              # rejects any non-ff update with 422, so this can only move
+              # merge-queue FORWARD to exactly main.
+              api_call -X PATCH "repos/${repo}/git/refs/heads/merge-queue" \
+                -f sha="${main_sha}" \
+                -F force=false
+              case "${API_CODE}" in
+                200)
+                  echo "fast-forwarded merge-queue to main ${main_sha} (force=false)"
+                  ;;
+                422)
+                  # 422 is the ONE predicted failure: non-ff, meaning
+                  # merge-queue moved concurrently — reconcile instead.
+                  echo "PATCH of refs/heads/merge-queue rejected with 422 (non-ff) — merge-queue moved concurrently; treating as diverged"
+                  merge_main_into_merge_queue
+                  ;;
+                *)
+                  echo "unexpected HTTP ${API_CODE} PATCHing refs/heads/merge-queue (only 422 means non-ff) — failing loudly, never guessing and never forcing"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            ahead)
+              # merge-queue is ahead of main: promotion is the gate's job,
+              # never sync's (the gate is the ONLY component that advances
+              # main, and only after the required checks succeeded on the
+              # queue HEAD). Dispatch it; the gate's merge-base guards make
+              # re-dispatch idempotent, and its concurrency group
+              # serializes this dispatch behind any running promotion.
+              api_call -X POST "repos/${repo}/actions/workflows/merge-queue-gate.yml/dispatches" \
+                -f ref="merge-queue"
+              case "${API_CODE}" in
+                204)
+                  echo "merge-queue is ahead of main — dispatched merge-queue-gate (the sole promotion path)"
+                  ;;
+                *)
+                  echo "unexpected HTTP ${API_CODE} dispatching merge-queue-gate (expected 204) — failing loudly"
+                  exit 1
+                  ;;
+              esac
+              ;;
+            diverged)
+              merge_main_into_merge_queue
+              ;;
+            *)
+              echo "unexpected compare status '${status}' — refusing to act"
+              exit 1
+              ;;
+          esac

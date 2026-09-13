@@ -1,3 +1,6 @@
+# instantiated from policy/templates/required-check.md (the I4 trigger
+# shape; the steps are the denylist scan itself) — edit the template, not
+# this file
 name: denylist
 
 # Invariant I4: this workflow must never filter its triggers — no `paths`, no

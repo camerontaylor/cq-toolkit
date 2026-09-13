@@ -28,11 +28,28 @@
 //                                      must still fire on its own probe, and
 //                                      the clean probes and the copy must
 //                                      produce ZERO findings;
-//                                      (4) workflow-I4 — EVERY workflow
-//                                      (*.yml and *.yaml, denylist.yml
-//                                      included) in .github/workflows/ must
-//                                      trigger on push and pull_request
-//                                      with no path/branch/tag filtering.
+//                                      (4) workflow-I4 — every workflow
+//                                      named in REQUIRED_WORKFLOW_FILES
+//                                      (the repo's required checks;
+//                                      denylist.yml included) must exist
+//                                      and its top-level `on:` block must
+//                                      carry BOTH push and pull_request
+//                                      as TOP-LEVEL entries with NO
+//                                      filter keys (paths, paths-ignore,
+//                                      branches, branches-ignore, tags,
+//                                      tags-ignore — quoted or unquoted)
+//                                      inside that block; every OTHER
+//                                      workflow (*.yml and *.yaml) gets
+//                                      a sanity check only: a parseable
+//                                      `on:` block in ANY valid shape —
+//                                      block/flow/scalar/filtered/null
+//                                      (queue mechanics legitimately
+//                                      filter triggers; a null/empty or
+//                                      scalar `on:` hard-fails ONLY the
+//                                      required entries, via the
+//                                      both-triggers check). Quoted
+//                                      `"on":` keys and whitespace inside
+//                                      flow lists are parsed.
 //                                      Exit 0 only if all legs pass.
 //
 // Zero npm dependencies: node:fs, node:path, node:child_process, node:os.
@@ -75,10 +92,21 @@ const TREE_ALLOWLIST_PATHS = [
   '(^|/)\\.gjc/',
   '(^|/)\\.DS_Store$',
 ];
-// Trigger-filter keys banned by invariant I4 (workflow leg). Matched
-// MID-LINE (word-bounded) on comment-stripped lines, not just at line
-// start, so flow-style `on:` maps cannot hide a filter key.
-const I4_BANNED_KEY = /\b(paths|paths-ignore|branches|branches-ignore|tags|tags-ignore)\b\s*:/;
+// I4 binds to required checks; these are the repo's required-check
+// workflows — extend when a new required check lands. Each listed file must
+// exist (a missing one fails the workflow-I4 leg by name, which also keeps
+// the denylist.yml-presence requirement alive) and its `on:` block must be
+// unfiltered. Queue-mechanics workflows (init/gate/sync: dispatch-only,
+// merge-queue-only, main-only triggers) are deliberately NOT listed — they
+// filter by design and get the sanity check instead. An empty list fails
+// the leg closed: I4 must never become vacuous.
+const REQUIRED_WORKFLOW_FILES = ['denylist.yml', 'ci.yml'];
+// Trigger-filter keys banned by invariant I4 inside a REQUIRED workflow's
+// `on:` block. Matched MID-LINE (word-bounded) on comment-stripped lines of
+// that block only, with an optional quote on either side of the key, so
+// flow-style `on:` maps and quoted keys (`"paths-ignore":`) cannot hide a
+// filter.
+const I4_BANNED_KEY = /["']?\b(paths|paths-ignore|branches|branches-ignore|tags|tags-ignore)\b["']?\s*:/;
 
 // Known, expected failure (bad patterns.yml, bad environment): printed as a
 // one-line diagnostic without a stack trace.
@@ -517,16 +545,25 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
 }
 
 // Leg 4: mechanically enforce invariant I4 by parsing the CI workflows as
-// TEXT. EVERY *.yml or *.yaml file under .github/workflows/ (GitHub
-// executes both) must be present in the first place — including
-// denylist.yml, the gate's own workflow — and each must have a `push:`
-// trigger, a `pull_request:` trigger, and none of paths/paths-ignore/
-// branches/branches-ignore/tags/tags-ignore filter keys anywhere outside
-// comments. Filter keys are matched mid-line (word-bounded), and the
-// flow-style trigger list `on: [push, pull_request]` is accepted; any flow
-// list line must carry both triggers. Comment-only lines are dropped and
-// inline comments (an unquoted `#` preceded by whitespace, to end of line)
-// are stripped BEFORE the checks, so `push:  # every push` is valid (#3).
+// TEXT. I4 binds to REQUIRED checks: a required check must report status on
+// EVERY pull request, so its workflow must never filter its triggers — no
+// paths, no paths-ignore, no branch or tag filters of any kind; a job-level
+// `if:` is the only sanctioned skip mechanism. Every file named in
+// REQUIRED_WORKFLOW_FILES must exist and its top-level `on:` block must
+// carry BOTH a `push` and a `pull_request` trigger — each as a TOP-LEVEL
+// entry of the `on:` value, so a name merely nested inside another
+// trigger's payload (an input named `push`, say) never satisfies presence —
+// and NO filter keys (checked inside the `on:` block only, mid-line,
+// word-bounded, quoted or unquoted). Every OTHER *.yml or *.yaml file under
+// .github/workflows/ (GitHub executes both) gets a sanity check only: a
+// parseable `on:` block in any valid shape — flow, block, filtered, scalar,
+// or null — because queue mechanics (the gate filters to merge-queue, the
+// sync to main, the init is dispatch-only) legitimately filter their
+// triggers; a null/empty or scalar `on:` hard-fails ONLY required entries,
+// through the both-triggers check. Quoted `"on":` keys (the YAML-1.1-safe
+// spelling) and whitespace inside flow lists are parsed. Comment-only lines
+// are dropped and inline comments (an unquoted `#` preceded by whitespace,
+// to end of line) are stripped quote-aware BEFORE any check (#3).
 function stripInlineComment(line) {
   let quote = null;
   for (let i = 0; i < line.length; i++) {
@@ -542,40 +579,190 @@ function stripInlineComment(line) {
   return line;
 }
 
-// Per-workflow I4 checks over comment-stripped, non-empty lines; prints a
-// FAIL line naming the file and returns false on the first violation.
-// Filter keys are checked FIRST and mid-line so a flow-style `on:` map with
-// a filter (e.g. branches) is named for the filter, not just missing
-// triggers; a flow-style trigger list satisfies trigger presence only if it
-// carries both push and pull_request.
-function workflowI4Checks(rel, code) {
-  for (const l of code) {
+// Net flow-collection depth of a comment-stripped line: opens ([ {) minus
+// closes (] }) counted outside quotes. Used to find the end of a multi-line
+// flow-style `on:` value — e.g. a flow map whose closing brace sits on a
+// column-0-anchored line is a continuation of the value, not a new key.
+function flowDepth(line) {
+  let quote = null;
+  let depth = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+    }
+  }
+  return depth;
+}
+
+// The `on:` key line at column 0, quoted-key forms included (`"on":` is
+// the YAML-1.1-safe spelling, since YAML 1.1 parsers read a bare `on` as a
+// boolean), with any value shape: none (null), a flow collection (`[`/`{`),
+// or a plain scalar (e.g. `on: workflow_dispatch`).
+const ON_KEY_LINE = /^["']?on["']?:/;
+const ON_VALUE_PREFIX = /^["']?on["']?:\s*/;
+
+// Extract the top-level `on:` block as comment-stripped lines (the `on:` key
+// line included), or null when the file has no column-0 `on:` key. Handles
+// block style (`on:` plus its indented lines), flow-list style (`on: [push,
+// pull_request]`), flow-map style (`on: {push: null}`), and the scalar form
+// (`on: workflow_dispatch`) — including MULTI-LINE flow values, consumed
+// until their brackets close (the closer may sit at column 0). The block
+// ends at the first column-0 line with content that is not a continuation
+// of the `on:` value; blank and comment-only lines never terminate it.
+function extractOnBlock(text) {
+  const stripped = text.split(/\r?\n/).map(stripInlineComment);
+  const start = stripped.findIndex((l) => ON_KEY_LINE.test(l));
+  if (start === -1) return null;
+  const block = [stripped[start]];
+  let depth = flowDepth(stripped[start].replace(ON_VALUE_PREFIX, ''));
+  let i = start + 1;
+  if (depth > 0) {
+    while (i < stripped.length && depth > 0) {
+      block.push(stripped[i]);
+      depth += flowDepth(stripped[i]);
+      i++;
+    }
+    return block;
+  }
+  while (i < stripped.length) {
+    const line = stripped[i];
+    if (line.trim() === '') {
+      i++;
+      continue;
+    }
+    if (!line.startsWith(' ')) break; // column-0 content: end of the block
+    block.push(line);
+    i++;
+  }
+  return block;
+}
+
+// Split a COMPLETE flow collection (the joined `on:` value, outer brackets
+// included) into its top-level items at depth-0 commas, quote-aware.
+// `{push: null, pull_request: {branches: [main]}}` -> ["push: null",
+// "pull_request: {branches: [main]}"]; `[ push, pull_request ]` ->
+// ["push", "pull_request"].
+function splitFlowTopLevel(flowText) {
+  let t = flowText.trim();
+  if ((t.startsWith('[') && t.endsWith(']')) || (t.startsWith('{') && t.endsWith('}'))) {
+    t = t.slice(1, -1);
+  }
+  const items = [];
+  let item = '';
+  let depth = 0;
+  let quote = null;
+  for (const ch of t) {
+    if (quote) {
+      item += ch;
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+      item += ch;
+    } else if (ch === '[' || ch === '{') {
+      depth++;
+      item += ch;
+    } else if (ch === ']' || ch === '}') {
+      depth--;
+      item += ch;
+    } else if (ch === ',' && depth === 0) {
+      items.push(item);
+      item = '';
+    } else {
+      item += ch;
+    }
+  }
+  if (item.trim() !== '') items.push(item);
+  return items.map((s) => s.trim());
+}
+
+// The event-name candidate of one `on:` entry: the mapping key when the
+// entry is "name: <value>" (the value may be a nested flow collection), the
+// bare name otherwise (block item `- name`, scalar `name`, flow item
+// `name`). Null when the entry is not a plain name (a nested collection or
+// a multi-word scalar). Optional quotes around the name are tolerated.
+function entryName(entry) {
+  const t = entry.trim().replace(/^-\s+/, '');
+  const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:/.exec(t);
+  const name = kv ? kv[1] : t;
+  const quoted = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?$/.exec(name);
+  return quoted ? quoted[1] : null;
+}
+
+// A trigger is present iff a TOP-LEVEL entry of the `on:` value is exactly
+// that event name: an inline flow item or key (`on: [ push, pull_request ]`
+// — whitespace around delimiters included — or `on: {push: null, ...}`),
+// an inline scalar (`on: workflow_dispatch` — one trigger), or a
+// block-style child at the first indentation level under `on:`
+// (`push:` / `- push`). Nested names — e.g. an input named `push` under
+// `workflow_dispatch:` — never satisfy trigger presence.
+function onBlockHasTrigger(block, trigger) {
+  const inline = block[0].replace(ON_VALUE_PREFIX, '').trim();
+  if (inline !== '') {
+    if (inline.startsWith('[') || inline.startsWith('{')) {
+      const flow = block.join(' ').replace(ON_VALUE_PREFIX, '').trim();
+      return splitFlowTopLevel(flow).some((item) => entryName(item) === trigger);
+    }
+    return entryName(inline) === trigger;
+  }
+  let base = null;
+  for (let i = 1; i < block.length; i++) {
+    const line = block[i];
+    if (line.trim() === '') continue;
+    const ind = line.match(/^ */)[0].length;
+    if (base === null) base = ind;
+    if (ind !== base) continue; // deeper lines are nested entries, not triggers
+    if (entryName(line) === trigger) return true;
+  }
+  return false;
+}
+
+// Per-workflow checks over the extracted, comment-stripped `on:` block;
+// prints a FAIL line naming the file and the reason and returns false on
+// the first violation. REQUIRED files: no filter keys anywhere in the block
+// (checked first, mid-line, so a filtered flow map is named for the filter,
+// not just missing triggers) and both triggers present as top-level entries
+// — which also means a null/empty or scalar `on:` hard-fails required
+// entries. Other files: the block merely has to parse (any trigger shape —
+// filtered, scalar, or null); the strict obligation belongs to required
+// checks only, because queue mechanics legitimately filter their triggers.
+function workflowI4Checks(rel, name, text) {
+  const block = extractOnBlock(text);
+  if (block === null) {
+    console.error(`FAIL workflow-I4: no top-level \`on:\` block in ${rel}`);
+    return false;
+  }
+  if (!REQUIRED_WORKFLOW_FILES.includes(name)) {
+    return true;
+  }
+  for (const l of block) {
     if (I4_BANNED_KEY.test(l)) {
-      console.error(`FAIL workflow-I4: trigger filter key violates invariant I4 in ${rel}: "${l.trim()}"`);
+      console.error(`FAIL workflow-I4: trigger filter key violates invariant I4 in the \`on:\` block of ${rel}: "${l.trim()}"`);
       return false;
     }
   }
-  const flowOn = code.filter((l) => /^\s*on:\s*\[[^\]]*\]/.test(l));
-  for (const l of flowOn) {
-    if (!/\bpush\b/.test(l) || !/\bpull_request\b/.test(l)) {
-      console.error(`FAIL workflow-I4: flow-style \`on:\` list in ${rel} must contain both push and pull_request: "${l.trim()}"`);
-      return false;
-    }
+  if (!onBlockHasTrigger(block, 'push')) {
+    console.error(`FAIL workflow-I4: no \`push\` trigger in the \`on:\` block of ${rel}`);
+    return false;
   }
-  if (flowOn.length === 0) {
-    if (!code.some((l) => /^\s*push:\s*$/.test(l))) {
-      console.error(`FAIL workflow-I4: no \`push:\` trigger key in ${rel}`);
-      return false;
-    }
-    if (!code.some((l) => /^\s*pull_request:\s*$/.test(l))) {
-      console.error(`FAIL workflow-I4: no \`pull_request:\` trigger key in ${rel}`);
-      return false;
-    }
+  if (!onBlockHasTrigger(block, 'pull_request')) {
+    console.error(`FAIL workflow-I4: no \`pull_request\` trigger in the \`on:\` block of ${rel}`);
+    return false;
   }
   return true;
 }
 
 function selfTestWorkflowI4() {
+  if (REQUIRED_WORKFLOW_FILES.length === 0) {
+    console.error('FAIL workflow-I4: REQUIRED_WORKFLOW_FILES is empty — I4 would police nothing (fail-closed)');
+    return false;
+  }
   let entries;
   try {
     entries = fs.readdirSync(WORKFLOWS_DIR, { withFileTypes: true });
@@ -591,13 +778,17 @@ function selfTestWorkflowI4() {
     console.error(`FAIL workflow-I4: no *.yml or *.yaml workflows found in ${WORKFLOWS_DIR}`);
     return false;
   }
-  // The gate's own workflow must exist and be policed like every other one;
-  // a rename or delete during a refactor must not silently shrink the leg.
-  if (!workflows.includes('denylist.yml')) {
-    console.error(`FAIL workflow-I4: denylist.yml is missing from ${WORKFLOWS_DIR} (the gate's own workflow must be present and policed)`);
-    return false;
-  }
+  // Fail closed on the policy data itself: a listed required workflow that
+  // has gone missing (rename or delete during a refactor) fails the leg by
+  // name — this is also what keeps the denylist.yml-presence requirement
+  // alive, since the gate's own workflow is in the list.
   let ok = true;
+  for (const required of REQUIRED_WORKFLOW_FILES) {
+    if (!workflows.includes(required)) {
+      console.error(`FAIL workflow-I4: required workflow "${required}" is missing from ${WORKFLOWS_DIR}`);
+      ok = false;
+    }
+  }
   for (const name of workflows) {
     const workflowPath = path.join(WORKFLOWS_DIR, name);
     const rel = path.join('.github', 'workflows', name);
@@ -609,8 +800,7 @@ function selfTestWorkflowI4() {
       ok = false;
       continue;
     }
-    const code = text.split(/\r?\n/).map(stripInlineComment).filter((l) => l.trim() !== '');
-    if (!workflowI4Checks(rel, code)) ok = false;
+    if (!workflowI4Checks(rel, name, text)) ok = false;
   }
   return ok;
 }

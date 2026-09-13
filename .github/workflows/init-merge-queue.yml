@@ -1,0 +1,34 @@
+# instantiated from policy/templates/init-merge-queue.yml — edit the template, not this file
+name: init-merge-queue
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    steps:
+      # The checkout remote carries the promote PAT, so the branch-creating
+      # push below authenticates with it (a write needs more than
+      # GITHUB_TOKEN's default contents:read grant here). Shallow is
+      # enough: the only git work here is ls-remote, resolving main's tip,
+      # and one ref push of a commit the server already has.
+      - name: Check out the repo (tip only, promote-token remote)
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+          token: ${{ secrets.PROMOTE_TOKEN }}
+      - name: Bootstrap merge-queue at origin/main HEAD (idempotent)
+        run: |
+          set -euo pipefail
+          if [ -n "$(git ls-remote --heads origin merge-queue)" ]; then
+            echo "merge-queue already exists at origin — no-op"
+            exit 0
+          fi
+          git fetch --depth=1 origin main
+          sha="$(git rev-parse origin/main)"
+          git push origin "${sha}:refs/heads/merge-queue"
+          echo "created merge-queue at origin/main HEAD (${sha})"

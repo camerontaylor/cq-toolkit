@@ -1,3 +1,4 @@
+# instantiated from policy/templates/required-check.md — edit the template, not this file
 name: ci
 
 # Invariant I4: required checks never get paths-ignore — nor any path, branch,
