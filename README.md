@@ -1,2 +1,2 @@
 cq-toolkit is a portable code-quality toolkit: a TypeScript SDK of atomic code-quality operations, a deterministic plan runner that composes those operations into reproducible execution plans, and adoptable merge-queue and doctrine policy templates that other repositories can take in whole or in part. It is greenfield and self-hosting — the toolkit's own quality gates run on the toolkit itself — and it is a work in progress.
-doctrine: see policy/DOCTRINE.md (pending)
+doctrine: see [policy/DOCTRINE.md](policy/DOCTRINE.md)
