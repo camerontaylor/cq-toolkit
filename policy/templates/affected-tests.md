@@ -59,13 +59,16 @@ see the I4 interplay above):
           cache: npm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
+      # Context values reach scripts via env: indirection — never a textual
+      # ${{ }} interpolation inside a run: script.
       - name: Detect changed files against the PR base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
-          git fetch origin "${{ github.event.pull_request.base.sha }}"
-          git diff --name-only \
-            "${{ github.event.pull_request.base.sha }}" \
-            "${{ github.event.pull_request.head.sha }}" \
+          git fetch origin "${BASE_SHA}"
+          git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" \
             > "${RUNNER_TEMP}/changed.txt"
           cat "${RUNNER_TEMP}/changed.txt"
       - name: Run affected tests (vitest related)

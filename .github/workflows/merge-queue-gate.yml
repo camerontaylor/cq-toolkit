@@ -24,26 +24,26 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     steps:
-      # Full history so both merge-base guards see real ancestry; the token
-      # input re-keys the origin remote to the promote PAT so the ff-push
-      # authenticates with it.
-      - name: Check out the merge-queue head (full history, promote-token remote)
-        uses: actions/checkout@v5
-        with:
-          ref: merge-queue
-          fetch-depth: 0
-          token: ${{ secrets.PROMOTE_TOKEN }}
-      - name: Resolve the gated sha
+      # The gated sha reaches the script via env: indirection — never a
+      # textual ${{ }} interpolation. Push events gate the pushed head
+      # (GITHUB_SHA); dispatch with an explicit sha gates that sha; dispatch
+      # without one resolves the merge-queue tip from the API.
+      - name: Resolve the gated sha (no checkout needed)
+        env:
+          SHA_INPUT: ${{ inputs.sha || '' }}
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.sha }}" ]; then
-            sha="${{ inputs.sha }}"
+          if [ -n "${SHA_INPUT}" ]; then
+            sha="${SHA_INPUT}"
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            sha="${GITHUB_SHA}"
           else
-            sha="$(git rev-parse origin/merge-queue)"
+            sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/merge-queue" --jq .object.sha)"
           fi
           echo "gating ${sha}"
           echo "SHA=${sha}" >> "$GITHUB_ENV"
-      - name: Wait for required checks on the gated sha
+      - name: Wait for required checks on the gated sha (API only)
         env:
           GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
         run: |
@@ -53,11 +53,13 @@ jobs:
           while :; do
             failing=0
             waiting=0
-            runs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs" \
+            # filter=latest: the endpoint returns the latest check run per
+            # name, so no client-side "pick the newest" guessing is needed.
+            runs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?filter=latest" \
               --paginate \
               --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
             for check in ${checks}; do
-              match="$(printf '%s\n' "${runs}" | awk -F'\t' -v c="${check}" '$1 == c' | tail -n 1)"
+              match="$(printf '%s\n' "${runs}" | awk -F'\t' -v c="${check}" '$1 == c')"
               if [ -z "${match}" ]; then
                 echo "waiting: ${check} has not reported on ${SHA} yet"
                 waiting=1
@@ -86,6 +88,23 @@ jobs:
             fi
             sleep 30
           done
+      # The wait above is API-only and may refuse or time out — a refusing
+      # run must not have paid for a clone at all. Full history is needed
+      # only by the guards and the push below; the token input re-keys the
+      # origin remote to the promote PAT so the ff-push authenticates
+      # with it.
+      - name: Check out the merge-queue head (full history, promote-token remote)
+        uses: actions/checkout@v5
+        with:
+          ref: merge-queue
+          fetch-depth: 0
+          token: ${{ secrets.PROMOTE_TOKEN }}
+      - name: Validate the gated sha
+        run: |
+          set -euo pipefail
+          # SHA is SHA_INPUT verbatim when dispatch supplied one — verify it
+          # names a real commit in the fetched history before any use.
+          git rev-parse --verify "${SHA}^{commit}"
       - name: Fast-forward promote the gated sha to main (guarded)
         run: |
           set -euo pipefail
