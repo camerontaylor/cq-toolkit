@@ -1,11 +1,12 @@
 // THROWAWAY: replaced by ops/ratchet in phase 2 (H4)
-// Placeholder typecheck ratchet: counts `error TS\d+:` lines from a clean,
-// exit-0 tsc run and compares them to baselines/typecheck.json. Thresholds
-// only tighten — never raise a baseline to go green (that is not a ratchet).
-// A missing baseline, or ANY nonzero tsc exit (missing node_modules, panic,
-// rejected flag), is non-passing evidence, never a pass (invariant I5): the
-// tool's output is echoed and we exit 1 before counting. --update is only
-// honored on a clean run. Lock a lowered count in with --update.
+// Placeholder typecheck ratchet: counts `error TS\d+:` lines from the pinned
+// compiler and compares them to baselines/typecheck.json. Thresholds only
+// tighten — never raise a baseline to go green (that is not a ratchet). A
+// missing baseline, or a nonzero exit whose output has NO parsable error
+// lines (missing node_modules, compiler panic, rejected flag), is
+// non-passing evidence, never a pass (invariant I5): the tool's output is
+// echoed and we exit 1 before counting. A counted run — including an
+// errored typecheck with parsable lines — may be persisted with --update.
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -18,14 +19,18 @@ const fail = (message) => {
   process.exit(1);
 };
 
-// Invoke the repo-local tsc binary directly: `npx --no-install tsc` falls
-// through to $PATH when the local bin is missing, so a broken node_modules
-// plus a global tsc would silently run an unpinned compiler and could
-// certify a bogus 0 (the exact I5 violation this gate exists to prevent).
-const TSC_BIN = resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc.cmd' : 'tsc');
+// Invoke tsc6 — the bin OWNED by the pinned alias (typescript =
+// npm:@typescript/typescript6, which declares exactly tsc6). The sibling
+// .bin/tsc belongs to the floating `@typescript/old: npm:typescript@^6`
+// transitive INSIDE that alias, so invoking it would certify evidence with
+// whatever ^6 happens to resolve to on a fresh install (an I5 violation).
+// On win32 the .cmd shim must be spawned through a shell: since Node's
+// CVE-2024-27980 fix, spawning a .cmd/.bat without shell:true throws EINVAL.
+const TSC_BIN = resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc6.cmd' : 'tsc6');
 const res = spawnSync(TSC_BIN, ['--noEmit', '-p', 'tsconfig.json', '--pretty', 'false'], {
   cwd: ROOT,
   encoding: 'utf8',
+  shell: process.platform === 'win32',
 });
 if (res.error || res.status === null) {
   fail(`cannot run tsc: ${res.error ? res.error.message : `signal ${res.signal}`}`);
@@ -43,7 +48,9 @@ if (res.status !== 0 && count === 0) {
 }
 
 if (process.argv.includes('--update')) {
-  if (res.status !== 0) fail('refusing --update: tsc did not exit 0');
+  // Safe on any counted run (the unparsable-nonzero guard above already
+  // failed those): tsc exits 1 whenever errors remain, so refusing nonzero
+  // exits would make a lowered-but-nonzero baseline impossible to persist.
   mkdirSync(dirname(BASELINE), { recursive: true });
   writeFileSync(BASELINE, `{"count": ${count}}\n`);
   console.log(`ratchet-typecheck: baseline updated to ${count}`);

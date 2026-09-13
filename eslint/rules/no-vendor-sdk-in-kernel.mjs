@@ -6,13 +6,27 @@
 
 const VENDOR_SDK_SOURCE = /^(?:@anthropic-ai\/|@ai-sdk\/|ai(?:\/|$)|openai(?:\/|$))/;
 
+// Module-source text: plain string literals, or template literals with no
+// substitutions (import(`ai`) parses as a TemplateLiteral, not a Literal).
+function sourceText(sourceNode) {
+  if (sourceNode.type === 'Literal' && typeof sourceNode.value === 'string') {
+    return sourceNode.value;
+  }
+  if (sourceNode.type === 'TemplateLiteral' && sourceNode.expressions.length === 0) {
+    return sourceNode.quasis[0].value.cooked;
+  }
+  return null;
+}
+
 function checkSource(context, sourceNode, reportNode) {
-  if (!sourceNode || sourceNode.type !== 'Literal' || typeof sourceNode.value !== 'string') return;
-  if (VENDOR_SDK_SOURCE.test(sourceNode.value)) {
+  if (!sourceNode) return;
+  const source = sourceText(sourceNode);
+  if (source === null) return;
+  if (VENDOR_SDK_SOURCE.test(source)) {
     context.report({
       node: reportNode,
       messageId: 'vendorSdk',
-      data: { source: sourceNode.value },
+      data: { source },
     });
   }
 }

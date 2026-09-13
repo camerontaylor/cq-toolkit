@@ -50,5 +50,13 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
       code: 'export * from "ai";',
       errors: [{ messageId: 'vendorSdk' }],
     },
+    {
+      code: 'import(`ai`);',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: 'require(`@anthropic-ai/claude-agent-sdk`);',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
   ],
 });

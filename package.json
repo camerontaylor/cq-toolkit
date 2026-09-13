@@ -13,8 +13,8 @@
     ".": "./dist/index.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
-    "typecheck": "tsc -p tsconfig.json",
+    "build": "tsc6 -p tsconfig.build.json",
+    "typecheck": "tsc6 -p tsconfig.json",
     "lint": "eslint .",
     "test": "vitest run",
     "denylist": "./scripts/denylist-scan"
