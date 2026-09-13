@@ -19,8 +19,13 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 
 ## Placeholder tokens
 
-Every `{{TOKEN}}` is replaced by literal text at instantiation time. Nothing
-else in a template changes.
+Every literal `{{TOKEN}}` in a template file is replaced by its literal
+value at instantiation time, and nothing else in the file changes — with
+one deliberate exception: `{{COMMANDS...}}` (last table row) names a
+HAND-REPLACED slot, not a token. No literal `{{COMMANDS...}}` placeholder
+appears in `required-check.md` — the worked example carries this repo's
+real run steps — so an adopter swaps those steps by hand rather than by
+substitution.
 
 | token | used by | meaning |
 | --- | --- | --- |
@@ -30,7 +35,7 @@ else in a template changes.
 | `{{RUNNER}}` | required-check.md, affected-tests.md | `runs-on` label, e.g. `ubuntu-latest` |
 | `{{NODE_VERSION}}` | required-check.md, affected-tests.md | Node version for `setup-node` |
 | `{{INSTALL_CMD}}` | required-check.md, affected-tests.md | dependency install command, e.g. `npm ci` |
-| `{{COMMANDS...}}` | required-check.md | the variadic ordered run-steps of the static job; this repo's instantiation is exactly four: typecheck ratchet, lint, test, build |
+| `{{COMMANDS...}}` | required-check.md | HAND-REPLACED slot (see above): the variadic ordered run-steps of the static job. The template carries this repo's four literal steps — typecheck ratchet, lint, test, build — and an adopter replaces them by hand with their own commands; no placeholder text is substituted. |
 
 ## How instantiation works
 
@@ -42,9 +47,12 @@ else in a template changes.
    file`); it is what makes template drift visible in diffs.
 4. When a NEW required check lands, remember that "required" is defined in
    THREE unlinked places, and all three must learn it:
-   - `REQUIRED_WORKFLOW_FILES` in `scripts/denylist-scan` — the I4 policy
-     data; the self-test fail-closes on an empty list or a missing file.
-     Updated alone, the check's workflow shape is policed but nothing in the
+   - `REQUIRED_WORKFLOW_CHECKS` in `scripts/denylist-scan` — the I4 policy
+     data, pairing each required workflow FILE with the CHECK NAME of the
+     job that must produce it (GitHub reports a job's check run under the
+     job id); the self-test fail-closes on an empty or malformed list, a
+     missing file, or a job renamed away from its paired name. Updated
+     alone, the check's workflow shape is policed but nothing in the
      merge path requires it to pass — the check is advisory.
    - the gate's wait list — `{{GATE_CHECKS}}` in this template, instantiated
      into `.github/workflows/merge-queue-gate.yml`. Not updated, the gate

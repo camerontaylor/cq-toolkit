@@ -80,8 +80,9 @@ only skip because it still reports a conclusion.
 and of `.github/workflows/denylist.yml`, which predates the templates and carries
 only their trigger shape (its steps are the scan itself — not regenerable from
 the template; `policy/templates/README.md`), policed by the denylist-scan
-self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_FILES`, fail-closed on an
-empty list or a missing file. Adopting repos: instantiate `required-check.md`
+self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_CHECKS` (each entry pairing
+a required workflow file with the check name of the job that must produce it),
+fail-closed on an empty or malformed list, a missing file, or a renamed job. Adopting repos: instantiate `required-check.md`
 and police triggers likewise.
 
 ## I5 — baselines only tighten; missing evidence is non-passing

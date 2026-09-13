@@ -53,27 +53,53 @@ jobs:
           while :; do
             failing=0
             waiting=0
-            # filter=latest: the endpoint returns the latest check run per
-            # name, so no client-side "pick the newest" guessing is needed.
+            # filter=latest keeps one row per check name PER REPORTING
+            # SUITE, not per name: a promoted sha carries same-name rows
+            # from both the merge-queue-push suite and the main-push suite,
+            # so a required check can appear multiple times. The verdict
+            # below therefore folds EVERY matching row into ONE verdict per
+            # check name (never a per-row shell read, which would see a
+            # multi-line status string and spin to the timeout): waiting if
+            # ANY row is incomplete, failing if ANY completed row is
+            # non-success (a non-success conclusion is already terminal, so
+            # it outranks waiting — fail fast instead of waiting out the
+            # clock), passing only when EVERY matching row is
+            # completed+success.
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?filter=latest" \
               --paginate \
               --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
             for check in ${checks}; do
-              match="$(printf '%s\n' "${runs}" | awk -F'\t' -v c="${check}" '$1 == c')"
-              if [ -z "${match}" ]; then
-                echo "waiting: ${check} has not reported on ${SHA} yet"
-                waiting=1
-                continue
-              fi
-              status="$(printf '%s\n' "${match}" | cut -f2)"
-              conclusion="$(printf '%s\n' "${match}" | cut -f3)"
-              if [ "${status}" != "completed" ]; then
-                echo "waiting: ${check} is ${status} on ${SHA}"
-                waiting=1
-              elif [ "${conclusion}" != "success" ]; then
-                echo "refusing: ${check} completed with conclusion ${conclusion} on ${SHA}"
-                failing=1
-              fi
+              verdict="$(printf '%s\n' "${runs}" | awk -F'\t' -v c="${check}" '
+                $1 == c {
+                  n++
+                  if ($2 != "completed") {
+                    if (v != "failing") { v = "waiting"; d = $2 }
+                  } else if ($3 != "success") {
+                    v = "failing"; d = $3
+                  }
+                }
+                END {
+                  if (n == 0) print "missing"
+                  else if (v == "") print "pass"
+                  else print v, d
+                }
+              ')"
+              case "${verdict}" in
+                pass)
+                  ;;
+                missing)
+                  echo "waiting: ${check} has not reported on ${SHA} yet"
+                  waiting=1
+                  ;;
+                waiting\ *)
+                  echo "waiting: ${check} is ${verdict#waiting } on ${SHA}"
+                  waiting=1
+                  ;;
+                failing\ *)
+                  echo "refusing: ${check} completed with conclusion ${verdict#failing } on ${SHA}"
+                  failing=1
+                  ;;
+              esac
             done
             if [ "${failing}" -ne 0 ]; then
               exit 1
