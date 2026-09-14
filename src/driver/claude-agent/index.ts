@@ -97,15 +97,20 @@
 //   - sessionRef → `SessionStore.load(sessionRef)`; the record's workspace
 //     AND message history continue. Unknown sessionRef → PRE-DISPATCH
 //     throw (a fake resume is worse than a loud one).
-//   - The agent's OWN conversation continues via the workspace sidecar
-//     `.cq-cli-session` (CLI_SESSION_FILE): the session id the agent
-//     reports (every frame carries `session_id`) is persisted post-settle
-//     and passed as `Options.resume` on the next run over the same
-//     sessionRef. A workspace without a sidecar (prior run died before the
-//     agent reported) resumes the WORKSPACE only — an honest partial
-//     continuation. A sidecar, not a record message: role 'tool' in a
-//     session record means A TOOL RAN, so the handle must not masquerade
-//     as one.
+//   - The agent's OWN conversation continues via the SESSIONS-STORE sidecar
+//     `<sessionsDir>/<sessionId>.cq-cli-session` (AGENT_SESSION_FILE): the
+//     session id the agent reports (every frame carries `session_id`) is
+//     persisted post-settle and passed as `Options.resume` on the next run
+//     over the same sessionRef. A session without a sidecar (prior run died
+//     before the agent reported) resumes the WORKSPACE only — an honest
+//     partial continuation. A sidecar, not a record message: role 'tool' in
+//     a session record means A TOOL RAN, so the handle must not masquerade
+//     as one. And NOT in the workspace (issue #26, design (b)): the
+//     workspace is MODEL-VISIBLE — the earlier placement there was a tamper
+//     vector (the harness edit tool's `**/*` glob includes dotfiles, so the
+//     model could read or alter its own resume handle); keyed by sessionId
+//     beside the session records, the handle is exactly as precise and out
+//     of its reach.
 //   - Persisted in OUR vocabulary: the user prompt (pre-run); ONE role
 //     'tool' message per IN-POLICY harness tool execution ({ input, ok,
 //     output } plain JSON) at the execute boundary; the assistant
@@ -218,10 +223,15 @@ export const SDK_MODULE_SPECIFIER = '@anthropic-ai/claude-agent-sdk';
 export const MCP_SERVER_NAME = 'cq-harness';
 
 /**
- * Workspace sidecar file carrying the agent's own session id — the
- * `Options.resume` handle for the NEXT run on the SAME sessionRef. A
+ * The file-name SUFFIX of the agent-session sidecar — the `Options.resume`
+ * handle for the NEXT run on the SAME sessionRef, stored as
+ * `<sessionsDir>/<sessionId>.cq-cli-session` (issue #26, design (b)). A
  * sidecar, not a record message: role 'tool' in a session record means a
- * tool ran (header), so the handle lives in the workspace it resumes.
+ * tool ran (header). And NOT in the workspace: the workspace is
+ * MODEL-VISIBLE — the earlier placement there was a tamper vector (the
+ * harness edit tool's catch-all path glob spans dotfiles too, so the model
+ * could read or alter its own resume handle); keyed by sessionId beside the
+ * session records, the handle is exactly as precise and out of its reach.
  */
 export const AGENT_SESSION_FILE = '.cq-cli-session';
 
@@ -351,7 +361,8 @@ export class ClaudeAgentDriver implements Driver {
     }
 
     // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
-    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
+    const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
         ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
@@ -368,8 +379,9 @@ export class ClaudeAgentDriver implements Driver {
     const selected = harnessTools.filter((t) => allowed.includes(t.name));
 
     // --- Agent-level resume: the agent session id recorded in the -------
-    // workspace sidecar by a prior run (absent → workspace-only continuation).
-    const resumeAgentSessionId = await readAgentSessionId(workspace);
+    // SESSIONS STORE sidecar by a prior run (absent → workspace-only
+    // continuation).
+    const resumeAgentSessionId = await readAgentSessionId(sessionsDir, record.sessionId);
 
     // --- Governed cancellation (I8): checked before the dispatch (an
     // already-cancelled invocation never dispatches), then wired to the
@@ -789,8 +801,16 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/**
+ * SDK-reported numeric fields must be finite non-negative INTEGERS: a
+ * negative or fractional "token count" is a lying measurement — accepting
+ * it folded negative usage (→ negative cost) and a NEGATIVE token total
+ * that could never trip the `>= maxTokens` budget check (the bypass,
+ * issue #19). Invalid → undefined → the fold sites' `?? 0` maps it to an
+ * honest zero.
+ */
 function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function asArray(value: unknown): unknown[] | undefined {
@@ -946,8 +966,15 @@ async function persistObservation(
   if (agentSessionId !== undefined && agentSessionId !== resumeAgentSessionId) {
     // Best-effort: the sidecar is the NEXT run's resume handle; a failed
     // write costs a workspace-only continuation, never this run's verdict.
+    // Stored beside the session records, keyed by sessionId (issue #26) —
+    // NOT in the model-visible workspace (the tamper vector, header) — and
+    // 0o600 like the records it sits beside (never world-readable).
     try {
-      await writeFile(join(record.workspace, AGENT_SESSION_FILE), `${agentSessionId}\n`, 'utf8');
+      await writeFile(
+        join(store.sessionsDir, `${record.sessionId}${AGENT_SESSION_FILE}`),
+        `${agentSessionId}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
     } catch {
       // deliberately swallowed — resume degrades honestly (no resume option)
     }
@@ -968,13 +995,15 @@ async function persistObservation(
 }
 
 /**
- * The agent session id recorded in a prior run's workspace sidecar, if any —
- * the resume handle of THIS run. Missing/unreadable → undefined (an honest
- * workspace-only continuation, never a fabricated resume).
+ * The agent session id recorded by a prior run of THIS session — the resume
+ * handle of the current run — read from the relocated store sidecar
+ * `<sessionsDir>/<sessionId>.cq-cli-session` (issue #26). Missing/
+ * unreadable → undefined (an honest workspace-only continuation, never a
+ * fabricated resume).
  */
-async function readAgentSessionId(workspace: string): Promise<string | undefined> {
+async function readAgentSessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
   try {
-    const raw = await readFile(join(workspace, AGENT_SESSION_FILE), 'utf8');
+    const raw = await readFile(join(sessionsDir, `${sessionId}${AGENT_SESSION_FILE}`), 'utf8');
     const trimmed = raw.trim();
     return trimmed === '' ? undefined : trimmed;
   } catch {

@@ -23,7 +23,8 @@
 //      pricing override → costUSD + costBasis 'modeled' / unpriced → both
 //      absent, OBSERVED-model surfacing (a served id ≠ requested id is
 //      surfaced, not hidden), the NO-ALLOWLIST rule (any model id
-//      dispatches verbatim), resume via the workspace sidecar → Options.resume,
+//      dispatches verbatim), resume via the relocated STORE sidecar →
+//      Options.resume (never in the model-visible workspace, issue #26),
 //      the env endpoint injection, the ToolPolicy mode-none surface (no MCP
 //      server, empty allowedTools), the sandbox mapping, and the
 //      structured-output schema rejection (a bad payload is dropped, never
@@ -104,7 +105,13 @@ function structuredOutputOf(options: Record<string, unknown>, text: string): { s
 
 /** One scripted query: init → (tool phase) → assistant text → success result. */
 async function* runScriptedQuery(
-  script: { directive?: ModelDirective; servedModel?: string; calls: MockQueryCall[] },
+  script: {
+    directive?: ModelDirective;
+    servedModel?: string;
+    calls: MockQueryCall[];
+    /** Overrides the mock's usage — the LYING-USAGE tests ride this (review round 3). */
+    usage?: Record<string, unknown>;
+  },
   prompt: string,
   options: Record<string, unknown>,
 ): AsyncGenerator<unknown, void> {
@@ -168,10 +175,11 @@ async function* runScriptedQuery(
       : directive?.kind === 'reply'
         ? directive.text
         : 'ok';
+  const usage = script.usage ?? AGENT_USAGE;
   yield {
     type: 'assistant',
     session_id: sessionId,
-    message: { model, content: [{ type: 'text', text }], usage: AGENT_USAGE },
+    message: { model, content: [{ type: 'text', text }], usage },
   };
   yield {
     type: 'result',
@@ -179,7 +187,7 @@ async function* runScriptedQuery(
     is_error: false,
     session_id: sessionId,
     result: text,
-    usage: AGENT_USAGE,
+    usage,
     modelUsage: {
       [model]: {
         inputTokens: 120,
@@ -211,7 +219,12 @@ const mockAdapters = {
 };
 
 /** Build the mock module for one directive; records every query call. */
-function mockSdkModule(script: { directive?: ModelDirective; servedModel?: string; calls: MockQueryCall[] }): Record<string, unknown> {
+function mockSdkModule(script: {
+  directive?: ModelDirective;
+  servedModel?: string;
+  calls: MockQueryCall[];
+  usage?: Record<string, unknown>;
+}): Record<string, unknown> {
   return {
     ...mockAdapters,
     query: ({ prompt, options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
@@ -494,19 +507,32 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
-  test('resume: the sidecar-written agent session id rides Options.resume; the same workspace continues', async () => {
+  test('resume: the STORE sidecar agent session id rides Options.resume; the same workspace continues (#26)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const { driver, calls } = driverWithCalls(scratchDir, { directive: { kind: 'reply', text: 'run one' } });
       const run1 = await driver.run(invocation({ prompt: 'resume run one' }));
       const record1 = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(run1.sessionId as string);
       expect(record1).toBeDefined();
-      // The agent's session id, sidecar-written into the workspace it resumes.
-      await expect(readFile(join(record1!.workspace, AGENT_SESSION_FILE), 'utf8')).resolves.toBe('agent-cli-1\n');
+      // The agent's session id, sidecar-written BESIDE the session records
+      // keyed by sessionId (issue #26 design (b)) — NOT in the model-visible
+      // workspace, where the earlier placement was a tamper vector.
+      const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${AGENT_SESSION_FILE}`);
+      await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
+      // 0o600 — the sidecar is evidence like the records it sits beside,
+      // never world-readable (review thread: mode was umask-default 0o666).
+      expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600);
+      const noSidecarInWorkspace = async (): Promise<void> => {
+        const files = await readdir(record1!.workspace);
+        expect(files.filter((f) => f.endsWith(AGENT_SESSION_FILE))).toEqual([]);
+      };
+      await noSidecarInWorkspace();
       const run2 = await driver.run(invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }));
       expect(run2.sessionId).toBe(run1.sessionId);
       expect(optionsOf(calls, 1)['resume']).toBe('agent-cli-1');
       expect(optionsOf(calls, 1)['cwd']).toBe(optionsOf(calls, 0)['cwd']); // the SAME workspace
+      // The resumed run still leaves NO resume handle in the workspace.
+      await noSidecarInWorkspace();
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -996,6 +1022,49 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       cacheRead: 0,
       cacheWrite: 0,
     });
+    // Lying measurements (issue #19-3 twin): negatives and fractions fold to
+    // an honest 0 — never negative usage, never a negative-cost propagation.
+    expect(
+      usageFromAgent({
+        input_tokens: -200_000,
+        output_tokens: 150_000,
+        cache_read_input_tokens: -3,
+        cache_creation_input_tokens: 2.5,
+      }),
+    ).toEqual({ input: 0, output: 150_000, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  test('a LYING usage report trips the maxTokens budget verdict instead of bypassing it (#19-3 twin)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const calls: MockQueryCall[] = [];
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'lying usage' },
+            calls,
+            // The lying SDK shape: a negative input masks real spend — the
+            // OLD asNumber folded -200,000 (total −50,000, never `>= cap`)
+            // and the budget verdict was bypassed forever.
+            usage: {
+              input_tokens: -200_000,
+              output_tokens: 150_000,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation({ prompt: 'lying usage run', budget: { maxTokens: 1000 } }));
+      // The tightened fold: the negative field → 0, so the total is 150,000
+      // ≥ 1000 — the budget verdict, not a silent bypass.
+      expect(result.stopReason).toBe('budget');
+      expect(result.usage).toEqual({ input: 0, output: 150_000, cacheRead: 0, cacheWrite: 0 });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
   });
 
   test('budget classification uses the TRUE total — thinking tokens are not added on top of output', async () => {

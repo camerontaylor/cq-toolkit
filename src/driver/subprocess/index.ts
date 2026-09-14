@@ -54,16 +54,30 @@
 //                               'allowlist' (default) → policy.allow ∩
 //                               harness, 'unrestricted' → all harness names,
 //                               'none' → an EMPTY value (nothing
-//                               pre-approved; combined with
-//                               --permission-prompts none every tool call
-//                               is denied — never prompted, never hung)
-//   --permission-prompts none   headless: a tool outside --allowedTools is
-//                               auto-DENIED; these denials are the CLI-side
-//                               source of WorkerResult.denials
-//   --bare                      minimal non-interactive operation
+//                               pre-approved). Headless -p mode CANNOT
+//                               PROMPT: a tool outside --allowedTools is
+//                               DENIED by the CLI (never prompted, never
+//                               hung) — those denials are the CLI-side
+//                               source of WorkerResult.denials. NO
+//                               UNDOCUMENTED FLAGS (issue #19):
+//                               `--permission-prompts none` and `--bare`
+//                               were removed — the real CLI rejects them at
+//                               parse.
 //   --model <route.model>       the routed, allowlist-verified model id
 //   --resume <cli-session-id>   only on sessionRef resume, when the record
 //                               carries a CLI session marker (below)
+//
+// TRUST STATEMENT (issue #28's subprocess half): sandboxPolicy governs the
+// tool-NAME surface only — the harness sandbox/path/output restrictions are
+// NOT enforced by this driver. The CLI is an independent process with its
+// own permission model: run/sandbox confinement is the host CLI's business
+// (--allowedTools controls WHICH tools may run, never where or how). When
+// sandboxPolicy.level is not 'none' AND a tool surface was actually
+// exposed, the run records a `sandbox-level-unenforced` narration marker so
+// the unenforced request is observable per run (a mode-'none' run exposes
+// NOTHING pre-approved — headless-denied — so there is nothing unenforced
+// to observe, and the shared conformance contract pins such records to zero
+// tool-role messages).
 //
 // SESSIONS (I6, OUR vocabulary — src/harness/session.ts):
 //   - NO sessionRef → tempWorkspace() + SessionStore.create(): a fresh
@@ -71,18 +85,22 @@
 //   - sessionRef → SessionStore.load (unknown → THROW pre-dispatch: a fake
 //     resume is worse than a loud one); the SAME workspace continues, and
 //     `--resume` continues the CLI-side conversation using the CLI session
-//     id recorded in the workspace sidecar file `.cq-cli-session` (below).
-//     A workspace without a sidecar (prior run died before the CLI reported
-//     a session) resumes the WORKSPACE only: no --resume flag, an honest
-//     partial continuation.
-//   - WHY A SIDECAR, not a record message: role 'tool' in a session record
+//     id recorded in the SESSIONS-STORE sidecar `<sessionsDir>/
+//     <sessionId>.cq-cli-session` (below). A session without a sidecar
+//     (prior run died before the CLI reported a session) resumes the
+//     WORKSPACE only: no --resume flag, an honest partial continuation.
+//   - WHY A SIDECAR, and why it lives in the STORE, not the workspace
+//     (issue #26, candidate design (b)): role 'tool' in a session record
 //     means A TOOL RAN — that is the contract the shared conformance suite
 //     observes (mode 'none' must leave a record with zero tool-role
-//     messages), so the CLI session handle must not masquerade as one. The
-//     sidecar is plain data (the CLI session id) inside the invocation's
-//     OWN workspace — it exists exactly where the resume it enables lives,
-//     and a fresh workspace carries none. Our vocabulary never becomes
-//     vendor vocabulary either way.
+//     messages), so the CLI session handle must not masquerade as one. And
+//     it must not live in the WORKSPACE either: the workspace is
+//     MODEL-VISIBLE — the earlier placement there was a tamper vector (the
+//     model could read or alter its own resume handle through the very
+//     tools the policy hands it). Relocated beside the session records and
+//     keyed by sessionId, the handle is exactly as precise and no longer
+//     reachable by the model. Our vocabulary never becomes vendor
+//     vocabulary either way.
 //   - Persisted per run, post-settle: the user prompt, ONE role 'tool'
 //     message PER IN-POLICY CLI TOOL EXECUTION (toolName = the CLI tool
 //     name; content = { input, ok, output } in plain-JSON our-vocabulary),
@@ -123,13 +141,17 @@
 //      → 'complete'; any other result status → 'error'
 //   4. no result event (spawn failure, nonzero exit, silent death) → 'error'
 // Once spawned, run() NEVER throws: every failure lands in an honest
-// 'error' verdict carrying the sessionId + denials gathered so far.
-// A spawn failure reports zero usage (nothing was measured); an 'error'
-// verdict from a real result event KEEPS the CLI-reported usage (real
-// evidence). Only PRE-DISPATCH validation throws (unknown model — the
-// routing footgun; missing key env; unknown sessionRef; a non-positive
-// Budget.maxTokens; a schema that cannot become JSON Schema — the last at
-// construction).
+// 'error' verdict carrying the sessionId + denials gathered so far — and a
+// SYNCHRONOUS SPAWN FAILURE is a verdict too (issue #19): a spawnImpl that
+// throws (empty argv → ERR_INVALID_ARG_TYPE, a hostile test override)
+// returns stopReason 'error' with the spawn error recorded as narration,
+// never a rejection. A spawn failure reports zero usage (nothing was
+// measured); an 'error' verdict from a real result event KEEPS the
+// CLI-reported usage (real evidence). Only PRE-DISPATCH validation throws
+// (unknown model — the routing footgun; missing key env; unknown
+// sessionRef; a non-positive Budget.maxTokens; invalid grace windows or
+// binary template at construction; a schema that cannot become JSON Schema
+// — the last at construction).
 //
 // BUDGET — the subprocess floor is honest about what a headless CLI cannot
 // do: there is NO mid-run token hook, so Budget.maxTokens is enforced only
@@ -138,14 +160,20 @@
 // is the governor's/admission's business). maxUsd is caller-side derived
 // accounting; maxAttempts is the runner's; wallClockMs is the governor's.
 //
-// COST (DD-2, derived-only): costUSD via computeCostUSD(modelSpec, usage)
-// — present only when the price map knows the model (overridable via the
-// `pricing` constructor option, same arithmetic over the injected rates),
-// and only on a verdict carrying REAL usage. Error/abort verdicts without
-// a measurement report NO costUSD: 0 would be a fabricated fact. The
-// derived figure is api-equivalent (modeled — list price for the tokens
-// consumed), never presented as billed (DD-9;
-// docs/dd-9-api-equivalent-budget.md).
+// COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
+// model id ({ ...modelSpec, model: servedModel ?? modelSpec.model }; the
+// provider handle stays ModelSpec.provider — the price table's key), so a
+// gateway that silently remaps is priced off the id the CLI actually
+// reported — present only when the price map knows that id (overridable via
+// the `pricing` constructor option, same arithmetic over the injected
+// rates), and only on a verdict carrying REAL usage. A served/reported
+// mismatch with the requested id is recorded as a served-model-mismatch
+// narration marker (observable, issue #19) — the conformance suite fails a
+// mismatching run loudly; production runs record it and price off the
+// served id. Error/abort verdicts without a measurement report NO costUSD:
+// 0 would be a fabricated fact. The derived figure is api-equivalent
+// (modeled — list price for the tokens consumed), never presented as billed
+// (DD-9; docs/dd-9-api-equivalent-budget.md).
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -170,10 +198,14 @@ import type { ManagedChild, SpawnOptions, TerminationRungMarker } from './proces
 // ---------------------------------------------------------------------------
 
 /**
- * Workspace sidecar file carrying the CLI's own session id — the `--resume`
- * handle for the NEXT run on the SAME sessionRef. A sidecar, not a record
- * message: role 'tool' in a session record means a tool ran (header), so
- * the handle lives in the workspace it resumes.
+ * The file-name SUFFIX of the CLI-session sidecar — the `--resume` handle
+ * for the NEXT run on the SAME sessionRef, stored as
+ * `<sessionsDir>/<sessionId>.cq-cli-session` (issue #26, design (b)). A
+ * sidecar, not a record message: role 'tool' in a session record means a
+ * tool ran (header). And NOT in the workspace: the workspace is
+ * model-visible — the earlier placement there let the model read or alter
+ * its own resume handle (the tamper vector); beside the session records the
+ * handle is out of its reach.
  */
 export const CLI_SESSION_FILE = '.cq-cli-session';
 
@@ -244,6 +276,13 @@ export class SubprocessDriver implements Driver {
 
   constructor(options: SubprocessDriverOptions = {}) {
     this.binary = typeof options.binary === 'string' ? [options.binary] : options.binary ?? ['claude'];
+    // An empty binary template cannot spawn anything — invalid argv would
+    // only explode at spawn time (post-dispatch). Validate HERE, loudly.
+    if (this.binary.length === 0 || this.binary.some((part) => part === '')) {
+      throw new Error(
+        `subprocess driver: binary must be a non-empty string or a non-empty array of non-empty strings, got ${JSON.stringify(options.binary)}`,
+      );
+    }
     // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
     // config error before any run, not a mid-dispatch surprise. The original
     // zod schema is retained alongside the serialized form — the CLI's
@@ -254,6 +293,17 @@ export class SubprocessDriver implements Driver {
     // An invalid table throws HERE (construction is the closest thing to
     // compile time a data table has) — never silently at route time.
     this.routingTable = RoutingTableSchema.parse(options.routingTable ?? defaultRoutingTable());
+    // The grace windows are the I8-exempt ladder's execution inputs: a
+    // negative/NaN/Infinity grace would collapse to an immediate SIGKILL.
+    // Validate HERE, loudly (issue #19).
+    for (const [name, value] of [
+      ['termGraceMs', options.termGraceMs],
+      ['killGraceMs', options.killGraceMs],
+    ] as const) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+        throw new Error(`subprocess driver: ${name} must be an integer >= 0, got ${String(value)}`);
+      }
+    }
     this.termGraceMs = options.termGraceMs;
     this.killGraceMs = options.killGraceMs;
     this.sessionsDir = options.sessionsDir;
@@ -277,7 +327,8 @@ export class SubprocessDriver implements Driver {
     }
 
     // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
-    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
+    const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
         ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
@@ -290,9 +341,15 @@ export class SubprocessDriver implements Driver {
     const harnessNames = buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map((t) => t.name);
     const allowed = allowedToolNames(harnessNames, toolPolicy);
 
-    // --- CLI-level resume: the CLI session id recorded in the workspace --
-    // sidecar by a prior run (absent → workspace-only continuation).
-    const resumeCliSessionId = await readCliSessionId(workspace);
+    // --- Trust statement (header): sandboxPolicy names the tool surface ---
+    // only; THIS driver does not enforce a sandbox level. When a level was
+    // requested AND a tool surface was actually exposed, record that the
+    // level went unenforced here (per-run, observable).
+    const sandboxUnenforced = sandboxPolicy.level !== 'none' && allowed.length > 0;
+
+    // --- CLI-level resume: the CLI session id recorded in the SESSIONS ---
+    // STORE sidecar by a prior run (absent → workspace-only continuation).
+    const resumeCliSessionId = await readCliSessionId(sessionsDir, record.sessionId);
 
     const argv = buildArgs({
       route,
@@ -310,16 +367,43 @@ export class SubprocessDriver implements Driver {
       return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'aborted' };
     }
 
-    // --- The one spawn. From here on, run() NEVER throws past the seam. ---
-    const child = this.spawnImpl({
-      command: this.binary[0] as string,
-      args: [...this.binary.slice(1), ...argv],
-      cwd: workspace,
-      env: childEnv,
-      stdin: prompt,
-    });
-
+    // --- The one spawn. From here on, run() NEVER throws past the seam —
+    // including the spawn itself: a SYNCHRONOUS spawnImpl failure (empty
+    // argv → ERR_INVALID_ARG_TYPE, a hostile override) is an 'error'
+    // VERDICT, not a rejection (issue #19).
     const observation = newObservation();
+    if (sandboxUnenforced) {
+      observation.narration.push(
+        JSON.stringify({ cq: 'sandbox-level-unenforced', level: sandboxPolicy.level }),
+      );
+    }
+    let child: ManagedChild;
+    try {
+      child = this.spawnImpl({
+        command: this.binary[0] as string,
+        args: [...this.binary.slice(1), ...argv],
+        cwd: workspace,
+        env: childEnv,
+        stdin: prompt,
+      });
+    } catch (err) {
+      // Best-effort narration first (the same swallow rule as persistence:
+      // the verdict outranks the record), then the honest error verdict.
+      try {
+        await store.appendMessage(record.sessionId, {
+          role: 'tool',
+          toolName: NARRATION_TOOL,
+          content: JSON.stringify([
+            JSON.stringify({ cq: 'spawn-failed', error: err instanceof Error ? err.message : String(err) }),
+          ]),
+          at: nowIso(),
+        });
+      } catch {
+        // deliberately swallowed — the verdict still reaches the caller
+      }
+      return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'error' };
+    }
+
     let aborted = false;
     let terminationStarted = false;
     let finishTermination: (() => void) | undefined;
@@ -392,6 +476,17 @@ export class SubprocessDriver implements Driver {
       }
     }
 
+    // The served model is OBSERVED, never requested: when the CLI reports a
+    // different id than ModelSpec.model asked for, the mismatch is recorded
+    // as narration (issue #19 — the corruption is now observable). The
+    // conformance suite fails a mismatching run loudly (leg m); production
+    // runs record the mismatch and price off the served id (below).
+    if (observation.servedModel !== undefined && observation.servedModel !== modelSpec.model) {
+      observation.narration.push(
+        JSON.stringify({ cq: 'served-model-mismatch', requested: modelSpec.model, served: observation.servedModel }),
+      );
+    }
+
     // --- Session persistence (post-settle, OUR vocabulary). A store error
     // here is swallowed: once spawned, the verdict must reach the caller —
     // persistence is evidence hygiene, not the seam contract.
@@ -431,7 +526,9 @@ export class SubprocessDriver implements Driver {
    * Fold the observation into the frozen WorkerResult (header tables:
    * stop reasons, cost, usage). Real usage (CLI-reported) is kept on any
    * verdict that observed it; unmeasured verdicts (spawn failure, abort)
-   * report zeros and NEVER a cost.
+   * report zeros and NEVER a cost. A served/reported model mismatch with
+   * the requested id is the narration marker's business (run()); the
+   * PRICING here keys on the served id either way (issue #24).
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -452,10 +549,18 @@ export class SubprocessDriver implements Driver {
     });
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/spawn-failure verdict.
+    // Price the model that was actually SERVED when one was observed (the
+    // remap evidence is real — pricing the requested id would attribute the
+    // wrong rates); the requested ModelSpec.model is the fallback. The
+    // provider handle stays modelSpec.provider (the price table's key).
+    const pricedModel: ModelSpec =
+      observation.servedModel !== undefined
+        ? { ...modelSpec, model: observation.servedModel }
+        : modelSpec;
     const cost =
       measured === undefined && observation.assistantUsage === undefined
         ? {}
-        : costField(this.costUSDOf.bind(this), modelSpec, usage);
+        : costField(this.costUSDOf.bind(this), pricedModel, usage);
     return {
       // The observed served model: what the endpoint reports it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
@@ -537,9 +642,12 @@ export interface ArgBuildInputs {
 
 /**
  * THE ARGV (header table, in order). --allowedTools is ALWAYS emitted: an
- * empty joined value means "nothing pre-approved", which — combined with
- * --permission-prompts none — is exactly ToolPolicy mode 'none' (every tool
- * call denied, never prompted).
+ * empty joined value means "nothing pre-approved" — and because headless -p
+ * mode cannot prompt, a tool outside --allowedTools is DENIED by the CLI
+ * (never prompted, never hung): those CLI-side denials are the source of
+ * WorkerResult.denials. No undocumented flags (issue #19): the former
+ * `--permission-prompts none` and `--bare` are REMOVED — the real `claude`
+ * CLI rejects them at argv parse.
  */
 export function buildArgs(inputs: ArgBuildInputs): string[] {
   const args: string[] = [
@@ -554,8 +662,6 @@ export function buildArgs(inputs: ArgBuildInputs): string[] {
     args.push('--json-schema', inputs.outputJsonSchema);
   }
   args.push('--allowedTools', inputs.allowedToolNames.join(' '));
-  args.push('--permission-prompts', 'none');
-  args.push('--bare');
   args.push('--model', inputs.route.model);
   if (inputs.resumeCliSessionId !== undefined) {
     args.push('--resume', inputs.resumeCliSessionId);
@@ -625,8 +731,16 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/**
+ * CLI-reported numeric fields must be finite non-negative INTEGERS: a
+ * negative or fractional "token count" is a lying measurement — accepting
+ * it folded negative usage (→ negative cost) and a NEGATIVE token total
+ * that could never trip the `>= maxTokens` budget check (the bypass,
+ * issue #19). Invalid → undefined → the fold sites' `?? 0` maps it to an
+ * honest zero.
+ */
 function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function asArray(value: unknown): unknown[] | undefined {
@@ -784,8 +898,15 @@ async function persistObservation(
   if (cliSessionId !== undefined && cliSessionId !== resumeCliSessionId) {
     // Best-effort: the sidecar is the NEXT run's --resume handle; a failed
     // write costs a workspace-only continuation, never this run's verdict.
+    // Stored beside the session records, keyed by sessionId (issue #26) —
+    // NOT in the model-visible workspace (the tamper vector, header) — and
+    // 0o600 like the records it sits beside (never world-readable).
     try {
-      await writeFile(join(record.workspace, CLI_SESSION_FILE), `${cliSessionId}\n`, 'utf8');
+      await writeFile(
+        join(store.sessionsDir, `${record.sessionId}${CLI_SESSION_FILE}`),
+        `${cliSessionId}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
     } catch {
       // deliberately swallowed — resume degrades honestly (no --resume flag)
     }
@@ -819,13 +940,15 @@ async function persistObservation(
 }
 
 /**
- * The CLI session id recorded in a prior run's workspace sidecar, if any —
- * the `--resume` argument of THIS run. Missing/unreadable → undefined (an
- * honest workspace-only continuation, never a fabricated resume).
+ * The CLI session id recorded by a prior run of THIS session — the
+ * `--resume` argument of the current run — read from the relocated store
+ * sidecar `<sessionsDir>/<sessionId>.cq-cli-session` (issue #26). Missing/
+ * unreadable → undefined (an honest workspace-only continuation, never a
+ * fabricated resume).
  */
-async function readCliSessionId(workspace: string): Promise<string | undefined> {
+async function readCliSessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
   try {
-    const raw = await readFile(join(workspace, CLI_SESSION_FILE), 'utf8');
+    const raw = await readFile(join(sessionsDir, `${sessionId}${CLI_SESSION_FILE}`), 'utf8');
     const trimmed = raw.trim();
     return trimmed === '' ? undefined : trimmed;
   } catch {

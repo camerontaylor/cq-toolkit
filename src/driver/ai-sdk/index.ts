@@ -20,7 +20,10 @@
 //     races it.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
-//     pure token fold — no scheduling primitive involved).
+//     pure token fold — no scheduling primitive involved). stopWhen is
+//     passed ALWAYS: `stepCountIs(DEFAULT_MAX_STEPS)` bounds the tool loop
+//     even without a token cap (the SDK's own default is a single step,
+//     under which tool calls are never followed up).
 //   - Budget.maxAttempts is the runner/governor's retry business; this
 //     driver makes exactly ONE attempt per run.
 //   - Budget.maxUsd is caller-side derived accounting (USD is never
@@ -92,27 +95,41 @@
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired (context.signal.aborted) or the SDK call threw
 //      an abort-shaped error          → 'aborted'
-//   2. token budget tripped (Σ step usage totalTokens >= Budget.maxTokens)
+//   2. token budget tripped (the Usage token fold — input+output+cache+
+//      cacheWrite, reasoning counted once via output — >= Budget.maxTokens)
 //      or SDK finishReason 'length'   → 'budget'
 //   3. SDK finishReason 'error' or 'content-filter', or the run threw  →
 //      'error'
 //   4. otherwise ('stop' | 'tool-calls' | 'other') → 'complete'
 // A caught throw returns stopReason 'error' (never throw past the seam
-// mid-run): the result keeps the denials + sessionId gathered so far. Only
-// PRE-DISPATCH validation (unknown provider, missing key, over-budget op
-// prompt, unknown sessionRef) throws.
+// mid-run): the result keeps the usage of every completed step (folded via
+// onStepFinish — all-zero only when truly nothing completed) plus the
+// denials + sessionId gathered so far. Only PRE-DISPATCH validation
+// (unknown provider, missing key, over-budget op prompt, unknown
+// sessionRef) throws.
 //
-// COST (DD-2, derived-only): costUSD = computeCostUSD(modelSpec, usage) —
+// COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
+// model id ({ ...modelSpec, model: servedModel ?? modelSpec.model } — a
+// silently-remapped gateway is priced off the id the response reports;
+// the provider handle stays ModelSpec.provider, the price table's key) —
 // present only on a COMPLETED run whose usage is real, and only when the
 // price map (src/driver/pricing; overridable via the `pricing` constructor
-// option) knows the model. The ERROR/ABORT path reports NO costUSD at all:
-// tokens may have been spent before the failure, so 0 would be a fabricated
-// fact. The derived figure is api-equivalent (modeled — list price for the
-// tokens consumed), never presented as billed (DD-9;
+// option) knows that id. The ERROR/ABORT path keeps the USAGE evidence of
+// every completed step but reports NO costUSD: the run did not complete,
+// so no cost figure is claimed (never fabricate — 0 would be as invented
+// as any other number). The derived figure is api-equivalent (modeled —
+// list price for the tokens consumed), never presented as billed (DD-9;
 // docs/dd-9-api-equivalent-budget.md). The driver never fabricates or
 // reports trusted USD.
-import { generateText, Output, tool } from 'ai';
-import type { FinishReason, LanguageModel, LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
+import { generateText, Output, stepCountIs, tool } from 'ai';
+import type {
+  FinishReason,
+  LanguageModel,
+  LanguageModelUsage,
+  ModelMessage,
+  StopCondition,
+  ToolSet,
+} from 'ai';
 import type { ZodType } from 'zod';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -121,7 +138,7 @@ import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
 import { createDeepSeek } from '@ai-sdk/deepseek';
 import { currentJobContext } from '../../kernel/governor.js';
-import { defaultHarnessConfig } from '../../harness/config.js';
+import { deepFreeze, defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
 import type { ToolkitTool } from '../../harness/tools.js';
@@ -138,6 +155,17 @@ import type { ModelSpec, OpInvocation } from '../types.js';
 
 /** A provider factory: frozen ModelSpec.model id → a live language-model instance. */
 export type ProviderFactory = (modelId: string) => LanguageModel;
+
+/**
+ * The multi-step default for the SDK tool loop (ai@7.0.99). TOOL-CALL LOOPS
+ * NEED MULTI-STEP: without an explicit `stopWhen` the SDK's default is
+ * `stepCountIs(1)` — the run would return after the FIRST tool-calls step,
+ * so tool calls would never be followed up. 8 steps bounds the loop
+ * defensively (a misbehaving model cannot loop forever) while remaining a
+ * pure STEP COUNT, not a scheduling primitive (I8: WHEN to abort on time is
+ * still the governor's ladder; Budget.maxTokens is the token-side bound).
+ */
+export const DEFAULT_MAX_STEPS = 8;
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
@@ -184,7 +212,14 @@ export class AiSdkDriver implements Driver {
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
     this.outputSchema = options.outputSchema;
-    this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
+    // The effective config is stored as a deep-frozen STRUCTURED CLONE:
+    // neither the caller's object (mutated after construction) nor the
+    // shared `defaultHarnessConfig` can be reached — or mutated — through
+    // the driver (a shared mutable default would leak one caller's change
+    // into every later run).
+    this.harnessConfig = deepFreeze(
+      structuredClone(options.harnessConfig ?? defaultHarnessConfig),
+    );
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
   }
@@ -205,16 +240,29 @@ export class AiSdkDriver implements Driver {
       sessionRef === undefined
         ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
         : await loadSessionOrThrow(store, sessionRef);
-    await store.appendMessage(record.sessionId, {
-      role: 'user',
-      content: prompt,
-      at: nowIso(),
-    });
+    // A FAILED prior attempt persists its prompt with no verdict after it:
+    // when the resumed record's LAST message is already this exact user
+    // prompt, re-appending would compose two CONSECUTIVE identical user
+    // turns — reuse the existing trailing turn instead (skip both the store
+    // append and the extra prompt message).
+    const lastMessage = record.messages[record.messages.length - 1];
+    const resumedTrailingPrompt =
+      lastMessage !== undefined && lastMessage.role === 'user' && lastMessage.content === prompt;
+    if (!resumedTrailingPrompt) {
+      await store.appendMessage(record.sessionId, {
+        role: 'user',
+        content: prompt,
+        at: nowIso(),
+      });
+    }
     // The store write does not mutate the in-memory record: the fresh prompt
     // is appended explicitly to the transcript (resume records already carry
-    // their history in record.messages).
+    // their history in record.messages) — unless the trailing turn above IS
+    // this prompt, in which case the transcript reuses it.
     const promptMessage: SessionMessage = { role: 'user', content: prompt, at: nowIso() };
-    const transcript = transcriptMessages([...record.messages, promptMessage]);
+    const transcript = transcriptMessages(
+      resumedTrailingPrompt ? record.messages : [...record.messages, promptMessage],
+    );
 
     // --- Tool surface: harness config surface ∩ per-op ToolPolicy. --------
     const denials: ToolDenial[] = [];
@@ -235,15 +283,24 @@ export class AiSdkDriver implements Driver {
     const governed = currentJobContext();
     const abortSignal = governed?.signal;
 
-    // --- Timer-free token budget: a stopWhen condition folding the --------
-    // accumulated step usage (Budget.maxTokens), never a scheduling
-    // primitive.
-    const stopWhen =
-      budget.maxTokens !== undefined
-        ? tokenBudgetCondition(budget.maxTokens)
-        : undefined;
+    // --- Timer-free budget + the tool-loop bound: stopWhen is ALWAYS ------
+    // passed. With Budget.maxTokens the token fold trips the cap; without
+    // one, stepCountIs(DEFAULT_MAX_STEPS) still bounds the tool loop — the
+    // SDK's own default is a SINGLE step (stepCountIs(1)), under which tool
+    // calls would never be followed up. Both ride the SDK's step loop: no
+    // scheduling primitive (I8).
+    const stopWhen: Array<StopCondition<ToolSet>> = [
+      ...(budget.maxTokens !== undefined ? [tokenBudgetCondition(budget.maxTokens)] : []),
+      stepCountIs(DEFAULT_MAX_STEPS),
+    ];
 
     // --- The one SDK call. -------------------------------------------------
+    // Per-step usage accumulation (DD-2 evidence): onStepFinish fires for
+    // EVERY completed step — intermediate ones included — so a run that
+    // fails mid-loop still carries the tokens its completed steps spent
+    // (an error verdict reporting all-zero usage after real work would be
+    // dishonest evidence). The fold never feeds a cost figure on this path.
+    let stepUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
     try {
       const result = await generateText({
         model,
@@ -254,7 +311,10 @@ export class AiSdkDriver implements Driver {
         // a governed abort must surface immediately.
         maxRetries: 0,
         ...(selected.length > 0 ? { tools: toolSet } : {}),
-        ...(stopWhen !== undefined ? { stopWhen } : {}),
+        stopWhen,
+        onStepFinish: (step) => {
+          stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
+        },
         ...(abortSignal !== undefined ? { abortSignal } : {}),
         ...(this.outputSchema !== undefined
           ? { output: Output.object({ schema: this.outputSchema }) }
@@ -288,7 +348,11 @@ export class AiSdkDriver implements Driver {
         ...(servedModel !== undefined ? { model: servedModel } : {}),
         ...(structuredOutput !== undefined ? { structuredOutput } : {}),
         usage,
-        ...costField(this.pricing, modelSpec, usage),
+        // PRICING KEY: derived over the OBSERVED served model id — a
+        // silently-remapped gateway is priced off the id the response
+        // reports (the same fact WorkerResult.model carries); the provider
+        // handle stays modelSpec.provider (the price table's key).
+        ...costField(this.pricing, { ...modelSpec, model: servedModel ?? modelSpec.model }, usage),
         sessionId: record.sessionId,
         denials,
         stopReason: stopReasonOf({
@@ -305,15 +369,16 @@ export class AiSdkDriver implements Driver {
       // error (I8). A missing structured object is an error verdict too:
       // the model never produced the required output.
       //
-      // NO costUSD here (never-fabricate): tokens may have been spent before
-      // the failure, so `0` would be a fabricated fact and any other number
-      // would be invented — the error/abort verdict carries NO cost claim.
-      // Cost stays derived-only on completed runs, where usage is real.
+      // USAGE EVIDENCE IS KEPT: onStepFinish folded every completed step,
+      // so the verdict carries the real tokens spent before the failure —
+      // all-zero only when truly nothing completed. COST is NOT fabricated
+      // (never-fabricate): the run did not complete, so no derived figure
+      // is claimed — cost stays derived-only on completed runs, where the
+      // usage is whole.
       const aborted =
         abortSignal?.aborted === true || (err instanceof Error && err.name === 'AbortError');
-      const zeroUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       return {
-        usage: zeroUsage,
+        usage: stepUsage,
         sessionId: record.sessionId,
         denials,
         stopReason: aborted ? 'aborted' : 'error',
@@ -355,8 +420,15 @@ export class AiSdkDriver implements Driver {
     }
     const room = maxChars - prompt.length - 2; // '\n\n' separator
     const preamble =
-      SYSTEM_PREAMBLE.length <= room ? SYSTEM_PREAMBLE : SYSTEM_PREAMBLE.slice(0, Math.max(0, room));
-    return `${preamble}\n\n${prompt}`;
+      room <= 0
+        ? ''
+        : SYSTEM_PREAMBLE.length <= room
+          ? SYSTEM_PREAMBLE
+          : SYSTEM_PREAMBLE.slice(0, room);
+    // An empty preamble has nothing to separate: the prompt rides ALONE.
+    // The unconditional separator would compose prompt.length + 2 chars —
+    // slipping past the very budget it enforces.
+    return preamble === '' ? prompt : `${preamble}\n\n${prompt}`;
   }
 }
 
@@ -476,7 +548,7 @@ function transcriptMessages(messages: readonly SessionMessage[]): ModelMessage[]
 }
 
 /** Timer-free Budget.maxTokens stop condition: fold accumulated step usage, compare, done. */
-function tokenBudgetCondition(maxTokens: number) {
+function tokenBudgetCondition(maxTokens: number): StopCondition<ToolSet> {
   return ({ steps }: { steps: ReadonlyArray<{ usage?: LanguageModelUsage }> }): boolean => {
     let total = 0;
     for (const step of steps) {
@@ -509,9 +581,33 @@ export function usageFromSdk(usage: LanguageModelUsage): Usage {
   };
 }
 
-/** Σ of the frozen Usage fields — the same total the SDK's totalTokens reports. */
+/**
+ * Field-wise Usage fold (frozen Usage) — accumulates per-step evidence into
+ * one rollup. `reasoning` sums the reported field itself; the CAP fold
+ * (totalTokensOf) is where reasoning must not double-count.
+ */
+function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    ...((a.reasoning !== undefined || b.reasoning !== undefined)
+      ? { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }
+      : {}),
+  };
+}
+
+/**
+ * Σ of the frozen Usage fields — the Budget.maxTokens cap fold. `reasoning`
+ * is NOT added on top: the frozen `output` field already includes reasoning
+ * tokens (outputTokenDetails.reasoningTokens is a breakdown OF output), so
+ * the fold counts them once, via output — output + reasoning would
+ * double-count. The field stays on Usage as reported evidence; the
+ * per-step accumulation (addUsage) still sums it.
+ */
 function totalTokensOf(usage: Usage): number {
-  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 }
 
 /**

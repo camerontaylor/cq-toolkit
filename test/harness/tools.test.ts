@@ -1,10 +1,18 @@
-// Harness tool-surface tests — PR 10 round-1 fixes 1 and 5:
+// Harness tool-surface tests — PR 10 round-1 fixes 1 and 5, plus issue #18:
 //   - fix 1 (HIGH): token-prefix command patterns must NOT bless shell
 //     metacharacters (the exec shell interprets what the token prefix never
 //     saw); anchored re: patterns are the documented escape hatch.
 //   - fix 5 (MED): pre-existing symlinks pointing outside the workspace are
 //     denied on read/edit (realpath re-check; the TOCTOU window stays
 //     documented, not tested — it is not deterministically exercisable).
+//   - issue #18: exec's maxBuffer is sized above the output cap so a noisy
+//     command returns a TRUNCATED RESULT (capOutput truncates), never the
+//     1 MiB default's string-code rejection dressed up as a run failure.
+//
+// NO EXTERNAL BINARIES (review round 3, finding 1): every ALLOWED case
+// actually EXECUTES through /bin/sh, so its command must be shell BUILTINS
+// only (echo / printf / exit / true / false). DENIED cases never execute —
+// their command strings may name whatever the judgment is about.
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -36,9 +44,14 @@ function runConfig(commandPatterns: string[]) {
 describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => {
   test('a legit prefix command is still allowed', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'run');
-      const result = await run?.execute({ command: 'npm test -- --watch' });
+      // Shell BUILTINS only (echo): an allowed case EXECUTES, so it must
+      // spawn nothing external (review round 3, finding 1).
+      const run = buildTools(runConfig(['echo pilot']), scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({ command: 'echo pilot patrol' });
       expect(result?.ok).toBe(true);
+      if (result?.ok) {
+        expect(result.output).toContain('pilot patrol'); // the builtin really ran
+      }
     });
   });
 
@@ -78,8 +91,10 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
 
   test('anchored re: patterns remain the deliberate metacharacter escape hatch', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['re:^npm test.*$']), scratchDir).find((t) => t.name === 'run');
-      const result = await run?.execute({ command: 'npm test; whoami' });
+      // Builtins only — the case EXECUTES (the re: author owns the full
+      // metachar-bearing string), so nothing external may spawn.
+      const run = buildTools(runConfig(['re:^echo pilot.*$']), scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({ command: 'echo pilot; exit 0' });
       expect(result?.ok).toBe(true); // the re: author owns the full string
     });
   });
@@ -88,12 +103,17 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
     await withScratch(async (scratchDir) => {
       // The token pattern matches the metacharacter-bearing command, but the
       // LATER anchored re: pattern is the escape hatch the denial points at —
-      // it must still allow outright, whatever the pattern order.
-      const run = buildTools(runConfig(['npm test', 're:^npm test ; deploy$']), scratchDir).find(
+      // it must still allow outright, whatever the pattern order. Builtins
+      // only (the case EXECUTES); exit 3 proves the command RAN by mapping
+      // to ok:true + exitCode 3 — no external binary involved.
+      const run = buildTools(runConfig(['echo pilot', 're:^echo pilot ; exit 3$']), scratchDir).find(
         (t) => t.name === 'run',
       );
-      const result = await run?.execute({ command: 'npm test ; deploy' });
+      const result = await run?.execute({ command: 'echo pilot ; exit 3' });
       expect(result?.ok).toBe(true);
+      if (result?.ok) {
+        expect(result.exitCode).toBe(3); // executed for real (nonzero exit is a result, not a denial)
+      }
     });
   });
 
@@ -198,4 +218,46 @@ describe('symlink hardening (fix 5)', () => {
       await expect(read?.execute({ path: 'src/real.txt' })).resolves.toMatchObject({ ok: true });
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #18 — exec maxBuffer sized above the output cap: capOutput truncates,
+// exec's 1 MiB default never turns noisy output into a 'run failed' denial.
+// ---------------------------------------------------------------------------
+
+describe('run output: maxBuffer sized above the cap (issue #18)', () => {
+  test('a command emitting > 1 MiB returns a truncated RESULT, not a run-failed denial', async () => {
+    await withScratch(async (scratchDir) => {
+      // cap 600k chars → maxBuffer = 600_000 * 4 + 64KiB ≈ 2.4 MB (bytes vs
+      // chars): the ~1.5 MB output fits the buffer — where exec's 1 MiB
+      // DEFAULT would reject with a string-code error — and capOutput
+      // truncates it. The probe is a PURE-BUILTIN /bin/sh while-loop with
+      // printf (review thread: no external binary; timed in-process at
+      // ~0.4 s per run, 3× consistent — far under the 2.5 s budget), so the
+      // no-external-binaries convention holds with NO exception.
+      const capConfig: HarnessConfig = {
+        ...defaultHarnessConfig,
+        tools: {
+          ...defaultHarnessConfig.tools,
+          run: {
+            enabled: true,
+            commandPatterns: ['re:^i=0; while.*cap-probe.*$'],
+            timeoutMs: 30_000,
+            maxOutputChars: 600_000,
+          },
+        },
+      };
+      const run = buildTools(capConfig, scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({
+        command: `i=0; while [ $i -lt 11000 ]; do printf 'cap-probe line %05d ${'x'.repeat(110)}\\n' "$i"; i=$((i+1)); done`,
+      });
+      expect(result?.ok).toBe(true); // the old default made this a denial
+      if (result?.ok) {
+        expect(result.exitCode).toBe(0);
+        expect(result.truncated).toBe(true);
+        expect(result.output.length).toBeLessThanOrEqual(600_000);
+        expect(result.output).toContain('exit 0');
+      }
+    });
+  }, 30_000);
 });
