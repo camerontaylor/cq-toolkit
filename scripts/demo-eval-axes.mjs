@@ -158,8 +158,11 @@ async function makeDriver(lane, provider, scratchDir) {
     // The mode pin (session/set_config_option mode=build before ANY prompt —
     // sessions open in `yolo`, which never asks) and the binary resolution
     // (zcode-acp-server via PATH — the operator's global install) are the
-    // DRIVER's own job; this script configures neither.
-    return new AcpDriver({ sessionsDir });
+    // DRIVER's own job; this script configures neither. modelEnv makes the
+    // requested model a REAL request on the vendor's own channel (the
+    // driver's documented REQUEST transport) — the served id remains what
+    // the identity guard verifies.
+    return new AcpDriver({ sessionsDir, modelEnv: 'ZCODE_MODEL' });
   }
   throw new Error(`unknown lane ${lane}`);
 }
