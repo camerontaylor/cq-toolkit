@@ -71,9 +71,9 @@
 // manifest order; replay-skipped jobs keep their slot), unschedulable
 // (missing-dep) jobs last in manifest order.
 //
-// opts.maxUsd is advisory and untouched here (USD stays derived; T1.3 owns
-// budget enforcement and honest-stop: this runner always reports
-// stoppedEarly: false with no earlyStopReason).
+// opts.maxUsd and opts.maxTokens are advisory and untouched here (USD stays
+// derived; T1.3 owns budget enforcement for BOTH caps and honest-stop: this
+// runner always reports stoppedEarly: false with no earlyStopReason).
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import { assertSafeRunId, openRunLog, type RunLog } from './journal.js';
