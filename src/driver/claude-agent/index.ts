@@ -888,14 +888,32 @@ export function foldMessage(observation: RunObservation, message: unknown): void
     }
     case 'user': {
       // SDKUserMessage frames ride this type (the SDKMessage union) — in
-      // practice tool-result deliveries after every tool round. They are
-      // deliberately DROPPED, exactly like assistant tool_use blocks: the
-      // harness surface executes in-process, so each outcome is already
-      // recorded at the execute boundary in OUR vocabulary, and SDK-side
-      // refusals arrive on the result's permission_denials (the
-      // authoritative record). Folding them to narration would duplicate
-      // the tool outcome AND put a raw vendor frame shape into persisted
-      // session data.
+      // practice tool-result deliveries after every tool round, whose
+      // MessageParam content can also carry ordinary TEXT blocks. Posture:
+      //   - tool_result-only content (or empty / unshapeable — the
+      //     subprocess lane's drop-if-unshapeable rule) is DROPPED, exactly
+      //     like assistant tool_use blocks: the harness surface executes
+      //     in-process, so each outcome is already recorded at the execute
+      //     boundary in OUR vocabulary, and SDK-side refusals arrive on the
+      //     result's permission_denials (the authoritative record). Folding
+      //     these to narration would duplicate the tool outcome AND put a
+      //     raw vendor frame shape into persisted session data.
+      //   - a frame carrying a TEXT block is NARRATED (evidence): the
+      //     normal flow never emits one — the prompt rides query()'s
+      //     argument and tool results ride tool_result frames — so a
+      //     text-bearing user frame is exactly the kind of unusual thing
+      //     narration exists to preserve. Never silently dropped.
+      const inner = asRecord(event['message']);
+      const content = inner === undefined ? undefined : asArray(inner['content']);
+      if (content === undefined) return; // unshapeable — dropped (subprocess posture)
+      let hasText = false;
+      for (const block of content) {
+        if (asRecord(block)?.['type'] === 'text') {
+          hasText = true;
+          break;
+        }
+      }
+      if (hasText) observation.narration.push(JSON.stringify(event));
       return;
     }
     case 'result': {

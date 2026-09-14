@@ -805,6 +805,104 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
+  test('a TEXT-bearing SDK user frame is narrated (unusual evidence, never silently dropped)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const unusualText = 'cq-unusual-user-text-evidence';
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              const sessionId = 'agent-cli-usertext';
+              const model = options['model'] as string;
+              yield { type: 'system', subtype: 'init', session_id: sessionId, model };
+              // The frame under test: a user frame whose MessageParam
+              // content carries an ordinary TEXT block — the normal flow
+              // never emits one.
+              yield {
+                type: 'user',
+                session_id: sessionId,
+                message: {
+                  role: 'user',
+                  content: [{ type: 'text', text: unusualText }],
+                },
+              };
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: false,
+                session_id: sessionId,
+                result: 'done',
+                usage: AGENT_USAGE,
+                modelUsage: {},
+                permission_denials: [],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('complete');
+      const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+      const record = await store.load(result.sessionId as string);
+      expect(record).toBeDefined();
+      const narration = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'agent-narration');
+      expect(narration).toBeDefined(); // the unusual frame is preserved as evidence
+      expect(narration?.content).toContain(unusualText); // our vocabulary: the text is IN the narration
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a MALFORMED SDK user frame (message not a record) is dropped — the subprocess lane drop-if-unshapeable posture', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              const sessionId = 'agent-cli-userjunk';
+              const model = options['model'] as string;
+              yield { type: 'system', subtype: 'init', session_id: sessionId, model };
+              // Malformed: message is a string, not a record — nothing
+              // shapeable to fold (subprocess lane: content undefined →
+              // return). Dropped, not narrated, never a crash.
+              yield { type: 'user', session_id: sessionId, message: 'garbage-not-a-record' };
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: false,
+                session_id: sessionId,
+                result: 'done',
+                usage: AGENT_USAGE,
+                modelUsage: {},
+                permission_denials: [],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('complete');
+      const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+      const record = await store.load(result.sessionId as string);
+      expect(record).toBeDefined();
+      // Dropped silently (no narration for an unshapeable user frame), and
+      // the run settled honestly regardless.
+      expect(
+        record?.messages.some((m) => m.role === 'tool' && m.toolName === 'agent-narration'),
+      ).toBe(false);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('endpoint lookup rejects prototype keys — constructor/toString are not providers', () => {
     expect(() => resolveEndpoint({ provider: 'constructor', model: 'm' }, defaultEndpointTable())).toThrow(
       /unknown provider 'constructor'/,
