@@ -638,7 +638,9 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
     case 'system': {
       if (event['subtype'] === 'init') {
         observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
+        return;
       }
+      observation.narration.push(line); // known type, unhandled subtype — evidence
       return;
     }
     case 'assistant': {

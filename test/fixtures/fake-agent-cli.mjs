@@ -174,9 +174,7 @@ const emitResult = (overrides = {}) =>
     session_id: sessionId,
     usage: USAGE,
     ...overrides,
-  });
-
-const emitJunk = () => {
+  });const emitJunk = () => {
   process.stdout.write('fake-agent-cli: transient bootstrapping noise (not json)\n');
   out({ type: 'system', subtype: 'status', message: 'worthless non-contract event' });
   process.stdout.write('{broken json at line level\n');
@@ -278,7 +276,7 @@ function keepAlive() {
 async function okFlow(replyText, usage = USAGE) {
   emitAssistantText(replyText, usage);
   const structured = structuredOutputFor(replyText);
-  emitResult(structured === undefined ? {} : { structured_output: structured });
+  emitResult({ usage, ...(structured === undefined ? {} : { structured_output: structured }) });
 }
 
 async function toolThenReply() {
@@ -303,6 +301,15 @@ async function main() {
   // Consume the prompt (stdin to EOF) without gating the event stream on it.
   process.stdin.resume();
 
+  // The ignore handler installs BEFORE anything else (init included) — a
+  // governed SIGTERM that raced node startup would otherwise kill us via
+  // the default disposition and never exercise the SIGKILL rung.
+  if (MODE === 'ignore-sigterm') {
+    process.on('SIGTERM', () => {
+      // deliberately ignored — the driver must escalate to SIGKILL
+    });
+  }
+
   if (MODE === 'unknown-model') {
     err(`fake-agent-cli: model '${model}' is not served by this endpoint; serving the endpoint default instead`);
     process.exit(1);
@@ -315,9 +322,6 @@ async function main() {
   emitInit();
 
   if (MODE === 'ignore-sigterm') {
-    process.on('SIGTERM', () => {
-      // deliberately ignored — the driver must escalate to SIGKILL
-    });
     keepAlive();
     return;
   }

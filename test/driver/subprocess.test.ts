@@ -137,6 +137,17 @@ function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {
   };
 }
 
+/** Base driver options shared by every test: fake binary, conformance routes, scratch dirs. */
+function baseOptions(scratchDir: string, extraEnv: Record<string, string>, calls: SpawnCall[]): SubprocessDriverOptions {
+  return {
+    binary: ['node', FAKE_CLI],
+    routingTable: conformanceRoutingTable(),
+    sessionsDir: join(scratchDir, SESSIONS_DIR),
+    harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
+    spawn: recordingSpawn(calls, extraEnv),
+  };
+}
+
 /** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
   const calls: SpawnCall[] = [];
@@ -198,7 +209,7 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
 
 describe('subprocess driver specifics (fake agent CLI)', () => {
   test('THE REMAP TEST: unknown model on the default routing table throws BEFORE any spawn', async () => {
-    await withScratch(async (scratchDir, store) => {
+    await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
       // DEFAULT table — the shipped deepseek endpoint config, no overrides.
       const driver = new SubprocessDriver({
@@ -218,13 +229,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       await expect(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'whatever' } })),
       ).rejects.toThrow(/unknown provider 'nope'/);
-      // Pre-dispatch means PRE-dispatch: zero spawns, zero session records.
+      // Pre-dispatch means PRE-dispatch: zero spawns — the sessions dir is
+      // never even created (store.create would have mkdir'd it).
       expect(calls).toEqual([]);
-      const store2 = new SessionStore(join(scratchDir, SESSIONS_DIR));
-      void store2;
-      const sessions = store; // the withScratch store shares the sessions dir
-      const loaded = await sessions.load('ses-nonexistent');
-      expect(loaded).toBeUndefined();
+      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
     });
   });
 
@@ -238,7 +246,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'stubborn run' })),
-        { wallClockMs: 50 },
+        { wallClockMs: 100 }, // > node startup: the fixture's ignore handler is installed first
         { op: 'subprocess', jobKey: 'subprocess-ladder', attempt: 1 },
       );
       expect(outcome.outcome).toBe('completed');
