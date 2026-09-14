@@ -369,13 +369,22 @@ touch. Therefore:
   business).
 - **maxUsd:** caller-side derived accounting, as on every lane.
 - **Usage mapping:** `PromptResponse.usage` → frozen `Usage`:
-  `inputTokens → input`, `outputTokens → output`,
-  `cachedReadTokens → cacheRead` (the reference mapper,
-  acp-agent.ts:677-684), and — **step-2 CORRECTION from the live wire** —
-  `cachedWriteTokens → cacheWrite`: the carried usage DOES have a
+  `outputTokens → output`, `cachedReadTokens → cacheRead` (the reference
+  mapper, acp-agent.ts:677-684), `cachedWriteTokens → cacheWrite` —
+  **step-2 CORRECTION from the live wire**: the carried usage DOES have a
   cache-write field on this vendor (OQ-3, verbatim on the wire), so the
   earlier "`cacheWrite` is 0-by-protocol" claim is wrong on this lane and
-  the field FOLDS instead of hardcoding 0. **`reasoning` is OMITTED** —
+  the field FOLDS instead of hardcoding 0 — and **round-3 CORRECTION**:
+  `input` is DERIVED, never mapped straight — `input = inputTokens −
+  cachedReadTokens − cachedWriteTokens`, floored at 0. The wire's
+  `inputTokens` is INCLUSIVE of the cached tokens (the live sample:
+  `totalTokens 15722 = inputTokens 15719 + outputTokens 3`, with
+  `cachedReadTokens 11648` inside the 15719), so the old
+  `inputTokens → input` mapping double-counted cache in every total that
+  sums the frozen fields — it totals **27370** against the wire's own
+  15722, while the derived fold `4071 + 3 + 11648 + 0 = 15722` sums to
+  the wire's totalTokens exactly (the ai-sdk lane's noCacheTokens
+  reasoning). **`reasoning` is OMITTED** —
   the same live probe shows `thoughtTokens` EXISTS on the wire, but its
   ADDITIVITY is unknown (whether the vendor counts thought tokens inside
   `outputTokens` or outside it; the sample turn reported

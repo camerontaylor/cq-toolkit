@@ -82,11 +82,26 @@
 //                         write fails (EPIPE) with the prompt still pending
 //                         (the broken-enforcement-channel scenario; the
 //                         run must settle 'error', never hang)
-//   FAKE_ACP_IGNORE_CANCEL  when '1', session/cancel is SWALLOWED — the
-//                         turn never settles protocol-side (a vendor that
-//                         ignores the cooperative cancel; the governed
-//                         kill rung must still reach the child and settle
-//                         the run 'aborted')
+//   FAKE_ACP_IGNORE_CANCEL  when '1', the TOLERANT-VENDOR persona:
+//                         session/cancel is SWALLOWED (the turn never
+//                         settles protocol-side — the governed kill rung
+//                         must still reach it), the termination SIGNAL is
+//                         IGNORED (SIGTERM cannot kill this process), and
+//                         in the tool flows an ask the client never
+//                         answers TIMES OUT — the vendor abandons the
+//                         permission and settles the turn end_turn anyway
+//                         (the wire can look green past failed
+//                         enforcement — the shape the selection-failure
+//                         verdict pin must survive)
+//   FAKE_ACP_PLACEHOLDER_CARD  when '1' (tool flows), the fixture emits
+//                         the probe-recorded PLACEHOLDER card while the
+//                         request_permission is still pending: a tool_call
+//                         titled 'tool permission (<Tool>)' (status
+//                         'pending', kind 'other') carrying the ASK's
+//                         toolCallId — the strategy-recorded popup card a
+//                         driver must not treat as the tool execution
+//                         (the run must stay a clean complete: no
+//                         never-asks tripwire, no denials)
 //   FAKE_ACP_BIG_FRAME   when '1', the reply chunk is ONE session/update
 //                         whose JSON line is ~20k chars, written in TWO
 //                         stdout flushes 25 ms apart with NO newline
@@ -152,7 +167,18 @@ const ADVERTISE_RESUME = process.env.FAKE_ACP_RESUME === '1';
 const STRING_REQUEST_IDS = process.env.FAKE_ACP_STRING_REQUEST_IDS === '1';
 const CLOSE_STDIN_ON_PERMISSION = process.env.FAKE_ACP_CLOSE_STDIN_ON_PERMISSION === '1';
 const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === '1';
+const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
+
+// The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL=1), signal half: the
+// termination is IGNORED — only the unignorable SIGKILL rung reaches this
+// process once it is up.
+if (IGNORE_CANCEL) process.on('SIGTERM', () => undefined);
+
+// The tolerant-vendor persona, ask half: an unanswered permission ask times
+// out and the turn settles end_turn anyway (see toolFlow). Generous enough
+// to never race the handshake; short enough to keep its test fast.
+const TOLERANT_ASK_TIMEOUT_MS = 250;
 
 // The POST-load tail marker (FAKE_ACP_REPLAY_WITH_TAIL=1): emitted in the
 // SAME stdout flush as the session/load response line, so it post-dates
@@ -480,7 +506,44 @@ async function toolFlow({ alwaysFail }) {
   const options = offeredOptions();
 
   await new Promise((answered) => {
-    askPermission(toolCallId, title, input, (result) => answered(result));
+    let settled = false;
+    const answer = (result) => {
+      if (settled) return;
+      settled = true;
+      answered(result);
+    };
+    askPermission(toolCallId, title, input, answer);
+    if (PLACEHOLDER_CARD) {
+      // The probe-recorded placeholder popup card (strategy checkpoint,
+      // verbatim shape): emitted while the ask is STILL PENDING, carrying
+      // the ASK's toolCallId — a driver must not mistake it for the tool
+      // execution, and its id (already permission-gated) must not read as
+      // never-asks evidence. The real tool_call card below overwrites it.
+      notifyUpdate({
+        sessionUpdate: 'tool_call',
+        toolCallId,
+        title: `tool permission (${TOOL})`,
+        kind: 'other',
+        status: 'pending',
+        content: [],
+        locations: [],
+      });
+    }
+    if (IGNORE_CANCEL) {
+      // The tolerant-vendor persona, ask half: an ask the client never
+      // answers TIMES OUT — the vendor abandons the permission and
+      // settles the turn end_turn anyway. `answer` stays uncalled on this
+      // path, so the execution continuation below is dead code (the run
+      // is settling over our head).
+      const askId = pendingPermission?.id;
+      setTimeout(() => {
+        if (pendingPermission !== null && pendingPermission.id === askId) {
+          pendingPermission = null;
+          emitChunk(REPLY ?? 'settled past the unanswered ask');
+          endTurn();
+        }
+      }, TOLERANT_ASK_TIMEOUT_MS);
+    }
   }).then(async (result) => {
     const outcome = result?.outcome ?? {};
     const optionId = outcome.outcome === 'selected' ? outcome.optionId : 'cancelled';

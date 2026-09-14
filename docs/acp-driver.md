@@ -135,10 +135,15 @@ silently soft.
   `builtin:bigmodel\…`). A harness that materializes nothing omits the
   field, and the conformance suite fails that lane — by design.
 - Usage folds ONLY from `PromptResponse.usage` (`usage_update` frames are
-  context telemetry, dropped): `inputTokens → input`, `outputTokens →
-  output`, `cachedReadTokens → cacheRead`, `cachedWriteTokens →
-  cacheWrite`. `reasoning` is never emitted — `thoughtTokens` exists on
-  the wire but its additivity vs `outputTokens` is unproven.
+  context telemetry, dropped): `outputTokens → output`, `cachedReadTokens
+  → cacheRead`, `cachedWriteTokens → cacheWrite`, and DERIVED input —
+  `input = inputTokens − cachedReadTokens − cachedWriteTokens`, floored
+  at 0. The wire's `inputTokens` is INCLUSIVE of the cached tokens (the
+  live sample: totalTokens 15722 = 4071 + 3 + 11648 + 0 — the derived
+  fold sums to the wire's own total, while the old straight
+  `inputTokens → input` mapping totals 27370, double-counting cache).
+  `reasoning` is never emitted — `thoughtTokens` exists on the wire but
+  its additivity vs `outputTokens` is unproven.
 - `costUSD` is derived-only (`pricing` lookup over the folded usage,
   keyed by the OBSERVED model), labeled `costBasis: 'modeled'`, absent
   for unpriced models, and absent on every unmeasured verdict (the

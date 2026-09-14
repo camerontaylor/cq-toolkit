@@ -15,7 +15,11 @@
 //      fallback when only allow_always is offered; reject selects
 //      reject_once by vendor-string optionId; a deny with no reject
 //      option AND an allow with no allow option each fail the run,
-//      narrating WHICH side failed), the never-asks tripwire, the
+//      narrating WHICH side failed — and the selection failure pins the
+//      verdict 'error' even when a termination-tolerant vendor settles
+//      end_turn past it), the never-asks tripwire, the probe-recorded
+//      placeholder permission card (never mistaken for the tool
+//      execution — the run stays a clean complete), the
 //      replay window (bait-before-response discarded; a post-load frame
 //      sharing the response's stdout flush FOLDS — the line-level gate),
 //      the THREE-RUNG resume gate (session/load → unstable_resumeSession
@@ -386,6 +390,41 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('answer table: the SELECTION failure pins the verdict error even when the tolerant vendor settles end_turn anyway', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL: the cancel
+      // notification is swallowed, the termination SIGNAL is ignored, an
+      // unanswered ask TIMES OUT into an end_turn settle) + the allow-side
+      // deadlock: the driver cannot answer the ask and terminates the
+      // child — the vendor ignores the termination, times out its
+      // unanswered ask, and settles end_turn with real usage anyway. A
+      // driver that trusts the wire outcome reads that shape as
+      // 'complete'; the failed ENFORCEMENT pins 'error' (the
+      // answerWriteFailed mirror, round-3) while the measurement still
+      // folds — it really happened.
+      const driver = new AcpDriver({
+        ...driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_OPTIONS: JSON.stringify([{ optionId: 'only_reject', kind: 'reject_once' }]),
+            FAKE_ACP_IGNORE_CANCEL: '1',
+          },
+          [],
+        ),
+        termGraceMs: 500,
+        killGraceMs: 500,
+      });
+      const result = await driver.run(invocation({ prompt: 'tolerant-vendor selection-failure run' }));
+      expect(result.stopReason).toBe('error'); // pinned — never 'complete', however green the wire looks
+      expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 }); // the end_turn measurement folds
+      const narration = await narrationOf(store, result.sessionId as string);
+      const failed = narration.find((line) => line.includes('"permission-answer-failed"'));
+      expect(failed !== undefined && failed.includes('"side":"allow"')).toBe(true);
+    });
+  }, 20_000);
+
   test('THE NEVER-ASKS TRIWIRE: an ungated tool_call is evidence + an error verdict — never green', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
@@ -407,6 +446,50 @@ describe('acp driver specifics (fake ACP server)', () => {
       const workspace = record?.workspace as string;
       const ungated = await readFile(join(workspace, 'ungated.txt'), 'utf8');
       expect(ungated).toContain('never-asks-marker');
+    });
+  });
+
+  test('the probe-recorded placeholder permission card is not the tool execution: the run stays a clean complete', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The strategy records the bridge's placeholder card — title
+      // 'tool permission (<Tool>)', status 'pending', kind 'other',
+      // emitted while the ask is PENDING — and warns the driver must not
+      // treat that card as the tool execution. With the card live on the
+      // wire (FAKE_ACP_PLACEHOLDER_CARD) the run must complete normally:
+      // the card's id is the ASK's id (permission precedes it — no
+      // never-asks evidence), 'pending' is not 'failed' (no denial), and
+      // the real execution still lands in the record.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            // A tool that genuinely SUCCEEDS in the fresh workspace (run +
+            // echo): the clean shape — the placeholder card must add no
+            // denial of its own, and a succeeding execution adds none
+            // either (a failed read would muddy the assertion with the
+            // second denial channel).
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo placeholder-card-ok > placeholder-card-marker.txt' }),
+            FAKE_ACP_PLACEHOLDER_CARD: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'placeholder-card run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.denials).toEqual([]);
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"never-asks"'))).toBe(false);
+      const record = await store.load(result.sessionId as string);
+      // The REAL execution is what the record carries (allow-answered,
+      // completed) and the turn settled the normal permission round-trip.
+      expect(
+        record?.messages.some((m) => m.role === 'tool' && m.toolName === 'run' && m.content.includes('"ok":true')),
+      ).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]')),
+      ).toBe(true);
     });
   });
 

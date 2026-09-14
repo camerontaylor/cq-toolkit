@@ -181,8 +181,9 @@
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired, or the prompt settled stopReason
 //      'cancelled'                                        → 'aborted'
-//   2. never-asks evidence at settle, or a failed permission-ANSWER
-//      write (the enforcement channel is broken — Codex P1) → 'error'
+//   2. never-asks evidence at settle, a permission ask with NO answerable
+//      option of the required side, or a failed permission-ANSWER write
+//      (the enforcement channel is broken — Codex P1)       → 'error'
 //   3. folded usage ≥ Budget.maxTokens                   → 'budget'
 //   4. no wellshaped prompt response (handshake failure, child death) → 'error'
 //   5. stopReason 'end_turn'                             → 'complete'
@@ -711,6 +712,13 @@ export class AcpDriver implements Driver {
     // channel is broken and the verdict is pinned to 'error' even if a
     // prompt response somehow arrived afterward (Codex P1).
     let answerWriteFailed = false;
+    // True when a permission answer could not be SELECTED — the decision's
+    // required side (allow/reject) was never offered (§2.1). The child is
+    // terminated, but a termination-tolerant vendor may ignore that, time
+    // out its unanswered ask, and settle the turn end_turn anyway: the
+    // flag pins the verdict to 'error' regardless (the answerWriteFailed
+    // mirror — failed ENFORCEMENT, not the wire outcome, decides).
+    let permissionAnswerFailed = false;
     let promptDispatched = false;
     let acpSessionId: string | undefined;
     // The inbound session/request_permission awaiting our answer, by its RAW
@@ -811,10 +819,14 @@ export class AcpDriver implements Driver {
         // A decision whose required side was NOT OFFERED — an allow with
         // no allow option, or a deny with no reject option — FAILS THE
         // RUN (strategy §2.1); 'cancelled' is only legal on a real
-        // cancellation, never as an answer. Killing the child settles the
-        // pending prompt request via the wire's exit path. The narration
-        // names WHICH side failed (selection.side — both sides fail the
-        // same way loudly).
+        // cancellation, never as an answer. Terminating the child settles
+        // the pending prompt request via the wire's exit path for a
+        // COMPLIANT vendor — but a termination-tolerant vendor may ignore
+        // the signal, time out its unanswered ask, and settle end_turn
+        // anyway, so permissionAnswerFailed pins the verdict to 'error'
+        // however green the wire then looks. The narration names WHICH
+        // side failed (selection.side — both sides fail the same way
+        // loudly).
         observation.narration.push(
           JSON.stringify({
             cq: 'permission-answer-failed',
@@ -827,6 +839,7 @@ export class AcpDriver implements Driver {
                 : 'no reject option offered on the deny side — the run fails; never answered cancelled',
           }),
         );
+        permissionAnswerFailed = true;
         void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
         pendingPermissionId = undefined; // the run is failing; the ask dies with the process — never answered cancelled
         return;
@@ -1211,6 +1224,7 @@ export class AcpDriver implements Driver {
       structured,
       signalFired,
       answerWriteFailed,
+      permissionAnswerFailed,
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
       measuredUsage,
@@ -1223,9 +1237,10 @@ export class AcpDriver implements Driver {
   /**
    * Fold the observation into the frozen WorkerResult (header tables: stop
    * reasons, usage, cost). A real measurement (the prompt response's
-   * usage) is kept on any verdict that observed it; unmeasured verdicts
-   * (abort, handshake failure, child death, a failed permission answer)
-   * report zeros and NEVER a cost.
+   * usage) is kept on any verdict that observed it — including a pinned-
+   * error enforcement failure the vendor settled past; unmeasured
+   * verdicts (abort, handshake failure, child death) report zeros and
+   * NEVER a cost.
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -1236,6 +1251,7 @@ export class AcpDriver implements Driver {
       structured: unknown;
       signalFired: boolean;
       answerWriteFailed: boolean;
+      permissionAnswerFailed: boolean;
       promptStopReason: string | undefined;
       responded: boolean;
       measuredUsage: Usage | undefined;
@@ -1246,6 +1262,7 @@ export class AcpDriver implements Driver {
     const stopReason = stopReasonOf({
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
       answerWriteFailed: inputs.answerWriteFailed,
+      permissionAnswerFailed: inputs.permissionAnswerFailed,
       ungated: inputs.ungated,
       maxTokens: budget.maxTokens,
       usage,
@@ -1584,6 +1601,8 @@ export interface StopReasonInputs {
   aborted: boolean;
   /** True when the write of a permission ANSWER failed — the enforcement channel is broken; the run fails even if a response arrived (Codex P1). */
   answerWriteFailed?: boolean;
+  /** True when a permission answer could not be SELECTED (the required side was never offered) — failed enforcement; the run fails even if the vendor ignores the termination and settles the unanswered ask (round-3). */
+  permissionAnswerFailed?: boolean;
   /** Never-asks evidence at settle (ungated execution — a policy void is an error, never green). */
   ungated: boolean;
   maxTokens: number | undefined;
@@ -1594,9 +1613,10 @@ export interface StopReasonInputs {
   responded: boolean;
 }
 
-/** THE mapping (checked in order): aborted → answer-write-failure → ungated-error → budget → no-response-error → the wire stopReason. */
+/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → ungated-error → budget → no-response-error → the wire stopReason. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
+  if (inputs.permissionAnswerFailed === true) return 'error'; // the unanswerable ask — failed enforcement even if the vendor settles end_turn anyway
   if (inputs.answerWriteFailed === true) return 'error'; // the broken enforcement channel — fail loud even if a response arrived
   if (inputs.ungated) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
