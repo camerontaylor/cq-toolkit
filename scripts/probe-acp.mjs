@@ -60,6 +60,11 @@ const CLIENT_CAPABILITIES = {
 };
 
 const ACP_BIN = process.env.PROBE_ACP_BIN ?? 'zcode-acp-server';
+// Mirror of src/driver/acp/protocol.ts's AUTH_REQUIRED_ERROR_CODE — the ACP
+// "authenticate first" error code (NOT http-style 401). The probe stays
+// dependency-free (node builtins only, the script's import posture), so the
+// constant is duplicated WITH this pointer; keep the two in sync.
+const AUTH_REQUIRED_ERROR_CODE = -32000;
 // `zcode` is not on this host's PATH; the README documents the app-bundle CLI
 // as the ZCODE_BIN value. Precedence: caller's env wins, then the documented
 // app-bundle path.
@@ -118,10 +123,29 @@ class AcpProbe {
   start(cwd) {
     const env = { ...process.env, ZCODE_BIN };
     this.child = spawn(ACP_BIN, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
+    // A spawn FAILURE emits 'error' (then 'close') and may never emit
+    // 'exit' — settle on whichever arrives FIRST, once, carrying the
+    // spawn error as evidence (an ENOENT must not hang the probe).
     this.exitPromise = new Promise((res) => {
-      this.child.on('exit', (code, signal) => {
-        this.exitInfo = { code, signal, atMs: elapsedMs() };
-        res(this.exitInfo);
+      let settled = false;
+      let spawnError = null;
+      const done = (info) => {
+        if (settled) return;
+        settled = true;
+        this.exitInfo = info;
+        res(info);
+      };
+      this.child.on('error', (e) => {
+        spawnError = e;
+        done({ code: null, signal: null, spawnError: String(e), atMs: elapsedMs() });
+      });
+      this.child.on('close', (code, signal) => {
+        done({
+          code,
+          signal,
+          ...(spawnError !== null ? { spawnError: String(spawnError) } : {}),
+          atMs: elapsedMs(),
+        });
       });
     });
     this.child.stdout.setEncoding('utf8');
@@ -161,12 +185,15 @@ class AcpProbe {
     try {
       frame = JSON.parse(line);
     } catch {
-      await appendLog({ dir: 'in-garbage', t: elapsedMs(), line: line.slice(0, 2000) });
+      void appendLog({ dir: 'in-garbage', t: elapsedMs(), line: line.slice(0, 2000) });
       return;
     }
-    await appendLog({ dir: 'in', t: elapsedMs(), frame });
+    // WIRE ORDER: every consumer push (allInbound / pending settlement /
+    // serverRequests / notifications) happens BEFORE any await — a pending
+    // log write must never reorder the record the verdicts sweep over.
     this.allInbound.push(frame);
     if (frame.id !== undefined && (frame.result !== undefined || frame.error !== undefined)) {
+      void appendLog({ dir: 'in', t: elapsedMs(), frame });
       const p = this.pending.get(frame.id);
       if (p) {
         clearTimeout(p.timer);
@@ -181,6 +208,7 @@ class AcpProbe {
       // anything else is answered with a JSON-RPC method-not-found error so
       // the record shows exactly what the vendor tried.
       this.serverRequests.push({ t: elapsedMs(), frame });
+      void appendLog({ dir: 'in', t: elapsedMs(), frame });
       if (this.serverRequestHandler && frame.method === this.serverRequestHandler.method) {
         try {
           const result = await this.serverRequestHandler.handler(frame.params);
@@ -200,6 +228,7 @@ class AcpProbe {
     if (frame.method !== undefined) {
       this.notifications.push({ t: elapsedMs(), frame });
     }
+    void appendLog({ dir: 'in', t: elapsedMs(), frame });
   }
 
   async send(obj) {
@@ -356,7 +385,7 @@ async function scenarioInit() {
       };
     } catch (e) {
       verdict.sessionNew = {
-        gated: e instanceof RpcError && e.code === 401 ? true : 'error',
+        gated: e instanceof RpcError && e.code === AUTH_REQUIRED_ERROR_CODE ? true : 'error',
         error: e instanceof RpcError ? e.errorObject : String(e.message ?? e),
         elapsedMs: elapsedMs() - tNew0,
       };
@@ -435,6 +464,11 @@ async function scenarioPrompt() {
       .filter((n) => n.frame.params?.update?.sessionUpdate === 'agent_message_chunk')
       .map((n) => n.frame.params?.update?.content?.text ?? '')
       .join('');
+  } catch (e) {
+    // A rejection (timeout, rpc error, spawn failure) is the scenario's
+    // failure EVIDENCE — recorded, never an unhandled rejection (which
+    // would kill the process before the verdict + log paths are printed).
+    verdict.error = e instanceof RpcError ? e.errorObject : String(e.message ?? e);
   } finally {
     verdict.exit = await settle(probe);
   }
@@ -595,23 +629,26 @@ async function scenarioCancel() {
     const updatesAtSettle = probe.notifications.length;
     await new Promise((res) => setTimeout(res, POST_CANCEL_OBSERVE_MS));
     const post = probe.notifications.slice(updatesAtSettle);
-    const textAfter = post
-      .filter((n) => n.frame.params?.update?.sessionUpdate === 'agent_message_chunk')
+    // Count FROM THE RECORDED FRAMES: the chunk count reflects what was
+    // actually observed post-cancel (chunks with empty/absent text still
+    // count — a text-derived count could silently read 0 when chunks exist).
+    const postTextChunks = post.filter((n) => n.frame.params?.update?.sessionUpdate === 'agent_message_chunk');
+    const textAfter = postTextChunks
       .map((n) => n.frame.params?.update?.content?.text ?? '')
       .join('');
     verdict.postCancel = {
       updateCount: post.length,
       updateKinds: post.map((n) => n.frame.params?.update?.sessionUpdate ?? n.frame.method),
-      textChunkCount: textAfter
-        ? post.filter((n) => n.frame.params?.update?.sessionUpdate === 'agent_message_chunk').length
-        : 0,
+      textChunkCount: postTextChunks.length,
       textChars: textAfter.length,
       continuedTraffic: post.length > 0,
     };
-    verdict.exit = await probe.kill();
+    // The cancel scenario logs its exit through the SAME settle() path as
+    // every other scenario — the NDJSON record carries the exit evidence.
+    verdict.exit = await settle(probe);
   } catch (e) {
     verdict.error = e instanceof RpcError ? e.errorObject : String(e.message ?? e);
-    verdict.exit = await probe.kill();
+    verdict.exit = await settle(probe);
   }
   await settleAndPrint(verdict, verdictPath);
 }

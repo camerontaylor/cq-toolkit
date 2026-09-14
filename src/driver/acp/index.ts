@@ -63,8 +63,9 @@
 // "allow_project", "deny" on the reference vendor — the chosen option's
 // OWN optionId is echoed): ALLOW → allow_once, else allow_always;
 // DENY → reject_once, else reject_always. A deny with NO reject option
-// offered FAILS THE RUN naming the offered options. The driver NEVER
-// answers 'cancelled' — that outcome is only legal on a real cancellation.
+// offered FAILS THE RUN naming the offered options. 'cancelled' is
+// answered on ONE occasion only — a REAL governed cancellation (the
+// signal fired while the ask was pending) — never as a table decision.
 // Every deny synthesizes the frozen {tool, reason} denial AT THE ANSWER
 // (the one place both facts are known); a tool that EXECUTED and then
 // failed (tool_call_update status 'failed') is a SECOND denial channel
@@ -137,7 +138,13 @@
 // session/cancel — then the driver AWAITS the prompt response (the spec
 // REQUIRES the agent to answer the original prompt with stopReason
 // 'cancelled'; settle on the cancelled RESPONSE, never on the cancel
-// write — strategy §2.3, live-verified at 327 ms). Consequences:
+// write — strategy §2.3, live-verified at 327 ms). The listener attaches
+// at WIRE CREATION, so a signal firing during the HANDSHAKE phases
+// (initialize / session establishment / the mode pin — no prompt yet to
+// cancel cooperatively) reaches the child too: the settle path's
+// termination ladder runs, the pending handshake request rejects on the
+// wire's exit path, and the run settles the honest 'aborted' verdict —
+// never an orphaned harness process. Consequences:
 //   - Budget.wallClockMs is IGNORED — the governor's ladder owns wall
 //     clock. Whether the vendor stops PROVIDER-side metering after a
 //     cancel is unobservable from any client (OQ-6/DD-1 scope).
@@ -512,6 +519,15 @@ class AcpWire {
 // ---------------------------------------------------------------------------
 
 /**
+ * The permission answer for a REAL governed cancellation — the ONE legal
+ * 'cancelled' outcome (the answer table's single exception). Never a policy
+ * decision: it says the ASK is moot because the run is cancelling, so the
+ * vendor can settle the prompt with stopReason 'cancelled' (§2.3) instead
+ * of hanging on a dangling request.
+ */
+const CANCELLED_PERMISSION_ANSWER = { outcome: { outcome: 'cancelled' } } as const;
+
+/**
  * The acp driver on the frozen Driver seam. One instance is stateless
  * across runs — all per-run state (session record, wire, observation,
  * denials) lives in the run call — so a single instance can serve many
@@ -625,6 +641,12 @@ export class AcpDriver implements Driver {
     let signalFired = false;
     let promptDispatched = false;
     let acpSessionId: string | undefined;
+    // The inbound session/request_permission awaiting our answer, by its RAW
+    // id (undefined = none). Set on arrival, cleared the moment an answer is
+    // initiated — the governed-abort handler answers a still-pending ask
+    // 'cancelled' BEFORE proceeding, so the vendor never hangs on a dangling
+    // request while the run is cancelling.
+    let pendingPermissionId: number | string | undefined;
     // The session/load REPLAY window (strategy §6): true from the
     // session/load write until its response resolves. Every session/update
     // inside the window is REPLAYED HISTORY — counted into the discard
@@ -673,6 +695,29 @@ export class AcpDriver implements Driver {
       if (!observation.toolFirstSeen.has(toolCallId)) {
         observation.toolFirstSeen.set(toolCallId, 'permission');
       }
+      pendingPermissionId = id;
+      // A governed cancellation that ALREADY landed: the answer table is
+      // moot — the ask is answered 'cancelled' (the ONE outcome legal on a
+      // real cancellation — the answer table's single exception, header) so
+      // the vendor can settle the prompt with stopReason 'cancelled' (§2.3)
+      // instead of hanging on a dangling ask while we await that settle.
+      // Never a policy decision: no table lookup, no denial, no allow.
+      if (signalFired) {
+        pendingPermissionId = undefined;
+        observation.narration.push(
+          JSON.stringify({
+            cq: 'permission-cancelled',
+            toolCallId,
+            note: 'the governed cancellation landed before this ask — answered cancelled (legal only on a real cancellation), never a table decision',
+          }),
+        );
+        void wire.respond(id, CANCELLED_PERMISSION_ANSWER).catch((err: unknown) => {
+          observation.narration.push(
+            JSON.stringify({ cq: 'permission-cancel-send-failed', toolCallId, message: messageOf(err) }),
+          );
+        });
+        return;
+      }
       const identity = permissionToolIdentity(request.toolCall.title, request.toolCall.kind);
       const decision = decidePermission(toolPolicy, sandboxPolicy.level, identity, request.toolCall.kind);
       const selection = selectPermissionAnswer(decision.decision, request.options);
@@ -690,6 +735,7 @@ export class AcpDriver implements Driver {
           }),
         );
         void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
+        pendingPermissionId = undefined; // the run is failing; the ask dies with the process — never answered cancelled
         return;
       }
       observation.permissionDecisions.set(toolCallId, decision.decision);
@@ -697,6 +743,7 @@ export class AcpDriver implements Driver {
         observation.deniedToolCallIds.add(toolCallId);
         observation.denials.push(decision.denial); // the frozen record, synthesized AT the answer
       }
+      pendingPermissionId = undefined; // the answer is initiated — no longer dangling
       void wire.respond(id, selection.answer).catch((err: unknown) => {
         observation.narration.push(
           JSON.stringify({ cq: 'permission-answer-send-failed', toolCallId, message: messageOf(err) }),
@@ -734,10 +781,32 @@ export class AcpDriver implements Driver {
       onStderrLine: (line) => observation.stderr.push(line),
     });
 
-    // --- Governed cancellation during the run: session/cancel, then the
-    // prompt await continues (settle on the cancelled RESPONSE — §2.3).
+    // --- Governed cancellation (I8). The listener attaches AT WIRE
+    // CREATION — before the initialize request — so the governor's signal
+    // is honored during EVERY phase, not only the prompt:
+    //   - a permission ask still pending as the cancellation lands is
+    //     answered 'cancelled' FIRST (legal only on a real cancellation —
+    //     the answer table's one exception), never left dangling;
+    //   - prompt in flight → session/cancel, then the prompt await
+    //     continues (settle on the cancelled RESPONSE — §2.3);
+    //   - pre-prompt phase (initialize / session establishment / the mode
+    //     pin) → there is no prompt to cancel cooperatively, so the child
+    //     is TERMINATED via the settle path's ladder (the same rung
+    //     discipline); the in-flight handshake request rejects on the
+    //     wire's exit path and the run fails to the honest 'aborted'
+    //     verdict instead of leaving the harness process running.
+    // Purely reactive: nothing here fires without the governor's signal.
     const onAbort = (): void => {
       signalFired = true;
+      const dangling = pendingPermissionId;
+      pendingPermissionId = undefined;
+      if (dangling !== undefined) {
+        void wire.respond(dangling, CANCELLED_PERMISSION_ANSWER).catch((err: unknown) => {
+          observation.narration.push(
+            JSON.stringify({ cq: 'permission-cancel-send-failed', message: messageOf(err) }),
+          );
+        });
+      }
       if (promptDispatched && acpSessionId !== undefined) {
         const target = acpSessionId;
         wire.notify(ACP_METHODS.sessionCancel, { sessionId: target }).then(
@@ -745,6 +814,14 @@ export class AcpDriver implements Driver {
           (err: unknown) =>
             observation.narration.push(JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) })),
         );
+      } else {
+        observation.narration.push(
+          JSON.stringify({
+            cq: 'pre-prompt-abort',
+            note: 'the governed signal fired before the prompt — terminating the child (the settle ladder); the pending handshake phase fails and the run settles aborted',
+          }),
+        );
+        void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
       }
     };
     if (signal !== undefined) {

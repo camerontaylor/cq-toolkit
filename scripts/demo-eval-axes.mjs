@@ -93,8 +93,11 @@ if (missing.length > 0) {
 }
 // The acp lane's harness (zcode-acp-server) spawns the vendor CLI itself;
 // when `zcode` is not on PATH the ZCODE_BIN env var names the desktop-app
-// CLI (the probe-recorded default — caller's env wins, set silently).
-if ((process.env.ZCODE_BIN ?? '') === '') {
+// CLI (caller's env wins, set silently). The app-bundle fallback is DARWIN-
+// ONLY — the path is a macOS app container and must never be handed to
+// another platform's child: elsewhere the harness resolves `zcode` from
+// PATH (or the caller exports ZCODE_BIN explicitly).
+if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
   process.env.ZCODE_BIN = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
 }
 

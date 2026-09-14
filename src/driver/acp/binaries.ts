@@ -11,8 +11,10 @@
 //
 // RESOLUTION ORDER (strategy §3): explicit constructor argv FIRST, then
 // the endpoint table's default argv; the chosen argv's first element is
-// then resolved like `which` — an absolute (or path-carrying) binary is
-// used as-is, a bare name is searched on PATH. An UNRESOLVABLE binary is
+// then resolved like `which` — an absolute binary is used as-is, a
+// RELATIVE path-carrying one is resolved against the CALLER's cwd (the
+// spawn later runs with cwd = the workspace), and a bare name is searched
+// on PATH. An UNRESOLVABLE binary is
 // a PRE-DISPATCH THROW naming the binary, the install hint, and the
 // searched PATH — the same posture as the claude-agent lane's absent
 // optional peer: fail loudly before any session exists, never a crash
@@ -22,7 +24,7 @@
 // never values. The driver injects the child env at run() time (see
 // index.ts); nothing here reads a key.
 import { access, constants } from 'node:fs/promises';
-import { delimiter, isAbsolute, join, sep } from 'node:path';
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { z } from 'zod';
 
 // ---------------------------------------------------------------------------
@@ -89,7 +91,7 @@ export interface ResolvedAcpCommand {
   endpoint: string;
   /** The launch argv (first element is the resolved `binary`). */
   command: readonly string[];
-  /** The resolved binary path (PATH-joined for a bare name; verbatim otherwise). */
+  /** The resolved binary path (absolute: PATH-joined for a bare name, caller-cwd-resolved for a relative path-carrying value, verbatim when already absolute). */
   binary: string;
   /** Which source won. */
   source: 'explicit' | 'endpoint';
@@ -115,8 +117,10 @@ async function probeExecutable(candidate: string): Promise<boolean> {
  *
  * `explicitCommand` (the constructor's argv) wins over the endpoint
  * table; the table's default argv applies otherwise. The first argv
- * element resolves like `which`: absolute or path-carrying values are
- * probed as-is; bare names are searched across every PATH entry.
+ * element resolves like `which`: absolute values are probed as-is;
+ * relative path-carrying values resolve against the caller's cwd (the
+ * spawn later runs with cwd = the workspace); bare names are searched
+ * across every PATH entry.
  *
  * `env` is the environment the PATH lookup reads (defaults to
  * `process.env`; tests inject a literal record). A set-but-EMPTY PATH
@@ -181,14 +185,21 @@ function basenameOf(pathValue: string): string {
   return index === -1 ? pathValue : pathValue.slice(index + 1);
 }
 
-/** which-like resolution: absolute/path-carrying probed verbatim; bare names searched across PATH. Undefined = absent. */
+/** which-like resolution: absolute/path-carrying values resolve to an ABSOLUTE path (a relative one against the CALLER's cwd — the spawn later runs with cwd = the workspace); bare names are searched across PATH. Undefined = absent. */
 async function resolveBinary(
   binary: string,
   env: Readonly<Record<string, string | undefined>>,
   probe: ExecutableProbe,
 ): Promise<string | undefined> {
   if (isAbsolute(binary) || binary.includes(sep)) {
-    return (await probe(binary)) ? binary : undefined;
+    // A RELATIVE path-carrying binary ('./bin/acp-server') must be resolved
+    // against the caller's cwd NOW: the spawn later runs with
+    // cwd = the invocation's workspace, and node resolves a relative spawn
+    // command against THAT cwd — probed verbatim, the probe would bless a
+    // file the child can never find (and vice versa). Bare names stay
+    // PATH-resolved (the child's cwd is irrelevant to a PATH hit).
+    const candidate = isAbsolute(binary) ? binary : resolve(binary);
+    return (await probe(candidate)) ? candidate : undefined;
   }
   const pathValue = env['PATH'] ?? '';
   for (const dir of pathValue.split(delimiter)) {
