@@ -825,9 +825,10 @@ const JOBS_KEY_LINE = /^jobs:/;
 // (`'name': Static` is YAML-valid), and step entries (`- name: ...`) never
 // match because the trimmed line starts with `-`. A FLOW-style or ALIASED
 // job value — a same-line `{...}` mapping, a next-line `{...}` mapping, or
-// a `*alias` — is not parsed by this text
-// leg: it surfaces as { flowDecl: true }, which the caller turns into a
-// loud failure rather than a silent pass.
+// a `*alias`; an `&anchor`-prefixed value is unwrapped before
+// classification, so an anchored flow mapping is still refused — is not
+// parsed by this text leg: it surfaces as { flowDecl: true }, which the
+// caller turns into a loud failure rather than a silent pass.
 function workflowDeclaresJob(text, jobName) {
   const stripped = text.split(/\r?\n/).map(stripInlineComment);
   const start = stripped.findIndex((l) => JOBS_KEY_LINE.test(l));
@@ -842,11 +843,13 @@ function workflowDeclaresJob(text, jobName) {
     if (ind !== base) continue; // deeper: job body, not a job id
     const kv = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?:/.exec(line.trim());
     if (kv && kv[1] === jobName) {
-      // A flow-style or aliased job value (`static: {name: ...}` or
-      // `static: *renamed`) is not parseable by this text leg — surface it
-      // so the caller fails the entry loudly.
+      // A flow-style, aliased, or anchored job value (`static: {name: ...}`,
+      // `static: *renamed`, or `static: &job {name: ...}`) is not parseable
+      // by this text leg — surface it so the caller fails the entry loudly.
+      // The &anchor token is stripped before classification.
       const postColon = line.trim().slice(kv[0].length).trimStart();
-      if (postColon.startsWith('{') || postColon.startsWith('*')) {
+      const val = postColon.replace(/^&\S+\s*/, '');
+      if (val.startsWith('{') || val.startsWith('*')) {
         return { flowDecl: true };
       }
       let bodyBase = null; // the job body's key indent (first non-blank body line)
@@ -857,8 +860,11 @@ function workflowDeclaresJob(text, jobName) {
         if (bodyInd <= base) break; // end of this job's body
         // A next-line flow mapping or an alias as the job's value is not
         // parseable by this text leg — surface it (loud failure upstream).
-        if (bodyBase === null && body.trimStart().startsWith('{')) return { flowDecl: true };
-        if (bodyBase === null && body.trimStart().startsWith('*')) return { flowDecl: true };
+        // The &anchor token is stripped before classification (an anchored
+        // flow mapping is still refused).
+        const t = body.trimStart().replace(/^&\S+\s*/, '');
+        if (bodyBase === null && t.startsWith('{')) return { flowDecl: true };
+        if (bodyBase === null && t.startsWith('*')) return { flowDecl: true };
         if (bodyBase === null) bodyBase = bodyInd;
         if (bodyInd !== bodyBase) continue; // nested mapping (or malformed shallower line) — not a job-level key
         const name = /^["']?name["']?\s*:\s*(.+?)\s*$/.exec(body.trim());
