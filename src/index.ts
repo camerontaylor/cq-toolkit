@@ -253,3 +253,12 @@ export {
   spawnManaged,
   terminateGracefully,
 } from './driver/subprocess/process.js';
+// Claude-agent driver (T1.6) — re-export only, no logic: the THIRD lane, the
+// OPTIONAL-PEER agent-SDK driver on the frozen seam. The peer
+// (@anthropic-ai/claude-agent-sdk) is loaded lazily by dynamic import at
+// run() time and feature-detected — importing THIS barrel never requires it
+// to be installed (the install-matrix workflow proves both halves). No model
+// allowlist: routing is by provider endpoint only; the observed-model check
+// is the silent-remap defence.
+export type { ClaudeAgentDriverOptions } from './driver/claude-agent/index.js';
+export { ClaudeAgentDriver } from './driver/claude-agent/index.js';
