@@ -184,6 +184,15 @@ async function runCell({ lane, provider, model }) {
           });
           continue;
         }
+        // The DD-2 fold check runs BEFORE the identity rejections: a remap
+        // corrupts exactly the cost datum, so the mismatch evidence must
+        // carry the fold ("the wrong model would have cost X at its real
+        // rates vs Y at the requested model's rates"), not discard it.
+        // Tolerance 1e-9 USD (float reassociation only).
+        const foldAgrees =
+          recomputed === undefined
+            ? result.costUSD === undefined
+            : Math.abs((result.costUSD ?? Number.NaN) - recomputed) <= 1e-9;
         // The eval axes claim MODEL IDENTITY: a completed verdict with NO
         // observed model id cannot be attributed to any model — failed with
         // evidence, and NO retry (an unreported id is not transient).
@@ -199,21 +208,24 @@ async function runCell({ lane, provider, model }) {
         // A served id that differs from the cell's configured model id is a
         // remap (deepseek-flash / glm-5.3-flash are exactly why) — the cell
         // fails with evidence, and NO retry: a remap is endpoint
-        // configuration, a retry would pay for the same answer.
+        // configuration, a retry would pay for the same answer. The fold
+        // evidence rides along: usage + what the tokens cost at the SERVED
+        // model's real rates vs what they would have cost at the requested
+        // model's rates — the DD-2 datum a remap corrupts.
         if (result.model !== model) {
           attempts.push({
             attempt,
             stopReason: result.stopReason,
-            servedModelMismatch: { requested: model, served: result.model },
+            servedModelMismatch: {
+              requested: model,
+              served: result.model,
+              usage: result.usage,
+              driverCostUSD: result.costUSD ?? null,
+              recomputed,
+            },
           });
           break;
         }
-        // The DD-2 fold check: derived-only means the SAME math must give
-        // the SAME number. Tolerance 1e-9 USD (float reassociation only).
-        const foldAgrees =
-          recomputed === undefined
-            ? result.costUSD === undefined
-            : Math.abs((result.costUSD ?? Number.NaN) - recomputed) <= 1e-9;
         if (!foldAgrees) {
           // A completed cell whose fold disagrees is a broken normalization,
           // not a transient — record the evidence and do NOT issue another

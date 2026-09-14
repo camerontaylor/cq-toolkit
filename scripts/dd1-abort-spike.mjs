@@ -26,6 +26,9 @@
 //   spendStopped     — the verdict: stopReason 'aborted' AND settle within
 //                      a small multiple of the signal AND no post-abort
 //                      transcript growth AND no lingering worker process.
+//                      An evidence channel that FAILS (transcript unreadable,
+//                      pgrep execution error) yields 'inconclusive' with a
+//                      reason — absence of observation is never "all clear".
 //
 // CLIENT-SIDE HONESTY LIMIT (stated in docs/dd-1-abort-spike.md): no client
 // can see provider-side tokens already in flight; "spendStopped" is the
@@ -88,13 +91,20 @@ const PROMPT =
 
 const lane = process.argv.includes('--lane') ? process.argv[process.argv.indexOf('--lane') + 1] : undefined;
 
-/** pgrep helper: pids whose cmdline matches, as an array of strings. */
+/**
+ * pgrep helper: pids whose cmdline matches, as an array of strings.
+ * Exit code 1 is a legitimate "no matches" → []. ANY other failure
+ * (pgrep unavailable, not executable, killed) THROWS: an empty list must
+ * never be indistinguishable from "we never checked" — the caller turns a
+ * thrown check into spendStopped 'inconclusive'.
+ */
 async function matchingPids(pattern) {
   try {
     const { stdout } = await execFileAsync('pgrep', ['-f', pattern]);
     return stdout.split('\n').map((s) => s.trim()).filter((s) => s !== '');
-  } catch {
-    return []; // pgrep exits 1 on no match
+  } catch (err) {
+    if (err?.code === 1) return []; // pgrep's documented "no processes matched"
+    throw new Error(`pgrep failed for '${pattern}' (exit ${String(err?.code ?? 'unknown')})`);
   }
 }
 
@@ -136,7 +146,12 @@ function claudeAgentLane() {
 
 /** The claude-agent leg's post-abort observables: CLI transcript growth + worker-process liveness. */
 async function claudeAgentPollEvidence(verdict) {
-  const evidence = { transcriptCountAtSettle: undefined, transcriptCountAfterPoll: undefined, lingeringWorkerPids: [] };
+  const evidence = {
+    transcriptCountAtSettle: undefined,
+    transcriptCountAfterPoll: undefined,
+    lingeringWorkerPids: [],
+    processCheckError: undefined,
+  };
   try {
     const record = await new SessionStore(join(tmpdir(), 'dd1-spike', 'agent-sessions')).load(verdict.sessionId);
     const workspace = record.workspace;
@@ -153,12 +168,18 @@ async function claudeAgentPollEvidence(verdict) {
     evidence.transcriptCountAtSettle = await count();
     await sleep(POLL_MS);
     evidence.transcriptCountAfterPoll = await count();
-    // A surviving worker process is a surviving spend channel.
-    const pidsAfterPoll = await matchingPids('claude-agent-sdk');
-    evidence.lingeringWorkerPids = pidsAfterPoll;
   } catch (err) {
     evidence.pollError = err instanceof Error ? err.message : String(err);
     await sleep(POLL_MS);
+  }
+  // The process check is INDEPENDENT of the transcript channel, and its own
+  // failure is inconclusive — never an empty (all-clear) pid list. A pgrep
+  // execution failure (unavailable, not executable, signal) throws out of
+  // matchingPids and lands here; exit-1 "no matches" returns [] legitimately.
+  try {
+    evidence.lingeringWorkerPids = await matchingPids('claude-agent-sdk');
+  } catch (err) {
+    evidence.processCheckError = err instanceof Error ? err.message : String(err);
   }
   return evidence;
 }
@@ -236,6 +257,11 @@ async function measure(laneName) {
   ) {
     spendStopped = 'inconclusive';
     inconclusiveReason = 'the agent transcript message counts were unavailable at settle and/or after the poll';
+  } else if (lane === 'claude-agent' && pollEvidence.processCheckError !== undefined) {
+    // The lingering-process check FAILED (pgrep itself broke) — an empty
+    // pid list was never observed, so "no survivors" cannot be claimed.
+    spendStopped = 'inconclusive';
+    inconclusiveReason = `process-check failed: ${pollEvidence.processCheckError}`;
   } else {
     spendStopped = verdict.stopReason === 'aborted' && settledPromptly && !grew && !lingered;
   }
@@ -256,6 +282,7 @@ async function measure(laneName) {
     grewAfterAbort: pollEvidence.transcriptCountAtSettle !== undefined ? grew === true : undefined,
     lingeringWorkerPids: pollEvidence.lingeringWorkerPids ?? [],
     pollError: pollEvidence.pollError,
+    processCheckError: pollEvidence.processCheckError,
     pollNote: pollEvidence.note,
   };
 }
