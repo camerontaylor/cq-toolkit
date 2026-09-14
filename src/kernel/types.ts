@@ -90,7 +90,9 @@ export interface Plan {
  * min(RunOptions.maxUsd, Limits.maxUsd); effective in-flight parallelism =
  * min(RunOptions.concurrency, Limits.inFlightCeiling); effective per-job
  * attempt cap = min(Budget.maxAttempts on the invocation (the
- * RunOptions-equivalent), Limits.maxAttemptsPerJob).
+ * RunOptions-equivalent), Limits.maxAttemptsPerJob). DD-9's token cap has no
+ * Limits half: the effective token cap = RunOptions.maxTokens alone (the USD
+ * cap keeps the frozen min() rule).
  */
 export interface RunOptions {
   /** Max jobs in flight — the ONE integer concurrency knob. */
@@ -101,6 +103,12 @@ export interface RunOptions {
   journalDir?: string;
   /** Run-level USD cap (advisory here: USD is derived, callers govern). */
   maxUsd?: number;
+  /** Run-level token rollup cap (DD-9): enforced by the governor against the
+   * folded WorkerResult usage rollup, independently of maxUsd — a cap that
+   * binds even when no price is known for a model. Either cap tripping stops
+   * the run (honest stop; I9). No Limits half in v1 (recorded in
+   * docs/dd-9-api-equivalent-budget.md). */
+  maxTokens?: number;
   /** Resume an interrupted run from its journal instead of starting fresh. */
   resume?: boolean;
 }

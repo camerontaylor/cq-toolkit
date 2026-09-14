@@ -23,6 +23,12 @@
 //   6. Journal evidence: a killed run leaves job-started with attempt, a
 //      budget-exhausted finish, and run-finished; statusOf folds sensibly.
 //
+// T1.6b adds the DD-9 describe block: the api-equivalent budget — a parallel
+// token rollup cap (maxTokens, independent of maxUsd), the USD cap tripping
+// through MODELED cost on subscription-shaped lanes, and the unpriced
+// fail-loud rule (real usage with no costUSD under a USD cap trips, never
+// fails open).
+//
 // Determinism: EVERY timer flows through the injected virtual Clock — no
 // real-time waits anywhere (a setImmediate pump yields event-loop turns for
 // the runner's fs/microtask work; assertions on delays are exact). Temp
@@ -604,6 +610,141 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     });
     expect(report.stoppedEarly).toBe(true);
     expect(report.earlyStopReason).toBe('budget');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b. DD-9 (T1.6b): parallel token rollup + api-equivalent USD
+// ---------------------------------------------------------------------------
+
+describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
+  /** Real usage, no cost — the subscription-routed lane's evidence shape (costUSD absent). */
+  const UNPRICED_USAGE = { input: 80, output: 40, cacheRead: 0, cacheWrite: 0 }; // 120 tokens
+  const usageOnlyOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+    const ctx = currentJobContext();
+    if (ctx !== undefined) {
+      ctx.reportUsage(UNPRICED_USAGE);
+    }
+    return okOp(raw);
+  };
+
+  test('maxTokens is an independent cap: trip reason names the token rollup; admission refuses; governed dispatch is budget-exhausted', async () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    // Boundary first: a fold AT the cap does not trip (same exceeds semantics as USD).
+    governor.observeResult('j1', { usage: { input: 60, output: 40, cacheRead: 0, cacheWrite: 0 } });
+    expect(governor.tripped).toBe(false);
+
+    // The over-cap fold trips on the TOKEN rollup — no maxUsd anywhere in this config.
+    governor.observeResult('j2', { usage: { input: 60, output: 40, cacheRead: 0, cacheWrite: 0 } });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/token rollup 200 exceeded cap 100/);
+
+    // A post-trip admission is refused as 'budget', and the governOp-level
+    // dispatch short-circuits to the frozen budget-exhausted verdict (I9).
+    expect(governor.admit('j3')).toEqual({ decision: 'reject', reason: 'budget' });
+    const governedEntry = governRegistry(viewWith(entry('fake', okOp)), governor).get('fake');
+    if (governedEntry === undefined) throw new Error('governed entry missing');
+    const governedOp = (await governedEntry.importer()) as (input: unknown) => Promise<OpResult<unknown>>;
+    expect(await governedOp({ jobId: 'never-runs' })).toEqual({ status: 'budget-exhausted' });
+
+    // Control: a governor whose fold stays UNDER the cap never trips.
+    const control = new BudgetGovernor({ maxTokens: 100 });
+    control.observeResult('c1', { usage: { input: 25, output: 25, cacheRead: 0, cacheWrite: 0 } });
+    expect(control.tripped).toBe(false);
+  });
+
+  test('THE d02a107 acceptance check: usage without costUSD still stops the run at maxTokens (the subscription case)', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 150 }, {}),
+    );
+    const plan = independentPlan('plan-dd9-tokens', 3, 'usagey');
+    const registry = viewWith(entry('usagey', usageOnlyOp));
+
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxTokens: 150 },
+      governRegistry(registry, governor),
+    );
+    // Runner-side the run reached a terminal state for every job; honest-stop
+    // marking is the governor's voice (the runner NEVER enforces budgets).
+    expect(raw.stoppedEarly).toBe(false);
+    const report = withBudgetStop(raw, plan, governor);
+
+    // The run did NOT continue past the cap: j1 folded 120 tokens (under),
+    // j2's fold hit 240 (over) and tripped mid-run — j2 keeps its real
+    // result, j3 never ran.
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'j1' });
+    expect(report.jobs[1]?.result).toEqual({ status: 'ok', value: 'j2' });
+    expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted']);
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 2,
+      failed: 0,
+      'budget-exhausted': 1,
+    });
+    // The evidence trail: usage rolled up, and the budget-tripped event
+    // carries the TOKEN reason (the governor's event journal).
+    expect(governor.usage).toEqual({ input: 160, output: 80, cacheRead: 0, cacheWrite: 0 });
+    expect(governor.usdSpent).toBe(0); // no cost was ever reported
+    const trip = governor.events.find((event) => event.kind === 'budget-tripped');
+    expect(trip).toBeDefined();
+    expect((trip as { reason: string }).reason).toMatch(/token rollup 240 exceeded cap 150/);
+  });
+
+  test('maxUsd stays PRIMARY and trips on MODELED cost — the run that previously failed open', async () => {
+    const governor = new BudgetGovernor({ maxUsd: 0.5 });
+    // A subscription-routed result folded through the price map carries a
+    // real usage figure and a MODELED costBasis:'modeled' costUSD — the USD
+    // cap must bind through that modeled number.
+    governor.observeResult('j1', { usage: UNPRICED_USAGE, costUSD: 0.6 });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/usd rollup 0\.6 exceeded cap 0\.5/);
+    expect(governor.usdSpent).toBe(0.6);
+    expect(governor.usage).toEqual(UNPRICED_USAGE);
+  });
+
+  test('unpriced usage under a USD cap fails LOUD; without maxUsd the same fold is not a budget event; zero usage folds nothing', async () => {
+    // Under a USD cap, real usage with NO costUSD (no price known for the
+    // model) trips — a silently unlimited run is the failure DD-9 prevents.
+    const loud = new BudgetGovernor({ maxUsd: 1 });
+    loud.observeResult('j1', { usage: UNPRICED_USAGE });
+    expect(loud.tripped).toBe(true);
+    expect(loud.tripReason).toMatch(/unpriced usage under a USD cap/);
+    expect(loud.tripReason).toMatch(/unpriced model/);
+
+    // The same fold WITHOUT a USD cap is not a budget event — the usage
+    // still rolls up (maxTokens would bind it), but nothing trips.
+    const noUsdCap = new BudgetGovernor({});
+    noUsdCap.observeResult('j1', { usage: UNPRICED_USAGE });
+    expect(noUsdCap.tripped).toBe(false);
+    expect(noUsdCap.usage).toEqual(UNPRICED_USAGE);
+
+    // A zero-usage result folds NOTHING under a USD cap — nothing was
+    // measured (I9), so there is no unpriced evidence to fail loud about.
+    const zero = new BudgetGovernor({ maxUsd: 1 });
+    zero.observeResult('j1', { usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } });
+    expect(zero.tripped).toBe(false);
+    expect(zero.usage).toBeUndefined();
+  });
+
+  test('independence cuts both ways: each trip reason names ITS cap, not the other', async () => {
+    // Cost overage with tokens safely under: the USD (modeled) cap trips.
+    const overCost = new BudgetGovernor({ maxTokens: 10_000, maxUsd: 0.5 });
+    overCost.observeResult('j1', { usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }, costUSD: 0.9 });
+    expect(overCost.tripped).toBe(true);
+    expect(overCost.tripReason).toMatch(/usd rollup 0\.9 exceeded cap 0\.5/);
+    expect(overCost.tripReason).not.toMatch(/token rollup/);
+
+    // Token overage with USD safely under: the token cap trips.
+    const overTokens = new BudgetGovernor({ maxTokens: 10, maxUsd: 50 });
+    overTokens.observeResult('j1', { usage: { input: 100, output: 5, cacheRead: 0, cacheWrite: 0 }, costUSD: 0.1 });
+    expect(overTokens.tripped).toBe(true);
+    expect(overTokens.tripReason).toMatch(/token rollup 105 exceeded cap 10/);
+    expect(overTokens.tripReason).not.toMatch(/usd rollup/);
   });
 });
 

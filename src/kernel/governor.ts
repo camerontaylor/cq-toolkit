@@ -21,6 +21,10 @@
 //   - I9: honest stop — at a cap the remaining work is marked
 //     budget-exhausted, never fabricated; `withBudgetStop` annotates a
 //     report only when the governor ACTUALLY tripped.
+//   - DD-9: the budget is api-equivalent — maxUsd trips through MODELED cost
+//     (the list-price proxy a subscription lane still produces), maxTokens
+//     rolls up independently as the unpriced-model backstop, and real usage
+//     folding with no costUSD under a USD cap trips loud (never fail open).
 //
 // Testability contract (slice 2 depends on it): every timer goes through the
 // injected `Clock` (no naked setTimeout anywhere in this module), every
@@ -387,6 +391,13 @@ export function runLadder<T>(
 export interface GovernorConfig {
   /** EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd) — frozen precedence. */
   maxUsd?: number;
+  /**
+   * EFFECTIVE run token cap = RunOptions.maxTokens (DD-9's parallel token
+   * rollup; no Limits half in v1). Independent of maxUsd — a cap that binds
+   * even when no price is known for a model — with the same exceeds-cap trip
+   * semantics as the USD cap.
+   */
+  maxTokens?: number;
   /** Rung-1 delay (Limits.perJobWallClockMs). Omit = no wall-clock ladder. */
   perJobWallClockMs?: number;
   /** Rung 1 → 2 grace. Default DEFAULT_ABORT_GRACE_MS (pre-spike; DD-1 result: pending T1.6). */
@@ -424,6 +435,9 @@ function validateConfig(config: GovernorConfig): void {
   if (config.maxUsd !== undefined && (!Number.isFinite(config.maxUsd) || config.maxUsd < 0)) {
     throw new Error(`governor: config.maxUsd must be a finite number >= 0, got ${config.maxUsd}`);
   }
+  if (config.maxTokens !== undefined && (!Number.isFinite(config.maxTokens) || config.maxTokens <= 0)) {
+    throw new Error(`governor: config.maxTokens must be a finite number > 0, got ${config.maxTokens}`);
+  }
   checkInt('perJobWallClockMs', config.perJobWallClockMs, 1);
   checkInt('abortGraceMs', config.abortGraceMs, 0);
   checkInt('killGraceMs', config.killGraceMs, 0);
@@ -435,10 +449,11 @@ function validateConfig(config: GovernorConfig): void {
 /**
  * Build a GovernorConfig from the frozen option surfaces, applying the
  * frozen cap-precedence rule: effective maxUsd = min(RunOptions.maxUsd,
- * Limits.maxUsd). The in-flight ceiling rides on Limits alone — the runner's
- * pool already enforces opts.concurrency, and the governor enforces the
- * ceiling by queueing, so effective parallelism is exactly the frozen
- * min(concurrency, inFlightCeiling).
+ * Limits.maxUsd). The token cap has no Limits half (DD-9): effective
+ * maxTokens is RunOptions.maxTokens alone. The in-flight ceiling rides on
+ * Limits alone — the runner's pool already enforces opts.concurrency, and
+ * the governor enforces the ceiling by queueing, so effective parallelism is
+ * exactly the frozen min(concurrency, inFlightCeiling).
  */
 export function governorConfig(
   opts: RunOptions,
@@ -448,6 +463,7 @@ export function governorConfig(
   const usdCaps = [opts.maxUsd, limits.maxUsd].filter((v): v is number => v !== undefined);
   return {
     ...(usdCaps.length > 0 ? { maxUsd: Math.min(...usdCaps) } : {}),
+    ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
     ...(limits.perJobWallClockMs !== undefined ? { perJobWallClockMs: limits.perJobWallClockMs } : {}),
     ...(limits.maxAttemptsPerJob !== undefined ? { maxAttemptsPerJob: limits.maxAttemptsPerJob } : {}),
     ...(limits.runDispatchQuota !== undefined ? { runDispatchQuota: limits.runDispatchQuota } : {}),
@@ -566,6 +582,11 @@ function addUsage(a: Usage, b: Usage): Usage {
       ? { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }
       : {}),
   };
+}
+
+/** Σ of the frozen Usage fields — the same fold the drivers totalTokens report (DD-9 token rollup). */
+function totalTokensOf(usage: Usage): number {
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -716,10 +737,18 @@ export class BudgetGovernor {
 
   // --- Observation ------------------------------------------------------------
 
-  /** Observe token usage for one governed invocation (rollup; never cost). */
+  /**
+   * Observe token usage for one governed invocation (rollup; never cost).
+   * The token cap (DD-9) rides the same rollup with the same exceeds
+   * semantics as the USD cap: the trip fires when the fold EXCEEDS maxTokens.
+   */
   observeUsage(jobKey: string, usage: Usage): void {
     this.usageN = this.usageN === undefined ? { ...usage } : addUsage(this.usageN, usage);
     this.record({ kind: 'usage', jobKey, atMs: this.now() });
+    const tokenCap = this.config.maxTokens;
+    if (tokenCap !== undefined && this.usageN !== undefined && totalTokensOf(this.usageN) > tokenCap) {
+      this.trip(`token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
+    }
   }
 
   /**
@@ -732,6 +761,28 @@ export class BudgetGovernor {
     const cap = this.config.maxUsd;
     if (cap !== undefined && this.usdSpentN > cap) {
       this.trip(`usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
+    }
+  }
+
+  /**
+   * Fold ONE driver result's budget evidence (DD-9): real usage rolls the
+   * token cap; a present costUSD rolls the USD cap; real usage with NO
+   * costUSD under a configured maxUsd TRIPS the budget — an unpriced model
+   * would make the USD cap unenforceable, and a silently unlimited run is
+   * the failure DD-9 exists to prevent (fail loud, never fail open; the
+   * honest-stop path marks the rest budget-exhausted). A zero-usage result
+   * folds nothing (nothing was measured — I9).
+   */
+  observeResult(jobKey: string, result: { usage?: Usage; costUSD?: number }): void {
+    const usage = result.usage;
+    const hasRealUsage = usage !== undefined && totalTokensOf(usage) > 0;
+    if (hasRealUsage && usage !== undefined) {
+      this.observeUsage(jobKey, usage);
+    }
+    if (result.costUSD !== undefined) {
+      this.observeCost(jobKey, result.costUSD);
+    } else if (hasRealUsage && this.config.maxUsd !== undefined) {
+      this.trip('unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)');
     }
   }
 
