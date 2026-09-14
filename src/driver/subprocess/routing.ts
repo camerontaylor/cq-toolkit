@@ -174,7 +174,14 @@ export function routeFor(
 ): Route {
   const parsed: RoutingTable = RoutingTableSchema.parse(table);
   const endpointName = modelSpec.provider;
-  const endpoint = parsed.endpoints[endpointName];
+  // Own-property guard (backport of the claude-agent lane's fix): the
+  // parsed record inherits Object.prototype, so a provider handle like
+  // 'constructor' or 'toString' would otherwise resolve to an inherited
+  // value and crash with a TypeError instead of the clean unknown-provider
+  // throw.
+  const endpoint = Object.prototype.hasOwnProperty.call(parsed.endpoints, endpointName)
+    ? parsed.endpoints[endpointName]
+    : undefined;
   if (endpoint === undefined) {
     throw new Error(
       `routing: unknown provider '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,

@@ -78,9 +78,11 @@
 // win: non-cached input keeps cache terms from double-counting; without
 // details the total input is used with cache fields at 0, which is the
 // same arithmetic), inputTokenDetails.cacheReadTokens → cacheRead,
-// inputTokenDetails.cacheWriteTokens → cacheWrite, outputTokens → output,
-// outputTokenDetails.reasoningTokens → reasoning (present ONLY when the
-// provider reported it). Missing numeric fields map to 0.
+// inputTokenDetails.cacheWriteTokens → cacheWrite, outputTokens → output.
+// reasoning is OMITTED on this lane: the AI SDK counts reasoning tokens
+// INSIDE outputTokens (totalTokens = inputTokens + outputTokens), so a
+// separate field would double-count every total that sums the frozen Usage
+// fields vs the SDK's own totalTokens. Missing numeric fields map to 0.
 //
 // MODEL OBSERVATION: WorkerResult.model carries `result.response.modelId` —
 // the SERVED model id the provider's response reports (the SDK prefers it
@@ -488,19 +490,23 @@ function tokenBudgetCondition(maxTokens: number) {
  * Exact ai@7.0.99 LanguageModelUsage → frozen Usage. Token details win over
  * the input total (noCacheTokens keeps cache fields from double-counting);
  * when a provider reports no details the total input is used with cache
- * fields at 0 — the same arithmetic, honestly stated. reasoning rides only
- * when reported.
+ * fields at 0 — the same arithmetic, honestly stated. `reasoning` is
+ * deliberately NOT set: the AI SDK counts reasoning tokens INSIDE
+ * outputTokens (totalTokens = inputTokens + outputTokens), so lifting
+ * outputTokenDetails.reasoningTokens into a separate field would make every
+ * total that sums the frozen Usage fields (the kernel's
+ * Budget.maxTokens/DD-9 rollup) diverge from the SDK's own totalTokens by
+ * exactly `reasoning` — the frozen field stays optional precisely for lanes
+ * whose SDK reports reasoning additive to output; this one does not.
  */
 export function usageFromSdk(usage: LanguageModelUsage): Usage {
   const input = usage.inputTokenDetails?.noCacheTokens ?? usage.inputTokens ?? 0;
-  const mapped: Usage = {
+  return {
     input,
     output: usage.outputTokens ?? 0,
     cacheRead: usage.inputTokenDetails?.cacheReadTokens ?? 0,
     cacheWrite: usage.inputTokenDetails?.cacheWriteTokens ?? 0,
   };
-  const reasoning = usage.outputTokenDetails?.reasoningTokens;
-  return reasoning !== undefined ? { ...mapped, reasoning } : mapped;
 }
 
 /** Σ of the frozen Usage fields — the same total the SDK's totalTokens reports. */

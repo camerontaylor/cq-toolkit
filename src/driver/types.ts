@@ -32,7 +32,12 @@ export interface Usage {
   output: number;
   cacheRead: number;
   cacheWrite: number;
-  /** Tokens spent on reasoning/thinking output, when the driver reports it. */
+  /**
+   * Tokens spent on reasoning/thinking output, when the driver reports it.
+   * ADDITIVE only when the lane's SDK reports reasoning OUTSIDE output; a
+   * lane whose SDK counts thinking inside output must not emit this field
+   * (every total that sums the frozen Usage fields would double-count).
+   */
   reasoning?: number;
 }
 

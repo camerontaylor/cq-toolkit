@@ -222,7 +222,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
     expect(stopReasonOf({ finishReason: 'other', aborted: false, tokenBudget: undefined, totalTokens: 0 })).toBe('complete');
   });
 
-  test('usage mapping: details win over totals; no details → totals with cache at 0; reasoning only when reported', () => {
+  test('usage mapping: details win over totals; no details → totals with cache at 0; reasoning NEVER set (subset of output)', () => {
+    // The mock reports outputTokenDetails.reasoningTokens: 2 — realistic,
+    // and deliberately so: reasoning is INSIDE outputTokens (the AI SDK's
+    // totalTokens = inputTokens + outputTokens), so the fold must NOT lift
+    // it into the separate frozen field (every summed total would diverge
+    // from the SDK's totalTokens by exactly that amount).
     expect(
       usageFromSdk({
         inputTokens: 90,
@@ -231,7 +236,16 @@ describe('ai-sdk driver specifics (mock model)', () => {
         outputTokenDetails: { textTokens: 40, reasoningTokens: 2 },
         totalTokens: 132,
       }),
-    ).toEqual({ input: 70, output: 42, cacheRead: 15, cacheWrite: 5, reasoning: 2 });
+    ).toEqual({ input: 70, output: 42, cacheRead: 15, cacheWrite: 5 });
+    expect(
+      usageFromSdk({
+        inputTokens: 90,
+        inputTokenDetails: { noCacheTokens: 70, cacheReadTokens: 15, cacheWriteTokens: 5 },
+        outputTokens: 42,
+        outputTokenDetails: { textTokens: 40, reasoningTokens: 2 },
+        totalTokens: 132,
+      }),
+    ).not.toHaveProperty('reasoning');
     expect(
       usageFromSdk({
         inputTokens: 10,

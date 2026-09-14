@@ -19,7 +19,10 @@ parts live in `src/kernel/schema.ts`.
 `WorkerResult` — the plain-data outcome:
 
 - `structuredOutput?: unknown`
-- `usage: Usage` — `{ input, output, cacheRead, cacheWrite, reasoning? }` (tokens)
+- `usage: Usage` — `{ input, output, cacheRead, cacheWrite, reasoning? }`
+  (tokens; `reasoning` is additive only when the lane's SDK reports
+  reasoning OUTSIDE output — a lane whose SDK counts thinking inside
+  output must not emit it)
 - `costUSD?: number`
 - `costBasis?: 'modeled' | 'billed'` — what `costUSD` is, when it is present (DD-9)
 - `sessionId?: string`
