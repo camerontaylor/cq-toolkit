@@ -85,6 +85,11 @@ Its live message flow, in order:
 5. **session/request_permission** (agent → client REQUEST): the real
    handler either auto-accepts (see §2.1) or surfaces the request and
    parks a promise on the UI's answer (acp-agent.ts:3195-3238).
+   **STEP-2 SHAPE PIN (live wire):** `session/update` payloads are
+   NESTED — the discriminating kind lives at
+   `params.update.sessionUpdate` and text at `params.update.content`,
+   NOT at `params.sessionUpdate.*` as a flat reading of the union would
+   suggest. The driver's fold reads the nested shape exclusively.
 6. **session/cancel** (client → agent NOTIFICATION): the stop path writes
    `connection.cancel({ sessionId })` through a per-stop ledger that
    tracks each cancel write's delivery (acp-agent.ts:2493-2530; also
@@ -123,14 +128,34 @@ binary is expected to arrive pre-authenticated (env/config at spawn;
 ### 1.2 The subset v1 implements
 
 Exactly: `initialize` (with integer protocol-version negotiation and a
-loud mismatch error, §3) → `session/new` → `session/prompt` → consume
-`session/update` (a FILTER: fold `usage_update`-independent facts only —
-see §1.3 — and keep `agent_message_chunk` text for the structured-output
-attempt, §4) → answer `session/request_permission` declaratively (§2.1)
-→ `session/cancel` on the governed abort signal (§2.3), with `authenticate`
-implemented ONLY IF the live spike shows a harness gates `session/new`
-behind `auth_required` (§1.3, OQ-1). The conformance fixture (§7) is a
-fake ACP server speaking exactly this subset over stdio.
+loud mismatch error, §3) → `session/new` → `session/set_config_option`
+(THE MODE PIN — added by the step-2 amendment, below) → `session/prompt`
+→ consume `session/update` (a FILTER: fold `usage_update`-independent
+facts only — see §1.3 — and keep `agent_message_chunk` text for the
+structured-output attempt, §4) → answer `session/request_permission`
+declaratively (§2.1) → `session/cancel` on the governed abort signal
+(§2.3). `authenticate` is NOT implemented — and now KNOWN-UNNEEDED, not
+merely unproven: OQ-1 is ANSWERED (no gate; one authMethod,
+`zcode-credentials`, agent self-handles; `session/new` succeeds with no
+authenticate call). The pass-through-unless-demanded posture stands: if a
+harness ever answers `auth_required` anyway, the run fails loud NAMING
+the advertised authMethods — never a silent retry with credentials we do
+not hold. The conformance fixture (§7) is a fake ACP server speaking
+exactly this subset over stdio.
+
+**THE MODE PIN (step-2 amendment — the live probes made this subset
+member mandatory, OQ-4):** sessions are created in mode `yolo` (available
+modes `plan/build/edit/yolo/auto` on the reference vendor), and `yolo`
+NEVER ASKS — tools execute ungated. The permission boundary (§2.1) is
+the ONLY gate this lane owns, and it exists only in a client-chosen mode,
+so BEFORE ANY PROMPT the driver pins the gating mode with ONE
+`session/set_config_option { configId: 'mode', value: 'build' }` request
+(live-verified: in `build`, every gated tool call produced exactly one
+`session/request_permission`, honored on both the allow and the deny
+side). A failed pin is a pre-prompt error verdict — an unpinned session
+is a policy void, not a degraded run — and the never-asks tripwire (§2.1)
+remains the backstop for a harness that accepts the pin and still does
+not ask.
 
 ### 1.3 The will-NOT-implement-in-v1 list (each against the frozen seam)
 
@@ -344,18 +369,37 @@ touch. Therefore:
   business).
 - **maxUsd:** caller-side derived accounting, as on every lane.
 - **Usage mapping:** `PromptResponse.usage` → frozen `Usage`:
-  `inputTokens → input`, `outputTokens → output`,
-  `cachedReadTokens → cacheRead` (the reference mapper,
-  acp-agent.ts:677-684). **`cacheWrite` is 0-by-protocol** — ACP's
-  carried usage has no cache-write field at all (mapper cites three
-  fields only); frozen `Usage` requires the field, so it folds as 0 with
-  that fact recorded here. **`reasoning` is OMITTED** — ACP reports no
-  reasoning token count, and the frozen field is additive-only-when-
-  reported-outside-output (`src/driver/types.ts:36-41`); thought CONTENT
-  (`agent_thought_chunk`) is not a token count and must not be
-  converted into one. On `aborted`/`error` verdicts the driver folds
+  `outputTokens → output`, `cachedReadTokens → cacheRead` (the reference
+  mapper, acp-agent.ts:677-684), `cachedWriteTokens → cacheWrite` —
+  **step-2 CORRECTION from the live wire**: the carried usage DOES have a
+  cache-write field on this vendor (OQ-3, verbatim on the wire), so the
+  earlier "`cacheWrite` is 0-by-protocol" claim is wrong on this lane and
+  the field FOLDS instead of hardcoding 0 — and **round-3 CORRECTION**:
+  `input` is DERIVED, never mapped straight — `input = inputTokens −
+  cachedReadTokens − cachedWriteTokens`, floored at 0. The wire's
+  `inputTokens` is INCLUSIVE of the cached tokens (the live sample:
+  `totalTokens 15722 = inputTokens 15719 + outputTokens 3`, with
+  `cachedReadTokens 11648` inside the 15719), so the old
+  `inputTokens → input` mapping double-counted cache in every total that
+  sums the frozen fields — it totals **27370** against the wire's own
+  15722, while the derived fold `4071 + 3 + 11648 + 0 = 15722` sums to
+  the wire's totalTokens exactly (the ai-sdk lane's noCacheTokens
+  reasoning). **`reasoning` is OMITTED** —
+  the same live probe shows `thoughtTokens` EXISTS on the wire, but its
+  ADDITIVITY is unknown (whether the vendor counts thought tokens inside
+  `outputTokens` or outside it; the sample turn reported
+  `thoughtTokens: 0`, so the wire itself cannot say), and the frozen
+  field is additive-only-when-reported-outside-output
+  (`src/driver/types.ts:36-41`) — folding it on a guess would
+  double-count every total that sums the frozen Usage fields (the
+  Budget.maxTokens classification). Same rule as the claude-agent lane:
+  an unproven-additive count stays unlifted. Thought CONTENT
+  (`agent_thought_chunk`) is not a token count and must not be converted
+  into one. On `aborted`/`error` verdicts the driver folds
   whatever the final response actually carried and never invents the
-  rest — cost is never reported on an unmeasured verdict.
+  rest — cost is never reported on an unmeasured verdict (the live
+  cancel probe: the cancelled response carried `usage: null`; that fold
+  is zeros, no cost).
 - **costUSD:** OUR modeled figure, never vendor-reported USD — the
   T1.6b posture unchanged on a new lane (`docs/dd-9-api-equivalent-budget.md`
   §3): derived from the folded usage through the vendored models.dev
@@ -465,19 +509,25 @@ posture as the weakest existing lane, stated without cosmetics:
 ## 5. The observed-model check and eval posture
 
 - **`WorkerResult.model` (leg m binds):** the driver surfaces whatever
-  model id the HARNESS reports as served — the honest candidates on the
-  wire are the session's reported model/config state (session/new
-  response fields or a `config_option_update` with a `model`-category
-  option; the reference reads model identity through exactly this
-  unstable-tier machinery, acp-agent.ts:2864-2872; the degrade
-  message at acp-agent.ts:3621-3623). A harness that
-  reports NOTHING fails the conformance suite — that failure is
+  model id the HARNESS reports as served. **STEP-2 SHAPE PINS (OQ-2,
+  answered live):** the id is reported in TWO places — `session/new`
+  result `configOptions[]` (entry `id: 'model'`, category `'model'`,
+  `currentValue` in `providerId\modelId` format, backslash separator —
+  the vendor's own encoding) and AGAIN as a `config_option_update`
+  session update once the session materializes on first use. The two
+  DISAGREE by design: the session/new entry is the LAZY default
+  (`builtin:zai\GLM-5.3` on the probe); the update carries the
+  MATERIALIZED truth (`builtin:bigmodel\GLM-5.3` — the providerId
+  CHANGES between the two). `WorkerResult.model` therefore reads the
+  POST-MATERIALIZATION `config_option_update` value ONLY — the
+  session/new default is never surfaced (surfacing it would be the exact
+  misobservation leg m exists to catch). A harness that reports NOTHING
+  materialized fails the conformance suite — that failure is
   INTENDED PRESSURE, the same silent-remap defence as every lane
   (conformance leg m, test/driver/conformance.ts:509; "a driver that
   hides the served id … fails"), and the driver will NOT substitute the
   requested `ModelSpec.model` to pass it (that would manufacture the
-  exact fact leg m exists to catch). What zcode-acp-server actually
-  reports as a model id is unknown-until-spike (OQ-2).
+  exact fact leg m exists to catch).
 - **Eval wires request what the wire serves (conductor decision
   2026-09-14):** eval cells on this lane request the model id the
   zcode/deepseek harness actually serves (observed in the spike, as
@@ -589,12 +639,152 @@ T1.8 costs the Z.AI-discount wire, not the phase.
 - **OQ-6 (cancel-spend):** whether a cancelled turn stops vendor-side
   spend — the §2.3 spike; client-observable verdict only.
 
+## Live-probe evidence — the OQ register answered (step-2 slice 1, 2026-09-15)
+
+Recorded from the wire by `scripts/probe-acp.mjs` (committed; every frame of
+every run captured verbatim to ndjson logs outside the repo). Environment:
+`zcode-acp-server@0.37.3` installed via `npm install -g` (its dependency
+resolved to `@agentclientprotocol/sdk@1.4.0`; `engines: node >=22` satisfied
+by host node 24.21.0 via mise), spawning the app-bundle CLI through
+`ZCODE_BIN=/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`
+(backend reports itself as 0.16.5). Transport confirmed: newline-delimited
+JSON-RPC 2.0 (the SDK's own `LineBuffer`; the v1 spec transports page agrees
+— "Messages are delimited by newlines"). One amendment input already
+visible: **session/update payloads are NESTED** — `params.update.
+sessionUpdate`, `params.update.content`, not `params.sessionUpdate.*`.
+
+**OQ-5 (protocol generation) — ANSWERED, trigger (a) CLEARED.**
+`initialize { protocolVersion: 1, clientCapabilities: { fs: { readTextFile:
+false, writeTextFile: false }, terminal: false }, clientInfo }` → negotiated
+`protocolVersion: 1` (agentInfo `{ name: "zcode-acp-server", title: "ZCode",
+version: "0.37.3" }`). Mismatch leg: requesting `protocolVersion: 99` gets
+`protocolVersion: 1` back — the agent never declines, it answers its latest,
+exactly the spec procedure §3's mismatch error is built on.
+
+**OQ-1 (auth) — ANSWERED: NO gate.** The initialize response advertises one
+authMethod: `[{ id: "zcode-credentials", name: "ZCode built-in credentials",
+description: "Reads the GLM API key from ~/.zcode/v2/config.json managed by
+the ZCode desktop app. No editor-side credentials required." }]` (no `type`
+field — agent self-handles auth). `session/new` issued WITHOUT any
+`authenticate` call succeeds in ~5 ms; no `auth_required` error ever appears.
+v1's "harness arrives pre-authenticated" posture holds; `authenticate` stays
+unimplemented.
+
+**OQ-2 (model reporting) — ANSWERED, trigger (c) CLEARED on the model leg.**
+The model id is reported in TWO places, both verbatim on the wire:
+1. `session/new` response: `result.configOptions[]` entry
+   `{ id: "model", name: "Model", category: "model", type: "select",
+   currentValue: "builtin:zai\\GLM-5.3", options: [...] }` — but sessions are
+   LAZY: these are defaults, not the materialized session's state.
+2. `session/update` → `params.update.configOptions` (a
+   `config_option_update`), emitted once the session materializes on first
+   use, carrying the REAL served model: `currentValue:
+   "builtin:bigmodel\\GLM-5.3"`. Note the providerId CHANGES between the lazy
+   default (`builtin:zai`) and the materialized value (`builtin:bigmodel`) —
+   the observed-model check (§5, leg m) must read the POST-materialization
+   value, never the session/new defaults. Value format is
+   `providerId\modelId` (backslash separator; vendor's own encoding). A
+   mechanical key sweep (every key path matching /model/i across EVERY inbound
+   frame) finds no other model reporting anywhere.
+
+**OQ-3 (usage on the wire) — ANSWERED, trigger (c) CLEARED on the usage leg.**
+`PromptResponse.usage` EXISTS on this wire (the SDK 1.4 type marks it
+UNSTABLE/experimental; the published v1 schema page omits it). Verbatim, a
+tiny no-tool prompt (`stopReason: "end_turn"`):
+`usage: { totalTokens: 15722, inputTokens: 15719, outputTokens: 3,
+thoughtTokens: 0, cachedReadTokens: 11648, cachedWriteTokens: 0 }` plus
+`_meta: { zcode: { usage: { source: "provider", modelRequestCount: 1,
+webFetchRequests: 0, webSearchRequests: 0 } } }`. TWO §2.3 claims are
+CONTRADICTED by the live wire, both in the additive direction: the carried
+usage is NOT limited to the reference mapper's three fields —
+`cachedWriteTokens` EXISTS (§2.3's "`cacheWrite` is 0-by-protocol" is wrong
+on this vendor: the field is present; it can be folded instead of hardcoded
+0), and `thoughtTokens` EXISTS (§2.3's "`reasoning` is OMITTED — ACP reports
+no reasoning token count" is likewise wrong here; the additive-only-when-
+reported rule can now fold it). The `_meta.zcode.usage.source: "provider"`
+provenance marker is recorded as evidence of vendor-side metering.
+
+**OQ-4 (permission identity; does the ask happen) — ANSWERED, trigger (b)
+CLEARED on both legs.** Mode fact first: sessions are created in mode
+`yolo` (availableModes `plan/build/edit/yolo/auto` per `session/new
+result.modes`), and **yolo does NOT ask** — tools execute ungated. Switching
+`session/set_config_option { configId: "mode", value: "build" }` arms the
+gate; in `build`, a file-writing prompt produced exactly one
+`session/request_permission`, verbatim:
+`toolCall: { toolCallId: "call_…", rawInput: { file_path: "…/probe-hello.txt",
+content: "hello" }, title: "Write: /…/probe-hello.txt", content: [full
+pretty-printed input as text], locations: [{ path: "…/probe-hello.txt" }] }`
+— **`kind` is ABSENT** from the request's toolCall (the §2.1 matching gap is
+real but narrower than feared: the tool NAME leads the `title` as
+"`<toolName>: <summary>`", capped at 80 chars, and the sibling `tool_call`
+update carries the canonical name at `_meta.claudeCode.toolName` = "Write"
+with `kind` mapped via the vendor's TOOL_KIND_MAP — Write→"edit"). Offered
+options, verbatim: `[{ optionId: "allow_once", kind: "allow_once" },
+{ optionId: "allow_project", kind: "allow_always" }, { optionId: "deny",
+kind: "reject_once" }]` — optionIds are VENDOR STRINGS ("deny", not
+"reject_once"), so the driver must select by `kind` and echo the chosen
+option's own optionId, never assume spec-shaped ids. ALLOW leg: answering
+`{ outcome: { outcome: "selected", optionId: "allow_once" } }` → Write
+executes (`tool_call_update` → `status: "completed"`, file created on disk).
+DENY leg: answering `{ outcome: { outcome: "selected", optionId: "deny" } }`
+(kind `reject_once`) → tool ends `status: "failed"`, `rawOutput: "rejected
+(deny)"`, file NOT created, the turn SETTLES `end_turn` normally (~17 s), and
+the model verbalizes the denial and adapts. No hang, no ignore — the reject
+side of the answer table is honored. Never-asks check: in `build` mode every
+toolCallId seen on the tool_call stream was preceded by a request_permission
+for the same id; the structural never-asks failure mode does NOT occur. The
+§2.1 design consequence recorded for the amendment before driver code: the
+gate only exists in a client-chosen mode, so the v1 driver MUST pin the
+mode (one `session/set_config_option` added to the §1.2 subset) — a driver
+that leaves the `yolo` default would sail through its own never-asks tripwire
+on every tool run.
+
+**OQ-6 (cancel-spend) — ANSWERED (client-observable scope per §2.3).**
+Mid-turn `session/cancel` on a generation prompt: `session/prompt` resolves
+`stopReason: "cancelled"` **327 ms** after the cancel notification; the
+cancelled response carries `usage: null` (the fold-what-it-carried rule applies
+— no invented tokens on `aborted`). Post-settle observation window (20 s):
+exactly ONE further frame, the vendor extension `$/zcode/turnState`
+(`params.running: false`), ZERO `agent_message_chunk`s, zero text growth.
+Client-observable verdict: the stream goes silent at cancel; whether the
+backend's model stream "runs to its natural end" internally (the bridge's own
+comment claims the backend ignores stop, verified 0.16.5) is NOT
+client-observable at 0.37.3 — unobservable, exactly as DD-1 scoped it. The
+§2.3 posture (settle on the cancelled PROMPT RESPONSE, never on the cancel
+write) is confirmed by the wire.
+
+**Also observed (recorded for the conformance fixture):** update kinds seen
+on a plain turn, in order: `available_commands_update` ×3,
+`session_info_update`, `config_option_update` ×4, `current_mode_update` ×2,
+`agent_thought_chunk`, `agent_message_chunk`, `usage_update` ×3, `plan`.
+`usage_update` verbatim: `{ sessionUpdate: "usage_update", used: 15719,
+size: 1000000 }` — context occupancy, not turn tokens (§1.3's drop ruling
+stands). The bridge emits a placeholder `tool_call` card titled
+`"tool permission (Write)"` (`status: "pending"`, `kind: "other"`) while a
+permission popup is pending — a driver must not treat that card as the tool
+execution. `agentCapabilities` verbatim: `{ loadSession: true,
+promptCapabilities: { image: true, audio: false, embeddedContext: false },
+mcpCapabilities: { http: true, sse: false }, sessionCapabilities: { list: {},
+resume: {}, fork: {} }, _meta: { zcode: { fs: true } } }` — the §6 gate order
+(loadSession → resume) is exercisable, and `fork` is additionally advertised
+(out of scope per §1.3). Unprobed, recorded for later: whether mode `plan`
+(read-only) could serve as the §2.2 sandbox `level` carrier.
+
+**Checkpoint status: NO trigger fired.** (a) versions agree at 1; (b) the ask
+fires in a gating mode and the rejected outcome is honored with a clean
+settle; (c) both model AND usage are reported on complete runs. The goal is
+READY-FOR-DRIVER-CODE, conditional on the §1.2 subset amendment recorded
+under OQ-4 (mode pinning via `session/set_config_option`) being made in this
+document BEFORE driver code lands.
+
 ## Complexity verdict
 
 **ACHIEVABLE WITHIN BUDGET AS SCOPED — conditional on the live spike
 answering OQ-2/OQ-5 without hitting a checkpoint-blocked trigger.** The
-subset is four methods, one notification, and one client callback
-(§1.2); every hard design question (declarative permissions, sandbox
+subset is five methods, one notification, and one client callback
+(§1.2; the fifth — the mode pin — was ADDED by the step-2 amendment
+after the probes showed the unpinned default is a policy void); every
+hard design question (declarative permissions, sandbox
 honesty, cancel semantics, usage provenance, session mapping) has a
 settled answer above, most of them pre-answered by the reference's own
 mechanics, which are cited and deliberately re-derived rather than

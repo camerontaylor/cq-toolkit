@@ -1,29 +1,45 @@
 # Eval-axes demo — LIVE run output
 
-**Run date:** 2026-09-14 (first coherent run; the glm × ai-sdk and
+**Run date:** 2026-09-15 (the acp cell — the four-wide lane axis completes;
+the cell's first run FAILED on a driver-side wire-schema transcription bug,
+the retry after the fix is the recorded row — see the per-cell evidence
+below) · 2026-09-14 (first coherent run; the glm × ai-sdk and
 deepseek-chat × ai-sdk rows were each re-run live the same day under the
 CURRENT script's identity guards — see the per-cell evidence notes below)
 · **Script:** `scripts/demo-eval-axes.mjs`
 (standalone; never part of `npm test`) · **Fixture prompt (identical in
 every cell):** "Reply with exactly this text and nothing else: The quick
-brown fox jumps over the lazy dog." · **Caps:** `Budget.maxUsd 2`,
-`maxTokens 2000`, `toolPolicy: 'none'` per run · **Model ids:**
-`glm-4.6` (Z.AI) and `deepseek-chat` (DeepSeek) · **Routes:** Z.AI via the
+brown fox jumps over the lazy dog." · **Caps:** `Budget.maxUsd 2` on every
+cell, `maxTokens 2000` on the raw lanes / `maxTokens 200_000` on the acp
+cell (its harness's FIXED scaffolding alone dwarfs the raw-chat cap — see
+below), `toolPolicy: 'none'` per run · **Model ids:**
+`glm-4.6` (Z.AI raw lanes), `deepseek-chat` (DeepSeek), and
+`glm-5.3-flash` — the acp lane's SERVED id, requested per the conductor
+decision (2026-09-14) · **Routes:** Z.AI via the
 anthropic-compat endpoint (`https://api.z.ai/api/anthropic`, auth vars
 `ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_API_KEY` injected by the drivers from
-`ZAI_API_KEY`); DeepSeek via its native API (`DEEPSEEK_API_KEY`). The stale
+`ZAI_API_KEY`); DeepSeek via its native API (`DEEPSEEK_API_KEY`); the acp
+lane via the vendor harness `zcode-acp-server` (JSON-RPC over stdio; auth
+is agent-side — the ZCode app's own credentials, no key env from the
+script; `ZCODE_BIN` names the app-bundle CLI). The stale
 host `ANTHROPIC_API_KEY` was neutralized (empty) before every run.
 
 **THE AXIS IS THE DRIVER, NOT THE PROVIDER WIRE:** the glm × ai-sdk cell
 runs through the standard `zai` provider construction, whose DEFAULT base
 URL is now the GLM Coding Plan's OpenAI-compatible endpoint
 (`https://api.z.ai/api/coding/paas/v4`, `ZAI_BASE_URL` overrides) — the
-plan-funded wire.
+plan-funded wire. The four-wide lane axis {ai-sdk, claude-agent,
+subprocess, acp} COMPLETES with the acp cell (2026-09-15): it rides
+glm-5.3-flash — the id its wire actually serves — rather than glm-4.6,
+exactly the conductor decision: eval wires REQUEST the served id so the
+observed-model check passes green and cells compare what actually ran,
+honestly labeled.
 
 | lane | provider | model | served model | stopReason | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | claude-agent | zai | glm-4.6 | glm-4.6 | complete | 382 | 95 | 0 | 0 | $0.00043820 | yes |
 | subprocess | zai | glm-4.6 | glm-4.6 | complete | 1132 | 26 | 0 | 0 | $0.00073640 | yes |
+| acp | zai | glm-5.3-flash | builtin:bigmodel\GLM-5.3 | complete | 15727 | 12 | 10368 | 0 | absent | yes |
 | ai-sdk | deepseek | deepseek-chat | **deepseek-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
 | ai-sdk | zai | glm-4.6 | **glm-5.3-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
 
@@ -44,6 +60,47 @@ plan-funded wire.
 > would have priced glm-5.3-flash tokens at glm-4.6 rates (~4× overstated).
 > The guard exists for exactly this; no retry was issued (a remap is
 > endpoint configuration, not transient).
+
+> cell acp/glm-5.3-flash evidence (run live 2026-09-15; the row is the
+> retry after ONE honest failure — full history in the note): the cell
+> REQUESTS `glm-5.3-flash` — the model id this wire actually serves
+> (conductor decision 2026-09-14) — with the harness's own materialized
+> encoding `builtin:bigmodel\GLM-5.3` (probe-recorded 2026-09-15,
+> strategy §5) PRE-DECLARED as the cell's expected served id
+> (`expectedServed`); the identity guard demands the OBSERVED id equal
+> that exact string, and it did. The vendor encoding means the row's
+> requested and served ids differ in SPELLING while naming the same
+> served model — a remap would have surfaced as any OTHER id and failed
+> the cell, the same guard strength as every other lane.
+> POST-RUN CORRECTION (2026-09-15, cache-bucket fix): the row's usage
+> figures predate the fold fix — the wire's inputTokens is INCLUSIVE of
+> the cached tokens, so the recorded input 15727 double-counts the 10368
+> cached reads (the corrected fold derives input = 15727 − 10368 − 0 =
+> 5359, Σ fields = 15739 = the wire's totalTokens); the recorded row
+> stands as captured, un-re-run.
+>
+> **The first run FAILED — a driver bug, not a wire fact.** stopReason
+> 'error', zero usage: the driver's session/new schema transcribed
+> `modes.availableModes` as bare STRINGS while the live wire sends
+> `{id, name}` OBJECTS (probe-verbatim: `[{ id: 'plan', name: 'Plan' },
+> …]`) — the handshake-failure narration in the session record carried
+> the zod evidence. The in-repo fake fixture emitted strings too, which
+> is why conformance stayed green while the live parse threw. The schema
+> (`SessionModesSchema`) and the fixture were fixed to the recorded
+> shape; the retry — the ONE honest retry — is the recorded row. NO
+> retry followed the completed result.
+>
+> Reading the row: usage 15727/12/10368/0 — the vendor harness's FIXED
+> scaffolding is ~26k tokens for the 16-word fixture, an order of
+> magnitude above the claude-agent lane's 382 and the CLI lane's 1132;
+> that fixed overhead IS the lane's shape, which is why the cell's token
+> cap is 200_000 (the raw-chat 2k cap would post-hoc-classify every
+> honest acp run 'budget' — the cap is a classification threshold, never
+> a stop). costUSD is ABSENT on purpose: the vendored price map knows
+> glm-4.6 but neither `glm-5.3-flash` nor the vendor encoding — the fold
+> records the pricing gap (both driver and independent recompute absent
+> → fold agrees) rather than fabricating a figure; the DD-2 discount
+> record for this lane lives in `docs/dd-2-usd-normalization.md`.
 
 > **History of the glm × ai-sdk cell (all evidence live, kept for honesty):**
 >
@@ -88,6 +145,18 @@ Notes:
   inherited the pricing gap silently; the guard now fails such a row
   instead. The agent lanes' rows pass identity because their endpoints
   served the requested ids truthfully.)
+- **The acp lane's identity is the served id, pre-declared (2026-09-15).**
+  The conductor decision (eval wires REQUEST the model id the wire
+  actually serves) meets this wire's encoding: the harness serves
+  glm-5.3-flash and materializes it as `builtin:bigmodel\GLM-5.3` — so the
+  cell requests the served model by name and pins the probe-recorded
+  encoding as `expectedServed`; the guard (`served === expectedServed`)
+  has exactly the remap-catching strength of the raw lanes'
+  (`served === requested`), and the row honestly labels both spellings.
+  The four-wide lane axis {ai-sdk, claude-agent, subprocess, acp} is
+  complete; the lane axis is "the fixed GLM model each wire actually
+  serves" (glm-4.6 on the raw lanes, glm-5.3-flash here), not one literal
+  id — that IS the honest labeling the decision asks for.
 - **Run-to-run variance** (claude-agent × glm-4.6, an earlier demo run the
   same minute): usage {395, 88} → $0.00043060 — same fixture, ±3% cost;
   agents are not deterministic and per-run costUSD varies with the sampled

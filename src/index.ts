@@ -274,3 +274,45 @@ export {
   EndpointEntrySchema,
   EndpointTableSchema,
 } from './driver/claude-agent/routing.js';
+// Acp driver (T1.8) — re-export only, no logic: the FOURTH lane, speaking
+// OUR transcription of the Agent Client Protocol (newline-delimited
+// JSON-RPC 2.0 over stdio) to operator-installed vendor harness binaries
+// (zcode-acp-server; dsh-acp as the fast-follow endpoint). NO vendor
+// package anywhere — the wire vocabulary lives in driver/acp/protocol.ts
+// (I10), the binaries registry is discovery-only (never bundled, never a
+// dependency), and the observed-model check reads the POST-MATERIALIZATION
+// config_option_update value only (the session/new entry is the lazy
+// default — docs/acp-driver-strategy.md §5). The permission answer table
+// helpers are exported because the table IS the lane's public contract.
+export type { AcpDriverOptions } from './driver/acp/index.js';
+export {
+  AcpDriver,
+  ACP_SESSION_FILE,
+  composePrompt,
+  decidePermission,
+} from './driver/acp/index.js';
+export type {
+  AcpEndpointEntry,
+  AcpEndpointTable,
+  ResolvedAcpCommand,
+} from './driver/acp/binaries.js';
+export {
+  AcpEndpointSchema,
+  AcpEndpointTableSchema,
+  DEFAULT_ACP_ENDPOINT,
+  defaultAcpEndpointTable,
+  resolveAcpCommand,
+} from './driver/acp/binaries.js';
+export type {
+  PermissionOption,
+  PermissionOptionKind,
+  RequestPermissionParams,
+} from './driver/acp/protocol.js';
+export {
+  ACP_METHODS,
+  ACP_PROTOCOL_VERSION,
+  permissionToolIdentity,
+  selectAllowOptionId,
+  selectPermissionAnswer,
+  selectRejectOptionId,
+} from './driver/acp/protocol.js';
