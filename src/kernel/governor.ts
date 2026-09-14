@@ -31,6 +31,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage } from '../driver/types.js';
+import type { RunLog } from './journal.js';
 import { attemptsFromJournal } from './rescue.js';
 import type { OpRegistryView } from './runner.js';
 import type {
@@ -45,6 +46,7 @@ import type {
   RunCounts,
   RunOptions,
   RunReport,
+  RunStartedJournalEvent,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -756,6 +758,14 @@ export class BudgetGovernor {
    * `usdOf` to derive cost from journaled usage (the T1.4 price-map layer
    * will own that mapping).
    *
+   * CONTRACT on `events`: the ORDERED CONCATENATION of ALL the plan's run
+   * journals, oldest-first — exactly what `seedFromRunLog` builds. The
+   * latest run's journal alone UNDERCOUNTS: a re-attested job appears as a
+   * finish-only event (no open start to close, so its usage is skipped and
+   * it contributes no attempt ordinal) and chained dispatches from earlier
+   * runs vanish — silently resetting the budget this method promises to
+   * continue.
+   *
    * Keys are seeded TWICE so every jobKeyFor fallback resolves, with
    * different aggregation per key: per journal jobId (aligns with the
    * `input.jobId` convention) as MAX-of-ordinals — a job's highest dispatch —
@@ -840,6 +850,43 @@ export class BudgetGovernor {
   record(event: GovernorEvent): void {
     this.events.push(event);
   }
+}
+
+/**
+ * The easy path for chained resumes: construct a governor seeded from ALL of
+ * the plan's run journals — `log.runs()` (oldest-first) filtered by the
+ * `<planId>--` candidate prefix and the run-started `planId` exact matcher,
+ * mirroring the runner's own resume rules — and return it. This builds the
+ * ordered concatenation that `seedFromJournal`'s events contract requires:
+ * the latest run's journal alone undercounts re-attested jobs (finish-only
+ * events) and chained dispatches, silently resetting the budget.
+ */
+export async function seedFromRunLog(
+  log: RunLog,
+  planId: string,
+  opts?: {
+    config?: GovernorConfig;
+    clock?: Clock;
+    usdOf?: (usage: Usage) => number;
+  },
+): Promise<BudgetGovernor> {
+  const governor = new BudgetGovernor(opts?.config ?? {}, opts?.clock);
+  const events: JournalEvent[] = [];
+  for (const runId of await log.runs()) {
+    if (!runId.startsWith(`${planId}--`)) {
+      continue; // candidate pre-filter — mirrors the runner's resume rules
+    }
+    const runEvents = await log.read(runId);
+    const started = runEvents.find(
+      (event): event is RunStartedJournalEvent => event.type === 'run-started',
+    );
+    if (started?.planId !== planId) {
+      continue; // exact matcher — rejects a pathological id that merely shares the prefix
+    }
+    events.push(...runEvents);
+  }
+  governor.seedFromJournal(events, { usdOf: opts?.usdOf });
+  return governor;
 }
 
 // ---------------------------------------------------------------------------
@@ -1013,28 +1060,6 @@ export function governRegistry(view: OpRegistryView, governor: BudgetGovernor): 
 const QUEUED_MARKER = 'queued:';
 const BLOCKED_MARKER = 'blocked:';
 
-// Mirrors runner.ts's private stateFromResult (not exported there) — keep in
-// sync; README "Budget governor" carries the note.
-function stateFromResult(result: OpResult<unknown>): JobState {
-  switch (result.status) {
-    case 'ok':
-      return 'done';
-    case 'failed':
-      return 'failed';
-    case 'budget-exhausted':
-      return 'budget-exhausted';
-    case 'needs-human':
-      return 'blocked';
-    case 'indeterminate':
-      return 'failed';
-  }
-}
-
-/** Mirrors runner.ts's private emptyCounts — keep in sync. */
-function emptyCounts(): RunCounts {
-  return { queued: 0, running: 0, blocked: 0, done: 0, failed: 0, 'budget-exhausted': 0 };
-}
-
 /**
  * HONEST STOP (I9): annotate a returned run report with the budget stop —
  * `stoppedEarly: true` + `earlyStopReason: 'budget'` (the frozen
@@ -1117,10 +1142,23 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
     }
     return row;
   });
-  const counts = emptyCounts();
-  for (const row of jobs) {
-    counts[stateFromResult(row.result)] += 1;
-  }
+  // Counts: start from the runner's OWN counts and move only the re-marked
+  // rows (untouched rows are the same object — identity comparison). A full
+  // recompute from result statuses migrates genuinely-blocked rows (result
+  // `failed`, error `blocked: …`) into counts.failed even though the budget
+  // never touched them; a re-marked row was counted by the runner as
+  // `queued` (queued marker) or `blocked` (blocked marker) — move exactly
+  // those.
+  const counts: RunCounts = { ...report.counts };
+  jobs.forEach((row, index) => {
+    const original = report.jobs[index];
+    if (row === original) {
+      return; // untouched — the runner's count stands
+    }
+    const priorState: JobState = original.result.status === 'indeterminate' ? 'queued' : 'blocked';
+    counts[priorState] -= 1;
+    counts['budget-exhausted'] += 1;
+  });
   return {
     ...report,
     stoppedEarly: true,

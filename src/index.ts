@@ -95,7 +95,6 @@ export { emitReport, narrate, renderHuman } from './kernel/output.js';
 // `export type`.
 export type {
   AdmissionDecision,
-  BudgetGovernor,
   Clock,
   GovernorConfig,
   GovernorEvent,
@@ -107,12 +106,14 @@ export type {
   LadderSpec,
 } from './kernel/governor.js';
 export {
+  BudgetGovernor,
   DEFAULT_ABORT_GRACE_MS,
   DEFAULT_KILL_GRACE_MS,
   governRegistry,
   governorConfig,
   realClock,
   runLadder,
+  seedFromRunLog,
   withBudgetStop,
 } from './kernel/governor.js';
 export type {

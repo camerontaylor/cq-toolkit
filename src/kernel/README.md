@@ -190,9 +190,15 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   journal evidence: an in-process kill produces a terminal
   budget-exhausted record; a hard-crashed job has `job-started` with no
   terminal event. Both re-enter correctly on `resume: true` (T1.2 replay
-  re-runs every non-ok row). `BudgetGovernor.seedFromJournal(events, {usdOf?})`
-  folds a prior journal into the governor — per-job attempt ordinals from
-  the frozen attempt field (via `rescue.attemptsFromJournal`), the usage
+  re-runs every non-ok row). `seedFromRunLog(log, planId, {config?, usdOf?})`
+  is the composition path: it reads ALL of the plan's run journals (the same
+  `<planId>--` prefix + run-started `planId` matchers as resume,
+  oldest-first) and seeds a constructed governor from their ordered
+  concatenation. The raw `BudgetGovernor.seedFromJournal(events, {usdOf?})`
+  requires exactly that concatenation — the latest run's journal alone
+  undercounts re-attested jobs (finish-only events) and chained dispatches.
+  The fold carries per-job attempt ordinals from the frozen attempt field
+  (via `rescue.attemptsFromJournal`), the usage
   rollup (USD needs the optional `usdOf` price mapping), and the dispatch
   count (`runDispatchQuota` carries across resume instead of restarting at
   0) — so a resumed run continues the SAME budget. Under the op-name

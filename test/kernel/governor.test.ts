@@ -41,6 +41,7 @@ import {
   governRegistry,
   governorConfig,
   runLadder,
+  seedFromRunLog,
   withBudgetStop,
 } from '../../src/kernel/governor.js';
 import { decideRescue, rescueInputFromJournal } from '../../src/kernel/rescue.js';
@@ -181,6 +182,11 @@ function independentPlan(id: string, n: number, op = 'fake'): Plan {
 const okOp = async (raw: unknown): Promise<OpResult<unknown>> => {
   const jobId = (raw as { jobId: string }).jobId;
   return { status: 'ok', value: jobId };
+};
+
+const failOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+  const jobId = (raw as { jobId: string }).jobId;
+  return { status: 'failed', error: `real failure ${jobId}` };
 };
 
 /** A spendy op: injects usage + cost through the governed job context (the observer hook). */
@@ -547,6 +553,57 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
       failed: 0,
       'budget-exhausted': 4,
     });
+  });
+
+  test('counts: genuinely-blocked rows keep counts.blocked when the governor trips (review VB1B)', async () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    const plan: Plan = {
+      id: 'plan-counts',
+      jobs: [
+        { id: 'f1', op: 'fail', input: { jobId: 'f1' } }, // REAL failure
+        { id: 's1', op: 'spendy', input: { jobId: 's1' } },
+        { id: 'f2', op: 'ok', input: { jobId: 'f2' }, dependsOn: ['f1'] }, // blocked for REAL
+        { id: 's2', op: 'spendy', input: { jobId: 's2' }, dependsOn: ['s1'] }, // trips during s2
+        { id: 's3', op: 'ok', input: { jobId: 's3' }, dependsOn: ['s2'] }, // refused post-trip
+        { id: 's4', op: 'ok', input: { jobId: 's4' }, dependsOn: ['s3'] }, // blocked by BUDGET-caused s3
+      ],
+    };
+    const registry = viewWith(entry('fail', failOp), entry('spendy', spendyOp), entry('ok', okOp));
+    const raw = await runPlan(plan, { concurrency: 1, stopOnError: false, maxUsd: 1.0 }, governRegistry(registry, governor));
+    // Raw: f2 blocked on the REAL f1 failure; s4 blocked on budget-exhausted s3.
+    expect(raw.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 2,
+      done: 2,
+      failed: 1,
+      'budget-exhausted': 1,
+    });
+
+    const report = withBudgetStop(raw, plan, governor);
+    // Only s4 moves (blocked -> budget-exhausted). f2 keeps its real verdict
+    // AND its blocked count — a full recompute would have migrated it into
+    // counts.failed even though the budget never touched it.
+    expect(rowStatuses(report)).toEqual([
+      'failed',
+      'ok',
+      'failed',
+      'ok',
+      'budget-exhausted',
+      'budget-exhausted',
+    ]);
+    expect(report.jobs[2]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'f1'/ });
+    expect(report.jobs[5]?.result).toEqual({ status: 'budget-exhausted' });
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 1,
+      done: 2,
+      failed: 1,
+      'budget-exhausted': 2,
+    });
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
   });
 });
 
@@ -1225,6 +1282,67 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
     expect(governor.dispatchCount).toBe(3); // refusals do not consume quota
   });
+
+  test('seedFromRunLog folds ALL of the chained runs — the latest run alone undercounts (review VB1B)', async () => {
+    const log = openRunLog(dir);
+    const plan: Plan = {
+      id: 'plan-chained',
+      jobs: [
+        { id: 'c1', op: 'fake', input: { jobId: 'c1' } },
+        { id: 'c2', op: 'fake', input: { jobId: 'c2' }, dependsOn: ['c1'] },
+      ],
+    };
+    const manifest = makeManifest(plan);
+    const hashOf = (index: number): string => manifest.jobs[index]?.inputsHash ?? '';
+    const U1 = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 };
+    const U2 = { input: 20, output: 10, cacheRead: 0, cacheWrite: 0 };
+
+    // Run 1: real dispatches with usage — c1 ok, c2 killed (budget-exhausted).
+    await log.append('plan-chained--r1--aa', { type: 'run-started', runId: 'plan-chained--r1--aa', at: 't', planId: 'plan-chained' });
+    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c1', op: 'fake', attempt: 1 });
+    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
+    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
+
+    // Run 2 (resume): c1 re-ATTESTED (finish-only — usage must NOT double-
+    // count), c2 really re-dispatched and killed again (usage counts again).
+    await log.append('plan-chained--r2--bb', { type: 'run-started', runId: 'plan-chained--r2--bb', at: 't', planId: 'plan-chained' });
+    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: 't', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
+    await log.append('plan-chained--r2--bb', { type: 'job-started', runId: 'plan-chained--r2--bb', at: 't', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: 't', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
+
+    // Run 3 (resume): c2 re-dispatched once more (fails, no usage).
+    await log.append('plan-chained--r3--cc', { type: 'run-started', runId: 'plan-chained--r3--cc', at: 't', planId: 'plan-chained' });
+    await log.append('plan-chained--r3--cc', { type: 'job-started', runId: 'plan-chained--r3--cc', at: 't', jobId: 'c2', op: 'fake', attempt: 2 });
+    await log.append('plan-chained--r3--cc', { type: 'job-finished', runId: 'plan-chained--r3--cc', at: 't', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'failed', error: 'flake' } });
+
+    // The helper folds ALL THREE runs, oldest-first — not just the latest.
+    const governor = await seedFromRunLog(log, 'plan-chained', { config: { runDispatchQuota: 3 } });
+    expect(governor.dispatchCount).toBe(4); // 2 (run 1) + 1 (run 2) + 1 (run 3)
+    expect(governor.usage).toEqual({ input: 50, output: 25, cacheRead: 0, cacheWrite: 0 }); // U1 once (deduped), U2 twice (two REAL dispatches)
+    expect(governor.attemptsFor('c1')).toBe(1);
+    expect(governor.attemptsFor('c2')).toBe(3);
+
+    // A quota sized BETWEEN the run-1 dispatches (2) and the chain total (4)
+    // refuses further dispatches on resume:
+    const calls: string[] = [];
+    const countingOk = async (raw: unknown): Promise<OpResult<unknown>> => {
+      calls.push((raw as { jobId: string }).jobId);
+      return okOp(raw);
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      governRegistry(viewWith(entry('fake', countingOk)), governor),
+    );
+    expect(calls).toEqual([]);
+    // c1 is refused by the spent quota; c2 (dependsOn c1) is then honestly
+    // BLOCKED on the refused c1 — never dispatched, nothing fabricated.
+    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'failed']);
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'c1'/ });
+    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1308,5 +1426,16 @@ describe('src/index.ts barrel', () => {
     expect(typeof toolkit.attemptsFromJournal).toBe('function');
     expect(typeof toolkit.rescueInputFromJournal).toBe('function');
     expect(toolkit.CONSERVATIVE_RESCUE_POLICY).toEqual({ rows: [] });
+  });
+
+  test('public consumers can CONSTRUCT a governor from the barrel (review VB1B)', () => {
+    // A type-only BudgetGovernor export would leave governRegistry /
+    // withBudgetStop / governorConfig exported but unusable.
+    expect(typeof toolkit.BudgetGovernor).toBe('function');
+    expect(typeof toolkit.seedFromRunLog).toBe('function');
+    const governor = new toolkit.BudgetGovernor({}); // minimal valid config
+    expect(governor.admit('k')).toEqual({ decision: 'admit', attempt: 1 });
+    expect(governor.dispatchCount).toBe(1);
+    expect(governor.tripped).toBe(false);
   });
 });
