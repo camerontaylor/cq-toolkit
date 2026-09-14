@@ -71,7 +71,8 @@ see the I4 interplay above):
           set -euo pipefail
           # Anonymous fetch works on public repos; a private-repo adopter needs a token for this fetch (persist-credentials: false above) or can drop it — fetch-depth: 0 already holds the history.
           git fetch origin "${BASE_SHA}"
-          git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" \
+          # -z: NUL-delimit entries so a (pathological) newline in a path cannot corrupt the list.
+          git diff --name-only -z "${BASE_SHA}" "${HEAD_SHA}" \
             > "${RUNNER_TEMP}/changed.txt"
           cat "${RUNNER_TEMP}/changed.txt"
       - name: Run affected tests (vitest related)
@@ -82,7 +83,7 @@ see the I4 interplay above):
             # $(cat ...) word-splits and globs, corrupting paths with
             # spaces or glob characters.
             changed=()
-            while IFS= read -r path || [ -n "${path}" ]; do
+            while IFS= read -r -d '' path || [ -n "${path}" ]; do
               changed+=("${path}")
             done < "${RUNNER_TEMP}/changed.txt"
             npx vitest related --run "${changed[@]}"

@@ -189,5 +189,12 @@ jobs:
             echo "refusing: main has diverged from merge-queue (origin/main is not an ancestor of ${SHA}) — merge main into merge-queue and let the gate re-run"
             exit 1
           fi
-          git push origin "${SHA}:refs/heads/main"
-          echo "promoted ${SHA} to main by pure fast-forward"
+          # Atomic compare-and-swap: the second refspec updates merge-queue
+          # to the gated SHA — an up-to-date no-op in the normal case — so a
+          # CONCURRENT queue advance turns it into a rewind the server
+          # rejects, and --atomic rejects the whole push: main only ever
+          # advances to a commit that is still the queue tip at push time.
+          # (A value-changing second refspec is impossible on success: that
+          # direction is a rewind, which is exactly the rejection.)
+          git push --atomic origin "${SHA}:refs/heads/main" "${SHA}:refs/heads/merge-queue"
+          echo "promoted ${SHA} to main by pure fast-forward (atomic tip CAS)"

@@ -12,7 +12,8 @@
 //      promote PAT by design and must not declare the key at all — their
 //      policy note says so beside the pin (the gate's note mentions the
 //      word "persist-credentials" in prose, so the assertion is on the KEY,
-//      not the word).
+//      not the word — and the key match is QUOTE-AWARE, so a quoted
+//      `'persist-credentials':` spelling cannot hide).
 //   3. policy/templates/README.md documents the policy ("## Action pinning").
 import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -32,12 +33,13 @@ const TEMPLATE_FILES = [
   'policy/templates/affected-tests.md',
 ];
 
-// Every `uses:` value in the text, as { line, ref } — ref is the full
+// Every `uses:` value in the text (quoted `'uses':` keys included — YAML
+// allows quoted keys), as { line, ref } — ref is the full
 // non-space token (e.g. "actions/checkout@fbc6...c09").
 function usesRefs(text: string): Array<{ line: number; ref: string }> {
   const refs: Array<{ line: number; ref: string }> = [];
   text.split(/\r?\n/).forEach((line, idx) => {
-    const pattern = /uses:\s*(\S+)/g;
+    const pattern = /["']?uses["']?\s*:\s*(\S+)/g;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(line)) !== null) {
       refs.push({ line: idx + 1, ref: match[1] });
@@ -95,7 +97,7 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
       // must not silently turn this assertion into a no-op.
       expect(checkoutBlocks.length, `${name}: at least one checkout step`).toBeGreaterThanOrEqual(1);
       for (const block of checkoutBlocks) {
-        expect(block, `${name}: a checkout step must set persist-credentials: false`).toMatch(/persist-credentials:\s*false/);
+        expect(block, `${name}: a checkout step must set persist-credentials: false`).toMatch(/["']?persist-credentials["']?\s*:\s*false/);
       }
     }
   });
@@ -108,7 +110,7 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
       // policy assertion is that neither file DECLARES the key (which would
       // have to be `true` to matter, and `false` would break the push); the
       // gate's prose comment mentioning the word is not a declaration.
-      expect(text, `${name}: must not declare a persist-credentials key`).not.toMatch(/^\s+persist-credentials\s*:/m);
+      expect(text, `${name}: must not declare a persist-credentials key`).not.toMatch(/^\s+["']?persist-credentials["']?\s*:/m);
     }
   });
 
