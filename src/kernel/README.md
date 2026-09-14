@@ -223,6 +223,7 @@ persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
 | field | meaning | default |
 | --- | --- | --- |
 | `maxUsd` | EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd) | none |
+| `maxTokens` | EFFECTIVE run token cap = `RunOptions.maxTokens` (DD-9's parallel token rollup; no Limits half in v1) — independent of `maxUsd`, same exceeds-cap trip semantics | none |
 | `perJobWallClockMs` | rung-1 delay (`Limits.perJobWallClockMs`) | none = no ladder |
 | `abortGraceMs` | rung 1 → rung 2 grace | `DEFAULT_ABORT_GRACE_MS` = 2000 (PRE-SPIKE) |
 | `killGraceMs` | rung 2 → rung 3 grace | `DEFAULT_KILL_GRACE_MS` = 5000 (PRE-SPIKE) |
@@ -234,6 +235,18 @@ persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
 **DD-1 result: pending T1.6** — the spike that sizes `abortGraceMs` lands
 there. The grace defaults above are documented conservative placeholders,
 marked pre-spike in the source, and are expected to change in T1.6's own PR.
+
+**DD-9 result: CLOSED (T1.6b)** — the api-equivalent budget shipped. Every
+usage-bearing driver result carries `costUSD` labeled
+`costBasis: 'modeled'` (the list-price proxy from `src/driver/pricing`), so
+`maxUsd` binds subscription-routed lanes through the modeled figure
+(primary), and `RunOptions.maxTokens` binds independently as the
+unpriced-model backstop. Folding real usage that carries no `costUSD` under
+a configured `maxUsd` trips the budget loud — never fail open (the
+escapes: price the model, or cap with `maxTokens`), and the seed-time trip
+covers BOTH caps, so a resumed run whose journaled rollup already overruns
+either cap stops before admitting anything. Full disposition:
+`docs/dd-9-api-equivalent-budget.md`.
 
 Every timer in the governor flows through the injected `Clock`
 (`new BudgetGovernor(config, clock)`; default `realClock`) — there is no

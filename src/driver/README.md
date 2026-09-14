@@ -21,6 +21,7 @@ parts live in `src/kernel/schema.ts`.
 - `structuredOutput?: unknown`
 - `usage: Usage` — `{ input, output, cacheRead, cacheWrite, reasoning? }` (tokens)
 - `costUSD?: number`
+- `costBasis?: 'modeled' | 'billed'` — what `costUSD` is, when it is present (DD-9)
 - `sessionId?: string`
 - `denials: ToolDenial[]` — `{ tool, reason }` per denied tool use
 - `stopReason: DriverStopReason` — `'complete' | 'aborted' | 'budget' | 'error'`
@@ -29,7 +30,11 @@ parts live in `src/kernel/schema.ts`.
 
 - Tokens are the source of truth. `costUSD` is OPTIONAL and derived-only:
   callers compute it from a price map over `usage`; drivers never report
-  trusted USD.
+  trusted USD. A present `costUSD` is labeled `costBasis: 'modeled'` — the
+  api-equivalent list-price proxy for the tokens consumed, never presented
+  as billed (`billed` is reserved for a lane whose provider reports actual
+  invoiced cost; none exists in v1) — and a result with no `costUSD`
+  carries no basis either.
 - Model identity is plain data: a model string plus a provider handle
   resolved per driver. Never an SDK model object.
 - Anything persisted uses our own vocabulary — no vendor message shapes in

@@ -45,8 +45,9 @@
 //     harness mapping).
 //   - `spec.pricedModel` — when present, makeDriver must resolve this
 //     ModelSpec onto its scripted model THROUGH its price map (ai-sdk: the
-//     `pricing` option), so the derived-cost test asserts a real costUSD.
-//     The canonical conformance model is NEVER priced.
+//     `pricing` option), so the derived-cost test asserts a real costUSD
+//     labeled `costBasis: 'modeled'` (the api-equivalent figure; DD-9). The
+//     canonical conformance model is NEVER priced.
 //   - I8: run() honors the governed `currentJobContext()` signal — the
 //     abort test wraps a run in `runLadder`, fires the signal mid-run, and
 //     requires stopReason 'aborted'. The scripted model blocks until the
@@ -382,8 +383,11 @@ export function runDriverConformance(
         });
         const result = await driver.run(invocation());
         // The canonical conformance model is by contract NOT in any price
-        // map: a driver reporting costUSD for it is fabricating cost.
+        // map: a driver reporting costUSD for it is fabricating cost. No
+        // cost means no basis either — costBasis is never fabricated without
+        // a costUSD to describe (DD-9).
         expect(result.costUSD).toBeUndefined();
+        expect(result.costBasis).toBeUndefined();
       });
     });
 
@@ -402,6 +406,9 @@ export function runDriverConformance(
         expect(typeof result.costUSD).toBe('number');
         expect(Number.isFinite(result.costUSD as number)).toBe(true);
         expect(result.costUSD as number).toBeGreaterThanOrEqual(0);
+        // A derived figure is modeled — the api-equivalent list-price proxy
+        // for the tokens consumed — never claimed as billed (DD-9).
+        expect(result.costBasis).toBe('modeled');
       });
     });
 

@@ -137,7 +137,10 @@
 // — present only when the price map knows the model (overridable via the
 // `pricing` constructor option, same arithmetic over the injected rates),
 // and only on a verdict carrying REAL usage. Error/abort verdicts without
-// a measurement report NO costUSD: 0 would be a fabricated fact.
+// a measurement report NO costUSD: 0 would be a fabricated fact. The
+// derived figure is api-equivalent (modeled — list price for the tokens
+// consumed), never presented as billed (DD-9;
+// docs/dd-9-api-equivalent-budget.md).
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -841,14 +844,19 @@ function zeroUsage(): Usage {
   return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 }
 
-/** Derived-only cost field: present only when the price lookup knows the model. */
+/**
+ * Derived-only cost field (DD-2): present only when the price lookup knows
+ * the model. A present costUSD is labeled `costBasis: 'modeled'` — the
+ * api-equivalent list-price figure for the tokens consumed, never a claim of
+ * billed spend; an unpriced model gets neither field (never fabricate).
+ */
 function costField(
   costUSDOf: (modelSpec: ModelSpec, usage: Usage) => number | undefined,
   modelSpec: ModelSpec,
   usage: Usage,
-): { costUSD?: number } {
+): { costUSD?: number; costBasis?: 'modeled' } {
   const costUSD = costUSDOf(modelSpec, usage);
-  return costUSD === undefined ? {} : { costUSD };
+  return costUSD === undefined ? {} : { costUSD, costBasis: 'modeled' as const };
 }
 
 /** Inputs to the frozen stop-reason mapping (header table). */

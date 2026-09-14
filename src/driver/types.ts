@@ -122,6 +122,15 @@ export interface WorkerResult {
   structuredOutput?: unknown;
   usage: Usage;
   costUSD?: number;
+  /**
+   * What `costUSD` is, when it is present (DD-9): `modeled` — an
+   * api-equivalent figure derived from usage through a list-price map (a
+   * comparable proxy, NOT an invoice: a subscription-routed run's marginal
+   * cost is not this number); `billed` — reserved for a lane whose provider
+   * reports actual invoiced cost (none in v1). A result that carries no
+   * costUSD carries no basis either.
+   */
+  costBasis?: 'modeled' | 'billed';
   sessionId?: string;
   denials: ToolDenial[];
   stopReason: DriverStopReason;

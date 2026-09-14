@@ -105,7 +105,10 @@
 // price map (src/driver/pricing; overridable via the `pricing` constructor
 // option) knows the model. The ERROR/ABORT path reports NO costUSD at all:
 // tokens may have been spent before the failure, so 0 would be a fabricated
-// fact. The driver never fabricates or reports trusted USD.
+// fact. The derived figure is api-equivalent (modeled — list price for the
+// tokens consumed), never presented as billed (DD-9;
+// docs/dd-9-api-equivalent-budget.md). The driver never fabricates or
+// reports trusted USD.
 import { generateText, Output, tool } from 'ai';
 import type { FinishReason, LanguageModel, LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
 import type { ZodType } from 'zod';
@@ -494,12 +497,17 @@ function totalTokensOf(usage: Usage): number {
   return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
-/** Derived-only cost field (DD-2): present only when the price lookup knows the model. */
+/**
+ * Derived-only cost field (DD-2): present only when the price lookup knows
+ * the model. A present costUSD is labeled `costBasis: 'modeled'` — the
+ * api-equivalent list-price figure for the tokens consumed, never a claim of
+ * billed spend; an unknown model gets neither field (never fabricate).
+ */
 function costField(
   pricing: (modelSpec: ModelSpec) => PerMillionRates | undefined,
   modelSpec: ModelSpec,
   usage: Usage,
-): { costUSD?: number } {
+): { costUSD?: number; costBasis?: 'modeled' } {
   const rates = pricing(modelSpec);
   if (rates === undefined) {
     return {}; // unknown model — never fabricate
@@ -511,7 +519,7 @@ function costField(
     perMillion(usage.output, rates.output) +
     perMillion(usage.cacheRead, rates.cacheRead) +
     perMillion(usage.cacheWrite, rates.cacheWrite);
-  return { costUSD };
+  return { costUSD, costBasis: 'modeled' as const };
 }
 
 /** Inputs to the frozen stop-reason mapping (header table). */
