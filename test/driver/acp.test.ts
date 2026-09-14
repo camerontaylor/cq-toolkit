@@ -1045,7 +1045,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       // FAKE_ACP_IGNORE_MODE_PIN: the pin request is answered 2xx but the
       // fixture never applies it — the echo names 'yolo'. A driver that
       // trusts the 2xx prompts into the policy void; the fixed driver
-      // verifies modes.currentModeId === 'build' and refuses to prompt.
+      // requires EITHER confirmation surface to name 'build' — the echo or
+      // a folded current_mode_update — and refuses to prompt when neither
+      // does (this persona provides neither).
       const driver = new AcpDriver(
         driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_IGNORE_MODE_PIN: '1' }, []),
       );
@@ -1058,6 +1060,28 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(marker !== undefined && marker.includes("'yolo'")).toBe(true);
       const record = await store.load(result.sessionId as string);
       expect(record?.messages.some((m) => m.role === 'assistant')).toBe(false); // the prompt never fired
+    });
+  });
+
+  test('the mode pin confirms from the NOTIFICATION surface: the live shape (no modes echo, current_mode_update build before the response) prompts normally', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_MODE_PIN_NOTIFICATION: the live vendor's recorded shape
+      // (probe 2026-09-14) — the set_config_option answer carries NO modes
+      // member; the switch is broadcast as current_mode_update 'build'
+      // written BEFORE the response line. The driver must confirm the pin
+      // from that surface and prompt; an echo-only gate would fail every
+      // live run pre-prompt (round-1 review finding 1).
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'tool-then-reply', FAKE_ACP_TOOL: 'read', FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }), FAKE_ACP_MODE_PIN_NOTIFICATION: '1' },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'notification-pin run' }));
+      expect(result.stopReason).toBe('complete'); // confirmed via current_mode_update — the prompt fired
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[mode:build]'))).toBe(true);
     });
   });
 

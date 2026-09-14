@@ -359,6 +359,8 @@ interface RunObservation {
   transcript: string[];
   /** The POST-MATERIALIZATION model value (config_option_update ONLY — never the session/new lazy default). */
   servedModel: string | undefined;
+  /** The mode the harness last REPORTED (current_mode_update — the live vendor's pin-confirmation surface; replay-gated like every fold). */
+  observedMode: string | undefined;
   /** toolCallId → latest tool fold. */
   tools: Map<string, ToolObservation>;
   /** toolCallId → the channel it was FIRST seen on ('permission' = the gate fired for it). First-write-wins. */
@@ -377,6 +379,7 @@ function newObservation(): RunObservation {
     stderr: [],
     transcript: [],
     servedModel: undefined,
+    observedMode: undefined,
     tools: new Map(),
     toolFirstSeen: new Map(),
     permissionDecisions: new Map(),
@@ -1202,11 +1205,18 @@ export class AcpDriver implements Driver {
           value: GATING_MODE,
         });
         const pin = SetConfigOptionResultSchema.safeParse(pinRaw);
-        const confirmedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
-        if (confirmedMode !== GATING_MODE) {
+        const echoedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
+        // TWO confirmation surfaces (review round 1 / the live record): the
+        // response's modes echo, OR a current_mode_update naming the pinned
+        // mode — the live vendor does the latter, in the same flush BEFORE
+        // the response line, so it is already folded when this continuation
+        // runs (wire lines process in order). Neither surface naming build =
+        // an unpinned session: a policy void, refusing to prompt.
+        if (echoedMode !== GATING_MODE && observation.observedMode !== GATING_MODE) {
           handshakeFailure =
             `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
-            `answered ${confirmedMode === undefined ? 'no mode echo' : `mode '${confirmedMode}'`}) — ` +
+            `echoed ${echoedMode === undefined ? 'no mode echo' : `mode '${echoedMode}'`}, observed ` +
+            `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}) — ` +
             'an unpinned session is a policy void, refusing to prompt';
         }
       } catch (err) {
@@ -1620,10 +1630,18 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
       if (value !== undefined) observation.servedModel = value;
       return;
     }
-    case 'current_mode_update':
+    case 'current_mode_update': {
+      // The mode the harness REPORTS — the live vendor's pin-confirmation
+      // surface: its set_config_option response carries no modes echo; the
+      // switch is broadcast as this notification in the same flush as the
+      // response (probe 2026-09-14, both tool legs). Arrives here only
+      // past the replay + session-id gates, so history cannot poison it.
+      if (update.currentModeId !== undefined) observation.observedMode = update.currentModeId;
+      return;
+    }
     case 'usage_update':
     case 'known-unconsumed':
-      return; // evidence lives in the mode-pin flow / context telemetry is dropped / no seam field
+      return; // context telemetry is dropped / no seam field
   }
 }
 

@@ -89,11 +89,15 @@ session/set_config_option { configId: 'mode', value: 'build' }
 ```
 
 A failed pin is a pre-prompt **error verdict** — an unpinned session is a
-policy void, not a degraded run. The pin is **verified, not just sent**:
-the response's echoed `modes.currentModeId` must name `build` — a response
-that leaves the mode `yolo`, or carries no mode echo at all, is a failed
-pin (review-debt #39). The never-asks tripwire (below) is the backstop for
-a harness that accepts the pin and still does not ask.
+policy void, not a degraded run. The pin is **verified, not just sent**,
+against EITHER of the two surfaces the wire actually offers: the
+response's echoed `modes.currentModeId`, or a `current_mode_update`
+notification naming `build` (the live vendor's shape — probe 2026-09-14:
+its set_config_option answer carries no modes member; the switch rides a
+notification in the same flush, before the response line). Neither surface
+naming `build` is a failed pin (review-debt #39). The never-asks tripwire
+(below) is the backstop for a harness that accepts the pin and still does
+not ask.
 
 ## Tool permissions: the answer table, and the tripwire
 

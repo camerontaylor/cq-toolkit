@@ -134,6 +134,13 @@
 //                         STILL 'yolo' (the unconfirmed-pin persona,
 //                         review-debt #39: the driver must verify the
 //                         echoed mode and fail the run pre-prompt)
+//   FAKE_ACP_MODE_PIN_NOTIFICATION when '1', the set_config_option answer
+//                         carries NO modes echo — the switch is broadcast
+//                         as a current_mode_update notification naming
+//                         'build' written BEFORE the response line (the
+//                         LIVE vendor's shape, probe 2026-09-14: the
+//                         driver must confirm the pin from the
+//                         notification surface)
 //   FAKE_ACP_DENY_BUT_COMPLETE when '1' (tool flows), a DENIED tool is
 //                         EXECUTED anyway and reported status 'completed'
 //                         on the same toolCallId (the
@@ -214,6 +221,7 @@ const OMIT_RAW_OUTPUT = process.env.FAKE_ACP_OMIT_RAW_OUTPUT === '1';
 const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 const IGNORE_MODE_PIN = process.env.FAKE_ACP_IGNORE_MODE_PIN === '1';
+const MODE_PIN_NOTIFICATION = process.env.FAKE_ACP_MODE_PIN_NOTIFICATION === '1';
 const DENY_BUT_COMPLETE = process.env.FAKE_ACP_DENY_BUT_COMPLETE === '1';
 const RAW_OUTPUT_JSON = process.env.FAKE_ACP_RAW_OUTPUT_JSON === '1';
 const HUGE_FRAME = process.env.FAKE_ACP_HUGE_FRAME === '1';
@@ -828,6 +836,19 @@ function onFrame(frame) {
     case 'session/set_config_option':
       if (frame.params?.configId === 'mode' && !IGNORE_MODE_PIN) {
         sessionMode = String(frame.params?.value ?? sessionMode);
+      }
+      if (MODE_PIN_NOTIFICATION) {
+        // The LIVE shape (probe 2026-09-14): no modes echo in the response;
+        // the switch rides a current_mode_update written BEFORE the
+        // response line — the driver's wire folds it before the pin await
+        // resolves (lines process in order).
+        notifyUpdate({ sessionUpdate: 'current_mode_update', currentModeId: sessionMode });
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          result: { configOptions: configOptionsLazy() },
+        });
+        return;
       }
       send({
         jsonrpc: '2.0',
