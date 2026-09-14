@@ -76,10 +76,12 @@ Its live message flow, in order:
    (spec prompt-turn page).
 4. **session/update notifications** (agent → client), filtered to the
    session's own id (acp-agent.ts:3251-3253) and dispatched over the
-   documented union: `agent_message_chunk`, `agent_thought_chunk`,
-   `tool_call`, `tool_call_update`, `plan`, `current_mode_update`,
-   `config_option_update`, `session_info_update`, `usage_update`,
-   `available_commands_update` (acp-agent.ts:3630-3683).
+   documented union: `user_message_chunk` (handled before the switch,
+   acp-agent.ts:3630-3632), `agent_message_chunk`,
+   `agent_thought_chunk`, `tool_call`, `tool_call_update`, `plan`,
+   `current_mode_update`, `config_option_update`,
+   `session_info_update`, `usage_update`, `available_commands_update`
+   (acp-agent.ts:3630-3683).
 5. **session/request_permission** (agent → client REQUEST): the real
    handler either auto-accepts (see §2.1) or surfaces the request and
    parks a promise on the UI's answer (acp-agent.ts:3195-3238).
@@ -89,7 +91,7 @@ Its live message flow, in order:
    issued on the close path, acp-agent.ts:3163).
 7. **Usage.** The reference folds usage ONLY from the prompt response:
    `mapACPUsage(response.usage)` → `{ inputTokens, outputTokens,
-   cachedInputTokens: cachedReadTokens }` (acp-agent.ts:3856, mapper at
+   cachedInputTokens: cachedReadTokens }` (acp-agent.ts:3846, mapper at
    677-684). The `usage_update` session update is consumed and dropped:
    `handleUsageUpdate` is literally `void update;` (acp-agent.ts:3841-3843).
 8. **Resume (sessionRef), capability-gated.** `loadSession` when
@@ -208,23 +210,33 @@ settings." The frozen `ToolPolicy` is DECLARATIVE
 (`src/driver/types.ts:61-71`). The mapping, exactly:
 
 - **mode `allowlist` (the default):** on each request, the driver matches
-  the request's tool identity against `policy.allow` and AUTO-SELECTS the
-  first allow option (`{ outcome: 'selected', optionId }` of an
-  `allow_once`/`allow_always` option) on a match — never `allow_always`
-  (there is no cross-run memory to honor); on a miss it AUTO-SELECTS a
-  reject option. The user is never prompted — a headless worker cannot
-  be an interactive authority. This is the reference's own auto-accept
-  mechanic pointed at a policy instead of a toggle:
+  the request's tool identity against `policy.allow` and answers per the
+  FULL answer table below. The user is never prompted — a headless
+  worker cannot be an interactive authority. This is the reference's own
+  auto-accept mechanic pointed at a policy instead of a toggle:
   `selectPermissionOption(options, { behavior: 'allow' })` picks
   allow_once before allow_always (acp-agent.ts:4617-4640), and the
   auto-accept gate short-circuits before any UI event
   (acp-agent.ts:3195-3211).
-- **mode `none`:** every permission request is auto-rejected — same
-  answer path, deny side. (Note the asymmetry with the other lanes: they
-  also REMOVE the tool surface; over ACP the vendor's tools exist whether
-  we like them or not, and the permission boundary is the ONLY gate we
-  own. That is why a deny answer must be cheap and total.)
-- **mode `unrestricted`:** every request auto-selects the allow option.
+- **mode `none`:** every permission request is auto-rejected — the deny
+  side of the answer table below. (Note the asymmetry with the other
+  lanes: they also REMOVE the tool surface; over ACP the vendor's tools
+  exist whether we like them or not, and the permission boundary is the
+  ONLY gate we own. That is why a deny answer must be cheap and total.)
+- **mode `unrestricted`:** every request takes the allow side of the
+  answer table below.
+
+**The answer table, exactly (both sides, all modes):** an ALLOW decision
+(an allowlist match, or any request under mode `unrestricted`) selects
+the `allow_once` option when one is offered, else the `allow_always`
+option (`{ outcome: 'selected', optionId }` of the chosen option;
+`allow_always` is harmless per-run — the session dies with the process,
+so there is no cross-run memory to honor). A DENY decision (an allowlist
+miss, or any request under mode `none`) selects the `reject_once` option
+when one is offered, else the `reject_always` option; a deny with NO
+reject option offered FAILS THE RUN with an error naming the vendor's
+offered options. The driver NEVER answers `cancelled` — that outcome is
+only legal on a real cancellation (spec tool-calls page; §2.3).
 
 **The matching gap, named:** ACP's `RequestPermissionRequest` carries a
 `ToolCallUpdate` — toolCallId, title, kind (read/edit/delete/move/
@@ -253,6 +265,19 @@ status that may never clarify WHY. A permission request answered
 `cancelled` (only legal when the turn itself is cancelled, spec
 tool-calls page) records no denial — the run verdict is `aborted`
 already (§2.3).
+
+**The never-asks failure mode, named:** everything above stakes
+enforcement on `session/request_permission` ARRIVING — but the spec
+makes asking the AGENT's decision, not a client-enforceable MUST, so a
+protocol-legal vendor that executes tools WITHOUT asking is possible.
+The driver does not assume it away: it OBSERVES the `tool_call` stream
+inside the session/update filter (§1.1 item 4), and a `tool_call`
+arriving with NO preceding permission request for that tool call is
+recorded as evidence of UNGATED EXECUTION and the run verdict is
+`error` — fail loud, because a policy that cannot be enforced is not
+silently soft. That is what keeps the "only gate we own" claim above
+honest: if the gate never fires, the run record says so instead of
+passing a policy-void run as green.
 
 ### 2.2 `sandboxPolicy` → nothing, and that is the answer, stated plainly
 
@@ -520,8 +545,11 @@ escalation (kill ladder) beyond the cooperative path.
 "unresolved is fine, unreviewed is not"): (a) NO protocol-version
 overlap — our client and the shipping zcode-acp-server cannot agree on
 an initialize version (unbuildable as specced); (b) the vendor ignores
-or hangs on REJECTED permission outcomes, making the declarative
-toolPolicy unenforceable on the lane; (c) the harness reports NEITHER
+or hangs on REJECTED permission outcomes, or STRUCTURALLY NEVER ASKS —
+executes gated tools with no `session/request_permission` at all (the
+never-asks failure mode, §2.1, detected by the tool_call observation) —
+in either case making the declarative toolPolicy unenforceable on the
+lane; (c) the harness reports NEITHER
 model NOR usage on complete runs — no conforming `WorkerResult` is
 possible without fabrication, which the seam forbids.
 
@@ -540,16 +568,20 @@ T1.8 costs the Z.AI-discount wire, not the phase.
   Unknown until the live session probe; leg m fails the lane until
   answered.
 - **OQ-3 (usage on the wire):** the reference's SDK carries
-  `PromptResponse.usage` (acp-agent.ts:3856) but the published v1
+  `PromptResponse.usage` (acp-agent.ts:3846) but the published v1
   schema page shows `PromptResponse = { _meta?, stopReason }` with no
   usage field. Whether current harness SDKs ship usage on the prompt
   response is unknown until the live probe; if absent, the usage
   contract fails conformantly (the fixture still proves the fold).
-- **OQ-4 (permission identity):** what zcode-acp-server/dsh-acp put in
-  `request_permission`'s `toolCall.title`/`kind`/`rawInput`, and whether
-  titles are stable enough to match an allowlist. Unknown until the
-  live permission probe; fail-closed (deny unmatched) is the standing
-  fallback.
+- **OQ-4 (permission identity, and whether the ask happens at all):**
+  what zcode-acp-server/dsh-acp put in `request_permission`'s
+  `toolCall.title`/`kind`/`rawInput`, whether titles are stable enough
+  to match an allowlist, AND whether the harness actually ISSUES
+  `request_permission` for the gated tool classes — the live permission
+  probe must confirm the ask itself, because a harness that never asks
+  is the never-asks failure mode (§2.1) and trips checkpoint trigger
+  (§7b). Unknown until the live permission probe; fail-closed (deny
+  unmatched) is the standing fallback.
 - **OQ-5 (protocol generation):** the negotiated `protocolVersion`
   integer against `zcode-acp-server@0.37.3` (SDK `^1.3.0` vs the
   reference's `^0.17.1`). Unknown until first initialize; the mismatch
@@ -566,7 +598,7 @@ subset is four methods, one notification, and one client callback
 honesty, cancel semantics, usage provenance, session mapping) has a
 settled answer above, most of them pre-answered by the reference's own
 mechanics, which are cited and deliberately re-derived rather than
-imported. The conformance fixture de-risks the suite (283 tests stay
+imported. The conformance fixture de-risks the suite (288 tests stay
 green with no binary present), and the lane's real unknowns are
 concentrated in exactly two live probes (model reporting, protocol
 version) that the implementation step MUST run FIRST — before any
