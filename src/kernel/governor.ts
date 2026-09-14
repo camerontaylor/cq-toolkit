@@ -120,6 +120,12 @@ export interface LadderRungMarker {
    * test can see the rung FIRED even when there was nothing to deliver.
    */
   delivered: boolean;
+  /**
+   * Set when the rung's cancellation primitive THREW: the rung still fired,
+   * later rungs still arm, and the ladder still settles — a failing port can
+   * never hang the job or lose the marker.
+   */
+  error?: string;
   atMs: number;
 }
 
@@ -284,7 +290,18 @@ export function runLadder<T>(
       }
     };
     const fireRung = (rung: LadderRung, delayMs: number, deliver: () => boolean): void => {
-      const delivered = deliver();
+      // A throwing port primitive must never escape a timer callback (that
+      // would lose the marker, skip the later rungs, and never settle): the
+      // rung is recorded with delivered:false plus an error note and the
+      // ladder CONTINUES.
+      let delivered: boolean;
+      let error: string | undefined;
+      try {
+        delivered = deliver();
+      } catch (err) {
+        delivered = false;
+        error = err instanceof Error ? err.message : String(err);
+      }
       const atMs = clock.now();
       const marker: LadderRungMarker = {
         op: info.op,
@@ -293,6 +310,7 @@ export function runLadder<T>(
         delayMs,
         sinceStartMs: atMs - startedAt,
         delivered,
+        ...(error !== undefined ? { error } : {}),
         atMs,
       };
       markers.push(marker);
@@ -373,8 +391,10 @@ export interface GovernorConfig {
    * Job-key extractor for per-job caps. The frozen Op contract carries no
    * job identity, so the governor keys on this when given; otherwise the
    * `input.jobId` plan-jobId convention (which the runner's ops and the
-   * phase-2 op families follow), else `<op>#<n>` by per-op dispatch
-   * ordinal. Runtime-only: never persisted.
+   * phase-2 op families follow), else the OP NAME — under that fallback
+   * every dispatch of an op counts as another attempt of that op, so
+   * attempt caps always exist. Stable PER-JOB identity needs config.jobKey
+   * or input.jobId. Runtime-only: never persisted.
    */
   jobKey?: (op: string, input: unknown) => string;
 }
@@ -458,6 +478,8 @@ export type GovernorEvent =
       delayMs: number;
       sinceStartMs: number;
       delivered: boolean;
+      /** Carried from the marker when the rung's primitive threw. */
+      error?: string;
       atMs: number;
     }
   | {
@@ -554,7 +576,6 @@ export class BudgetGovernor {
   private trippedFlag = false;
   private tripReasonN?: string;
   private readonly slots: SlotPool | undefined;
-  private readonly ordinals = new Map<string, number>();
 
   constructor(config: GovernorConfig, clock: Clock = realClock) {
     validateConfig(config);
@@ -618,7 +639,10 @@ export class BudgetGovernor {
   /**
    * Job identity for per-job caps and events: the explicit config.jobKey
    * extractor when configured, else the input's string `jobId` (the
-   * plan-jobId convention), else `<op>#<n>` by per-op dispatch ordinal.
+   * plan-jobId convention), else the OP NAME. Under that fallback every
+   * dispatch of an op counts as another attempt of that op — the per-job
+   * (here: per-op) attempt cap always EXISTS instead of silently never
+   * tripping; stable per-job identity needs config.jobKey or input.jobId.
    */
   jobKeyFor(op: string, input: unknown): string {
     if (this.config.jobKey !== undefined) {
@@ -630,9 +654,7 @@ export class BudgetGovernor {
         return id;
       }
     }
-    const ordinal = (this.ordinals.get(op) ?? 0) + 1;
-    this.ordinals.set(op, ordinal);
-    return `${op}#${ordinal}`;
+    return op;
   }
 
   // --- Admission ------------------------------------------------------------
@@ -717,13 +739,24 @@ export class BudgetGovernor {
    * JobStartedJournalEvent.attempt field via rescue.attemptsFromJournal)
    * and the token-usage rollup. USD seeding needs prices the kernel does not
    * own — pass `usdOf` to derive cost from journaled usage (the T1.4
-   * price-map layer will own that mapping). Job keys are the journal's
-   * jobIds, which align with the default `input.jobId` job-key convention.
+   * price-map layer will own that mapping).
+   *
+   * Keys are seeded TWICE so every jobKeyFor fallback resolves: per journal
+   * jobId (aligns with the `input.jobId` convention) AND per op name
+   * (aligns with the no-identity fallback, where a dispatch's key IS its op
+   * name — it must inherit the attempts of every journal job that ran that
+   * op). Usage is counted only for finishes that CLOSE an open start: an
+   * orphan finish in a multi-run journal is a replay re-attestation of an
+   * already-counted dispatch, and counting it again would double the rollup.
    */
   seedFromJournal(events: readonly JournalEvent[], opts?: { usdOf?: (usage: Usage) => number }): void {
     const jobIds = new Set<string>();
+    const opByJob = new Map<string, string>();
     for (const event of events) {
-      if (event.type === 'job-started' || event.type === 'job-finished') {
+      if (event.type === 'job-started') {
+        jobIds.add(event.jobId);
+        opByJob.set(event.jobId, event.op);
+      } else if (event.type === 'job-finished') {
         jobIds.add(event.jobId);
       }
     }
@@ -731,14 +764,30 @@ export class BudgetGovernor {
     for (const jobId of jobIds) {
       const attempts = attemptsFromJournal(events, jobId);
       totalAttempts += attempts.length;
+      const op = opByJob.get(jobId);
       for (const attempt of attempts) {
         if (attempt.attempt > this.attemptsFor(jobId)) {
           this.attemptsByJob.set(jobId, attempt.attempt);
         }
+        if (op !== undefined && attempt.attempt > this.attemptsFor(op)) {
+          this.attemptsByJob.set(op, attempt.attempt);
+        }
       }
     }
+    // Usage/USD dedupe: only a finish that closes an open start represents a
+    // dispatch's own usage; an orphan finish (re-attestation) restates an
+    // already-counted dispatch and is skipped.
+    const openStarts = new Set<string>();
     for (const event of events) {
-      if (event.type !== 'job-finished' || event.usage === undefined) {
+      if (event.type === 'job-started') {
+        openStarts.add(event.jobId);
+        continue;
+      }
+      if (event.type !== 'job-finished') {
+        continue;
+      }
+      const closed = openStarts.delete(event.jobId); // any finish closes its start
+      if (event.usage === undefined || !closed) {
         continue;
       }
       this.usageN = this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
@@ -839,6 +888,7 @@ function governOp(op: Op<never, never>, opName: string, governor: BudgetGovernor
             delayMs: marker.delayMs,
             sinceStartMs: marker.sinceStartMs,
             delivered: marker.delivered,
+            ...(marker.error !== undefined ? { error: marker.error } : {}),
             atMs: marker.atMs,
           });
         },
@@ -983,28 +1033,46 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
     plan.jobs.map((job) => [job.id, job.dependsOn ?? []]),
   );
   // Is this job's non-execution attributable to the budget (transitively)?
-  const budgetCaused = (jobId: string, seen: Set<string>): boolean => {
-    if (seen.has(jobId)) {
+  // Memoized per jobId: a diamond dependency (A → B,C → D) must reuse D's
+  // verdict when the SECOND branch reaches it — a visited marker is not a
+  // "no" verdict, and reading it as one kept dishonest `blocked…` verdicts
+  // on diamond roots (I9). inProgress is a cycle guard only (runPlan forbids
+  // cycles) and is never memoized, so a partial walk cannot poison results.
+  const memo = new Map<string, boolean>();
+  const inProgress = new Set<string>();
+  const budgetCaused = (jobId: string): boolean => {
+    const memoed = memo.get(jobId);
+    if (memoed !== undefined) {
+      return memoed;
+    }
+    if (inProgress.has(jobId)) {
       return false; // defensive: runPlan forbids cycles
     }
-    seen.add(jobId);
+    inProgress.add(jobId);
+    let caused = false;
     const row = rowsByJob.get(jobId);
     if (row === undefined) {
-      return false; // unknown row — conservative: don't attribute
+      caused = false; // unknown row — conservative: don't attribute
+    } else {
+      switch (row.result.status) {
+        case 'budget-exhausted':
+          caused = true;
+          break;
+        case 'indeterminate':
+          caused = row.result.detail.startsWith(QUEUED_MARKER);
+          break;
+        case 'failed':
+          if (row.result.error.startsWith(BLOCKED_MARKER)) {
+            caused = (depsOf.get(jobId) ?? []).every((dep) => budgetCaused(dep));
+          }
+          break;
+        default:
+          caused = false; // ok / needs-human: real verdicts
+      }
     }
-    switch (row.result.status) {
-      case 'budget-exhausted':
-        return true;
-      case 'indeterminate':
-        return row.result.detail.startsWith(QUEUED_MARKER);
-      case 'failed':
-        if (!row.result.error.startsWith(BLOCKED_MARKER)) {
-          return false; // an executed failure is a real verdict
-        }
-        return (depsOf.get(jobId) ?? []).every((dep) => budgetCaused(dep, seen));
-      default:
-        return false; // ok / needs-human: real verdicts
-    }
+    inProgress.delete(jobId);
+    memo.set(jobId, caused);
+    return caused;
   };
   const jobs: JobOutcome[] = report.jobs.map((row) => {
     if (row.result.status === 'indeterminate' && row.result.detail.startsWith(QUEUED_MARKER)) {
@@ -1013,7 +1081,7 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
     if (
       row.result.status === 'failed' &&
       row.result.error.startsWith(BLOCKED_MARKER) &&
-      budgetCaused(row.jobId, new Set<string>())
+      budgetCaused(row.jobId)
     ) {
       return { ...row, result: { status: 'budget-exhausted' } };
     }

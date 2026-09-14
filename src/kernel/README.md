@@ -140,9 +140,12 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
      the run no longer waits on it. A fake op that ignores the abort signal
      is therefore still terminated at the final rung — that is the slice-2
      test.
-  An op that settles early disarms every pending rung. `runLadder` is the
-  standalone unit (no registry needed); markers are also returned on the
-  `LadderOutcome`.
+  An op that settles early disarms every pending rung. A port primitive that
+  THROWS is recorded on the rung marker (`delivered: false` plus an `error`
+  note — mirrored on the governor's `ladder-rung` event) and the ladder
+  continues: a failing port can never lose a marker, skip the later rungs,
+  or hang the job. `runLadder` is the standalone unit (no registry needed);
+  markers are also returned on the `LadderOutcome`.
 - **Why kills are `budget-exhausted`, not `indeterminate` (recorded
   decision).** The taxonomy lists "timeout" under `indeterminate` for
   op-internal losses with no attributable cause; a governor kill has a known
@@ -215,7 +218,7 @@ persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
 | `maxAttemptsPerJob` | per-job attempt cap (effective min) | none |
 | `runDispatchQuota` | per-run dispatch/attempt cap (`Limits.runDispatchQuota`) | none |
 | `inFlightCeiling` | in-flight ceiling — enforced by queueing | none |
-| `jobKey` | job-key extractor (runtime-only) | `input.jobId` convention, else `<op>#<n>` |
+| `jobKey` | job-key extractor (runtime-only) | `input.jobId` convention, else the **op name** |
 
 **DD-1 result: pending T1.6** — the spike that sizes `abortGraceMs` lands
 there. The grace defaults above are documented conservative placeholders,
@@ -305,7 +308,16 @@ composition harness for that arrives with the op families (T1.4+).
   the journal.
 - **Job-key identity**: the frozen Op contract carries no job id, so caps
   key on an explicit `jobKey` extractor, the `input.jobId` plan-jobId
-  convention, else `<op>#<n>`.
+  convention, else the OP NAME — under that fallback every dispatch of an op
+  counts as another attempt of that op, so the per-job attempt cap always
+  exists (a per-dispatch unique key would make it a silent no-op).
+  `seedFromJournal` seeds BOTH keys (journal jobId and op name) so a resumed
+  run's caps hold under either identity. Stable per-job identity needs
+  `config.jobKey` or `input.jobId`.
+- **Seed dedupe**: usage is counted only for journal finishes that close an
+  open start — an orphan finish in a multi-run journal is a replay
+  re-attestation of an already-counted dispatch, and counting it again would
+  double the rollup.
 - **Trip gates admission only**: in-flight jobs complete; their evidence
   stays real.
 - **USD is observed, never derived**: cost arrives via `reportCost` (tests

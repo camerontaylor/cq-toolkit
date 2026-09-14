@@ -20,7 +20,7 @@
 // process helpers land.
 import { readdir, readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join, relative } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { describe, expect, test } from 'vitest';
 
 const SRC = fileURLToPath(new URL('../../src', import.meta.url));
@@ -30,11 +30,11 @@ const KERNEL_DIR = join(SRC, 'kernel');
 /** The banned primitives: wall-clock scheduling and cancellation roots. */
 const PATTERN = /setTimeout|AbortController/;
 
-/** The one exclusion: src/driver/<name>/process.ts (T1.5's kill-ladder home). */
-const PROCESS_HELPER = /^driver\/[^/]+\/process\.ts$/;
+/** The one exclusion: src/driver/<name>/process.{ts,js,mjs} (T1.5's kill-ladder home). */
+const PROCESS_HELPER = /^driver\/[^/]+\/process\.(?:ts|js|mjs)$/;
 
-/** Every .ts source under `dir`, sorted (relative to src/), recursively. */
-async function tsFilesUnder(dir: string): Promise<string[]> {
+/** Every .ts/.js/.mjs source under `dir`, sorted (relative to src/, forward slashes), recursively. */
+async function sourceFilesUnder(dir: string): Promise<string[]> {
   const found: string[] = [];
   async function walk(current: string): Promise<void> {
     const entries = await readdir(current, { withFileTypes: true });
@@ -42,8 +42,10 @@ async function tsFilesUnder(dir: string): Promise<string[]> {
       const full = join(current, entry.name);
       if (entry.isDirectory()) {
         await walk(full);
-      } else if (entry.isFile() && entry.name.endsWith('.ts')) {
-        found.push(full);
+      } else if (entry.isFile() && /\.(?:ts|js|mjs)$/.test(entry.name)) {
+        // Normalize separators BEFORE any pattern matching — a raw
+        // `relative()` on win32 would carry backslashes and dodge the regex.
+        found.push(relative(SRC, full).split(sep).join('/'));
       }
     }
   }
@@ -53,32 +55,31 @@ async function tsFilesUnder(dir: string): Promise<string[]> {
 
 describe('I8 hygiene — the grep check', () => {
   test('src/driver/** owns no setTimeout/AbortController outside process.ts helpers', async () => {
-    const files = await tsFilesUnder(DRIVER_DIR);
+    const files = await sourceFilesUnder(DRIVER_DIR);
     // The scan cannot silently pass on an empty directory:
     expect(files.length).toBeGreaterThanOrEqual(1);
-    expect(files).toContain(join(DRIVER_DIR, 'types.ts')); // the frozen seam was scanned
+    expect(files).toContain('driver/types.ts'); // the frozen seam was scanned
     const offenders: string[] = [];
-    for (const file of files) {
-      const rel = relative(SRC, file);
+    for (const rel of files) {
       if (PROCESS_HELPER.test(rel)) continue; // T1.5 SIGTERM→SIGKILL helpers may own timers
-      const text = await readFile(file, 'utf8');
+      const text = await readFile(join(SRC, rel), 'utf8');
       if (PATTERN.test(text)) offenders.push(rel);
     }
     expect(offenders).toEqual([]);
   });
 
   test('the kernel keeps ONE wall-clock owner: governor.ts', async () => {
-    const files = await tsFilesUnder(KERNEL_DIR);
+    const files = await sourceFilesUnder(KERNEL_DIR);
     expect(files.length).toBeGreaterThanOrEqual(5); // types, schema, runner, journal, manifest, output, governor, rescue
     const offenders: string[] = [];
     let governorOwnsTheWallClock = false;
-    for (const file of files) {
-      const text = await readFile(file, 'utf8');
+    for (const rel of files) {
+      const text = await readFile(join(SRC, rel), 'utf8');
       const hit = PATTERN.test(text);
-      if (file.endsWith(join('kernel', 'governor.ts'))) {
+      if (rel === 'kernel/governor.ts') {
         governorOwnsTheWallClock = hit; // the ladder must genuinely live there
       } else if (hit) {
-        offenders.push(relative(SRC, file));
+        offenders.push(rel);
       }
     }
     expect(offenders).toEqual([]); // no other kernel file schedules time or roots cancellation
