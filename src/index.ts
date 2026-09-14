@@ -132,3 +132,72 @@ export {
   decideRescue,
   rescueInputFromJournal,
 } from './kernel/rescue.js';
+// Composition harness (T1.4) — re-export only, no logic: the R4 per-op
+// config schema + conservative defaults, the toolkit's minimal read/edit/run
+// tool surface with its per-op allowlists, and the JSONL session store
+// backing the I6 isolation contract.
+export type {
+  FileToolConfig,
+  HarnessConfig,
+  HarnessToolConfig,
+  PromptBudgetConfig,
+  RunToolConfig,
+} from './harness/config.js';
+export {
+  defaultHarnessConfig,
+  FileToolConfigSchema,
+  HarnessConfigSchema,
+  HarnessToolConfigSchema,
+  PromptBudgetConfigSchema,
+  RunToolConfigSchema,
+} from './harness/config.js';
+export type {
+  EditToolInput,
+  ReadToolInput,
+  RunToolInput,
+  ToolkitTool,
+  ToolkitToolName,
+  ToolkitToolResult,
+} from './harness/tools.js';
+export {
+  buildTools,
+  compileCommandPatterns,
+  compilePathPatterns,
+  EditToolInputSchema,
+  ReadToolInputSchema,
+  RunToolInputSchema,
+} from './harness/tools.js';
+export type {
+  SessionHeaderLine,
+  SessionLine,
+  SessionMessage,
+  SessionMessageLine,
+  SessionRecord,
+} from './harness/session.js';
+export {
+  assertSafeSessionId,
+  SessionHeaderLineSchema,
+  SessionLineSchema,
+  SessionMessageLineSchema,
+  SessionMessageSchema,
+  SessionRecordSchema,
+  SessionStore,
+  tempWorkspace,
+} from './harness/session.js';
+// First-party driver + price map (T1.4) — re-export only, no logic: the
+// in-process ai-sdk driver on the frozen seam, and the models.dev-derived
+// price map behind the derived-only costUSD rule.
+export type {
+  AiSdkDriverOptions,
+  ProviderFactory,
+} from './driver/ai-sdk/index.js';
+export { AiSdkDriver } from './driver/ai-sdk/index.js';
+export type {
+  PerMillionRates,
+  PriceTable,
+} from './driver/pricing/index.js';
+export {
+  computeCostUSD,
+  priceOf,
+} from './driver/pricing/index.js';
+export { PRICE_TABLE } from './driver/pricing/data.js';
