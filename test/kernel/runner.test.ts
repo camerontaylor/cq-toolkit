@@ -608,6 +608,87 @@ describe('runPlan — execution semantics', () => {
     });
   });
 
+  test('silently-lossy op results are rejected: Map, Date, function member, undefined array hole', async () => {
+    // Each of these stringifies WITHOUT throwing but the journal line would
+    // disagree with the value the op returned (Map → {}, Date → ISO string,
+    // function members vanish, undefined array elements → null).
+    const { op } = makeFake();
+    const registry = viewWith(
+      entry('map-op', jobInputSchema, async () => ({ status: 'ok', value: new Map([['a', 1]]) })),
+      entry('date-op', jobInputSchema, async () => ({ status: 'ok', value: new Date(0) })),
+      entry('fn-op', jobInputSchema, async () => ({
+        status: 'ok',
+        value: { compute: () => 1 },
+      })),
+      entry('hole-op', jobInputSchema, async () => {
+        const holey: unknown[] = [1];
+        holey[2] = 3; // index 1 left undefined — stringify would null it
+        return { status: 'ok', value: holey } as { status: 'ok'; value: unknown };
+      }),
+      entry('fake', jobInputSchema, op),
+    );
+    const plan: Plan = {
+      id: 'plan-lossy',
+      jobs: [
+        { id: 'm', op: 'map-op', input: { jobId: 'm' } },
+        { id: 'd', op: 'date-op', input: { jobId: 'd' } },
+        { id: 'f', op: 'fn-op', input: { jobId: 'f' } },
+        { id: 'h', op: 'hole-op', input: { jobId: 'h' } },
+        { id: 'ok1', op: 'fake', input: { jobId: 'ok1' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 5, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    const failureOf = (id: string): string =>
+      (report.jobs.find((row) => row.jobId === id)?.result as { error?: string }).error ?? '';
+    expect(failureOf('m')).toMatch(/non-serializable.*non-plain object of type 'Map'/);
+    expect(failureOf('d')).toMatch(/non-serializable.*non-plain object of type 'Date'/);
+    expect(failureOf('f')).toMatch(/non-serializable.*non-JSON value of type 'function'/);
+    expect(failureOf('h')).toMatch(/non-serializable.*undefined array element/);
+    expect(report.counts.failed).toBe(4);
+    expect(report.counts.done).toBe(1); // the run continues
+  });
+
+  test("an ok result whose value is undefined is rejected — the journal requires ok's value", async () => {
+    // The frozen ok variant carries a REQUIRED value: a journaled
+    // {status:'ok'} without one fails JournalEventSchema on read. Undefined
+    // is therefore lossy here (not absent data) and must be an honest
+    // per-job failure — never a journal line that cannot be replayed.
+    const { op } = makeFake();
+    const registry = viewWith(
+      entry('absent', jobInputSchema, async () => ({
+        status: 'ok',
+        value: undefined,
+      }) as OpResult<unknown>),
+      entry('fake', jobInputSchema, op),
+    );
+    const plan: Plan = {
+      id: 'plan-absent-value',
+      jobs: [
+        { id: 'j1', op: 'absent', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/non-serializable.*without a 'value'/),
+    });
+    expect(report.counts.done).toBe(1); // j2 unaffected — the run continues
+    // Every journaled line still reads back cleanly.
+    const events = await openRunLog(dir).read(report.runId);
+    expect(jobFinishes(events).find((event) => event.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+    });
+  });
+
   test('a throwing registry lookup records failed with the throw message (run survives)', async () => {
     // A registry backend that throws on read must fail THIS job, not reject
     // the whole runPlan call ('this function never throws' holds).

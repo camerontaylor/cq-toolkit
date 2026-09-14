@@ -135,6 +135,54 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * JSON-LOSSLESSNESS check for op results (the journal line is a JSON.stringify
+ * of the result; replay reconstructs from that line). stringify-throwing
+ * values (BigInt, circular) are caught by the stringify probe; this walk
+ * catches the SILENTLY lossy ones — Map/Set/Date/RegExp/class instances
+ * stringify as `{}` or strings, function/symbol members vanish, undefined
+ * array elements become null — where the journal would otherwise disagree
+ * with the value the run produced. One normalization is accepted, matching
+ * JSON semantics: an undefined-valued member of a nested object IS absent
+ * data ({a: undefined} and {} are the same JSON record) — required-field
+ * positions (the ok variant's `value`) are guarded by the caller.
+ * Plain objects: prototype null or Object.prototype only.
+ * Requires cycle-freedom — call only after the stringify probe passed.
+ */
+function assertJsonLossless(value: unknown): void {
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return;
+    case 'number':
+      if (!Number.isFinite(value)) throw new Error(`non-finite number ${String(value)}`);
+      return;
+    case 'object': {
+      if (value === null) return;
+      if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i++) {
+          const element = value[i];
+          if (element === undefined) throw new Error(`undefined array element at [${i}]`);
+          assertJsonLossless(element);
+        }
+        return;
+      }
+      const proto = Object.getPrototypeOf(value) as object | null;
+      if (proto !== Object.prototype && proto !== null) {
+        const name = (value as object).constructor?.name ?? 'unknown';
+        throw new Error(`non-plain object of type '${name}'`);
+      }
+      for (const memberValue of Object.values(value)) {
+        if (memberValue === undefined) continue; // absent-key semantics
+        assertJsonLossless(memberValue);
+      }
+      return;
+    }
+    default:
+      throw new Error(`non-JSON value of type '${typeof value}'`);
+  }
+}
+
 /** ISO-8601 timestamp for journal events. */
 const now = (): string => new Date().toISOString();
 
@@ -219,13 +267,15 @@ async function executeOp(
         error: `op '${job.op}' violated the op contract: did not return an OpResult`,
       };
     }
-    // OpResultSchema's value slot is z.unknown(), so a BigInt/circular result
-    // passes the shape check but would still throw OUT of the journal append
-    // (each line is JSON.stringify'd there), and NaN/±Infinity would silently
-    // journal as `null` — the replay would then consume a different value
-    // than the run produced. JSON-faithfulness is checked HERE via a
-    // replacer that rejects non-finite numbers: an honest per-job failure
-    // instead of a run-killing append error or a silently falsified journal.
+    // OpResultSchema's value slot is z.unknown(), so a result can pass the
+    // shape check yet not survive the journal line (each is JSON.stringify'd
+    // at append) — or survive it LOSSILY, the journal disagreeing with the
+    // value the run produced. Two probes, both HERE, recording an honest
+    // per-job failure instead: stringify rejects throwing values (BigInt,
+    // cycles, and — via the replacer — non-finite numbers); the losslessness
+    // walk rejects silently-lossy values (Maps, Dates, class instances,
+    // function/symbol members, undefined array elements). See
+    // assertJsonLossless for the one accepted normalization.
     try {
       JSON.stringify(checked.data, (_key, value: unknown) => {
         if (typeof value === 'number' && !Number.isFinite(value)) {
@@ -233,6 +283,13 @@ async function executeOp(
         }
         return value;
       });
+      // The frozen ok variant REQUIRES its value in the journaled record
+      // (JournalEventSchema fails on read for {status:'ok'} without one), so
+      // an undefined value is a lossy result, not absent data.
+      if (checked.data.status === 'ok' && checked.data.value === undefined) {
+        throw new Error("ok result without a 'value'");
+      }
+      assertJsonLossless(checked.data);
     } catch (err) {
       return {
         status: 'failed',
