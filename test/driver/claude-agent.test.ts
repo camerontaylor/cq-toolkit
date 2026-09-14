@@ -105,7 +105,13 @@ function structuredOutputOf(options: Record<string, unknown>, text: string): { s
 
 /** One scripted query: init → (tool phase) → assistant text → success result. */
 async function* runScriptedQuery(
-  script: { directive?: ModelDirective; servedModel?: string; calls: MockQueryCall[] },
+  script: {
+    directive?: ModelDirective;
+    servedModel?: string;
+    calls: MockQueryCall[];
+    /** Overrides the mock's usage — the LYING-USAGE tests ride this (review round 3). */
+    usage?: Record<string, unknown>;
+  },
   prompt: string,
   options: Record<string, unknown>,
 ): AsyncGenerator<unknown, void> {
@@ -169,10 +175,11 @@ async function* runScriptedQuery(
       : directive?.kind === 'reply'
         ? directive.text
         : 'ok';
+  const usage = script.usage ?? AGENT_USAGE;
   yield {
     type: 'assistant',
     session_id: sessionId,
-    message: { model, content: [{ type: 'text', text }], usage: AGENT_USAGE },
+    message: { model, content: [{ type: 'text', text }], usage },
   };
   yield {
     type: 'result',
@@ -180,7 +187,7 @@ async function* runScriptedQuery(
     is_error: false,
     session_id: sessionId,
     result: text,
-    usage: AGENT_USAGE,
+    usage,
     modelUsage: {
       [model]: {
         inputTokens: 120,
@@ -212,7 +219,12 @@ const mockAdapters = {
 };
 
 /** Build the mock module for one directive; records every query call. */
-function mockSdkModule(script: { directive?: ModelDirective; servedModel?: string; calls: MockQueryCall[] }): Record<string, unknown> {
+function mockSdkModule(script: {
+  directive?: ModelDirective;
+  servedModel?: string;
+  calls: MockQueryCall[];
+  usage?: Record<string, unknown>;
+}): Record<string, unknown> {
   return {
     ...mockAdapters,
     query: ({ prompt, options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
@@ -1010,6 +1022,49 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       cacheRead: 0,
       cacheWrite: 0,
     });
+    // Lying measurements (issue #19-3 twin): negatives and fractions fold to
+    // an honest 0 — never negative usage, never a negative-cost propagation.
+    expect(
+      usageFromAgent({
+        input_tokens: -200_000,
+        output_tokens: 150_000,
+        cache_read_input_tokens: -3,
+        cache_creation_input_tokens: 2.5,
+      }),
+    ).toEqual({ input: 0, output: 150_000, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  test('a LYING usage report trips the maxTokens budget verdict instead of bypassing it (#19-3 twin)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const calls: MockQueryCall[] = [];
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'lying usage' },
+            calls,
+            // The lying SDK shape: a negative input masks real spend — the
+            // OLD asNumber folded -200,000 (total −50,000, never `>= cap`)
+            // and the budget verdict was bypassed forever.
+            usage: {
+              input_tokens: -200_000,
+              output_tokens: 150_000,
+              cache_read_input_tokens: 0,
+              cache_creation_input_tokens: 0,
+            },
+          }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation({ prompt: 'lying usage run', budget: { maxTokens: 1000 } }));
+      // The tightened fold: the negative field → 0, so the total is 150,000
+      // ≥ 1000 — the budget verdict, not a silent bypass.
+      expect(result.stopReason).toBe('budget');
+      expect(result.usage).toEqual({ input: 0, output: 150_000, cacheRead: 0, cacheWrite: 0 });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
   });
 
   test('budget classification uses the TRUE total — thinking tokens are not added on top of output', async () => {

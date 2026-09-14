@@ -239,6 +239,12 @@ export function decideRescue(
     throw new Error(`rescue: policy row '${row.id}' maxAttempts must be an integer >= 1, got ${rowMax}`);
   }
   const jobCap = caps?.maxAttemptsPerJob;
+  // The LIMITS half gets the identical validation (review round 3): a NaN/
+  // fractional cap makes effectiveCap NaN (`>= NaN` is false → UNBOUNDED
+  // retry); 0/negative → silent never-retry. Throw naming the field.
+  if (jobCap !== undefined && (!Number.isInteger(jobCap) || jobCap < 1)) {
+    throw new Error(`rescue: caps.maxAttemptsPerJob must be an integer >= 1, got ${jobCap}`);
+  }
   const effectiveCap = jobCap !== undefined ? Math.min(rowMax, jobCap) : rowMax;
   if (attemptsSoFar >= effectiveCap) {
     return {

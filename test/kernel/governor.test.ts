@@ -1163,6 +1163,42 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
     expect(report.jobs[0]?.result).toEqual({ status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' });
     expect(report.stoppedEarly).toBe(false);
   });
+
+  test('a fabricated queued: row does not condemn its DEPENDENTS either (#15-6, review round 3)', async () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    // The ADMITTED op fabricates `queued: …` AND has a dependent: the
+    // budgetCaused walk reads indeterminate rows too, so a lying row must
+    // not get the dependent re-marked budget-exhausted (the predicate is
+    // shared — re-mark pass and causality walk cannot drift).
+    const lyingOp = async (): Promise<OpResult<unknown>> => {
+      const ctx = currentJobContext();
+      if (ctx !== undefined) ctx.reportCost(2.0); // trips the 1.0 cap mid-run
+      return { status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' };
+    };
+    const plan: Plan = {
+      id: 'plan-queued-fabricated-dep',
+      jobs: [
+        { id: 'f1', op: 'lying', input: { jobId: 'f1' } },
+        { id: 'd1', op: 'fake', input: { jobId: 'd1' }, dependsOn: ['f1'] },
+      ],
+    };
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      governRegistry(viewWith(entry('lying', lyingOp), entry('fake', okOp)), governor),
+    );
+    expect(governor.tripped).toBe(true);
+    // f1 indeterminate → the runner counts it failed; d1 is blocked by it.
+    expect(rowStatuses(raw)).toEqual(['indeterminate', 'failed']);
+
+    const report = withBudgetStop(raw, plan, governor);
+    // The fabricated row keeps its verdict…
+    expect(report.jobs[0]?.result).toEqual({ status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' });
+    // …and the dependent is NOT re-marked budget-exhausted off the lie: it
+    // stays honestly blocked on an unresolved row.
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'f1'/ });
+    expect(report.stoppedEarly).toBe(false); // nothing was re-marked
+  });
 });
 
 // ---------------------------------------------------------------------------

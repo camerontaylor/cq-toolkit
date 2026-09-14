@@ -1387,6 +1387,18 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
   // cycles) and is never memoized, so a partial walk cannot poison results.
   const memo = new Map<string, boolean>();
   const inProgress = new Set<string>();
+  // Provenance predicate (shared by the re-mark pass and budgetCaused below
+  // so the two cannot drift): the runner writes `queued: …` ONLY for jobs it
+  // never dispatched — an 'admitted' or 'completed' event for the jobKey
+  // means the marker came from EXECUTED code (an op fabricating an
+  // indeterminate `queued: …` verdict), not from the runner's
+  // never-dispatch sweep. Conservative: custom config.jobKey layouts simply
+  // never match the row id and behave exactly as before.
+  const hasAdmissionEvidence = (jobKey: string): boolean =>
+    governor.events.some(
+      (event) =>
+        (event.kind === 'admitted' || event.kind === 'completed') && event.jobKey === jobKey,
+    );
   const budgetCaused = (jobId: string): boolean => {
     const memoed = memo.get(jobId);
     if (memoed !== undefined) {
@@ -1406,7 +1418,12 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
           caused = true;
           break;
         case 'indeterminate':
-          caused = row.result.detail.startsWith(QUEUED_MARKER);
+          // The SAME provenance rule the re-mark pass applies (shared
+          // predicate above): a `queued:`-prefixed detail on a row the
+          // governor ADMITTED is a lie from executed code — not evidence of
+          // a budget-caused non-execution — so its dependents keep their
+          // real blocked verdicts (review round 3).
+          caused = row.result.detail.startsWith(QUEUED_MARKER) && !hasAdmissionEvidence(jobId);
           break;
         case 'failed':
           if (row.result.error.startsWith(BLOCKED_MARKER)) {
@@ -1423,20 +1440,11 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
   };
   const jobs: JobOutcome[] = report.jobs.map((row) => {
     if (row.result.status === 'indeterminate' && row.result.detail.startsWith(QUEUED_MARKER)) {
-      // Provenance check: the runner writes `queued: …` ONLY for jobs it
-      // never dispatched. If the governor's events show an admission (or a
-      // completion) for this jobKey, the marker came from EXECUTED code (an
-      // op returning an indeterminate `queued: …` verdict) — the row claims
-      // queued but the governor admitted it, so the marker is fabricated:
-      // keep its real verdict, never rewrite it. Conservative provenance:
-      // custom config.jobKey layouts simply never match the row id and
-      // behave exactly as before.
-      const executed = governor.events.some(
-        (event) =>
-          (event.kind === 'admitted' || event.kind === 'completed') &&
-          event.jobKey === row.jobId,
-      );
-      if (!executed) {
+      // Provenance check (hasAdmissionEvidence above — one predicate, both
+      // uses): if the governor's events show an admission (or a completion)
+      // for this jobKey, the marker came from EXECUTED code, not the
+      // runner's never-dispatch sweep — keep the real verdict.
+      if (!hasAdmissionEvidence(row.jobId)) {
         return { ...row, result: { status: 'budget-exhausted' } };
       }
     }

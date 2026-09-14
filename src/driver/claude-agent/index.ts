@@ -801,8 +801,16 @@ function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
+/**
+ * SDK-reported numeric fields must be finite non-negative INTEGERS: a
+ * negative or fractional "token count" is a lying measurement — accepting
+ * it folded negative usage (→ negative cost) and a NEGATIVE token total
+ * that could never trip the `>= maxTokens` budget check (the bypass,
+ * issue #19). Invalid → undefined → the fold sites' `?? 0` maps it to an
+ * honest zero.
+ */
 function asNumber(value: unknown): number | undefined {
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 ? value : undefined;
 }
 
 function asArray(value: unknown): unknown[] | undefined {
