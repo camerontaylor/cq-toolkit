@@ -34,6 +34,8 @@ import type { OpInvocation } from '../../src/driver/types.js';
 
 /** The scripted model's per-step token usage — numbers the usage contract can assert on. */
 function mockUsage(): LanguageModelV4GenerateResult['usage'] {
+  // The mock serves the REQUESTED id (its modelId) as the response's model —
+  // the conformance observed-model check (leg m) asserts exactly that.
   return {
     inputTokens: { total: 120, noCache: 100, cacheRead: 15, cacheWrite: 5 },
     outputTokens: { total: 12, text: 10, reasoning: 2 },
@@ -58,13 +60,19 @@ function toolCallResult(tool: string, input: unknown): LanguageModelV4GenerateRe
   };
 }
 
-/** Build the mock model for one directive (see conformance.ts for the script contract). */
-function modelFor(directive: ModelDirective | undefined): MockLanguageModelV4 {
+/**
+ * Build the mock model for one directive (see conformance.ts for the script
+ * contract). `servedModel` threads the factory's modelId so the mock's
+ * response reports the REQUESTED id as served — the observed-model fact
+ * WorkerResult.model carries.
+ */
+function modelFor(directive: ModelDirective | undefined, servedModel?: string): MockLanguageModelV4 {
   switch (directive?.kind) {
     case 'block-until-abort': {
       const abortError = (): Error =>
         Object.assign(new Error('run aborted by the governed signal'), { name: 'AbortError' });
       return new MockLanguageModelV4({
+        modelId: servedModel,
         doGenerate: async (options) => {
           const signal = options.abortSignal;
           if (signal?.aborted) throw abortError();
@@ -77,16 +85,18 @@ function modelFor(directive: ModelDirective | undefined): MockLanguageModelV4 {
     case 'fail':
       // A plain non-abort failure: the driver must return stopReason 'error'.
       return new MockLanguageModelV4({
+        modelId: servedModel,
         doGenerate: async () => {
           throw new Error('scripted model failure');
         },
       });
     case 'tool-then-reply':
       return new MockLanguageModelV4({
+        modelId: servedModel,
         doGenerate: [toolCallResult(directive.tool, directive.input), textResult(directive.reply)],
       });
     default:
-      return new MockLanguageModelV4({ doGenerate: textResult(directive?.text ?? 'ok') });
+      return new MockLanguageModelV4({ modelId: servedModel, doGenerate: textResult(directive?.text ?? 'ok') });
   }
 }
 
@@ -113,11 +123,12 @@ function conformanceHarnessConfig(scratchDir: string): AiSdkDriverOptions['harne
 function makeDriver(spec: ConformanceSpec): AiSdkDriver {
   return new AiSdkDriver({
     // The suite's canonical modelSpec handle resolves to the scripted mock,
-    // as does the priced handle when the suite brings one.
+    // as does the priced handle when the suite brings one; the factory's
+    // modelId IS the served id the mock reports (leg m).
     providers: {
-      [CONFORMANCE_PROVIDER]: () => modelFor(spec.directive),
+      [CONFORMANCE_PROVIDER]: (modelId) => modelFor(spec.directive, modelId),
       ...(spec.pricedModel !== undefined
-        ? { [spec.pricedModel.provider]: () => modelFor(spec.directive) }
+        ? { [spec.pricedModel.provider]: (modelId) => modelFor(spec.directive, modelId) }
         : {}),
     },
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),

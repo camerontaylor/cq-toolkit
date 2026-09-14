@@ -6,6 +6,9 @@
 // outside the repo (so the generated regexes themselves are never scanned),
 // and runs gitleaks over the repo working tree.
 //
+// `probe_path` (optional rule key) places a path-scoped rule's probe at a
+// matching relative path (path rules cannot fire on a flat root probe).
+//
 // Modes:
 //   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
 //   scripts/denylist-scan --self-test  four legs, three gitleaks runs; the
@@ -82,7 +85,7 @@ const WORKFLOWS_DIR = path.join(REPO_ROOT, '.github', 'workflows');
 
 const TOP_KEYS = ['rules', 'clean_probes'];
 const REQUIRED_RULE_KEYS = ['id', 'description', 'regex', 'sample'];
-const RULE_KEYS = [...REQUIRED_RULE_KEYS, 'path'];
+const RULE_KEYS = [...REQUIRED_RULE_KEYS, 'path', 'probe_path'];
 // Real invariant vs .gitignore: every .gitignore entry EXCEPT `*.env*`
 // (.env-shaped files are deliberately scanned as key material), plus `.git/`
 // and patterns.yml itself (it contains the sample strings by design: it is
@@ -316,10 +319,11 @@ function gitleaksBin() {
   return process.env.GITLEAKS_BIN || 'gitleaks';
 }
 
-// Shared spawn + error mapping for every gitleaks invocation (#11).
-function spawnGitleaks(args, label) {
+// Shared spawn + error mapping for every gitleaks invocation (#11). Extra
+// spawnOpts (cwd for the relative-source tree scan) are merged last.
+function spawnGitleaks(args, label, spawnOpts = {}) {
   const bin = gitleaksBin();
-  const res = spawnSync(bin, args, { encoding: 'utf8' });
+  const res = spawnSync(bin, args, { encoding: 'utf8', ...spawnOpts });
   if (res.error) {
     if (res.error.code === 'ENOENT') throw new GitleaksMissingError(bin);
     throw new GitleaksError(`${label}: could not run gitleaks: ${res.error.message}`);
@@ -339,8 +343,8 @@ function gitleaksArgs(source, configPath, reportPath) {
   ];
 }
 
-function runGitleaks(source, configPath, reportPath, label) {
-  return spawnGitleaks(gitleaksArgs(source, configPath, reportPath), label);
+function runGitleaks(source, configPath, reportPath, label, spawnOpts = {}) {
+  return spawnGitleaks(gitleaksArgs(source, configPath, reportPath), label, spawnOpts);
 }
 
 // Run at the start of the scan/self-test branches: this scanner only targets
@@ -411,11 +415,11 @@ function makeTempDir(prefixPath) {
 // write config, run gitleaks over `source`, parse the report. The config and
 // report live in tmpRoot BESIDE (never inside) the scanned source, so the
 // generated regex text is never scanned (#14).
-function runScan(tmpRoot, name, configToml, source) {
+function runScan(tmpRoot, name, configToml, source, spawnOpts = {}) {
   const configPath = path.join(tmpRoot, `${name}.toml`);
   const reportPath = path.join(tmpRoot, `${name}.json`);
   fs.writeFileSync(configPath, configToml);
-  const res = runGitleaks(source, configPath, reportPath, name);
+  const res = runGitleaks(source, configPath, reportPath, name, spawnOpts);
   return { res, findings: readReport(reportPath) };
 }
 
@@ -435,7 +439,14 @@ function treeScan() {
   const { rules } = loadPatterns();
   const tmp = makeTempDir(path.join(os.tmpdir(), 'denylist-tree-'));
   try {
-    const { res, findings } = runScan(tmp, 'tree', treeConfigToml(rules), REPO_ROOT);
+    // The source is RELATIVE to the repo root (gitleaks is spawned with its
+    // cwd there): gitleaks matches a rule's `path` filter against the path
+    // as constructed from the source argument, so an absolute source would
+    // make presence rules fire on ancestor directories ABOVE the repo (a
+    // worktree living under ~/.paseo, say) — the whole tree would look
+    // dirty. Relative paths anchor path-scoped rules to the tree actually
+    // being scanned.
+    const { res, findings } = runScan(tmp, 'tree', treeConfigToml(rules), '.', { cwd: REPO_ROOT });
     if (res.status === 0) {
       console.log(`denylist: tree scan clean (${rules.length} rule classes active)`);
       return 0;
@@ -466,16 +477,31 @@ function slug(id) {
   return id.replace(/[^A-Za-z0-9]+/g, '-');
 }
 
-// Probe naming: one file per rule — `<slug>.txt`, or `<slug>.env` for
-// path-scoped rules so the file NAME exercises their path filter. Derived
-// from the rule id, so probes cannot collide across rules.
+// Probe naming: one file per rule — `<slug>.txt`, `<slug>.env` for
+// path-scoped rules (so the file NAME exercises their path filter), or the
+// rule's own `probe_path` when it carries one: a path rule whose filter
+// demands directory segments can never fire on a flat root probe, so its
+// probe is placed at that relative path instead (nested paths included).
+// Derived from the rule id or the explicit probe_path, so probes cannot
+// collide across rules.
 function probeFileFor(rule) {
+  if (rule.probe_path !== undefined) return rule.probe_path;
   return `${slug(rule.id)}${rule.path !== undefined ? '.env' : '.txt'}`;
+}
+
+// Path-suffix match, segment-wise: the finding path ENDS WITH the probe's
+// path segments (a nested probe_path like .zcode/probe.txt matches only that
+// nesting, never an unrelated directory that merely shares the basename).
+function pathEndsWithProbe(file, probeRel) {
+  const fileSegs = String(file || '').replace(/\\/g, '/').split('/').filter((s) => s !== '');
+  const probeSegs = probeRel.split('/');
+  if (probeSegs.length > fileSegs.length) return false;
+  return probeSegs.every((seg, i) => seg === fileSegs[fileSegs.length - probeSegs.length + i]);
 }
 
 // Findings proving THIS rule fired on ITS OWN sample probe (#1).
 function findingsOnProbe(findings, rule) {
-  return findings.filter((f) => f.RuleID === rule.id && path.basename(String(f.File || '').replace(/\\/g, '/')) === probeFileFor(rule));
+  return findings.filter((f) => f.RuleID === rule.id && pathEndsWithProbe(f.File, probeFileFor(rule)));
 }
 
 function writeProbes(dir, rules) {
@@ -484,7 +510,10 @@ function writeProbes(dir, rules) {
     const name = probeFileFor(r);
     if (seen.has(name)) throw new ConfigError(`probe filename "${name}" is shared by multiple rules; rule ids must slug distinctly`);
     seen.add(name);
-    fs.writeFileSync(path.join(dir, name), `${r.sample}\n`);
+    const target = path.join(dir, name);
+    // Nested probe paths are legal (probe_path): create the dirname first.
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, `${r.sample}\n`);
   }
 }
 

@@ -11,9 +11,11 @@
 # plutocracy, neutrons, extravagant) never trip either.
 #
 # Constrained format: top-level keys `rules` and `clean_probes`; rule keys
-# `id`, `description`, `regex`, `sample`, and optional `path`; values are
-# single-quoted or plain scalars. scripts/denylist-scan parses this with a
-# fail-closed hand-written parser and rejects any deviation.
+# `id`, `description`, `regex`, `sample`, optional `path`, and optional
+# `probe_path` (where the self-test places this rule's probe file, for path
+# rules a flat root probe can never match); values are single-quoted or
+# plain scalars. scripts/denylist-scan parses this with a fail-closed
+# hand-written parser and rejects any deviation.
 #
 # The tree scan deliberately overlays gitleaks' DEFAULT rules on top of these
 # classes (belt-and-braces, plan-sanctioned). To tune out a single rule (one
@@ -59,6 +61,12 @@ rules:
     regex: '.+'
     path: '(^|/)[^/]*\.env'
     sample: 'API_KEY=sk-1234567890abcdef'
+  - id: class:agent-scratch-paths
+    description: agent scratch dirs committed into the tree (runtime tooling state, never content)
+    regex: '.+'
+    path: '(^|/)\.(zcode|paseo)(/|$)|\.claude/(settings\.local\.json|\.credentials\.json|scheduled_tasks\.lock|memory\.db(-wal|-shm)?|worktrees|shell-snapshots|history\.jsonl|paste-cache|file-history|session-env)(/|$)'
+    sample: 'agent scratch state'
+    probe_path: '.zcode/probe.txt'
 clean_probes:
   - 'phoenixes rise over plutocracy: extravagant mappings for the masses'
   - 'VP of Engineering and the vp of operations both approved'

@@ -82,6 +82,11 @@
 // outputTokenDetails.reasoningTokens → reasoning (present ONLY when the
 // provider reported it). Missing numeric fields map to 0.
 //
+// MODEL OBSERVATION: WorkerResult.model carries `result.response.modelId` —
+// the SERVED model id the provider's response reports (the SDK prefers it
+// over the requested id), which the shared conformance suite checks against
+// the requested model (the silent-remap defence).
+//
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired (context.signal.aborted) or the SDK call threw
 //      an abort-shaped error          → 'aborted'
@@ -252,6 +257,14 @@ export class AiSdkDriver implements Driver {
       });
 
       const usage = usageFromSdk(result.usage);
+      // The observed served model: the SDK prefers the provider-reported
+      // response modelId over the requested id (ai@7.0.99), which is exactly
+      // the remap-detection fact WorkerResult.model carries. Absent on the
+      // error/abort path: no response, no observation.
+      const servedModel =
+        typeof result.response.modelId === 'string' && result.response.modelId !== ''
+          ? result.response.modelId
+          : undefined;
       const finishReason: FinishReason = result.finishReason;
       let structuredOutput: unknown;
       if (this.outputSchema !== undefined) {
@@ -267,6 +280,7 @@ export class AiSdkDriver implements Driver {
       });
 
       return {
+        ...(servedModel !== undefined ? { model: servedModel } : {}),
         ...(structuredOutput !== undefined ? { structuredOutput } : {}),
         usage,
         ...costField(this.pricing, modelSpec, usage),

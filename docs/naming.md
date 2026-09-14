@@ -81,3 +81,12 @@ package name.
 - https://registry.npmjs.org/cq — exists, version 0.0.1
 - https://api.github.com/search/repositories?q=cq-toolkit+in:name — 17 results
 - package.json of this repository — `"name": "cq-toolkit"`, `"version": "0.0.0"`
+
+
+## Owner decision 2026-09-14 — scoped name adopted
+
+The owner reserved the npm placeholder as **@camerontaylor/cq-toolkit@0.0.0** (scoped;
+the publish token is granular-scoped to @camerontaylor packages). The unscoped
+`cq-toolkit` record above stands as history; the shipped package name is the
+scoped form. T0.5's publish block is cleared. Folded into the T1.5 PR per the
+owner's one-line-fold-in instruction.

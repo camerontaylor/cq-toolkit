@@ -37,4 +37,18 @@ export default [
       'cq/no-vendor-sdk-in-kernel': 'error',
     },
   },
+  {
+    // Test fixtures are plain .mjs run by node: timer globals are node
+    // built-ins the fixture legitimately uses (the I8 token ban covers
+    // src/driver/** only, never test/).
+    files: ['test/fixtures/**/*.mjs'],
+    languageOptions: {
+      globals: {
+        setTimeout: 'readonly',
+        setInterval: 'readonly',
+        clearTimeout: 'readonly',
+        clearInterval: 'readonly',
+      },
+    },
+  },
 ];

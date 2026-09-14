@@ -201,3 +201,55 @@ export {
   priceOf,
 } from './driver/pricing/index.js';
 export { PRICE_TABLE } from './driver/pricing/data.js';
+// Subprocess driver (T1.5) — re-export only, no logic: the out-of-process
+// driver that runs an existing agent CLI headless on the frozen seam, its
+// env-based model routing (CONFIG, with the DeepSeek silent-remap footgun
+// enforced at route time), and its process-lifecycle helpers — the
+// documented extension surface for future CLI drivers (I8: the grace
+// ladder lives in driver/<name>/process.ts, the hygiene scan's one exempt
+// path).
+export type {
+  ArgBuildInputs,
+  ResultStatus,
+  SpawnFn,
+  StopReasonInputs,
+  SubprocessDriverOptions,
+} from './driver/subprocess/index.js';
+export {
+  allowedToolNames,
+  buildArgs,
+  CLI_SESSION_FILE,
+  NARRATION_TOOL,
+  resultStatusOf,
+  stopReasonOf,
+  SubprocessDriver,
+  usageFromCli,
+} from './driver/subprocess/index.js';
+export type {
+  Route,
+  RoutingEndpoint,
+  RoutingTable,
+} from './driver/subprocess/routing.js';
+export {
+  defaultRoutingTable,
+  routeFor,
+  RoutingEndpointSchema,
+  RoutingTableSchema,
+} from './driver/subprocess/routing.js';
+export type {
+  GraceLadderOptions,
+  ManagedChild,
+  ProcessClose,
+  SpawnOptions,
+  TerminationOutcome,
+  TerminationRungMarker,
+} from './driver/subprocess/process.js';
+export {
+  // Aliased: the governor's DEFAULT_KILL_GRACE_MS (the escalation ladder's
+  // rung-2→3 grace) is already exported above; this is the subprocess
+  // grace ladder's SIGKILL→force-resolve window.
+  DEFAULT_KILL_GRACE_MS as SUBPROCESS_DEFAULT_KILL_GRACE_MS,
+  DEFAULT_TERM_GRACE_MS,
+  spawnManaged,
+  terminateGracefully,
+} from './driver/subprocess/process.js';
