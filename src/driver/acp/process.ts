@@ -5,7 +5,7 @@
 // scheduling primitives under src/driver/**, with the single exemption
 // `driver/<name>/process.{ts,js,mjs}` — process-lifecycle helpers may own
 // timers, because there the decision has ALREADY BEEN MADE. This file owns
-// exactly two such machines:
+// exactly the timer machines below:
 //
 //   - `spawnAcpProcess` — the shell-less spawn of the harness binary
 //     (driver-built argv, piped stdio, cwd = the invocation's workspace).
@@ -23,6 +23,14 @@
 //     terminate at settle (strategy §6). Every timer here is an
 //     EXECUTION detail of a decided kill, never a scheduling policy, and
 //     the delays are INJECTABLE (`delay`) so tests run deterministically.
+//
+//   - `raceWithGrace` — the bounded grace racing the courtesy
+//     session/cancel write in the governed-abort path (Codex P1, round
+//     4): the kill the write precedes is ALREADY DECIDED when the race
+//     starts, so its default 250 ms window is execution machinery of that
+//     decision — the decided kill must never depend on the cooperation of
+//     the thing being killed (a backpressured child that never drains its
+//     stdin can hold the write open forever).
 //
 // NO RETRIES, one spawn per run (R2): nothing in this file re-spawns.
 import { spawn } from 'node:child_process';
@@ -121,6 +129,14 @@ export function acpExitPromise(child: ChildProcess): Promise<AcpExitInfo> {
 /** Grace defaults: mirror the subprocess lane's ladder (generous; execution details, not policy). */
 export const DEFAULT_TERM_GRACE_MS = 2_000;
 export const DEFAULT_KILL_GRACE_MS = 5_000;
+/**
+ * The bounded grace racing the courtesy session/cancel write before the
+ * decided kill executes anyway (Codex P1, round 4): the write rides the
+ * same stdin a backpressured prompt may have wedged, so its settlement can
+ * never be a precondition of the kill. Short by design — it buys the
+ * vendor only a fair head start over the SIGTERM, never a veto.
+ */
+export const DEFAULT_CANCEL_WRITE_GRACE_MS = 250;
 
 /** One observable ladder rung: WHICH signal fired, WHEN (epoch ms). */
 export interface TerminationRungMarker {
@@ -228,4 +244,32 @@ function fireRung(
   } catch {
     // deliberately swallowed — the ladder continues to the next rung
   }
+}
+
+/** How the race resolved: the watched promise settled inside the grace, or the grace expired first. */
+export type GraceRaceOutcome = 'settled' | 'stalled';
+
+/**
+ * Race a pending promise against a bounded grace: 'settled' when the
+ * promise settles (fulfilled OR rejected) inside the window, 'stalled'
+ * when the grace expires first. This is the second I8-exempt timer machine
+ * (file header): the caller has ALREADY decided the kill the watched write
+ * precedes — the grace only bounds the courtesy, so the kill's execution
+ * can never hang on the cooperation of the thing being killed (Codex P1).
+ * The default wait is the same unref'd timeout the ladder uses — a stalled
+ * write must never hold the event loop open — and is INJECTABLE so tests
+ * run deterministically.
+ */
+export function raceWithGrace<T>(
+  watched: Promise<T>,
+  graceMs: number,
+  delay: AcpGraceLadderOptions['delay'] = defaultDelay,
+): Promise<GraceRaceOutcome> {
+  return Promise.race([
+    watched.then(
+      () => 'settled' as const,
+      () => 'settled' as const, // a failed write is a settled write — evidence, not a stall
+    ),
+    delay(graceMs).then(() => 'stalled' as const),
+  ]);
 }

@@ -150,8 +150,12 @@
 // via `currentJobContext()` (the one driver→kernel import, same as every
 // lane) and is used in exactly two cooperative ways: an already-fired
 // signal never dispatches, and a signal firing mid-prompt sends
-// session/cancel — the COURTESY write, settled before the ladder fires —
-// after which the child is TERMINATED via the settle path's ladder: the
+// session/cancel — the COURTESY write, raced against a short bounded grace
+// (cancelWriteGraceMs, default 250 ms) so the termination ladder NEVER
+// waits on a write a backpressured child can hold open forever (Codex P1:
+// the decided kill is independent of the write's cooperation; the write's
+// completion, failure, or stall is evidence either way) — after which the
+// child is TERMINATED via the settle path's ladder: the
 // governed signal is the kill decision wherever it fires, and a vendor
 // that ignores session/cancel must not hang the run past it. The prompt
 // settles on whichever arrives first — the cancelled RESPONSE (the spec
@@ -239,7 +243,13 @@ import {
 import type { AcpUpdate, ConfigOption, PromptResponse } from './protocol.js';
 import { DEFAULT_ACP_ENDPOINT, defaultAcpEndpointTable, resolveAcpCommand } from './binaries.js';
 import type { AcpEndpointTable } from './binaries.js';
-import { acpExitPromise, spawnAcpProcess, terminateAcpProcess } from './process.js';
+import {
+  DEFAULT_CANCEL_WRITE_GRACE_MS,
+  acpExitPromise,
+  raceWithGrace,
+  spawnAcpProcess,
+  terminateAcpProcess,
+} from './process.js';
 import type { AcpExitInfo, AcpGraceLadderOptions, AcpSpawnFn } from './process.js';
 
 // ---------------------------------------------------------------------------
@@ -310,6 +320,15 @@ export interface AcpDriverOptions {
   termGraceMs?: number;
   /** SIGKILL→force-resolve grace in ms (default: process.ts's DEFAULT_KILL_GRACE_MS). */
   killGraceMs?: number;
+  /**
+   * The bounded grace, in ms, racing the courtesy session/cancel write in
+   * the governed-abort path (Codex P1): the termination ladder fires when
+   * the write settles OR this grace expires, whichever first — a child
+   * that stopped reading stdin can hold the write open forever, and the
+   * decided kill must never wait on it. Default:
+   * process.ts's DEFAULT_CANCEL_WRITE_GRACE_MS (250).
+   */
+  cancelWriteGraceMs?: number;
   /** Spawn override hook for tests. Default: the real spawnAcpProcess. */
   spawn?: AcpSpawnFn;
 }
@@ -612,6 +631,7 @@ export class AcpDriver implements Driver {
   private readonly pricingOverride: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined;
   private readonly termGraceMs: number | undefined;
   private readonly killGraceMs: number | undefined;
+  private readonly cancelWriteGraceMs: number;
   private readonly spawnImpl: AcpSpawnFn;
 
   constructor(options: AcpDriverOptions = {}) {
@@ -626,6 +646,7 @@ export class AcpDriver implements Driver {
     this.pricingOverride = options.pricing;
     this.termGraceMs = options.termGraceMs;
     this.killGraceMs = options.killGraceMs;
+    this.cancelWriteGraceMs = options.cancelWriteGraceMs ?? DEFAULT_CANCEL_WRITE_GRACE_MS;
     this.spawnImpl = options.spawn ?? spawnAcpProcess;
   }
 
@@ -918,8 +939,11 @@ export class AcpDriver implements Driver {
     //   - a permission ask still pending as the cancellation lands is
     //     answered 'cancelled' FIRST (legal only on a real cancellation —
     //     the answer table's one exception), never left dangling;
-    //   - prompt in flight → session/cancel (the COURTESY write, settled
-    //     either way before the ladder fires), then the settle ladder
+    //   - prompt in flight → session/cancel (the COURTESY write, RACED
+    //     against a short bounded grace — its settlement is never the
+    //     ladder's precondition: a child wedged on a backpressured prompt
+    //     can hold the write open forever, and the kill must not wait on
+    //     the thing being killed — Codex P1), then the settle ladder
     //     terminates the child — the same decided-kill execution as the
     //     pre-prompt branch below: the governed signal is the kill
     //     decision wherever it fires, and a vendor that ignores
@@ -951,19 +975,39 @@ export class AcpDriver implements Driver {
       }
       if (promptDispatched && acpSessionId !== undefined) {
         const target = acpSessionId;
-        wire
-          .notify(ACP_METHODS.sessionCancel, { sessionId: target })
-          .then(
-            () => observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
-            (err: unknown) =>
-              observation.narration.push(JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) })),
-          )
-          .finally(() => {
-            // The decided kill, AFTER the courtesy write settles — the
-            // marker stays honest and the vendor sees the cancel before
-            // the SIGTERM (the prompt-phase kill rung; Codex P1).
-            void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
-          });
+        // THE DECIDED KILL NEVER DEPENDS ON THE COOPERATION OF THE THING
+        // BEING KILLED (Codex P1, round 4). The courtesy session/cancel
+        // write rides the SAME stdin the prompt may have backpressured: a
+        // child that stopped reading never drains it, the write's callback
+        // never fires, and a ladder gated on the write's settlement would
+        // never start — the run would hang past a decided kill. So the
+        // write is RACED against a short bounded grace
+        // (cancelWriteGraceMs, default 250 ms, process.ts's
+        // raceWithGrace), and the termination ladder fires on WHICHEVER
+        // settles first. The write's completion or failure is recorded as
+        // evidence either way ('cancel-sent' / 'cancel-send-failed'); a
+        // grace win adds the 'cancel-write-stalled' marker — the vendor
+        // demonstrably never consumed the cancel before the SIGTERM, and
+        // the record says so. When the write WINS the race its evidence
+        // handler (attached first) still runs ahead of the kill, so the
+        // ordering is preserved: the vendor sees the cancel before the
+        // SIGTERM.
+        const cancelWrite = wire.notify(ACP_METHODS.sessionCancel, { sessionId: target });
+        void cancelWrite.then(
+          () => observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
+          (err: unknown) =>
+            observation.narration.push(JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) })),
+        );
+        void raceWithGrace(cancelWrite, this.cancelWriteGraceMs).then((outcome) => {
+          if (outcome === 'stalled') {
+            observation.narration.push(
+              JSON.stringify({ cq: 'cancel-write-stalled', graceMs: this.cancelWriteGraceMs, sessionId: target }),
+            );
+          }
+          // The decided kill, gated on NOTHING the child controls (the
+          // prompt-phase kill rung; Codex P1).
+          void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
+        });
       } else {
         observation.narration.push(
           JSON.stringify({
@@ -1469,6 +1513,15 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
         existing.rawInput = update.rawInput ?? existing.rawInput;
       } else if (update.rawOutput !== undefined) {
         existing.output = update.rawOutput;
+      } else if (update.contentText !== undefined) {
+        // No rawOutput on the wire — the tool reported its result via
+        // CONTENT blocks (the reference vendor's SUCCESS shape; Codex P2):
+        // the folded output is the blocks' text, so a successful tool's
+        // output lands in the record and a failed one's in the denial
+        // reason, instead of an empty string. A later rawOutput still
+        // overwrites (the branch order); a no-text update leaves the
+        // folded output untouched (contentText is lifted only non-empty).
+        existing.output = update.contentText;
       }
       existing.status = update.status ?? existing.status;
       existing.identity = permissionToolIdentity(existing.title, existing.kind);

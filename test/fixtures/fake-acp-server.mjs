@@ -93,6 +93,25 @@
 //                         (the wire can look green past failed
 //                         enforcement — the shape the selection-failure
 //                         verdict pin must survive)
+//   FAKE_ACP_STOP_READ_BEFORE_PROMPT  when '1', the fixture PAUSES its
+//                         stdin (stops reading — libuv's reads stop, the
+//                         OS pipe never drains) right AFTER answering the
+//                         mode pin and NEVER reads or responds again. The
+//                         driver's prompt write then wedges: only the pipe
+//                         buffer's worth reaches the OS, the rest sits in
+//                         the driver's stream queue forever, and the
+//                         courtesy session/cancel write's callback queues
+//                         BEHIND it — notify() never settles, the Codex P1
+//                         hang shape. The termination ladder must fire off
+//                         the bounded grace, not the write's settlement.
+//                         (A ref'd keep-alive holds the process for the
+//                         SIGTERM that answers it.)
+//   FAKE_ACP_OMIT_RAW_OUTPUT  when '1', the CONTENT-ONLY persona: the
+//                         tool_call_update NEVER carries rawOutput — the
+//                         result rides the content blocks alone (the
+//                         reference vendor's SUCCESS shape, applied to
+//                         failures too) — the failed tool's denial reason
+//                         must still come from the blocks' text (Codex P2)
 //   FAKE_ACP_PLACEHOLDER_CARD  when '1' (tool flows), the fixture emits
 //                         the probe-recorded PLACEHOLDER card while the
 //                         request_permission is still pending: a tool_call
@@ -167,6 +186,8 @@ const ADVERTISE_RESUME = process.env.FAKE_ACP_RESUME === '1';
 const STRING_REQUEST_IDS = process.env.FAKE_ACP_STRING_REQUEST_IDS === '1';
 const CLOSE_STDIN_ON_PERMISSION = process.env.FAKE_ACP_CLOSE_STDIN_ON_PERMISSION === '1';
 const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === '1';
+const STOP_READ_BEFORE_PROMPT = process.env.FAKE_ACP_STOP_READ_BEFORE_PROMPT === '1';
+const OMIT_RAW_OUTPUT = process.env.FAKE_ACP_OMIT_RAW_OUTPUT === '1';
 const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 
@@ -174,6 +195,12 @@ const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 // termination is IGNORED — only the unignorable SIGKILL rung reaches this
 // process once it is up.
 if (IGNORE_CANCEL) process.on('SIGTERM', () => undefined);
+
+// The stalled-stdin persona (FAKE_ACP_STOP_READ_BEFORE_PROMPT=1): with
+// reads paused the loop can otherwise run empty and exit on its own — this
+// ref'd (default) interval holds the process for the SIGTERM the
+// grace-raced ladder delivers.
+if (STOP_READ_BEFORE_PROMPT) setInterval(() => undefined, 1_000);
 
 // The tolerant-vendor persona, ask half: an unanswered permission ask times
 // out and the turn settles end_turn anyway (see toolFlow). Generous enough
@@ -581,7 +608,9 @@ async function toolFlow({ alwaysFail }) {
       toolCallId,
       status: ok ? 'completed' : 'failed',
       content: [{ type: 'text', text }],
-      ...(ok ? {} : { rawOutput: text }),
+      // OMIT_RAW_OUTPUT: the content-only persona (Codex P2) — the result
+      // rides the blocks alone, failures included.
+      ...(ok || OMIT_RAW_OUTPUT ? {} : { rawOutput: text }),
     });
     emitChunk(`${REPLY ?? 'noted the tool result'} [permission:${optionId}] [mode:${sessionMode}]`);
     endTurn();
@@ -611,7 +640,7 @@ async function neverAsksFlow() {
     toolCallId,
     status: executed.ok ? 'completed' : 'failed',
     content: [{ type: 'text', text: executed.text }],
-    ...(executed.ok ? {} : { rawOutput: executed.text }),
+    ...(executed.ok || OMIT_RAW_OUTPUT ? {} : { rawOutput: executed.text }),
   });
   emitChunk(REPLY ?? 'executed without asking');
   endTurn();
@@ -760,6 +789,16 @@ function onFrame(frame) {
         id: frame.id,
         result: { modes: modesShape(), configOptions: configOptionsLazy() },
       });
+      if (STOP_READ_BEFORE_PROMPT) {
+        // The Codex P1 hang shape: reads stop AFTER the pin response is
+        // out, so the driver's PROMPT write (next) wedges — only the pipe
+        // buffer's worth is accepted, the rest sits in the driver's stream
+        // queue forever, and the courtesy session/cancel write's callback
+        // queues BEHIND it. notify() can never settle; only the
+        // grace-raced ladder answers the governed abort.
+        errLine('fake-acp-server: paused stdin after the mode pin (the backpressure stall persona)');
+        process.stdin.pause();
+      }
       return;
     case 'session/prompt': {
       if (promptRequestId !== null) {

@@ -198,6 +198,12 @@ const ToolCallProgressSchema = z.looseObject({
   toolCallId: z.string(),
   status: z.string().optional(),
   rawOutput: z.string().optional(),
+  // The tool's result CONTENT blocks (the spec's ContentBlock[]; the
+  // reference vendor reports a SUCCESSFUL tool result here, rawOutput
+  // riding only on some failure shapes — Codex P2). The text of the text
+  // blocks is lifted at this boundary (contentText below); the vendor's
+  // block vocabulary dies here, never crossing into the driver.
+  content: z.array(ContentBlockSchema).optional(),
 });
 
 const ConfigOptionsUpdateSchema = z.looseObject({
@@ -228,7 +234,14 @@ export type AcpUpdate =
   | { kind: 'agent_message_chunk'; text: string }
   | { kind: 'agent_thought_chunk'; text: string }
   | { kind: 'tool_call'; toolCallId: string; title?: string; toolKind?: string; status?: string; rawInput?: unknown }
-  | { kind: 'tool_call_update'; toolCallId: string; status?: string; rawOutput?: string }
+  | {
+      kind: 'tool_call_update';
+      toolCallId: string;
+      status?: string;
+      rawOutput?: string;
+      /** The content blocks' text (text-typed blocks joined in order), when non-empty — the fallback output the fold reads when rawOutput is absent. */
+      contentText?: string;
+    }
   | { kind: 'config_option_update'; configOptions?: ConfigOption[] }
   | { kind: 'current_mode_update'; currentModeId?: string }
   | { kind: 'usage_update' }
@@ -265,14 +278,15 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
     }
     case 'tool_call_update': {
       const parsed = ToolCallProgressSchema.safeParse(update);
-      return parsed.success
-        ? {
-            kind: 'tool_call_update',
-            toolCallId: parsed.data.toolCallId,
-            ...(parsed.data.status !== undefined ? { status: parsed.data.status } : {}),
-            ...(parsed.data.rawOutput !== undefined ? { rawOutput: parsed.data.rawOutput } : {}),
-          }
-        : undefined;
+      if (!parsed.success) return undefined;
+      const contentText = textOfContentBlocks(parsed.data.content ?? []);
+      return {
+        kind: 'tool_call_update',
+        toolCallId: parsed.data.toolCallId,
+        ...(parsed.data.status !== undefined ? { status: parsed.data.status } : {}),
+        ...(parsed.data.rawOutput !== undefined ? { rawOutput: parsed.data.rawOutput } : {}),
+        ...(contentText !== '' ? { contentText } : {}),
+      };
     }
     case 'config_option_update': {
       const parsed = ConfigOptionsUpdateSchema.safeParse(update);
@@ -574,4 +588,19 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * The text of a tool_call_update's content blocks: the text-typed blocks'
+ * `text` members joined in order — the same extraction the subprocess lane
+ * applies to tool_result content (textOfContent there; Codex P2 here).
+ * Resource/image/audio/resource_link blocks carry no text and contribute
+ * nothing; an absent or empty array yields ''.
+ */
+function textOfContentBlocks(blocks: readonly { type: string; text?: string }[]): string {
+  const parts: string[] = [];
+  for (const block of blocks) {
+    if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);
+  }
+  return parts.join('');
 }

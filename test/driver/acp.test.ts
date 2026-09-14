@@ -34,7 +34,13 @@
 //      attach-time abort recheck (a deadline firing before the listener
 //      attach still cancels the child — abort events are not replayed),
 //      the mode-pin observability, the protocol-version mismatch verdict,
-//      and the prompt-directed-JSON drop rule.
+//      and the prompt-directed-JSON drop rule — plus the round-4 Codex
+//      legs: a cancel write STALLED behind a wedged prompt cannot gate the
+//      kill (the bounded grace starts the ladder — the decided kill never
+//      depends on the cooperation of the thing being killed), and a tool
+//      result reported via content blocks (no rawOutput) lands in the
+//      record output and in the denial reason (textOfContent-style
+//      extraction).
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -879,6 +885,39 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('a cancel write stalled behind a wedged prompt cannot gate the kill: the bounded grace starts the ladder (Codex P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The fixture goes deaf (pauses stdin) right AFTER the mode pin, so
+      // the 1 MiB prompt write wedges: only the OS pipe buffer's worth is
+      // accepted, the rest sits in the driver's stream queue FOREVER, and
+      // the courtesy session/cancel write's callback queues BEHIND it —
+      // notify() never settles. The old ladder was gated on the write's
+      // .finally(), never fired, and the run hung past the decided kill
+      // (THIS test times out on that regression). The fixed driver races
+      // the write against cancelWriteGraceMs and runs the ladder
+      // regardless of which wins.
+      const driver = new AcpDriver({
+        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_STOP_READ_BEFORE_PROMPT: '1' }, []),
+        termGraceMs: 300,
+        killGraceMs: 300,
+        cancelWriteGraceMs: 100,
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) })),
+        { wallClockMs: 1000 },
+        { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
+      const narration = await narrationOf(store, outcome.value.sessionId as string);
+      // The grace won the race: the record says the vendor never consumed
+      // the cancel before the SIGTERM — and the kill happened anyway.
+      expect(narration.some((line) => line.includes('"cancel-write-stalled"'))).toBe(true);
+    });
+  }, 20_000);
+
   test('answer-write failure fails the run loudly: a broken enforcement channel settles error, never hangs', async () => {
     await withScratch(async (scratchDir, store) => {
       // The fixture destroys its own stdin as the permission ask goes out
@@ -960,6 +999,60 @@ describe('acp driver specifics (fake ACP server)', () => {
       ]);
       expect(result.stopReason).toBe('complete'); // the turn settled end_turn with real usage
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
+    });
+  });
+
+  test('a successful tool result reported via content blocks (no rawOutput) lands in the record output (Codex P2)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The fixture's SUCCESS path emits the tool_call_update with
+      // content: [{type:'text', text}] and NO rawOutput — the committed
+      // shape the old fold dropped (existing.output stayed ''). The
+      // output must be the content blocks' text.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo content-block-marker > run-marker.txt' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'content-block success run' }));
+      expect(result.stopReason).toBe('complete');
+      const record = await store.load(result.sessionId as string);
+      const toolMessage = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'run');
+      expect(toolMessage !== undefined).toBe(true); // the execution was persisted
+      const folded = JSON.parse(toolMessage?.content as string) as { input: unknown; ok: boolean; output: string };
+      expect(folded.ok).toBe(true);
+      expect(folded.output).toBe('exit 0'); // the block's text — never the empty string the old fold left
+    });
+  });
+
+  test('a FAILED tool result carried by content blocks only: the denial reason comes from the text (the WorkerResult channel, Codex P2)', async () => {
+    await withScratch(async (scratchDir) => {
+      // FAKE_ACP_OMIT_RAW_OUTPUT: the content-only persona — even a
+      // failure rides content blocks alone. The denial reason must be the
+      // blocks' text, never the empty-output fallback wording ('tool
+      // execution failed (…)') the old fold produced here.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'deny-tool',
+            FAKE_ACP_OMIT_RAW_OUTPUT: '1',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'x.txt', oldText: 'a', newText: 'b' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'content-block failure run' }));
+      expect(result.denials).toEqual([
+        { tool: 'edit', reason: 'permission denied: edit is not allowed' },
+      ]);
+      expect(result.stopReason).toBe('complete'); // the turn settled end_turn; the denial rides the frozen channel
     });
   });
 
