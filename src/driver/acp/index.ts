@@ -1215,9 +1215,15 @@ export class AcpDriver implements Driver {
         if (echoedMode !== GATING_MODE && observation.observedMode !== GATING_MODE) {
           handshakeFailure =
             `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
-            `echoed ${echoedMode === undefined ? 'no mode echo' : `mode '${echoedMode}'`}, observed ` +
+            `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, observed ` +
             `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}) — ` +
             'an unpinned session is a policy void, refusing to prompt';
+        }
+        if (handshakeFailure === undefined) {
+          // The settle-time downgrade marker (below) judges only POST-PIN
+          // reports: a pre-pin yolo report is the session's honest starting
+          // state, never a downgrade of the pin.
+          observation.observedMode = undefined;
         }
       } catch (err) {
         handshakeFailure =
@@ -1285,6 +1291,22 @@ export class AcpDriver implements Driver {
           cq: 'denied-tool-completed',
           toolCallIds: deniedButCompletedIds,
           note: 'a tool_call our answer DENIED reported status completed — the harness executed past the rejection; UNGATED EXECUTION through the answer channel (strategy §2.1)',
+        }),
+      );
+    }
+
+    // --- THE MODE-DOWNGRADE MARKER (round-2 review, low): a harness that
+    // REPORTED a mode other than the pinned one AFTER the pin landed is
+    // enforcement-relevant evidence — the never-asks tripwire only catches
+    // the ungated-execution half of a broken pin. Narrated, never
+    // classified alone: the verdict's error paths own every enforcement
+    // break this wire can show, and a clean reported mode is silence.
+    if (observation.observedMode !== undefined && observation.observedMode !== GATING_MODE) {
+      observation.narration.push(
+        JSON.stringify({
+          cq: 'mode-downgrade',
+          mode: observation.observedMode,
+          note: `the harness reported mode '${observation.observedMode}' after the pin — the never-asks tripwire remains the verdict-level backstop`,
         }),
       );
     }
