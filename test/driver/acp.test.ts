@@ -1162,7 +1162,17 @@ describe('acp binary resolution (the §3 which-like fold)', () => {
       return candidate === join('/usr/bin', 'acp-server');
     };
     const resolved = await resolveAcpCommand(['acp-server'], 'explicit', defaultAcpEndpointTable(), env, probe);
-    expect(seen).toEqual([join('/cq-tools', 'acp-server'), join('/usr/bin', 'acp-server')]);
+    // The extensionless candidates must appear IN PATH ORDER — past the
+    // miss, onto the hit — and the hit must win. Asserted as an ordered
+    // SUBSEQUENCE of `seen`, not the whole array: on win32 the walk also
+    // probes the PATHEXT extensions per dir (issue #40; this env carries
+    // no PATHEXT, so DEFAULT_PATHEXT fires), so the full candidate list is
+    // platform-shaped while the which-contract shape — PATH order, first
+    // hit wins, extensionless resolution — is what binds here.
+    const miss = seen.indexOf(join('/cq-tools', 'acp-server'));
+    const hit = seen.indexOf(join('/usr/bin', 'acp-server'));
+    expect(miss).toBeGreaterThanOrEqual(0);
+    expect(hit).toBeGreaterThan(miss);
     expect(resolved.binary).toBe(join('/usr/bin', 'acp-server'));
   });
 

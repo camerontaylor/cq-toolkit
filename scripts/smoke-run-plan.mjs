@@ -29,6 +29,16 @@
 //      stdout (`cq <plan> | jq .` stays safe). The plan run executes in a
 //      CHILD process (this script re-invokes itself with --plan-run) so the
 //      parent can inspect its streams as a consumer would.
+//   4. USAGE/MODEL OBSERVABILITY — each ok row's observable IS the served
+//      model id: the fixture reports the requested --model as served, so
+//      the row pins 'smoke-1' (never the 'unreported' fallback), and the
+//      governed reportUsage fold lands in the governor's rollup as the
+//      fixture's fixed usage ×2 jobs. A driver result WITHOUT usage fails
+//      the op outright (the fixture contract guarantees fixed usage).
+//      RunReport.usage itself is replay-only on a fresh run (the frozen
+//      JobOutcome contract — runner.ts sources per-job usage from replayed
+//      journal events alone), so the fold is asserted at the governor in
+//      the producing child, not on the report.
 //
 // SECRETS: the fixture route's key env var (SMOKE_API_KEY) is set here to a
 // FAKE value — the subprocess driver reads key VALUES from the environment
@@ -107,19 +117,29 @@ async function runPlanParent() {
     if (report.stoppedEarly !== false || report.earlyStopReason !== undefined) {
       fail(`a clean two-job run claims stoppedEarly=${report.stoppedEarly} — dishonest stop (I9)`);
     }
-    assertDeepEqual(report.counts, {
-      queued: 0,
-      running: 0,
-      blocked: 0,
-      done: 2,
-      failed: 0,
-      'budget-exhausted': 0,
-    }, 'run counts');
+    // Per-key over the six canonical states: a JSON.stringify whole-object
+    // compare is key-ORDER-sensitive, so a semantically-equal key reorder
+    // in the runner's emptyCounts() would fail the smoke with a misleading
+    // diff. Key presence needs no guard here — RunCountsSchema is strict
+    // over all six states and the report parsed above.
+    const expectedCounts = { queued: 0, running: 0, blocked: 0, done: 2, failed: 0, 'budget-exhausted': 0 };
+    for (const state of ['queued', 'running', 'blocked', 'done', 'failed', 'budget-exhausted']) {
+      if (report.counts[state] !== expectedCounts[state]) {
+        fail(`run counts: state '${state}' expected ${expectedCounts[state]}, got ${report.counts[state]} (full counts ${JSON.stringify(report.counts)})`);
+      }
+    }
     if (report.jobs.length !== 2) fail(`expected 2 job rows, got ${report.jobs.length}`);
     for (const row of report.jobs) {
       if (row.op !== 'agent-run') fail(`job '${row.jobId}' ran op '${row.op}', expected 'agent-run'`);
       if (row.result.status !== 'ok') {
         fail(`job '${row.jobId}' did not finish ok: ${JSON.stringify(row.result)}`);
+      }
+      // The op's observable is the SERVED model id (the remap-detection
+      // fact): the fixture reports the requested --model as served, so the
+      // row must pin 'smoke-1'. A driver dropping WorkerResult.model would
+      // otherwise slide through the op's 'unreported' fallback green.
+      if (row.result.value !== 'smoke-1') {
+        fail(`job '${row.jobId}' observable ${JSON.stringify(row.result.value ?? null)} does not pin the served model 'smoke-1' — model reporting regressed to the 'unreported' fallback`);
       }
     }
 
@@ -183,7 +203,10 @@ async function runPlanChild(journalDir) {
   process.env.SMOKE_API_KEY ??= 'smoke-fake-key';
   // A stray host FAKE_AGENT_MODE would re-script the fixture (up to a
   // SIGTERM-ignoring hang) — the smoke always wants the default 'ok' run.
+  // Same for FAKE_AGENT_SERVED_MODEL: the parent pins the served model as
+  // 'smoke-1', so a stray override would masquerade as a driver regression.
   delete process.env.FAKE_AGENT_MODE;
+  delete process.env.FAKE_AGENT_SERVED_MODEL;
 
   const scratchDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-ws-'));
   try {
@@ -230,7 +253,17 @@ async function runPlanChild(journalDir) {
       } catch (err) {
         return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
       }
-      if (ctx !== undefined && result.usage !== undefined) ctx.reportUsage(result.usage);
+      // The fixture contract guarantees usage on every result (fixed
+      // numbers): a driver result WITHOUT it is exactly the regression
+      // this smoke must catch, so it fails the job — never a silent skip
+      // of the reportUsage fold.
+      if (result.usage === undefined) {
+        return {
+          status: 'failed',
+          error: 'driver result carries no usage — WorkerResult.usage reporting regressed (the fixture always reports fixed usage)',
+        };
+      }
+      if (ctx !== undefined) ctx.reportUsage(result.usage);
       if (result.stopReason === 'complete') return { status: 'ok', value: result.model ?? 'unreported' };
       return { status: 'failed', error: `agent run stopped: ${result.stopReason}` };
     };
@@ -257,6 +290,21 @@ async function runPlanChild(journalDir) {
     // on an actual trip.
     const raw = await runPlan(plan, runOptions, governRegistry(registry, governor));
     const report = withBudgetStop(raw, plan, governor);
+
+    // The reportUsage fold, observed where it lands: on a fresh run the
+    // RunReport carries usage only from REPLAYED journal events (frozen
+    // JobOutcome contract), so the fold's evidence on this path is the
+    // governor's rollup — the fixture's fixed usage {10,5,2,3} once per
+    // job, twice here. A dropped reportUsage call (or a regressed
+    // WorkerResult.usage sneaking past the op guard above) leaves this
+    // undefined or short. Key order is the driver's canonical Usage order
+    // on both sides (same in-process fold), so the whole-object compare
+    // here is not order-sensitive.
+    assertDeepEqual(
+      governor.usage,
+      { input: 20, output: 10, cacheRead: 4, cacheWrite: 6 },
+      'governor usage rollup (fixture fixed usage ×2 jobs — the reportUsage fold)',
+    );
 
     // THE I1 CONTRACT: stdout carries the report (one JSON artifact, via the
     // shipped emitReport helper); narration rides stderr under `cq: `.
