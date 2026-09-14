@@ -33,7 +33,8 @@
 //
 // Replay (opts.resume === true — which REQUIRES journalDir; requesting resume
 // without one throws before a runId exists or anything is journaled): fold
-// EVERY prior run of this plan in the dir, oldest-first (runs() order), with
+// EVERY prior run of this plan in the dir, ordered by each run's run-started
+// `at` (ties by runId — deterministic, mtime-independent), with
 // per-job LAST-FINISH-WINS. Candidate pre-filter: only files whose runId
 // carries this plan's exact `<planId>--` prefix AND whose remainder is the
 // exact two-segment runId tail (`<base36>--<hex>` — so plan 'a' does not
@@ -87,7 +88,7 @@
 // runner always reports stoppedEarly: false with no earlyStopReason).
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
-import { assertSafeRunId, openRunLog, type RunLog } from './journal.js';
+import { assertSafeRunId, candidateRunsForPlan, openRunLog, type RunLog } from './journal.js';
 import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultSchema } from './schema.js';
 import type { Usage } from '../driver/types.js';
@@ -148,15 +149,6 @@ function makeRunId(planId: string, requireFileSafe: boolean): string {
   if (requireFileSafe) assertSafeRunId(runId);
   return runId;
 }
-
-/**
- * Tail shape of a well-formed runId: `<timestamp-base36>--<random-hex>`. The
- * replay candidate filter requires this AFTER the `<planId>--` prefix, so a
- * planId that itself ends in `--<segment>` ('a' vs 'a--b') cannot match the
- * other plan's files — the shape check makes the pre-filter exact enough
- * that a corrupt journal of ANOTHER plan cannot block this plan's resume.
- */
-const RUN_ID_TAIL = /^[0-9a-z]+--[0-9a-f]+$/;
 
 /** All-six-states counts table, zeros included. */
 function emptyCounts(): RunCounts {
@@ -229,10 +221,18 @@ async function executeOp(
     }
     // OpResultSchema's value slot is z.unknown(), so a BigInt/circular result
     // passes the shape check but would still throw OUT of the journal append
-    // (each line is JSON.stringify'd there). Serializability is checked HERE:
-    // an honest per-job failure instead of a run-killing append error.
+    // (each line is JSON.stringify'd there), and NaN/±Infinity would silently
+    // journal as `null` — the replay would then consume a different value
+    // than the run produced. JSON-faithfulness is checked HERE via a
+    // replacer that rejects non-finite numbers: an honest per-job failure
+    // instead of a run-killing append error or a silently falsified journal.
     try {
-      JSON.stringify(checked.data);
+      JSON.stringify(checked.data, (_key, value: unknown) => {
+        if (typeof value === 'number' && !Number.isFinite(value)) {
+          throw new Error(`non-finite number ${String(value)}`);
+        }
+        return value;
+      });
     } catch (err) {
       return {
         status: 'failed',
@@ -296,32 +296,38 @@ export async function runPlan(
   // --- Replay: fold EVERY prior run of this plan, per-job last-finish-wins --
   const replay = new Map<string, JobFinishedJournalEvent>();
   if (opts.resume === true && runLog) {
-    const runIds = await runLog.runs(); // oldest first
-    // Exact candidate pre-filter: runIds embed the plan id
-    // (`<planId>--<timestamp>--<random>`), so only THIS plan's files are ever
-    // parsed. The RUN_ID_TAIL check keeps the prefix match from catching a
-    // planId that merely extends this one ('a' vs 'a--b'); the run-started
-    // planId check below remains the semantic matcher. Net blast radius: a
+    // Shared candidate pre-filter (journal.candidateRunsForPlan — the same
+    // helper governor.seedFromRunLog uses): runIds embed the plan id
+    // (`<planId>--<timestamp>--<random>`) and must carry the exact
+    // two-segment tail, so only THIS plan's files are ever parsed — a planId
+    // that merely extends this one ('a' vs 'a--b') cannot slip in, and a
     // corrupt middle line in ANOTHER plan's journal cannot block THIS plan's
-    // resume.
-    const candidates = runIds.filter(
-      (candidateId) =>
-        candidateId.startsWith(`${plan.id}--`) &&
-        RUN_ID_TAIL.test(candidateId.slice(plan.id.length + 2)),
-    );
+    // resume. The run-started planId check below remains the semantic
+    // matcher for every file that IS parsed.
+    const candidates = candidateRunsForPlan(await runLog.runs(), plan.id);
+    // Parse every candidate, then order the fold by each run's run-started
+    // `at` (ties broken by runId) — NOT by mtime: mtime reflects the last
+    // append and can be perturbed or tied under concurrent runs, while `at`
+    // is the run's own claim about when it started. With that order the
+    // per-job LAST finish wins — within a run (retries append later
+    // finishes) and ACROSS runs: a later partial run contributes only the
+    // jobs it actually finished, so it cannot erase older runs' completed
+    // jobs; a later failed re-attempt DOES override an older ok.
+    const folded: Array<{ at: string; runId: string; events: JournalEvent[] }> = [];
     for (const priorRunId of candidates) {
       const priorEvents = await runLog.read(priorRunId);
       let priorPlanId: string | undefined;
+      let startedAt: string | undefined;
       for (const event of priorEvents) {
+        if (event.type === 'run-started' && startedAt === undefined) startedAt = event.at;
         if (event.type === 'run-started') priorPlanId = event.planId;
       }
-      if (priorPlanId !== plan.id) continue;
-      for (const event of priorEvents) {
-        // Last finish wins — within a run (retries append later finishes) and
-        // ACROSS runs (candidates iterate oldest-first): a later partial run
-        // contributes only the jobs it actually finished, so it cannot erase
-        // older runs' completed jobs; a later failed re-attempt DOES
-        // override an older ok.
+      if (priorPlanId !== plan.id || startedAt === undefined) continue;
+      folded.push({ at: startedAt, runId: priorRunId, events: priorEvents });
+    }
+    folded.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.runId < b.runId ? -1 : 1));
+    for (const prior of folded) {
+      for (const event of prior.events) {
         if (event.type === 'job-finished') replay.set(event.jobId, event);
       }
     }
@@ -409,14 +415,13 @@ export async function runPlan(
 
   const blockedResult = (job: ManifestJob): OpResult<unknown> => {
     // Name a dependency that DEFINITIVELY did not succeed (failed/blocked/
-    // budget-exhausted), not a merely queued sibling still awaiting dispatch;
-    // the fallback covers contexts where no queue-aware pass has classified
-    // anything yet.
-    const notOk =
-      job.dependsOn.find((dep) => {
-        const state = entries.get(dep)?.state;
-        return state !== 'done' && state !== 'queued';
-      }) ?? job.dependsOn.find((dep) => entries.get(dep)?.state !== 'done');
+    // budget-exhausted), not a merely queued sibling still awaiting dispatch.
+    // Both call sites guarantee such a dep exists (wave: the job was not
+    // ready; sweep: anyNotOk), so the first find always hits.
+    const notOk = job.dependsOn.find((dep) => {
+      const state = entries.get(dep)?.state;
+      return state !== 'done' && state !== 'queued';
+    });
     return {
       status: 'failed',
       error: `blocked: dependency '${notOk}' did not succeed`,
@@ -472,8 +477,11 @@ export async function runPlan(
   // Wave order guarantees a job's dependencies are classified first. The
   // classification precedence: any dependency that definitively did not
   // succeed (failed/blocked/budget-exhausted, transitively) → blocked — the
-  // job can never run, even when a sibling dependency is merely queued;
-  // only all-done-or-queued dependencies → queued (dispatch never happened).
+  // job can never run THIS run, even when a sibling dependency is merely
+  // queued; only all-done-or-queued dependencies → queued (dispatch never
+  // happened). Budget attribution composes downstream: withBudgetStop
+  // re-marks only rows whose non-execution is transitively budget-caused,
+  // so a blocked row whose failed dep was a genuine failure stays failed.
   for (const wave of waveJobs) {
     for (const job of wave) {
       if (entries.has(job.id)) continue;

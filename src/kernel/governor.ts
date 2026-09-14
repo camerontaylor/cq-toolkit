@@ -36,7 +36,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
-import type { RunLog } from './journal.js';
+import { candidateRunsForPlan, type RunLog } from './journal.js';
 import { attemptsFromJournal } from './rescue.js';
 import type { OpRegistryView } from './runner.js';
 import type {
@@ -935,10 +935,12 @@ export async function seedFromRunLog(
 ): Promise<BudgetGovernor> {
   const governor = new BudgetGovernor(opts?.config ?? {}, opts?.clock);
   const events: JournalEvent[] = [];
-  for (const runId of await log.runs()) {
-    if (!runId.startsWith(`${planId}--`)) {
-      continue; // candidate pre-filter — mirrors the runner's resume rules
-    }
+  // Shared candidate filter — journal.candidateRunsForPlan — mirroring the
+  // runner's resume rules (the coupling is declared on both sides): prefix +
+  // two-segment runId tail, so a planId that merely extends this one
+  // ('a' vs 'a--b') cannot slip in and a corrupt journal of ANOTHER plan
+  // cannot block this seed.
+  for (const runId of candidateRunsForPlan(await log.runs(), planId)) {
     const runEvents = await log.read(runId);
     const started = runEvents.find(
       (event): event is RunStartedJournalEvent => event.type === 'run-started',
