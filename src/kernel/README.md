@@ -74,16 +74,20 @@ T1.3's governor, never the runner).
   independent, array-order sensitive. That hash is what makes replay
   provable.
 - **NDJSON journal** (`<journalDir>/<runId>.ndjson`): append-only,
-  schema-validated facts; a torn tail (crash mid-append) is ignored only as
-  the LAST line, corrupt middle lines throw; `statusOf` is derived at read
-  by folding events.
-- **Replay/resume** (`resume: true`): the latest prior run for the planId;
-  a job skips only on terminal-`ok` + equal `inputsHash` (zero op
-  invocation, outcome reconstructed from the journal); everything else
-  re-runs — continue-from-first-failure falls out naturally.
-- **stopOnError**: after the first non-ok result nothing new starts
-  (in-flight jobs complete and are recorded); downstream jobs are `blocked`,
-  never-dispatched jobs with healthy dependencies are `queued`.
+  schema-validated facts; a torn tail (crash mid-append — an UNTERMINATED
+  last line) is ignored, while a complete but invalid line anywhere,
+  including last, throws; `statusOf` is derived at read by folding events.
+- **Replay/resume** (`resume: true`): every prior run for the planId folds
+  oldest-first, per job last-finish-wins — a later PARTIAL run cannot erase
+  older runs' completed jobs; a job skips only on terminal-`ok` + equal
+  `inputsHash` (zero op invocation, outcome reconstructed from the journal);
+  everything else re-runs — continue-from-first-failure falls out naturally.
+- **stopOnError**: only when `stopOnError` is true: after the first non-ok
+  result nothing new starts (in-flight jobs complete and are recorded);
+  downstream jobs are `blocked`, never-dispatched jobs with healthy
+  dependencies are `queued`. With `stopOnError: false` every schedulable job
+  dispatches regardless of earlier failures — downstream rows are `blocked`
+  only when a dependency actually did not succeed.
 
 Recorded freeze-friction workarounds (the ws-a "deviations need a recorded
 reason" clause):
@@ -96,7 +100,7 @@ reason" clause):
 - Replay re-attests skipped jobs with a `job-finished` event and no
   preceding `job-started` (no dispatch happened; the verified inputsHash
   makes the attestation sound). This keeps each run's journal
-  self-contained so the latest-run rule survives chained resumes.
+  self-contained so the per-job fold rule survives chained resumes.
 - `stopOnError` leaving jobs unstarted does NOT set `stoppedEarly`: the
   frozen `RunEarlyStopReason` only contains `'budget'`, and honest-stop
   marking is T1.3's — callers read `counts.queued`/`counts.blocked` to see

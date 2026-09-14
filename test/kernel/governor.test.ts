@@ -33,7 +33,7 @@
 // real-time waits anywhere (a setImmediate pump yields event-loop turns for
 // the runner's fs/microtask work; assertions on delays are exact). Temp
 // journal dirs: mkdtemp under os.tmpdir, removed in afterEach.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
@@ -1513,12 +1513,38 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       governRegistry(viewWith(entry('fake', countingOk)), governor),
     );
     expect(calls).toEqual([]);
-    // c1 is refused by the spent quota; c2 (dependsOn c1) is then honestly
-    // BLOCKED on the refused c1 — never dispatched, nothing fabricated.
-    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'failed']);
-    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'c1'/ });
+    // Resume-fold (issue #16): c1 has terminal-ok evidence from runs 1-2 with
+    // a matching hash, so it REPLAYS — zero dispatch, no quota consumed,
+    // nothing re-executed. c2's own re-dispatch is what the spent quota
+    // refuses (short-circuited before the op runs).
+    expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
+    expect(report.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
     const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+  });
+
+  test('seedFromRunLog ignores a corrupt sibling-plan journal ("a" vs "a--b", shared filter)', async () => {
+    // Review VB1C r1: the seed used a prefix-only candidate filter, so a
+    // corrupt journal of plan 'a--b' threw /corrupt line/ into plan 'a''s
+    // governed resume. It now shares the runner's candidateRunsForPlan.
+    const log = openRunLog(dir);
+    await log.append('a--r1--aa', { type: 'run-started', runId: 'a--r1--aa', at: 't', planId: 'a' });
+    await log.append('a--r1--aa', {
+      type: 'job-started',
+      runId: 'a--r1--aa',
+      at: 't',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    // A corrupt MIDDLE line in the sibling plan's file (prefix 'a--' matches).
+    await appendFile(
+      join(dir, 'a--b--k3y--c0ffee.ndjson'),
+      `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: 't', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
+      'utf8',
+    );
+    const governor = await seedFromRunLog(log, 'a', { config: { runDispatchQuota: 3 } });
+    expect(governor.dispatchCount).toBe(1); // only plan a's own dispatch was seeded
   });
 });
 

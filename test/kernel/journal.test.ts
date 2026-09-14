@@ -7,8 +7,9 @@
 //      normalization + no aliasing into the plan, JSON serializability,
 //      topoOrder waves / cycle / unknown-dep / duplicate-id rejection.
 //   2. Journal: append+read round-trip (every line parses through
-//      JournalEventSchema), append creates the directory recursively, torn
-//      LAST line tolerated while a corrupt MIDDLE line throws, statusOf
+//      JournalEventSchema), append creates the directory recursively, a torn
+//      LAST line (no trailing newline) tolerated while a complete but
+//      invalid line anywhere — including last — throws, statusOf
 //      derivation rules (including the documented needs-human/indeterminate
 //      friction with the frozen JobState taxonomy), runs() mtime ordering,
 //      loud rejection of invalid events and unsafe runIds.
@@ -21,7 +22,12 @@ import { appendFile, mkdtemp, readFile, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { assertSafeRunId, deriveJobStatuses, openRunLog } from '../../src/kernel/journal.js';
+import {
+  assertSafeRunId,
+  candidateRunsForPlan,
+  deriveJobStatuses,
+  openRunLog,
+} from '../../src/kernel/journal.js';
 import {
   canonicalJson,
   hashInputs,
@@ -93,6 +99,17 @@ describe('canonicalJson', () => {
 
   test('array order is significant (arrays are ordered data)', () => {
     expect(canonicalJson([1, 2])).not.toBe(canonicalJson([2, 1]));
+  });
+
+  test('sparse array slots canonicalize as null — a hole never hashes like []', () => {
+    // value.map skipped holes, so `new Array(1)` hashed like `[]`. Index-based
+    // canonicalization reads a hole as undefined → the documented `null`.
+    expect(canonicalJson(new Array(1))).toBe('[null]');
+    const sparse = new Array(3);
+    sparse[0] = 1;
+    sparse[2] = 3;
+    expect(canonicalJson(sparse)).toBe('[1,null,3]');
+    expect(hashInputs('op-x', new Array(1))).not.toBe(hashInputs('op-x', []));
   });
 
   test('scalars, null, and explicit-undefined values have stable forms', () => {
@@ -313,6 +330,71 @@ describe('openRunLog', () => {
     await appendFile(pathFor('run-schema'), '{}\n', 'utf8');
     await log.append('run-schema', runStarted('run-schema'));
     await expect(log.read('run-schema')).rejects.toThrow(/corrupt line 1/);
+  });
+
+  test('read drops trailing blank lines (byte-less whitespace, not a torn event)', async () => {
+    const log = openRunLog(dir);
+    await log.append('run-blank', runStarted('run-blank'));
+    // `echo '' >>` appends a bare newline: complete lines, no event bytes.
+    // This heals on read instead of permanently bricking the journal.
+    await appendFile(pathFor('run-blank'), '\n\n', 'utf8');
+    await expect(log.read('run-blank')).resolves.toEqual([runStarted('run-blank')]);
+
+    // Whitespace-only trailing content is the same story.
+    await appendFile(pathFor('run-blank'), '   \n', 'utf8');
+    await expect(log.read('run-blank')).resolves.toEqual([runStarted('run-blank')]);
+  });
+
+  test('read still throws on a blank MIDDLE line (a hole in the evidence)', async () => {
+    const log = openRunLog(dir);
+    await log.append('run-mid-blank', runStarted('run-mid-blank'));
+    // A blank line BETWEEN events is a structural hole, not trailing noise.
+    await log.append('run-mid-blank', runFinished('run-mid-blank'));
+    const raw = await readFile(pathFor('run-mid-blank'), 'utf8');
+    const withHole = raw.replace('\n', '\n\n'); // blank line after line 1
+    await rm(pathFor('run-mid-blank'));
+    await appendFile(pathFor('run-mid-blank'), withHole, 'utf8');
+    await expect(log.read('run-mid-blank')).rejects.toThrow(/corrupt line 2/);
+  });
+
+  test('read throws when a line carries another runId than the file records', async () => {
+    const log = openRunLog(dir);
+    // System-written files always match (append enforces it); a mismatched
+    // line means operator-concatenated journals — misattributed evidence.
+    const foreign = runStarted('run-other');
+    await appendFile(pathFor('run-mine'), `${JSON.stringify(foreign)}\n`, 'utf8');
+    await expect(log.read('run-mine')).rejects.toThrow(
+      /event\.runId 'run-other' does not match this file's run 'run-mine'/,
+    );
+  });
+
+  test('candidateRunsForPlan: sibling-plan ids cannot slip past the two-segment tail', () => {
+    // plan 'a' must not match plan 'a--b''s files ('b--k3y--c0ffee' is three
+    // tail segments); case-insensitive so operator-copied evidence ('A3F2')
+    // still parses; non-conforming tails are skipped (re-run direction only).
+    expect(
+      candidateRunsForPlan(
+        ['a--ts--beef', 'a--b--k3y--c0ffee', 'a--r7--A3F2', 'ab--ts--beef', 'a--ts'],
+        'a',
+      ),
+    ).toEqual(['a--ts--beef', 'a--r7--A3F2']);
+  });
+
+  test('read throws when the last COMPLETE line is invalid (file ends with a newline)', async () => {
+    const log = openRunLog(dir);
+    await log.append('run-complete', runStarted('run-complete'));
+    // A fully-written but schema-invalid line: with the trailing newline this
+    // is a COMPLETE record, not a torn write — tolerance must not hide it.
+    await appendFile(pathFor('run-complete'), '{}\n', 'utf8');
+    await expect(log.read('run-complete')).rejects.toThrow(/corrupt line 2/);
+  });
+
+  test('read throws when the last complete line is pure JSON garbage (file ends with a newline)', async () => {
+    const log = openRunLog(dir);
+    await log.append('run-garbage', runStarted('run-garbage'));
+    // Same rule for non-JSON garbage: trailing newline ⇒ complete line ⇒ loud.
+    await appendFile(pathFor('run-garbage'), 'not json at all\n', 'utf8');
+    await expect(log.read('run-garbage')).rejects.toThrow(/corrupt line 2/);
   });
 
   test('read of an unknown run yields [] (no facts yet)', async () => {
