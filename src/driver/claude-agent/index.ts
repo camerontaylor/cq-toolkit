@@ -884,6 +884,18 @@ export function foldMessage(observation: RunObservation, message: unknown): void
       }
       return;
     }
+    case 'user': {
+      // SDKUserMessage frames ride this type (the SDKMessage union) — in
+      // practice tool-result deliveries after every tool round. They are
+      // deliberately DROPPED, exactly like assistant tool_use blocks: the
+      // harness surface executes in-process, so each outcome is already
+      // recorded at the execute boundary in OUR vocabulary, and SDK-side
+      // refusals arrive on the result's permission_denials (the
+      // authoritative record). Folding them to narration would duplicate
+      // the tool outcome AND put a raw vendor frame shape into persisted
+      // session data.
+      return;
+    }
     case 'result': {
       observation.result = event;
       observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;

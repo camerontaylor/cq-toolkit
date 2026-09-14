@@ -722,6 +722,89 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
+  test('foldMessage drops SDK user frames: tool outcomes live in our vocabulary, narration carries no vendor frame JSON', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      // A scripted round WITH a tool call: assistant tool_use → the
+      // registered harness tool executes in-process → an SDKUserMessage
+      // (type 'user') delivering the tool_result → success result. The
+      // execute boundary records the outcome in OUR vocabulary; the user
+      // frame must be dropped, not narrated as raw vendor JSON.
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              const sessionId = 'agent-cli-userframe';
+              const model = options['model'] as string;
+              yield { type: 'system', subtype: 'init', session_id: sessionId, model };
+              const server = (options['mcpServers'] as Record<string, { tools?: Array<{ name: string; handler: (args: unknown, extra: unknown) => Promise<unknown> }> }> | undefined)?.['cq-harness'];
+              const toolRecord = server?.tools?.find((t) => t.name === 'read');
+              yield {
+                type: 'assistant',
+                session_id: sessionId,
+                message: {
+                  model,
+                  content: [{ type: 'tool_use', id: 'u1', name: 'mcp__cq-harness__read', input: { path: 'absent.txt' } }],
+                  usage: AGENT_USAGE,
+                },
+              };
+              await toolRecord?.handler({ path: 'absent.txt' }, undefined);
+              // The frame under test: an SDK user-role tool_result delivery.
+              yield {
+                type: 'user',
+                session_id: sessionId,
+                message: {
+                  role: 'user',
+                  content: [{ type: 'tool_result', tool_use_id: 'u1', content: [{ type: 'text', text: 'file body' }] }],
+                },
+              };
+              yield {
+                type: 'assistant',
+                session_id: sessionId,
+                message: { model, content: [{ type: 'text', text: 'done' }], usage: AGENT_USAGE },
+              };
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: false,
+                session_id: sessionId,
+                result: 'done',
+                usage: AGENT_USAGE,
+                modelUsage: {},
+                permission_denials: [],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(
+        invocation({ toolPolicy: { allow: [], mode: 'unrestricted' } }),
+      );
+      expect(result.stopReason).toBe('complete');
+      const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+      const record = await store.load(result.sessionId as string);
+      expect(record).toBeDefined();
+      // The tool outcome IS recorded — in OUR vocabulary, at the execute
+      // boundary (the read executed and was denied on the merits).
+      expect(
+        record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read'),
+      ).toBe(true);
+      // The user frame did NOT become narration: no narration message at
+      // all (every frame in this stream is folded), hence no raw
+      // vendor 'tool_result' JSON in persisted session data.
+      const narration = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'agent-narration');
+      expect(narration).toBeUndefined();
+      expect(
+        record?.messages.some((m) => m.role === 'tool' && m.content.includes('tool_result')),
+      ).toBe(false);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('endpoint lookup rejects prototype keys — constructor/toString are not providers', () => {
     expect(() => resolveEndpoint({ provider: 'constructor', model: 'm' }, defaultEndpointTable())).toThrow(
       /unknown provider 'constructor'/,
