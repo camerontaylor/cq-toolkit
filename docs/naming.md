@@ -37,7 +37,15 @@ release.
 > tarball whose payload is LICENSE + README.md — plus the package.json that
 > npm itself always includes in every tarball — at `0.0.0`, per the plan §6
 > allowance (it does not violate the no-staging rule, which governs the v1
-> feature release). Exact procedure, reproducible as written:
+> feature release).
+>
+> Historical note (2026-09-14): this procedure records the blocked attempt
+> verbatim, under the then-chosen unscoped name. Any retry uses the owner's
+> adopted scoped name — the same steps with
+> `"name":"@camerontaylor/cq-toolkit"` (see the owner decision at the foot of
+> this record).
+>
+> Exact procedure, reproducible as written:
 >
 > 1. Create a temp dir OUTSIDE this repo and work there. Publishing from the
 >    repo's own manifest would NOT produce the placeholder payload: its
