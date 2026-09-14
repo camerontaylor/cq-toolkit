@@ -28,12 +28,12 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
-import { SubprocessDriver, buildArgs } from '../../src/driver/subprocess/index.js';
+import { SubprocessDriver, buildArgs, stopReasonOf, usageFromCli } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from '../../src/driver/subprocess/routing.js';
 import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
-import { spawnManaged } from '../../src/driver/subprocess/process.js';
+import { DEFAULT_MAX_RETAINED_BYTES, spawnManaged } from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
@@ -222,20 +222,46 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   });
 
   test('buildArgs: stream-json print mode always carries --verbose (the real CLI refuses it otherwise — found live, T1.6)', () => {
+||||||| parent of 33b56f4 (fix(driver): review-debt subprocess fixes (issue #19, #24, #26 subprocess halves))
+  test('buildArgs: stream-json print mode always carries --verbose (the real CLI refuses it otherwise — found live, T1.6)', () => {
+  test('buildArgs: the exact headless argv — undocumented flags removed (#19-8)', () => {
+    const route = {
+      endpoint: 'conformance',
+      baseUrl: 'http://127.0.0.1:1/anthropic',
+      env: { ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY', ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY' },
+      model: 'conformance-1',
+    };
     const args = buildArgs({
-      route: {
-        endpoint: 'conformance',
-        baseUrl: 'http://127.0.0.1:1/anthropic',
-        env: { ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY', ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY' },
-        model: 'conformance-1',
-      },
-      allowedToolNames: ['read'],
+      route,
+      allowedToolNames: ['read', 'edit'],
+      outputJsonSchema: '{"type":"object"}',
+      resumeCliSessionId: 'cli-9',
+    });
+    expect(args).toEqual([
+      '-p',
+      '--output-format', 'stream-json',
+      '--verbose', // the real CLI refuses stream-json print mode without it (found live, T1.6)
+      '--json-schema', '{"type":"object"}',
+      '--allowedTools', 'read edit',
+      '--model', 'conformance-1',
+      '--resume', 'cli-9',
+    ]);
+    // ToolPolicy mode 'none' shape: --allowedTools ALWAYS present with an
+    // EMPTY value (nothing pre-approved; headless -p cannot prompt, so a
+    // tool outside the list is CLI-DENIED — the WorkerResult.denials source).
+    const none = buildArgs({
+      route,
+      allowedToolNames: [],
       outputJsonSchema: undefined,
       resumeCliSessionId: undefined,
     });
-    const jsonIndex = args.indexOf('--output-format');
-    expect(args.slice(jsonIndex, jsonIndex + 2)).toEqual(['--output-format', 'stream-json']);
-    expect(args[jsonIndex + 2]).toBe('--verbose'); // -p + stream-json WITHOUT --verbose is rejected by the real CLI
+    expect(none).toEqual([
+      '-p', '--output-format', 'stream-json', '--verbose',
+      '--allowedTools', '',
+      '--model', 'conformance-1',
+    ]);
+    expect(none).not.toContain('--permission-prompts'); // undocumented — removed (issue #19)
+    expect(none).not.toContain('--bare'); // undocumented — removed (issue #19)
   });
 
   test('THE REMAP TEST: unknown model on the default routing table throws BEFORE any spawn', async () => {
@@ -360,15 +386,23 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   });
 
-  test('resume: the second run passes --resume; the workspace sidecar carries the CLI handle', async () => {
+  test('resume: the second run passes --resume; the sidecar lives in the STORE, not the workspace (#19-12/#26)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
       const first = new SubprocessDriver(baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls));
       const run1 = await first.run(invocation({ prompt: 'resume run one' }));
       expect(calls[0]?.args).not.toContain('--resume'); // fresh run: no resume flag
+      // The sidecar is RELOCATED (issue #26, design (b)): beside the session
+      // records, keyed by sessionId — never in the model-visible workspace.
       const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
-      const cliId = (await readFile(join(workspace, CLI_SESSION_FILE), 'utf8')).trim();
+      const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${CLI_SESSION_FILE}`);
+      const cliId = (await readFile(sidecarPath, 'utf8')).trim();
       expect(cliId).toMatch(/^fake-cli-/);
+      const noSidecarInWorkspace = async (): Promise<void> => {
+        const files = await readdir(workspace);
+        expect(files.filter((f) => f.endsWith(CLI_SESSION_FILE))).toEqual([]);
+      };
+      await noSidecarInWorkspace();
 
       // The resumed run forwards the recorded CLI session id as --resume
       // (proven by the fixture echoing it) and reuses the SAME workspace.
@@ -383,14 +417,16 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const resumeIndex = calls2[0]?.args.indexOf('--resume') ?? -1;
       expect(calls2[0]?.args[resumeIndex + 1]).toBe(cliId);
 
-      // ONE session record carries both runs' turns; the sidecar is stable.
+      // ONE session record carries both runs' turns; the store sidecar is
+      // stable, and the workspace still carries NO resume handle.
       const record = await store.load(run1.sessionId as string);
       expect(record?.messages.some((m) => m.role === 'user' && m.content === 'resume run one')).toBe(true);
       expect(record?.messages.some((m) => m.role === 'user' && m.content === 'resume run two')).toBe(true);
       expect(
         record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from cli session ${cliId}`)),
       ).toBe(true);
-      expect((await readFile(join(workspace, CLI_SESSION_FILE), 'utf8')).trim()).toBe(cliId);
+      expect((await readFile(sidecarPath, 'utf8')).trim()).toBe(cliId);
+      await noSidecarInWorkspace();
     });
   });
 
@@ -527,6 +563,207 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(folded.input.path).toBe('note.txt');
       expect(folded.ok).toBe(true);
       expect(folded.output).toBe('hello note');
+    });
+  });
+
+  // -------------------------------------------------------------------------
+
+  test('served-model pricing + mismatch marker: the price lookup gets the SERVED id (#19-1/#24, #19-2)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const pricedKeys: Array<{ provider: string; model: string }> = [];
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' },
+          [],
+        ),
+        pricing: (modelSpec) => {
+          pricedKeys.push({ provider: modelSpec.provider, model: modelSpec.model });
+          return { input: 2, output: 2, cacheRead: 0, cacheWrite: 0 };
+        },
+      });
+      const result = await driver.run(invocation({ prompt: 'served pricing run' }));
+      // WorkerResult.model keeps the observed served id…
+      expect(result.model).toBe('actually-served-model');
+      // …and the price lookup was keyed on the SERVED id with the REQUESTED
+      // provider (pricing the requested id would attribute the wrong rates).
+      expect(pricedKeys).toEqual([{ provider: CONFORMANCE_PROVIDER, model: 'actually-served-model' }]);
+      // usage {10,5,2,3} at 2/2 per million (cache terms 0) = 30 / 1e6.
+      expect(result.costUSD).toBeCloseTo(0.00003, 12);
+      // The mismatch is OBSERVABLE, not silent (issue #19): a narration
+      // marker naming requested and served, persisted via the diagnostics
+      // path (the conformance suite fails this run loudly; production records it).
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"served-model-mismatch"'));
+      expect(marker).toBeDefined();
+      expect(marker).toContain('"requested":"conformance-1"');
+      expect(marker).toContain('"served":"actually-served-model"');
+    });
+  });
+
+  test('CLI token fields must be finite non-negative integers: lying fields fold to 0 (#19-3)', () => {
+    expect(
+      usageFromCli({
+        input_tokens: -200_000,
+        output_tokens: 150_000,
+        cache_read_input_tokens: -3,
+        cache_creation_input_tokens: 2.5,
+      }),
+    ).toEqual({ input: 0, output: 150_000, cacheRead: 0, cacheWrite: 0 });
+    // The bypass is closed: the OLD fold read -50,000 total (negative
+    // input masking real spend), which could never trip `>= maxTokens`;
+    // the tightened fold counts the real magnitude.
+    const lying = usageFromCli({ input_tokens: -200_000, output_tokens: 150_000 });
+    expect(lying).toBeDefined();
+    if (lying === undefined) return;
+    expect(stopReasonOf({ aborted: false, maxTokens: 1000, usage: lying, resultStatus: 'success' })).toBe('budget');
+  });
+
+  test('binary validation: an empty template throws at construction, never at spawn (#19-4)', () => {
+    expect(() => new SubprocessDriver({ binary: [] })).toThrow(
+      /non-empty string or a non-empty array of non-empty strings/,
+    );
+    expect(() => new SubprocessDriver({ binary: ['node', ''] })).toThrow(
+      /non-empty string or a non-empty array of non-empty strings/,
+    );
+    expect(() => new SubprocessDriver({ binary: '' })).toThrow(/non-empty string/);
+    // The valid forms still construct.
+    expect(() => new SubprocessDriver({ binary: 'claude' })).not.toThrow();
+    expect(() => new SubprocessDriver({ binary: ['node', FAKE_CLI] })).not.toThrow();
+  });
+
+  test('a SYNCHRONOUS spawn failure is an error verdict, not a rejection (#19-5)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const throwingSpawn: SpawnFn = () => {
+        throw new TypeError('spawn args must be strings');
+      };
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: throwingSpawn,
+      });
+      // The run RESOLVES with an honest error verdict — the spawn throw is
+      // contained behind the frozen seam.
+      const result = await driver.run(invocation({ prompt: 'boom run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      expect(result.costUSD).toBeUndefined(); // nothing was measured — no cost claim
+      // The failure is narrated best-effort (same swallow rule as persistence).
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"spawn-failed"'));
+      expect(marker).toBeDefined();
+      expect(marker).toContain('spawn args must be strings');
+    });
+  });
+
+  test('grace validation: negative/NaN/Infinity/fractional graces throw at construction (#19-6)', () => {
+    expect(() => new SubprocessDriver({ termGraceMs: -1 })).toThrow(/termGraceMs must be an integer >= 0/);
+    expect(() => new SubprocessDriver({ termGraceMs: Number.NaN })).toThrow(/termGraceMs must be an integer >= 0/);
+    expect(() => new SubprocessDriver({ termGraceMs: Number.POSITIVE_INFINITY })).toThrow(
+      /termGraceMs must be an integer >= 0/,
+    );
+    expect(() => new SubprocessDriver({ termGraceMs: 0.5 })).toThrow(/termGraceMs must be an integer >= 0/);
+    expect(() => new SubprocessDriver({ killGraceMs: -5 })).toThrow(/killGraceMs must be an integer >= 0/);
+    // Zero and positive integers are legitimate.
+    expect(() => new SubprocessDriver({ killGraceMs: 0 })).not.toThrow();
+    expect(() => new SubprocessDriver({ termGraceMs: 100, killGraceMs: 200 })).not.toThrow();
+  });
+
+  test('sandbox-level-unenforced marker: a requested level is recorded as unenforced (#19-7)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      // The default invocation requests workspace-write — the marker must
+      // record that THIS driver does not enforce it (trust statement, header).
+      const result = await driver.run(invocation({ prompt: 'sandbox marker run' }));
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"sandbox-level-unenforced"'));
+      expect(marker).toBeDefined();
+      expect(marker).toContain('"level":"workspace-write"');
+
+      // level 'none' asks for nothing extra → no marker…
+      const noneDriver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const noneResult = await noneDriver.run(invocation({ prompt: 'no sandbox run', sandboxPolicy: { level: 'none' } }));
+      const noneNarration = await narrationOf(store, noneResult.sessionId as string);
+      expect(noneNarration.some((line) => line.includes('"sandbox-level-unenforced"'))).toBe(false);
+      // …and a level over an EMPTY tool surface (mode 'none': nothing
+      // pre-approved, headless-denied) has nothing unenforced to observe —
+      // no marker (the conformance contract also pins such records to zero
+      // tool-role messages).
+      const emptySurface = new SubprocessDriver(baseOptions(scratchDir, {}, []));
+      const emptyResult = await emptySurface.run(
+        invocation({ prompt: 'empty surface run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      const emptyNarration = await narrationOf(store, emptyResult.sessionId as string);
+      expect(emptyNarration.some((line) => line.includes('"sandbox-level-unenforced"'))).toBe(false);
+    });
+  });
+
+  test('abort kills the whole process GROUP: a fixture-spawned grandchild dies with the CLI (#19-9)', async () => {
+    await withScratch(async (scratchDir) => {
+      const pidFile = join(scratchDir, 'grandchild.pid');
+      const calls: SpawnCall[] = [];
+      // The binary template carries the fixture-only probe flag: the CLI
+      // spawns a sleeping grandchild in ITS process group and records the
+      // pid, then ignores SIGTERM (forcing the SIGKILL rung).
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ignore-sigterm' }, calls),
+        binary: ['node', FAKE_CLI, '--spawn-grandchild', pidFile],
+        termGraceMs: 200,
+        killGraceMs: 200,
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation({ prompt: 'group kill run' })),
+        { wallClockMs: 1000 },
+        { op: 'subprocess', jobKey: 'subprocess-group', attempt: 1 },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.value.stopReason).toBe('aborted');
+
+      // The grandchild pid was recorded; after the group kill it is DEAD —
+      // poll process.kill(pid, 0) until ESRCH. A direct-child-only kill
+      // would leave the (non-detached, group-inheriting) grandchild running.
+      const grandchildPid = Number((await readFile(pidFile, 'utf8')).trim());
+      expect(Number.isInteger(grandchildPid) && grandchildPid > 0).toBe(true);
+      let dead = false;
+      for (let i = 0; i < 200 && !dead; i++) {
+        try {
+          process.kill(grandchildPid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        } catch {
+          dead = true; // ESRCH — the process is gone
+        }
+      }
+      expect(dead).toBe(true);
+    });
+  }, 30_000);
+
+  test('stdout retention is a bounded TAIL: droppedBytes counted, every line still observed (#19-10)', async () => {
+    await withScratch(async (scratchDir) => {
+      const cap = 64 * 1024;
+      const lines = 20_000;
+      const last = `line-${String(lines - 1).padStart(8, '0')}`;
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '-e',
+          `for (let i = 0; i < ${lines}; i++) process.stdout.write('line-' + String(i).padStart(8, '0') + '\\n');`,
+        ],
+        cwd: scratchDir,
+        maxRetainedBytes: cap,
+      });
+      const seen: string[] = [];
+      child.onStdoutLine((line) => seen.push(line));
+      const close = await child.close;
+      // The buffer is evidence HYGIENE: past the cap only the tail is kept…
+      expect(close.droppedBytes).toBeGreaterThan(0);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(cap);
+      expect(close.stdout.endsWith(`${last}\n`)).toBe(true); // …the END of the stream
+      // …while the line callbacks saw EVERY line.
+      expect(seen).toHaveLength(lines);
+      expect(seen[0]).toBe('line-00000000');
+      expect(seen[lines - 1]).toBe(last);
+      // The shipped default.
+      expect(DEFAULT_MAX_RETAINED_BYTES).toBe(1_048_576);
     });
   });
 });

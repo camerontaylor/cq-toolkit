@@ -160,22 +160,47 @@ Argv surface (headless reference): `-p` (prompt rides stdin),
 print mode without it — found live, CLI 2.1.270, T1.6 slice 4),
 `--json-schema <schema>` when
 `outputSchema` is set, `--allowedTools <names>` (ALWAYS present — the
-harness tool surface ∩ the frozen ToolPolicy; an empty value with
-`--permission-prompts none` is exactly mode `none`), `--permission-prompts
-none`, `--bare`, `--model <route.model>`, and `--resume <cli-session-id>`
-on sessionRef resume.
+harness tool surface ∩ the frozen ToolPolicy; an empty value is exactly
+mode `none`: headless `-p` mode cannot prompt, so a tool outside
+`--allowedTools` is denied by the CLI, and those CLI-side denials are the
+source of `WorkerResult.denials`), `--model <route.model>`, and
+`--resume <cli-session-id>` on sessionRef resume. No undocumented flags:
+`--permission-prompts none` and `--bare` were removed (issue #19) — the
+real CLI rejects them at argv parse.
+
+TRUST STATEMENT (issue #28's subprocess half): `sandboxPolicy` governs the
+tool-NAME surface only — the harness sandbox/path/output restrictions are
+not enforced by this driver. The CLI is an independent process with its own
+permission model; run/sandbox confinement is the host CLI's business
+(`--allowedTools` controls which tools may run, never where or how). When
+`sandboxPolicy.level` is not `none` AND a tool surface was actually
+exposed, the run records a `sandbox-level-unenforced` narration marker so
+the unenforced request is observable per run (a mode-`none` run exposes
+nothing pre-approved — headless-denied — so there is nothing unenforced to
+observe, and the shared conformance contract pins such records to zero
+tool-role messages).
 
 Event mapping (stream-json → seam): init `session_id` → CLI session id
-(persisted post-settle to the workspace sidecar file `.cq-cli-session`
-(`CLI_SESSION_FILE` in `index.ts`) — the resume handle passed as
-`--resume` on the next run over the same sessionRef; a missing or
-unreadable sidecar means an honest workspace-only continuation); assistant text
-→ transcript; errored `tool_result` events → frozen
-`{tool, reason}` denials; the terminal `result` event → frozen Usage
-(`input_tokens`/`output_tokens`/`cache_read_input_tokens`/
+(persisted post-settle to the sessions-store sidecar
+`<sessionsDir>/<sessionId>.cq-cli-session` (`CLI_SESSION_FILE` in
+`index.ts`) — see the isolation paragraph for why it no longer lives in the
+workspace); init/result `model` → the OBSERVED served model id, surfaced as
+`WorkerResult.model`; assistant text → transcript; errored `tool_result`
+events → frozen `{tool, reason}` denials; the terminal `result` event →
+frozen Usage (`input_tokens`/`output_tokens`/`cache_read_input_tokens`/
 `cache_creation_input_tokens`), `structured_output` →
 `structuredOutput`, status → stopReason. Non-JSON lines become narration
 (`toolName:'cli-narration'`), never a crash.
+
+Pricing attribution: `costUSD` is derived over the OBSERVED served model id
+(`{ ...modelSpec, model: servedModel ?? modelSpec.model }`; the provider
+handle stays `modelSpec.provider`) — a gateway that silently remaps is
+priced off the id the CLI actually reported, and pricing the requested id
+would attribute the wrong rates. A served/reported mismatch with the
+requested id is recorded as a `served-model-mismatch` narration marker
+(issue #19): the conformance suite fails a mismatching run loudly (leg m);
+production runs record the mismatch and price off the served id. Absent
+when the map does not know the served id — the driver never fabricates USD.
 
 Budget mapping (I8, the honest floor): a headless CLI has no mid-run
 token hook — `Budget.maxTokens` is checked only against the folded
@@ -186,15 +211,32 @@ ladder (the driver forwards its signal to the kill ladder only);
 accounting. Stop reasons: governed abort → `aborted`; folded usage ≥
 `maxTokens` → `budget`; result `success` → `complete`; any other result
 status, no result event, or a spawn failure → `error`. Once spawned,
-`run()` never throws past the seam.
+`run()` never throws past the seam — and a SYNCHRONOUS spawn failure is a
+verdict too: it returns stopReason `error` with the failure narrated,
+never a rejection.
 
 Isolation (I6): no `sessionRef` → fresh temp workspace +
 `SessionStore.create` (cwd = workspace); `sessionRef` →
 `SessionStore.load` resumes the SAME workspace and passes `--resume`
-when the workspace carries the CLI session sidecar (a sidecar-less
-workspace resumes the workspace only — an honest partial continuation); unknown
+when the sessions store carries the CLI session sidecar for that
+sessionId (`<sessionsDir>/<sessionId>.cq-cli-session`, issue #26 design
+(b) — RELOCATED out of the model-visible workspace, whose earlier
+sidecar placement let the model read or alter its own resume handle
+through the very tools the policy hands it; keyed by sessionId it is
+exactly as precise and out of reach); a sidecar-less session resumes the
+workspace only — an honest partial continuation; unknown
 sessionRef throws. Session turns persist in our `SessionMessage`
 vocabulary only.
+
+Process groups (#19): on POSIX the child is spawned `detached` (its own
+process-group leader) and the driver's kill signals the WHOLE group
+(`process.kill(-pid)`), so agent-spawned descendants die with the CLI;
+Windows has no Job Object in v1 (descendants can survive there —
+recorded limitation in `src/driver/subprocess/process.ts`). Stdout/stderr
+retention is bounded to a 1 MiB tail (`DEFAULT_MAX_RETAINED_BYTES`,
+`SpawnOptions.maxRetainedBytes`) with the dropped byte count on
+`ProcessClose.droppedBytes` — the verdict path folds evidence from the
+line callbacks, so the cap bounds the buffer, never the evidence.
 
 ## First-party driver: `claude-agent` (T1.6)
 

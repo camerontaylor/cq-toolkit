@@ -20,11 +20,29 @@
 // map merged over process.env (the CLI needs PATH/HOME etc. to function);
 // per-Route vars (endpoint base URL, auth token) ride that override map.
 //
+// PROCESS GROUPS (issue #19): on POSIX the child is spawned `detached` —
+// it becomes the leader of its OWN process group, so a kill can take the
+// WHOLE group down (`process.kill(-pid)`) and agent-spawned descendants die
+// with the CLI instead of surviving it. WINDOWS LIMITATION (recorded): no
+// Job Object in v1 — `detached` is not set there and descendants can
+// survive a kill; closing that gap is a later lane's business.
+//
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+
+/** POSIX gets process-group semantics; Windows has no Job Object in v1 (header). */
+const POSIX = process.platform !== 'win32';
+
+/**
+ * The stdout/stderr RETENTION cap (issue #19): the verdict path folds
+ * evidence from the LINE callbacks, so the whole-stream buffers are
+ * diagnostics hygiene only — past this cap the collector retains the TAIL
+ * and counts what it dropped (exposed as `ProcessClose.droppedBytes`).
+ */
+export const DEFAULT_MAX_RETAINED_BYTES = 1_048_576; // 1 MiB
 
 // ---------------------------------------------------------------------------
 // spawnManaged — the managed child
@@ -42,6 +60,13 @@ export interface SpawnOptions {
   env?: Readonly<Record<string, string>>;
   /** When set, written to the child's stdin and the pipe closed (prompt piping). */
   stdin?: string;
+  /**
+   * Stdout/stderr TAIL retention cap in bytes (issue #19). Default
+   * DEFAULT_MAX_RETAINED_BYTES; past the cap the head is dropped and its
+   * byte count reported on `ProcessClose.droppedBytes` — line callbacks
+   * still see every line.
+   */
+  maxRetainedBytes?: number;
 }
 
 /** How the child process closed, with everything the driver harvested. */
@@ -52,10 +77,12 @@ export interface ProcessClose {
   signal: NodeJS.Signals | null;
   /** Set when the process never ran (e.g. ENOENT — a missing binary). */
   spawnError?: Error;
-  /** Complete collected stdout. */
+  /** The retained stdout TAIL (≤ maxRetainedBytes) — evidence hygiene, NOT the whole stream. */
   stdout: string;
-  /** Complete collected stderr. */
+  /** The retained stderr TAIL (≤ maxRetainedBytes) — evidence hygiene, NOT the whole stream. */
   stderr: string;
+  /** Total bytes dropped off the two streams' heads by the retention cap. */
+  droppedBytes: number;
 }
 
 /**
@@ -83,22 +110,48 @@ export interface ManagedChild {
   kill(signal: NodeJS.Signals): boolean;
 }
 
-/** Whole-text accumulation + line streaming for one stdio pipe. */
+/** Whole-text TAIL retention + line streaming for one stdio pipe. */
 interface StreamCollector {
   onChunk(chunk: string): void;
   /** Emit a final unterminated line at close (a truncated stream is still evidence). */
   flush(): void;
-  /** The complete collected text. */
+  /** The retained TAIL (≤ the retention cap) — evidence hygiene, not the whole stream. */
   readonly text: string;
+  /** Bytes dropped off the HEAD once the retention cap was hit. */
+  readonly droppedBytes: number;
 }
 
-/** Collect one pipe's text and stream its complete lines (no trailing newline) to listeners. */
-function createCollector(listeners: Array<(line: string) => void>): StreamCollector {
-  let all = '';
+/**
+ * Collect one pipe's text and stream its complete lines (no trailing
+ * newline) to listeners. Retention is bounded (issue #19): only the TAIL up
+ * to `maxRetainedBytes` is kept — past the cap the head is dropped and
+ * counted. The LINE listeners always see every line: the cap bounds the
+ * buffer, never the evidence stream.
+ */
+function createCollector(
+  listeners: Array<(line: string) => void>,
+  maxRetainedBytes: number,
+): StreamCollector {
+  let tail = '';
+  let tailBytes = 0;
+  let droppedBytes = 0;
   let rest = '';
+  // Trim the retained tail back under the cap, cutting whole characters off
+  // the head; the dropped count is measured in real bytes (Buffer.byteLength).
+  const trimToCap = (): void => {
+    if (tailBytes <= maxRetainedBytes) return;
+    let cut = 0;
+    let cutBytes = 0;
+    while (cut < tail.length && tailBytes - cutBytes > maxRetainedBytes) {
+      cutBytes += Buffer.byteLength(tail[cut]);
+      cut += 1;
+    }
+    droppedBytes += cutBytes;
+    tail = tail.slice(cut);
+    tailBytes -= cutBytes;
+  };
   return {
     onChunk(chunk: string): void {
-      all += chunk;
       rest += chunk;
       let index = rest.indexOf('\n');
       while (index !== -1) {
@@ -107,15 +160,27 @@ function createCollector(listeners: Array<(line: string) => void>): StreamCollec
         for (const listener of listeners) listener(line);
         index = rest.indexOf('\n');
       }
+      tail += chunk;
+      tailBytes += Buffer.byteLength(chunk);
+      trimToCap();
     },
     flush(): void {
       if (rest !== '') {
-        for (const listener of listeners) listener(rest);
+        const finalLine = rest;
         rest = '';
+        // Retention bookkeeping FIRST, then the line is emitted to listeners
+        // IN FULL — the cap bounds the buffer, never the evidence stream.
+        tail += finalLine;
+        tailBytes += Buffer.byteLength(finalLine);
+        trimToCap();
+        for (const listener of listeners) listener(finalLine);
       }
     },
     get text(): string {
-      return all;
+      return tail;
+    },
+    get droppedBytes(): number {
+      return droppedBytes;
     },
   };
 }
@@ -124,13 +189,17 @@ function createCollector(listeners: Array<(line: string) => void>): StreamCollec
  * Spawn the CLI headless: no shell, piped stdio, cwd = workspace, env
  * overrides per Route. Stdout is split into complete lines (streamed to
  * listeners as they arrive; a final unterminated line is flushed at close)
- * and also accumulated whole on the `close` result; stderr likewise.
+ * and retained as a bounded TAIL on the `close` result; stderr likewise.
+ * On POSIX the child is spawned DETACHED — the leader of its own process
+ * group — so `kill` can take descendants down with it (header; Windows
+ * limitation recorded there).
  */
 export function spawnManaged(opts: SpawnOptions): ManagedChild {
   const stdoutListeners: Array<(line: string) => void> = [];
   const stderrListeners: Array<(line: string) => void> = [];
-  const stdout = createCollector(stdoutListeners);
-  const stderr = createCollector(stderrListeners);
+  const maxRetainedBytes = opts.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES;
+  const stdout = createCollector(stdoutListeners, maxRetainedBytes);
+  const stderr = createCollector(stderrListeners, maxRetainedBytes);
   let spawnError: Error | undefined;
   let exited = false;
 
@@ -138,6 +207,10 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     cwd: opts.cwd,
     shell: false, // driver-built argv — nothing is ever re-interpreted by a shell
     stdio: ['pipe', 'pipe', 'pipe'],
+    // POSIX: the child becomes its own process-group leader, so the group
+    // kill below reaches agent-spawned descendants too. Windows: not set —
+    // no Job Object in v1, descendants can survive (header).
+    ...(POSIX ? { detached: true } : {}),
     ...(opts.env !== undefined ? { env: { ...process.env, ...opts.env } } : {}),
   });
 
@@ -166,6 +239,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       ...(spawnError !== undefined ? { spawnError } : {}),
       stdout: stdout.text,
       stderr: stderr.text,
+      droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
     });
   });
 
@@ -198,6 +272,19 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       child.stdin.end();
     },
     kill(signal: NodeJS.Signals): boolean {
+      // GROUP KILL (issue #19): the child leads its own process group on
+      // POSIX (spawned detached), so signal the WHOLE group first —
+      // agent-spawned descendants die with it — falling back to the direct
+      // child when there is no pid or the group kill throws (group already
+      // gone). Windows: no detached spawn in v1, direct child only (header).
+      if (POSIX && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal);
+          return true;
+        } catch {
+          // fall through — the direct kill below decides delivery
+        }
+      }
       try {
         return child.kill(signal); // ChildProcess.kill needs no IPC channel
       } catch {

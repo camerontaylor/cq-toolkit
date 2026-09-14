@@ -4,9 +4,10 @@
 //
 // It speaks the headless contract the driver parses (src/driver/subprocess):
 //
-//   argv:  -p   --output-format stream-json   --json-schema <json>
+//   argv:  -p   --output-format stream-json   --verbose?  --json-schema <json>
 //          --allowedTools <space-separated names>
-//          --permission-prompts none   --bare   --model <id>   --resume <id>
+//          --model <id>   --resume <id>
+//          --spawn-grandchild <file>   (fixture-only probe flag, see below)
 //   stdin: the prompt (read to EOF; the content steers nothing — the script
 //          below is the model).
 //   stdout: one JSON event per line —
@@ -19,7 +20,7 @@
 //     {type:'result', subtype:'success', is_error:false, session_id, usage,
 //      model, structured_output?}
 //   stderr: diagnostics. Exit 0 on a completed run, non-zero on a simulated
-//   hard failure.
+//   hard failure (via process.exitCode, so stdio flushes).
 //
 // SCRIPTED BEHAVIOR (env FAKE_AGENT_MODE, values below) — the default is a
 // clean 'ok' completion with fixed usage numbers:
@@ -59,10 +60,17 @@
 //                    SIGKILL rung), block-until-abort keeps the DEFAULT
 //                    disposition (dies on SIGTERM — the graceful rung)
 //
+// FIXTURE-ONLY PROBE FLAG (--spawn-grandchild <file>, issue #19): with the
+// flag set (any mode), the CLI spawns a SLEEPING GRANDCHILD that inherits
+// the CLI's process group, records the grandchild's pid into <file>, and
+// stays alive itself — the descendant-survival probe for the driver's
+// process-group kill (a direct-child-only kill leaves the grandchild
+// running; a group kill takes it down).
+//
 // Fixed usage everywhere: {input_tokens:10, output_tokens:5,
 // cache_read_input_tokens:2, cache_creation_input_tokens:3} (budget-usage
 // overrides the numbers, not the shape).
-import { exec } from 'node:child_process';
+import { exec, spawn } from 'node:child_process';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import process from 'node:process';
@@ -88,6 +96,7 @@ const SERVED_MODEL = process.env.FAKE_AGENT_SERVED_MODEL;
 const STRUCTURED_RAW = process.env.FAKE_AGENT_STRUCTURED_RAW;
 const resumeId = flagValue('--resume');
 const jsonSchemaRaw = flagValue('--json-schema');
+const spawnGrandchildPath = flagValue('--spawn-grandchild');
 const model = flagValue('--model') ?? 'fake-model';
 const servedModel = SERVED_MODEL ?? model; // the endpoint's response model — a remap simulation overrides it
 
@@ -323,14 +332,36 @@ async function main() {
 
   if (MODE === 'unknown-model') {
     err(`fake-agent-cli: model '${model}' is not served by this endpoint; serving the endpoint default instead`);
-    process.exit(1);
+    // exitCode, not exit(): stdout/stderr flush before the process reaps.
+    process.exitCode = 1;
+    return;
   }
   if (MODE === 'fail') {
     err('fake-agent-cli: simulated hard failure before any result');
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   emitInit();
+
+  // The descendant-survival probe (header): a sleeping grandchild in THIS
+  // process group, its pid recorded for the test's liveness poll. The CLI
+  // stays alive afterwards — the governed ladder decides when it dies.
+  if (spawnGrandchildPath !== undefined) {
+    const grandchild = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)'], {
+      stdio: 'ignore', // SAME process group (not detached) — that is the point
+    });
+    grandchild.unref();
+    try {
+      await writeFile(spawnGrandchildPath, String(grandchild.pid), 'utf8');
+    } catch {
+      err('fake-agent-cli: could not record the grandchild pid');
+      process.exitCode = 1;
+      return;
+    }
+    keepAlive();
+    return;
+  }
 
   if (MODE === 'ignore-sigterm') {
     keepAlive();
@@ -406,5 +437,5 @@ async function main() {
 
 main().catch((err_) => {
   err(`fake-agent-cli: ${messageOf(err_)}`);
-  process.exit(1);
+  process.exitCode = 1; // no exit(): let stdio flush before the reaper
 });
