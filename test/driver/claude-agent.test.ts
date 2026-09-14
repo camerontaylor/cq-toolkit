@@ -649,15 +649,24 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       // A misbehaving agent that IGNORES the wired cancellation root: the
-      // for-await loop settles cleanly (no abort-shaped throw), but the
-      // governed signal FIRED mid-run — the mapping table says a fired
-      // governed signal → 'aborted', so 'complete' would be a false verdict.
+      // for-await loop settles cleanly (no abort-shaped throw), but ONLY
+      // after the governed signal has actually fired (the generator waits
+      // for the signal itself — deterministic under any machine load, no
+      // fixed-sleep race). The mapping table says a fired governed signal →
+      // 'aborted', so 'complete' would be a false verdict.
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
           query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
             (async function* () {
-              await new Promise((resolve) => setTimeout(resolve, 80)); // outlives the 20ms rung-1 wall clock
+              const signal = (options['abortController'] as { signal?: AbortSignal } | undefined)?.signal;
+              if (signal !== undefined) {
+                await new Promise<void>((resolve) => {
+                  if (signal.aborted) resolve();
+                  else signal.addEventListener('abort', () => resolve(), { once: true });
+                });
+                await new Promise((resolve) => setTimeout(resolve, 10)); // a tick past the abort
+              }
               yield { type: 'system', subtype: 'init', session_id: 'agent-cli-clean', model: options['model'] };
               yield {
                 type: 'assistant',
