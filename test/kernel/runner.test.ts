@@ -15,7 +15,7 @@
 // p-limit actually caps in-flight work (high-water === concurrency), usage
 // reconstruction + rollup from a replayed journal, and report
 // JSON-serializability.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
@@ -95,15 +95,15 @@ function viewWith(...entries: OpRegistryEntry<never, never>[]): OpRegistryView {
 
 const DEFAULT_VIEW = (): OpRegistryView => viewWith(entry('fake', jobInputSchema, makeFake().op));
 
-/** n-job chain j1..jn over the 'fake' op; input carries the job id. */
-function chainPlan(id: string, n: number): Plan {
+/** n-job chain over the 'fake' op; input carries the job id. Job ids are `<prefix><i>` (prefix defaults to 'j'). */
+function chainPlan(id: string, n: number, prefix = 'j'): Plan {
   return {
     id,
     jobs: Array.from({ length: n }, (_, i) => {
-      const jobId = `j${i + 1}`;
+      const jobId = `${prefix}${i + 1}`;
       return i === 0
         ? { id: jobId, op: 'fake', input: { jobId } }
-        : { id: jobId, op: 'fake', input: { jobId }, dependsOn: [`j${i}`] };
+        : { id: jobId, op: 'fake', input: { jobId }, dependsOn: [`${prefix}${i}`] };
     }),
   };
 }
@@ -326,6 +326,18 @@ describe('runPlan — execution semantics', () => {
     await expect(
       runPlan(plan, { concurrency: 1, stopOnError: false }, DEFAULT_VIEW()),
     ).rejects.toThrow(/cycle/);
+  });
+
+  test('resume:true without journalDir throws before anything is generated or journaled', async () => {
+    const { state, op } = makeFake();
+    await expect(
+      runPlan(
+        chainPlan('plan-nojournaldir', 2),
+        { concurrency: 1, stopOnError: false, resume: true }, // no journalDir
+        viewWith(entry('fake', jobInputSchema, op)),
+      ),
+    ).rejects.toThrow(/resume: true requires journalDir/);
+    expect(state.calls).toEqual([]); // no op ever ran
   });
 
   test('unknown op name fails that job at execution time with a clear error', async () => {
@@ -591,6 +603,80 @@ describe('runPlan — report shape and replay details', () => {
     );
     expect(state.calls).toEqual(['j1', 'j2']);
     expect(report.counts.done).toBe(2);
+  });
+
+  test('two plans share one journalDir: resuming A skips only A; B stays untouched', async () => {
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    // Distinct job-id prefixes so a wrong plan match could not silently skip.
+    const planA = chainPlan('plan-alpha', 3, 'a');
+    const planB = chainPlan('plan-beta', 3, 'b');
+    const reportA1 = await runPlan(
+      planA,
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    const reportB1 = await runPlan(
+      planB,
+      { concurrency: 1, stopOnError: false, journalDir: dir }, // B's run is NEWER
+      registry,
+    );
+    const log = openRunLog(dir);
+    const eventsB1 = await log.read(reportB1.runId);
+    // Force deterministic mtimes (real resolution can tie); A2's file gets a
+    // real (far later) mtime, so it must sort last.
+    const at = (ms: number): Date => new Date(ms);
+    await utimes(join(dir, `${reportA1.runId}.ndjson`), at(1000), at(1000));
+    await utimes(join(dir, `${reportB1.runId}.ndjson`), at(2000), at(2000));
+    const runsBefore = await log.runs();
+    expect(runsBefore).toEqual([reportA1.runId, reportB1.runId]);
+
+    // Resume A: only A has prior records for jobs a1..a3 — all skip, zero
+    // invocations; B's journal file is byte-identical afterwards.
+    state.calls = [];
+    const reportA2 = await runPlan(
+      planA,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+    );
+    expect(state.calls).toEqual([]);
+    expect(reportA2.counts.done).toBe(3);
+    await expect(log.runs()).resolves.toEqual([...runsBefore, reportA2.runId]);
+    await expect(log.read(reportB1.runId)).resolves.toEqual(eventsB1);
+    // A's new run attested all three skips without dispatching.
+    const eventsA2 = await log.read(reportA2.runId);
+    expect(eventsA2.filter((event) => event.type === 'job-started')).toHaveLength(0);
+    expect(jobFinishes(eventsA2)).toHaveLength(3);
+    // Sanity: the two fresh runs really were distinct files.
+    expect(reportA1.runId).not.toBe(reportB1.runId);
+  });
+
+  test('torn tail composes with resume: a crashed run with a torn last line resumes cleanly', async () => {
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    const plan = chainPlan('plan-torn-resume', 8);
+    state.crashOn.add('j5');
+    const report1 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true, journalDir: dir },
+      registry,
+    );
+    // Simulate a crash mid-append on run 1's journal file (torn LAST line).
+    await appendFile(join(dir, `${report1.runId}.ndjson`), '{"type":"run-finis', 'utf8');
+
+    state.calls = [];
+    state.crashOn.clear();
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true, journalDir: dir, resume: true },
+      registry,
+    );
+    // Torn line ignored; the failed job (j5) plus the unstarted ones (j6-j8)
+    // re-ran — exactly 4 invocations; everything ends done.
+    expect(state.calls).toEqual(['j5', 'j6', 'j7', 'j8']);
+    expect(state.calls.length).toBe(4);
+    expect(report2.counts.done).toBe(8);
+    expect(report2.counts.failed).toBe(0);
   });
 
   test('replayed outcomes reconstruct usage and roll it up (usage only ever comes from the journal)', async () => {

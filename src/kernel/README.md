@@ -37,7 +37,11 @@ These types are the GLOBAL freeze point for the toolkit; the frozen surface
 is tagged `types-freeze-v1`. After the tag, any change to a frozen name,
 field, status value, or schema is a separate migration PR with its own
 review — never an edit folded into a later goal. Serializability is pinned
-by `test/kernel/types.test.ts`.
+by `test/kernel/types.test.ts`. Recorded fold-ins from a previous PR's
+accepted-at-merge record (for instance PR 7's `concurrency .min(1)` → T1.2)
+are the one exception in MECHANISM only: they are executed as
+mirror-tightenings with provenance comments, never as frozen-shape changes
+(which always need their own migration PR).
 
 ## Vendor neutrality (invariant I10)
 
@@ -92,3 +96,7 @@ reason" clause):
   preceding `job-started` (no dispatch happened; the verified inputsHash
   makes the attestation sound). This keeps each run's journal
   self-contained so the latest-run rule survives chained resumes.
+- `stopOnError` leaving jobs unstarted does NOT set `stoppedEarly`: the
+  frozen `RunEarlyStopReason` only contains `'budget'`, and honest-stop
+  marking is T1.3's — callers read `counts.queued`/`counts.blocked` to see
+  what never ran.

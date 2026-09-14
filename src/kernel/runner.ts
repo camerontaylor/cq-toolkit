@@ -19,6 +19,9 @@
 //   4. topoOrder waves over the schedulable remainder; a cycle throws (an
 //      unschedulable plan is plan corruption). Waves run in order through one
 //      p-limit pool with EXACTLY opts.concurrency (the one integer knob).
+//      Trade-off, named: wave barriers buy deterministic order at a
+//      throughput cost — a slow job delays the next wave even when other
+//      jobs' dependencies are already ready.
 //   5. A job is ready iff all dependsOn ended `ok`. Any dep not ok (failed,
 //      blocked, …) → the job is blocked and NOT executed.
 //   6. stopOnError: after the first non-ok RESULT, no further job is STARTED;
@@ -26,7 +29,9 @@
 //      p-limit actually starts them). Jobs never started are classified in a
 //      final sweep (see counts policy below).
 //
-// Replay (opts.resume === true AND journalDir set): find the LATEST prior run
+// Replay (opts.resume === true — which REQUIRES journalDir; requesting resume
+// without one throws before a runId exists or anything is journaled): find
+// the LATEST prior run
 // for this planId in the dir (runs() is oldest-first; matched on the
 // run-started event's planId — the frozen RunStartedJournalEvent DOES carry
 // planId, so no prefix matching is needed). A job whose latest prior
@@ -198,6 +203,10 @@ export async function runPlan(
 ): Promise<RunReport> {
   if (!Number.isInteger(opts.concurrency) || opts.concurrency < 1) {
     throw new Error(`runPlan: concurrency must be an integer >= 1, got ${opts.concurrency}`);
+  }
+  // Before any state exists: no runId generated, nothing journaled.
+  if (opts.resume === true && opts.journalDir === undefined) {
+    throw new Error('runPlan: resume: true requires journalDir (there is nothing to replay from)');
   }
 
   const runId = makeRunId(plan.id);

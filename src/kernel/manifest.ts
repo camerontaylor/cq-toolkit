@@ -72,8 +72,11 @@ export function hashInputs(op: string, input: unknown): string {
 /**
  * Commit a plan to its manifest: same jobs, same order, with `dependsOn`
  * normalized to `[]` when absent and each job's `inputsHash` computed over
- * its {op, input}. The manifest never aliases plan-owned arrays (deep-copy of
- * dependsOn), so mutating the plan afterwards cannot mutate a committed run.
+ * its {op, input}. The manifest never aliases plan-owned data — `dependsOn`
+ * is copied AND `input` is deep-copied (inputs are contractually plain JSON,
+ * so a structuredClone snapshot is lossless) — meaning a committed run cannot
+ * be changed by mutating the plan afterwards, and the hash committed at
+ * manifest time stays the hash of the input that will be dispatched.
  */
 export function makeManifest(plan: Plan): RunManifest {
   return {
@@ -81,7 +84,7 @@ export function makeManifest(plan: Plan): RunManifest {
     jobs: plan.jobs.map((job) => ({
       id: job.id,
       op: job.op,
-      input: job.input,
+      input: structuredClone(job.input),
       inputsHash: hashInputs(job.op, job.input),
       dependsOn: [...(job.dependsOn ?? [])],
     })),

@@ -164,6 +164,19 @@ describe('makeManifest', () => {
     expect(plan.jobs.find((job) => job.id === 'a')?.dependsOn).toBeUndefined();
   });
 
+  test('deep-copies job input at commit: mutating the plan afterwards changes neither manifest nor hash', () => {
+    const plan = diamondPlan();
+    const manifest = makeManifest(plan);
+    const hashBefore = manifest.jobs[0]?.inputsHash;
+
+    // Mutate the plan-owned input object AFTER the commit.
+    const planInput = plan.jobs[0]?.input as { n: number };
+    planInput.n = 999;
+
+    expect((manifest.jobs[0]?.input as { n: number }).n).toBe(3); // snapshot untouched
+    expect(manifest.jobs[0]?.inputsHash).toBe(hashBefore); // committed hash is the hash of the committed input
+  });
+
   test('carries only {planId, jobs} — the plan label is not load-bearing', () => {
     const manifest: RunManifest = makeManifest(diamondPlan());
     expect(Object.keys(manifest)).toEqual(['planId', 'jobs']);
