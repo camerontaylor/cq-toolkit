@@ -76,6 +76,17 @@
 //                         reference vendor sends numbers) — the answer
 //                         must echo the id verbatim or the round-trip
 //                         never completes and the turn hangs
+//   FAKE_ACP_CLOSE_STDIN_ON_PERMISSION  when '1', the fixture DESTROYS its
+//                         own stdin the moment a session/request_permission
+//                         goes out and KEEPS RUNNING — the driver's answer
+//                         write fails (EPIPE) with the prompt still pending
+//                         (the broken-enforcement-channel scenario; the
+//                         run must settle 'error', never hang)
+//   FAKE_ACP_IGNORE_CANCEL  when '1', session/cancel is SWALLOWED — the
+//                         turn never settles protocol-side (a vendor that
+//                         ignores the cooperative cancel; the governed
+//                         kill rung must still reach the child and settle
+//                         the run 'aborted')
 //   ok               materialization updates + reply (FAKE_ACP_REPLY ??
 //                    'ok') + end_turn with usage
 //   tool-then-reply  ONE gated tool call: request_permission round-trip
@@ -104,6 +115,7 @@
 // by the driver's usage-mapping test as { input: 10, output: 5,
 // cacheRead: 2, cacheWrite: 3 } with NO reasoning field.
 import { exec } from 'node:child_process';
+import { closeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve, sep } from 'node:path';
 import process from 'node:process';
@@ -124,6 +136,8 @@ const REPLAY_WITH_TAIL = process.env.FAKE_ACP_REPLAY_WITH_TAIL === '1';
 const NO_LOADSESSION = process.env.FAKE_ACP_NO_LOADSESSION === '1';
 const ADVERTISE_RESUME = process.env.FAKE_ACP_RESUME === '1';
 const STRING_REQUEST_IDS = process.env.FAKE_ACP_STRING_REQUEST_IDS === '1';
+const CLOSE_STDIN_ON_PERMISSION = process.env.FAKE_ACP_CLOSE_STDIN_ON_PERMISSION === '1';
+const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === '1';
 
 // The POST-load tail marker (FAKE_ACP_REPLAY_WITH_TAIL=1): emitted in the
 // SAME stdout flush as the session/load response line, so it post-dates
@@ -270,7 +284,7 @@ function askPermission(toolCallId, title, input, onAnswered) {
   const options = offeredOptions();
   const id = STRING_REQUEST_IDS ? `perm_${serverRequestId++}` : serverRequestId++;
   pendingPermission = { id, onAnswered };
-  send({
+  const frame = {
     jsonrpc: '2.0',
     id,
     method: 'session/request_permission',
@@ -279,7 +293,29 @@ function askPermission(toolCallId, title, input, onAnswered) {
       toolCall: { toolCallId, rawInput: input, title, content: [], locations: [] },
       options,
     },
-  });
+  };
+  if (CLOSE_STDIN_ON_PERMISSION) {
+    // The broken-enforcement-channel scenario: the vendor closes its INPUT
+    // pipe as the ask goes out but KEEPS RUNNING. destroy() alone does NOT
+    // close fd 0 (Node never closes stdin's fd — the parent's writes would
+    // still succeed), so the REAL close happens after the stream's 'close'
+    // event releases libuv's handle: closeSync(0). The ask goes out only
+    // AFTER that, so the driver's answer write deterministically EPIPEs
+    // while this process stays alive (the 'end' exit handler never fires —
+    // destroy is not EOF).
+    errLine("fake-acp-server: closing stdin on the permission ask (the driver's answer write must fail)");
+    process.stdin.once('close', () => {
+      try {
+        closeSync(0);
+      } catch {
+        // already gone — nothing left to simulate
+      }
+      send(frame);
+    });
+    process.stdin.destroy();
+    return;
+  }
+  send(frame);
 }
 
 function kindOfOptionId(optionId, options) {
@@ -633,6 +669,7 @@ function onFrame(frame) {
       return;
     }
     case 'session/cancel':
+      if (IGNORE_CANCEL) return; // the non-compliant vendor: the cancel is swallowed, the turn never settles protocol-side
       // The probed cancel settle: the ORIGINAL prompt request answers
       // 'cancelled' with usage null (§2.3: settle on the cancelled
       // RESPONSE, never on the cancel write).

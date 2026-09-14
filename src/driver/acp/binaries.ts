@@ -180,8 +180,25 @@ function installHintFor(binary: string, table: AcpEndpointTable): string {
   return entry?.installHint ?? 'install the harness binary and ensure it is on PATH (see docs/acp-driver.md)';
 }
 
+/**
+ * A path-carrying command candidate — EITHER separator counts (Codex P2).
+ * `sep` is '\\' on Windows, but Node also accepts '/' there: the
+ * documented './bin/acp-server' form would miss a sep-only test, fall
+ * through to the PATH walk, and get joined to every PATH dir. Exported
+ * for the resolution tests; the suite runs on ubuntu/macOS (where sep IS
+ * '/'), so the backslash half of the check is inert on this host — it is
+ * correctness for the documented Windows case, not locally observable
+ * behavior.
+ */
+export function carriesPathSeparator(candidate: string): boolean {
+  return candidate.includes('/') || candidate.includes(sep);
+}
+
 function basenameOf(pathValue: string): string {
-  const index = pathValue.lastIndexOf(sep);
+  // The same either-separator rule as carriesPathSeparator: a Windows
+  // form like './bin/acp-server' must yield 'acp-server' for the
+  // install-hint basename match (hint quality only — but the same bug).
+  const index = Math.max(pathValue.lastIndexOf('/'), pathValue.lastIndexOf(sep));
   return index === -1 ? pathValue : pathValue.slice(index + 1);
 }
 
@@ -191,13 +208,15 @@ async function resolveBinary(
   env: Readonly<Record<string, string | undefined>>,
   probe: ExecutableProbe,
 ): Promise<string | undefined> {
-  if (isAbsolute(binary) || binary.includes(sep)) {
+  if (isAbsolute(binary) || carriesPathSeparator(binary)) {
     // A RELATIVE path-carrying binary ('./bin/acp-server') must be resolved
     // against the caller's cwd NOW: the spawn later runs with
     // cwd = the invocation's workspace, and node resolves a relative spawn
     // command against THAT cwd — probed verbatim, the probe would bless a
     // file the child can never find (and vice versa). Bare names stay
-    // PATH-resolved (the child's cwd is irrelevant to a PATH hit).
+    // PATH-resolved (the child's cwd is irrelevant to a PATH hit). The
+    // path-carrying test accepts EITHER separator (Codex P2 — see
+    // carriesPathSeparator).
     const candidate = isAbsolute(binary) ? binary : resolve(binary);
     return (await probe(candidate)) ? candidate : undefined;
   }

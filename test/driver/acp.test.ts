@@ -28,12 +28,18 @@
 //      and the prompt-directed-JSON drop rule.
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import { AcpDriver, ACP_SESSION_FILE, NARRATION_TOOL } from '../../src/driver/acp/index.js';
-import { defaultAcpEndpointTable, AcpEndpointTableSchema } from '../../src/driver/acp/binaries.js';
+import {
+  carriesPathSeparator,
+  defaultAcpEndpointTable,
+  AcpEndpointTableSchema,
+  resolveAcpCommand,
+} from '../../src/driver/acp/binaries.js';
+import type { ExecutableProbe } from '../../src/driver/acp/binaries.js';
 import type { AcpDriverOptions } from '../../src/driver/acp/index.js';
 import { spawnAcpProcess } from '../../src/driver/acp/process.js';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
@@ -667,6 +673,68 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   }, 20_000);
 
+  test('a vendor that IGNORES session/cancel cannot hang the governed cancel: the kill rung reaches the child mid-prompt', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // block-until-abort + the swallow knob: the turn NEVER settles
+      // protocol-side. The governed signal fires mid-prompt → the
+      // session/cancel courtesy write → the settle ladder terminates the
+      // child → the pending prompt rejects on the wire's exit path → the
+      // run settles 'aborted'. Without the mid-prompt kill rung (Codex P1)
+      // THIS test hangs into its timeout.
+      const driver = new AcpDriver({
+        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_IGNORE_CANCEL: '1' }, []),
+        termGraceMs: 300,
+        killGraceMs: 300,
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation({ prompt: 'ignore-cancel run' })),
+        { wallClockMs: 1000 },
+        { op: 'acp', jobKey: 'acp-ignore-cancel', attempt: 1 },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
+      const narration = await narrationOf(store, outcome.value.sessionId as string);
+      // The courtesy write landed BEFORE the ladder fired (the settled-write
+      // ordering), then the kill settled the run.
+      expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
+    });
+  }, 20_000);
+
+  test('answer-write failure fails the run loudly: a broken enforcement channel settles error, never hangs', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The fixture destroys its own stdin as the permission ask goes out
+      // and KEEPS RUNNING: the driver's ALLOW answer write fails (EPIPE)
+      // with the prompt still pending. A driver that only narrates the
+      // failure hangs here forever (no timeouts by design — I8) — THIS
+      // test fails by its timeout on that regression; a correct driver
+      // terminates the child via the settle ladder and settles 'error'
+      // with the write-failure evidence (Codex P1).
+      const driver = new AcpDriver({
+        ...driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_ACP_CLOSE_STDIN_ON_PERMISSION: '1',
+          },
+          [],
+        ),
+        termGraceMs: 500,
+        killGraceMs: 500,
+      });
+      const result = await driver.run(invocation({ prompt: 'broken-channel run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the prompt never settled
+      expect(result.costUSD).toBeUndefined(); // never a cost on an unmeasured verdict
+      const narration = await narrationOf(store, result.sessionId as string);
+      const failed = narration.find((line) => line.includes('"permission-answer-send-failed"'));
+      expect(failed !== undefined).toBe(true); // the write-failure evidence
+    });
+  }, 20_000);
+
   test('the mode pin is observable: the session really runs in build (the echo proves the pin landed)', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
@@ -790,5 +858,50 @@ describe('acp driver specifics (fake ACP server)', () => {
       // Run 1's prompt never leaked into run 2's record.
       expect(record2?.messages.some((m) => m.content === 'isolation run one')).toBe(false);
     });
+  });
+});
+
+describe('acp binary resolution (the §3 which-like fold)', () => {
+  const env = { PATH: '/cq-tools:/usr/bin' };
+
+  test("the documented './bin/acp-server' form is path-carrying: resolved against the caller cwd, NEVER joined to PATH dirs", async () => {
+    const seen: string[] = [];
+    const probe: ExecutableProbe = async (candidate) => {
+      seen.push(candidate);
+      return true; // every candidate "exists" — the SHAPE of the resolution is what binds
+    };
+    const resolved = await resolveAcpCommand(['./bin/acp-server', '--flag'], 'explicit', defaultAcpEndpointTable(), env, probe);
+    // Exactly ONE probe — the caller-cwd-resolved candidate. A driver that
+    // misses the path-carrying branch would walk the PATH instead
+    // (/cq-tools/./bin/acp-server, /usr/bin/./bin/acp-server, ...).
+    expect(seen).toEqual([resolve('./bin/acp-server')]);
+    expect(resolved.binary).toBe(resolve('./bin/acp-server'));
+    expect(resolved.command).toEqual([resolve('./bin/acp-server'), '--flag']);
+    expect(resolved.source).toBe('explicit');
+  });
+
+  test('a bare name walks the PATH (the which contract) — past a miss, onto the hit; the two shapes stay distinct', async () => {
+    const seen: string[] = [];
+    // Only the SECOND PATH dir carries the binary: the walk must skip the
+    // first entry (a miss) and land on the second.
+    const probe: ExecutableProbe = async (candidate) => {
+      seen.push(candidate);
+      return candidate === join('/usr/bin', 'acp-server');
+    };
+    const resolved = await resolveAcpCommand(['acp-server'], 'explicit', defaultAcpEndpointTable(), env, probe);
+    expect(seen).toEqual([join('/cq-tools', 'acp-server'), join('/usr/bin', 'acp-server')]);
+    expect(resolved.binary).toBe(join('/usr/bin', 'acp-server'));
+  });
+
+  test('carriesPathSeparator: the forward-slash form is path-carrying on EVERY platform (the Windows fix — sep is a backslash there, but Node accepts / too)', () => {
+    expect(carriesPathSeparator('./bin/acp-server')).toBe(true);
+    expect(carriesPathSeparator('bin/acp-server')).toBe(true);
+    expect(carriesPathSeparator('/abs/acp-server')).toBe(true);
+    expect(carriesPathSeparator('acp-server')).toBe(false);
+    expect(carriesPathSeparator('')).toBe(false);
+    // Platform note (Codex P2): on win32 the backslash forms are caught by
+    // the same check via `sep`; this suite runs on ubuntu/macOS where sep
+    // IS '/', so that half is inert here — correctness for the documented
+    // Windows case, not locally observable behavior.
   });
 });

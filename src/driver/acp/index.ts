@@ -144,13 +144,19 @@
 // via `currentJobContext()` (the one driver→kernel import, same as every
 // lane) and is used in exactly two cooperative ways: an already-fired
 // signal never dispatches, and a signal firing mid-prompt sends
-// session/cancel — then the driver AWAITS the prompt response (the spec
+// session/cancel — the COURTESY write, settled before the ladder fires —
+// after which the child is TERMINATED via the settle path's ladder: the
+// governed signal is the kill decision wherever it fires, and a vendor
+// that ignores session/cancel must not hang the run past it. The prompt
+// settles on whichever arrives first — the cancelled RESPONSE (the spec
 // REQUIRES the agent to answer the original prompt with stopReason
-// 'cancelled'; settle on the cancelled RESPONSE, never on the cancel
-// write — strategy §2.3, live-verified at 327 ms). The listener attaches
+// 'cancelled'; §2.3, live-verified at 327 ms — a compliant vendor that
+// beats the ladder still folds that shape) or the wire's exit-path
+// rejection — and the run settles the honest 'aborted' verdict either
+// way. The listener attaches
 // at WIRE CREATION, so a signal firing during the HANDSHAKE phases
 // (initialize / session establishment / the mode pin — no prompt yet to
-// cancel cooperatively) reaches the child too: the settle path's
+// cancel) reaches the child too: the settle path's
 // termination ladder runs, the pending handshake request rejects on the
 // wire's exit path, and the run settles the honest 'aborted' verdict —
 // never an orphaned harness process. Consequences:
@@ -169,7 +175,8 @@
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired, or the prompt settled stopReason
 //      'cancelled'                                        → 'aborted'
-//   2. never-asks evidence at settle                     → 'error'
+//   2. never-asks evidence at settle, or a failed permission-ANSWER
+//      write (the enforcement channel is broken — Codex P1) → 'error'
 //   3. folded usage ≥ Budget.maxTokens                   → 'budget'
 //   4. no wellshaped prompt response (handshake failure, child death) → 'error'
 //   5. stopReason 'end_turn'                             → 'complete'
@@ -680,6 +687,10 @@ export class AcpDriver implements Driver {
     }
 
     let signalFired = false;
+    // True when the write of a permission ANSWER failed — the enforcement
+    // channel is broken and the verdict is pinned to 'error' even if a
+    // prompt response somehow arrived afterward (Codex P1).
+    let answerWriteFailed = false;
     let promptDispatched = false;
     let acpSessionId: string | undefined;
     // The inbound session/request_permission awaiting our answer, by its RAW
@@ -807,9 +818,18 @@ export class AcpDriver implements Driver {
       }
       pendingPermissionId = undefined; // the answer is initiated — no longer dangling
       void wire.respond(id, selection.answer).catch((err: unknown) => {
+        // A failed ANSWER write is a BROKEN ENFORCEMENT CHANNEL (Codex P1):
+        // the vendor closed its input pipe yet may keep running, and the
+        // pending prompt would never settle (the driver has no timeouts —
+        // I8). The write-failure evidence lands in narration,
+        // answerWriteFailed pins the verdict to 'error', and the child is
+        // terminated via the settle ladder so the pending prompt rejects
+        // on the wire's exit path — the run settles instead of hanging.
+        answerWriteFailed = true;
         observation.narration.push(
           JSON.stringify({ cq: 'permission-answer-send-failed', toolCallId, message: messageOf(err) }),
         );
+        void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
       });
     };
 
@@ -865,8 +885,15 @@ export class AcpDriver implements Driver {
     //   - a permission ask still pending as the cancellation lands is
     //     answered 'cancelled' FIRST (legal only on a real cancellation —
     //     the answer table's one exception), never left dangling;
-    //   - prompt in flight → session/cancel, then the prompt await
-    //     continues (settle on the cancelled RESPONSE — §2.3);
+    //   - prompt in flight → session/cancel (the COURTESY write, settled
+    //     either way before the ladder fires), then the settle ladder
+    //     terminates the child — the same decided-kill execution as the
+    //     pre-prompt branch below: the governed signal is the kill
+    //     decision wherever it fires, and a vendor that ignores
+    //     session/cancel must not hang the run past it (no timeouts —
+    //     I8). The prompt settles on whichever arrives first — the
+    //     cancelled RESPONSE (§2.3's shape, from a vendor that beats the
+    //     ladder) or the wire's exit-path rejection — 'aborted' either way;
     //   - pre-prompt phase (initialize / session establishment / the mode
     //     pin) → there is no prompt to cancel cooperatively, so the child
     //     is TERMINATED via the settle path's ladder (the same rung
@@ -887,11 +914,19 @@ export class AcpDriver implements Driver {
       }
       if (promptDispatched && acpSessionId !== undefined) {
         const target = acpSessionId;
-        wire.notify(ACP_METHODS.sessionCancel, { sessionId: target }).then(
-          () => observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
-          (err: unknown) =>
-            observation.narration.push(JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) })),
-        );
+        wire
+          .notify(ACP_METHODS.sessionCancel, { sessionId: target })
+          .then(
+            () => observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
+            (err: unknown) =>
+              observation.narration.push(JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) })),
+          )
+          .finally(() => {
+            // The decided kill, AFTER the courtesy write settles — the
+            // marker stays honest and the vendor sees the cancel before
+            // the SIGTERM (the prompt-phase kill rung; Codex P1).
+            void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
+          });
       } else {
         observation.narration.push(
           JSON.stringify({
@@ -1140,6 +1175,7 @@ export class AcpDriver implements Driver {
     return this.verdict(modelSpec, budget, observation, record.sessionId, {
       structured,
       signalFired,
+      answerWriteFailed,
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
       measuredUsage,
@@ -1153,7 +1189,8 @@ export class AcpDriver implements Driver {
    * Fold the observation into the frozen WorkerResult (header tables: stop
    * reasons, usage, cost). A real measurement (the prompt response's
    * usage) is kept on any verdict that observed it; unmeasured verdicts
-   * (abort, handshake failure, child death) report zeros and NEVER a cost.
+   * (abort, handshake failure, child death, a failed permission answer)
+   * report zeros and NEVER a cost.
    */
   private verdict(
     modelSpec: ModelSpec,
@@ -1163,6 +1200,7 @@ export class AcpDriver implements Driver {
     inputs: {
       structured: unknown;
       signalFired: boolean;
+      answerWriteFailed: boolean;
       promptStopReason: string | undefined;
       responded: boolean;
       measuredUsage: Usage | undefined;
@@ -1172,6 +1210,7 @@ export class AcpDriver implements Driver {
     const usage = inputs.measuredUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
+      answerWriteFailed: inputs.answerWriteFailed,
       ungated: inputs.ungated,
       maxTokens: budget.maxTokens,
       usage,
@@ -1508,6 +1547,8 @@ function costField(
 export interface StopReasonInputs {
   /** The governed signal fired, or the prompt settled stopReason 'cancelled'. */
   aborted: boolean;
+  /** True when the write of a permission ANSWER failed — the enforcement channel is broken; the run fails even if a response arrived (Codex P1). */
+  answerWriteFailed?: boolean;
   /** Never-asks evidence at settle (ungated execution — a policy void is an error, never green). */
   ungated: boolean;
   maxTokens: number | undefined;
@@ -1518,9 +1559,10 @@ export interface StopReasonInputs {
   responded: boolean;
 }
 
-/** THE mapping (checked in order): aborted → ungated-error → budget → no-response-error → the wire stopReason. */
+/** THE mapping (checked in order): aborted → answer-write-failure → ungated-error → budget → no-response-error → the wire stopReason. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
+  if (inputs.answerWriteFailed === true) return 'error'; // the broken enforcement channel — fail loud even if a response arrived
   if (inputs.ungated) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
   if (!inputs.responded) return 'error';
