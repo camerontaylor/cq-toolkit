@@ -64,6 +64,11 @@ export default {
       ExportAllDeclaration(node) {
         checkSource(context, node.source, node);
       },
+      TSImportEqualsDeclaration(node) {
+        if (node.moduleReference.type === 'TSExternalModuleReference') {
+          checkSource(context, node.moduleReference.expression, node);
+        }
+      },
       CallExpression(node) {
         if (
           node.callee.type === 'Identifier' &&
