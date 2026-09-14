@@ -1,26 +1,45 @@
 #!/usr/bin/env node
 // Eval-axes demo + DD-2 cross-lane USD normalization — T1.6 slice 4.
 //
-// Runs the SAME tiny deterministic fixture prompt on four LIVE cells and
+// Runs the SAME tiny deterministic fixture prompt on five LIVE cells and
 // prints one markdown table row per cell (usage + token-derived costUSD +
 // stopReason):
 //
 //   axis 1 — model × ai-sdk lane:   { zai/glm-4.6, deepseek/deepseek-chat }
 //   axis 2 — glm-4.6 × lane:        { ai-sdk, claude-agent, subprocess }
+//   axis 3 — the acp lane:          { zai/glm-5.3-flash (the served id) }
 //
-// (the ai-sdk × glm cell belongs to both axes — four unique runs). The glm
-// × ai-sdk cell rides the GLM Coding Plan's OpenAI-COMPATIBLE endpoint —
-// the ai-sdk driver's zai provider defaults to it (owner-verified
-// 2026-09-14: /api/paas/v4 is the pay-as-you-go wire, unfunded by design;
-// /api/coding/paas/v4 is the plan-funded OpenAI-compat wire) — see
-// makeDriver and docs/eval-axes-demo.md.
+// (the ai-sdk × glm cell belongs to the first two axes; the acp cell
+// COMPLETES the four-wide lane axis {ai-sdk, claude-agent, subprocess,
+// acp} — five unique runs). The glm × ai-sdk cell rides the GLM Coding
+// Plan's OpenAI-COMPATIBLE endpoint — the ai-sdk driver's zai provider
+// defaults to it (owner-verified 2026-09-14: /api/paas/v4 is the
+// pay-as-you-go wire, unfunded by design; /api/coding/paas/v4 is the
+// plan-funded OpenAI-compat wire) — see makeDriver and
+// docs/eval-axes-demo.md.
+//
+// THE ACP CELL (T1.8; conductor decision 2026-09-14 — eval wires REQUEST
+// the model id the wire ACTUALLY serves): this lane's wire is the vendor
+// harness `zcode-acp-server` (JSON-RPC over stdio, AcpDriver), whose
+// served GLM is glm-5.3-flash — reported by the harness under its own
+// `providerId\modelId` encoding, materialized as `builtin:bigmodel\GLM-5.3`
+// (probe-recorded 2026-09-15, strategy §5). The cell requests
+// glm-5.3-flash and pre-declares that served id (expectedServed); the
+// identity guard demands the OBSERVED model equal it EXACTLY — any other
+// id is a remap and fails the cell, exactly the other lanes' guard. The
+// driver owns the mode pin (set_config_option mode=build before any
+// prompt) and the binary resolution; auth is agent-side (the app's own
+// credentials — no key env from this script); the cell's SPEND rides the
+// vendor harness (the DD-2 discount record lives in
+// docs/dd-2-usd-normalization.md).
 //
 // SPEND BOUNDS — what actually bounds a live run here (round-1 review
 // wording): each cell is dispatched through the kernel's escalation ladder
 // (runLadder, wallClockMs 120_000 — the governor owns WHEN to abort), the
 // fixture prompt is tiny, toolPolicy is 'none', and retries are capped at
 // MAX_ATTEMPTS per cell with NO new paid call after a cell produced a
-// completed result. `Budget.maxUsd 2` / `maxTokens 2000` ride the
+// completed result. `Budget.maxUsd 2` (every cell) / `maxTokens 2000` (raw
+// lanes; 200_000 on the acp cell — see ACP_BUDGET) ride the
 // invocation as caller-side derived accounting — the drivers derive cost
 // AFTER usage; maxUsd is NOT a runtime kill switch — it is what a caller
 // (or governor) compares the derived figure against, so this script states
@@ -44,7 +63,7 @@
 // network). EXIT CODE: 0 only when every selected cell passed (identity,
 // fixture, and fold checks green); any failed cell sets exit 1. Usage:
 // zsh -lic 'node scripts/demo-eval-axes.mjs'
-import { AiSdkDriver, ClaudeAgentDriver, SessionStore, SubprocessDriver, runLadder } from '../dist/index.js';
+import { AcpDriver, AiSdkDriver, ClaudeAgentDriver, SessionStore, SubprocessDriver, runLadder } from '../dist/index.js';
 import { priceOf } from '../dist/driver/pricing/index.js';
 import dns from 'node:dns';
 import net from 'node:net';
@@ -72,21 +91,39 @@ if (missing.length > 0) {
   console.error(`demo-eval-axes: missing key env var(s): ${missing.join(', ')} — refusing to run`);
   process.exit(1);
 }
+// The acp lane's harness (zcode-acp-server) spawns the vendor CLI itself;
+// when `zcode` is not on PATH the ZCODE_BIN env var names the desktop-app
+// CLI (the probe-recorded default — caller's env wins, set silently).
+if ((process.env.ZCODE_BIN ?? '') === '') {
+  process.env.ZCODE_BIN = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+}
 
 // --- The fixture (identical across every cell) --------------------------------
 const PROMPT = 'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
 const MODEL_GLM = 'glm-4.6';
 const MODEL_DEEPSEEK = 'deepseek-chat';
+// The acp cell's request — the SERVED model id per the conductor decision —
+// and the wire's own encoding of it, verbatim from the live probe
+// (materialized config_option_update; the lazy session/new default is
+// `builtin:zai\GLM-5.3` and is never surfaced by the driver).
+const MODEL_GLM_SERVED = 'glm-5.3-flash';
+const ACP_SERVED_ID = 'builtin:bigmodel\\GLM-5.3';
 const BUDGET = { maxUsd: 2, maxTokens: 2000 };
+// The acp cell's own token ceiling: the vendor harness's FIXED scaffolding
+// alone materialized {input 15_719, cachedRead 11_648} tokens on the probe's
+// tiny prompt (OQ-3, 2026-09-15) — the raw-chat-sized 2k cap would
+// post-hoc-classify every honest acp run 'budget'. maxUsd stays the declared
+// 2; the cap is a post-hoc classification threshold, never a stop.
+const ACP_BUDGET = { maxUsd: 2, maxTokens: 200_000 };
 const POLICY = { allow: [], mode: 'none' };
 const SANDBOX = { level: 'none' };
 
-const invocationFor = (provider, model) => ({
+const invocationFor = (provider, model, budget = BUDGET) => ({
   prompt: PROMPT,
   modelSpec: { provider, model },
   toolPolicy: POLICY,
   sandboxPolicy: SANDBOX,
-  budget: BUDGET,
+  budget,
 });
 
 /** Independent recompute of the DD-2 derived-cost fold (must equal the driver's). */
@@ -114,6 +151,13 @@ async function makeDriver(lane, provider, scratchDir) {
   }
   if (lane === 'claude-agent') return new ClaudeAgentDriver({ sessionsDir });
   if (lane === 'subprocess') return new SubprocessDriver({ sessionsDir });
+  if (lane === 'acp') {
+    // The mode pin (session/set_config_option mode=build before ANY prompt —
+    // sessions open in `yolo`, which never asks) and the binary resolution
+    // (zcode-acp-server via PATH — the operator's global install) are the
+    // DRIVER's own job; this script configures neither.
+    return new AcpDriver({ sessionsDir });
+  }
   throw new Error(`unknown lane ${lane}`);
 }
 
@@ -127,7 +171,7 @@ const MAX_ATTEMPTS = 2; // the live-retry budget per cell (spend discipline)
 const WALL_CLOCK_MS = 120_000;
 const FIXTURE_PHRASE = 'quick brown fox'; // the fixture's distinctive text
 
-async function runCell({ lane, provider, model }) {
+async function runCell({ lane, provider, model, expectedServed, budget }) {
   const scratchDir = await mkdtemp(join(tmpdir(), 'eval-axes-'));
   const attempts = [];
   try {
@@ -142,7 +186,7 @@ async function runCell({ lane, provider, model }) {
         // retry loop NEVER issues another paid call once a cell produced a
         // completed result.
         const ladderOutcome = await runLadder(
-          () => driver.run(invocationFor(provider, model)),
+          () => driver.run(invocationFor(provider, model, budget)),
           { wallClockMs: WALL_CLOCK_MS },
           { op: 'eval-axes', jobKey: `eval-axes/${lane}/${model}`, attempt },
         );
@@ -205,19 +249,25 @@ async function runCell({ lane, provider, model }) {
           });
           break;
         }
-        // A served id that differs from the cell's configured model id is a
-        // remap (deepseek-flash / glm-5.3-flash are exactly why) — the cell
-        // fails with evidence, and NO retry: a remap is endpoint
-        // configuration, a retry would pay for the same answer. The fold
-        // evidence rides along: usage + what the tokens cost at the SERVED
-        // model's real rates vs what they would have cost at the requested
-        // model's rates — the DD-2 datum a remap corrupts.
-        if (result.model !== model) {
+        // A served id that differs from the cell's expected id is a remap
+        // (deepseek-flash / glm-5.3-flash are exactly why) — the cell fails
+        // with evidence, and NO retry: a remap is endpoint configuration, a
+        // retry would pay for the same answer. The expected id is the
+        // requested model for every raw lane, and the PRE-DECLARED served id
+        // for the acp lane (expectedServed — the conductor decision: request
+        // the id the wire actually serves; this wire reports glm-5.3-flash
+        // under its own `providerId\modelId` encoding, probe-recorded). The
+        // fold evidence rides along: usage + what the tokens cost at the
+        // SERVED model's real rates vs what they would have cost at the
+        // requested model's rates — the DD-2 datum a remap corrupts.
+        const expectedId = expectedServed ?? model;
+        if (result.model !== expectedId) {
           attempts.push({
             attempt,
             stopReason: result.stopReason,
             servedModelMismatch: {
               requested: model,
+              ...(expectedServed !== undefined ? { expectedServed } : {}),
               served: result.model,
               usage: result.usage,
               driverCostUSD: result.costUSD ?? null,
@@ -238,6 +288,7 @@ async function runCell({ lane, provider, model }) {
         }
         return {
           lane, provider, model, elapsedMs,
+          ...(expectedServed !== undefined ? { expectedServed } : {}),
           governedOutcome: ladderOutcome.outcome,
           stopReason: result.stopReason,
           servedModel: result.model ?? 'unreported',
@@ -264,6 +315,14 @@ const cells = [
   { lane: 'ai-sdk', provider: 'deepseek', model: MODEL_DEEPSEEK },
   { lane: 'claude-agent', provider: 'zai', model: MODEL_GLM },
   { lane: 'subprocess', provider: 'zai', model: MODEL_GLM },
+  {
+    // The four-wide lane axis completes here: the acp lane rides the SERVED
+    // id (conductor decision) with the probe-recorded wire encoding as the
+    // expected served id, and its own token ceiling (ACP_BUDGET — the
+    // harness's fixed scaffolding dwarfs the raw-chat 2k cap).
+    lane: 'acp', provider: 'zai', model: MODEL_GLM_SERVED,
+    expectedServed: ACP_SERVED_ID, budget: ACP_BUDGET,
+  },
 ];
 
 // `--only <substring>` runs just the matching cells (e.g. the single-cell
