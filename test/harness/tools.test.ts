@@ -8,6 +8,11 @@
 //   - issue #18: exec's maxBuffer is sized above the output cap so a noisy
 //     command returns a TRUNCATED RESULT (capOutput truncates), never the
 //     1 MiB default's string-code rejection dressed up as a run failure.
+//
+// NO EXTERNAL BINARIES (review round 3, finding 1): every ALLOWED case
+// actually EXECUTES through /bin/sh, so its command must be shell BUILTINS
+// only (echo / printf / exit / true / false). DENIED cases never execute —
+// their command strings may name whatever the judgment is about.
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -39,9 +44,14 @@ function runConfig(commandPatterns: string[]) {
 describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => {
   test('a legit prefix command is still allowed', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['npm test']), scratchDir).find((t) => t.name === 'run');
-      const result = await run?.execute({ command: 'npm test -- --watch' });
+      // Shell BUILTINS only (echo): an allowed case EXECUTES, so it must
+      // spawn nothing external (review round 3, finding 1).
+      const run = buildTools(runConfig(['echo pilot']), scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({ command: 'echo pilot patrol' });
       expect(result?.ok).toBe(true);
+      if (result?.ok) {
+        expect(result.output).toContain('pilot patrol'); // the builtin really ran
+      }
     });
   });
 
@@ -81,8 +91,10 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
 
   test('anchored re: patterns remain the deliberate metacharacter escape hatch', async () => {
     await withScratch(async (scratchDir) => {
-      const run = buildTools(runConfig(['re:^npm test.*$']), scratchDir).find((t) => t.name === 'run');
-      const result = await run?.execute({ command: 'npm test; whoami' });
+      // Builtins only — the case EXECUTES (the re: author owns the full
+      // metachar-bearing string), so nothing external may spawn.
+      const run = buildTools(runConfig(['re:^echo pilot.*$']), scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({ command: 'echo pilot; exit 0' });
       expect(result?.ok).toBe(true); // the re: author owns the full string
     });
   });
@@ -91,12 +103,17 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
     await withScratch(async (scratchDir) => {
       // The token pattern matches the metacharacter-bearing command, but the
       // LATER anchored re: pattern is the escape hatch the denial points at —
-      // it must still allow outright, whatever the pattern order.
-      const run = buildTools(runConfig(['npm test', 're:^npm test ; deploy$']), scratchDir).find(
+      // it must still allow outright, whatever the pattern order. Builtins
+      // only (the case EXECUTES); exit 3 proves the command RAN by mapping
+      // to ok:true + exitCode 3 — no external binary involved.
+      const run = buildTools(runConfig(['echo pilot', 're:^echo pilot ; exit 3$']), scratchDir).find(
         (t) => t.name === 'run',
       );
-      const result = await run?.execute({ command: 'npm test ; deploy' });
+      const result = await run?.execute({ command: 'echo pilot ; exit 3' });
       expect(result?.ok).toBe(true);
+      if (result?.ok) {
+        expect(result.exitCode).toBe(3); // executed for real (nonzero exit is a result, not a denial)
+      }
     });
   });
 
