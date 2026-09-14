@@ -52,6 +52,29 @@ const workflowFiles = readdirSync(WORKFLOWS_DIR)
   .map((name) => join(WORKFLOWS_DIR, name));
 const pinnedFiles = [...workflowFiles, ...TEMPLATE_FILES.map((rel) => join(ROOT, rel))];
 
+// Split the workflow text into top-level step blocks: a block starts at a
+// `- ` item line whose indent equals the steps-list base indent (taken from
+// the FIRST `- ` item in the file) and extends until the next item at that
+// same indent or a dedent below it. Deeper `- ` lines (script bodies, nested
+// lists) never start a block.
+function stepBlocks(text: string): string[] {
+  const lines = text.split(/\r?\n/);
+  let base: number | null = null;
+  const starts: number[] = [];
+  lines.forEach((line, i) => {
+    const m = /^(\s*)- /.exec(line);
+    if (m === null) return;
+    if (base === null) base = m[1].length;
+    if (m[1].length === base) starts.push(i);
+  });
+  const blocks: string[] = [];
+  for (let s = 0; s < starts.length; s++) {
+    const end = s + 1 < starts.length ? starts[s + 1] : lines.length;
+    blocks.push(lines.slice(starts[s], end).join('\n'));
+  }
+  return blocks;
+}
+
 describe('action pins: every uses: is an immutable commit SHA', () => {
   it.each(pinnedFiles)('pins every uses: in %s to exactly 40 lowercase hex chars', (file) => {
     const failures: string[] = [];
@@ -64,10 +87,16 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(failures, 'mutable or missing action pins').toEqual([]);
   });
 
-  it('generated ci.yml, denylist.yml, and install-matrix.yml drop the checkout token (persist-credentials: false)', () => {
+  it('generated ci.yml, denylist.yml, and install-matrix.yml drop the token on EVERY checkout step', () => {
     for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
-      expect(text, `${name}: required-check checkout must set persist-credentials: false`).toMatch(/^(\s+)persist-credentials: false$/m);
+      const checkoutBlocks = stepBlocks(text).filter((block) => block.includes('actions/checkout@'));
+      // Vacuity guard: a refactor that removed the steps (or the checkout)
+      // must not silently turn this assertion into a no-op.
+      expect(checkoutBlocks.length, `${name}: at least one checkout step`).toBeGreaterThanOrEqual(1);
+      for (const block of checkoutBlocks) {
+        expect(block, `${name}: a checkout step must set persist-credentials: false`).toMatch(/persist-credentials:\s*false/);
+      }
     }
   });
 
