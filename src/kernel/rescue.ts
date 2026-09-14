@@ -231,6 +231,13 @@ export function decideRescue(
   }
   const attemptsSoFar = latest.attempt;
   const rowMax = row.action.maxAttempts;
+  // Policy validation (fail loud, never fail open): a retry cap that is not
+  // a positive integer — NaN, fractional, zero, negative — would corrupt
+  // the effective-cap arithmetic below into either an unbounded or a
+  // silent never-retry decision. Reject the row loudly instead.
+  if (!Number.isInteger(rowMax) || rowMax < 1) {
+    throw new Error(`rescue: policy row '${row.id}' maxAttempts must be an integer >= 1, got ${rowMax}`);
+  }
   const jobCap = caps?.maxAttemptsPerJob;
   const effectiveCap = jobCap !== undefined ? Math.min(rowMax, jobCap) : rowMax;
   if (attemptsSoFar >= effectiveCap) {

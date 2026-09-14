@@ -208,7 +208,10 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   0) — so a resumed run continues the SAME budget. Under the op-name
   fallback the op key seeds the SUM of the op's journaled dispatches (the
   fallback's ordinal IS the op's dispatch count; a max would understate it
-  and let a resumed run exceed the cap). Consequence: budget-exhausted rows
+  and let a resumed run exceed the cap). A custom `config.jobKey` extractor
+  is runtime-only and is NOT seeded on resume — the seed keys on journal
+  jobIds and op names, so a custom key must align with those conventions or
+  per-job caps reset across resume. Consequence: budget-exhausted rows
   are
   terminal and are NOT auto-retried by resume in any effective sense — a
   seeded, still-tripped governor re-marks them without op invocation; only
@@ -262,14 +265,26 @@ Folding real usage that carries no `costUSD` under a configured `maxUsd`
 trips the budget loud — never fail open (the escapes: price the model, or
 cap with `maxTokens`), and the seed-time trip covers BOTH caps, so a resumed
 run whose journaled rollup already overruns either cap stops before
-admitting anything. NOT yet wired in production: there is NO production
-folding path yet — the drivers never report usage or cost
-(`reportUsage`/`reportCost` are exercised only by custom/test ops) and the
-per-result `observeResult` fold has no production caller;
-`RunOptionsSchema` does not yet accept `maxTokens` (the strict schema
-rejects the option). The driver→governor bridge is review-debt #14. Full
-disposition:
+admitting anything. WIRED (the driver→governor bridge, review-debt #14): `governOp` folds a
+completed `ok` value that carries a WorkerResult shape through
+`observeResult` once (streaming `reportUsage`/`reportCost` suppressed via
+once-only flags), `RunOptionsSchema` accepts `maxTokens`, and seeded
+journaled usage with no `usdOf` under a configured `maxUsd` trips at seed
+time. Full disposition:
 `docs/dd-9-api-equivalent-budget.md`.
+||||||| parent of 431decb (fix(kernel): review-debt budget-seam fixes (issues #14, #15))
+**DD-9 result: CLOSED (T1.6b)** — the api-equivalent budget shipped. Every
+usage-bearing driver result carries `costUSD` labeled
+`costBasis: 'modeled'` (the list-price proxy from `src/driver/pricing`), so
+`maxUsd` binds subscription-routed lanes through the modeled figure
+(primary), and `RunOptions.maxTokens` binds independently as the
+unpriced-model backstop. Folding real usage that carries no `costUSD` under
+a configured `maxUsd` trips the budget loud — never fail open (the
+escapes: price the model, or cap with `maxTokens`), and the seed-time trip
+covers BOTH caps, so a resumed run whose journaled rollup already overruns
+either cap stops before admitting anything. Full disposition:
+`docs/dd-9-api-equivalent-budget.md`.
+
 
 Every timer in the governor flows through the injected `Clock`
 (`new BudgetGovernor(config, clock)`; default `realClock`) — there is no

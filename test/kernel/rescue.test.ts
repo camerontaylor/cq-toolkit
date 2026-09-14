@@ -173,6 +173,37 @@ describe('bounded re-dispatch (ws-a item 5)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Policy validation — retry caps must be positive integers (#15-9)
+// ---------------------------------------------------------------------------
+
+describe('retry-row maxAttempts validation (#15-9)', () => {
+  const row = (maxAttempts: number): RescuePolicy => ({
+    rows: [{ id: 'capped', on: 'failed', action: { kind: 'retry', maxAttempts } }],
+  });
+
+  test.each([NaN, 1.5, 0, -2])('maxAttempts %p is rejected loudly at the decision path', (bad) => {
+    expect(() => decideRescue(input([attempt(1, 'failed')]), row(bad))).toThrowError(
+      /maxAttempts must be an integer >= 1/,
+    );
+  });
+
+  test('the rejection names the row id and the bad value', () => {
+    expect(() => decideRescue(input([attempt(1, 'failed')]), row(NaN))).toThrowError(
+      "rescue: policy row 'capped' maxAttempts must be an integer >= 1, got NaN",
+    );
+  });
+
+  test('a valid cap still decides: maxAttempts 1 means the initial dispatch only', () => {
+    expect(decideRescue(input([attempt(1, 'failed')]), row(1))).toEqual({
+      kind: 'terminate',
+      reason: 'attempt-cap',
+      rowId: 'capped',
+      cap: 'row-max-attempts',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Escalation — policy recorded as data, never driver objects
 // ---------------------------------------------------------------------------
 

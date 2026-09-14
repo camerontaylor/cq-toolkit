@@ -34,7 +34,7 @@
 // registry.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { Usage } from '../driver/types.js';
+import type { Usage, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
 import { candidateRunsForPlan, type RunLog } from './journal.js';
 import { attemptsFromJournal } from './rescue.js';
@@ -160,7 +160,9 @@ export interface LadderContextInfo {
  * The hard-cancel primitives an op can host. A subprocess-backed op (T1.4
  * op families) registers these via its JobGovernance; the ladder calls them
  * at rungs 2 and 3. Both are optional — the ladder fires and RECORDS the
- * rung even when only the signal exists.
+ * rung even when only the signal exists. Port methods MAY be async: a
+ * rejected async primitive is recorded on the rung marker (an `async: …`
+ * error note) and is never an unhandled rejection.
  */
 export interface JobCancelPort {
   /** Rung 2: the second, harder cancel — the subprocess-timeout placeholder (e.g. SIGTERM). */
@@ -307,15 +309,29 @@ export function runLadder<T>(
         resolve({ outcome: 'threw', error: outcome.error, markers: [...markers], elapsedMs: elapsed() });
       }
     };
-    const fireRung = (rung: LadderRung, delayMs: number, deliver: () => boolean): void => {
+    const fireRung = (rung: LadderRung, delayMs: number, deliver: () => unknown): void => {
       // A throwing port primitive must never escape a timer callback (that
       // would lose the marker, skip the later rungs, and never settle): the
       // rung is recorded with delivered:false plus an error note and the
       // ladder CONTINUES.
       let delivered: boolean;
       let error: string | undefined;
+      let asyncDelivery: Promise<unknown> | undefined;
       try {
-        delivered = deliver();
+        const returned: unknown = deliver();
+        if (typeof (returned as { then?: unknown } | null | undefined)?.then === 'function') {
+          // An async port primitive (`async () => void`) hands back a
+          // promise the sync call made: the primitive counts as invoked,
+          // and its REJECTION is recorded on the marker below — never an
+          // unhandled rejection.
+          asyncDelivery = returned as Promise<unknown>;
+          delivered = true;
+        } else {
+          // Sync contract: false means no port method to deliver to; any
+          // other sync return (true, or a void method's undefined) means
+          // the primitive was invoked.
+          delivered = returned !== false;
+        }
       } catch (err) {
         delivered = false;
         error = err instanceof Error ? err.message : String(err);
@@ -332,6 +348,16 @@ export function runLadder<T>(
         atMs,
       };
       markers.push(marker);
+      // ASYNC PORT REJECTIONS: the sync try/catch above cannot see a
+      // rejected promise from an `async () => void` port — left alone it
+      // would surface as an unhandled rejection. Attach a handler that
+      // records the rejection on the already-pushed (mutable) marker: the
+      // rung still fired, later rungs still arm, nothing goes unhandled.
+      if (asyncDelivery !== undefined) {
+        void asyncDelivery.then(undefined, (err: unknown) => {
+          marker.error = `async: ${err instanceof Error ? err.message : String(err)}`;
+        });
+      }
       // Observer failure must never break the ladder (the same class as a
       // throwing port): the marker is already on the record, so an onRung
       // throw is swallowed and the ladder CONTINUES.
@@ -355,15 +381,13 @@ export function runLadder<T>(
           fireRung('timeout', abortGraceMs, () => {
             const hardCancel = port.hardCancel;
             if (hardCancel === undefined) return false;
-            hardCancel();
-            return true;
+            return hardCancel(); // an async primitive's promise MUST flow back so its rejection is recorded (never unhandled)
           });
           arm(killGraceMs, () => {
             fireRung('kill', killGraceMs, () => {
               const kill = port.kill;
               if (kill === undefined) return false;
-              kill();
-              return true;
+              return kill(); // same as hardCancel: a promise flows back to fireRung
             });
             settle({ outcome: 'killed' });
           });
@@ -427,6 +451,11 @@ export interface GovernorConfig {
    * every dispatch of an op counts as another attempt of that op, so
    * attempt caps always exist. Stable PER-JOB identity needs config.jobKey
    * or input.jobId. Runtime-only: never persisted.
+   *
+   * RESUME LIMITATION (recorded): a custom jobKey is NOT seeded on resume —
+   * `seedFromJournal` seeds per journal jobId (max-of-ordinals) and per op
+   * name (sum), so a custom jobKey must align with those conventions or
+   * per-job caps reset across resume.
    */
   jobKey?: (op: string, input: unknown) => string;
 }
@@ -589,9 +618,27 @@ function addUsage(a: Usage, b: Usage): Usage {
   };
 }
 
-/** Σ of the frozen Usage fields — the same fold the drivers totalTokens report (DD-9 token rollup). */
+/**
+ * Σ of the frozen Usage fields — the same fold the drivers totalTokens
+ * report (DD-9 token rollup). `reasoning` is NOT added on top: the frozen
+ * `output` field already includes reasoning tokens, so the cap fold counts
+ * them once, via output (output + reasoning double-counted). Reasoning
+ * stays a reported Usage field — addUsage still sums the field itself.
+ */
 function totalTokensOf(usage: Usage): number {
-  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+}
+
+/**
+ * USD observations must be a finite number >= 0, validated BEFORE any
+ * rollup mutation — a NaN/negative fold would poison the rollup and
+ * silently disable the USD cap (I9). Seeding goes through the same check:
+ * a bad `usdOf` derivation fails loud at construction time.
+ */
+function assertValidUsd(field: string, usd: number): void {
+  if (!Number.isFinite(usd) || usd < 0) {
+    throw new Error(`governor: ${field} must be a finite number >= 0, got ${usd}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -758,9 +805,13 @@ export class BudgetGovernor {
 
   /**
    * Observe USD cost for one governed invocation and check the run cap. The
-   * cap is inclusive: the trip fires when the rollup EXCEEDS maxUsd.
+   * cap is inclusive: the trip fires when the rollup EXCEEDS maxUsd. The
+   * observation is validated BEFORE the rollup mutates: a NaN/negative
+   * value throws instead of poisoning the cap (I9 — fail loud, never fail
+   * open).
    */
   observeCost(jobKey: string, usd: number): void {
+    assertValidUsd('observed cost', usd);
     this.usdSpentN += usd;
     this.record({ kind: 'usage', jobKey, usd, atMs: this.now() });
     const cap = this.config.maxUsd;
@@ -777,16 +828,33 @@ export class BudgetGovernor {
    * the failure DD-9 exists to prevent (fail loud, never fail open; the
    * honest-stop path marks the rest budget-exhausted). A zero-usage result
    * folds nothing (nothing was measured — I9).
+   *
+   * `counts` keeps the fold ONCE-ONLY for an invocation whose evidence was
+   * already streamed through the job context: usage or cost already counted
+   * via reportUsage/reportCost is skipped here, and the unpriced trip fires
+   * only when THIS invocation's usage has no cost evidence either way — a
+   * `costAlreadyCounted` flag means cost evidence existed and was counted,
+   * so there is nothing left to fail loud about.
    */
-  observeResult(jobKey: string, result: { usage?: Usage; costUSD?: number }): void {
+  observeResult(
+    jobKey: string,
+    result: { usage?: Usage; costUSD?: number },
+    counts?: { usageAlreadyCounted?: boolean; costAlreadyCounted?: boolean },
+  ): void {
     const usage = result.usage;
     const hasRealUsage = usage !== undefined && totalTokensOf(usage) > 0;
-    if (hasRealUsage && usage !== undefined) {
+    if (hasRealUsage && usage !== undefined && counts?.usageAlreadyCounted !== true) {
       this.observeUsage(jobKey, usage);
     }
     if (result.costUSD !== undefined) {
-      this.observeCost(jobKey, result.costUSD);
-    } else if (hasRealUsage && this.config.maxUsd !== undefined) {
+      if (counts?.costAlreadyCounted !== true) {
+        this.observeCost(jobKey, result.costUSD);
+      }
+    } else if (
+      hasRealUsage &&
+      this.config.maxUsd !== undefined &&
+      counts?.costAlreadyCounted !== true
+    ) {
       this.trip('unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)');
     }
   }
@@ -884,13 +952,31 @@ export class BudgetGovernor {
       }
       this.usageN = this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
       if (opts?.usdOf !== undefined) {
-        this.usdSpentN += opts.usdOf(event.usage);
+        const usd = opts.usdOf(event.usage);
+        // Seeding happens at construction: a derived cost that is not a
+        // finite number >= 0 fails loud and EARLY, never poisons the rollup.
+        assertValidUsd('derived cost', usd);
+        this.usdSpentN += usd;
       }
     }
     // The dispatch quota is part of the SAME budget: seeding replays the
     // journaled dispatch count so runDispatchQuota carries across resume
     // instead of restarting at 0.
     this.dispatchedCount += totalAttempts;
+    // DD-9 fail-loud at seed time: real journaled usage with NO price
+    // mapping under a configured maxUsd means the resumed run's PRIOR
+    // usage cannot be priced, so maxUsd cannot bind it — trip BEFORE the
+    // resumed run admits anything (fail loud, never fail open).
+    if (
+      opts?.usdOf === undefined &&
+      this.config.maxUsd !== undefined &&
+      this.usageN !== undefined &&
+      totalTokensOf(this.usageN) > 0
+    ) {
+      this.trip(
+        `seeded prior usage (${totalTokensOf(this.usageN)} tokens) cannot be priced — no usdOf mapping, so maxUsd ${this.config.maxUsd} cannot bind the resumed run's prior usage; refusing to continue past an unenforceable budget (DD-9)`,
+      );
+    }
     // A seed that already overruns a cap trips the governor BEFORE the
     // resumed run admits anything: budget-exhausted rows from the prior run
     // re-mark without op invocation (the "not auto-retried by resume" rule,
@@ -976,6 +1062,56 @@ function statusOfValue(value: unknown): GovernedOutcomeStatus {
 }
 
 /**
+ * Structural guard for a governed 'ok' value (the same defensive style as
+ * statusOfValue — contract-violating returns exist): when the value carries
+ * a WorkerResult shape, return it for the DD-9 budget fold; anything else
+ * returns undefined and folds nothing. Requires `usage` to be an object
+ * with numeric input/output/cacheRead/cacheWrite, `denials` an array, and
+ * `stopReason` one of the four frozen DriverStopReason strings; `costUSD`
+ * rides along only when it is a number.
+ */
+function workerResultOfValue(value: unknown): WorkerResult | undefined {
+  if (typeof value !== 'object' || value === null) {
+    return undefined;
+  }
+  const candidate = value as {
+    usage?: unknown;
+    costUSD?: unknown;
+    denials?: unknown;
+    stopReason?: unknown;
+  };
+  const usage = candidate.usage;
+  if (
+    typeof usage !== 'object' ||
+    usage === null ||
+    typeof (usage as { input?: unknown }).input !== 'number' ||
+    typeof (usage as { output?: unknown }).output !== 'number' ||
+    typeof (usage as { cacheRead?: unknown }).cacheRead !== 'number' ||
+    typeof (usage as { cacheWrite?: unknown }).cacheWrite !== 'number'
+  ) {
+    return undefined;
+  }
+  if (!Array.isArray(candidate.denials)) {
+    return undefined;
+  }
+  const stopReason = candidate.stopReason;
+  if (
+    stopReason !== 'complete' &&
+    stopReason !== 'aborted' &&
+    stopReason !== 'budget' &&
+    stopReason !== 'error'
+  ) {
+    return undefined;
+  }
+  return {
+    usage: usage as Usage,
+    denials: candidate.denials,
+    stopReason,
+    ...(typeof candidate.costUSD === 'number' ? { costUSD: candidate.costUSD } : {}),
+  };
+}
+
+/**
  * Wrap one op with the governor: admission caps → in-flight slot → wall-clock
  * ladder (inside the job context, so ops reach the signal/port via
  * currentJobContext()) → honest verdict. Refusals and kills return
@@ -1019,6 +1155,12 @@ function governOp(op: Op<never, never>, opName: string, governor: BudgetGovernor
         return { status: 'budget-exhausted' };
       }
       const attempt = admission.attempt;
+      // The once-only guard: usage/cost the op STREAMED through the job
+      // context is folded by the callbacks below — the flags tell the
+      // completion-time WorkerResult fold to skip that evidence instead of
+      // counting it twice.
+      let reportedUsage = false;
+      let reportedCost = false;
       const outcome = await runLadder(() => op(input), governor.ladderSpec, { op: opName, jobKey, attempt }, {
         clock: governor.clock,
         onRung: (marker) => {
@@ -1034,8 +1176,14 @@ function governOp(op: Op<never, never>, opName: string, governor: BudgetGovernor
             atMs: marker.atMs,
           });
         },
-        onUsage: (usage) => governor.observeUsage(jobKey, usage),
-        onCost: (usd) => governor.observeCost(jobKey, usd),
+        onUsage: (usage) => {
+          reportedUsage = true;
+          governor.observeUsage(jobKey, usage);
+        },
+        onCost: (usd) => {
+          reportedCost = true;
+          governor.observeCost(jobKey, usd);
+        },
       });
       if (outcome.outcome === 'completed') {
         governor.record({
@@ -1047,6 +1195,19 @@ function governOp(op: Op<never, never>, opName: string, governor: BudgetGovernor
           elapsedMs: outcome.elapsedMs,
           atMs: governor.now(),
         });
+        // DD-9 evidence fold: a completed 'ok' result whose value is
+        // WorkerResult-shaped carries this invocation's budget evidence —
+        // fold it ONCE, skipping whatever the op already streamed (the
+        // flags above).
+        if (statusOfValue(outcome.value) === 'ok') {
+          const worker = workerResultOfValue((outcome.value as { value?: unknown }).value);
+          if (worker !== undefined) {
+            governor.observeResult(jobKey, worker, {
+              usageAlreadyCounted: reportedUsage,
+              costAlreadyCounted: reportedCost,
+            });
+          }
+        }
         return outcome.value;
       }
       if (outcome.outcome === 'threw') {
@@ -1138,14 +1299,35 @@ const BLOCKED_MARKER = 'blocked:';
  *     blocked row with any definitively-failed dependency keeps its real
  *     verdict (that obstruction is evidence, not budget).
  *
- * No-op unless the governor actually tripped. Executed rows are never
- * rewritten. Counts are recomputed over the marked rows (needs-human→blocked
- * and indeterminate→failed per the documented T1.2 freeze workaround). The
- * T1.4 runner integration folds this into runPlan; today the caller
- * composes: `withBudgetStop(await runPlan(...), plan, governor)`.
+ * TWO honesty rules (I9: annotate only a real stop that actually gated
+ * undispatched work):
+ *   - the STOP must be budget-family: the governor tripped, OR the run hit
+ *     the per-run dispatch quota — a 'dispatch-quota' short-circuit stops
+ *     the run for budget-family reasons even though `tripped` stays false.
+ *     An 'attempt-cap' is PER-JOB (it gates only that job's own
+ *     re-dispatch, never the run) and must NOT trigger annotation.
+ *   - the stop must actually GATE: if NO row differs from the input report
+ *     after the marking pass (identity compare below), nothing undispatched
+ *     was gated — the refused rows are themselves real terminal verdicts —
+ *     and the report is returned WITHOUT the stoppedEarly claim.
+ *
+ * Executed rows are never rewritten: a `queued:`-marker row the governor's
+ * events show as ADMITTED (or completed) carries a detail fabricated by
+ * executed code, not the runner's never-dispatched marker, and keeps its
+ * real verdict. Counts are recomputed over the marked rows
+ * (needs-human→blocked and indeterminate→failed per the documented T1.2
+ * freeze workaround). The T1.4 runner integration folds this into runPlan;
+ * today the caller composes:
+ * `withBudgetStop(await runPlan(...), plan, governor)`.
  */
 export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGovernor): RunReport {
-  if (!governor.tripped) {
+  // Honesty rule 1 — a budget-family stop only (see the doc comment): the
+  // trip, or a per-run dispatch-quota refusal. 'attempt-cap' is per-job and
+  // deliberately absent here.
+  const dispatchQuotaRefused = governor.events.some(
+    (event) => event.kind === 'short-circuited' && event.reason === 'dispatch-quota',
+  );
+  if (!governor.tripped && !dispatchQuotaRefused) {
     return report;
   }
   const rowsByJob = new Map<string, JobOutcome>(report.jobs.map((row) => [row.jobId, row]));
@@ -1196,7 +1378,22 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
   };
   const jobs: JobOutcome[] = report.jobs.map((row) => {
     if (row.result.status === 'indeterminate' && row.result.detail.startsWith(QUEUED_MARKER)) {
-      return { ...row, result: { status: 'budget-exhausted' } };
+      // Provenance check: the runner writes `queued: …` ONLY for jobs it
+      // never dispatched. If the governor's events show an admission (or a
+      // completion) for this jobKey, the marker came from EXECUTED code (an
+      // op returning an indeterminate `queued: …` verdict) — the row claims
+      // queued but the governor admitted it, so the marker is fabricated:
+      // keep its real verdict, never rewrite it. Conservative provenance:
+      // custom config.jobKey layouts simply never match the row id and
+      // behave exactly as before.
+      const executed = governor.events.some(
+        (event) =>
+          (event.kind === 'admitted' || event.kind === 'completed') &&
+          event.jobKey === row.jobId,
+      );
+      if (!executed) {
+        return { ...row, result: { status: 'budget-exhausted' } };
+      }
     }
     if (
       row.result.status === 'failed' &&
@@ -1215,15 +1412,23 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
   // `queued` (queued marker) or `blocked` (blocked marker) — move exactly
   // those.
   const counts: RunCounts = { ...report.counts };
+  let reMarked = false;
   jobs.forEach((row, index) => {
     const original = report.jobs[index];
     if (row === original) {
       return; // untouched — the runner's count stands
     }
+    reMarked = true;
     const priorState: JobState = original.result.status === 'indeterminate' ? 'queued' : 'blocked';
     counts[priorState] -= 1;
     counts['budget-exhausted'] += 1;
   });
+  // Honesty rule 2 — the stop must have actually GATED undispatched work:
+  // every row kept its real verdict (a refusal row is itself terminal
+  // evidence), so there is no early stop to claim (I9).
+  if (!reMarked) {
+    return report;
+  }
   return {
     ...report,
     stoppedEarly: true,
