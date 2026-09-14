@@ -237,6 +237,18 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // never even created (store.create would have mkdir'd it).
       expect(calls).toEqual([]);
       await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+
+      // The routeFor throw is only the OUTER guard; a gateway can still remap
+      // an ALLOWED name server-side. The driver therefore surfaces the model
+      // the endpoint actually served — the fact the shared conformance suite's
+      // observed-model check (leg m) keys on — and a remapped run fails that
+      // check loudly.
+      const remapping = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' }, []),
+      );
+      const remapped = await remapping.run(invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL } }));
+      expect(remapped.model).toBe('actually-served-model'); // the honest observation
+      expect(remapped.model).not.toBe(CONFORMANCE_MODEL); // the suite's leg m fails this run loudly
     });
   });
 

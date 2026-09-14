@@ -10,19 +10,23 @@
 //   stdin: the prompt (read to EOF; the content steers nothing — the script
 //          below is the model).
 //   stdout: one JSON event per line —
-//     {type:'system', subtype:'init', session_id}
+//     {type:'system', subtype:'init', session_id, model}
 //     {type:'assistant', message:{content:[{type:'text',text}
 //                                         |{type:'tool_use',id,name,input}],
 //                                usage}}
 //     {type:'user', message:{content:[{type:'tool_result',tool_use_id,
 //                                      is_error,content}]}}
 //     {type:'result', subtype:'success', is_error:false, session_id, usage,
-//      structured_output?}
+//      model, structured_output?}
 //   stderr: diagnostics. Exit 0 on a completed run, non-zero on a simulated
 //   hard failure.
 //
 // SCRIPTED BEHAVIOR (env FAKE_AGENT_MODE, values below) — the default is a
 // clean 'ok' completion with fixed usage numbers:
+//   FAKE_AGENT_SERVED_MODEL — a GLOBAL override, not a mode: the model id
+//                    both contract events report as served (default: the
+//                    requested --model). Simulates a gateway silently
+//                    remapping the requested name server-side.
 //   ok               assistant text (FAKE_AGENT_REPLY ?? 'ok') + result
 //   structured-ok    result carries structured_output {answer:'ok'}
 //   tool-then-reply  ONE tool_use (FAKE_AGENT_TOOL/FAKE_AGENT_INPUT, default
@@ -77,9 +81,11 @@ const TOOL_INPUT = process.env.FAKE_AGENT_INPUT;
 const TOOL_PATH = process.env.FAKE_AGENT_PATH;
 const SLOW_EXIT_MS = Number(process.env.FAKE_AGENT_SLOW_EXIT_MS ?? '0');
 const ALLOWED = process.env.FAKE_AGENT_ALLOWED; // undefined (standalone) = all; '' = none
+const SERVED_MODEL = process.env.FAKE_AGENT_SERVED_MODEL;
 const resumeId = flagValue('--resume');
 const jsonSchemaRaw = flagValue('--json-schema');
 const model = flagValue('--model') ?? 'fake-model';
+const servedModel = SERVED_MODEL ?? model; // the endpoint's response model — a remap simulation overrides it
 
 const USAGE = {
   input_tokens: 10,
@@ -153,7 +159,7 @@ function structuredOutputFor(replyText) {
 // Event helpers
 // ---------------------------------------------------------------------------
 
-const emitInit = () => out({ type: 'system', subtype: 'init', session_id: sessionId });
+const emitInit = () => out({ type: 'system', subtype: 'init', session_id: sessionId, model: servedModel });
 const emitAssistantText = (text, usage = USAGE) =>
   out({ type: 'assistant', message: { content: [{ type: 'text', text }], usage } });
 const emitToolUse = (id, name, input, usage = USAGE) =>
@@ -173,6 +179,7 @@ const emitResult = (overrides = {}) =>
     is_error: false,
     session_id: sessionId,
     usage: USAGE,
+    model: servedModel,
     ...overrides,
   });const emitJunk = () => {
   process.stdout.write('fake-agent-cli: transient bootstrapping noise (not json)\n');
