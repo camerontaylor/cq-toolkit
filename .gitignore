@@ -3,3 +3,28 @@ node_modules/
 dist/
 *.env*
 .DS_Store
+
+# --- agent scratch (runtime tooling; never commit) ---
+# .zcode/ and .paseo/ are pure runtime agent scratch — ignored wholesale.
+.zcode/
+.paseo/
+# .claude/ is NOT blanket-ignored: it mixes authored, tracked config
+# (skills/commands/agents/hooks/settings.json, scheduled_tasks.json) with
+# runtime artifacts. Ignore ONLY the runtime artifacts; a blanket rule
+# would hide newly authored skills from git status.
+.claude/settings.local.json
+.claude/.credentials.json
+.claude/scheduled_tasks.lock
+.claude/memory.db
+.claude/memory.db-wal
+.claude/memory.db-shm
+.claude/worktrees/
+.claude/shell-snapshots/
+.claude/history.jsonl
+.claude/paste-cache/
+.claude/file-history/
+.claude/session-env/
+# Deliberately UNignored (no convention to assert): .claude/sessions/,
+# projects/, ide/, cache/, debug/, tasks/ — runtime in a HOME .claude/, but
+# none has ever appeared inside a project .claude/ here, and authored
+# config must stay visible.
