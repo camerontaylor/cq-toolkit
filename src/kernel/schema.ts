@@ -179,7 +179,12 @@ export const PlanSchema: z.ZodType<Plan> = z.object({
 }).strict();
 
 export const RunOptionsSchema: z.ZodType<RunOptions> = z.object({
-  concurrency: z.number().int(),
+  // Concurrency is a pool size, so < 1 is meaningless: .min(1) tightens the
+  // T1.1 mirror (round-4 medium finding, recorded in PR 7's 'Accepted at
+  // merge' notes as folded into the next kernel-schema-touching PR — this
+  // one, T1.2). Mirror-only tightening; the frozen RunOptions type is
+  // untouched. The runner enforces the same bound at runtime.
+  concurrency: z.number().int().min(1),
   stopOnError: z.boolean(),
   journalDir: z.string().optional(),
   maxUsd: z.number().optional(),

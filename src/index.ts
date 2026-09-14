@@ -1,7 +1,7 @@
-// cq-toolkit public barrel — T1.1 types freeze. Re-export only, no logic:
-// the frozen driver-seam types, the frozen kernel types, and the kernel's
-// zod schema mirrors (schema values, generic op-result factory included).
-// Types are re-exported as types; schemas as values.
+// cq-toolkit public barrel — re-export only, no logic: the frozen T1.1
+// driver-seam and kernel types, the kernel's zod schema mirrors (schema
+// values, generic op-result factory included), and the T1.2 kernel runtime
+// surface (runner, journal, manifest, output helpers).
 export type {
   Budget,
   Driver,
@@ -67,3 +67,24 @@ export {
   WorkerResultSchema,
   opResultSchema,
 } from './kernel/schema.js';
+// Kernel runtime surface (T1.2) — re-export only, no logic: the plan runner,
+// the NDJSON journal, the run manifest, and the I1 output helpers. Pure
+// types ride along as `export type`.
+export type {
+  ManifestJob,
+  RunManifest,
+} from './kernel/manifest.js';
+export type { OpRegistryView } from './kernel/runner.js';
+export type { RunLog } from './kernel/journal.js';
+export {
+  canonicalJson,
+  hashInputs,
+  makeManifest,
+  topoOrder,
+} from './kernel/manifest.js';
+export {
+  deriveJobStatuses,
+  openRunLog,
+} from './kernel/journal.js';
+export { runPlan } from './kernel/runner.js';
+export { emitReport, narrate, renderHuman } from './kernel/output.js';
