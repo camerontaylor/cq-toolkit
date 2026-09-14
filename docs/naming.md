@@ -15,7 +15,7 @@ public npm registry (https://registry.npmjs.org) and GitHub repository search.
 | candidate | npm status | GitHub name collisions | decision |
 | --- | --- | --- | --- |
 | `cq-toolkit` | free (404) — see below | 17 repos match `cq-toolkit in:name`; only exact-name hit besides ours is `csiberlin/CQ-Toolkit` (unrelated personal repo) | chosen |
-| `@camerontaylor/cq-toolkit` | free (404) — see below | not checked — fallback only | fallback; not needed, kept on record |
+| `@camerontaylor/cq-toolkit` | free (404) at T0.5 check time — published by the owner later the same day, see the decision at the foot | not checked — fallback only | fallback; not needed, kept on record |
 | `cq` | taken — 0.0.1 exists (see legacy note below) | not applicable | never a candidate (legacy note below) |
 
 ## Legacy note: the bare short name was taken
@@ -45,8 +45,8 @@ release.
 > verbatim, under the then-chosen unscoped name. The block was cleared the
 > same day — the owner published the placeholder as the scoped
 > `@camerontaylor/cq-toolkit@0.0.0` (the decision at the foot of this
-> record); the procedure is kept for its packaging recipe, with the scoped
-> name substituted.
+> record); the procedure stands as recorded — substitute the scoped name if
+> the recipe is ever reused.
 >
 > Exact procedure, reproducible as written:
 >
@@ -91,7 +91,7 @@ package name.
 ## Sources
 
 - https://registry.npmjs.org/cq-toolkit — 404
-- https://registry.npmjs.org/@camerontaylor%2fcq-toolkit — 404
+- https://registry.npmjs.org/@camerontaylor%2fcq-toolkit — 404 at T0.5 check time (published by the owner later the same day — see the owner decision above)
 - https://registry.npmjs.org/cq — exists, version 0.0.1
 - https://api.github.com/search/repositories?q=cq-toolkit+in:name — 17 results
 - package.json of this repository — `"name": "@camerontaylor/cq-toolkit"`, `"version": "0.0.0"` (unscoped `cq-toolkit` was the T0.5-era name; see the owner decision above)
