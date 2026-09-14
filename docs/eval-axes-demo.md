@@ -1,8 +1,9 @@
 # Eval-axes demo — LIVE run output
 
-**Run date:** 2026-09-14 (first coherent run; the glm × ai-sdk row was
-re-run live the same day over the anthropic-compat wire — see the wire note
-below) · **Script:** `scripts/demo-eval-axes.mjs`
+**Run date:** 2026-09-14 (first coherent run; the glm × ai-sdk and
+deepseek-chat × ai-sdk rows were each re-run live the same day under the
+CURRENT script's identity guards — see the per-cell evidence notes below)
+· **Script:** `scripts/demo-eval-axes.mjs`
 (standalone; never part of `npm test`) · **Fixture prompt (identical in
 every cell):** "Reply with exactly this text and nothing else: The quick
 brown fox jumps over the lazy dog." · **Caps:** `Budget.maxUsd 2`,
@@ -21,10 +22,18 @@ plan-funded wire.
 
 | lane | provider | model | served model | stopReason | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| ai-sdk | deepseek | deepseek-chat | **deepseek-flash** | complete | 93 | 10 | 0 | 0 | $0.00003024 | yes |
 | claude-agent | zai | glm-4.6 | glm-4.6 | complete | 382 | 95 | 0 | 0 | $0.00043820 | yes |
 | subprocess | zai | glm-4.6 | glm-4.6 | complete | 1132 | 26 | 0 | 0 | $0.00073640 | yes |
+| ai-sdk | deepseek | deepseek-chat | **deepseek-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
 | ai-sdk | zai | glm-4.6 | **glm-5.3-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
+
+> cell ai-sdk/deepseek-chat evidence (re-run live 2026-09-14 under the
+> current script): the run completed, but the endpoint REPORTED serving
+> `deepseek-flash` for the requested `deepseek-chat` — the
+> served-model-mismatch guard rejected the cell. The earlier PASSING
+> deepseek row (93/10 tokens → $0.00003024) predates the guard and is kept
+> as PRE-GUARD HISTORY below — under the current script that cell fails
+> exactly this way, so the table now matches the script.
 
 > cell ai-sdk/glm-4.6 evidence: the coding-plan OpenAI-compat wire
 > CONNECTED (after pinning node to IPv4-first — see below) and the run
@@ -68,14 +77,17 @@ plan-funded wire.
 
 Notes:
 
-- **The observed-model defence fired for real**: the DeepSeek endpoint was
-  asked for `deepseek-chat` and REPORTED serving `deepseek-flash` —
-  `WorkerResult.model` surfaces the served id, so the rename is visible
-  instead of silent (the pre-dispatch-allowlist lane would have refused the
-  run; the observation lane surfaces the fact — both defences, chosen per
-  lane). Pricing consequence: the modeled figure used the vendored
-  `deepseek-chat` rates; if `deepseek-flash`'s list price differs, the
-  modeled number inherits that gap — stated, not hidden.
+- **The observed-model defence fired for real — twice.** BOTH raw-chat
+  cells were rejected by the identity guards: DeepSeek reported serving
+  `deepseek-flash` for `deepseek-chat`, and Z.AI's coding wire reported
+  `glm-5.3-flash` for `glm-4.6`. `WorkerResult.model` surfaces the served
+  id, so both remaps are visible facts instead of silent price
+  attributions. (The pre-guard deepseek run's passing row — 93/10 tokens →
+  $0.00003024, priced at deepseek-chat rates — is PRE-GUARD HISTORY: had
+  the remap existed with different list prices, that row would have
+  inherited the pricing gap silently; the guard now fails such a row
+  instead. The agent lanes' rows pass identity because their endpoints
+  served the requested ids truthfully.)
 - **Run-to-run variance** (claude-agent × glm-4.6, an earlier demo run the
   same minute): usage {395, 88} → $0.00043060 — same fixture, ±3% cost;
   agents are not deterministic and per-run costUSD varies with the sampled

@@ -41,7 +41,9 @@
 // 1e-9 USD) before printing the row.
 //
 // Standalone by design — never runs in `npm test` (CI has no keys, no
-// network). Usage: zsh -lic 'node scripts/demo-eval-axes.mjs'
+// network). EXIT CODE: 0 only when every selected cell passed (identity,
+// fixture, and fold checks green); any failed cell sets exit 1. Usage:
+// zsh -lic 'node scripts/demo-eval-axes.mjs'
 import { AiSdkDriver, ClaudeAgentDriver, SessionStore, SubprocessDriver, runLadder } from '../dist/index.js';
 import { priceOf } from '../dist/driver/pricing/index.js';
 import dns from 'node:dns';
@@ -182,11 +184,23 @@ async function runCell({ lane, provider, model }) {
           });
           continue;
         }
-        // The eval axes claim MODEL IDENTITY: a served id that differs from
-        // the cell's configured model id is a remap (deepseek-flash is
-        // exactly why) — the cell fails with evidence, and NO retry: a remap
-        // is endpoint configuration, a retry would pay for the same answer.
-        if (typeof result.model === 'string' && result.model !== model) {
+        // The eval axes claim MODEL IDENTITY: a completed verdict with NO
+        // observed model id cannot be attributed to any model — failed with
+        // evidence, and NO retry (an unreported id is not transient).
+        if (typeof result.model !== 'string' || result.model === '') {
+          attempts.push({
+            attempt,
+            stopReason: result.stopReason,
+            servedModelUnreported:
+              'the verdict carries no observed model id — an eval claiming model identity cannot accept it',
+          });
+          break;
+        }
+        // A served id that differs from the cell's configured model id is a
+        // remap (deepseek-flash / glm-5.3-flash are exactly why) — the cell
+        // fails with evidence, and NO retry: a remap is endpoint
+        // configuration, a retry would pay for the same answer.
+        if (result.model !== model) {
           attempts.push({
             attempt,
             stopReason: result.stopReason,
@@ -264,6 +278,11 @@ const results = [];
 for (const cell of selected) {
   process.stderr.write(`running cell ${cell.lane} × ${cell.provider}/${cell.model} …\n`);
   results.push({ ...cell, ...(await runCell(cell)) });
+}
+// A failed cell fails the RUN: the exit code carries the verdict so any
+// caller (CI, a wrapper) cannot mistake red evidence for a green demo.
+if (results.some((r) => r.failed === true)) {
+  process.exitCode = 1;
 }
 
 // --- Markdown output -----------------------------------------------------------

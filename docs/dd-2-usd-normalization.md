@@ -37,7 +37,7 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | claude-agent | glm-4.6 (glm-4.6) | 382 | 95 | 0 | 0 | (382×0.6 + 95×2.2)/1e6 = $0.00043820 | $0.00043820 | YES — exact |
 | subprocess | glm-4.6 (glm-4.6) | 1132 | 26 | 0 | 0 | (1132×0.6 + 26×2.2)/1e6 = $0.00073640 | $0.00073640 | YES — exact |
-| ai-sdk | deepseek-chat (served: deepseek-flash) | 93 | 10 | 0 | 0 | (93×0.28 + 10×0.42)/1e6 = $0.00003024 | $0.00003024 | YES — exact |
+| ai-sdk | deepseek-chat (served: **deepseek-flash** — mismatch guard FAILED the cell) | — | — | — | — | — | absent | FAILED — served-model mismatch |
 | ai-sdk | glm-4.6 (served: **glm-5.3-flash** — coding wire) | — | — | — | — | — | absent | FAILED — served-model mismatch |
 
 **Tolerance, stated precisely — three different claims:**
@@ -45,8 +45,9 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 1. **Driver fold vs independent recompute** (the normalization check that
    CAN be exact): every completed cell's `costUSD` equals a recompute of the
    same fold from the reported usage and the published rates, within 1e-9
-   USD. Observed: equality in all three completed cells. Every lane lands
-   inside this tolerance.
+   USD. Observed: equality in the TWO completed cells (the agent lanes —
+   both raw-chat cells were failed by the identity guards, below). Every
+   lane lands inside this tolerance.
 2. **Vendored table vs provider pages**: the GLM-4.6 and deepseek-chat rows
    match Z.AI's and DeepSeek's official per-million rates as re-checked
    today — the modeled figure is the api-equivalent list-price math, not an
@@ -54,14 +55,15 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 3. **Cross-lane usage comparability** (the check that CANNOT be exact):
    usage is deliberately NOT expected to agree across lanes — the identical
    user prompt rides different harness scaffolding. For ~16 prompt tokens,
-   the raw chat lane sent 93 input tokens (chat framing); the agent SDK
-   lane sent 382 (agent system prompt + tool-surface description); the CLI
-   lane sent 1132 (the CLI's full system prompt). The modeled cost
-   differences across lanes for the same model ($0.00044 → $0.00074 on
-   glm-4.6) are almost entirely that fixed scaffolding overhead, not
-   model behavior — which is exactly the fact a per-lane costUSD makes
-   visible, and the reason eval budgets must be compared WITHIN a lane or
-   normalized through this same fold.
+   the raw chat lane sent 93 input tokens (chat framing, PRE-GUARD
+   deepseek run — historical, see below); the agent SDK lane sent 382
+   (agent system prompt + tool-surface description); the CLI lane sent
+   1132 (the CLI's full system prompt). The modeled cost differences across
+   lanes for the same model ($0.00044 → $0.00074 on glm-4.6) are almost
+   entirely that fixed scaffolding overhead, not model behavior — which is
+   exactly the fact a per-lane costUSD makes visible, and the reason eval
+   budgets must be compared WITHIN a lane or normalized through this same
+   fold.
 
 ## The glm × ai-sdk wire history (owner-verified endpoint facts)
 
@@ -87,6 +89,14 @@ endpoint served glm-4.6 truthfully) remains a recorded historical datum
 from the superseded workaround — the same fixture over that wire did NOT
 remap, so the remap is a property of the coding wire, not of the driver.
 Full history: `docs/eval-axes-demo.md`.
+
+The DEEPSEEK cell was reconciled the same way (re-run live under the
+current script): the endpoint still REPORTS serving `deepseek-flash` for
+the requested `deepseek-chat`, so the identity guard fails that cell too.
+Its earlier passing row (93/10 tokens → $0.00003024, priced at
+deepseek-chat rates) is PRE-GUARD history — a genuine measurement of its
+moment, kept for the record; under the current script the cell fails
+exactly this way, so the recorded evidence and the script now agree.
 
 Host network note: this host's IPv6 route to api.z.ai hangs (node fetch →
 ETIMEDOUT; curl and the agent CLI survive via happy-eyeballs/IPv4). The
