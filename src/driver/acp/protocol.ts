@@ -505,9 +505,24 @@ export const UsageWireSchema = z.looseObject({
 });
 
 /**
- * Wire usage → frozen Usage: inputTokens → input, outputTokens → output,
- * cachedReadTokens → cacheRead, cachedWriteTokens → cacheWrite (the
- * step-2 correction: the field EXISTS on this wire and folds).
+ * Wire usage → frozen Usage: outputTokens → output, cachedReadTokens →
+ * cacheRead, cachedWriteTokens → cacheWrite (the step-2 correction: the
+ * field EXISTS on this wire and folds), and input = inputTokens −
+ * cachedReadTokens − cachedWriteTokens (floored at 0).
+ *
+ * THE SUBTRACTION (the cache-bucket fix): the wire's inputTokens is
+ * INCLUSIVE of the cached tokens — the committed live sample proves the
+ * overlap: `{ totalTokens: 15722, inputTokens: 15719, outputTokens: 3,
+ * cachedReadTokens: 11648, cachedWriteTokens: 0 }` has totalTokens =
+ * inputTokens + outputTokens, so 11648 of the 15719 ARE the cached reads
+ * (an exclusive input would have totaled 27370). Mapping inputTokens
+ * straight through double-counted cache in every total that sums the
+ * frozen Usage fields (Budget.maxTokens, the DD-9 rollup) — the exact
+ * defect class the ai-sdk lane fixed via `inputTokenDetails.noCacheTokens`
+ * (src/driver/ai-sdk/index.ts, usageFromSdk). The derived input keeps
+ * cacheRead/cacheWrite as the breakdown terms, so Σ of the frozen fields
+ * equals the wire's own totalTokens: 15719 − 11648 − 0 = 4071, and
+ * 4071 + 3 + 11648 + 0 = 15722.
  *
  * `reasoning` is deliberately NOT emitted: `thoughtTokens` exists on the
  * wire but its ADDITIVITY is unknown (inside or outside outputTokens —
@@ -523,11 +538,13 @@ export function mapWireUsage(raw: unknown): Usage | undefined {
   if (raw === null || raw === undefined) return undefined;
   const parsed = UsageWireSchema.safeParse(raw);
   if (!parsed.success) return undefined;
+  const cacheRead = parsed.data.cachedReadTokens ?? 0;
+  const cacheWrite = parsed.data.cachedWriteTokens ?? 0;
   return {
-    input: parsed.data.inputTokens,
+    input: Math.max(0, parsed.data.inputTokens - cacheRead - cacheWrite),
     output: parsed.data.outputTokens,
-    cacheRead: parsed.data.cachedReadTokens ?? 0,
-    cacheWrite: parsed.data.cachedWriteTokens ?? 0,
+    cacheRead,
+    cacheWrite,
   };
 }
 

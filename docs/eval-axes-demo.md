@@ -72,6 +72,12 @@ honestly labeled.
 > requested and served ids differ in SPELLING while naming the same
 > served model — a remap would have surfaced as any OTHER id and failed
 > the cell, the same guard strength as every other lane.
+> POST-RUN CORRECTION (2026-09-15, cache-bucket fix): the row's usage
+> figures predate the fold fix — the wire's inputTokens is INCLUSIVE of
+> the cached tokens, so the recorded input 15727 double-counts the 10368
+> cached reads (the corrected fold derives input = 15727 − 10368 − 0 =
+> 5359, Σ fields = 15739 = the wire's totalTokens); the recorded row
+> stands as captured, un-re-run.
 >
 > **The first run FAILED — a driver bug, not a wire fact.** stopReason
 > 'error', zero usage: the driver's session/new schema transcribed

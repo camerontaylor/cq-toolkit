@@ -87,6 +87,14 @@
 //                         ignores the cooperative cancel; the governed
 //                         kill rung must still reach the child and settle
 //                         the run 'aborted')
+//   FAKE_ACP_BIG_FRAME   when '1', the reply chunk is ONE session/update
+//                         whose JSON line is ~20k chars, written in TWO
+//                         stdout flushes 25 ms apart with NO newline
+//                         between — a valid frame straddling data-chunk
+//                         boundaries (ACP defines no line-length limit);
+//                         the driver's stdout line buffer must hold the
+//                         partial frame until the newline (the old
+//                         8000-char cap destroyed it mid-JSON)
 //   ok               materialization updates + reply (FAKE_ACP_REPLY ??
 //                    'ok') + end_turn with usage
 //   tool-then-reply  ONE gated tool call: request_permission round-trip
@@ -110,10 +118,16 @@
 //   resume-echo      replies 'resumed from acp session <id>' (proves the
 //                   session/load sidecar round-trip)
 //
-// Fixed usage: { totalTokens: 20, inputTokens: 10, outputTokens: 5,
-// thoughtTokens: 0, cachedReadTokens: 2, cachedWriteTokens: 3 } — frozen
-// by the driver's usage-mapping test as { input: 10, output: 5,
-// cacheRead: 2, cacheWrite: 3 } with NO reasoning field.
+// Fixed usage: { totalTokens: 20, inputTokens: 15, outputTokens: 5,
+// thoughtTokens: 0, cachedReadTokens: 2, cachedWriteTokens: 3 } — modeled
+// on the LIVE wire's INCLUSIVE arithmetic (cache-bucket fix, 2026-09-15):
+// totalTokens = inputTokens + outputTokens with the cached tokens INSIDE
+// inputTokens (the committed probe sample: total 15722 = input 15719 +
+// output 3, cachedRead 11648 inside the 15719). The driver's fold derives
+// input = inputTokens − cachedRead − cachedWrite = 15 − 2 − 3 = 10, so the
+// usage-mapping test freezes { input: 10, output: 5, cacheRead: 2,
+// cacheWrite: 3 } with NO reasoning field, and Σ of the frozen fields
+// (20) equals the wire's totalTokens.
 import { exec } from 'node:child_process';
 import { closeSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -138,6 +152,7 @@ const ADVERTISE_RESUME = process.env.FAKE_ACP_RESUME === '1';
 const STRING_REQUEST_IDS = process.env.FAKE_ACP_STRING_REQUEST_IDS === '1';
 const CLOSE_STDIN_ON_PERMISSION = process.env.FAKE_ACP_CLOSE_STDIN_ON_PERMISSION === '1';
 const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === '1';
+const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 
 // The POST-load tail marker (FAKE_ACP_REPLAY_WITH_TAIL=1): emitted in the
 // SAME stdout flush as the session/load response line, so it post-dates
@@ -146,9 +161,41 @@ const IGNORE_CANCEL = process.env.FAKE_ACP_IGNORE_CANCEL === '1';
 const POST_LOAD_TAIL_TEXT =
   'POST-LOAD tail chunk — same flush as the load response, post-dates the settle, must fold';
 
+// The frame-straddle marker (FAKE_ACP_BIG_FRAME=1): one session/update
+// whose JSON line is ~20k chars, written in TWO flushes with no newline
+// between — the first flush exceeds the old 8000-char stdout cap while the
+// line is still partial. The driver must hold the partial frame until the
+// newline; BOTH markers must then appear in the folded transcript.
+const BIG_FRAME_TEXT = `BIGFRAME-START ${'x'.repeat(20000)} BIGFRAME-END`;
+
+/**
+ * Emit ONE agent_message_chunk update as a ~20k-char JSON line split across
+ * two stdout flushes (no newline in the first): the straddle shape the
+ * driver's line buffer must survive. Resolves after the second flush lands.
+ */
+function emitBigFrameChunk() {
+  const line = JSON.stringify({
+    jsonrpc: '2.0',
+    method: 'session/update',
+    params: {
+      sessionId: acpSessionId,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: BIG_FRAME_TEXT } },
+    },
+  });
+  return new Promise((flushed) => {
+    process.stdout.write(line.slice(0, 9000)); // partial frame — no newline yet
+    setTimeout(() => {
+      process.stdout.write(`${line.slice(9000)}\n`); // the frame completes
+      flushed();
+    }, 25);
+  });
+}
+
 const USAGE = {
+  // INCLUSIVE wire arithmetic (the live sample's shape): totalTokens =
+  // inputTokens + outputTokens, cachedRead/cachedWrite INSIDE inputTokens.
   totalTokens: 20,
-  inputTokens: 10,
+  inputTokens: 15,
   outputTokens: 5,
   thoughtTokens: 0,
   cachedReadTokens: 2,
@@ -411,7 +458,11 @@ function endTurn() {
 
 async function okFlow() {
   materializationUpdates();
-  emitChunk(REPLY ?? 'ok');
+  if (BIG_FRAME) {
+    await emitBigFrameChunk(); // the straddled frame fully flushes BEFORE end_turn
+  } else {
+    emitChunk(REPLY ?? 'ok');
+  }
   endTurn();
 }
 

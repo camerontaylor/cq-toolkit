@@ -90,13 +90,19 @@
 //
 // USAGE (the step-2-corrected fold): ONLY the PromptResponse.usage folds —
 // `usage_update` frames are context-window telemetry and are dropped
-// (§1.3). inputTokens → input, outputTokens → output, cachedReadTokens →
-// cacheRead, cachedWriteTokens → cacheWrite (the field EXISTS on this
-// wire — probe OQ-3). `reasoning` is NEVER emitted: thoughtTokens exists
-// but its additivity vs outputTokens is unproven, and the frozen field is
-// additive-only-when-reported-outside-output (same rule as the claude-agent
-// lane). A cancelled response carries usage null → the fold is zeros; an
-// unmeasured verdict NEVER reports cost.
+// (§1.3). outputTokens → output, cachedReadTokens → cacheRead,
+// cachedWriteTokens → cacheWrite (the field EXISTS on this wire — probe
+// OQ-3), and input = inputTokens − cachedRead − cachedWrite (floored at
+// 0): the wire's inputTokens is INCLUSIVE of the cached tokens (live
+// sample: totalTokens 15722 = inputTokens 15719 + outputTokens 3, with
+// cachedReadTokens 11648 INSIDE the 15719), so a straight mapping
+// double-counted cache in every total that sums the frozen Usage fields —
+// the ai-sdk lane's noCacheTokens reasoning; Σ of the frozen fields then
+// equals the wire's own totalTokens. `reasoning` is NEVER emitted:
+// thoughtTokens exists but its additivity vs outputTokens is unproven, and
+// the frozen field is additive-only-when-reported-outside-output (same
+// rule as the claude-agent lane). A cancelled response carries usage null
+// → the fold is zeros; an unmeasured verdict NEVER reports cost.
 //
 // MODEL OBSERVATION (leg m binds): WorkerResult.model is the
 // POST-MATERIALIZATION config_option_update model value ONLY — the
@@ -360,6 +366,17 @@ function newObservation(): RunObservation {
 // The wire — line-framed JSON-RPC over the spawned child's stdio
 // ---------------------------------------------------------------------------
 
+/**
+ * The stdout line-buffer ceiling (1 MiB). Frames ARE this wire's data and
+ * ACP defines NO line-length limit — a valid frame (a tool_call's rawInput
+ * can be large) routinely straddles `data`-chunk boundaries and must sit
+ * in the buffer intact until its newline arrives. The old 8000-char mirror
+ * of the stderr cap destroyed exactly those frames mid-JSON, before onLine
+ * could parse them. 1 MiB is a pathological-run bound, not a protocol
+ * limit; stderr (human diagnostics, not frames) keeps its 8000-char cap.
+ */
+const STDOUT_LINE_BUFFER_LIMIT = 1_048_576;
+
 interface WireHandlers {
   onNotification(method: string, params: unknown): void;
   /**
@@ -406,10 +423,13 @@ class AcpWire {
         if (line !== '') this.onLine(line);
         nl = this.lineBuffer.indexOf('\n');
       }
-      // The stdout mirror of stderr's 8000-cap: a run this long was never
-      // a well-framed line — narrate the truncation (never silent loss)
-      // and reset before the buffer can grow unbounded.
-      if (this.lineBuffer.length > 8000) {
+      // A frame straddling chunk boundaries WAITS here for its newline —
+      // the normal case on this wire, not an error (frames are the data;
+      // see STDOUT_LINE_BUFFER_LIMIT). The 1 MiB ceiling only bounds a
+      // pathological run: on overflow the accumulated bytes are emitted as
+      // a narration truncation marker (never silent loss) before the
+      // buffer clears.
+      if (this.lineBuffer.length > STDOUT_LINE_BUFFER_LIMIT) {
         this.handlers.onUnparseableLine(
           `[cq: stdout line buffer overflow — ${this.lineBuffer.length} chars with no newline; truncated, never silently dropped]`,
         );
@@ -901,7 +921,11 @@ export class AcpDriver implements Driver {
     //     wire's exit path and the run fails to the honest 'aborted'
     //     verdict instead of leaving the harness process running.
     // Purely reactive: nothing here fires without the governor's signal.
+    // ONCE-semantics (the attach-time recheck below): a double entry — the
+    // abort event AND the recheck, in an attach-then-abort race — must run
+    // the path exactly once; signalFired is that guard.
     const onAbort = (): void => {
+      if (signalFired) return;
       signalFired = true;
       const dangling = pendingPermissionId;
       pendingPermissionId = undefined;
@@ -939,6 +963,17 @@ export class AcpDriver implements Driver {
     };
     if (signal !== undefined) {
       signal.addEventListener('abort', onAbort, { once: true });
+      // ATTACH-TIME RECHECK (Codex P1): abort events are NOT replayed — a
+      // governed deadline that fired while appendMessage()/
+      // readAcpSessionId() was awaiting (between the pre-dispatch aborted
+      // check and THIS attach) leaves the listener on an ALREADY-aborted
+      // signal, never invoked, and the child would never be cancelled: the
+      // run would proceed through the whole handshake and prompt past a
+      // fired deadline. Run the abort path NOW — idempotent (the
+      // signalFired once-guard above), and the cancel/termination path
+      // tolerates the entry (the settle ladder re-terminating an already
+      // terminating child is a no-op).
+      if (signal.aborted) onAbort();
     }
 
     // --- Handshake step 1: initialize (integer version negotiation; the

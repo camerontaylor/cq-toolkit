@@ -22,9 +22,14 @@
 //      → the honest partial, narrated), served-model surfacing + the
 //      FAKE_ACP_SERVED_MODEL mismatch demonstration (the observed-model
 //      check catches it — the subprocess remap test's framing), usage
-//      mapping (fixed numbers, NO reasoning field), the resume sidecar
+//      mapping (fixed numbers → the DERIVED input, the wire's inputTokens
+//      being INCLUSIVE of the cached tokens — no reasoning field), the
+//      stdout frame-straddle leg (a ~20k-char frame split across flushes
+//      survives the line buffer — frames are the data), the resume sidecar
 //      discipline, cancel → 'aborted' over the governed signal, the
-//      mode-pin observability, the protocol-version mismatch verdict,
+//      attach-time abort recheck (a deadline firing before the listener
+//      attach still cancels the child — abort events are not replayed),
+//      the mode-pin observability, the protocol-version mismatch verdict,
 //      and the prompt-directed-JSON drop rule.
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -48,6 +53,7 @@ import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { runLadder } from '../../src/kernel/governor.js';
+import type { Clock } from '../../src/kernel/governor.js';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
 
 // The fake ACP server: node + the fixture script, spawned through the
@@ -440,15 +446,43 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, []));
       const result = await driver.run(invocation({ prompt: 'usage run' }));
       expect(result.stopReason).toBe('complete');
-      // {inputTokens:10, outputTokens:5, cachedReadTokens:2,
-      // cachedWriteTokens:3} → the frozen fold (the step-2 correction:
-      // cacheWrite FOLDS — the field exists on this wire).
+      // The wire carries {inputTokens:15, outputTokens:5, cachedReadTokens:2,
+      // cachedWriteTokens:3} — inputTokens INCLUSIVE of the cached tokens
+      // (totalTokens 20 = 15 + 5, the live-sample arithmetic). The fold
+      // DERIVES input = 15 − 2 − 3 = 10 (cacheRead/cacheWrite stay the
+      // breakdown terms, Σ = 20 = the wire's totalTokens): a driver that
+      // maps inputTokens straight through reports 15 and fails here.
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
       // thoughtTokens exists on the wire but its additivity is unproven —
       // reasoning is NEVER emitted (header; strategy §2.3).
       expect('reasoning' in result.usage).toBe(false);
       expect(result.costUSD).toBeUndefined(); // unpriced model — derived-only
       expect(result.costBasis).toBeUndefined();
+    });
+  });
+
+  test('stdout frame straddle: a ~20k-char frame split across flushes survives the line buffer intact (frames are the data)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The fixture writes ONE session/update whose JSON line is ~20k
+      // chars in TWO stdout flushes with no newline between. A driver with
+      // the old 8000-char stdout cap destroyed the partial frame mid-JSON
+      // (ACP defines no line-length limit) — the transcript lost the chunk
+      // and the overflow narration fired; THIS test failed on both.
+      const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_BIG_FRAME: '1' }, []));
+      const result = await driver.run(invocation({ prompt: 'big-frame run' }));
+      expect(result.stopReason).toBe('complete');
+      const record = await store.load(result.sessionId as string);
+      // BOTH ends of the straddled frame folded into the transcript: the
+      // line buffer held the partial bytes across the flush boundary.
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('BIGFRAME-START')),
+      ).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('BIGFRAME-END')),
+      ).toBe(true);
+      // No truncation marker — the frame was never treated as an overflow.
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(false);
     });
   });
 
@@ -701,6 +735,66 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
     });
   }, 20_000);
+
+  test('attach-time abort recheck: a governed signal that fired before the listener attach still cancels the child — the run settles aborted', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // Manual clock: the ladder's rung-1 timer fires ONLY when the test
+      // flushes it — and the flush happens INSIDE the spawn seam, i.e.
+      // synchronously between the spawn and the driver's abort-listener
+      // attach. That is exactly the window the attach-time recheck guards:
+      // the pre-dispatch `signal.aborted` check ran long before, so the
+      // abort is injected while appendMessage()/readAcpSessionId()-shaped
+      // awaits have already passed; the listener then attaches to an
+      // ALREADY-aborted signal, which NEVER receives the abort event. The
+      // unfixed driver runs the whole handshake + prompt to 'complete'
+      // past a fired deadline; the fixed one cancels the child pre-prompt.
+      let fireSignal: (() => void) | undefined;
+      const clock: Clock = {
+        now: () => 0,
+        setTimeout: (fn) => {
+          fireSignal ??= fn; // only rung 1 is flushable — the later rungs must never fire
+          return { rung: 'signal' };
+        },
+        clearTimeout: () => undefined,
+      };
+      const calls: SpawnCall[] = [];
+      const abortingSpawn: AcpSpawnFn = (opts) => {
+        calls.push({ command: opts.command, args: [...opts.args], env: { ...opts.env } });
+        const child = spawnAcpProcess(opts);
+        fireSignal?.(); // the governed deadline lands before the listener attach
+        return child;
+      };
+      const driver = new AcpDriver({
+        command: ['node', FAKE_ACP_SERVER],
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        workspaceRoot: join(scratchDir, 'workspaces'),
+        modelEnv: 'FAKE_ACP_MODEL',
+        termGraceMs: 500,
+        killGraceMs: 500,
+        spawn: abortingSpawn,
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation({ prompt: 'pre-attach abort run' })),
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
+        { op: 'acp', jobKey: 'acp-pre-attach-abort', attempt: 1 },
+        { clock },
+      );
+      expect(outcome.outcome).toBe('completed'); // the run settled, not ladder-killed
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
+      expect(outcome.value.stopReason).toBe('aborted');
+      // The child was cancelled BEFORE the handshake: no session was ever
+      // established, so no assistant turn exists and exactly one spawn
+      // (the child that received the termination) happened.
+      const record = await store.load(outcome.value.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'assistant')).toBe(false);
+      expect(calls).toHaveLength(1);
+      const narration = await narrationOf(store, outcome.value.sessionId as string);
+      const marker = narration.find((line) => line.includes('"pre-prompt-abort"'));
+      expect(marker !== undefined).toBe(true); // the abort path RAN at attach time
+      expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(false); // pre-prompt — nothing to cancel
+    });
+  });
 
   test('answer-write failure fails the run loudly: a broken enforcement channel settles error, never hangs', async () => {
     await withScratch(async (scratchDir, store) => {
