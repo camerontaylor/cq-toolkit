@@ -440,16 +440,18 @@ export class ClaudeAgentDriver implements Driver {
       // signal may fire mid-iteration — flow analysis of the pre-dispatch
       // check cannot see that).
       aborted = abortRoot?.controller.signal.aborted === true || isAbortShaped(err);
-    } finally {
-      abortRoot?.dispose();
     }
     // Mapping-table alignment (governed signal fired → 'aborted'): the
     // exception path above is not the ONLY way an abort manifests — the SDK
     // can settle the for-await loop CLEANLY on abort, and the signal can
-    // fire after normal exit but before the verdict. Read the LIVE state of
-    // the wired root (it is true exactly when the governed signal fired —
-    // reading `signal` here would be a flow-narrowed always-false compare).
+    // fire after normal exit but before the verdict. Fold the LIVE state of
+    // the wired root here (reading `signal` would be a flow-narrowed
+    // always-false compare), and only THEN dispose: an abort landing in the
+    // post-settle window must still reach the verdict — disposing first
+    // would sever governed-cancellation propagation before the verdict
+    // state is captured.
     aborted = aborted || abortRoot?.controller.signal.aborted === true;
+    abortRoot?.dispose();
 
     // --- SDK-side permission denials → frozen shape (post-settle, deduped
     // per tool_use id). These are tools the agent's permission gate refused

@@ -101,6 +101,17 @@ function ipv4Fetch(input, init = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(typeof input === 'string' ? input : input.url);
     const headers = new Headers(init.headers ?? (typeof input !== 'string' ? input.headers : undefined));
+    const signal = init.signal;
+    // The governed wall-clock abort rides init.signal — it MUST reach the
+    // socket, or a DNS/TLS stall (or a slow response body) survives the
+    // ladder and a retry starts a second paid request while the first one
+    // lives.
+    const onAbort = () => {
+      // Forward the abort reason where trivial: the caller sees the
+      // governed cancellation, not a generic socket error.
+      req.destroy(signal?.reason instanceof Error ? signal.reason : new Error('ipv4Fetch: aborted by the governed signal'));
+    };
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
     const req = https.request(
       {
         hostname: url.hostname,
@@ -114,16 +125,28 @@ function ipv4Fetch(input, init = {}) {
         const chunks = [];
         res.on('data', (c) => chunks.push(c));
         res.on('end', () => {
+          cleanup();
           resolve(new Response(Buffer.concat(chunks).toString('utf8'), {
             status: res.statusCode,
             statusText: res.statusMessage,
             headers: res.headers,
           }));
         });
+        res.on('error', (err) => {
+          cleanup();
+          reject(err);
+        });
       },
     );
+    if (signal !== undefined) {
+      if (signal.aborted) onAbort();
+      else signal.addEventListener('abort', onAbort, { once: true });
+    }
     req.on('timeout', () => req.destroy(new Error('ipv4Fetch: socket timeout')));
-    req.on('error', reject);
+    req.on('error', (err) => {
+      cleanup();
+      reject(err);
+    });
     if (init.body !== undefined) req.write(init.body);
     req.end();
   });
@@ -201,7 +224,13 @@ async function runCell({ lane, provider, model }) {
           continue;
         }
         const result = ladderOutcome.value;
-        const recomputed = recomputeCost({ provider, model }, result.usage);
+        // The independent recompute prices the model that was actually
+        // SERVED (the driver prices the served id too — the remap evidence
+        // is real); the requested id is only the fallback when nothing was
+        // observed. Otherwise a remapped cell would print fold disagreement
+        // for a CORRECT fold.
+        const pricedModel = result.model ?? model;
+        const recomputed = recomputeCost({ provider, model: pricedModel }, result.usage);
         // Fixture validation (the acceptance bar for a PASS): the verdict
         // must be stopReason 'complete' — a 'budget' or 'error' stopReason
         // records the cell as failed-with-evidence — AND the assistant
@@ -227,12 +256,34 @@ async function runCell({ lane, provider, model }) {
           });
           continue;
         }
+        // The eval axes claim MODEL IDENTITY: a served id that differs from
+        // the cell's configured model id is a remap (deepseek-flash is
+        // exactly why) — the cell fails with evidence, and NO retry: a remap
+        // is endpoint configuration, a retry would pay for the same answer.
+        if (typeof result.model === 'string' && result.model !== model) {
+          attempts.push({
+            attempt,
+            stopReason: result.stopReason,
+            servedModelMismatch: { requested: model, served: result.model },
+          });
+          break;
+        }
         // The DD-2 fold check: derived-only means the SAME math must give
         // the SAME number. Tolerance 1e-9 USD (float reassociation only).
         const foldAgrees =
           recomputed === undefined
             ? result.costUSD === undefined
             : Math.abs((result.costUSD ?? Number.NaN) - recomputed) <= 1e-9;
+        if (!foldAgrees) {
+          // A completed cell whose fold disagrees is a broken normalization,
+          // not a transient — record the evidence and do NOT issue another
+          // paid attempt.
+          attempts.push({
+            attempt,
+            foldDisagreement: { driverCostUSD: result.costUSD ?? null, recomputed },
+          });
+          break;
+        }
         return {
           lane, provider, model, elapsedMs,
           governedOutcome: ladderOutcome.outcome,
