@@ -1513,10 +1513,12 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       governRegistry(viewWith(entry('fake', countingOk)), governor),
     );
     expect(calls).toEqual([]);
-    // c1 is refused by the spent quota; c2 (dependsOn c1) is then honestly
-    // BLOCKED on the refused c1 — never dispatched, nothing fabricated.
-    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'failed']);
-    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'c1'/ });
+    // Resume-fold (issue #16): c1 has terminal-ok evidence from runs 1-2 with
+    // a matching hash, so it REPLAYS — zero dispatch, no quota consumed,
+    // nothing re-executed. c2's own re-dispatch is what the spent quota
+    // refuses (short-circuited before the op runs).
+    expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
+    expect(report.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
     const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
   });

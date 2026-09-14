@@ -12,10 +12,12 @@
 //     so a corrupted or stale derived view can always be recomputed.
 //
 // Crash tolerance (torn-tail policy): a crash mid-append can leave an
-// incomplete final line. `read` tolerates exactly that — an unparsable LAST
-// line is ignored; an unparsable (invalid JSON or schema-invalid) MIDDLE line
-// throws, because a hole in the middle of the evidence is corruption, not a
-// torn write.
+// incomplete final line — by definition one WITHOUT its trailing newline.
+// `read` tolerates exactly that: an unparsable LAST line is ignored only when
+// the file does NOT end with '\n' (a torn final write). A complete but
+// invalid line anywhere — including last — throws, as does any unparsable
+// middle line: a hole in complete evidence is corruption, not a torn write,
+// and silently dropping it would hide the corruption.
 import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JournalEventSchema } from './schema.js';
@@ -50,8 +52,9 @@ export interface RunLog {
   append(runId: string, event: JournalEvent): Promise<void>;
   /**
    * Parse every line of `<runId>.ndjson` in order. A missing file means "no
-   * facts yet" and yields `[]`; an unparsable LAST line is ignored (torn
-   * tail); an unparsable middle line throws (evidence corruption).
+   * facts yet" and yields `[]`; an unparsable last line is ignored ONLY when
+   * the file has no trailing newline (a torn final write); a complete but
+   * invalid line anywhere — including last — throws (evidence corruption).
    */
   read(runId: string): Promise<JournalEvent[]>;
   /** Run ids present in the dir, files sorted by mtime, oldest first (ties broken by id). */
@@ -139,6 +142,11 @@ async function readEvents(path: string): Promise<JournalEvent[]> {
     throw err;
   }
   if (raw === '') return [];
+  // Torn-tail detection BEFORE splitting: tolerance applies only when the
+  // final write never completed (no trailing newline). A file that ends with
+  // '\n' consists solely of complete lines — an invalid one is corruption,
+  // even in last position.
+  const tornTail = !raw.endsWith('\n');
   const lines = raw.split('\n');
   if (lines[lines.length - 1] === '') {
     lines.pop(); // file ended with a complete newline; the '' split artifact is not an event
@@ -150,12 +158,12 @@ async function readEvents(path: string): Promise<JournalEvent[]> {
       events.push(parsed);
       continue;
     }
-    if (i === lines.length - 1) {
-      break; // torn tail: crash mid-append, only the LAST line may be lost
+    if (i === lines.length - 1 && tornTail) {
+      break; // torn tail: crash mid-append, only an UNTERMINATED last line may be lost
     }
     throw new Error(
-      `journal: corrupt line ${i + 1} of ${path} — middle lines must be valid journal events ` +
-        '(only a trailing torn line is tolerated)',
+      `journal: corrupt line ${i + 1} of ${path} — a complete but invalid line is corruption; ` +
+        'only a trailing torn line (one without a trailing newline) is tolerated',
     );
   }
   return events;

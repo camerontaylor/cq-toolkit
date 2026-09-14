@@ -49,7 +49,13 @@ export function canonicalJson(value: unknown): string {
     return JSON.stringify(value) ?? 'null';
   }
   if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+    // Index-based, not value.map: map skips sparse-array holes, so
+    // `new Array(1)` would hash like `[]`. A hole reads as undefined, which
+    // canonicalizes to `null` (the documented array form) — the hash then
+    // distinguishes `[null]` from `[]`.
+    const parts: string[] = [];
+    for (let i = 0; i < value.length; i++) parts.push(canonicalJson(value[i]));
+    return `[${parts.join(',')}]`;
   }
   const entries = Object.entries(value)
     // Drop explicit-undefined values so {a: 1, b: undefined} hashes like {a: 1}.

@@ -7,8 +7,9 @@
 //      normalization + no aliasing into the plan, JSON serializability,
 //      topoOrder waves / cycle / unknown-dep / duplicate-id rejection.
 //   2. Journal: append+read round-trip (every line parses through
-//      JournalEventSchema), append creates the directory recursively, torn
-//      LAST line tolerated while a corrupt MIDDLE line throws, statusOf
+//      JournalEventSchema), append creates the directory recursively, a torn
+//      LAST line (no trailing newline) tolerated while a complete but
+//      invalid line anywhere — including last — throws, statusOf
 //      derivation rules (including the documented needs-human/indeterminate
 //      friction with the frozen JobState taxonomy), runs() mtime ordering,
 //      loud rejection of invalid events and unsafe runIds.
@@ -93,6 +94,17 @@ describe('canonicalJson', () => {
 
   test('array order is significant (arrays are ordered data)', () => {
     expect(canonicalJson([1, 2])).not.toBe(canonicalJson([2, 1]));
+  });
+
+  test('sparse array slots canonicalize as null — a hole never hashes like []', () => {
+    // value.map skipped holes, so `new Array(1)` hashed like `[]`. Index-based
+    // canonicalization reads a hole as undefined → the documented `null`.
+    expect(canonicalJson(new Array(1))).toBe('[null]');
+    const sparse = new Array(3);
+    sparse[0] = 1;
+    sparse[2] = 3;
+    expect(canonicalJson(sparse)).toBe('[1,null,3]');
+    expect(hashInputs('op-x', new Array(1))).not.toBe(hashInputs('op-x', []));
   });
 
   test('scalars, null, and explicit-undefined values have stable forms', () => {
@@ -313,6 +325,23 @@ describe('openRunLog', () => {
     await appendFile(pathFor('run-schema'), '{}\n', 'utf8');
     await log.append('run-schema', runStarted('run-schema'));
     await expect(log.read('run-schema')).rejects.toThrow(/corrupt line 1/);
+  });
+
+  test('read throws when the last COMPLETE line is invalid (file ends with a newline)', async () => {
+    const log = openRunLog(dir);
+    await log.append('run-complete', runStarted('run-complete'));
+    // A fully-written but schema-invalid line: with the trailing newline this
+    // is a COMPLETE record, not a torn write — tolerance must not hide it.
+    await appendFile(pathFor('run-complete'), '{}\n', 'utf8');
+    await expect(log.read('run-complete')).rejects.toThrow(/corrupt line 2/);
+  });
+
+  test('read throws when the last complete line is pure JSON garbage (file ends with a newline)', async () => {
+    const log = openRunLog(dir);
+    await log.append('run-garbage', runStarted('run-garbage'));
+    // Same rule for non-JSON garbage: trailing newline ⇒ complete line ⇒ loud.
+    await appendFile(pathFor('run-garbage'), 'not json at all\n', 'utf8');
+    await expect(log.read('run-garbage')).rejects.toThrow(/corrupt line 2/);
   });
 
   test('read of an unknown run yields [] (no facts yet)', async () => {
