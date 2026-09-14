@@ -16,10 +16,17 @@
 // point: outside a governed run there is no cancellation source and the
 // run is simply un-abortable by us.
 //
-// SLICE 3 NOTE (the spike's question, recorded where the mechanism lives):
-// whether an aborted query actually STOPS spend at the endpoint (tokens
-// already in flight) is unmeasured; the I8 seam guarantees the run settles
-// honestly ('aborted'), not that the provider stops billing mid-stream.
+// DD-1 SPIKE RESULT (T1.6, 2026-09-14 — docs/dd-1-abort-spike.md): the
+// question this file's mechanism poses was measured LIVE on this lane
+// against the Z.AI anthropic-compat endpoint: a governed abort settles
+// ≈2.0 s after the signal (2006 / 2008 ms, two samples — the SDK's CLI-worker
+// teardown), with NO transcript growth and NO surviving worker process over
+// the 5 s post-abort poll. Verdict: abort stops spend client-side on this
+// lane; the rung-1 → rung-2 grace default derived from this measurement
+// (DEFAULT_ABORT_GRACE_MS = 5000, src/kernel/governor.config.ts) leaves
+// ≈2.5× headroom over it. Provider-side metering of tokens already in
+// flight when the socket died remains unobservable from any client — the
+// spike's claim is deliberately scoped to what was measured.
 
 /** One wired cancellation root plus the teardown for its signal listener. */
 export interface AbortRoot {

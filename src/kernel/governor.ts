@@ -35,6 +35,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage } from '../driver/types.js';
+import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
 import type { RunLog } from './journal.js';
 import { attemptsFromJournal } from './rescue.js';
 import type { OpRegistryView } from './runner.js';
@@ -83,13 +84,17 @@ export const realClock: Clock = {
 /** The ladder rungs, in firing order. */
 export type LadderRung = 'signal' | 'timeout' | 'kill';
 
-// PRE-SPIKE grace defaults — conservative placeholders (generous grace
-// before each harder rung) chosen so nothing is killed hastily before the
-// spike lands.
-//
-// DD-1 result: pending T1.6 — the spike-sized abortGraceMs value replaces
-// these constants (and is expected to change them) in T1.6's own PR.
-export const DEFAULT_ABORT_GRACE_MS = 2_000;
+// DD-1 SPIKE RESULT (T1.6, docs/dd-1-abort-spike.md): the cooperative-abort
+// settle latency was measured live on both governed lanes — ai-sdk ≈6 ms,
+// claude-agent ≈2.0 s (the SDK's CLI-worker teardown; no transcript growth
+// and no surviving worker process over the post-abort poll). The spike
+// derives the rung-1 → rung-2 default in src/kernel/governor.config.ts
+// (the single source of truth, imported above and re-exported here for the
+// public barrel; ≈2.5× headroom over the measured worst cooperative settle —
+// the pre-spike placeholder sat exactly AT it). DEFAULT_KILL_GRACE_MS stays
+// a conservative constant: the spike gathered no evidence about
+// SIGTERM→SIGKILL resistance, so the T1.5 process-ladder measurements stand.
+export { DEFAULT_ABORT_GRACE_MS };
 export const DEFAULT_KILL_GRACE_MS = 5_000;
 
 /** Per-job ladder delays. */
@@ -99,9 +104,9 @@ export interface LadderSpec {
    * task runs unbounded (caps and observation still apply).
    */
   wallClockMs?: number;
-  /** Rung 1 → rung 2 grace. Default: DEFAULT_ABORT_GRACE_MS (pre-spike). */
+  /** Rung 1 → rung 2 grace. Default: DEFAULT_ABORT_GRACE_MS (DD-1 spike result: 5000). */
   abortGraceMs?: number;
-  /** Rung 2 → rung 3 grace. Default: DEFAULT_KILL_GRACE_MS (pre-spike). */
+  /** Rung 2 → rung 3 grace. Default: DEFAULT_KILL_GRACE_MS (conservative; no spike evidence to move it). */
   killGraceMs?: number;
 }
 
@@ -400,9 +405,9 @@ export interface GovernorConfig {
   maxTokens?: number;
   /** Rung-1 delay (Limits.perJobWallClockMs). Omit = no wall-clock ladder. */
   perJobWallClockMs?: number;
-  /** Rung 1 → 2 grace. Default DEFAULT_ABORT_GRACE_MS (pre-spike; DD-1 result: pending T1.6). */
+  /** Rung 1 → 2 grace. Default DEFAULT_ABORT_GRACE_MS (DD-1 spike result: 5000, docs/dd-1-abort-spike.md). */
   abortGraceMs?: number;
-  /** Rung 2 → 3 grace. Default DEFAULT_KILL_GRACE_MS (pre-spike; DD-1 result: pending T1.6). */
+  /** Rung 2 → 3 grace. Default DEFAULT_KILL_GRACE_MS (conservative; no spike evidence to move it). */
   killGraceMs?: number;
   /** Per-job attempt cap (the effective min per the frozen precedence rule). */
   maxAttemptsPerJob?: number;

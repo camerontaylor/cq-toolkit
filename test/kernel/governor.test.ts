@@ -1597,7 +1597,10 @@ describe('src/index.ts barrel', () => {
     expect(typeof toolkit.runLadder).toBe('function');
     expect(typeof toolkit.governorConfig).toBe('function');
     expect(typeof toolkit.realClock.now()).toBe('number');
-    expect(toolkit.DEFAULT_ABORT_GRACE_MS).toBe(2_000);
+    // DD-1 spike result (docs/dd-1-abort-spike.md): 5000, ≈2.5× the measured
+    // worst cooperative abort settle (~2.0 s, claude-agent lane); the value
+    // is pinned to the doc by test/kernel/governor-config.test.ts.
+    expect(toolkit.DEFAULT_ABORT_GRACE_MS).toBe(5_000);
     expect(toolkit.DEFAULT_KILL_GRACE_MS).toBe(5_000);
     expect(typeof toolkit.decideRescue).toBe('function');
     expect(typeof toolkit.attemptsFromJournal).toBe('function');

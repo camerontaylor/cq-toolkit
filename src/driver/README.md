@@ -264,8 +264,9 @@ enforcement instead of failing the run on a capability we do not rely on.
 Budget mapping (I8): the driver owns NO wall clock — the governed
 `currentJobContext()?.signal` is forwarded to the SDK query's
 cancellation root and `Budget.wallClockMs` is ignored (the governor's
-ladder decides when; whether an aborted query stops endpoint spend
-mid-flight is unmeasured — the slice-3 spike's question).
+ladder decides when). The DD-1 spike MEASURED this lane's cooperative
+abort settle live: ≈2.0 s after the signal, with no post-abort transcript
+growth and no surviving worker process (docs/dd-1-abort-spike.md).
 `Budget.maxTokens` has NO native SDK stop (the SDK's caps are turns, USD,
 and an alpha pacing budget — none is a token stop), so it is enforced the
 subprocess lane's way: post-hoc verdict classification over the folded
