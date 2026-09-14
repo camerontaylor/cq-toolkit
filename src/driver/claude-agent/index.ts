@@ -140,16 +140,22 @@
 //   usage.input_tokens → input, usage.output_tokens → output,
 //   usage.cache_read_input_tokens → cacheRead,
 //   usage.cache_creation_input_tokens → cacheWrite (missing numerics → 0;
-//   an unshaped usage is NO measurement). reasoning: the result's
-//   modelUsage[*].thinkingTokens sum — present ONLY when the agent
-//   reported it (already counted inside outputTokens, like every lane's
-//   reasoning). The result's usage is the main-loop count ("prefer
-//   modelUsage for token/cost accounting" — but modelUsage keys are
-//   per-model aggregates keyed by id; the frozen Usage is one flat fold,
-//   so the main-loop usage is folded and only its reasoning complement is
-//   taken from modelUsage). Assistant frames carry per-message usage:
-//   folded as the FALLBACK when no result event arrived. Σ(frozen Usage)
-//   is the number Budget.maxTokens is checked against.
+//   an unshaped usage is NO measurement). reasoning is OMITTED on this
+//   lane: the SDK reports thinkingTokens as ALREADY INSIDE outputTokens
+//   ("Thinking tokens, already counted inside outputTokens"), so lifting
+//   them into a separate field would double-count every total — the
+//   kernel's Budget.maxTokens classification sums all frozen Usage fields,
+//   and a run whose real total was below the cap would misclassify
+//   'budget'. The frozen reasoning field stays OPTIONAL precisely for
+//   lanes whose SDK reports reasoning ADDITIVE to output; this lane has
+//   none. The result's usage is the main-loop count ("prefer modelUsage
+//   for token/cost accounting" — but modelUsage keys are per-model
+//   aggregates keyed by id; the frozen Usage is one flat fold, so the
+//   main-loop usage is what folds; its thinkingTokens subset is left
+//   inside output where the SDK put it). Assistant frames carry
+//   per-message usage: folded as the FALLBACK when no result event
+//   arrived. Σ(frozen Usage) is the number Budget.maxTokens is checked
+//   against — the TRUE total, never output-plus-thinking.
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired (or the query threw an abort-shaped error) →
@@ -533,7 +539,7 @@ export class ClaudeAgentDriver implements Driver {
     aborted: boolean,
     structured: unknown,
   ): WorkerResult {
-    const measured = observation.result !== undefined ? usageFromAgent(observation.result['usage'], observation.result['modelUsage']) : undefined;
+    const measured = observation.result !== undefined ? usageFromAgent(observation.result['usage']) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted,
@@ -793,47 +799,33 @@ function asArray(value: unknown): unknown[] | undefined {
 
 /**
  * The agent usage vocabulary → frozen Usage (missing numeric fields map to
- * 0; an unshaped usage is NO measurement). `modelUsage` (the result's
- * per-model accounting record, keyed by model id) supplies ONLY the
- * reasoning complement: the sum of its thinkingTokens values, present only
- * when the agent reported them (header).
+ * 0; an unshaped usage is NO measurement). `reasoning` is deliberately NOT
+ * set: the SDK's thinkingTokens are ALREADY INCLUDED inside output_tokens,
+ * so a separate field would double-count every total that sums the frozen
+ * Usage fields (Budget.maxTokens classification) — the frozen field stays
+ * optional precisely for lanes whose reasoning is additive (header).
  */
-export function usageFromAgent(raw: unknown, modelUsage?: unknown): Usage | undefined {
+export function usageFromAgent(raw: unknown): Usage | undefined {
   const rec = asRecord(raw);
   if (rec === undefined) return undefined;
-  const mapped: Usage = {
+  return {
     input: asNumber(rec['input_tokens']) ?? 0,
     output: asNumber(rec['output_tokens']) ?? 0,
     cacheRead: asNumber(rec['cache_read_input_tokens']) ?? 0,
     cacheWrite: asNumber(rec['cache_creation_input_tokens']) ?? 0,
   };
-  let reasoning: number | undefined;
-  for (const entry of modelUsageValues(modelUsage)) {
-    const thinking = asNumber(asRecord(entry)?.['thinkingTokens']);
-    if (thinking !== undefined) {
-      reasoning = (reasoning ?? 0) + thinking;
-    }
-  }
-  return reasoning !== undefined ? { ...mapped, reasoning } : mapped;
-}
-
-/** modelUsage is a record keyed by model id — iterate its VALUES. */
-function modelUsageValues(modelUsage: unknown): unknown[] {
-  const rec = asRecord(modelUsage);
-  return rec === undefined ? [] : Object.values(rec);
 }
 
 /** Fold one usage observation into an accumulator. */
 function addUsage(a: Usage | undefined, b: Usage): Usage {
   if (a === undefined) return b;
+  // No reasoning term: on this lane usageFromAgent never produces one
+  // (thinking tokens are a subset of output — never double-count).
   return {
     input: a.input + b.input,
     output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
-    ...(a.reasoning !== undefined || b.reasoning !== undefined
-      ? { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }
-      : {}),
   };
 }
 

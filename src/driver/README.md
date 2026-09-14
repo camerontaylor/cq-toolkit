@@ -299,8 +299,11 @@ NATIVE `outputFormat: { type: 'json_schema' }` path; the result's
 post-settle — a payload that fails is dropped to narration, never
 trusted. Usage maps the result vocabulary (`input_tokens` /
 `output_tokens` / `cache_read_input_tokens` /
-`cache_creation_input_tokens`) with `reasoning` folded from
-`modelUsage[*].thinkingTokens` only when reported. `costUSD` is
+`cache_creation_input_tokens`); `reasoning` is deliberately OMITTED —
+the SDK's `thinkingTokens` are already counted inside `output_tokens`,
+so a separate field would double-count every total (Budget.maxTokens
+classification); the frozen field stays optional for lanes whose
+reasoning is additive. `costUSD` is
 derived-only via the `pricing` lookup (default: the vendored models.dev
 table), labeled `costBasis: 'modeled'`, absent for unpriced models, and
 NEVER reported on unmeasured error/abort verdicts — the SDK's own

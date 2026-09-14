@@ -186,7 +186,7 @@ async function* runScriptedQuery(
         outputTokens: 12,
         cacheReadInputTokens: 15,
         cacheCreationInputTokens: 5,
-        thinkingTokens: 2, // the reasoning complement (absent from the flat usage)
+        thinkingTokens: 2, // realistic: the SDK counts thinking INSIDE output — the driver must not lift it into reasoning
         webSearchRequests: 0,
         costUSD: 0,
       },
@@ -957,19 +957,20 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     expect(resultStatusOf({ subtype: 'something-new' })).toBe('error'); // unknown → not a success
   });
 
-  test('usage mapping: agent vocabulary → frozen Usage; reasoning only from modelUsage thinkingTokens', () => {
+  test('usage mapping: agent vocabulary → frozen Usage; reasoning NEVER set (thinking tokens are a subset of output)', () => {
+    // thinkingTokens reported → reasoning still ABSENT: the SDK counts
+    // thinking INSIDE output_tokens, so a separate field would double-count
+    // every total that sums the frozen Usage fields.
     expect(
-      usageFromAgent(
-        {
-          input_tokens: 90,
-          output_tokens: 42,
-          cache_read_input_tokens: 15,
-          cache_creation_input_tokens: 5,
-        },
-        { 'some-model': { thinkingTokens: 7 } },
-      ),
-    ).toEqual({ input: 90, output: 42, cacheRead: 15, cacheWrite: 5, reasoning: 7 });
-    // Missing numeric fields map to 0; no modelUsage → no reasoning.
+      usageFromAgent({
+        input_tokens: 90,
+        output_tokens: 42,
+        cache_read_input_tokens: 15,
+        cache_creation_input_tokens: 5,
+      }),
+    ).toEqual({ input: 90, output: 42, cacheRead: 15, cacheWrite: 5 });
+    expect(usageFromAgent({ input_tokens: 1, output_tokens: 2 })).not.toHaveProperty('reasoning');
+    // Missing numeric fields map to 0.
     expect(usageFromAgent({ input_tokens: 10, output_tokens: 3 })).toEqual({
       input: 10,
       output: 3,
@@ -986,6 +987,29 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       cacheRead: 0,
       cacheWrite: 0,
     });
+  });
+
+  test('budget classification uses the TRUE total — thinking tokens are not added on top of output', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      // The mock's result usage totals 152 (120+12+15+5) and its modelUsage
+      // reports thinkingTokens: 2. With the old double-count (152 + 2 = 154)
+      // a cap of 153 would misclassify 'budget'; the true total is below it.
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const below = await driver.run(invocation({ budget: { maxTokens: 153 } }));
+      expect(below.stopReason).toBe('complete'); // 152 < 153 — the true total decides
+      expect(below.usage).toEqual({ input: 120, output: 12, cacheRead: 15, cacheWrite: 5 });
+      expect(below.usage.reasoning).toBeUndefined();
+      const at = await driver.run(invocation({ budget: { maxTokens: 152 } }));
+      expect(at.stopReason).toBe('budget'); // 152 >= 152 — the boundary still trips on the true total
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
   });
 
   test('pure helpers: allowedToolNames and sandboxOption', () => {
