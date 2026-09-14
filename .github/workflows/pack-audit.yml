@@ -26,6 +26,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Superseded PR audits cancel: a newer commit on the same ref makes an
+# older run's verdict moot, and the audit is free to re-run. Per-ref group —
+# different PRs never cancel each other. Note this is run serialization, not
+# a trigger filter: the unfiltered `on:` block above (the I4 posture) is
+# untouched.
+concurrency:
+  group: pack-audit-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -104,6 +113,12 @@ jobs:
           sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
           gitleaks version
       - name: Denylist scan over the unpacked tree (the tarball's own patterns.yml)
+        env:
+          # The scanner's tree allowlist exempts dist/ as repo-tree build
+          # output; here the unpacked dist/ IS the payload, so this opt-in
+          # drops that entry from the generated config and gitleaks-scans
+          # the shipped bytes — the audit's whole point.
+          DENYLIST_SCAN_NO_DIST_ALLOWLIST: '1'
         run: |
           set -euo pipefail
           # The scanner resolves its root from its own location; the tarball

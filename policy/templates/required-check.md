@@ -28,7 +28,7 @@ silently orphans the required context while every id-keyed check stays
 green. Checkouts in required-check jobs are pinned to immutable commit SHAs
 and set `persist-credentials: false` — they run repo code and never push.
 
-## Worked example — this repo's static job
+## Worked example — this repo's static job, plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
 instantiation tokens; the four command steps below are this repo's
@@ -37,6 +37,9 @@ typecheck gate: full `tsc6 --noEmit` plus the error-count baseline), then
 lint, test, build. This repo's `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
+The `from-source` companion job below mirrors ci.yml's second job exactly
+(tokens swapped) so a regeneration carries it instead of silently dropping
+it; it is deliberately not a required check — see its comment.
 
 ```yaml
 name: ci
@@ -83,6 +86,37 @@ jobs:
       # deliberate, boring-safe choice.
       - name: Build
         run: npm run build
+
+  # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
+  # FROM SOURCE — the built artifact drives a real governed plan (two jobs
+  # through the subprocess driver and the fake agent CLI fixture) and the
+  # script asserts the report shape, the journal evidence, and the I1 output
+  # contract. A companion job, not a required check: REQUIRED_WORKFLOW_CHECKS
+  # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static},
+  # so this job's presence cannot dangle a branch-protection wait.
+  from-source:
+    runs-on: {{RUNNER}}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node {{NODE_VERSION}}
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: {{NODE_VERSION}}
+          cache: npm
+      - name: Install dependencies
+        run: {{INSTALL_CMD}}
+      # The smoke imports the BUILT barrel (dist/index.js) — emitting dist/
+      # is the from-source point, so build runs unconditionally here (the
+      # static job's build above is its own job's emit gate).
+      - name: Build
+        run: npm run build
+      - name: From-source smoke (real governed plan through dist/)
+        run: node scripts/smoke-run-plan.mjs
 ```
 
 When adopting for another repository: keep the `on:` block and the

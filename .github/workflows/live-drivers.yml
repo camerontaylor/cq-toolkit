@@ -27,6 +27,14 @@ name: live-drivers
 on:
   workflow_dispatch:
 
+# One live run at a time: a second dispatch queues behind the in-flight one
+# (cancel-in-progress: false — cancelling a live run still spends its
+# tokens; queueing avoids duplicated paid work). Fixed group, not per-ref:
+# this workflow never fires on PRs, so there is nothing per-ref to isolate.
+concurrency:
+  group: live-drivers
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
