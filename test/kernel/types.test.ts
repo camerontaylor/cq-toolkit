@@ -18,6 +18,10 @@
 //      exactly when `stoppedEarly` is true (RunReportSchema and
 //      RunFinishedJournalEventSchema), and `attempt` is 1-based
 //      (JobStartedJournalEventSchema).
+//   7. RD-B review debt: RunOptionsSchema mirrors the frozen maxTokens cap
+//      (mirror-only tightening, .positive()), and WorkerResultSchema
+//      encodes the DD-9 wire coupling — costBasis present exactly when
+//      costUSD is.
 //
 // Determinism: hand-rolled mulberry32 PRNG, fixed seeds derived from test
 // names. No Date.now(), no Math.random(), no new dependencies — vitest only.
@@ -202,8 +206,14 @@ function genWorkerResult(r: Rng): WorkerResult {
   };
   const structuredOutput = sometimes(r, () => jsonValue(r, 2));
   if (structuredOutput !== undefined) result.structuredOutput = structuredOutput;
+  // DD-9 wire pairing (mirror refinement): costBasis is present exactly
+  // when costUSD is — a priced result carries both, an unpriced result
+  // carries neither.
   const costUSD = sometimes(r, () => intBetween(r, 0, 10_000) / 100);
-  if (costUSD !== undefined) result.costUSD = costUSD;
+  if (costUSD !== undefined) {
+    result.costUSD = costUSD;
+    result.costBasis = pick(r, ['modeled', 'billed'] as const);
+  }
   const sessionId = sometimes(r, () => id(r, 'sess-'));
   if (sessionId !== undefined) result.sessionId = sessionId;
   return result;
@@ -775,5 +785,52 @@ describe('RunOptionsSchema concurrency bound (round-4 finding, folded from T1.1)
     );
     roundTripsThrough(kernelSchema.RunOptionsSchema, { concurrency: 1, stopOnError: true });
     roundTripsThrough(kernelSchema.RunOptionsSchema, { concurrency: 16, stopOnError: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 7. RD-B review debt: the maxTokens mirror (#14-3) and the DD-9
+//    costUSD/costBasis wire pairing (#14-4)
+// ---------------------------------------------------------------------------
+
+describe('RunOptionsSchema maxTokens mirror (DD-9 cap, mirror-only tightening)', () => {
+  test('maxTokens 0 and negatives fail; a positive value parses and round-trips', () => {
+    failsParse(
+      kernelSchema.RunOptionsSchema,
+      { concurrency: 1, stopOnError: false, maxTokens: 0 },
+      'maxTokens 0',
+    );
+    failsParse(
+      kernelSchema.RunOptionsSchema,
+      { concurrency: 1, stopOnError: false, maxTokens: -5 },
+      'negative maxTokens',
+    );
+    roundTripsThrough(kernelSchema.RunOptionsSchema, { concurrency: 1, stopOnError: false, maxTokens: 100 });
+  });
+});
+
+describe('WorkerResultSchema costUSD/costBasis pairing (DD-9 wire coupling)', () => {
+  const base = {
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+    denials: [],
+    stopReason: 'complete' as const,
+  };
+
+  test('both fields parse; either field ALONE fails; neither parses', () => {
+    // Priced: costUSD and its basis together.
+    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base, costUSD: 0.5, costBasis: 'modeled' });
+    // Unpriced: neither field.
+    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base });
+    // Half a pairing is a fabrication either way.
+    failsParse(
+      kernelSchema.WorkerResultSchema,
+      { ...base, costBasis: 'modeled' },
+      'costBasis without costUSD',
+    );
+    failsParse(
+      kernelSchema.WorkerResultSchema,
+      { ...base, costUSD: 0.5 },
+      'costUSD without costBasis',
+    );
   });
 });

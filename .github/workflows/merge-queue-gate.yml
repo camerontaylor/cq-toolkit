@@ -49,6 +49,12 @@ jobs:
         run: |
           set -euo pipefail
           checks="$(echo 'static,denylist' | tr -d ' ' | tr ',' ' ')"
+          # Fail closed on an empty gate wait list: an empty list would run
+          # the wait loop zero times and promote with NO check validated.
+          if [ -z "${checks// /}" ]; then
+            echo "refusing: GATE_CHECKS is empty — the gate would promote with zero checks validated"
+            exit 1
+          fi
           deadline=$(( $(date +%s) + 20 * 60 ))
           while :; do
             failing=0
@@ -64,7 +70,7 @@ jobs:
             # non-success (a non-success conclusion is already terminal, so
             # it outranks waiting — fail fast instead of waiting out the
             # clock), passing only when EVERY matching row is
-            # completed+success.
+            # completed+success. A `skipped` conclusion is terminal and NEVER a pass: a skipped required check is missing, and missing = failing (invariant I4) — the shell below refuses it explicitly instead of waiting out the clock.
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?filter=latest" \
               --paginate \
               --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
@@ -73,7 +79,9 @@ jobs:
                 $1 == c {
                   n++
                   if ($2 != "completed") {
-                    if (v != "failing") { v = "waiting"; d = $2 }
+                    if (v != "failing" && v != "skipped") { v = "waiting"; d = $2 }
+                  } else if ($3 == "skipped") {
+                    if (v != "failing") { v = "skipped"; d = $3 }
                   } else if ($3 != "success") {
                     v = "failing"; d = $3
                   }
@@ -94,6 +102,10 @@ jobs:
                 waiting\ *)
                   echo "waiting: ${check} is ${verdict#waiting } on ${SHA}"
                   waiting=1
+                  ;;
+                skipped\ *)
+                  echo "refusing: ${check} concluded skipped on ${SHA} — a skipped required check is neither pass nor fail (missing = failing, I4)"
+                  failing=1
                   ;;
                 failing\ *)
                   echo "refusing: ${check} completed with conclusion ${verdict#failing } on ${SHA}"
@@ -119,8 +131,11 @@ jobs:
       # only by the guards and the push below; the token input re-keys the
       # origin remote to the promote PAT so the ff-push authenticates
       # with it.
+      # Pinned to an immutable commit SHA; persist-credentials deliberately
+      # stays ON here: this job pushes with the promote PAT and runs no repo
+      # code that could exfiltrate it.
       - name: Check out the merge-queue head (full history, promote-token remote)
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           ref: merge-queue
           fetch-depth: 0
@@ -134,14 +149,30 @@ jobs:
       - name: Fast-forward promote the gated sha to main (guarded)
         run: |
           set -euo pipefail
-          git fetch origin main
+          git fetch origin main merge-queue
           if git merge-base --is-ancestor "${SHA}" origin/main; then
             echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
             exit 0
+          fi
+          # Tip guard: the gate promotes ONLY the current merge-queue tip.
+          # A manual dispatch (or a race with a newer queue push) must never
+          # promote an off-queue or stale commit; the tip's own gate run
+          # supersedes it, so refusing here loses no promotion.
+          queue_tip="$(git rev-parse origin/merge-queue)"
+          if [ "${SHA}" != "${queue_tip}" ]; then
+            echo "refusing: ${SHA} is not the current merge-queue tip (${queue_tip}) — promotion advances main to the tip only"
+            exit 1
           fi
           if ! git merge-base --is-ancestor origin/main "${SHA}"; then
             echo "refusing: main has diverged from merge-queue (origin/main is not an ancestor of ${SHA}) — merge main into merge-queue and let the gate re-run"
             exit 1
           fi
-          git push origin "${SHA}:refs/heads/main"
-          echo "promoted ${SHA} to main by pure fast-forward"
+          # Atomic compare-and-swap: the second refspec updates merge-queue
+          # to the gated SHA — an up-to-date no-op in the normal case — so a
+          # CONCURRENT queue advance turns it into a rewind the server
+          # rejects, and --atomic rejects the whole push: main only ever
+          # advances to a commit that is still the queue tip at push time.
+          # (A value-changing second refspec is impossible on success: that
+          # direction is a rewind, which is exactly the rejection.)
+          git push --atomic origin "${SHA}:refs/heads/main" "${SHA}:refs/heads/merge-queue"
+          echo "promoted ${SHA} to main by pure fast-forward (atomic tip CAS)"

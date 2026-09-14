@@ -23,6 +23,25 @@
 // package from the identical tree (a literal specifier here would also ask
 // tsc to statically resolve a package this repo deliberately does not
 // install). No SDK types are imported, ever (I10).
+//
+// ABSENT vs BROKEN (issue #29): the peer being GENUINELY ABSENT is the
+// documented without-peer posture (skip signal); anything else — a missing
+// TRANSITIVE dependency (the peer IS installed but cannot load) or any
+// other failure shape (module-init throw, incompatible runtime) — is a
+// BROKEN INSTALL that must fail the with-peer job loudly, never
+// masquerade as "peer absent". classifySdkPresence makes the distinction
+// explicit and testable; the top-level probe THROWS on 'broken' with the
+// underlying error attached.
+//
+// Resolution-target matching, restricted to the KNOWN resolution-error
+// shapes (review thread): the specifier must appear as the QUOTED
+// resolution target in one of exactly two shapes — node's
+// `Cannot find package '<spec>'` (with ERR_MODULE_NOT_FOUND) or the module
+// runner's `Could not resolve "<spec>"`. Everything else is 'broken': a
+// module-init error that merely MENTIONS the specifier (quoted or not) is
+// a broken install, not absence — and an ERR_MODULE_NOT_FOUND for a
+// TRANSITIVE dependency names the SDK's own dist path as the IMPORTING
+// module, which must also stay 'broken'.
 import { mkdtemp, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,13 +49,47 @@ import { describe, expect, test } from 'vitest';
 import { ClaudeAgentDriver, SDK_MODULE_SPECIFIER } from '../../src/driver/claude-agent/index.js';
 import type { OpInvocation } from '../../src/driver/types.js';
 
-// Top-level probe: does the optional peer resolve in THIS tree? A missing
-// package rejects the dynamic import — that is the skip signal, never an
-// error.
-const sdkPresent: boolean = await import(SDK_MODULE_SPECIFIER).then(
-  () => true,
-  () => false,
-);
+/**
+ * Classify ONE import rejection (issue #29 + review): 'absent' ONLY for the
+ * known resolution-error shapes naming the top-level SDK_MODULE_SPECIFIER
+ * as the resolution target — node's ERR_MODULE_NOT_FOUND +
+ * `Cannot find package '<spec>'`, or the module runner's
+ * `Could not resolve "<spec>"`. Everything else — a transitive
+ * ERR_MODULE_NOT_FOUND, a module-init error that merely MENTIONS the
+ * specifier, an incompatible runtime, junk — is 'broken'.
+ */
+export function classifySdkPresence(err: unknown): 'absent' | 'broken' {
+  if (typeof err !== 'object' || err === null) return 'broken';
+  const code = (err as { code?: unknown }).code;
+  const message = (err as { message?: unknown }).message;
+  if (typeof message !== 'string') return 'broken';
+  if (
+    (code === 'ERR_MODULE_NOT_FOUND' &&
+      message.includes(`Cannot find package '${SDK_MODULE_SPECIFIER}'`)) ||
+    message.includes(`Could not resolve "${SDK_MODULE_SPECIFIER}"`)
+  ) {
+    return 'absent';
+  }
+  return 'broken';
+}
+
+// Top-level probe: does the optional peer resolve in THIS tree — and did it
+// LOAD cleanly? 'absent' is the skip signal; a 'broken' verdict throws
+// loudly with the underlying error attached (issue #29).
+let sdkPresent = true;
+try {
+  await import(SDK_MODULE_SPECIFIER);
+} catch (err) {
+  if (classifySdkPresence(err) === 'absent') {
+    sdkPresent = false; // the genuine without-peer posture — skip silently
+  } else {
+    throw new Error(
+      'claude-agent sdk-presence: the optional peer is installed but FAILED to load — ' +
+        'fix the install; the with-peer job must never go green over a broken peer (issue #29)',
+      { cause: err },
+    );
+  }
+}
 
 function invocation(): OpInvocation {
   return {
@@ -89,4 +142,70 @@ describe.skipIf(!sdkPresent)('claude-agent driver × REAL installed SDK (product
       await rm(scratchDir, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+// ---------------------------------------------------------------------------
+// Issue #29 — the absent/broken classifier, unit-tested with synthetic
+// errors (no install matrix needed to pin the distinction)
+// ---------------------------------------------------------------------------
+
+describe('classifySdkPresence (issue #29: genuinely absent vs broken install)', () => {
+  test('ERR_MODULE_NOT_FOUND naming the TOP-LEVEL specifier → absent (the without-peer posture)', () => {
+    expect(
+      classifySdkPresence({
+        code: 'ERR_MODULE_NOT_FOUND',
+        message: `Cannot find package '${SDK_MODULE_SPECIFIER}' imported from /repo/src/driver/claude-agent/index.ts`,
+      }),
+    ).toBe('absent');
+  });
+
+  test('the module-runner wrapper shape (no code, quoted specifier) → absent too', () => {
+    // Vitest intercepts the dynamic import and rejects with ITS OWN error —
+    // the real shape this environment produces for a missing optional peer.
+    expect(
+      classifySdkPresence({
+        message: `Could not resolve "${SDK_MODULE_SPECIFIER}" imported by "@camerontaylor/cq-toolkit".`,
+      }),
+    ).toBe('absent');
+  });
+
+  test('ERR_MODULE_NOT_FOUND naming any OTHER specifier → broken (a missing transitive dependency)', () => {
+    expect(
+      classifySdkPresence({
+        code: 'ERR_MODULE_NOT_FOUND',
+        message:
+          "Cannot find package 'some-transitive-dep' imported from node_modules/@anthropic-ai/claude-agent-sdk/dist/index.js",
+      }),
+    ).toBe('broken');
+  });
+
+  test('any other rejection shape → broken (module-init failure, incompatible runtime, junk)', () => {
+    expect(classifySdkPresence({ code: 'ERR_INCOMPATIBLE' })).toBe('broken');
+    expect(
+      classifySdkPresence(new Error('SyntaxError: classes may extend only a class or a function')),
+    ).toBe('broken');
+    expect(classifySdkPresence(undefined)).toBe('broken');
+    expect(classifySdkPresence('boom')).toBe('broken');
+  });
+
+  test('a non-resolution error that merely MENTIONS the specifier → broken (review thread)', () => {
+    // A module-init failure whose message happens to contain the quoted
+    // specifier is a BROKEN INSTALL — the old quoted-substring rule would
+    // have skipped it as "absent".
+    expect(
+      classifySdkPresence(
+        new TypeError(
+          `Cannot read properties of undefined (reading 'query') of "${SDK_MODULE_SPECIFIER}"`,
+        ),
+      ),
+    ).toBe('broken');
+    // …and a resolution error whose target is a DIFFERENT quoted package
+    // stays broken even though the message carries the SDK's own path.
+    expect(
+      classifySdkPresence({
+        code: 'ERR_MODULE_NOT_FOUND',
+        message: `Could not resolve "some-transitive-dep" imported from node_modules/${SDK_MODULE_SPECIFIER}/dist/index.js`,
+      }),
+    ).toBe('broken');
+  });
 });

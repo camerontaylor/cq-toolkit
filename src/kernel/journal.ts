@@ -12,10 +12,14 @@
 //     so a corrupted or stale derived view can always be recomputed.
 //
 // Crash tolerance (torn-tail policy): a crash mid-append can leave an
-// incomplete final line. `read` tolerates exactly that — an unparsable LAST
-// line is ignored; an unparsable (invalid JSON or schema-invalid) MIDDLE line
-// throws, because a hole in the middle of the evidence is corruption, not a
-// torn write.
+// incomplete final line — by definition one WITHOUT its trailing newline.
+// `read` tolerates exactly that: an unparsable LAST line is ignored only when
+// the file does NOT end with '\n' (a torn final write), and whitespace-only
+// trailing lines are dropped (no event bytes). Any other complete but
+// invalid line — including last — throws, as does any unparsable middle
+// line, and a line whose event.runId does not match the file's run: a hole
+// or misattribution in complete evidence is corruption, not a torn write,
+// and silently accepting it would poison the fold.
 import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JournalEventSchema } from './schema.js';
@@ -37,6 +41,37 @@ export function assertSafeRunId(runId: string): void {
   }
 }
 
+/**
+ * Tail shape of a well-formed runId: `<timestamp>--<random>` — exactly two
+ * more dash-free segments after the planId prefix (base36/hex by the
+ * generator; case-insensitive so operator-copied evidence is not silently
+ * dropped). OWNED HERE because journal.ts owns the runId shape
+ * ({@link assertSafeRunId}); every consumer of the shape shares one
+ * definition.
+ */
+const RUN_ID_TAIL = /^[0-9a-z]+--[0-9a-f]+$/i;
+
+/**
+ * The resume/seed candidate filter shared by EVERY consumer that picks a
+ * plan's runs out of a journal dir (the runner's replay fold, governor
+ * `seedFromRunLog`). A candidate must carry the `<planId>--` prefix AND the
+ * two-segment tail, so a planId that itself ends in `--<segment>` ('a' vs
+ * 'a--b') cannot match the other plan's files and a corrupt journal of
+ * ANOTHER plan cannot block this plan's reads.
+ *
+ * Failure direction, named: a genuine evidence file whose tail does not
+ * conform (operator-renamed) is skipped — that can only cause RE-RUNS, never
+ * a wrong skip, because the per-file planId check still guards every parsed
+ * run. System-written runIds always conform.
+ */
+export function candidateRunsForPlan(runIds: readonly string[], planId: string): string[] {
+  return runIds.filter(
+    (candidateId) =>
+      candidateId.startsWith(`${planId}--`) &&
+      RUN_ID_TAIL.test(candidateId.slice(planId.length + 2)),
+  );
+}
+
 /** The journal surface one open run-log directory exposes. All async, all serializable. */
 export interface RunLog {
   /**
@@ -50,8 +85,11 @@ export interface RunLog {
   append(runId: string, event: JournalEvent): Promise<void>;
   /**
    * Parse every line of `<runId>.ndjson` in order. A missing file means "no
-   * facts yet" and yields `[]`; an unparsable LAST line is ignored (torn
-   * tail); an unparsable middle line throws (evidence corruption).
+   * facts yet" and yields `[]`; an unparsable last line is ignored ONLY when
+   * the file has no trailing newline (a torn final write), and whitespace-only
+   * trailing lines are dropped as byte-less; any other complete but invalid
+   * line — including last — throws (evidence corruption), as does a line
+   * whose event.runId does not match the file's run.
    */
   read(runId: string): Promise<JournalEvent[]>;
   /** Run ids present in the dir, files sorted by mtime, oldest first (ties broken by id). */
@@ -91,7 +129,7 @@ export function openRunLog(journalDir: string): RunLog {
 
     async read(runId: string): Promise<JournalEvent[]> {
       assertSafeRunId(runId);
-      return readEvents(pathFor(runId));
+      return readEvents(runId, pathFor(runId));
     },
 
     async runs(): Promise<string[]> {
@@ -100,7 +138,7 @@ export function openRunLog(journalDir: string): RunLog {
 
     async statusOf(runId: string): Promise<JobStatus[]> {
       assertSafeRunId(runId);
-      return deriveJobStatuses(await readEvents(pathFor(runId)));
+      return deriveJobStatuses(await readEvents(runId, pathFor(runId)));
     },
   };
 }
@@ -130,7 +168,7 @@ function parseLine(line: string): JournalEvent | null {
   return result.success ? result.data : null;
 }
 
-async function readEvents(path: string): Promise<JournalEvent[]> {
+async function readEvents(fileRunId: string, path: string): Promise<JournalEvent[]> {
   let raw: string;
   try {
     raw = await readFile(path, 'utf8');
@@ -139,23 +177,44 @@ async function readEvents(path: string): Promise<JournalEvent[]> {
     throw err;
   }
   if (raw === '') return [];
+  // Torn-tail detection BEFORE splitting: tolerance applies only when the
+  // final write never completed (no trailing newline). A file that ends with
+  // '\n' consists solely of complete lines — an invalid one is corruption,
+  // even in last position. Whitespace-only trailing lines are the one
+  // exception: they carry no event bytes (benign `echo '' >>` damage, not a
+  // torn write of an event), so they are dropped, while a whitespace line in
+  // the MIDDLE still throws — there it is a hole in the evidence.
+  const tornTail = !raw.endsWith('\n');
   const lines = raw.split('\n');
   if (lines[lines.length - 1] === '') {
     lines.pop(); // file ended with a complete newline; the '' split artifact is not an event
+  }
+  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+    lines.pop();
   }
   const events: JournalEvent[] = [];
   for (let i = 0; i < lines.length; i++) {
     const parsed = parseLine(lines[i]);
     if (parsed !== null) {
+      // The file name is the run identity (append enforces the same match at
+      // write time), so a line claiming another runId is misattributed
+      // evidence — e.g. operator-concatenated journals — and must throw, not
+      // silently fold into the wrong run.
+      if (parsed.runId !== fileRunId) {
+        throw new Error(
+          `journal: corrupt line ${i + 1} of ${path} — event.runId '${parsed.runId}' does not ` +
+            `match this file's run '${fileRunId}'`,
+        );
+      }
       events.push(parsed);
       continue;
     }
-    if (i === lines.length - 1) {
-      break; // torn tail: crash mid-append, only the LAST line may be lost
+    if (i === lines.length - 1 && tornTail) {
+      break; // torn tail: crash mid-append, only an UNTERMINATED last line may be lost
     }
     throw new Error(
-      `journal: corrupt line ${i + 1} of ${path} — middle lines must be valid journal events ` +
-        '(only a trailing torn line is tolerated)',
+      `journal: corrupt line ${i + 1} of ${path} — a complete but invalid line is corruption; ` +
+        'only a trailing torn line (one without a trailing newline) is tolerated',
     );
   }
   return events;

@@ -7,8 +7,8 @@
 # client-side trust. This workflow NEVER advances main itself: when
 # merge-queue is ahead, it dispatches merge-queue-gate — the sole promotion
 # path — so nothing reaches main except behind the gate's required-check
-# wait and merge-base guards. See policy/templates/README.md for the token
-# table and the entitlement facts.
+# wait, the merge-queue-tip guard, and the merge-base guards. See
+# policy/templates/README.md for the token table and the entitlement facts.
 #
 # Instantiate: replace {{PROMOTE_SECRET}} with the NAME of the repo secret
 # holding a PAT with contents:write (branch writes via the refs and merge
@@ -86,6 +86,11 @@ jobs:
             case "${API_CODE}" in
               201)
                 echo "merged main into merge-queue with a merge commit (I3)"
+                ;;
+              204)
+                # 204 (no content) means nothing to merge: merge-queue
+                # already contains main — a concurrent sync got here first.
+                echo "no-op: the merge API returned 204 (merge-queue already contains main)"
                 ;;
               409)
                 # 409 is the ONE predicted failure: the merge API created

@@ -16,8 +16,11 @@ jobs:
       # GITHUB_TOKEN's default contents:read grant here). Shallow is
       # enough: the only git work here is ls-remote, resolving main's tip,
       # and one ref push of a commit the server already has.
+      # Pinned to an immutable commit SHA; persist-credentials deliberately
+      # stays ON here: this job pushes with the promote PAT and runs no repo
+      # code that could exfiltrate it.
       - name: Check out the repo (tip only, promote-token remote)
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           fetch-depth: 1
           token: ${{ secrets.PROMOTE_TOKEN }}

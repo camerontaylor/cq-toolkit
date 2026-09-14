@@ -107,6 +107,7 @@ export type {
 } from './kernel/governor.js';
 export {
   BudgetGovernor,
+  currentJobContext,
   DEFAULT_ABORT_GRACE_MS,
   DEFAULT_KILL_GRACE_MS,
   governRegistry,

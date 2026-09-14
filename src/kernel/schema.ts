@@ -126,7 +126,28 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z.object({
   sessionId: z.string().optional(),
   denials: z.array(ToolDenialSchema),
   stopReason: DriverStopReasonSchema,
-}).strict();
+}).strict()
+  // DD-9 cost pairing, wire schema only: costBasis is present EXACTLY when
+  // costUSD is — a priced result carries both, an unpriced result carries
+  // neither. Mirror-only tightening (same recorded precedent as the
+  // RunOptions bounds): the frozen WorkerResult type is untouched — the
+  // type-level half of this coupling is a post-freeze note.
+  .superRefine((result, ctx) => {
+    if (result.costUSD !== undefined && result.costBasis === undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'costBasis is required when costUSD is present',
+        path: ['costBasis'],
+      });
+    }
+    if (result.costUSD === undefined && result.costBasis !== undefined) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'costBasis must be omitted when costUSD is absent',
+        path: ['costBasis'],
+      });
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Kernel: op result taxonomy
@@ -190,6 +211,13 @@ export const RunOptionsSchema: z.ZodType<RunOptions> = z.object({
   stopOnError: z.boolean(),
   journalDir: z.string().optional(),
   maxUsd: z.number().optional(),
+  // maxTokens (DD-9's token rollup cap) mirrors the frozen RunOptions field
+  // with the same mirror-tightening precedent as `concurrency` above
+  // (recorded pattern: mirror-only tightening, the frozen RunOptions type is
+  // untouched; the governor validates finite > 0 at construction). Optional
+  // in the frozen type, so the mirror stays optional — the .positive() bound
+  // is the tightening.
+  maxTokens: z.number().positive().optional(),
   resume: z.boolean().optional(),
 }).strict();
 

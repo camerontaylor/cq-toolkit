@@ -20,7 +20,13 @@ entry in `REQUIRED_WORKFLOW_CHECKS` (each pairing a required workflow file
 with the check name of the job that must produce it) must exist, declare a
 job with exactly that paired name, and carry both `push` and `pull_request`
 in its top-level `on:` block with zero filter keys inside that block
-(fail-closed on an empty or malformed list or a missing listed file).
+(fail-closed on an empty or malformed list or a missing listed file). The
+leg also fails a required workflow whose paired job carries a job-level
+`name:` override that differs from the paired check name: GitHub reports a
+job's check run under the `name:` when one is set, so a rename there
+silently orphans the required context while every id-keyed check stays
+green. Checkouts in required-check jobs are pinned to immutable commit SHAs
+and set `persist-credentials: false` — they run repo code and never push.
 
 ## Worked example — this repo's static job
 
@@ -51,9 +57,13 @@ jobs:
     runs-on: {{RUNNER}}
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
       - name: Set up Node {{NODE_VERSION}}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: {{NODE_VERSION}}
           cache: npm

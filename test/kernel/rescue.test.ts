@@ -173,6 +173,87 @@ describe('bounded re-dispatch (ws-a item 5)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b. Policy validation — retry caps must be positive integers (#15-9)
+// ---------------------------------------------------------------------------
+
+describe('retry-row maxAttempts validation (#15-9)', () => {
+  const row = (maxAttempts: number): RescuePolicy => ({
+    rows: [{ id: 'capped', on: 'failed', action: { kind: 'retry', maxAttempts } }],
+  });
+
+  test.each([NaN, 1.5, 0, -2])('maxAttempts %p is rejected loudly at the decision path', (bad) => {
+    expect(() => decideRescue(input([attempt(1, 'failed')]), row(bad))).toThrowError(
+      /maxAttempts must be an integer >= 1/,
+    );
+  });
+
+  test('the rejection names the row id and the bad value', () => {
+    expect(() => decideRescue(input([attempt(1, 'failed')]), row(NaN))).toThrowError(
+      "rescue: policy row 'capped' maxAttempts must be an integer >= 1, got NaN",
+    );
+  });
+
+  test('a valid cap still decides: maxAttempts 1 means the initial dispatch only', () => {
+    expect(decideRescue(input([attempt(1, 'failed')]), row(1))).toEqual({
+      kind: 'terminate',
+      reason: 'attempt-cap',
+      rowId: 'capped',
+      cap: 'row-max-attempts',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review round 3 — the LIMITS half of the cap arithmetic is validated too:
+// caps.maxAttemptsPerJob NaN/fractional made effectiveCap NaN (`>= NaN` is
+// false → UNBOUNDED retry); 0/negative → silent never-retry.
+// ---------------------------------------------------------------------------
+
+describe('caps.maxAttemptsPerJob validation (review round 3)', () => {
+  const row = (maxAttempts: number): RescuePolicy => ({
+    rows: [{ id: 'capped', on: 'failed', action: { kind: 'retry', maxAttempts } }],
+  });
+
+  test.each([Number.NaN, 1.5, 0, -2])('caps.maxAttemptsPerJob %p throws naming the field', (bad) => {
+    expect(() =>
+      decideRescue(input([attempt(1, 'failed')]), row(9), { maxAttemptsPerJob: bad }),
+    ).toThrowError(/caps\.maxAttemptsPerJob must be an integer >= 1/);
+  });
+
+  test('the rejection names the bad value', () => {
+    expect(() =>
+      decideRescue(input([attempt(1, 'failed')]), row(9), { maxAttemptsPerJob: Number.NaN }),
+    ).toThrowError('rescue: caps.maxAttemptsPerJob must be an integer >= 1, got NaN');
+  });
+
+  test('valid caps are untouched: the min() semantics still decide', () => {
+    // limits cap 2 < row 9: two attempts exhaust the effective cap — the
+    // LIMITS half is the named binder.
+    expect(
+      decideRescue(input([attempt(1, 'failed'), attempt(2, 'failed')]), row(9), {
+        maxAttemptsPerJob: 2,
+      }),
+    ).toEqual({
+      kind: 'terminate',
+      reason: 'attempt-cap',
+      rowId: 'capped',
+      cap: 'per-job-attempts',
+    });
+    // limits cap 9 > row 2: the row stays the binder.
+    expect(
+      decideRescue(input([attempt(1, 'failed'), attempt(2, 'failed')]), row(2), {
+        maxAttemptsPerJob: 9,
+      }),
+    ).toEqual({
+      kind: 'terminate',
+      reason: 'attempt-cap',
+      rowId: 'capped',
+      cap: 'row-max-attempts',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. Escalation — policy recorded as data, never driver objects
 // ---------------------------------------------------------------------------
 

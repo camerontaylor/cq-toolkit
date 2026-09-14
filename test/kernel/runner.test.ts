@@ -9,12 +9,21 @@
 //
 // Also pinned here: stopOnError:false fleet collection (all 10 outcomes,
 // downstream blocked), the queued/blocked counts policy for never-started
-// jobs, replay re-running an input-changed job (hash mismatch beats terminal
-// ok), replay OFF without resume:true, unknown op / schema violation /
-// throwing op / contract-violating op all record honest `failed` results,
-// p-limit actually caps in-flight work (high-water === concurrency), usage
-// reconstruction + rollup from a replayed journal, and report
-// JSON-serializability.
+// jobs (a definitively failed dependency BLOCKS even when a sibling dep is
+// merely queued), replay folding ALL prior runs of the plan per-job
+// last-finish-wins (a later partial run keeps older completed jobs; a later
+// failed re-attempt re-runs), a sibling plan whose id extends this one
+// ('a' vs 'a--b') cannot block the resume with its corrupt journal, replay
+// re-running an input-changed job (hash mismatch beats terminal ok), replay
+// OFF without resume:true, unknown op / schema violation / throwing op /
+// contract-violating op / non-serializable op result / throwing registry
+// lookup all record honest `failed` results, the runId filename-safety assert
+// applying only to journaled runs, p-limit actually caps in-flight work
+// (high-water === concurrency), usage reconstruction + rollup from a
+// replayed journal, and report JSON-serializability.
+//
+// Matcher note: bare regex literals passed as values inside toMatchObject
+// are wrapped in expect.stringMatching — vitest 5.0.0's subset-compare quirk.
 import { appendFile, mkdtemp, rm, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -240,7 +249,10 @@ describe('runPlan — execution semantics', () => {
       'budget-exhausted': 0,
     });
     const j4 = report.jobs.find((row) => row.jobId === 'j4');
-    expect(j4?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'j3'/ });
+    expect(j4?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/blocked: dependency 'j3'/),
+    });
   });
 
   test('never-started jobs: queued when deps are fine, blocked when a dependency failed (counts policy)', async () => {
@@ -274,10 +286,51 @@ describe('runPlan — execution semantics', () => {
     });
     const a2 = report.jobs.find((row) => row.jobId === 'a2');
     const b2 = report.jobs.find((row) => row.jobId === 'b2');
-    expect(a2?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'a1'/ });
+    expect(a2?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/blocked: dependency 'a1'/),
+    });
     expect(b2?.result).toMatchObject({
       status: 'indeterminate',
-      detail: /queued: run stopped before dispatch/,
+      detail: expect.stringMatching(/queued: run stopped before dispatch/),
+    });
+  });
+
+  test('stop sweep precedence: a failed dep beats a queued dep (blocked, not queued)', async () => {
+    // c depends on [a1, b2]: a1 definitively failed, b2 is merely queued. The
+    // failed dep means c can NEVER run → blocked (old code classified c
+    // queued via anyQueued, and the error could name the queued sibling b2).
+    const { state, op } = makeFake();
+    state.failOn.add('a1');
+    const plan: Plan = {
+      id: 'plan-sweep-precedence',
+      jobs: [
+        { id: 'a1', op: 'fake', input: { jobId: 'a1' } },
+        { id: 'b1', op: 'fake', input: { jobId: 'b1' } },
+        { id: 'b2', op: 'fake', input: { jobId: 'b2' }, dependsOn: ['b1'] },
+        { id: 'c', op: 'fake', input: { jobId: 'c' }, dependsOn: ['a1', 'b2'] },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: true, journalDir: dir },
+      viewWith(entry('fake', jobInputSchema, op)),
+    );
+    // Wave 1 runs a1 (fails → stop) and b1 (ok, in flight); waves 2-3 never
+    // dispatch, so b2 stays queued and c is classified in the sweep.
+    expect(state.calls.sort()).toEqual(['a1', 'b1']);
+    expect(report.counts).toEqual({
+      queued: 1, // b2: all-done deps, dispatch never happened
+      running: 0,
+      blocked: 1, // c: a1 definitively failed
+      done: 1, // b1
+      failed: 1, // a1
+      'budget-exhausted': 0,
+    });
+    // The error names the FAILED dep, not the queued sibling.
+    expect(report.jobs.find((row) => row.jobId === 'c')?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/blocked: dependency 'a1' did not succeed/),
     });
   });
 
@@ -307,11 +360,11 @@ describe('runPlan — execution semantics', () => {
     });
     expect(report.jobs.find((row) => row.jobId === 'b')?.result).toMatchObject({
       status: 'failed',
-      error: /dependency 'ghost' missing from plan/,
+      error: expect.stringMatching(/dependency 'ghost' missing from plan/),
     });
     expect(report.jobs.find((row) => row.jobId === 'c')?.result).toMatchObject({
       status: 'failed',
-      error: /blocked/,
+      error: expect.stringMatching(/blocked/),
     });
   });
 
@@ -358,6 +411,43 @@ describe('runPlan — execution semantics', () => {
       ),
     ).rejects.toThrow(/duplicate job id 'a'/);
     expect(state.calls).toEqual([]); // zero invocations
+    // Nothing journaled: the rejection happened before the run existed.
+    await expect(openRunLog(dir).runs()).resolves.toEqual([]);
+  });
+
+  test('journal-less runs accept any schema-valid plan id (filename assert only when journaling)', async () => {
+    // PlanSchema.id is any string; without a journalDir there is no file name
+    // and no resume key, so the filesystem-safety assert must not fire.
+    const { state, op } = makeFake();
+    const plan: Plan = {
+      id: 'plan in-mem ω',
+      jobs: [{ id: 'a', op: 'fake', input: { jobId: 'a' } }],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', jobInputSchema, op)),
+    );
+    expect(report.runId.startsWith('plan in-mem ω--')).toBe(true);
+    expect(state.calls).toEqual(['a']); // jobs execute
+  });
+
+  test('journaled runs still reject a non-filesystem-safe plan id before any op runs', async () => {
+    // Journaled runIds become file names and resume keys, so they stay
+    // asserted — loudly, before the run exists.
+    const { state, op } = makeFake();
+    const plan: Plan = {
+      id: 'plan in-mem ω',
+      jobs: [{ id: 'a', op: 'fake', input: { jobId: 'a' } }],
+    };
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', jobInputSchema, op)),
+      ),
+    ).rejects.toThrow(/runId must match/);
+    expect(state.calls).toEqual([]); // no op ever ran
     // Nothing journaled: the rejection happened before the run existed.
     await expect(openRunLog(dir).runs()).resolves.toEqual([]);
   });
@@ -437,8 +527,200 @@ describe('runPlan — execution semantics', () => {
     );
     expect(report.jobs[0]?.result).toMatchObject({
       status: 'failed',
-      error: /violated the op contract/,
+      error: expect.stringMatching(/violated the op contract/),
     });
+  });
+
+  test('a non-serializable op result is an honest per-job failure (run and journal survive)', async () => {
+    // OpResultSchema's value is z.unknown(), so a BigInt result passes the
+    // shape check but cannot survive JSON.stringify at the journal append —
+    // it must come back as THIS job's failure, not kill the run at the emit.
+    const { op } = makeFake();
+    const registry = viewWith(
+      entry('bigint', jobInputSchema, async () => ({ status: 'ok', value: 1n })),
+      entry('fake', jobInputSchema, op),
+    );
+    const plan: Plan = {
+      id: 'plan-bigint',
+      jobs: [
+        { id: 'j1', op: 'bigint', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false, journalDir: dir }, // exercises the append path
+      registry,
+    );
+    expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/non-serializable/),
+    });
+    expect(report.jobs.find((row) => row.jobId === 'j2')?.result).toEqual({
+      status: 'ok',
+      value: 'j2',
+    });
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 1,
+      failed: 1,
+      'budget-exhausted': 0,
+    });
+    // The journaled failure line is valid: the file still reads cleanly.
+    const events = await openRunLog(dir).read(report.runId);
+    expect(jobFinishes(events).find((event) => event.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+    });
+  });
+
+  test('a NaN-carrying op result is non-serializable too (NaN would journal as null)', async () => {
+    // JSON.stringify silently rewrites NaN/Infinity to null — the journal
+    // would then disagree with the value the run produced, and replay would
+    // consume the falsified form. The serializability probe rejects
+    // non-finite numbers, so this is an honest per-job failure.
+    const { op } = makeFake();
+    const registry = viewWith(
+      entry('nan', jobInputSchema, async () => ({ status: 'ok', value: { score: NaN } })),
+      entry('fake', jobInputSchema, op),
+    );
+    const plan: Plan = {
+      id: 'plan-nan',
+      jobs: [
+        { id: 'j1', op: 'nan', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/non-serializable.*non-finite/s),
+    });
+    expect(report.counts.done).toBe(1); // j2 unaffected — the run continues
+    const events = await openRunLog(dir).read(report.runId);
+    expect(jobFinishes(events).find((event) => event.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+    });
+  });
+
+  test('silently-lossy op results are rejected: Map, Date, function member, undefined array hole', async () => {
+    // Each of these stringifies WITHOUT throwing but the journal line would
+    // disagree with the value the op returned (Map → {}, Date → ISO string,
+    // function members vanish, undefined array elements → null).
+    const { op } = makeFake();
+    const registry = viewWith(
+      entry('map-op', jobInputSchema, async () => ({ status: 'ok', value: new Map([['a', 1]]) })),
+      entry('date-op', jobInputSchema, async () => ({ status: 'ok', value: new Date(0) })),
+      entry('fn-op', jobInputSchema, async () => ({
+        status: 'ok',
+        value: { compute: () => 1 },
+      })),
+      entry('hole-op', jobInputSchema, async () => {
+        const holey: unknown[] = [1];
+        holey[2] = 3; // index 1 left undefined — stringify would null it
+        return { status: 'ok', value: holey } as { status: 'ok'; value: unknown };
+      }),
+      entry('fake', jobInputSchema, op),
+    );
+    const plan: Plan = {
+      id: 'plan-lossy',
+      jobs: [
+        { id: 'm', op: 'map-op', input: { jobId: 'm' } },
+        { id: 'd', op: 'date-op', input: { jobId: 'd' } },
+        { id: 'f', op: 'fn-op', input: { jobId: 'f' } },
+        { id: 'h', op: 'hole-op', input: { jobId: 'h' } },
+        { id: 'ok1', op: 'fake', input: { jobId: 'ok1' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 5, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    const failureOf = (id: string): string =>
+      (report.jobs.find((row) => row.jobId === id)?.result as { error?: string }).error ?? '';
+    expect(failureOf('m')).toMatch(/non-serializable.*non-plain object of type 'Map'/);
+    expect(failureOf('d')).toMatch(/non-serializable.*non-plain object of type 'Date'/);
+    expect(failureOf('f')).toMatch(/non-serializable.*non-JSON value of type 'function'/);
+    expect(failureOf('h')).toMatch(/non-serializable.*undefined array element/);
+    expect(report.counts.failed).toBe(4);
+    expect(report.counts.done).toBe(1); // the run continues
+  });
+
+  test("an ok result whose value is undefined is rejected — the journal requires ok's value", async () => {
+    // The frozen ok variant carries a REQUIRED value: a journaled
+    // {status:'ok'} without one fails JournalEventSchema on read. Undefined
+    // is therefore lossy here (not absent data) and must be an honest
+    // per-job failure — never a journal line that cannot be replayed.
+    const { op } = makeFake();
+    const registry = viewWith(
+      entry('absent', jobInputSchema, async () => ({
+        status: 'ok',
+        value: undefined,
+      }) as OpResult<unknown>),
+      entry('fake', jobInputSchema, op),
+    );
+    const plan: Plan = {
+      id: 'plan-absent-value',
+      jobs: [
+        { id: 'j1', op: 'absent', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/non-serializable.*without a 'value'/),
+    });
+    expect(report.counts.done).toBe(1); // j2 unaffected — the run continues
+    // Every journaled line still reads back cleanly.
+    const events = await openRunLog(dir).read(report.runId);
+    expect(jobFinishes(events).find((event) => event.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+    });
+  });
+
+  test('a throwing registry lookup records failed with the throw message (run survives)', async () => {
+    // A registry backend that throws on read must fail THIS job, not reject
+    // the whole runPlan call ('this function never throws' holds).
+    const cursedView: OpRegistryView = {
+      get(name: string) {
+        if (name === 'cursed') throw new Error('registry backend offline');
+        return undefined; // other names stay plain unknown ops
+      },
+    };
+    const plan: Plan = {
+      id: 'plan-cursed-registry',
+      jobs: [
+        { id: 'j1', op: 'cursed', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'ghost', input: { jobId: 'j2' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false },
+      cursedView,
+    );
+    expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(
+        /registry lookup for op 'cursed' failed: registry backend offline/,
+      ),
+    });
+    expect(report.jobs.find((row) => row.jobId === 'j2')?.result).toEqual({
+      status: 'failed',
+      error: "unknown op 'ghost'",
+    });
+    expect(report.counts.failed).toBe(2);
   });
 
   test('concurrency is the one knob: in-flight high-water equals it under load', async () => {
@@ -699,6 +981,272 @@ describe('runPlan — report shape and replay details', () => {
     expect(state.calls.length).toBe(4);
     expect(report2.counts.done).toBe(8);
     expect(report2.counts.failed).toBe(0);
+  });
+
+  test("resume keeps older runs' completed jobs when the latest run is partial", async () => {
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    const plan = independentPlan('plan-partial', 3);
+    const report1 = await runPlan(
+      plan,
+      { concurrency: 3, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    expect(report1.counts.done).toBe(3);
+
+    // Hand-append a PARTIAL run 2 — run-started, a job-started for i1, no
+    // finish, no run-finished: a crash mid-run. The hand-built runId follows
+    // the `<planId>--<base36>--<hex>` shape so the resume pre-filter passes
+    // it, and its run-started `at` is stamped AFTER run 1's real clock so
+    // the fold (ordered by `at`, not mtime) treats it as the latest run.
+    const log = openRunLog(dir);
+    const partialRunId = `${plan.id}--partial--deadbeef`;
+    await log.append(partialRunId, {
+      type: 'run-started',
+      runId: partialRunId,
+      at: new Date(Date.now() + 1000).toISOString(), // strictly after run 1 started
+      planId: plan.id,
+    });
+    await log.append(partialRunId, {
+      type: 'job-started',
+      runId: partialRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'i1',
+      op: 'fake',
+      attempt: 1,
+    });
+    // Force mtime ordering: run 1's file old, the partial run 2 newest — the
+    // LATEST run really is the partial one.
+    const at = (ms: number): Date => new Date(ms);
+    await utimes(join(dir, `${report1.runId}.ndjson`), at(1000), at(1000));
+    await utimes(join(dir, `${partialRunId}.ndjson`), at(2000), at(2000));
+
+    // Resume: the partial latest run must not erase run 1's completed jobs —
+    // zero re-invocations (old code re-ran all three), all rows reconstructed.
+    state.calls = [];
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 3, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+    );
+    expect(state.calls).toEqual([]);
+    expect(report2.counts.done).toBe(3);
+    expect(report2.jobs.every((row) => row.result.status === 'ok')).toBe(true);
+  });
+
+  test('last finish wins across runs: a failed re-attempt in a later run re-runs despite an older ok', async () => {
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    const plan = independentPlan('plan-lastwin', 3);
+    const report1 = await runPlan(
+      plan,
+      { concurrency: 3, stopOnError: false, journalDir: dir },
+      registry,
+    );
+    expect(report1.counts.done).toBe(3);
+
+    // A later run re-attempted i2 and it FAILED there; i1/i3 were untouched.
+    const log = openRunLog(dir);
+    const laterRunId = `${plan.id}--reattempt--beefdead`;
+    const manifest = makeManifest(plan);
+    const i2Hash = manifest.jobs.find((job) => job.id === 'i2')?.inputsHash ?? '';
+    await log.append(laterRunId, {
+      type: 'run-started',
+      runId: laterRunId,
+      at: new Date(Date.now() + 1000).toISOString(), // strictly after run 1 started
+      planId: plan.id,
+    });
+    await log.append(laterRunId, {
+      type: 'job-finished',
+      runId: laterRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'i2',
+      opId: 'fake',
+      inputsHash: i2Hash,
+      result: { status: 'failed', error: 're-attempt blew up' },
+    });
+    await log.append(laterRunId, {
+      type: 'run-finished',
+      runId: laterRunId,
+      at: '2026-01-01T00:00:02.000Z',
+      stoppedEarly: false,
+    });
+    const at = (ms: number): Date => new Date(ms);
+    await utimes(join(dir, `${report1.runId}.ndjson`), at(1000), at(1000));
+    await utimes(join(dir, `${laterRunId}.ndjson`), at(2000), at(2000));
+
+    // Resume: the later FAILED finish overrides run 1's ok for i2 (it
+    // re-runs); i1/i3 keep their older oks and skip. All end done.
+    state.calls = [];
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 3, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+    );
+    expect(state.calls).toEqual(['i2']);
+    expect(report2.counts.done).toBe(3);
+    expect(report2.counts.failed).toBe(0);
+  });
+
+  test('the fold is ordered by run-started `at`, not mtime (concurrent-run safety)', async () => {
+    // Two hand-built runs of one plan with DELIBERATELY contradictory
+    // orderings: mtime says r2 (failed j1) is newest, but r1 (ok j1) started
+    // LATER by its own `at`. The fold must follow `at` — r1's ok wins, so
+    // the resume skips j1; mtime order would have re-run it.
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    const plan: Plan = {
+      id: 'plan-atorder',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+    const log = openRunLog(dir);
+    const run1 = `${plan.id}--r1--aaaa`; // started LATER (at 2026-01-02), finished ok
+    const run2 = `${plan.id}--r2--bbbb`; // started EARLIER (at 2026-01-01), failed j1
+    await log.append(run1, {
+      type: 'run-started',
+      runId: run1,
+      at: '2026-01-02T00:00:00.000Z',
+      planId: plan.id,
+    });
+    await log.append(run1, {
+      type: 'job-finished',
+      runId: run1,
+      at: '2026-01-02T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: hash,
+      result: { status: 'ok', value: 'j1' },
+    });
+    await log.append(run2, {
+      type: 'run-started',
+      runId: run2,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: plan.id,
+    });
+    await log.append(run2, {
+      type: 'job-finished',
+      runId: run2,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: hash,
+      result: { status: 'failed', error: 'older attempt blew up' },
+    });
+    // mtime: run2 NEWEST (2000) — the trap mtime-based folding would fall into.
+    const at = (ms: number): Date => new Date(ms);
+    await utimes(join(dir, `${run1}.ndjson`), at(1000), at(1000));
+    await utimes(join(dir, `${run2}.ndjson`), at(2000), at(2000));
+
+    state.calls = [];
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+    );
+    expect(state.calls).toEqual([]); // the by-`at` winner (ok) is honored
+    expect(report.counts.done).toBe(1);
+  });
+
+  test('case-insensitive runId tails still count as this-plan evidence', async () => {
+    // An operator-copied journal with an uppercase hex tail ('A3F2') is
+    // well-formed evidence for the plan: the candidate filter is
+    // case-insensitive, so it is parsed, its planId matched, and its
+    // terminal-ok finish honored (zero re-invocations on resume).
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    const plan: Plan = {
+      id: 'plan-tail',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+    const log = openRunLog(dir);
+    const copiedRunId = 'plan-tail--r7--A3F2';
+    await log.append(copiedRunId, {
+      type: 'run-started',
+      runId: copiedRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: plan.id,
+    });
+    await log.append(copiedRunId, {
+      type: 'job-finished',
+      runId: copiedRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: hash,
+      result: { status: 'ok', value: 'j1' },
+    });
+
+    state.calls = [];
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+    );
+    expect(state.calls).toEqual([]);
+    expect(report.counts.done).toBe(1);
+  });
+
+  test("a sibling plan whose id extends this one ('a' vs 'a--b') cannot block the resume", async () => {
+    const { state, op } = makeFake();
+    const registry = viewWith(entry('fake', jobInputSchema, op));
+    const planA = chainPlan('a', 2);
+    const reportA1 = await runPlan(
+      planA,
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      registry,
+    );
+
+    // Hand-write plan 'a--b''s journal: valid first/last lines around a
+    // corrupt MIDDLE line. A prefix-only candidate filter would parse this
+    // file when resuming plan 'a' and die on the corruption.
+    const bogusId = 'a--b--k3y--c0ffee';
+    await appendFile(
+      join(dir, `${bogusId}.ndjson`),
+      `${JSON.stringify({
+        type: 'run-started',
+        runId: bogusId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'a--b',
+      })}\n{"type":"job-started","runI\n${JSON.stringify({
+        type: 'run-finished',
+        runId: bogusId,
+        at: '2026-01-01T00:00:02.000Z',
+        stoppedEarly: false,
+      })}\n`,
+      'utf8',
+    );
+    // Plan a's file is oldest so candidate iteration is deterministic.
+    const at = (ms: number): Date => new Date(ms);
+    await utimes(join(dir, `${reportA1.runId}.ndjson`), at(1000), at(1000));
+    await utimes(join(dir, `${bogusId}.ndjson`), at(2000), at(2000));
+
+    // Resume plan 'a': the 'a--b' file fails the two-segment tail check
+    // ('b--k3y--c0ffee' is not `<base36>--<hex>`) and is never parsed —
+    // old code rejected with /corrupt line/. Jobs all skip.
+    state.calls = [];
+    const reportA2 = await runPlan(
+      planA,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      registry,
+    );
+    expect(state.calls).toEqual([]);
+    expect(reportA2.counts.done).toBe(2);
+
+    // Plan 'a--b''s OWN corrupt journal is loud (its runId legitimately
+    // passes the pre-filter, so read() throws on the corrupt middle line).
+    const planB: Plan = {
+      id: 'a--b',
+      jobs: [{ id: 'b1', op: 'fake', input: { jobId: 'b1' } }],
+    };
+    await expect(
+      runPlan(
+        planB,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        registry,
+      ),
+    ).rejects.toThrow(/corrupt line/);
   });
 
   test('replayed outcomes reconstruct usage and roll it up (usage only ever comes from the journal)', async () => {

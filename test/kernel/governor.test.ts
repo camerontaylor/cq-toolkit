@@ -6,10 +6,12 @@
 //      rung (names, order, exact delays via the injected virtual clock), the
 //      final kill producing OpResult budget-exhausted, with a late
 //      post-kill rejection provably swallowed (no unhandled rejection).
-//   2. USD cap trips mid-run: remaining jobs get budget-exhausted rows,
-//      RunReport.stoppedEarly === true + earlyStopReason === 'budget'
-//      (via the documented withBudgetStop composition), done rows keep real
-//      results; queued-marker rows are re-marked too (stopOnError variant).
+//   2. USD cap trips mid-run: remaining dispatches are refused as
+//      budget-exhausted (real terminal verdicts), done rows keep real
+//      results; withBudgetStop annotates ONLY a stop that actually gated
+//      undispatched work (queued/blocked re-marks — the stopOnError
+//      variant), dispatch-quota stops included, and NEVER claims
+//      stoppedEarly when nothing was gated (I9 honesty, both directions).
 //   3. Dual caps: the in-flight ceiling holds as a high-water mark even at
 //      higher RunOptions.concurrency (and the pool binds in the min()'s other
 //      direction); runDispatchQuota refuses with the refusal recorded.
@@ -33,7 +35,7 @@
 // real-time waits anywhere (a setImmediate pump yields event-loop turns for
 // the runner's fs/microtask work; assertions on delays are exact). Temp
 // journal dirs: mkdtemp under os.tmpdir, removed in afterEach.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
@@ -299,6 +301,44 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
     }
   });
 
+  test('an ASYNC cancel-port rejection is recorded on the marker — never unhandled (review #15-5)', async () => {
+    const clock = virtualClock();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const markers: LadderRungMarker[] = [];
+      const task = async (ctx: JobGovernance): Promise<never> => {
+        ctx.signal.addEventListener('abort', () => {}); // ignored
+        // An `async () => void` port: the sync try/catch cannot see its
+        // REJECTION — only a `.then(undefined, handler)` can record it.
+        ctx.setCancelPort({
+          hardCancel: async () => { throw new Error('async boom'); },
+        });
+        return new Promise<never>(() => {});
+      };
+      const outcomePromise = runLadder(
+        task,
+        { wallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
+        { op: 'fake', jobKey: 'j1', attempt: 1 },
+        { clock: clock, onRung: (marker) => { markers.push(marker); } },
+      );
+      await tick(); // let the task register its async port
+      clock.advance(110); // rung 1 (signal) + rung 2 (the async hardCancel REJECTS)
+      await tick();
+      await tick(); // the rejection handler has landed on the marker
+      expect(unhandled).toEqual([]); // recorded on the marker, never unhandled
+      expect(markers[1]?.rung).toBe('timeout');
+      expect(markers[1]?.error).toMatch(/^async: /);
+      expect(markers[1]?.error).toContain('async boom');
+      clock.advance(20); // rung 3 — settle the ladder
+      const outcome = await outcomePromise;
+      expect(outcome.outcome).toBe('killed'); // the ladder still settled normally
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   test('a task that settles early disarms every pending rung', async () => {
     const clock = virtualClock();
     const markers: LadderRungMarker[] = [];
@@ -444,7 +484,7 @@ describe('governRegistry — the ladder through runPlan (ws-a item 1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('USD cap trips mid-run (ws-a item 3)', () => {
-  test('remaining jobs get budget-exhausted rows; the report says budget; done rows keep real results', async () => {
+  test('remaining jobs get budget-exhausted refusal rows; done rows keep real results', async () => {
     const governor = new BudgetGovernor(
       governorConfig({ concurrency: 2, stopOnError: false, maxUsd: 1.0 }, {}),
     );
@@ -453,14 +493,18 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
 
     const raw = await runPlan(plan, { concurrency: 2, stopOnError: false, maxUsd: 1.0 }, governRegistry(registry, governor));
     // Runner-side the run reached a terminal state for every job (the
-    // governor short-circuited post-trip dispatches), so the raw report is
-    // silent; honest-stop marking is the governor's voice:
+    // governor short-circuited post-trip dispatches): each refusal IS a
+    // real budget-exhausted verdict, and the raw report is silent.
     expect(raw.stoppedEarly).toBe(false);
     const report = withBudgetStop(raw, plan, governor);
 
-    expect(report.stoppedEarly).toBe(true);
-    expect(report.earlyStopReason).toBe('budget'); // the frozen reason's ONLY value
-    // a and b were admitted pre-trip and keep their real results; c/d/e never ran.
+    // I9 honesty, both directions: the trip gated NO undispatched work —
+    // every row kept its real verdict, nothing was re-marked — so the
+    // report carries NO stoppedEarly claim.
+    expect(report.stoppedEarly).toBe(false);
+    expect(report.earlyStopReason).toBeUndefined();
+    // a and b were admitted pre-trip and keep their real results; c/d/e were
+    // refused post-trip and keep their real budget-exhausted verdicts.
     expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'j1' });
     expect(report.jobs[1]?.result).toEqual({ status: 'ok', value: 'j2' });
     expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted', 'budget-exhausted']);
@@ -665,16 +709,19 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
       { concurrency: 1, stopOnError: false, maxTokens: 150 },
       governRegistry(registry, governor),
     );
-    // Runner-side the run reached a terminal state for every job; honest-stop
-    // marking is the governor's voice (the runner NEVER enforces budgets).
+    // Runner-side the run reached a terminal state for every job: j3's
+    // post-trip dispatch was REFUSED, and that refusal is a real
+    // budget-exhausted verdict — the raw report is silent.
     expect(raw.stoppedEarly).toBe(false);
     const report = withBudgetStop(raw, plan, governor);
 
     // The run did NOT continue past the cap: j1 folded 120 tokens (under),
     // j2's fold hit 240 (over) and tripped mid-run — j2 keeps its real
-    // result, j3 never ran.
-    expect(report.stoppedEarly).toBe(true);
-    expect(report.earlyStopReason).toBe('budget');
+    // result, j3's dispatch was refused. I9 honesty: the trip gated no
+    // undispatched work (every row is a real terminal verdict), so the
+    // report carries NO stoppedEarly claim.
+    expect(report.stoppedEarly).toBe(false);
+    expect(report.earlyStopReason).toBeUndefined();
     expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'j1' });
     expect(report.jobs[1]?.result).toEqual({ status: 'ok', value: 'j2' });
     expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted']);
@@ -781,6 +828,414 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2b-bis. RD-B review round 2 — the token-side fail-open closed: a lying
+// usage measurement fails loud (live + seed paths) or folds nothing
+// (WorkerResult guard), and never poisons the rollup.
+// ---------------------------------------------------------------------------
+
+describe('token-side NaN fail-open closed (review round 2)', () => {
+  const GOOD = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 };
+
+  test('(a) reportUsage with a NaN/negative field throws BEFORE the rollup; the cap stays enforceable', () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    governor.observeUsage('j1', GOOD);
+    expect(() =>
+      governor.observeUsage('j2', { input: 10, output: Number.NaN, cacheRead: 0, cacheWrite: 0 }),
+    ).toThrowError(/usage\.output must be a finite number >= 0, got NaN/);
+    expect(() =>
+      governor.observeUsage('j2', { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: Infinity }),
+    ).toThrowError(/usage\.reasoning must be a finite number >= 0, got Infinity/);
+    expect(() =>
+      governor.observeUsage('j2', { input: -5, output: 1, cacheRead: 0, cacheWrite: 0 }),
+    ).toThrowError(/usage\.input must be a finite number >= 0, got -5/);
+    // The poisoned folds never landed.
+    expect(governor.usage).toEqual(GOOD);
+    // The cap still binds: a real over-cap fold trips.
+    governor.observeUsage('j3', { input: 90, output: 20, cacheRead: 0, cacheWrite: 0 });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/token rollup 125 exceeded cap 100/);
+  });
+
+  test('(b) a returned WorkerResult carrying NaN usage folds NOTHING — and the runner fails the lossy job loud', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 100 }, {}),
+    );
+    // The defensive WorkerResult guard rejects the lying measurement BEFORE
+    // the completion-time fold: nothing folds, nothing throws post-record.
+    // DOWNSTREAM, the runner (RD-C, post-rebase contract) independently
+    // rejects the non-serializable (NaN-bearing) result as an honest per-job
+    // failure — two fail-loud layers, neither poisons the rollup.
+    const lyingOp = async (): Promise<OpResult<unknown>> => ({
+      status: 'ok',
+      value: {
+        usage: { input: Number.NaN, output: 50, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason: 'complete',
+      },
+    });
+    const plan = independentPlan('plan-lying-worker', 1, 'lying');
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxTokens: 100 },
+      governRegistry(viewWith(entry('lying', lyingOp)), governor),
+    );
+    expect(report.jobs[0]?.result.status).toBe('failed');
+    expect(report.jobs[0]?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/non-serializable result/),
+    });
+    expect(governor.usage).toBeUndefined(); // folded NOTHING
+    expect(governor.tripped).toBe(false);
+
+    // (b2, review 9-2) A lying COST — NaN or negative — must fold NOTHING
+    // via the direct governed-op path too: the guard rejects the WHOLE
+    // result, so the completed event is never followed by an
+    // assertValidUsd post-record throw, no usage folds, and the row stays
+    // 'ok' (the runner's serialization layer is not on this seam).
+    for (const badCost of [Number.NaN, -0.5]) {
+      const costGovernor = new BudgetGovernor(
+        governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 100, maxUsd: 5 }, {}),
+      );
+      const costlyEntry = governRegistry(
+        viewWith(
+          entry('costly', async () => ({
+            status: 'ok' as const,
+            value: {
+              usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+              denials: [] as never[],
+              stopReason: 'complete' as const,
+              costUSD: badCost,
+            },
+          })),
+        ),
+        costGovernor,
+      ).get('costly');
+      if (costlyEntry === undefined) throw new Error('governed entry missing');
+      const costlyOp = (await costlyEntry.importer()) as (input: unknown) => Promise<OpResult<unknown>>;
+      const verdict = await costlyOp({ jobId: 'cost-lying' });
+      expect(verdict.status).toBe('ok'); // the verdict is untouched — no throw
+      expect(costGovernor.usage).toBeUndefined(); // the WHOLE lying result folded nothing
+      expect(costGovernor.usdSpent).toBe(0); // no cost claimed
+      expect(costGovernor.tripped).toBe(false); // zero evidence, not a trip
+    }
+  });
+
+  test('(c) a seeded journal event with negative usage throws at seed time', () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    const events: JournalEvent[] = [
+      { type: 'run-started', runId: 'r1', at: 't', planId: 'plan-seed-lying' },
+      { type: 'job-started', runId: 'r1', at: 't', jobId: 'c1', op: 'fake', attempt: 1 },
+      {
+        type: 'job-finished',
+        runId: 'r1',
+        at: 't',
+        jobId: 'c1',
+        opId: 'fake',
+        inputsHash: 'h1',
+        result: { status: 'budget-exhausted' },
+        usage: { input: -5, output: 3, cacheRead: 0, cacheWrite: 0 },
+      },
+    ];
+    expect(() => governor.seedFromJournal(events)).toThrowError(
+      /seeded usage\.input must be a finite number >= 0, got -5/,
+    );
+  });
+
+  test('(d) valid folds are untouched: the cap trips exactly as before', () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    governor.observeUsage('j1', { input: 60, output: 40, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+    governor.observeUsage('j2', { input: 60, output: 40, cacheRead: 0, cacheWrite: 0 });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/token rollup 200 exceeded cap 100/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2c. RD-B review debt — the production observeResult wiring (#14-1/#14-2)
+// ---------------------------------------------------------------------------
+
+describe('governOp folds a returned WorkerResult through observeResult (#14-1/#14-2)', () => {
+  const WORKER_USAGE = { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 };
+  const workerValue = (extra?: { costUSD?: number; costBasis?: 'modeled' | 'billed' }): unknown => ({
+    usage: WORKER_USAGE,
+    denials: [],
+    stopReason: 'complete',
+    ...extra,
+  });
+
+  test('THE production path: a returned priced WorkerResult moves the budget', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxUsd: 5 }, {}),
+    );
+    const workerOp = async (): Promise<OpResult<unknown>> => ({
+      status: 'ok',
+      value: workerValue({ costUSD: 0.02, costBasis: 'modeled' }),
+    });
+    const plan = independentPlan('plan-worker-priced', 1, 'worker');
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 5 },
+      governRegistry(viewWith(entry('worker', workerOp)), governor),
+    );
+    // The op never called reportUsage/reportCost — the RETURNED value is the
+    // budget evidence, folded through the governed completed branch.
+    expect(governor.usage).toEqual(WORKER_USAGE);
+    expect(governor.usdSpent).toBe(0.02);
+    expect(governor.tripped).toBe(false);
+    expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: workerValue({ costUSD: 0.02, costBasis: 'modeled' }) });
+  });
+
+  test('returned UNPRICED usage under maxUsd trips the budget through the production path', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxUsd: 5 }, {}),
+    );
+    const unpricedWorkerOp = async (): Promise<OpResult<unknown>> => ({
+      status: 'ok',
+      value: workerValue(), // real usage, no costUSD — the unpriced-model shape
+    });
+    const plan = independentPlan('plan-worker-unpriced', 1, 'unpriced');
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 5 },
+      governRegistry(viewWith(entry('unpriced', unpricedWorkerOp)), governor),
+    );
+    expect(governor.usage).toEqual(WORKER_USAGE);
+    expect(governor.usdSpent).toBe(0);
+    expect(governor.tripped).toBe(true); // fail loud, never fail open (DD-9)
+    expect(governor.tripReason).toMatch(/unpriced usage under a USD cap/);
+  });
+
+  test('once-only: usage streamed through the job context is NOT double-counted by the returned WorkerResult', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxUsd: 5 }, {}),
+    );
+    const doubleEvidenceOp = async (): Promise<OpResult<unknown>> => {
+      const ctx = currentJobContext();
+      if (ctx !== undefined) {
+        ctx.reportUsage(WORKER_USAGE); // streamed evidence…
+      }
+      // …AND the same usage returned in the WorkerResult: the rollup must
+      // count it ONCE, not twice.
+      return { status: 'ok', value: workerValue({ costUSD: 0.02, costBasis: 'modeled' }) };
+    };
+    const plan = independentPlan('plan-worker-once', 1, 'double');
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 5 },
+      governRegistry(viewWith(entry('double', doubleEvidenceOp)), governor),
+    );
+    expect(governor.usage).toEqual(WORKER_USAGE); // once — not {input: 200, output: 100, …}
+    expect(governor.usdSpent).toBe(0.02); // the returned cost folded (once)
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2d. RD-B review debt — seed-time USD pricing (#14-5), cost validation
+// (#15-1), and the reasoning-once token fold (#14-6)
+// ---------------------------------------------------------------------------
+
+describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)', () => {
+  const SEED_USAGE = { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 };
+  const seededEvents = (): JournalEvent[] => [
+    { type: 'run-started', runId: 'r1', at: 't', planId: 'plan-seed-usd' },
+    { type: 'job-started', runId: 'r1', at: 't', jobId: 'c1', op: 'fake', attempt: 1 },
+    {
+      type: 'job-finished',
+      runId: 'r1',
+      at: 't',
+      jobId: 'c1',
+      opId: 'fake',
+      inputsHash: 'h1',
+      result: { status: 'budget-exhausted' },
+      usage: SEED_USAGE,
+    },
+  ];
+
+  test('seeded usage + maxUsd + NO usdOf trips LOUD before the resumed run admits anything', () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    governor.seedFromJournal(seededEvents());
+    expect(governor.usage).toEqual(SEED_USAGE);
+    expect(governor.tripped).toBe(true); // the seed alone trips — never fail open
+    expect(governor.tripReason).toMatch(/prior usage/);
+    expect(governor.tripReason).toMatch(/cannot be priced/);
+    expect(governor.tripReason).toMatch(/maxUsd 1 cannot bind/);
+    expect(governor.tripReason).toMatch(/DD-9/);
+    expect(governor.admit('c1')).toEqual({ decision: 'reject', reason: 'budget' });
+  });
+
+  test('with usdOf the same seed prices the rollup and does NOT trip', () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    governor.seedFromJournal(seededEvents(), { usdOf: () => 0.1 });
+    expect(governor.usdSpent).toBe(0.1);
+    expect(governor.tripped).toBe(false);
+  });
+
+  test('a usdOf deriving NaN throws at seed time (construction-time: fail loud and early)', () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    expect(() =>
+      governor.seedFromJournal(seededEvents(), { usdOf: () => NaN }),
+    ).toThrowError(/derived cost must be a finite number >= 0, got NaN/);
+    expect(governor.usdSpent).toBe(0); // the rollup was never poisoned
+  });
+
+  test('a usdOf deriving a negative usd throws likewise', () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    expect(() =>
+      governor.seedFromJournal(seededEvents(), { usdOf: () => -1 }),
+    ).toThrowError(/derived cost must be a finite number >= 0, got -1/);
+  });
+});
+
+describe('observeCost rejects invalid USD before mutating the rollup (#15-1)', () => {
+  test.each([NaN, Infinity, -0.01])('usd %p throws and leaves the rollup untouched', (bad) => {
+    const governor = new BudgetGovernor({ maxUsd: 1 });
+    governor.observeCost('j1', 0.25); // a valid fold first
+    expect(() => governor.observeCost('j1', bad)).toThrowError(
+      /observed cost must be a finite number >= 0/,
+    );
+    expect(governor.usdSpent).toBe(0.25); // not poisoned by the bad fold
+  });
+});
+
+describe('totalTokensOf counts reasoning once, via output (#14-6)', () => {
+  test('reasoning is NOT added on top of output: the token-cap fold', () => {
+    const usage = { input: 10, output: 20, cacheRead: 5, cacheWrite: 0, reasoning: 8 };
+    // Boundary: the fold is 35 (10+20+5+0) — NOT 43 (reasoning double-counted).
+    const atCap = new BudgetGovernor({ maxTokens: 35 });
+    atCap.observeUsage('j1', usage);
+    expect(atCap.tripped).toBe(false); // 35 ≤ 35 — the same exceeds semantics
+    const overCap = new BudgetGovernor({ maxTokens: 34 });
+    overCap.observeUsage('j1', usage);
+    expect(overCap.tripped).toBe(true);
+    expect(overCap.tripReason).toMatch(/token rollup 35 exceeded cap 34/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 2e. RD-B review debt — honest-stop annotation, both directions (#15-4/#15-6)
+// ---------------------------------------------------------------------------
+
+describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', () => {
+  test('a dispatch-quota stop annotates: queued rows re-mark budget-exhausted (#15-4a)', async () => {
+    const governor = new BudgetGovernor({ runDispatchQuota: 2 });
+    const plan: Plan = {
+      id: 'plan-quota-stop',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j3', op: 'fake', input: { jobId: 'j3' } }, // refused: dispatch-quota
+        { id: 'j4', op: 'fake', input: { jobId: 'j4' }, dependsOn: ['j2'] }, // wave 2 — never dispatched → queued
+      ],
+    };
+    const registry = viewWith(entry('fake', okOp));
+    const raw = await runPlan(plan, { concurrency: 1, stopOnError: true }, governRegistry(registry, governor));
+    // j3's refusal is a non-ok terminal → stopOnError halts dispatching; j4
+    // never dispatched (its dep j2 is done) → the runner's queued marker.
+    expect(governor.tripped).toBe(false); // a quota stop is NOT a USD/token trip…
+    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+    expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'indeterminate']);
+    expect((raw.jobs[3]?.result as { detail: string }).detail).toMatch(/^queued:/);
+
+    // …yet the run stopped for budget-family reasons: withBudgetStop
+    // annotates and re-marks the queued row even though no trip fired.
+    const report = withBudgetStop(raw, plan, governor);
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 2,
+      failed: 0,
+      'budget-exhausted': 2,
+    });
+  });
+
+  test('a trip that gated NOTHING stays silent: zero re-marked rows → no stoppedEarly claim (#15-4b)', async () => {
+    const governor = new BudgetGovernor({ maxUsd: 0.5 });
+    const plan = independentPlan('plan-trip-no-gate', 2, 'spendy');
+    const registry = viewWith(entry('spendy', spendyOp));
+    const raw = await runPlan(plan, { concurrency: 1, stopOnError: false }, governRegistry(registry, governor));
+    // j1's cost trips the cap mid-run; j2's dispatch is refused — both rows
+    // are real terminal verdicts; nothing was ever queued or blocked.
+    expect(governor.tripped).toBe(true);
+    expect(rowStatuses(raw)).toEqual(['ok', 'budget-exhausted']);
+    const report = withBudgetStop(raw, plan, governor);
+    // I9 honesty: no row was re-marked → the report is returned UNTOUCHED.
+    expect(report).toBe(raw);
+    expect(report.stoppedEarly).toBe(false);
+    expect(report.earlyStopReason).toBeUndefined();
+  });
+
+  test('a fabricated queued: detail from an ADMITTED op is NOT rewritten (#15-6)', async () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    // The op RAN (the governor admitted it) and returned an indeterminate
+    // verdict claiming the runner's never-dispatched marker — executed code
+    // fabricating `queued: …`.
+    const lyingOp = async (): Promise<OpResult<unknown>> => {
+      const ctx = currentJobContext();
+      if (ctx !== undefined) ctx.reportCost(2.0); // trips the 1.0 cap mid-run
+      return { status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' };
+    };
+    const plan = independentPlan('plan-queued-fabricated', 1, 'lying');
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      governRegistry(viewWith(entry('lying', lyingOp)), governor),
+    );
+    const admissions = governor.events.filter((event): event is AdmittedEvent => event.kind === 'admitted');
+    expect(admissions.map((event) => event.jobKey)).toEqual(['j1']); // the governor ADMITTED this job
+    expect(governor.tripped).toBe(true);
+    expect(rowStatuses(raw)).toEqual(['indeterminate']);
+
+    const report = withBudgetStop(raw, plan, governor);
+    // The row keeps its REAL verdict — the queued marker was written by
+    // executed code, not the runner's stop sweep — and with nothing
+    // re-marked there is no stoppedEarly claim either.
+    expect(report.jobs[0]?.result).toEqual({ status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' });
+    expect(report.stoppedEarly).toBe(false);
+  });
+
+  test('a fabricated queued: row does not condemn its DEPENDENTS either (#15-6, review round 3)', async () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    // The ADMITTED op fabricates `queued: …` AND has a dependent: the
+    // budgetCaused walk reads indeterminate rows too, so a lying row must
+    // not get the dependent re-marked budget-exhausted (the predicate is
+    // shared — re-mark pass and causality walk cannot drift).
+    const lyingOp = async (): Promise<OpResult<unknown>> => {
+      const ctx = currentJobContext();
+      if (ctx !== undefined) ctx.reportCost(2.0); // trips the 1.0 cap mid-run
+      return { status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' };
+    };
+    const plan: Plan = {
+      id: 'plan-queued-fabricated-dep',
+      jobs: [
+        { id: 'f1', op: 'lying', input: { jobId: 'f1' } },
+        { id: 'd1', op: 'fake', input: { jobId: 'd1' }, dependsOn: ['f1'] },
+      ],
+    };
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      governRegistry(viewWith(entry('lying', lyingOp), entry('fake', okOp)), governor),
+    );
+    expect(governor.tripped).toBe(true);
+    // f1 indeterminate → the runner counts it failed; d1 is blocked by it.
+    expect(rowStatuses(raw)).toEqual(['indeterminate', 'failed']);
+
+    const report = withBudgetStop(raw, plan, governor);
+    // The fabricated row keeps its verdict…
+    expect(report.jobs[0]?.result).toEqual({ status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' });
+    // …and the dependent is NOT re-marked budget-exhausted off the lie: it
+    // stays honestly blocked on an unresolved row.
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'f1'/ });
+    expect(report.stoppedEarly).toBe(false); // nothing was re-marked
   });
 });
 
@@ -1414,9 +1869,13 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     const report = withBudgetStop(raw, plan, governor);
     expect(calls).toEqual([]); // zero op invocations — nothing was re-dispatched
     expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'c1' }); // attested
-    expect(report.jobs[1]?.result).toEqual({ status: 'budget-exhausted' }); // re-marked
-    expect(report.stoppedEarly).toBe(true);
-    expect(report.earlyStopReason).toBe('budget');
+    // c2's row is its REAL verdict — the seeded governor refused the
+    // dispatch at admission (a short-circuit, not a re-mark).
+    expect(report.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
+    // I9 honesty: no row was re-marked (both verdicts are real evidence),
+    // so the report carries NO stoppedEarly claim.
+    expect(report.stoppedEarly).toBe(false);
+    expect(report.earlyStopReason).toBeUndefined();
     expect(report.counts['budget-exhausted']).toBe(1);
   });
 
@@ -1513,12 +1972,38 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       governRegistry(viewWith(entry('fake', countingOk)), governor),
     );
     expect(calls).toEqual([]);
-    // c1 is refused by the spent quota; c2 (dependsOn c1) is then honestly
-    // BLOCKED on the refused c1 — never dispatched, nothing fabricated.
-    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'failed']);
-    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'c1'/ });
+    // Resume-fold (issue #16): c1 has terminal-ok evidence from runs 1-2 with
+    // a matching hash, so it REPLAYS — zero dispatch, no quota consumed,
+    // nothing re-executed. c2's own re-dispatch is what the spent quota
+    // refuses (short-circuited before the op runs).
+    expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
+    expect(report.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
     const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+  });
+
+  test('seedFromRunLog ignores a corrupt sibling-plan journal ("a" vs "a--b", shared filter)', async () => {
+    // Review VB1C r1: the seed used a prefix-only candidate filter, so a
+    // corrupt journal of plan 'a--b' threw /corrupt line/ into plan 'a''s
+    // governed resume. It now shares the runner's candidateRunsForPlan.
+    const log = openRunLog(dir);
+    await log.append('a--r1--aa', { type: 'run-started', runId: 'a--r1--aa', at: 't', planId: 'a' });
+    await log.append('a--r1--aa', {
+      type: 'job-started',
+      runId: 'a--r1--aa',
+      at: 't',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    // A corrupt MIDDLE line in the sibling plan's file (prefix 'a--' matches).
+    await appendFile(
+      join(dir, 'a--b--k3y--c0ffee.ndjson'),
+      `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: 't', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
+      'utf8',
+    );
+    const governor = await seedFromRunLog(log, 'a', { config: { runDispatchQuota: 3 } });
+    expect(governor.dispatchCount).toBe(1); // only plan a's own dispatch was seeded
   });
 });
 
@@ -1596,6 +2081,7 @@ describe('src/index.ts barrel', () => {
     expect(typeof toolkit.withBudgetStop).toBe('function');
     expect(typeof toolkit.runLadder).toBe('function');
     expect(typeof toolkit.governorConfig).toBe('function');
+    expect(typeof toolkit.currentJobContext).toBe('function');
     expect(typeof toolkit.realClock.now()).toBe('number');
     // DD-1 spike result (docs/dd-1-abort-spike.md): 5000, ≈2.5× the measured
     // worst cooperative abort settle (~2.0 s, claude-agent lane); the value

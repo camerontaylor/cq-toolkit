@@ -18,7 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # The scan runs repo code, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
       - name: Install pinned gitleaks v8.30.1 (digest-pinned)
         run: |
           set -euo pipefail
