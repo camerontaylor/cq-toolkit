@@ -1103,9 +1103,10 @@ function statusOfValue(value: unknown): GovernedOutcomeStatus {
  * returns undefined and folds nothing. Requires `usage` to be an object
  * with FINITE non-negative numeric input/output/cacheRead/cacheWrite
  * (`denials` an array, `stopReason` one of the four frozen
- * DriverStopReason strings; `costUSD` rides along only when it is a
- * number): a LYING WorkerResult folds NOTHING — the guard rejects it so
- * the completion-time fold never trips assertValidUsage post-record (the
+ * DriverStopReason strings; a present `costUSD` must be a finite number
+ * >= 0 as well — a lying cost rejects the WHOLE result): a LYING
+ * WorkerResult folds NOTHING — the guard rejects it so the completion-time
+ * fold never trips assertValidUsage/assertValidUsd post-record (the
  * verdict stays real evidence; the usage stays zero-evidence).
  */
 function workerResultOfValue(value: unknown): WorkerResult | undefined {
@@ -1148,11 +1149,24 @@ function workerResultOfValue(value: unknown): WorkerResult | undefined {
   ) {
     return undefined;
   }
+  // A present costUSD must be a finite number >= 0 too: a NaN/Infinity/
+  // negative cost would survive this guard, reach observeCost, and trip
+  // assertValidUsd AFTER the completed event was recorded — the exact
+  // post-record throw this defensive guard exists to prevent (review
+  // thread). A lying cost rejects the WHOLE result: zero evidence, never a
+  // post-record throw.
+  const costUSD = candidate.costUSD;
+  if (
+    costUSD !== undefined &&
+    (typeof costUSD !== 'number' || !Number.isFinite(costUSD) || costUSD < 0)
+  ) {
+    return undefined;
+  }
   return {
     usage: usage as Usage,
     denials: candidate.denials,
     stopReason,
-    ...(typeof candidate.costUSD === 'number' ? { costUSD: candidate.costUSD } : {}),
+    ...(typeof costUSD === 'number' ? { costUSD } : {}),
   };
 }
 

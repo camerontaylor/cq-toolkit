@@ -229,15 +229,19 @@ describe('run output: maxBuffer sized above the cap (issue #18)', () => {
   test('a command emitting > 1 MiB returns a truncated RESULT, not a run-failed denial', async () => {
     await withScratch(async (scratchDir) => {
       // cap 600k chars → maxBuffer = 600_000 * 4 + 64KiB ≈ 2.4 MB (bytes vs
-      // chars): the 2 MB output fits the buffer — where exec's 1 MiB DEFAULT
-      // would reject with a string-code error — and capOutput truncates it.
+      // chars): the ~1.5 MB output fits the buffer — where exec's 1 MiB
+      // DEFAULT would reject with a string-code error — and capOutput
+      // truncates it. The probe is a PURE-BUILTIN /bin/sh while-loop with
+      // printf (review thread: no external binary; timed in-process at
+      // ~0.4 s per run, 3× consistent — far under the 2.5 s budget), so the
+      // no-external-binaries convention holds with NO exception.
       const capConfig: HarnessConfig = {
         ...defaultHarnessConfig,
         tools: {
           ...defaultHarnessConfig.tools,
           run: {
             enabled: true,
-            commandPatterns: ['re:^node -e .*cap-probe.*$'],
+            commandPatterns: ['re:^i=0; while.*cap-probe.*$'],
             timeoutMs: 30_000,
             maxOutputChars: 600_000,
           },
@@ -245,7 +249,7 @@ describe('run output: maxBuffer sized above the cap (issue #18)', () => {
       };
       const run = buildTools(capConfig, scratchDir).find((t) => t.name === 'run');
       const result = await run?.execute({
-        command: `node -e "/* cap-probe */ process.stdout.write('x'.repeat(2 * 1024 * 1024));"`,
+        command: `i=0; while [ $i -lt 11000 ]; do printf 'cap-probe line %05d ${'x'.repeat(110)}\\n' "$i"; i=$((i+1)); done`,
       });
       expect(result?.ok).toBe(true); // the old default made this a denial
       if (result?.ok) {

@@ -817,4 +817,27 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(close.stdout.split('final-fragment')).toHaveLength(2); // exactly one occurrence
     });
   }, 20_000);
+
+  test('astral characters past the cap: byte-exact trim, no lone surrogate at the head (review 9-1)', async () => {
+    await withScratch(async (scratchDir) => {
+      const cap = 64 * 1024;
+      // The whole stream is one giant unterminated line of emoji (4 UTF-8
+      // bytes each) — the tail region is FULL of astral pairs, the exact
+      // shape where a code-unit trim mis-measured 3+3 instead of 4 bytes
+      // per pair, under-counted, and let the retained text exceed the cap.
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', `process.stdout.write('🦄'.repeat(40_000));`],
+        cwd: scratchDir,
+        maxRetainedBytes: cap,
+      });
+      const close = await child.close;
+      // The documented absolute bound holds BYTE-exactly.
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(cap);
+      expect(close.droppedBytes).toBeGreaterThan(0);
+      // The retained head starts with a COMPLETE code point — a code-unit
+      // cut between the halves of a pair would strand a lone surrogate.
+      expect(close.stdout.codePointAt(0)).toBe(0x1f984); // 🦄
+    });
+  }, 20_000);
 });

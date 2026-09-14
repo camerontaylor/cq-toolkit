@@ -138,18 +138,23 @@ function createCollector(
   const tailBuf = { text: '', bytes: 0 };
   const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
-  // Trim a buffer back under the cap, cutting whole characters off the
-  // head; the dropped count is measured in real bytes (Buffer.byteLength).
-  // Only the TAIL's trims count toward droppedBytes: the pending line is a
-  // suffix of the same stream, so everything its trim drops sits inside the
-  // head the tail's trim drops anyway — counting both would inflate.
+  // Trim a buffer back under the cap, cutting whole CODE POINTS off the
+  // head (a cut between the halves of an astral pair would leave a lone
+  // surrogate — corruption at the head of retained evidence) and measuring
+  // each cut in its real UTF-8 bytes (a code-unit advance mis-measures an
+  // astral pair as 3+3 instead of 4, under-counts, and lets the retained
+  // text exceed the documented absolute bound — review thread). Only the
+  // TAIL's trims count toward droppedBytes: the pending line is a suffix of
+  // the same stream, so everything its trim drops sits inside the head the
+  // tail's trim drops anyway — counting both would inflate.
   const trimToCap = (buf: { text: string; bytes: number }): void => {
     if (buf.bytes <= maxRetainedBytes) return;
     let cut = 0;
     let cutBytes = 0;
     while (cut < buf.text.length && buf.bytes - cutBytes > maxRetainedBytes) {
-      cutBytes += Buffer.byteLength(buf.text[cut]);
-      cut += 1;
+      const width = (buf.text.codePointAt(cut) ?? 0) > 0xffff ? 2 : 1;
+      cutBytes += Buffer.byteLength(buf.text.slice(cut, cut + width));
+      cut += width;
     }
     if (buf === tailBuf) droppedBytes += cutBytes;
     buf.text = buf.text.slice(cut);

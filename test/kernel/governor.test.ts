@@ -890,6 +890,38 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
     });
     expect(governor.usage).toBeUndefined(); // folded NOTHING
     expect(governor.tripped).toBe(false);
+
+    // (b2, review 9-2) A lying COST — NaN or negative — must fold NOTHING
+    // via the direct governed-op path too: the guard rejects the WHOLE
+    // result, so the completed event is never followed by an
+    // assertValidUsd post-record throw, no usage folds, and the row stays
+    // 'ok' (the runner's serialization layer is not on this seam).
+    for (const badCost of [Number.NaN, -0.5]) {
+      const costGovernor = new BudgetGovernor(
+        governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 100, maxUsd: 5 }, {}),
+      );
+      const costlyEntry = governRegistry(
+        viewWith(
+          entry('costly', async () => ({
+            status: 'ok' as const,
+            value: {
+              usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 },
+              denials: [] as never[],
+              stopReason: 'complete' as const,
+              costUSD: badCost,
+            },
+          })),
+        ),
+        costGovernor,
+      ).get('costly');
+      if (costlyEntry === undefined) throw new Error('governed entry missing');
+      const costlyOp = (await costlyEntry.importer()) as (input: unknown) => Promise<OpResult<unknown>>;
+      const verdict = await costlyOp({ jobId: 'cost-lying' });
+      expect(verdict.status).toBe('ok'); // the verdict is untouched — no throw
+      expect(costGovernor.usage).toBeUndefined(); // the WHOLE lying result folded nothing
+      expect(costGovernor.usdSpent).toBe(0); // no cost claimed
+      expect(costGovernor.tripped).toBe(false); // zero evidence, not a trip
+    }
   });
 
   test('(c) a seeded journal event with negative usage throws at seed time', () => {
