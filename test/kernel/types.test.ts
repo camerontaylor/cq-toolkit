@@ -752,3 +752,28 @@ describe('bogus discriminant rejection (VB1A)', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// 6. RunOptionsSchema concurrency bound — the promised T1.1 record item:
+//    review round-4 medium finding, recorded in PR 7's 'Accepted at merge'
+//    notes as "folded into the next kernel-schema-touching PR (T1.2)".
+//    Mirror-only tightening (concurrency is a pool size; < 1 is
+//    meaningless); the frozen RunOptions type is untouched.
+// ---------------------------------------------------------------------------
+
+describe('RunOptionsSchema concurrency bound (round-4 finding, folded from T1.1)', () => {
+  test('concurrency 0 and negatives fail; 1 and 16 parse and round-trip', () => {
+    failsParse(
+      kernelSchema.RunOptionsSchema,
+      { concurrency: 0, stopOnError: false },
+      'concurrency 0',
+    );
+    failsParse(
+      kernelSchema.RunOptionsSchema,
+      { concurrency: -3, stopOnError: false },
+      'negative concurrency',
+    );
+    roundTripsThrough(kernelSchema.RunOptionsSchema, { concurrency: 1, stopOnError: true });
+    roundTripsThrough(kernelSchema.RunOptionsSchema, { concurrency: 16, stopOnError: false });
+  });
+});

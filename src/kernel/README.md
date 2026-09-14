@@ -52,3 +52,43 @@ Phase 1 (this phase): plan runner, NDJSON journal, budget governor — all
 consuming these frozen types as-is. Later phases: op families under
 `src/ops/`, the plan library under `src/plans/`, and the CLI layer (which
 owns the {0,1,2,3} exit-code mapping) under `src/cli/`.
+
+## Runner, manifest, journal (T1.2)
+
+`runPlan(plan, opts, registry)` interprets a plan to a `RunReport` (R2 §5:
+a deterministic interpreter — no daemon, no workflow engine; rescue is
+T1.3's governor, never the runner).
+
+- **Registry is dependency-injected** (`OpRegistryView.get`): the frozen
+  `RunOptions` cannot carry it, and the runner stays DI-clean — phase-2
+  lane I's `src/plans/registry.ts` will own the global registry. Unknown op
+  names fail that job at execution time; the manifest still builds
+  (op-agnostic).
+- **Committed manifest**: `makeManifest` freezes a plan into plain rows,
+  each with `inputsHash = sha256(canonicalJson({op, input}))` — key-order
+  independent, array-order sensitive. That hash is what makes replay
+  provable.
+- **NDJSON journal** (`<journalDir>/<runId>.ndjson`): append-only,
+  schema-validated facts; a torn tail (crash mid-append) is ignored only as
+  the LAST line, corrupt middle lines throw; `statusOf` is derived at read
+  by folding events.
+- **Replay/resume** (`resume: true`): the latest prior run for the planId;
+  a job skips only on terminal-`ok` + equal `inputsHash` (zero op
+  invocation, outcome reconstructed from the journal); everything else
+  re-runs — continue-from-first-failure falls out naturally.
+- **stopOnError**: after the first non-ok result nothing new starts
+  (in-flight jobs complete and are recorded); downstream jobs are `blocked`,
+  never-dispatched jobs with healthy dependencies are `queued`.
+
+Recorded freeze-friction workarounds (the ws-a "deviations need a recorded
+reason" clause):
+
+- `JobState` has no needs-human/indeterminate values, so report COUNTS map
+  needs-human→blocked and indeterminate→failed; `JobOutcome.result` rows
+  keep the true taxonomy statuses (and resume re-runs both).
+- Blocked jobs emit NO journal events — no frozen event type can express
+  blocking — so they exist only in the run report.
+- Replay re-attests skipped jobs with a `job-finished` event and no
+  preceding `job-started` (no dispatch happened; the verified inputsHash
+  makes the attestation sound). This keeps each run's journal
+  self-contained so the latest-run rule survives chained resumes.
