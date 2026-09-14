@@ -258,11 +258,13 @@ Folding real usage that carries no `costUSD` under a configured `maxUsd`
 trips the budget loud — never fail open (the escapes: price the model, or
 cap with `maxTokens`), and the seed-time trip covers BOTH caps, so a resumed
 run whose journaled rollup already overruns either cap stops before
-admitting anything. NOT yet wired in production: the per-result fold —
-`observeResult` has no production caller (runs fold only through
-`governOp`'s streaming `onUsage`/`onCost` callbacks), and
-`RunOptionsSchema` does not yet accept `maxTokens`; until that bridge lands
-the strict schema rejects the option (review-debt #14). Full disposition:
+admitting anything. NOT yet wired in production: there is NO production
+folding path yet — the drivers never report usage or cost
+(`reportUsage`/`reportCost` are exercised only by custom/test ops) and the
+per-result `observeResult` fold has no production caller;
+`RunOptionsSchema` does not yet accept `maxTokens` (the strict schema
+rejects the option). The driver→governor bridge is review-debt #14. Full
+disposition:
 `docs/dd-9-api-equivalent-budget.md`.
 
 Every timer in the governor flows through the injected `Clock`

@@ -16,9 +16,9 @@ truth; drivers never report trusted USD).
   2026-09-13): the upstream data repository is MIT-licensed, "Copyright
   (c) 2025 models.dev" (GitHub's license metadata agrees, `spdx_id` MIT).
 - **Verdict (from the re-verification): vendoring-allowed for the scope
-  vendored here — the eval-matrix pricing entries.** The MIT grant
-  conditions copying on carrying the copyright notice; `data.ts`'s header
-  carries it and points back at the record.
+  vendored here — the eval-matrix pricing entries.** The complete models.dev
+  MIT notice travels in `data.ts`'s header (which compiles into the
+  published `dist`), so it accompanies the distributed data.
 
 ## As-of date and refresh rule
 

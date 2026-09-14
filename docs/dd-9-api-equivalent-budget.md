@@ -45,10 +45,11 @@ debt like any other: it ships reviewed or it does not ship.
   fires when the fold EXCEEDS the cap; a fold at the cap does not).
 - `BudgetGovernor.observeResult(jobKey, result)` — the canonical fold for
   ONE driver result at the folding point (INTENDED caller: a phase-2
-  registry layer, per `WorkerResult` — today `observeResult` has no
-  production caller; runs fold through the `observeUsage`/`observeCost`
-  streaming primitives the governed ladder reports through, and the
-  driver→governor bridge is tracked as review-debt #14). Fold rules:
+  registry layer, per `WorkerResult` — today there is NO production folding
+  path: the drivers never report usage or cost, the `observeUsage`/
+  `observeCost` streaming hooks are exercised only by custom/test ops, and
+  `observeResult` has no production caller; the driver→governor bridge is
+  tracked as review-debt #14). Fold rules:
   real usage (any nonzero token count) rolls the token cap; a present
   `costUSD` rolls the USD cap; real usage with NO `costUSD` under a
   configured `maxUsd` TRIPS the budget (see §4); a zero-usage result folds

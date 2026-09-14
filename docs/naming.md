@@ -72,7 +72,8 @@ release.
 
 Executor re-verification: `npm view cq-toolkit` and
 `npm view @camerontaylor/cq-toolkit` both returned registry 404 at re-check
-time — consistent with the blocked reservation above; the publish attempt and
+time (2026-09-14, before the owner's scoped publish recorded below) —
+consistent with the blocked reservation above; the publish attempt and
 its failure are the lane leader's record, stated here verbatim.
 
 ## GitHub repo-name near-matches (informational only)

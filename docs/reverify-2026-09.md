@@ -96,8 +96,9 @@ any way — the tool comes from the digest-pinned GitHub release only.
   per-model `license` fields and links); the per-model `license` field
   describes each MODEL's own terms, not the terms of the pricing data itself,
   so it does not restrict copying the data. The MIT grant conditions copying
-  on carrying the copyright notice; `data.ts`'s header carries it and points
-  back at this record.
+  on carrying the copyright and permission notice; the COMPLETE notice
+  travels in `data.ts`'s header — which compiles into the published `dist` —
+  so the distributed data carries it.
 
 ## ADR revisit triggers (status as of 2026-09-13)
 
