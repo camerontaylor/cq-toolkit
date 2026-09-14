@@ -12,9 +12,20 @@
 // is the driver, not the provider wire: the glm × ai-sdk cell rides the
 // anthropic-compat wire (@ai-sdk/anthropic at Z.AI's compat endpoint)
 // because the plan key funds only that endpoint — see makeDriver and
-// docs/eval-axes-demo.md. Every
-// run is capped: Budget.maxUsd 2 + maxTokens 2000, toolPolicy 'none',
-// sandbox 'none'. The claude lanes route through Z.AI's anthropic-compat
+// docs/eval-axes-demo.md.
+//
+// SPEND BOUNDS — what actually bounds a live run here (round-1 review
+// wording): each cell is dispatched through the kernel's escalation ladder
+// (runLadder, wallClockMs 120_000 — the governor owns WHEN to abort), the
+// fixture prompt is tiny, toolPolicy is 'none', and retries are capped at
+// MAX_ATTEMPTS per cell with NO new paid call after a cell produced a
+// completed result. `Budget.maxUsd 2` / `maxTokens 2000` ride the
+// invocation as caller-side derived accounting — the drivers derive cost
+// AFTER usage; maxUsd is NOT a runtime kill switch — it is what a caller
+// (or governor) compares the derived figure against, so this script states
+// it as the declared ceiling, not the enforcement mechanism.
+//
+// The claude lanes route through Z.AI's anthropic-compat
 // endpoint via the drivers' own env routing (base URL +
 // ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY injected from the ZAI key var);
 // the STALE host ANTHROPIC_API_KEY is neutralized (empty string) first.
@@ -30,7 +41,7 @@
 //
 // Standalone by design — never runs in `npm test` (CI has no keys, no
 // network). Usage: zsh -lic 'node scripts/demo-eval-axes.mjs'
-import { AiSdkDriver, ClaudeAgentDriver, SubprocessDriver } from '../dist/index.js';
+import { AiSdkDriver, ClaudeAgentDriver, SessionStore, SubprocessDriver, runLadder } from '../dist/index.js';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { priceOf } from '../dist/driver/pricing/index.js';
 import { tmpdir } from 'node:os';
@@ -159,6 +170,11 @@ const u = (n) => (n === undefined ? '—' : String(n));
 const usd = (n) => (n === undefined ? 'absent' : `$${n.toFixed(8)}`);
 
 const MAX_ATTEMPTS = 2; // the live-retry budget per cell (spend discipline)
+// The governed wall clock per cell attempt — generous against the observed
+// per-cell latencies (~1–6 s), tight enough that a hung lane escalates
+// through the ladder instead of holding the demo forever.
+const WALL_CLOCK_MS = 120_000;
+const FIXTURE_PHRASE = 'quick brown fox'; // the fixture's distinctive text
 
 async function runCell({ lane, provider, model }) {
   const scratchDir = await mkdtemp(join(tmpdir(), 'eval-axes-'));
@@ -168,30 +184,67 @@ async function runCell({ lane, provider, model }) {
       const driver = await makeDriver(lane, provider, scratchDir);
       const startedAt = Date.now();
       try {
-        const result = await driver.run(invocationFor(provider, model));
+        // GOVERNED DISPATCH (the kernel's own channel): every live call runs
+        // inside runLadder so the escalation ladder owns WHEN to abort — the
+        // driver only obeys. A governed outcome other than 'completed' (or a
+        // verdict that is not a pass, below) is recorded as evidence; the
+        // retry loop NEVER issues another paid call once a cell produced a
+        // completed result.
+        const ladderOutcome = await runLadder(
+          () => driver.run(invocationFor(provider, model)),
+          { wallClockMs: WALL_CLOCK_MS },
+          { op: 'eval-axes', jobKey: `eval-axes/${lane}/${model}`, attempt },
+        );
         const elapsedMs = Date.now() - startedAt;
-        const recomputed = recomputeCost({ provider, model }, result.usage);
-        if (result.stopReason === 'complete' || result.stopReason === 'budget') {
-          // The DD-2 fold check: derived-only means the SAME math must give
-          // the SAME number. Tolerance 1e-9 USD (float reassociation only).
-          const foldAgrees =
-            recomputed === undefined
-              ? result.costUSD === undefined
-              : Math.abs((result.costUSD ?? Number.NaN) - recomputed) <= 1e-9;
-          return {
-            lane, provider, model, elapsedMs,
-            stopReason: result.stopReason,
-            servedModel: result.model ?? 'unreported',
-            usage: result.usage,
-            costUSD: result.costUSD,
-            costBasis: result.costBasis,
-            recomputedCostUSD: recomputed,
-            foldAgrees,
-            text: (result.structuredOutput === undefined ? '' : JSON.stringify(result.structuredOutput)).slice(0, 60),
-            sessionId: result.sessionId,
-          };
+        if (ladderOutcome.outcome !== 'completed') {
+          attempts.push({ attempt, governedOutcome: ladderOutcome.outcome });
+          continue;
         }
-        attempts.push({ attempt, stopReason: result.stopReason, usage: result.usage });
+        const result = ladderOutcome.value;
+        const recomputed = recomputeCost({ provider, model }, result.usage);
+        // Fixture validation (the acceptance bar for a PASS): the verdict
+        // must be stopReason 'complete' — a 'budget' or 'error' stopReason
+        // records the cell as failed-with-evidence — AND the assistant
+        // transcript must carry the fixture's distinctive phrase (the model
+        // actually answered the fixture, not something else).
+        if (result.stopReason !== 'complete') {
+          attempts.push({ attempt, stopReason: result.stopReason, usage: result.usage });
+          continue;
+        }
+        const store = new SessionStore(join(scratchDir, `sessions-${lane}`));
+        const record = await store.load(result.sessionId);
+        const assistantText = (record?.messages ?? [])
+          .filter((m) => m.role === 'assistant')
+          .map((m) => m.content)
+          .join('\n')
+          .toLowerCase();
+        if (!assistantText.includes(FIXTURE_PHRASE)) {
+          attempts.push({
+            attempt,
+            stopReason: result.stopReason,
+            fixtureResponseInvalid: `assistant transcript lacks '${FIXTURE_PHRASE}'`,
+            transcriptChars: assistantText.length,
+          });
+          continue;
+        }
+        // The DD-2 fold check: derived-only means the SAME math must give
+        // the SAME number. Tolerance 1e-9 USD (float reassociation only).
+        const foldAgrees =
+          recomputed === undefined
+            ? result.costUSD === undefined
+            : Math.abs((result.costUSD ?? Number.NaN) - recomputed) <= 1e-9;
+        return {
+          lane, provider, model, elapsedMs,
+          governedOutcome: ladderOutcome.outcome,
+          stopReason: result.stopReason,
+          servedModel: result.model ?? 'unreported',
+          usage: result.usage,
+          costUSD: result.costUSD,
+          costBasis: result.costBasis,
+          recomputedCostUSD: recomputed,
+          foldAgrees,
+          sessionId: result.sessionId,
+        };
       } catch (err) {
         attempts.push({ attempt, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) });
       }
@@ -212,9 +265,23 @@ const cells = [
 
 // `--only <substring>` runs just the matching cells (e.g. the single-cell
 // compat-wire retry of glm × ai-sdk) — spend discipline for targeted reruns.
-const onlyIndex = process.argv.indexOf('--only');
-const only = onlyIndex !== -1 ? process.argv[onlyIndex + 1] : undefined;
-const selected = only === undefined ? cells : cells.filter((c) => `${c.lane}/${c.model}`.includes(only));
+// A missing value, or a value matching NO cell, is a loud usage error —
+// never a silent full run.
+function selectCells() {
+  const onlyIndex = process.argv.indexOf('--only');
+  if (onlyIndex === -1) return cells;
+  const only = process.argv[onlyIndex + 1];
+  const valid = cells.map((c) => `${c.lane}/${c.model}`);
+  if (only === undefined || !cells.some((c) => `${c.lane}/${c.model}`.includes(only))) {
+    console.error(
+      `demo-eval-axes: ${only === undefined ? '--only requires a value' : `no cell matches '${only}'`} — valid cells: ${valid.join(', ')}`,
+    );
+    process.exit(1);
+  }
+  return cells.filter((c) => `${c.lane}/${c.model}`.includes(only));
+}
+
+const selected = selectCells();
 
 const results = [];
 for (const cell of selected) {

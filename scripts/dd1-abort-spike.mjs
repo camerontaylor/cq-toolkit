@@ -35,8 +35,11 @@
 // NOTHING sensitive — verdict JSON carries env var NAMES only. The stale
 // host ANTHROPIC_API_KEY is explicitly neutralized (empty string) at start;
 // the Z.AI key is expected in Z_AI_API_KEY (mapped onto the routes'
-// ZAI_API_KEY name in-process). Both live runs are capped: Budget.maxUsd 2,
-// toolPolicy 'none', and the rung-1 wall clock bounds the exposure.
+// ZAI_API_KEY name in-process). Spend bounds, stated precisely: the
+// rung-1 wall clock (WALL_CLOCK_MS) is the RUNTIME bound; `Budget.maxUsd 2`
+// rides the invocation as caller-side derived accounting (the drivers
+// derive cost after usage — it is the declared ceiling a caller compares
+// against, not a kill switch).
 //
 // Usage:
 //   node scripts/dd1-abort-spike.mjs --lane ai-sdk
@@ -215,7 +218,27 @@ async function measure(laneName) {
     pollEvidence.transcriptCountAfterPoll > pollEvidence.transcriptCountAtSettle;
   const lingered = Array.isArray(pollEvidence.lingeringWorkerPids) && pollEvidence.lingeringWorkerPids.length > 0;
   const settledPromptly = settledAtMs <= WALL_CLOCK_MS + 3_000; // signal → settle well inside rung-2 territory
-  const spendStopped = verdict.stopReason === 'aborted' && settledPromptly && !grew && !lingered;
+  // EVIDENCE AVAILABILITY gates the verdict: a missing poll channel (failed
+  // store load / transcript read / SDK import) must never be scored as
+  // "spend stopped" — that would be `true` by absence of observation. The
+  // ai-sdk lane's channel is structurally absent (an in-process fetch
+  // cannot accrue after the abort destroys it) — that is EVIDENCE BY
+  // STRUCTURE, not missing evidence, and the doc states it; every other
+  // gap is inconclusive.
+  let spendStopped;
+  let inconclusiveReason;
+  if (lane === 'claude-agent' && pollEvidence.pollError !== undefined) {
+    spendStopped = 'inconclusive';
+    inconclusiveReason = `post-abort evidence channel failed: ${pollEvidence.pollError}`;
+  } else if (
+    lane === 'claude-agent' &&
+    (pollEvidence.transcriptCountAtSettle === undefined || pollEvidence.transcriptCountAfterPoll === undefined)
+  ) {
+    spendStopped = 'inconclusive';
+    inconclusiveReason = 'the agent transcript message counts were unavailable at settle and/or after the poll';
+  } else {
+    spendStopped = verdict.stopReason === 'aborted' && settledPromptly && !grew && !lingered;
+  }
 
   return {
     lane,
@@ -229,6 +252,7 @@ async function measure(laneName) {
     costUSDAtAbort: verdict.costUSD ?? null,
     usageAfterPoll,
     spendStopped,
+    ...(inconclusiveReason !== undefined ? { inconclusiveReason } : {}),
     grewAfterAbort: pollEvidence.transcriptCountAtSettle !== undefined ? grew === true : undefined,
     lingeringWorkerPids: pollEvidence.lingeringWorkerPids ?? [],
     pollError: pollEvidence.pollError,

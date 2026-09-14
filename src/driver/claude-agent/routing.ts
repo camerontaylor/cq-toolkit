@@ -151,7 +151,12 @@ export function resolveEndpoint(
 ): ResolvedEndpoint {
   const parsed: EndpointTable = EndpointTableSchema.parse(table);
   const endpointName = modelSpec.provider;
-  const entry = parsed.endpoints[endpointName];
+  // Own-property guard: the parsed record inherits Object.prototype, so a
+  // provider handle like 'constructor' or 'toString' would otherwise
+  // resolve to an inherited value and DODGE the unknown-provider throw.
+  const entry = Object.prototype.hasOwnProperty.call(parsed.endpoints, endpointName)
+    ? parsed.endpoints[endpointName]
+    : undefined;
   if (entry === undefined) {
     throw new Error(
       `claude-agent driver: unknown provider '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,

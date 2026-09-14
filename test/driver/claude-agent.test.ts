@@ -47,7 +47,7 @@ import {
   usageFromAgent,
 } from '../../src/driver/claude-agent/index.js';
 import type { ClaudeAgentDriverOptions, StopReasonInputs } from '../../src/driver/claude-agent/index.js';
-import { EndpointTableSchema, defaultEndpointTable } from '../../src/driver/claude-agent/routing.js';
+import { EndpointTableSchema, defaultEndpointTable, resolveEndpoint } from '../../src/driver/claude-agent/routing.js';
 import type { EndpointTable } from '../../src/driver/claude-agent/routing.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
@@ -645,8 +645,93 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
-  test('unknown sessionRef throws pre-dispatch — never a fake resume', async () => {
+  test('abort-verdict alignment: a CLEANLY-settling query still verdicts aborted once the governed signal has fired', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      // A misbehaving agent that IGNORES the wired cancellation root: the
+      // for-await loop settles cleanly (no abort-shaped throw), but the
+      // governed signal FIRED mid-run — the mapping table says a fired
+      // governed signal → 'aborted', so 'complete' would be a false verdict.
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              await new Promise((resolve) => setTimeout(resolve, 80)); // outlives the 20ms rung-1 wall clock
+              yield { type: 'system', subtype: 'init', session_id: 'agent-cli-clean', model: options['model'] };
+              yield {
+                type: 'assistant',
+                session_id: 'agent-cli-clean',
+                message: { model: options['model'], content: [{ type: 'text', text: 'settled cleanly' }], usage: AGENT_USAGE },
+              };
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: false,
+                session_id: 'agent-cli-clean',
+                result: 'settled cleanly',
+                usage: AGENT_USAGE,
+                modelUsage: {},
+                permission_denials: [],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation()),
+        { wallClockMs: 20 },
+        { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return; // narrow for TS
+      expect(outcome.value.stopReason).toBe('aborted');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('cost prices the SERVED model when one was observed (remap rates, not requested rates)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls: [],
+            servedModel: 'gateway-default-served-instead',
+          }),
+        endpointTable: conformanceEndpointTable(),
+        // The price map knows ONLY the served id — pricing the REQUESTED id
+        // would return undefined and the verdict would carry no cost.
+        pricing: (modelSpec) =>
+          modelSpec.model === 'gateway-default-served-instead' ? { input: 3, output: 15 } : undefined,
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(
+        invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: 'what-we-asked-for' } }),
+      );
+      expect(result.model).toBe('gateway-default-served-instead'); // the remap was surfaced
+      expect(result.costUSD).toBeCloseTo(0.00054, 12); // usage {120, 12} at the SERVED id's rates
+      expect(result.costBasis).toBe('modeled');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('endpoint lookup rejects prototype keys — constructor/toString are not providers', () => {
+    expect(() => resolveEndpoint({ provider: 'constructor', model: 'm' }, defaultEndpointTable())).toThrow(
+      /unknown provider 'constructor'/,
+    );
+    expect(() => resolveEndpoint({ provider: 'toString', model: 'm' }, defaultEndpointTable())).toThrow(
+      /unknown provider 'toString'/,
+    );
+  });
+
+  test('unknown sessionRef throws pre-dispatch — never a fake resume', async () => {    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const { driver, calls } = driverWithCalls(scratchDir);
       await expect(driver.run(invocation({ sessionRef: 'ses-does-not-exist' }))).rejects.toThrow(

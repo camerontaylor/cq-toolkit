@@ -172,13 +172,16 @@
 // (default: computeCostUSD over the vendored models.dev table) — present
 // only on a verdict carrying a REAL usage measurement (a result event, or
 // the assistant-usage fallback), and only when the price map knows the
-// model. An UNMEASURED error/abort verdict reports NO costUSD: 0 would be
-// a fabricated fact. A present costUSD is labeled `costBasis: 'modeled'` —
-// the api-equivalent list-price figure for the tokens consumed, never a
-// claim of billed spend (DD-9; docs/dd-9-api-equivalent-budget.md). The
-// driver never fabricates or reports trusted USD — the SDK's own
-// total_cost_usd is deliberately NOT surfaced: a vendor-side cost estimate
-// would bypass the derived-only rule.
+// model. The model PRICED is the one actually SERVED when the agent
+// reported a served id (the remap evidence is real — pricing the requested
+// id would attribute the wrong rates); ModelSpec.model is the fallback when
+// nothing was observed. An UNMEASURED error/abort verdict reports NO
+// costUSD: 0 would be a fabricated fact. A present costUSD is labeled
+// `costBasis: 'modeled'` — the api-equivalent list-price figure for the
+// tokens consumed, never a claim of billed spend (DD-9;
+// docs/dd-9-api-equivalent-budget.md). The driver never fabricates or
+// reports trusted USD — the SDK's own total_cost_usd is deliberately NOT
+// surfaced: a vendor-side cost estimate would bypass the derived-only rule.
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -440,6 +443,13 @@ export class ClaudeAgentDriver implements Driver {
     } finally {
       abortRoot?.dispose();
     }
+    // Mapping-table alignment (governed signal fired → 'aborted'): the
+    // exception path above is not the ONLY way an abort manifests — the SDK
+    // can settle the for-await loop CLEANLY on abort, and the signal can
+    // fire after normal exit but before the verdict. Read the LIVE state of
+    // the wired root (it is true exactly when the governed signal fired —
+    // reading `signal` here would be a flow-narrowed always-false compare).
+    aborted = aborted || abortRoot?.controller.signal.aborted === true;
 
     // --- SDK-side permission denials → frozen shape (post-settle, deduped
     // per tool_use id). These are tools the agent's permission gate refused
@@ -531,10 +541,19 @@ export class ClaudeAgentDriver implements Driver {
     });
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/dispatch-failure verdict.
+    // Price the model that was actually SERVED when one was observed (the
+    // remap evidence is real — an anthropic-compat gateway can serve a
+    // different id than ModelSpec.model asked for, and pricing the
+    // requested id would attribute the wrong rates); the requested
+    // ModelSpec.model is the fallback when nothing was observed.
+    const pricedModel: ModelSpec =
+      observation.servedModel !== undefined
+        ? { ...modelSpec, model: observation.servedModel }
+        : modelSpec;
     const cost =
       measured === undefined && observation.assistantUsage === undefined
         ? {}
-        : costField(this.costUSDOf.bind(this), modelSpec, usage);
+        : costField(this.costUSDOf.bind(this), pricedModel, usage);
     return {
       // The observed served model: what the agent reported it served, not
       // what ModelSpec.model requested (the remap-detection fact, header).
