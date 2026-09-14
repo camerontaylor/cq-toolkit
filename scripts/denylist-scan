@@ -811,18 +811,22 @@ const JOBS_KEY_LINE = /^jobs:/;
 // text: the block starts at the `jobs:` key line and ends at the next
 // column-0 content line; the base indent is the first indented line's, and
 // a job id is a base-indent line whose key spelling (before the colon) is
-// exactly the wanted name. Deeper lines are job bodies, not job ids.
-// Returns null when the job id is absent; otherwise an object
-// { nameOverride } where nameOverride is the job-level `name:` value
-// (one leading+trailing ' or " pair stripped) or null when the job declares
-// none — a job-level `name:` renames the emitted check run (GitHub reports
-// it under the name, not the id), which is why the override is surfaced.
-// The override scan walks the job's body lines (indent > base, blanks
-// skipped) until the body ends, matching at the job body's first indent
-// level only — nested mappings (environment.name, with.name) are not
-// overrides. The FIRST body line at that indent whose trimmed form matches
-// /^name:\s*(.+?)\s*$/ wins, and step entries (`- name: ...`) never match
-// because the trimmed line starts with `-`.
+// exactly the wanted name (quote-aware: `'static':` matches `static`).
+// Deeper lines are job bodies, not job ids. Returns null when the job id is
+// absent; otherwise an object { nameOverride } where nameOverride is the
+// job-level `name:` value (one leading+trailing ' or " pair stripped) or
+// null when the job declares none — a job-level `name:` renames the emitted
+// check run (GitHub reports it under the name, not the id), which is why
+// the override is surfaced. The override scan walks the job's body lines
+// (indent > base, blanks skipped) until the body ends, matching at the job
+// body's first indent level only — nested mappings (environment.name,
+// with.name) are not overrides. The FIRST body line at that indent whose
+// trimmed form matches the QUOTE-AWARE /^["']?name["']?\s*:\s*(.+?)\s*$/ wins
+// (`'name': Static` is YAML-valid), and step entries (`- name: ...`) never
+// match because the trimmed line starts with `-`. A FLOW-style job
+// declaration (`static: {name: Static, ...}`) is not parsed by this text
+// leg: it surfaces as { flowDecl: true }, which the caller turns into a
+// loud failure rather than a silent pass.
 function workflowDeclaresJob(text, jobName) {
   const stripped = text.split(/\r?\n/).map(stripInlineComment);
   const start = stripped.findIndex((l) => JOBS_KEY_LINE.test(l));
@@ -835,8 +839,13 @@ function workflowDeclaresJob(text, jobName) {
     const ind = line.match(/^ */)[0].length;
     if (base === null) base = ind;
     if (ind !== base) continue; // deeper: job body, not a job id
-    const kv = /^([A-Za-z_][A-Za-z0-9_-]*):/.exec(line.trim());
+    const kv = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?:/.exec(line.trim());
     if (kv && kv[1] === jobName) {
+      // A flow-style job mapping (`static: {name: ...}`) is not parseable
+      // by this text leg — surface it so the caller fails the entry loudly.
+      if (line.trim().slice(kv[0].length).trimStart().startsWith('{')) {
+        return { flowDecl: true };
+      }
       let bodyBase = null; // the job body's key indent (first non-blank body line)
       for (let j = i + 1; j < stripped.length; j++) {
         const body = stripped[j];
@@ -845,7 +854,7 @@ function workflowDeclaresJob(text, jobName) {
         if (bodyInd <= base) break; // end of this job's body
         if (bodyBase === null) bodyBase = bodyInd;
         if (bodyInd !== bodyBase) continue; // nested mapping (or malformed shallower line) — not a job-level key
-        const name = /^name:\s*(.+?)\s*$/.exec(body.trim());
+        const name = /^["']?name["']?\s*:\s*(.+?)\s*$/.exec(body.trim());
         if (name) {
           let value = name[1];
           if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
@@ -898,6 +907,10 @@ function workflowI4Checks(rel, name, text) {
     return false;
   }
   const declared = workflowDeclaresJob(text, pair.check);
+  if (declared !== null && declared.flowDecl) {
+    console.error(`FAIL workflow-I4: required workflow ${rel} declares job "${pair.check}" as a FLOW-style mapping — not parseable by this text leg; use block style so the emitted check name stays verifiable`);
+    return false;
+  }
   if (declared === null) {
     console.error(`FAIL workflow-I4: required workflow ${rel} does not declare a job "${pair.check}" at the first indent level under \`jobs:\` — the "${pair.check}" required check name would dangle (restore the job id, or rename the check everywhere at once: the pairing, branch protection, and the gate's wait list)`);
     return false;
