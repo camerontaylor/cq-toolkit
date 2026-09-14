@@ -65,10 +65,16 @@ const ACP_BIN = process.env.PROBE_ACP_BIN ?? 'zcode-acp-server';
 // dependency-free (node builtins only, the script's import posture), so the
 // constant is duplicated WITH this pointer; keep the two in sync.
 const AUTH_REQUIRED_ERROR_CODE = -32000;
-// `zcode` is not on this host's PATH; the README documents the app-bundle CLI
-// as the ZCODE_BIN value. Precedence: caller's env wins, then the documented
-// app-bundle path.
-const ZCODE_BIN = process.env.ZCODE_BIN ?? '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+// `zcode` may not be on this host's PATH; the ZCODE_BIN env var names the
+// app-bundle CLI the README documents. Caller's env wins; the app-bundle
+// fallback is DARWIN-ONLY (issue #50, the demo script's darwin-scoped
+// posture — scripts/demo-eval-axes.mjs): the path is a macOS app container,
+// and injecting it on Linux/Windows would shadow the harness's own PATH
+// discovery of `zcode`, failing every documented probe scenario to launch.
+if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
+  process.env.ZCODE_BIN = '/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs';
+}
+const ZCODE_BIN = process.env.ZCODE_BIN;
 
 const INIT_TIMEOUT_MS = 20_000;
 const SESSION_NEW_TIMEOUT_MS = 30_000;
@@ -121,7 +127,11 @@ class AcpProbe {
   }
 
   start(cwd) {
-    const env = { ...process.env, ZCODE_BIN };
+    // ZCODE_BIN rides only when it is actually set (issue #50): an
+    // undefined value must never reach the child env as the string
+    // "undefined" — on a non-darwin host with no explicit setting the
+    // harness resolves `zcode` from PATH untouched.
+    const env = { ...process.env, ...(ZCODE_BIN !== undefined ? { ZCODE_BIN } : {}) };
     this.child = spawn(ACP_BIN, { cwd, env, stdio: ['pipe', 'pipe', 'pipe'] });
     // A spawn FAILURE emits 'error' (then 'close') and may never emit
     // 'exit' — settle on whichever arrives FIRST, once, carrying the
@@ -133,6 +143,24 @@ class AcpProbe {
         if (settled) return;
         settled = true;
         this.exitInfo = info;
+        // THE CHILD IS GONE — no in-flight RPC can ever be answered
+        // (issue #38): reject every pending request NOW with the exit
+        // evidence instead of letting each ride to its 20–120s timeout and
+        // report a bogus timeout for what was really a process exit. Each
+        // rejection lands in the scenario's own catch (failure EVIDENCE,
+        // never an unhandled rejection).
+        const evidence = [
+          info.spawnError !== undefined ? `spawnError=${info.spawnError}` : null,
+          info.code !== undefined && info.code !== null ? `code=${info.code}` : null,
+          info.signal !== undefined && info.signal !== null ? `signal=${info.signal}` : null,
+        ].filter((part) => part !== null).join(' ');
+        for (const [id, pending] of this.pending) {
+          clearTimeout(pending.timer);
+          this.pending.delete(id);
+          pending.reject(
+            new Error(`${pending.method ?? 'rpc'} aborted: the ACP process closed (${evidence || 'no exit details'})`),
+          );
+        }
         res(info);
       };
       this.child.on('error', (e) => {
@@ -246,8 +274,16 @@ class AcpProbe {
         this.pending.delete(id);
         rejectP(new Error(`${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
-      this.pending.set(id, { resolve: resolveP, reject: rejectP, timer });
-      void this.send({ jsonrpc: '2.0', id, method, params }).catch(rejectP);
+      this.pending.set(id, { resolve: resolveP, reject: rejectP, timer, method });
+      void this.send({ jsonrpc: '2.0', id, method, params }).catch((e) => {
+        // A failed request write must not leave the pending entry and its
+        // timeout alive (issue #51): clear BOTH before rejecting, so the
+        // probe process cannot outlive the scenario cleanup hanging on a
+        // timeout for a request that was never even written.
+        clearTimeout(timer);
+        this.pending.delete(id);
+        rejectP(e);
+      });
     });
   }
 
@@ -395,6 +431,12 @@ async function scenarioInit() {
       paths: [...modelKeyPaths(probe.allInbound)],
     };
     verdict.framesSeen = probe.frames;
+  } catch (e) {
+    // A rejection (rpc error, or issue #38's child-exit rejection) is the
+    // scenario's failure EVIDENCE — recorded like the other scenarios do,
+    // never an unhandled rejection that would kill the process before the
+    // verdict + log paths are printed.
+    verdict.error = e instanceof RpcError ? e.errorObject : String(e.message ?? e);
   } finally {
     verdict.exit = await settle(probe);
   }

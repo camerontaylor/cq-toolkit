@@ -43,7 +43,7 @@
 //      extraction).
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
@@ -1132,7 +1132,10 @@ describe('acp driver specifics (fake ACP server)', () => {
 });
 
 describe('acp binary resolution (the §3 which-like fold)', () => {
-  const env = { PATH: '/cq-tools:/usr/bin' };
+  // Platform delimiter (issue #41): a fixed colon makes this ONE entry on
+  // Windows (';' would split '/cq-tools:/usr/bin' nowhere) — derive it, so
+  // the walk is two-dir on every platform.
+  const env = { PATH: ['/cq-tools', '/usr/bin'].join(delimiter) };
 
   test("the documented './bin/acp-server' form is path-carrying: resolved against the caller cwd, NEVER joined to PATH dirs", async () => {
     const seen: string[] = [];

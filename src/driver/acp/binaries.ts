@@ -223,8 +223,40 @@ async function resolveBinary(
   const pathValue = env['PATH'] ?? '';
   for (const dir of pathValue.split(delimiter)) {
     if (dir === '') continue;
-    const candidate = join(dir, binary);
-    if (await probe(candidate)) return candidate;
+    for (const candidate of pathCandidates(dir, binary, env)) {
+      if (await probe(candidate)) return candidate;
+    }
   }
   return undefined;
+}
+
+// Windows default PATHEXT (documented shell behavior) — used when the env
+// carries no PATHEXT of its own.
+const DEFAULT_PATHEXT = ['.COM', '.EXE', '.BAT', '.CMD'];
+
+/**
+ * The candidates ONE PATH dir offers for a bare command name (in probe
+ * order): the name verbatim first, then — win32 ONLY — the name with each
+ * PATHEXT extension appended (issue #40): npm-installed bare commands are
+ * exposed as `.cmd` shims on Windows, so an extensionless-only probe finds
+ * nothing and a present harness reads as absent. On every other platform
+ * the verbatim name is the whole candidate list. Keyed on the HOST platform
+ * (like `sep` in carriesPathSeparator): correct for the documented Windows
+ * case, not locally observable on the ubuntu/macOS suite.
+ */
+function pathCandidates(
+  dir: string,
+  binary: string,
+  env: Readonly<Record<string, string | undefined>>,
+): string[] {
+  if (process.platform !== 'win32') return [join(dir, binary)];
+  const exts = (env['PATHEXT'] ?? '')
+    .split(';')
+    .map((ext) => ext.trim())
+    .filter((ext) => ext !== '');
+  return [
+    join(dir, binary),
+    ...exts.map((ext) => join(dir, binary + ext)),
+    ...(exts.length === 0 ? DEFAULT_PATHEXT.map((ext) => join(dir, binary + ext)) : []),
+  ];
 }
