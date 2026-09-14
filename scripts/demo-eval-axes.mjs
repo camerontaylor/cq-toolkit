@@ -64,13 +64,11 @@ net.setDefaultAutoSelectFamily(false);
 
 // --- Environment hygiene (silent) -------------------------------------------
 process.env.ANTHROPIC_API_KEY = ''; // the stale, invalid host key — never used
-if ((process.env.ZAI_API_KEY ?? '') === '') {
+// The source-guarded mapping: assigning `undefined` (an absent Z_AI_API_KEY)
+// to process.env COERCES to the 9-char string "undefined", which would forge
+// a non-empty ZAI_API_KEY out of nothing and defeat the credential gate.
+if ((process.env.ZAI_API_KEY ?? '') === '' && (process.env.Z_AI_API_KEY ?? '') !== '') {
   process.env.ZAI_API_KEY = process.env.Z_AI_API_KEY; // route name mapping, never printed
-}
-const missing = ['ZAI_API_KEY', 'DEEPSEEK_API_KEY'].filter((k) => (process.env[k] ?? '') === '');
-if (missing.length > 0) {
-  console.error(`demo-eval-axes: missing key env var(s): ${missing.join(', ')} — refusing to run`);
-  process.exit(1);
 }
 
 // --- The fixture (identical across every cell) --------------------------------
@@ -285,6 +283,22 @@ function selectCells() {
 }
 
 const selected = selectCells();
+
+// Credential validation runs AFTER cell selection: --only may select
+// cells that never contact every provider, so only the providers the
+// selected cells actually touch are required.
+const NEEDED_KEY = { zai: 'ZAI_API_KEY', deepseek: 'DEEPSEEK_API_KEY' };
+const missing = [
+  ...new Set(
+    selected
+      .map((c) => NEEDED_KEY[c.provider])
+      .filter((k) => k !== undefined && (process.env[k] ?? '') === ''),
+  ),
+];
+if (missing.length > 0) {
+  console.error(`demo-eval-axes: missing key env var(s) for the selected cells: ${missing.join(', ')} — refusing to run`);
+  process.exit(1);
+}
 
 const results = [];
 for (const cell of selected) {

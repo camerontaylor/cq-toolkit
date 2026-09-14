@@ -5,13 +5,17 @@
 //
 // The sandbox is a minimal throwaway repo OUTSIDE this repo: a copy of
 // scripts/ratchet-typecheck.mjs, a tsconfig whose only input is a bad.ts
-// carrying exactly one type error, and a node_modules symlink back into the
-// real repo so the pinned tsc6 bin resolves. The script derives its own ROOT
-// from its location, so the sandbox isolates the baseline and the compiled
-// tree while sharing only the toolchain.
+// carrying exactly one type error, and a node_modules whose .bin/tsc6 is a
+// STUB — a fixed-output compiler stand-in emitting exactly one parsable
+// `error TS2322:` line and exiting 1. The script derives its own ROOT from
+// its location, so the sandbox isolates the baseline while the stub keeps
+// the run deterministic and free of real-compiler load (a parallel vitest
+// worker's time-sensitive tests must not eat a tsc cold start). The spawn →
+// parse → count → baseline-compare path exercised is the script's real one.
+// POSIX only: the script's win32 branch wants a .cmd shim; CI is linux.
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncReturns } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,7 +27,7 @@ let sandbox: string | undefined;
 
 // bad.ts carries EXACTLY one type error: strict mode + the assignment of a
 // string literal to a number -> one `error TS2322` line, so the ratchet
-// counts 1 on every sandbox run (deterministic across tsc cold starts).
+// counts 1 on every sandbox run (the stub below emits the matching line).
 function makeSandbox(): string {
   const sbx = mkdtempSync(join(tmpdir(), 'ratchet-sandbox-'));
   mkdirSync(join(sbx, 'scripts'), { recursive: true });
@@ -34,7 +38,16 @@ function makeSandbox(): string {
     `${JSON.stringify({ compilerOptions: { strict: true, skipLibCheck: true }, include: ['bad.ts'] })}\n`,
   );
   writeFileSync(join(sbx, 'bad.ts'), `const n: number = 'not a number';\n`);
-  symlinkSync(join(ROOT, 'node_modules'), join(sbx, 'node_modules'), 'dir');
+  // The stub toolchain: TSC_BIN is <sandbox>/node_modules/.bin/tsc6; it must
+  // behave like an errored-but-parsable tsc run (one `error TS\d+:` line,
+  // exit 1) or the script's I5 guard would fail before the baseline logic.
+  mkdirSync(join(sbx, 'node_modules', '.bin'), { recursive: true });
+  const stub = join(sbx, 'node_modules', '.bin', 'tsc6');
+  writeFileSync(
+    stub,
+    `#!/bin/sh\nprintf '%s\\n' "bad.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'. (stubbed toolchain)"\nexit 1\n`,
+  );
+  chmodSync(stub, 0o755);
   return sbx;
 }
 
@@ -58,7 +71,7 @@ describe('ratchet-typecheck --update: the baseline can only tighten', () => {
     }
   });
 
-  it('refuses to raise the baseline', { timeout: 120_000 }, () => {
+  it('refuses to raise the baseline', { timeout: 30_000 }, () => {
     const sbx = makeSandbox();
     sandbox = sbx;
     writeFileSync(join(sbx, 'baselines/typecheck.json'), '{"count": 0}\n');
@@ -68,7 +81,7 @@ describe('ratchet-typecheck --update: the baseline can only tighten', () => {
     expect(baselineOf(sbx), 'the baseline must survive a refused raise untouched').toEqual({ count: 0 });
   });
 
-  it('allows tightening', { timeout: 120_000 }, () => {
+  it('allows tightening', { timeout: 30_000 }, () => {
     const sbx = makeSandbox();
     sandbox = sbx;
     writeFileSync(join(sbx, 'baselines/typecheck.json'), '{"count": 2}\n');
@@ -77,7 +90,7 @@ describe('ratchet-typecheck --update: the baseline can only tighten', () => {
     expect(baselineOf(sbx)).toEqual({ count: 1 });
   });
 
-  it('creates a missing baseline', { timeout: 120_000 }, () => {
+  it('creates a missing baseline', { timeout: 30_000 }, () => {
     const sbx = makeSandbox();
     sandbox = sbx;
     const res = runUpdate(sbx);
