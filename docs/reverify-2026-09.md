@@ -86,16 +86,18 @@ any way — the tool comes from the digest-pinned GitHub release only.
   associated documentation files..." — the standard MIT grant; GitHub's license
   metadata agrees (`spdx_id` MIT).
 - Verdict: vendoring-allowed — for the data classes this toolkit actually
-  vendors: the per-model pricing entries (model id, display name, USD per
-  million input/output tokens) for the eval-matrix families (claude, gpt,
-  glm, deepseek), transcribed from the provider pages into the TypeScript
-  table `src/driver/pricing/data.ts`. Terms basis: the upstream repository's
-  root MIT LICENSE covers the repository's content, including its data files
-  (the upstream README describes the same data as per-provider/per-model TOML
-  with per-model `license` fields and links); the per-model `license` field
+  vendors: the per-model pricing entries for the eval-matrix families
+  (claude, gpt, glm, deepseek) — each entry carrying the model id and its
+  USD-per-million rates (input, output, and the optional cacheRead/cacheWrite
+  terms) — transcribed from the provider pages into the TypeScript table
+  `src/driver/pricing/data.ts`. Terms basis: the upstream repository's root
+  MIT LICENSE covers the repository's content, including its data files (the
+  upstream README describes the same data as per-provider/per-model TOML with
+  per-model `license` fields and links); the per-model `license` field
   describes each MODEL's own terms, not the terms of the pricing data itself,
-  so it does not restrict copying the data. The MIT grant requires the
-  copyright notice — preserved in `data.ts`'s header, as the grant requires.
+  so it does not restrict copying the data. The MIT grant conditions copying
+  on carrying the copyright notice; `data.ts`'s header carries it and points
+  back at this record.
 
 ## ADR revisit triggers (status as of 2026-09-13)
 

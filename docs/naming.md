@@ -33,17 +33,20 @@ plan §6 the name is to be reserved early rather than left to race the v1
 release.
 
 > **Reservation status: BLOCKED — publish-capable npm credentials missing
-> (2026-09-14).** The lane leader attempted the placeholder publish — a
+> (2026-09-14; superseded — the owner's scoped publish cleared the block, see
+> the decision at the foot of this record).** The lane leader attempted the
+> placeholder publish — a
 > tarball whose payload is LICENSE + README.md — plus the package.json that
 > npm itself always includes in every tarball — at `0.0.0`, per the plan §6
 > allowance (it does not violate the no-staging rule, which governs the v1
 > feature release).
 >
 > Historical note (2026-09-14): this procedure records the blocked attempt
-> verbatim, under the then-chosen unscoped name. Any retry uses the owner's
-> adopted scoped name — the same steps with
-> `"name":"@camerontaylor/cq-toolkit"` (see the owner decision at the foot of
-> this record).
+> verbatim, under the then-chosen unscoped name. The block was cleared the
+> same day — the owner published the placeholder as the scoped
+> `@camerontaylor/cq-toolkit@0.0.0` (the decision at the foot of this
+> record); the procedure is kept for its packaging recipe, with the scoped
+> name substituted.
 >
 > Exact procedure, reproducible as written:
 >
@@ -91,7 +94,7 @@ package name.
 - https://registry.npmjs.org/@camerontaylor%2fcq-toolkit — 404
 - https://registry.npmjs.org/cq — exists, version 0.0.1
 - https://api.github.com/search/repositories?q=cq-toolkit+in:name — 17 results
-- package.json of this repository — `"name": "cq-toolkit"`, `"version": "0.0.0"`
+- package.json of this repository — `"name": "@camerontaylor/cq-toolkit"`, `"version": "0.0.0"` (unscoped `cq-toolkit` was the T0.5-era name; see the owner decision above)
 
 
 ## Owner decision 2026-09-14 — scoped name adopted
