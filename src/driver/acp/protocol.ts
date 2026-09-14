@@ -432,12 +432,27 @@ export const InitializeResultSchema = z.looseObject({
 
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
 
+/**
+ * The session modes block, shared by session/new and set_config_option.
+ * `availableModes` entries are OBJECTS `{ id, name }` on the live wire —
+ * probe-verbatim 2026-09-15: `[{ id: 'plan', name: 'Plan' }, …]` (the spec's
+ * SessionMode). An earlier transcription pinned bare strings; the LIVE
+ * session/new parse threw on the first eval-cell run (the failed-with-
+ * evidence record, docs/eval-axes-demo.md) while the fake fixture — emitting
+ * strings — had matched the bug. `currentModeId` IS a bare string (probe:
+ * the `current_mode_update` value).
+ */
+const SessionModesSchema = z.looseObject({
+  currentModeId: z.string().optional(),
+  availableModes: z.array(z.looseObject({
+    id: z.string(),
+    name: z.string().optional(),
+  })).optional(),
+});
+
 export const SessionNewResultSchema = z.looseObject({
   sessionId: z.string(),
-  modes: z.looseObject({
-    currentModeId: z.string().optional(),
-    availableModes: z.array(z.string()).optional(),
-  }).optional(),
+  modes: SessionModesSchema.optional(),
   configOptions: z.array(ConfigOptionSchema).optional(),
 });
 
@@ -445,10 +460,7 @@ export type SessionNewResult = z.infer<typeof SessionNewResultSchema>;
 
 /** set_config_option's answer carries the same modes/configOptions shape (no sessionId member). */
 export const SetConfigOptionResultSchema = z.looseObject({
-  modes: z.looseObject({
-    currentModeId: z.string().optional(),
-    availableModes: z.array(z.string()).optional(),
-  }).optional(),
+  modes: SessionModesSchema.optional(),
   configOptions: z.array(ConfigOptionSchema).optional(),
 });
 

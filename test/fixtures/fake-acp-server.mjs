@@ -165,7 +165,19 @@ function emitChunk(text) {
 }
 
 function modesShape() {
-  return { currentModeId: sessionMode, availableModes: ['plan', 'build', 'edit', 'yolo', 'auto'] };
+  // Probe-verbatim (2026-09-15): availableModes entries are { id, name }
+  // OBJECTS on the live wire — the fixture previously emitted bare strings,
+  // matching the driver schema's transcription bug instead of the wire.
+  return {
+    currentModeId: sessionMode,
+    availableModes: [
+      { id: 'plan', name: 'Plan' },
+      { id: 'build', name: 'Build' },
+      { id: 'edit', name: 'Edit' },
+      { id: 'yolo', name: 'Yolo' },
+      { id: 'auto', name: 'Auto' },
+    ],
+  };
 }
 
 function configOptionsLazy() {
