@@ -18,15 +18,46 @@
 import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
-import { AiSdkDriver, stopReasonOf, usageFromSdk } from '../../src/driver/ai-sdk/index.js';
+import { AiSdkDriver, DEFAULT_MAX_STEPS, stopReasonOf, usageFromSdk } from '../../src/driver/ai-sdk/index.js';
 import type { AiSdkDriverOptions } from '../../src/driver/ai-sdk/index.js';
 import { type ConformanceSpec, CONFORMANCE_PROVIDER, type ModelDirective, BANNED_VOCABULARY, SESSIONS_DIR, runDriverConformance } from './conformance.js';
 import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
+import { SessionStore } from '../../src/harness/session.js';
 import type { OpInvocation } from '../../src/driver/types.js';
+
+// ---------------------------------------------------------------------------
+// generateText arg capture — a TRANSPARENT spy over the real 'ai' module:
+// tests assert what the driver actually PASSED (composed system prompt,
+// stopWhen conditions, conversation messages) without signature churn.
+// ---------------------------------------------------------------------------
+
+const captured = vi.hoisted(() => ({ generateTextArgs: [] as unknown[] }));
+
+vi.mock('ai', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ai')>();
+  return {
+    ...actual,
+    generateText: (args: Parameters<typeof actual.generateText>[0]) => {
+      captured.generateTextArgs.push(args);
+      return actual.generateText(args);
+    },
+  };
+});
+
+/** The args of the MOST RECENT generateText call (one per driver.run). */
+function lastGenerateTextArgs(): {
+  system?: string;
+  messages?: Array<{ role: string; content: string }>;
+  stopWhen?: unknown;
+} {
+  const last = captured.generateTextArgs[captured.generateTextArgs.length - 1];
+  if (last === undefined) throw new Error('no generateText call was captured');
+  return last as { system?: string; messages?: Array<{ role: string; content: string }>; stopWhen?: unknown };
+}
 
 // ---------------------------------------------------------------------------
 // Mock-model scripting (the conformance contract, wired onto ai/test mocks)
@@ -58,6 +89,19 @@ function toolCallResult(tool: string, input: unknown): LanguageModelV4GenerateRe
     usage: mockUsage(),
     warnings: [],
   };
+}
+
+/** A plain reply model carrying ARBITRARY per-step token usage (custom usage-shape tests). */
+function usageModel(usage: LanguageModelV4GenerateResult['usage'], modelId = 'mock-1'): MockLanguageModelV4 {
+  return new MockLanguageModelV4({
+    modelId,
+    doGenerate: {
+      content: [{ type: 'text', text: 'ok' }],
+      finishReason: { unified: 'stop', raw: undefined },
+      usage,
+      warnings: [],
+    },
+  });
 }
 
 /**
@@ -134,11 +178,15 @@ function makeDriver(spec: ConformanceSpec): AiSdkDriver {
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
+    // PRICING KEYING (issue #18): the lookup matches provider AND model —
+    // at the spec-declared rates when the suite declares them — so the
+    // suite's exact-figure assertion computes from the same numbers.
     ...(spec.pricedModel !== undefined
       ? {
           pricing: (modelSpec: { provider: string; model: string }) =>
-            modelSpec.provider === spec.pricedModel?.provider
-              ? { input: 3, output: 15 }
+            modelSpec.provider === spec.pricedModel?.provider &&
+            modelSpec.model === spec.pricedModel.model
+              ? (spec.pricedModel.rates ?? { input: 3, output: 15 })
               : undefined,
         }
       : {}),
@@ -261,7 +309,10 @@ describe('ai-sdk driver specifics (mock model)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
       const known = new AiSdkDriver({
-        providers: { anthropic: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        // The mock must serve the REQUESTED id: pricing keys on the OBSERVED
+        // served model id now (issue #24), so a mock serving its default id
+        // would be — correctly — unpriced for the requested model.
+        providers: { anthropic: () => modelFor({ kind: 'reply', text: 'ok' }, 'claude-sonnet-4-5') },
         sessionsDir: join(scratchDir, 'sessions'),
       });
       const knownResult = await known.run(
@@ -278,6 +329,212 @@ describe('ai-sdk driver specifics (mock model)', () => {
       });
       const unknownResult = await unknown.run(invocation());
       expect(unknownResult.costUSD).toBeUndefined(); // derived-only: never fabricated
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// RD-B review debt (#18/#24) — usage evidence on failure, budget folds,
+// config isolation, the always-on tool loop, resume dedupe, served-id pricing
+// ---------------------------------------------------------------------------
+
+describe('ai-sdk driver review fixes (#18/#24)', () => {
+  test('a mid-run failure keeps the COMPLETED steps usage — not zeros (#18-1)', async () => {
+    // Step 1 completes (tool call); step 2's model call throws. The
+    // always-on stopWhen follows the tool call up into step 2 — exactly the
+    // multi-step shape whose usage the old zeroUsage return discarded.
+    let calls = 0;
+    const stepThenFail = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        calls += 1;
+        if (calls === 1) return toolCallResult('read', { path: 'absent-step-one.txt' });
+        throw new Error('scripted step-two failure');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => stepThenFail },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation({ prompt: 'fails on step two' }));
+      expect(calls).toBe(2); // step 1 completed, step 2 threw
+      expect(result.stopReason).toBe('error');
+      // step 1's usage (folded through onStepFinish → usageFromSdk), NOT zeros
+      expect(result.usage).toEqual({ input: 100, output: 12, cacheRead: 15, cacheWrite: 5, reasoning: 2 });
+      // cost stays UNFABRICATED on the error path — no figure, no basis
+      expect(result.costUSD).toBeUndefined();
+      expect(result.costBasis).toBeUndefined();
+      // the step-1 tool call really ran (its denial is the evidence)
+      expect(result.denials.some((d) => d.tool === 'read')).toBe(true);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('the token cap folds reasoning ONCE, via output: cap 35 trips, cap 40 does not (#18-2)', async () => {
+    // mapped Usage {input:10, output:20, cacheRead:5, cacheWrite:0, reasoning:8}
+    // → fold 35 (10+20+5+0). The old fold added reasoning ON TOP (43).
+    const reasoningUsage: LanguageModelV4GenerateResult['usage'] = {
+      inputTokens: { total: 15, noCache: 10, cacheRead: 5, cacheWrite: 0 },
+      outputTokens: { total: 20, text: 12, reasoning: 8 },
+    };
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => usageModel(reasoningUsage) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      // AT the cap: the fold (35) >= 35 trips exactly.
+      expect((await driver.run(invocation({ budget: { maxTokens: 35 } }))).stopReason).toBe('budget');
+      // Headroom: 35 < 40 — the old 43-fold would have tripped here too.
+      expect((await driver.run(invocation({ budget: { maxTokens: 40 } }))).stopReason).toBe('complete');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('composed system prompt: empty preamble → prompt alone, never past the budget (#18-3)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const prompt = 'p'.repeat(50); // prompt.length === maxSystemPromptChars: no room at all
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          promptBudget: { ...defaultHarnessConfig.promptBudget, maxSystemPromptChars: 50 },
+        },
+      });
+      await driver.run(invocation({ prompt }));
+      const system = lastGenerateTextArgs().system;
+      expect(system).toBeDefined();
+      expect(system?.length).toBeLessThanOrEqual(50);
+      expect(system?.endsWith(prompt)).toBe(true);
+      expect(system).toBe(prompt); // no room → no preamble → NO separator either
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('defaultHarnessConfig is deeply frozen; the driver holds an isolated deep-frozen clone (#18-4)', async () => {
+    // The shared default is frozen all the way down: a nested write throws
+    // in strict mode instead of poisoning every later consumer.
+    expect(Object.isFrozen(defaultHarnessConfig)).toBe(true);
+    expect(Object.isFrozen(defaultHarnessConfig.promptBudget)).toBe(true);
+    expect(Object.isFrozen(defaultHarnessConfig.tools.run)).toBe(true);
+    const chars = defaultHarnessConfig.promptBudget.maxSystemPromptChars;
+    expect(() => {
+      (defaultHarnessConfig.promptBudget as { maxSystemPromptChars: number }).maxSystemPromptChars = 1;
+    }).toThrow(TypeError);
+    expect(defaultHarnessConfig.promptBudget.maxSystemPromptChars).toBe(chars);
+
+    // The driver CLONED its effective config at construction: mutating the
+    // CALLER's object afterwards cannot reach the run.
+    const callerConfig = {
+      ...defaultHarnessConfig,
+      promptBudget: { ...defaultHarnessConfig.promptBudget, maxSystemPromptChars: 60 },
+    };
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        harnessConfig: callerConfig,
+      });
+      callerConfig.promptBudget.maxSystemPromptChars = 5; // post-construction mutation
+      await driver.run(invocation({ prompt: 'p' }));
+      const system = lastGenerateTextArgs().system;
+      // Composed under the construction-time 60 (preamble truncated to
+      // 57 + '\n\n' + the 1-char prompt = 60), NOT under the mutated 5
+      // (which would compose the prompt alone) — the clone held.
+      expect(system?.length).toBe(60);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('stopWhen is ALWAYS passed: the tool loop is bounded even without maxTokens (#18-5)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      // No maxTokens: the SDK's own default is stepCountIs(1) — a single
+      // step, under which tool calls are never followed up. The driver must
+      // pass its own bound.
+      await driver.run(invocation());
+      let stopWhen = lastGenerateTextArgs().stopWhen;
+      expect(Array.isArray(stopWhen)).toBe(true);
+      expect(stopWhen as unknown[]).toHaveLength(1); // the step-count bound alone
+      // With maxTokens: the token condition AND the step-count bound (the
+      // SDK accepts an array — any condition met stops).
+      await driver.run(invocation({ budget: { maxTokens: 500 } }));
+      stopWhen = lastGenerateTextArgs().stopWhen;
+      expect(stopWhen as unknown[]).toHaveLength(2);
+      expect(DEFAULT_MAX_STEPS).toBe(8); // the documented tool-loop default
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a failed prompt already persisted is NOT re-appended on the resumed retry (#18-6)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const store = new SessionStore(join(scratchDir, 'sessions'));
+      // Run 1 fails mid-model-call: the record ends with the bare user
+      // prompt (no assistant turn followed the failure).
+      const failDriver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'fail' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const failed = await failDriver.run(invocation({ prompt: 'retry-me-once' }));
+      expect(failed.stopReason).toBe('error');
+      const before = await store.load(failed.sessionId as string);
+      expect(before?.messages.at(-1)).toMatchObject({ role: 'user', content: 'retry-me-once' });
+
+      // Run 2 resumes with the SAME prompt: the trailing turn is REUSED —
+      // one store append skipped, one prompt message skipped.
+      const retryDriver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'recovered' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      await retryDriver.run(invocation({ prompt: 'retry-me-once', sessionRef: failed.sessionId as string }));
+      const messages = lastGenerateTextArgs().messages ?? [];
+      expect(messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once')).toHaveLength(1);
+      const after = await store.load(failed.sessionId as string);
+      expect(after?.messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once')).toHaveLength(1);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('costUSD is priced off the SERVED model id; the provider handle stays modelSpec.provider (#24-7)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const pricingKeys: Array<{ provider: string; model: string }> = [];
+      const driver = new AiSdkDriver({
+        // The factory IGNORES the requested id and serves 'deepseek-flash' —
+        // the silent-remap shape (modelSpec.model is 'deepseek-chat').
+        providers: { mock: () => usageModel(mockUsage(), 'deepseek-flash') },
+        sessionsDir: join(scratchDir, 'sessions'),
+        pricing: (modelSpec) => {
+          pricingKeys.push({ provider: modelSpec.provider, model: modelSpec.model });
+          return { input: 1, output: 2 };
+        },
+      });
+      const result = await driver.run(invocation({ modelSpec: { provider: 'mock', model: 'deepseek-chat' } }));
+      expect(result.model).toBe('deepseek-flash'); // WorkerResult.model keeps the served id
+      // The price lookup got the SERVED id with the REQUESTED provider.
+      expect(pricingKeys).toEqual([{ provider: 'mock', model: 'deepseek-flash' }]);
+      // usage {input:100, output:12, cacheRead:15, cacheWrite:5} at 1/2 per
+      // million (no cache rates → zero terms) = 124/1e6.
+      expect(result.costUSD).toBeCloseTo(124 / 1_000_000, 12);
+      expect(result.costBasis).toBe('modeled');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

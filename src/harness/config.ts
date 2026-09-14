@@ -100,13 +100,30 @@ export type HarnessConfig = z.infer<typeof HarnessConfigSchema>;
 // ---------------------------------------------------------------------------
 
 /**
+ * Deep-freeze a plain-data value in place (recursively — objects and arrays)
+ * and return it. Shared default CONFIG must be immutable: a caller mutating
+ * a nested object of `defaultHarnessConfig` would otherwise silently change
+ * every later consumer's behavior — freezing makes that write THROW loudly
+ * (strict mode) instead of poisoning the shared default.
+ */
+export function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const key of Object.keys(value as Record<string, unknown>)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
  * The conservative baseline harness config (parsed through the schema so it
  * can never drift out of validity). read + edit over the whole workspace;
  * run enabled but DENY-ALL until command patterns are configured; modest
- * prompt caps. Treat as immutable — `buildTools` parses a copy, but callers
- * should not mutate the exported value.
+ * prompt caps. IMMUTABLE BY CONSTRUCTION — deep-frozen, so a nested write
+ * throws instead of mutating the shared baseline value.
  */
-export const defaultHarnessConfig: HarnessConfig = HarnessConfigSchema.parse({
+export const defaultHarnessConfig: HarnessConfig = deepFreeze(HarnessConfigSchema.parse({
   tools: {
     read: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 200_000 },
     edit: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 4_000 },
@@ -122,4 +139,4 @@ export const defaultHarnessConfig: HarnessConfig = HarnessConfigSchema.parse({
     maxTools: 3, // read/edit/run — inert at the default, enforced if tightened
     maxToolDescriptionChars: 1_024,
   },
-});
+}));

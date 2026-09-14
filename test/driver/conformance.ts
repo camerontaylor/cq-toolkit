@@ -98,8 +98,22 @@ export interface ConformanceSpec {
    * test can assert costUSD is a real number. (The canonical conformance
    * model is by contract NEVER priced — the absent-costUSD assertion needs
    * an unknown model to catch fabricating drivers.)
+   *
+   * `rates` — the per-million USD rates (input/output required; cache
+   * directions optional — an absent rate is a zero-priced term, DD-2) that
+   * makeDriver's price map MUST attach to this provider+model key. When
+   * declared, the derived-cost test recomputes Σ tokens/1e6 × rate over the
+   * SERVED model id (result.model ?? requested; leg m binds it to the
+   * requested id) with the requested provider and asserts costUSD equals it
+   * EXACTLY — pricing the wrong key (e.g. the requested id when the
+   * response reports a served remap) or mispricing a token class fails
+   * here, not just a NaN/absent figure.
    */
-  pricedModel?: { provider: string; model: string };
+  pricedModel?: {
+    provider: string;
+    model: string;
+    rates?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
+  };
   /** Suite-created temp dir: session store at `<scratchDir>/sessions`, workspaces under it. */
   scratchDir: string;
 }
@@ -391,9 +405,16 @@ export function runDriverConformance(
       });
     });
 
-    test('h. costUSD present and finite when the model is priced (derived from real usage)', async () => {
+    test('h. costUSD present, finite, and EXACTLY the derived figure when the model is priced', async () => {
       await withScratch(async (scratchDir) => {
-        const pricedModel = { provider: 'conformance-priced', model: 'priced-1' };
+        const pricedModel: NonNullable<ConformanceSpec['pricedModel']> = {
+          provider: 'conformance-priced',
+          model: 'priced-1',
+          // The rates makeDriver's price map MUST attach to this
+          // provider+model key (see ConformanceSpec.pricedModel): the
+          // assertion below recomputes the derived cost from them.
+          rates: { input: 3, output: 15 },
+        };
         const driver = makeDriver({
           directive: { kind: 'reply', text: 'ok' },
           pricedModel,
@@ -409,6 +430,23 @@ export function runDriverConformance(
         // A derived figure is modeled — the api-equivalent list-price proxy
         // for the tokens consumed — never claimed as billed (DD-9).
         expect(result.costBasis).toBe('modeled');
+        // The EXACT derived figure: Σ tokens/1e6 × rate computed over the
+        // SERVED model id (result.model ?? requested; leg m binds served ===
+        // requested here) with the REQUESTED provider — provider+model
+        // keying. A driver pricing the wrong key or a wrong token class
+        // fails here, not just on finiteness.
+        const rates = pricedModel.rates;
+        if (rates === undefined) {
+          throw new Error('conformance: the priced-cost test must declare pricedModel.rates');
+        }
+        const perMillion = (tokens: number, rate: number | undefined): number =>
+          rate === undefined ? 0 : (tokens / 1_000_000) * rate;
+        const expected =
+          perMillion(result.usage.input, rates.input) +
+          perMillion(result.usage.output, rates.output) +
+          perMillion(result.usage.cacheRead, rates.cacheRead) +
+          perMillion(result.usage.cacheWrite, rates.cacheWrite);
+        expect(result.costUSD).toBeCloseTo(expected, 12);
       });
     });
 
