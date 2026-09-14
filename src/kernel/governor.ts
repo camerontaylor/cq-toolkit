@@ -642,6 +642,30 @@ function assertValidUsd(field: string, usd: number): void {
   }
 }
 
+/**
+ * Token observations must be finite numbers >= 0, per field, validated
+ * BEFORE any rollup mutation: one NaN/Infinity/negative fold makes
+ * totalTokensOf NaN and `NaN > cap` is false — the token cap permanently
+ * and silently disabled, the exact twin of the USD fail-open (I9 — fail
+ * loud, never fail open; review round 2).
+ */
+function assertValidTokens(field: string, value: number): void {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`governor: ${field} must be a finite number >= 0, got ${value}`);
+  }
+}
+
+/** Every numeric Usage field validated before a fold (see assertValidTokens). */
+function assertValidUsage(prefix: string, usage: Usage): void {
+  assertValidTokens(`${prefix}.input`, usage.input);
+  assertValidTokens(`${prefix}.output`, usage.output);
+  assertValidTokens(`${prefix}.cacheRead`, usage.cacheRead);
+  assertValidTokens(`${prefix}.cacheWrite`, usage.cacheWrite);
+  if (usage.reasoning !== undefined) {
+    assertValidTokens(`${prefix}.reasoning`, usage.reasoning);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // BudgetGovernor — the stateful per-run enforcer
 // ---------------------------------------------------------------------------
@@ -794,8 +818,13 @@ export class BudgetGovernor {
    * Observe token usage for one governed invocation (rollup; never cost).
    * The token cap (DD-9) rides the same rollup with the same exceeds
    * semantics as the USD cap: the trip fires when the fold EXCEEDS maxTokens.
+   * Every numeric Usage field is validated BEFORE the rollup mutates — one
+   * NaN/Infinity/negative fold would make totalTokensOf NaN and `NaN > cap`
+   * is false, silently disabling the token cap forever (I9 — fail loud,
+   * never fail open; the USD cap's exact twin, review round 2).
    */
   observeUsage(jobKey: string, usage: Usage): void {
+    assertValidUsage('usage', usage);
     this.usageN = this.usageN === undefined ? { ...usage } : addUsage(this.usageN, usage);
     this.record({ kind: 'usage', jobKey, atMs: this.now() });
     const tokenCap = this.config.maxTokens;
@@ -951,6 +980,11 @@ export class BudgetGovernor {
       if (event.usage === undefined || !closed) {
         continue;
       }
+      // Same fail-loud rule as the live fold (review round 2): a seeded
+      // NaN/negative usage would disable the token cap for the whole
+      // resumed run — and seeding is construction time, the earliest loud
+      // failure there is.
+      assertValidUsage('seeded usage', event.usage);
       this.usageN = this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
       if (opts?.usdOf !== undefined) {
         const usd = opts.usdOf(event.usage);
@@ -1067,9 +1101,12 @@ function statusOfValue(value: unknown): GovernedOutcomeStatus {
  * statusOfValue — contract-violating returns exist): when the value carries
  * a WorkerResult shape, return it for the DD-9 budget fold; anything else
  * returns undefined and folds nothing. Requires `usage` to be an object
- * with numeric input/output/cacheRead/cacheWrite, `denials` an array, and
- * `stopReason` one of the four frozen DriverStopReason strings; `costUSD`
- * rides along only when it is a number.
+ * with FINITE non-negative numeric input/output/cacheRead/cacheWrite
+ * (`denials` an array, `stopReason` one of the four frozen
+ * DriverStopReason strings; `costUSD` rides along only when it is a
+ * number): a LYING WorkerResult folds NOTHING — the guard rejects it so
+ * the completion-time fold never trips assertValidUsage post-record (the
+ * verdict stays real evidence; the usage stays zero-evidence).
  */
 function workerResultOfValue(value: unknown): WorkerResult | undefined {
   if (typeof value !== 'object' || value === null) {
@@ -1082,13 +1119,20 @@ function workerResultOfValue(value: unknown): WorkerResult | undefined {
     stopReason?: unknown;
   };
   const usage = candidate.usage;
+  if (typeof usage !== 'object' || usage === null) {
+    return undefined;
+  }
+  const usageRec = usage as Record<string, unknown>;
+  for (const field of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
+    const v = usageRec[field];
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      return undefined; // lying measurement — zero evidence, never a throw
+    }
+  }
+  const reasoning = usageRec['reasoning'];
   if (
-    typeof usage !== 'object' ||
-    usage === null ||
-    typeof (usage as { input?: unknown }).input !== 'number' ||
-    typeof (usage as { output?: unknown }).output !== 'number' ||
-    typeof (usage as { cacheRead?: unknown }).cacheRead !== 'number' ||
-    typeof (usage as { cacheWrite?: unknown }).cacheWrite !== 'number'
+    reasoning !== undefined &&
+    (typeof reasoning !== 'number' || !Number.isFinite(reasoning) || reasoning < 0)
   ) {
     return undefined;
   }

@@ -832,6 +832,91 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 2b-bis. RD-B review round 2 — the token-side fail-open closed: a lying
+// usage measurement fails loud (live + seed paths) or folds nothing
+// (WorkerResult guard), and never poisons the rollup.
+// ---------------------------------------------------------------------------
+
+describe('token-side NaN fail-open closed (review round 2)', () => {
+  const GOOD = { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 };
+
+  test('(a) reportUsage with a NaN/negative field throws BEFORE the rollup; the cap stays enforceable', () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    governor.observeUsage('j1', GOOD);
+    expect(() =>
+      governor.observeUsage('j2', { input: 10, output: Number.NaN, cacheRead: 0, cacheWrite: 0 }),
+    ).toThrowError(/usage\.output must be a finite number >= 0, got NaN/);
+    expect(() =>
+      governor.observeUsage('j2', { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: Infinity }),
+    ).toThrowError(/usage\.reasoning must be a finite number >= 0, got Infinity/);
+    expect(() =>
+      governor.observeUsage('j2', { input: -5, output: 1, cacheRead: 0, cacheWrite: 0 }),
+    ).toThrowError(/usage\.input must be a finite number >= 0, got -5/);
+    // The poisoned folds never landed.
+    expect(governor.usage).toEqual(GOOD);
+    // The cap still binds: a real over-cap fold trips.
+    governor.observeUsage('j3', { input: 90, output: 20, cacheRead: 0, cacheWrite: 0 });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/token rollup 125 exceeded cap 100/);
+  });
+
+  test('(b) a returned WorkerResult carrying NaN usage folds NOTHING — no throw, no rollup change', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 100 }, {}),
+    );
+    // The defensive WorkerResult guard rejects the lying measurement BEFORE
+    // the completion-time fold: the verdict stays real, the usage stays
+    // zero-evidence, nothing throws post-record.
+    const lyingOp = async (): Promise<OpResult<unknown>> => ({
+      status: 'ok',
+      value: {
+        usage: { input: Number.NaN, output: 50, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason: 'complete',
+      },
+    });
+    const plan = independentPlan('plan-lying-worker', 1, 'lying');
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxTokens: 100 },
+      governRegistry(viewWith(entry('lying', lyingOp)), governor),
+    );
+    expect(report.jobs[0]?.result.status).toBe('ok');
+    expect(governor.usage).toBeUndefined(); // folded NOTHING
+    expect(governor.tripped).toBe(false);
+  });
+
+  test('(c) a seeded journal event with negative usage throws at seed time', () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    const events: JournalEvent[] = [
+      { type: 'run-started', runId: 'r1', at: 't', planId: 'plan-seed-lying' },
+      { type: 'job-started', runId: 'r1', at: 't', jobId: 'c1', op: 'fake', attempt: 1 },
+      {
+        type: 'job-finished',
+        runId: 'r1',
+        at: 't',
+        jobId: 'c1',
+        opId: 'fake',
+        inputsHash: 'h1',
+        result: { status: 'budget-exhausted' },
+        usage: { input: -5, output: 3, cacheRead: 0, cacheWrite: 0 },
+      },
+    ];
+    expect(() => governor.seedFromJournal(events)).toThrowError(
+      /seeded usage\.input must be a finite number >= 0, got -5/,
+    );
+  });
+
+  test('(d) valid folds are untouched: the cap trips exactly as before', () => {
+    const governor = new BudgetGovernor({ maxTokens: 100 });
+    governor.observeUsage('j1', { input: 60, output: 40, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+    governor.observeUsage('j2', { input: 60, output: 40, cacheRead: 0, cacheWrite: 0 });
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/token rollup 200 exceeded cap 100/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2c. RD-B review debt — the production observeResult wiring (#14-1/#14-2)
 // ---------------------------------------------------------------------------
 
