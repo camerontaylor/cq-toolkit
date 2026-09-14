@@ -746,6 +746,42 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
     expect(overTokens.tripReason).toMatch(/token rollup 105 exceeded cap 10/);
     expect(overTokens.tripReason).not.toMatch(/usd rollup/);
   });
+
+  test('the SEED path honors maxTokens: a journaled rollup already over the cap trips before the resumed run admits anything', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-gov-dd9-seed-'));
+    try {
+      const log = openRunLog(dir);
+      const plan: Plan = { id: 'plan-dd9-seed', jobs: [{ id: 'c1', op: 'usagey', input: { jobId: 'c1' } }] };
+      const manifest = makeManifest(plan);
+      // Prior run: c1 reached a terminal budget-exhausted record, usage
+      // journaled (the same shape as the seeded-USD test).
+      await log.append('plan-dd9-seed--prior--aa', { type: 'run-started', runId: 'plan-dd9-seed--prior--aa', at: 't', planId: 'plan-dd9-seed' });
+      await log.append('plan-dd9-seed--prior--aa', { type: 'job-started', runId: 'plan-dd9-seed--prior--aa', at: 't', jobId: 'c1', op: 'usagey', attempt: 1 });
+      await log.append('plan-dd9-seed--prior--aa', {
+        type: 'job-finished',
+        runId: 'plan-dd9-seed--prior--aa',
+        at: 't',
+        jobId: 'c1',
+        opId: 'usagey',
+        inputsHash: manifest.jobs[0]?.inputsHash ?? '',
+        result: { status: 'budget-exhausted' },
+        usage: UNPRICED_USAGE,
+      });
+      const events = await log.read('plan-dd9-seed--prior--aa');
+
+      // The journaled usage alone overruns the token cap: the SEED trips —
+      // before the resumed run admits or dispatches anything, even if no
+      // further usage-reporting op ever folds.
+      const governor = new BudgetGovernor({ maxTokens: 100 });
+      governor.seedFromJournal(events);
+      expect(governor.usage).toEqual(UNPRICED_USAGE);
+      expect(governor.tripped).toBe(true);
+      expect(governor.tripReason).toMatch(/seeded token rollup 120 exceeded cap 100/);
+      expect(governor.admit('c1')).toEqual({ decision: 'reject', reason: 'budget' });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -54,6 +54,12 @@ debt like any other: it ships reviewed or it does not ship.
 - Tripping gates admission exactly as before: refused dispatches return
   `{ status: 'budget-exhausted' }`, and `withBudgetStop` marks the
   never-run rows honestly (I9).
+- The seeded resume path honors BOTH caps: `seedFromJournal` checks the
+  journaled token rollup against `maxTokens` at seed time, right beside the
+  seeded-USD check — a prior run's usage that already overruns either cap
+  trips BEFORE the resumed run admits anything (without it, a resumed
+  run whose seeded token rollup was over the cap would admit and dispatch,
+  and never trip at all if no further usage-reporting op folded).
 
 ## 3. The modelling assumption, stated honestly
 
@@ -106,7 +112,7 @@ budget event (the usage still rolls; `maxTokens` binds it).
 ## 6. Evidence
 
 - `test/kernel/governor.test.ts`, describe `DD-9 (T1.6b): parallel token
-  rollup + api-equivalent USD` — five cases:
+  rollup + api-equivalent USD` — six cases:
   1. `maxTokens` trips independently of `maxUsd` (reason names the token
      rollup; admission refuses with reason `budget`; the governed dispatch
      returns `budget-exhausted`; a control governor under the cap never
@@ -121,6 +127,11 @@ budget event (the usage still rolls; `maxTokens` binds it).
   4. Unpriced usage under a USD cap trips loud; the same fold without a
      USD cap does not; a zero-usage result folds nothing.
   5. Independence cuts both ways — each trip reason names ITS cap.
+  6. The SEED path honors `maxTokens`: a journal whose usage rollup
+     already exceeds the cap trips at seed time with the seeded-token
+     reason, and a subsequent `admit` rejects with `budget` (the r1 review
+     fix — the resumed-run path cannot dispatch past an already-overrun
+     token cap).
 - Driver conformance legs g/h (`test/driver/conformance.ts`): g asserts
   `costUSD` AND `costBasis` ABSENT for the unpriced canonical model (no
   basis without a cost, never fabricated); h asserts a present, finite

@@ -243,7 +243,9 @@ usage-bearing driver result carries `costUSD` labeled
 (primary), and `RunOptions.maxTokens` binds independently as the
 unpriced-model backstop. Folding real usage that carries no `costUSD` under
 a configured `maxUsd` trips the budget loud — never fail open (the
-escapes: price the model, or cap with `maxTokens`). Full disposition:
+escapes: price the model, or cap with `maxTokens`), and the seed-time trip
+covers BOTH caps, so a resumed run whose journaled rollup already overruns
+either cap stops before admitting anything. Full disposition:
 `docs/dd-9-api-equivalent-budget.md`.
 
 Every timer in the governor flows through the injected `Clock`

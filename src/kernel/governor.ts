@@ -886,13 +886,20 @@ export class BudgetGovernor {
     // journaled dispatch count so runDispatchQuota carries across resume
     // instead of restarting at 0.
     this.dispatchedCount += totalAttempts;
-    // A seed that already overruns the cap trips the governor BEFORE the
+    // A seed that already overruns a cap trips the governor BEFORE the
     // resumed run admits anything: budget-exhausted rows from the prior run
     // re-mark without op invocation (the "not auto-retried by resume" rule,
-    // README "Budget governor").
+    // README "Budget governor"). BOTH caps check here — a seeded token
+    // rollup over maxTokens that only tripped on later usage would admit
+    // and dispatch before any new fold, and never trip at all if no
+    // further usage-reporting op ran (DD-9).
     const cap = this.config.maxUsd;
     if (cap !== undefined && this.usdSpentN > cap) {
       this.trip(`seeded usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
+    }
+    const tokenCap = this.config.maxTokens;
+    if (tokenCap !== undefined && this.usageN !== undefined && totalTokensOf(this.usageN) > tokenCap) {
+      this.trip(`seeded token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
     }
     this.record({ kind: 'seeded', jobs: jobIds.size, attempts: totalAttempts, atMs: this.now() });
   }
