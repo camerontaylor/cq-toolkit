@@ -130,9 +130,13 @@ interface SpawnCall {
 function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {}): SpawnFn {
   return (opts) => {
     calls.push({ args: [...opts.args], env: { ...opts.env } });
+    // The fixture's permission simulation reads FAKE_AGENT_ALLOWED, so the
+    // driver's --allowedTools value is forwarded verbatim — the fixture now
+    // simulates --permission-prompts none faithfully.
+    const allowed = allowedToolsArg(opts.args);
     return spawnManaged({
       ...opts,
-      env: { ...opts.env, ...extraEnv },
+      env: { ...opts.env, ...extraEnv, FAKE_AGENT_ALLOWED: allowed },
     });
   };
 }
@@ -246,7 +250,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'stubborn run' })),
-        { wallClockMs: 100 }, // > node startup: the fixture's ignore handler is installed first
+        // > node startup: the fixture's ignore handler is installed before
+        // the SIGTERM arrives (a 100ms budget raced node boot and killed the
+        // child by default disposition)
+        { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-ladder', attempt: 1 },
       );
       expect(outcome.outcome).toBe('completed');
@@ -265,7 +272,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The child really was SIGKILLed: exactly one spawn, never completed.
       expect(calls).toHaveLength(1);
     });
-  });
+  }, 20_000);
 
   test('graceful abort: a default-disposition child dies on SIGTERM — one rung, no SIGKILL', async () => {
     await withScratch(async (scratchDir, store) => {
@@ -279,7 +286,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'slow run' })),
-        { wallClockMs: 50 },
+        // > node startup: the abort must land after the driver attached the
+        // ladder (an abort before the spawn path returns the early-aborted
+        // verdict with no narration)
+        { wallClockMs: 300 },
         { op: 'subprocess', jobKey: 'subprocess-graceful', attempt: 1 },
       );
       expect(outcome.outcome).toBe('completed');
@@ -293,7 +303,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const termination = narration.find((line) => line.includes('"termination"'));
       expect(termination !== undefined && termination.includes('"terminated"')).toBe(true);
     });
-  });
+  }, 20_000);
 
   test('junk lines are narration, never a crash: the result event still parses', async () => {
     await withScratch(async (scratchDir, store) => {

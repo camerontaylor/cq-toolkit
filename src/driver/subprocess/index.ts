@@ -304,11 +304,13 @@ export class SubprocessDriver implements Driver {
 
     const observation = newObservation();
     let aborted = false;
+    let terminationStarted = false;
     let finishTermination: (() => void) | undefined;
     const terminationDone = new Promise<void>((resolve) => {
       finishTermination = resolve;
     });
     const onAbort = (): void => {
+      terminationStarted = true;
       void terminateGracefully(
         child,
         {
@@ -344,6 +346,12 @@ export class SubprocessDriver implements Driver {
     // The termination path deliberately does NOT await a stubborn child.
     await Promise.race([child.close, terminationDone]);
     signal?.removeEventListener('abort', onAbort);
+
+    // The ladder's markers (rungs + outcome) are part of the narration
+    // contract; a child that dies on SIGTERM must not win the settle race
+    // against the ladder's final marker. Bounded: terminateGracefully
+    // always settles (its SIGKILL rung force-resolves).
+    if (terminationStarted) await terminationDone;
 
     // --- Session persistence (post-settle, OUR vocabulary). A store error
     // here is swallowed: once spawned, the verdict must reach the caller —
