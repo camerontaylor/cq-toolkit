@@ -34,7 +34,8 @@ release.
 
 > **Reservation status: BLOCKED — publish-capable npm credentials missing
 > (2026-09-14).** The lane leader attempted the placeholder publish — a
-> tarball containing only LICENSE + README.md at `0.0.0`, per the plan §6
+> tarball whose payload is LICENSE + README.md — plus the package.json that
+> npm itself always includes in every tarball — at `0.0.0`, per the plan §6
 > allowance (it does not violate the no-staging rule, which governs the v1
 > feature release). Exact procedure, reproducible as written:
 >
@@ -42,7 +43,9 @@ release.
 >    repo's own manifest would NOT produce the placeholder payload: its
 >    `files` allowlist is `["dist", "policy", "LICENSE", "README.md"]`, so the
 >    tarball would ship dist/ and policy/. The temp-dir manifest override in
->    the next step is what makes the payload LICENSE + README only.
+>    the next step is what keeps the payload to LICENSE + README + the
+>    npm-mandatory package.json (npm never builds a tarball without the
+>    manifest).
 > 2. In that dir, write a minimal package.json:
 >    `{"name":"cq-toolkit","version":"0.0.0","description":"…","license":"MIT","files":["LICENSE","README.md"],"private":false}`
 > 3. Copy LICENSE and README.md from the repo root into that dir.
