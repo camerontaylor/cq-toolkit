@@ -335,6 +335,36 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
       ['kill', 20, false, 'kill boom'],
     ]);
   });
+
+  test('a THROWING onRung observer cannot break the ladder (review R2)', async () => {
+    const clock = virtualClock();
+    const observed: string[] = [];
+    const task = async (ctx: JobGovernance): Promise<never> => {
+      ctx.signal.addEventListener('abort', () => {}); // ignored
+      return new Promise<never>(() => {});
+    };
+    const outcomePromise = runLadder(
+      task,
+      { wallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
+      { op: 'fake', jobKey: 'j1', attempt: 1 },
+      {
+        clock: clock,
+        onRung: (marker) => {
+          observed.push(marker.rung);
+          if (marker.rung === 'signal') throw new Error('observer boom');
+        },
+      },
+    );
+    await tick();
+    clock.advance(130); // all three rungs come due
+    const outcome = await outcomePromise;
+    // The observer's throw changed nothing: the ladder fired every rung in
+    // order, settled killed, and the marker stream stayed authoritative.
+    expect(outcome.outcome).toBe('killed');
+    expect(outcome.elapsedMs).toBe(130);
+    expect(observed).toEqual(['signal', 'timeout', 'kill']);
+    expect(outcome.markers).toHaveLength(3);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -846,6 +876,114 @@ describe('default job key — the cap exists without config (review F3)', () => 
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  test('op-name fallback seeds the SUM of a shared op.s dispatches, not the max (review R2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-gov-seed-sum-'));
+    try {
+      const log = openRunLog(dir);
+      // Two journal jobs sharing op 'solo', two attempts EACH = 4 dispatches.
+      await log.append('p-sum--r1--aa', { type: 'run-started', runId: 'p-sum--r1--aa', at: 't', planId: 'plan-sum' });
+      for (const jobId of ['x1', 'x2']) {
+        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 1 });
+        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 2 });
+        await log.append('p-sum--r1--aa', {
+          type: 'job-finished',
+          runId: 'p-sum--r1--aa',
+          at: 't',
+          jobId: jobId,
+          opId: 'solo',
+          inputsHash: `hash-${jobId}`,
+          result: { status: 'failed', error: 'flake' },
+        });
+      }
+      const events = await log.read('p-sum--r1--aa');
+
+      const governor = new BudgetGovernor({ maxAttemptsPerJob: 3 });
+      governor.seedFromJournal(events);
+      expect(governor.attemptsFor('solo')).toBe(4); // SUM (2+2), not max(2)
+
+      // cap 3 < 4 seeded dispatches: a fresh no-jobId run of the same op
+      // cannot dispatch AT ALL — the max would have admitted two.
+      const calls: string[] = [];
+      const solo = async (raw: unknown): Promise<OpResult<unknown>> => {
+        calls.push(String((raw as { n: number }).n));
+        return { status: 'ok', value: raw };
+      };
+      const schema = z.object({ n: z.number() });
+      const plan2: Plan = {
+        id: 'plan-sum-2',
+        jobs: [
+          { id: 'y1', op: 'solo', input: { n: 1 } },
+          { id: 'y2', op: 'solo', input: { n: 2 } },
+        ],
+      };
+      const report = await runPlan(
+        plan2,
+        { concurrency: 1, stopOnError: false },
+        governRegistry(viewWith(entry('solo', solo, schema)), governor),
+      );
+      expect(calls).toEqual([]);
+      expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
+      const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+      expect(refusals.map((event) => event.reason)).toEqual(['attempt-cap', 'attempt-cap']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('the op ordinal CONTINUES from the seeded sum when the cap allows (review R2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-gov-seed-sum2-'));
+    try {
+      const log = openRunLog(dir);
+      await log.append('p-sum2--r1--aa', { type: 'run-started', runId: 'p-sum2--r1--aa', at: 't', planId: 'plan-sum2' });
+      for (const jobId of ['x1', 'x2']) {
+        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 1 });
+        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 2 });
+        await log.append('p-sum2--r1--aa', {
+          type: 'job-finished',
+          runId: 'p-sum2--r1--aa',
+          at: 't',
+          jobId: jobId,
+          opId: 'solo',
+          inputsHash: `hash-${jobId}`,
+          result: { status: 'failed', error: 'flake' },
+        });
+      }
+      const events = await log.read('p-sum2--r1--aa');
+
+      const governor = new BudgetGovernor({ maxAttemptsPerJob: 5 });
+      governor.seedFromJournal(events);
+      // 4 seeded dispatches: the next admission IS attempt 5, the one after
+      // is refused (5 >= 5) — the ordinal continues from the sum.
+      const calls: string[] = [];
+      const solo = async (raw: unknown): Promise<OpResult<unknown>> => {
+        const n = (raw as { n: number }).n;
+        calls.push(String(n));
+        return { status: 'ok', value: n };
+      };
+      const schema = z.object({ n: z.number() });
+      const plan2: Plan = {
+        id: 'plan-sum2-2',
+        jobs: [
+          { id: 'y1', op: 'solo', input: { n: 1 } },
+          { id: 'y2', op: 'solo', input: { n: 2 } },
+        ],
+      };
+      const report = await runPlan(
+        plan2,
+        { concurrency: 1, stopOnError: false },
+        governRegistry(viewWith(entry('solo', solo, schema)), governor),
+      );
+      expect(calls).toEqual(['1']);
+      const admissions = governor.events.filter((event): event is AdmittedEvent => event.kind === 'admitted');
+      expect(admissions.map((event) => event.attempt)).toEqual([5]);
+      expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
+      const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+      expect(refusals.map((event) => event.reason)).toEqual(['attempt-cap']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('seedFromJournal usage dedupe across multi-run journals (review F4)', () => {
@@ -1046,6 +1184,46 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     expect(report.stoppedEarly).toBe(true);
     expect(report.earlyStopReason).toBe('budget');
     expect(report.counts['budget-exhausted']).toBe(1);
+  });
+
+  test('seeding replays the dispatch count: runDispatchQuota carries across resume (review R2)', async () => {
+    const log = openRunLog(dir);
+    const plan: Plan = { id: 'plan-resume-quota', jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }] };
+    const manifest = makeManifest(plan);
+    // Prior run: THREE journaled dispatches of j1 (attempts 1-3, all failed).
+    await log.append('plan-resume-quota--prior--aa', { type: 'run-started', runId: 'plan-resume-quota--prior--aa', at: 't', planId: 'plan-resume-quota' });
+    for (const attempt of [1, 2, 3]) {
+      await log.append('plan-resume-quota--prior--aa', { type: 'job-started', runId: 'plan-resume-quota--prior--aa', at: 't', jobId: 'j1', op: 'fake', attempt: attempt });
+      await log.append('plan-resume-quota--prior--aa', {
+        type: 'job-finished',
+        runId: 'plan-resume-quota--prior--aa',
+        at: 't',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: manifest.jobs[0]?.inputsHash ?? '',
+        result: { status: 'failed', error: 'flake' },
+      });
+    }
+    const events = await log.read('plan-resume-quota--prior--aa');
+
+    const calls: string[] = [];    const countingOk = async (raw: unknown): Promise<OpResult<unknown>> => {
+      calls.push((raw as { jobId: string }).jobId);
+      return okOp(raw);
+    };
+    const governor = new BudgetGovernor({ runDispatchQuota: 3 });
+    governor.seedFromJournal(events);
+    expect(governor.dispatchCount).toBe(3); // the quota is already spent
+
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      governRegistry(viewWith(entry('fake', countingOk)), governor),
+    );
+    expect(calls).toEqual([]); // zero further dispatches
+    expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
+    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+    expect(governor.dispatchCount).toBe(3); // refusals do not consume quota
   });
 });
 

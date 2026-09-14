@@ -103,7 +103,9 @@ export interface LadderSpec {
  * One observable rung. Tests assert the marker sequence: WHAT fired (rung),
  * in WHAT ORDER (markers append), with WHAT DELAYS (delayMs since the
  * previous rung / since start for rung 1), and whether the rung's
- * cancellation primitive was actually delivered.
+ * cancellation primitive was actually delivered. Observers are isolated: an
+ * onRung throw is swallowed (after the marker lands) and cannot affect the
+ * ladder.
  */
 export interface LadderRungMarker {
   op: string;
@@ -240,6 +242,11 @@ export function runLadder<T>(
   info: LadderContextInfo,
   opts?: {
     clock?: Clock;
+    /**
+     * Rung observer — invoked AFTER the marker lands. A THROW here is
+     * swallowed: observer failure must never break the ladder (same contract
+     * as the cancel port).
+     */
     onRung?: (marker: LadderRungMarker) => void;
     onUsage?: (usage: Usage) => void;
     onCost?: (usd: number) => void;
@@ -314,7 +321,14 @@ export function runLadder<T>(
         atMs,
       };
       markers.push(marker);
-      opts?.onRung?.(marker);
+      // Observer failure must never break the ladder (the same class as a
+      // throwing port): the marker is already on the record, so an onRung
+      // throw is swallowed and the ladder CONTINUES.
+      try {
+        opts?.onRung?.(marker);
+      } catch {
+        // deliberately swallowed — the markers array stays authoritative
+      }
     };
     const arm = (ms: number, fn: () => void): void => {
       timers.push(clock.setTimeout(fn, ms));
@@ -736,18 +750,23 @@ export class BudgetGovernor {
   /**
    * Seed caps state from a prior run's journal so a resumed run continues
    * the SAME budget: per-job attempt ordinals (folded from the frozen
-   * JobStartedJournalEvent.attempt field via rescue.attemptsFromJournal)
-   * and the token-usage rollup. USD seeding needs prices the kernel does not
-   * own — pass `usdOf` to derive cost from journaled usage (the T1.4
-   * price-map layer will own that mapping).
+   * JobStartedJournalEvent.attempt field via rescue.attemptsFromJournal),
+   * the token-usage rollup, and the DISPATCH COUNT (runDispatchQuota carries
+   * across resume). USD seeding needs prices the kernel does not own — pass
+   * `usdOf` to derive cost from journaled usage (the T1.4 price-map layer
+   * will own that mapping).
    *
-   * Keys are seeded TWICE so every jobKeyFor fallback resolves: per journal
-   * jobId (aligns with the `input.jobId` convention) AND per op name
-   * (aligns with the no-identity fallback, where a dispatch's key IS its op
-   * name — it must inherit the attempts of every journal job that ran that
-   * op). Usage is counted only for finishes that CLOSE an open start: an
-   * orphan finish in a multi-run journal is a replay re-attestation of an
-   * already-counted dispatch, and counting it again would double the rollup.
+   * Keys are seeded TWICE so every jobKeyFor fallback resolves, with
+   * different aggregation per key: per journal jobId (aligns with the
+   * `input.jobId` convention) as MAX-of-ordinals — a job's highest dispatch —
+   * and per op name (aligns with the no-identity fallback, where a
+   * dispatch's key IS its op name) as the SUM of the op's dispatches across
+   * all journal jobs — the fallback's ordinal IS the op's dispatch count, so
+   * a max would understate it (2 jobs × 2 attempts = 4 dispatches) and let a
+   * resumed run exceed the cap. Usage is counted only for finishes that
+   * CLOSE an open start: an orphan finish in a multi-run journal is a replay
+   * re-attestation of an already-counted dispatch, and counting it again
+   * would double the rollup.
    */
   seedFromJournal(events: readonly JournalEvent[], opts?: { usdOf?: (usage: Usage) => number }): void {
     const jobIds = new Set<string>();
@@ -761,17 +780,24 @@ export class BudgetGovernor {
       }
     }
     let totalAttempts = 0;
+    const dispatchesByOp = new Map<string, number>(); // SUM across journal jobs sharing the op
     for (const jobId of jobIds) {
       const attempts = attemptsFromJournal(events, jobId);
       totalAttempts += attempts.length;
       const op = opByJob.get(jobId);
+      if (op !== undefined) {
+        dispatchesByOp.set(op, (dispatchesByOp.get(op) ?? 0) + attempts.length);
+      }
       for (const attempt of attempts) {
+        // jobId keys keep max-of-ordinals: the job's highest dispatch.
         if (attempt.attempt > this.attemptsFor(jobId)) {
           this.attemptsByJob.set(jobId, attempt.attempt);
         }
-        if (op !== undefined && attempt.attempt > this.attemptsFor(op)) {
-          this.attemptsByJob.set(op, attempt.attempt);
-        }
+      }
+    }
+    for (const [op, dispatches] of dispatchesByOp) {
+      if (dispatches > this.attemptsFor(op)) {
+        this.attemptsByJob.set(op, dispatches);
       }
     }
     // Usage/USD dedupe: only a finish that closes an open start represents a
@@ -795,6 +821,10 @@ export class BudgetGovernor {
         this.usdSpentN += opts.usdOf(event.usage);
       }
     }
+    // The dispatch quota is part of the SAME budget: seeding replays the
+    // journaled dispatch count so runDispatchQuota carries across resume
+    // instead of restarting at 0.
+    this.dispatchedCount += totalAttempts;
     // A seed that already overruns the cap trips the governor BEFORE the
     // resumed run admits anything: budget-exhausted rows from the prior run
     // re-mark without op invocation (the "not auto-retried by resume" rule,

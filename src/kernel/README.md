@@ -192,9 +192,14 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   terminal event. Both re-enter correctly on `resume: true` (T1.2 replay
   re-runs every non-ok row). `BudgetGovernor.seedFromJournal(events, {usdOf?})`
   folds a prior journal into the governor — per-job attempt ordinals from
-  the frozen attempt field (via `rescue.attemptsFromJournal`) plus the usage
-  rollup (USD needs the optional `usdOf` price mapping) — so a resumed run
-  continues the SAME budget. Consequence: budget-exhausted rows are
+  the frozen attempt field (via `rescue.attemptsFromJournal`), the usage
+  rollup (USD needs the optional `usdOf` price mapping), and the dispatch
+  count (`runDispatchQuota` carries across resume instead of restarting at
+  0) — so a resumed run continues the SAME budget. Under the op-name
+  fallback the op key seeds the SUM of the op's journaled dispatches (the
+  fallback's ordinal IS the op's dispatch count; a max would understate it
+  and let a resumed run exceed the cap). Consequence: budget-exhausted rows
+  are
   terminal and are NOT auto-retried by resume in any effective sense — a
   seeded, still-tripped governor re-marks them without op invocation; only
   an input change (new `inputsHash`, which defeats even ok-skip in T1.2
