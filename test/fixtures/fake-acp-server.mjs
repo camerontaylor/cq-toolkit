@@ -43,6 +43,20 @@
 //                           reads the lazy default fails the observed-model leg
 //   FAKE_ACP_PROTOCOL_VERSION  the protocolVersion the initialize answer
 //                           reports (default 1 — the mismatch-verdict test)
+//   FAKE_ACP_REPLAY       when '1', session/load REPLAYS a prior-turn
+//                         history via session/update BEFORE the load
+//                         response — an agent_message_chunk, a tool_call
+//                         with NO permission request, and a failed
+//                         tool_call_update (the reference-recorded
+//                         replay-before-load-response shape, strategy §6;
+//                         a driver that folds them false-fires the
+//                         never-asks tripwire, leaks prior-turn text into
+//                         the transcript, and synthesizes a phantom denial)
+//   FAKE_ACP_STRING_REQUEST_IDS  when '1', session/request_permission ids
+//                         are JSON-RPC STRINGS (protocol-legal; the
+//                         reference vendor sends numbers) — the answer
+//                         must echo the id verbatim or the round-trip
+//                         never completes and the turn hangs
 //   ok               materialization updates + reply (FAKE_ACP_REPLY ??
 //                    'ok') + end_turn with usage
 //   tool-then-reply  ONE gated tool call: request_permission round-trip
@@ -86,6 +100,8 @@ const OPTIONS_RAW = process.env.FAKE_ACP_OPTIONS;
 const SERVED_MODEL = process.env.FAKE_ACP_SERVED_MODEL;
 const REQUESTED_MODEL = process.env.FAKE_ACP_MODEL ?? 'fake-model';
 const PROTOCOL_VERSION = Number(process.env.FAKE_ACP_PROTOCOL_VERSION ?? '1');
+const REPLAY = process.env.FAKE_ACP_REPLAY === '1';
+const STRING_REQUEST_IDS = process.env.FAKE_ACP_STRING_REQUEST_IDS === '1';
 
 const USAGE = {
   totalTokens: 20,
@@ -164,6 +180,33 @@ function emitChunk(text) {
   notifyUpdate({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
 }
 
+// The replay-before-load-response history (strategy §1.1 item 8 / §6,
+// FAKE_ACP_REPLAY=1): three prior-turn bait frames — a text chunk, a
+// tool_call with NO permission request, a FAILED tool_call_update — a
+// driver that folds them marks toolFirstSeen (never-asks false-fire at
+// settle), joins prior-turn text to this run's transcript, and
+// synthesizes a phantom denial.
+function replayPriorTurnHistory() {
+  emitChunk('REPLAYED prior-turn reply (must never surface in this run)');
+  notifyUpdate({
+    sessionUpdate: 'tool_call',
+    toolCallId: 'call_replayed_prior_turn',
+    title: 'read: replayed.txt',
+    kind: 'read',
+    status: 'in_progress',
+    content: [],
+    locations: [],
+    rawInput: { path: 'replayed.txt' },
+  });
+  notifyUpdate({
+    sessionUpdate: 'tool_call_update',
+    toolCallId: 'call_replayed_prior_turn',
+    status: 'failed',
+    content: [{ type: 'text', text: 'REPLAYED prior-turn failure' }],
+    rawOutput: 'REPLAYED prior-turn failure',
+  });
+}
+
 function modesShape() {
   // Probe-verbatim (2026-09-15): availableModes entries are { id, name }
   // OBJECTS on the live wire — the fixture previously emitted bare strings,
@@ -196,7 +239,7 @@ function respondPrompt(result) {
 
 function askPermission(toolCallId, title, input, onAnswered) {
   const options = offeredOptions();
-  const id = serverRequestId++;
+  const id = STRING_REQUEST_IDS ? `perm_${serverRequestId++}` : serverRequestId++;
   pendingPermission = { id, onAnswered };
   send({
     jsonrpc: '2.0',
@@ -474,6 +517,7 @@ function onFrame(frame) {
       }
       acpSessionId = sid;
       sessionMode = 'yolo';
+      if (REPLAY) replayPriorTurnHistory(); // BEFORE the response — the reference-recorded replay shape
       send({
         jsonrpc: '2.0',
         id: frame.id,

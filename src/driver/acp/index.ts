@@ -24,7 +24,10 @@
 //     workspace sidecar carries a harness session id AND the agent
 //     advertises loadSession — else session/new { cwd, mcpServers: [] }
 //     (mcpServers never omitted — the recorded Devin quirk generalizes to
-//     "keep the param present"). No authenticate call, EVER: OQ-1 is
+//     "keep the param present"). History that replays via session/update
+//     BEFORE the load response is counted into a discard sink — none of
+//     it is this run's observation; the wire fold starts after the load
+//     settles (strategy §6). No authenticate call, EVER: OQ-1 is
 //     answered (no gate; the agent self-handles credentials); an
 //     auth_required error fails the run naming the advertised authMethods.
 //   session/set_config_option { configId: 'mode', value: 'build' } — THE
@@ -336,7 +339,12 @@ function newObservation(): RunObservation {
 
 interface WireHandlers {
   onNotification(method: string, params: unknown): void;
-  onServerRequest(method: string, id: number, params: unknown): void;
+  /**
+   * `id` is the RAW inbound id (JSON-RPC 2.0 allows number AND string) —
+   * answers echo it VERBATIM: a coerced id ('id':null) is uncorrelatable,
+   * the vendor's pending ask never resolves, and the turn hangs.
+   */
+  onServerRequest(method: string, id: number | string, params: unknown): void;
   onUnparseableLine(line: string): void;
   onStderrLine(line: string): void;
 }
@@ -378,6 +386,12 @@ class AcpWire {
     });
     this.exit = acpExitPromise(child);
     void this.exit.then(() => {
+      // The trailing partial stderr line (no final newline — often the
+      // death diagnosis) flushes at exit: 'close' fires only after stdio
+      // is flushed, so nothing can arrive after this.
+      const trailing = this.stderrBuffer;
+      this.stderrBuffer = '';
+      if (trailing.trim() !== '') this.handlers.onStderrLine(trailing);
       for (const p of this.pending.values()) {
         p.reject(new Error('the harness process exited before responding'));
       }
@@ -403,12 +417,13 @@ class AcpWire {
     return this.send({ jsonrpc: '2.0', method, params });
   }
 
-  respond(id: number, result: unknown): Promise<void> {
+  /** The id echoes back EXACTLY as it arrived (number or string — JSON-RPC correlates on the raw value). */
+  respond(id: number | string, result: unknown): Promise<void> {
     return this.send({ jsonrpc: '2.0', id, result });
   }
 
   /** Answer an unhandled/unshapeable server request so the vendor sees a diagnosis, never silence. */
-  failRequest(id: number, message: string): Promise<void> {
+  failRequest(id: number | string, message: string): Promise<void> {
     return this.send({ jsonrpc: '2.0', id, error: { code: -32603, message } });
   }
 
@@ -426,19 +441,28 @@ class AcpWire {
       return;
     }
     const frame = checked.data;
-    const id = frame.id === undefined ? undefined : Number(frame.id);
-    if (id === undefined && frame.method === undefined) {
+    // The RAW id rides through every branch VERBATIM (number or string —
+    // JSON-RPC 2.0 allows both): Number() coercion turned a legal string
+    // request id into NaN (the answer serialized 'id':null —
+    // uncorrelatable, the vendor's ask hung) and would fabricate 0 from
+    // a null id (a misrouted notification answered into the void).
+    const rawId = frame.id;
+    const numericId = typeof rawId === 'number' ? rawId : undefined;
+    if (rawId === undefined && frame.method === undefined) {
       this.handlers.onUnparseableLine(line); // neither response nor request nor notification
       return;
     }
-    // A RESPONSE: id present + result/error present.
-    if (id !== undefined && (frame.result !== undefined || frame.error !== undefined)) {
-      const pending = this.pending.get(id);
+    // A RESPONSE: id + result/error present. OUR request ids are numeric,
+    // so only a NUMERIC id can correlate against the pending table — a
+    // string-id response was never ours and stays narration evidence
+    // (a null id cannot occur: InboundFrameSchema rejects it).
+    if (numericId !== undefined && (frame.result !== undefined || frame.error !== undefined)) {
+      const pending = this.pending.get(numericId);
       if (pending === undefined) {
         this.handlers.onUnparseableLine(line); // a response to an id we never sent — evidence
         return;
       }
-      this.pending.delete(id);
+      this.pending.delete(numericId);
       if (frame.error !== undefined) {
         const parsedError = JsonRpcErrorObjectSchema.safeParse(frame.error);
         pending.reject(
@@ -457,9 +481,10 @@ class AcpWire {
       }
       return;
     }
-    // A server→client REQUEST (session/request_permission is the one the subset answers).
-    if (frame.method !== undefined && id !== undefined) {
-      this.handlers.onServerRequest(frame.method, id, frame.params);
+    // A server→client REQUEST (session/request_permission is the one the
+    // subset answers): method + a present id, echoed back VERBATIM.
+    if (frame.method !== undefined && rawId !== undefined) {
+      this.handlers.onServerRequest(frame.method, rawId, frame.params);
       return;
     }
     // A notification.
@@ -544,6 +569,25 @@ export class AcpDriver implements Driver {
         : await loadSessionOrThrow(store, sessionRef);
     const workspace = record.workspace;
 
+    // --- Child env: the host environment rides (the vendor reads its own
+    // credentials app-side, OQ-1); envNames adds explicitly configured
+    // NAMES (values read AT run time — the one place a secret value is
+    // ever touched); modelEnv hands the REQUESTED model id to the harness.
+    // This block sits ABOVE the user-turn append: a missing envNames entry
+    // is a PRE-DISPATCH throw and must never leave a dangling user turn
+    // in the record.
+    const childEnv = { ...process.env } as Record<string, string>;
+    for (const name of this.envNames) {
+      const value = process.env[name];
+      if (value === undefined || value === '') {
+        throw new Error(`acp driver: envNames entry '${name}' is not set in the environment`);
+      }
+      childEnv[name] = value;
+    }
+    if (this.modelEnv !== undefined) {
+      childEnv[this.modelEnv] = modelSpec.model;
+    }
+
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
     // --- Protocol-level resume handle: the ACP session id a prior run
@@ -556,22 +600,6 @@ export class AcpDriver implements Driver {
     const signal = governed?.signal;
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'aborted' };
-    }
-
-    // --- Child env: the host environment rides (the vendor reads its own
-    // credentials app-side, OQ-1); envNames adds explicitly configured
-    // NAMES (values read AT run time — the one place a secret value is
-    // ever touched); modelEnv hands the REQUESTED model id to the harness.
-    const childEnv = { ...process.env } as Record<string, string>;
-    for (const name of this.envNames) {
-      const value = process.env[name];
-      if (value === undefined || value === '') {
-        throw new Error(`acp driver: envNames entry '${name}' is not set in the environment`);
-      }
-      childEnv[name] = value;
-    }
-    if (this.modelEnv !== undefined) {
-      childEnv[this.modelEnv] = modelSpec.model;
     }
 
     // --- The one spawn. From here on, run() NEVER throws past the seam.
@@ -597,6 +625,15 @@ export class AcpDriver implements Driver {
     let signalFired = false;
     let promptDispatched = false;
     let acpSessionId: string | undefined;
+    // The session/load REPLAY window (strategy §6): true from the
+    // session/load write until its response resolves. Every session/update
+    // inside the window is REPLAYED HISTORY — counted into the discard
+    // sink below, never folded into THIS run's observation (a replayed
+    // tool_call must not mark toolFirstSeen, a replayed chunk must not
+    // join the transcript, a replayed failed status must not synthesize a
+    // denial, a replayed model value must not feed servedModel).
+    let replaying = false;
+    let replayedFrameCount = 0;
 
     const graceOpts = (): AcpGraceLadderOptions => ({
       ...(this.termGraceMs !== undefined ? { termGraceMs: this.termGraceMs } : {}),
@@ -612,7 +649,10 @@ export class AcpDriver implements Driver {
     // --- Inbound server→client requests: session/request_permission is
     // answered declaratively per the FULL answer table (header); anything
     // else gets method-not-found so the record shows what the vendor tried.
-    const handleServerRequest = (method: string, id: number, params: unknown): void => {
+    // `id` is the RAW inbound id and rides back verbatim (a string request
+    // id answered as a number — or as null via Number() coercion — is an
+    // answer the vendor can never correlate).
+    const handleServerRequest = (method: string, id: number | string, params: unknown): void => {
       if (method !== ACP_METHODS.sessionRequestPermission) {
         observation.narration.push(JSON.stringify({ cq: 'unhandled-server-request', method }));
         void wire.failRequest(id, `cq acp driver does not implement ${method}`).catch(() => undefined);
@@ -667,6 +707,23 @@ export class AcpDriver implements Driver {
     const wire = new AcpWire(child, {
       onNotification: (method, params) => {
         if (method === ACP_METHODS.sessionUpdate) {
+          // GATE ORDER (round-1 review): the REPLAY gate first — a frame
+          // arriving before the session/load response is replay-by-
+          // definition (history replays BEFORE the response, strategy
+          // §6), discarded on arrival whatever its sessionId; the
+          // SESSION-ID gate second — this run's acpSessionId does not
+          // exist until establishment resolves, so an id filter could
+          // never hold inside the replay window (the reference filters
+          // updates to the session's own id: §1.1 item 4). Both gates
+          // drop SILENTLY — narration is reserved for unshapeable
+          // frames, so a clean run persists none; the replay window
+          // leaves exactly one COUNT marker after the load settles (the
+          // count is the honest evidence, never the content).
+          if (replaying) {
+            replayedFrameCount += 1;
+            return;
+          }
+          if (sessionIdOf(params) !== acpSessionId) return; // not this run's session (the spec puts sessionId on every update)
           foldSessionUpdate(observation, params);
         } else {
           observation.narration.push(JSON.stringify({ cq: 'unhandled-notification', method }));
@@ -731,17 +788,37 @@ export class AcpDriver implements Driver {
     if (handshakeFailure === undefined && !signalFired) {
       try {
         if (sessionRef !== undefined && resumeAcpSessionId !== undefined && agentSupportsLoad) {
-          // History replays via session/update before the response —
-          // consumed and DISCARDED; only the fact of continuity is kept
-          // (strategy §6). cwd + mcpServers stay present (the recorded
-          // Devin quirk generalizes: keep the params present).
-          const loadedRaw = await wire.request(ACP_METHODS.sessionLoad, {
-            sessionId: resumeAcpSessionId,
-            cwd: workspace,
-            mcpServers: [],
-          });
-          const loaded = SessionNewResultSchema.safeParse(loadedRaw);
-          acpSessionId = loaded.success ? loaded.data.sessionId : resumeAcpSessionId;
+          // History replays via session/update BEFORE the response
+          // (strategy §6) — the replaying flag routes the whole window
+          // into the discard sink: none of it is this run's observation.
+          // The flag clears when THIS await resolves (the load response),
+          // so the mode pin and everything after folds normally; only a
+          // config_option_update arriving AFTER the load settles can feed
+          // servedModel — session/new/load configOptions stay the
+          // never-folded lazy defaults (header, §5). cwd + mcpServers
+          // stay present (the recorded Devin quirk generalizes: keep the
+          // params present).
+          replaying = true;
+          try {
+            const loadedRaw = await wire.request(ACP_METHODS.sessionLoad, {
+              sessionId: resumeAcpSessionId,
+              cwd: workspace,
+              mcpServers: [],
+            });
+            const loaded = SessionNewResultSchema.safeParse(loadedRaw);
+            acpSessionId = loaded.success ? loaded.data.sessionId : resumeAcpSessionId;
+          } finally {
+            replaying = false;
+            if (replayedFrameCount > 0) {
+              observation.narration.push(
+                JSON.stringify({
+                  cq: 'replayed-frames-discarded',
+                  count: replayedFrameCount,
+                  note: 'session/update frames replayed before the session/load response never entered this run (strategy §6) — the count is the evidence, not the content',
+                }),
+              );
+            }
+          }
         } else {
           const createdRaw = await wire.request(ACP_METHODS.sessionNew, { cwd: workspace, mcpServers: [] });
           const created = SessionNewResultSchema.parse(createdRaw);
@@ -1155,6 +1232,12 @@ function previewOf(value: unknown): string {
   const text = JSON.stringify(value);
   if (text === undefined) return String(value);
   return text.length > 500 ? text.slice(0, 500) : text;
+}
+
+/** The `sessionId` member of an inbound params object, when a string (absent/other-shaped → undefined — never this run's id). */
+function sessionIdOf(params: unknown): string | undefined {
+  const value = (params as { sessionId?: unknown } | undefined)?.sessionId;
+  return typeof value === 'string' ? value : undefined;
 }
 
 /**

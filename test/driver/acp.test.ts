@@ -440,6 +440,72 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('session/load REPLAY: replayed prior-turn frames are suppressed — honest verdict, clean transcript, the count is the evidence', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls1: SpawnCall[] = [];
+      const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
+      const run1 = await first.run(invocation({ prompt: 'replay run one' }));
+
+      const calls2: SpawnCall[] = [];
+      // The resumed run points the fixture at a REPLAYING session/load:
+      // three prior-turn session/update frames (a text chunk, a
+      // permission-less tool_call, a FAILED tool_call_update) arrive
+      // BEFORE the load response — the reference-recorded replay shape
+      // (strategy §6). A driver that folds them false-fires the
+      // never-asks tripwire (verdict 'error' on an honest run), leaks the
+      // prior-turn text into this run's transcript, and synthesizes a
+      // phantom denial.
+      const second = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_REPLAY: '1' }, calls2),
+      );
+      const run2 = await second.run(invocation({ prompt: 'replay run two', sessionRef: run1.sessionId }));
+      expect(run2.stopReason).toBe('complete'); // NOT the never-asks false 'error'
+      expect(run2.denials).toEqual([]); // the replayed failed status synthesized no phantom denial
+      const record = await store.load(run2.sessionId as string);
+      // The replayed prior-turn text never joined THIS run's transcript —
+      // the persisted assistant turn is this run's resume echo only.
+      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('REPLAYED'))).toBe(false);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('resumed from acp session')),
+      ).toBe(true);
+      // The discard sink narrates the COUNT (honest evidence, never the
+      // content): all three replayed frames were counted and discarded.
+      const narration = await narrationOf(store, run2.sessionId as string);
+      const marker = narration.find((line) => line.includes('"replayed-frames-discarded"'));
+      expect(marker !== undefined && marker.includes('"count":3')).toBe(true);
+      expect(narration.some((line) => line.includes('"never-asks"'))).toBe(false);
+    });
+  });
+
+  test('JSON-RPC string request ids: the permission answer echoes the id VERBATIM (no coercion into an uncorrelatable null)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // A string session/request_permission id is legal JSON-RPC (the
+      // reference vendor sends numbers). A driver that Number()-coerces
+      // answers 'id':null — the vendor's ask never resolves and the turn
+      // hangs; on a regression THIS test fails by timeout.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_ACP_STRING_REQUEST_IDS: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'string-id run' }));
+      expect(result.stopReason).toBe('complete');
+      const record = await store.load(result.sessionId as string);
+      // The answer CORRELATED: the fixture honored it and echoed the
+      // selected optionId — proof the round-trip completed.
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]')),
+      ).toBe(true);
+    });
+  });
+
   test('cancel maps to aborted: the governed signal settles via session/cancel + the cancelled response (§2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
