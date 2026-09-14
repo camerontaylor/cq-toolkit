@@ -8,27 +8,42 @@
 // in src/harness/**; the ai-sdk driver (slice 2) adapts these descriptors.
 //
 // DENIAL FLOW — executors never throw. Every refusal (sandbox, bad input,
-// path escape, allowlist miss, missing file, missing target text, failed
-// command spawn) is a structured denial record `{ tool, reason }` — exactly
+// path escape (lexical or via symlink), allowlist miss, shell metacharacters
+// under a token pattern, missing file, missing target text, failed command
+// spawn) is a structured denial record `{ tool, reason }` — exactly
 // the FROZEN driver-seam ToolDenial shape, so denials flow into
 // WorkerResult.denials verbatim. Denial reasons are human-readable strings
-// with stable PREFIXES (slice 3's conformance suite asserts on these):
+// with stable PREFIXES (the conformance suite asserts on these):
 //   'sandbox: …' | 'invalid input: …' | 'path escape: …'
 //   'path not allowed by harness config allowlist: …'
 //   'command not allowed by harness config allowlist: …'
+//   'command allowlist: shell metacharacters not permitted with token
+//    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
 //   'edit failed: …' | 'run failed: …'
 //
 // ENFORCEMENT ORDER per call: sandbox gate → input schema → workspace
-// containment → config allowlist → execution (fs / child_process). Each step
-// short-circuits into a denial.
+// containment (lexical, then symlink realpath re-check) → config allowlist →
+// execution (fs / child_process). Each step short-circuits into a denial.
 //
 // SANDBOX MAPPING (driver seam SandboxLevel):
 //   - 'read-only'       → `edit`/`run` deny with 'sandbox: read-only'; `read`
 //                         stays available.
 //   - 'none' | 'workspace-write' → tools behave per config.
 //   True OS sandboxing is a DRIVER-specific concern; the harness enforces
-//   the workspace boundary (lexical path containment) + allowlists only.
+//   the workspace boundary + allowlists only.
+//
+// SYMLINK CHANNEL (named limitation + partial hardening): containment is
+// lexical, and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
+// command can create a symlink inside the workspace pointing outside
+// (`ln -s /etc passwd`), after which read/edit through the link would cross
+// the boundary. Partial hardening: read/edit REALPATH the resolved path and
+// re-check containment when the file exists (against the workspace's own
+// realpath, so symlinked tmp roots don't false-positive) — pre-existing
+// symlinks are caught with 'path escape: … through a symlink'. A symlink
+// planted/swapped in AFTER that check is a documented TOCTOU window.
+// Mitigation: keep run command allowlists tight (never allowlist `ln`); a
+// realpath-based jail is the follow-up.
 //
 // PATH PATTERN SEMANTICS (the read/edit allowlist): glob-ish strings matched
 // against the workspace-relative POSIX path ('/' separators), FULL match:
@@ -38,14 +53,24 @@
 //   - '?' matches one non-separator char; everything else is literal.
 //
 // COMMAND PATTERN SEMANTICS (the run allowlist), matched against the FULL
-// command string, case-sensitive, first match allows:
+// command string, case-sensitive:
 //   - 're:<js regex>'  → the rest is a JavaScript RegExp tested against the
-//     command string.
+//     command string. re: patterns are the ESCAPE HATCH for anything beyond
+//     plain prefixes: a re: match allows OUTRIGHT (including commands with
+//     shell metacharacters), so a re: pattern MUST be authored anchored
+//     (e.g. 're:^npm test.*$') — an unanchored re: is author error
+//     (recorded finding; documentation-covered, not code-repaired).
 //   - anything else    → whitespace-token PREFIX: the pattern's tokens must
 //     equal the command's leading tokens ('npm test' allows 'npm test' and
 //     'npm test -- --watch', not 'npm run test'). Token splitting is naive
-//     whitespace splitting — quoting is NOT parsed; use 're:' when a command
-//     needs quoted arguments.
+//     whitespace splitting — quoting is NOT parsed.
+//     SHELL-METACHARACTER GUARD: a token-pattern match allows only a command
+//     FREE of shell metacharacters (';' '&' '|' '$' '`' '(' ')' '<' '>'
+//     newline). The exec shell would otherwise interpret sequences the
+//     token prefix never saw ('npm test ; whoami', 'npm test && curl …',
+//     'npm test $(rm -rf ~)'); such a command denies with the distinct
+//     'command allowlist: shell metacharacters …' reason pointing at
+//     anchored re: patterns as the deliberate escape hatch.
 // Invalid regexes and empty/whitespace-only patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
@@ -58,7 +83,7 @@
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
 import { exec } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import { z } from 'zod';
@@ -203,13 +228,39 @@ export function compileCommandPatterns(patterns: readonly string[]): CommandPatt
   });
 }
 
-/** Full-match the compiled command allowlist against a command string. */
-function commandAllowed(patterns: readonly CommandPattern[], command: string): boolean {
+/**
+ * Shell metacharacters a token-prefix pattern must never bless: the exec
+ * shell would interpret chaining (';', '&', '|', newline), substitution
+ * ('$(`') and redirection ('<', '>') beyond what the token prefix saw.
+ */
+const SHELL_METACHARACTERS = /[;&|$`()<>\n\r]/;
+
+/** The allowlist verdict for one command string (header semantics). */
+type CommandVerdict =
+  | { allowed: true; via: 'regex' | 'tokens' }
+  | { allowed: false; metacharacters: boolean };
+
+/**
+ * Match the compiled command allowlist: a re: match allows OUTRIGHT (the
+ * author owns the full string); a token-prefix match allows only a command
+ * free of shell metacharacters. On a denial, `metacharacters` marks the
+ * reached-a-token-pattern-but-carried-metacharacters case — the trigger for
+ * the distinct denial reason.
+ */
+function commandVerdict(patterns: readonly CommandPattern[], command: string): CommandVerdict {
   const cmdTokens = command.trim().split(/\s+/);
-  return patterns.some((pattern) => {
-    if (pattern.kind === 'regex') return pattern.re.test(command);
-    return pattern.tokens.every((token, i) => cmdTokens[i] === token);
-  });
+  for (const pattern of patterns) {
+    if (pattern.kind === 'regex') {
+      if (pattern.re.test(command)) return { allowed: true, via: 'regex' };
+      continue;
+    }
+    if (!pattern.tokens.every((token, i) => cmdTokens[i] === token)) continue;
+    if (SHELL_METACHARACTERS.test(command)) {
+      return { allowed: false, metacharacters: true };
+    }
+    return { allowed: true, via: 'tokens' };
+  }
+  return { allowed: false, metacharacters: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -263,7 +314,6 @@ export function buildTools(
 ): ToolkitTool[] {
   const cfg: HarnessConfig = HarnessConfigSchema.parse(config);
   const workspaceAbs = resolve(workspace);
-  const workspacePrefix = workspaceAbs.endsWith(sep) ? workspaceAbs : workspaceAbs + sep;
   const { promptBudget } = cfg;
 
   const deny = (tool: ToolkitToolName, reason: string): ToolkitToolResult => ({
@@ -271,10 +321,46 @@ export function buildTools(
     denial: { tool, reason },
   });
 
+  /** Root-containment predicate, shared by the lexical and realpath checks. */
+  const isInside = (abs: string, root: string): boolean =>
+    abs === root || abs.startsWith(root.endsWith(sep) ? root : root + sep);
+
   /** Lexical containment: an absolute path inside the workspace, or undefined on escape. */
   const resolveInside = (requested: string): string | undefined => {
     const abs = resolve(workspaceAbs, requested);
-    return abs === workspaceAbs || abs.startsWith(workspacePrefix) ? abs : undefined;
+    return isInside(abs, workspaceAbs) ? abs : undefined;
+  };
+
+  // The workspace's own realpath, computed once and lazily: tmp roots are
+  // often symlinked themselves (macOS /var → /private/var), so the symlink
+  // re-check must compare against the realpath of the ROOT or every path in
+  // a symlinked tmp would false-positive.
+  let workspaceReal: Promise<string | undefined> | undefined;
+  const workspaceRealRoot = (): Promise<string | undefined> => {
+    workspaceReal ??= realpath(workspaceAbs).catch(() => undefined);
+    return workspaceReal;
+  };
+
+  /**
+   * Symlink re-check (partial hardening — see the header's SYMLINK CHANNEL):
+   * when `abs` EXISTS, its realpath must stay inside the workspace. ENOENT
+   * (and any other realpath failure — ENOTDIR on file-under-file paths and
+   * friends) falls through to the lexical path so the fs op itself produces
+   * the honest denial; executors never throw. The realpath of an existing
+   * file is also what downstream fs ops use, so a check-then-read race on
+   * the SAME path resolves consistently; a symlink swapped in after the
+   * check remains the documented TOCTOU window.
+   */
+  const resolveRealInside = async (abs: string): Promise<string | undefined> => {
+    let real: string;
+    try {
+      real = await realpath(abs);
+    } catch {
+      return abs; // missing / unreadable path — the fs op will deny honestly
+    }
+    const root = await workspaceRealRoot();
+    if (root === undefined) return abs; // workspace realpath unavailable — lexical check is all we have
+    return isInside(real, root) ? real : undefined;
   };
 
   const relOf = (abs: string): string => relative(workspaceAbs, abs).split(sep).join('/');
@@ -305,12 +391,16 @@ export function buildTools(
         if (abs === undefined) {
           return deny('read', `path escape: '${parsed.data.path}' resolves outside the workspace`);
         }
+        const effective = await resolveRealInside(abs);
+        if (effective === undefined) {
+          return deny('read', `path escape: '${parsed.data.path}' escapes the workspace through a symlink`);
+        }
         if (!pathAllowed(fileCfg.pathPatterns, abs)) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
         let content: string;
         try {
-          content = await readFile(abs, 'utf8');
+          content = await readFile(effective, 'utf8');
         } catch (err) {
           const reason =
             errorCode(err) === 'ENOENT'
@@ -344,12 +434,16 @@ export function buildTools(
         if (abs === undefined) {
           return deny('edit', `path escape: '${path}' resolves outside the workspace`);
         }
+        const effective = await resolveRealInside(abs);
+        if (effective === undefined) {
+          return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
+        }
         if (!pathAllowed(fileCfg.pathPatterns, abs)) {
           return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
         let content: string;
         try {
-          content = await readFile(abs, 'utf8');
+          content = await readFile(effective, 'utf8');
         } catch (err) {
           const reason =
             errorCode(err) === 'ENOENT'
@@ -365,7 +459,7 @@ export function buildTools(
         // literal (no $&/$1 substitution).
         const edited = content.replace(oldText, () => newText);
         try {
-          await writeFile(abs, edited, 'utf8');
+          await writeFile(effective, edited, 'utf8');
         } catch (err) {
           return deny('edit', `edit failed: ${messageOf(err)}`);
         }
@@ -403,8 +497,14 @@ export function buildTools(
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
-        if (!commandAllowed(patterns, command)) {
-          return deny('run', `command not allowed by harness config allowlist: '${command}'`);
+        const verdict = commandVerdict(patterns, command);
+        if (!verdict.allowed) {
+          return deny(
+            'run',
+            verdict.metacharacters
+              ? 'command allowlist: shell metacharacters not permitted with token patterns — use re: with anchoring'
+              : `command not allowed by harness config allowlist: '${command}'`,
+          );
         }
         try {
           const { stdout, stderr } = await execAsync(command, {

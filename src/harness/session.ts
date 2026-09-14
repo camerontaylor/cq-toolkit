@@ -30,8 +30,14 @@
 // into a SessionRecord: the header line supplies identity facts, message
 // lines append in order — the file is the source of truth, the record is the
 // fold (same posture as the kernel journal).
+//
+// CRASH TOLERANCE + APPEND-TIME RECOVERY: `load` tolerates a torn LAST line
+// (crash mid-append) and throws on a corrupt MIDDLE line (evidence
+// corruption). AppendMessage recovers the torn case before writing —
+// truncating back to the last complete line — so the next append cannot glue
+// onto the fragment and brick every future load (see recoverTornTail).
 import { randomBytes } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, readFile, stat } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -156,20 +162,15 @@ export class SessionStore {
 
   /**
    * Append one message to `<sessionId>.jsonl`. Validates the message against
-   * SessionMessageSchema BEFORE disk (invalid messages are loud errors) and
-   * refuses unknown sessions — appending never fabricates a session. Single-
-   * writer discipline applies (same as the journal): one writer per store.
+   * SessionMessageSchema BEFORE disk (invalid messages are loud errors),
+   * recovers a torn tail first (see recoverTornTail), and refuses unknown
+   * sessions — appending never fabricates a session. Single-writer
+   * discipline applies (same as the journal): one writer per store.
    */
   async appendMessage(sessionId: string, message: SessionMessage): Promise<void> {
     assertSafeSessionId(sessionId);
     const parsed: SessionMessage = SessionMessageSchema.parse(message);
-    try {
-      await stat(this.pathFor(sessionId));
-    } catch {
-      throw new Error(
-        `session: unknown sessionId '${sessionId}' — create() the session before appending`,
-      );
-    }
+    await this.assertSessionExists(sessionId);
     const line: SessionMessageLine = { type: 'message', message: parsed };
     const write = async (): Promise<void> => {
       await mkdir(this.sessionsDir, { recursive: true });
@@ -178,6 +179,48 @@ export class SessionStore {
     const next = this.tail.then(write, write);
     this.tail = next.catch(() => undefined);
     await next;
+  }
+
+  /**
+   * TORN-TAIL RECOVERY (append-time — the fix for the brick scenario): a
+   * crash mid-append leaves a partial final line; `load` tolerates it, but a
+   * blind append would GLUE onto the fragment and turn it into a corrupt
+   * MIDDLE line, throwing on every future load and destroying the only
+   * resume path. So before appending: a file that does not end with a
+   * complete newline (the signature of a torn write — every completed write
+   * ends its line) is truncated back to its last complete line. A file with
+   * no complete line at all is a torn HEADER — create() crashed and the
+   * session never existed — so appending throws the unknown-session error
+   * instead of fabricating a headerless file.
+   */
+  private async recoverTornTail(sessionId: string): Promise<void> {
+    let raw: string;
+    try {
+      raw = await readFile(this.pathFor(sessionId), 'utf8');
+    } catch (err) {
+      if (isEnoent(err)) {
+        throw new Error(
+          `session: unknown sessionId '${sessionId}' — create() the session before appending`,
+        );
+      }
+      throw err;
+    }
+    if (raw === '' || raw.endsWith('\n')) {
+      return; // nothing torn (empty = load() yields undefined anyway; complete write = clean tail)
+    }
+    const lastComplete = raw.lastIndexOf('\n');
+    if (lastComplete === -1) {
+      // All-fragment file: a torn header — the session was never established.
+      throw new Error(
+        `session: unknown sessionId '${sessionId}' — the session record has no complete line (create() crashed mid-write)`,
+      );
+    }
+    await truncate(this.pathFor(sessionId), lastComplete + 1);
+  }
+
+  /** Existence + torn-tail recovery in one read; unknown sessions are loud errors. */
+  private async assertSessionExists(sessionId: string): Promise<void> {
+    await this.recoverTornTail(sessionId);
   }
 
   /**

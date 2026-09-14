@@ -74,6 +74,13 @@ function modelFor(directive: ModelDirective | undefined): MockLanguageModelV4 {
         },
       });
     }
+    case 'fail':
+      // A plain non-abort failure: the driver must return stopReason 'error'.
+      return new MockLanguageModelV4({
+        doGenerate: async () => {
+          throw new Error('scripted model failure');
+        },
+      });
     case 'tool-then-reply':
       return new MockLanguageModelV4({
         doGenerate: [toolCallResult(directive.tool, directive.input), textResult(directive.reply)],
@@ -83,14 +90,21 @@ function modelFor(directive: ModelDirective | undefined): MockLanguageModelV4 {
   }
 }
 
-/** Conformance harness config: echo permitted for the isolation write; workspaces inside scratchDir. */
+/** Conformance harness config: the conformance write permitted via an anchored re: pattern (token patterns deny redirects by design); workspaces inside scratchDir. */
 function conformanceHarnessConfig(scratchDir: string): AiSdkDriverOptions['harnessConfig'] {
   return {
     ...defaultHarnessConfig,
     workspaceRoot: join(scratchDir, 'workspaces'),
     tools: {
       ...defaultHarnessConfig.tools,
-      run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['echo'] },
+      run: {
+        ...defaultHarnessConfig.tools.run,
+        // `echo conformance-marker > note.txt` redirects — the shell-
+        // metacharacter guard (fix 1) denies that under a token pattern, so
+        // the conformance write rides the documented escape hatch: an
+        // anchored re: pattern matching exactly the isolation write.
+        commandPatterns: ['re:^echo .* > note\\.txt$'],
+      },
     },
   };
 }
@@ -98,9 +112,25 @@ function conformanceHarnessConfig(scratchDir: string): AiSdkDriverOptions['harne
 /** Fresh mock-backed AiSdkDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): AiSdkDriver {
   return new AiSdkDriver({
-    // The suite's canonical modelSpec handle resolves to the scripted mock.
-    providers: { [CONFORMANCE_PROVIDER]: () => modelFor(spec.directive) },
+    // The suite's canonical modelSpec handle resolves to the scripted mock,
+    // as does the priced handle when the suite brings one.
+    providers: {
+      [CONFORMANCE_PROVIDER]: () => modelFor(spec.directive),
+      ...(spec.pricedModel !== undefined
+        ? { [spec.pricedModel.provider]: () => modelFor(spec.directive) }
+        : {}),
+    },
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
+    // The priced handle flows through the price lookup so the conformance
+    // suite can assert a derived costUSD; everything else stays unpriced.
+    ...(spec.pricedModel !== undefined
+      ? {
+          pricing: (modelSpec: { provider: string; model: string }) =>
+            modelSpec.provider === spec.pricedModel?.provider
+              ? { input: 3, output: 15 }
+              : undefined,
+        }
+      : {}),
     sessionsDir: join(spec.scratchDir, SESSIONS_DIR),
     harnessConfig: conformanceHarnessConfig(spec.scratchDir),
   });

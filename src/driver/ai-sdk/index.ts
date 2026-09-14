@@ -96,8 +96,11 @@
 // prompt, unknown sessionRef) throws.
 //
 // COST (DD-2, derived-only): costUSD = computeCostUSD(modelSpec, usage) —
-// present only when the price map (src/driver/pricing) knows the model;
-// the driver never fabricates or reports trusted USD.
+// present only on a COMPLETED run whose usage is real, and only when the
+// price map (src/driver/pricing; overridable via the `pricing` constructor
+// option) knows the model. The ERROR/ABORT path reports NO costUSD at all:
+// tokens may have been spent before the failure, so 0 would be a fabricated
+// fact. The driver never fabricates or reports trusted USD.
 import { generateText, Output, tool } from 'ai';
 import type { FinishReason, LanguageModel, LanguageModelUsage, ModelMessage, ToolSet } from 'ai';
 import type { ZodType } from 'zod';
@@ -114,7 +117,8 @@ import { buildTools } from '../../harness/tools.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
-import { computeCostUSD } from '../pricing/index.js';
+import { priceOf } from '../pricing/index.js';
+import type { PerMillionRates } from '../pricing/index.js';
 import type { Driver, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
 import type { ModelSpec, OpInvocation } from '../types.js';
 
@@ -145,6 +149,13 @@ export interface AiSdkDriverOptions {
   harnessConfig?: HarnessConfig;
   /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
   sessionsDir?: string;
+  /**
+   * Price-lookup override for the derived-only costUSD rule (default:
+   * `priceOf` over the vendored models.dev table). Tests and per-deployment
+   * price tables inject here; the conformance suite's priced-model test
+   * rides this seam. A lookup returning undefined keeps costUSD absent.
+   */
+  pricing?: (modelSpec: ModelSpec) => PerMillionRates | undefined;
 }
 
 /**
@@ -158,12 +169,14 @@ export class AiSdkDriver implements Driver {
   private readonly outputSchema: ZodType | undefined;
   private readonly harnessConfig: HarnessConfig;
   private readonly sessionsDir: string | undefined;
+  private readonly pricing: (modelSpec: ModelSpec) => PerMillionRates | undefined;
 
   constructor(options: AiSdkDriverOptions = {}) {
     this.providers = options.providers ?? defaultProviders();
     this.outputSchema = options.outputSchema;
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.sessionsDir = options.sessionsDir;
+    this.pricing = options.pricing ?? priceOf;
   }
 
   /** The frozen seam: run one invocation to completion. */
@@ -256,7 +269,7 @@ export class AiSdkDriver implements Driver {
       return {
         ...(structuredOutput !== undefined ? { structuredOutput } : {}),
         usage,
-        ...(costField(modelSpec, usage)),
+        ...costField(this.pricing, modelSpec, usage),
         sessionId: record.sessionId,
         denials,
         stopReason: stopReasonOf({
@@ -272,12 +285,16 @@ export class AiSdkDriver implements Driver {
       // An abort-shaped failure is the governor's cancellation, not an
       // error (I8). A missing structured object is an error verdict too:
       // the model never produced the required output.
+      //
+      // NO costUSD here (never-fabricate): tokens may have been spent before
+      // the failure, so `0` would be a fabricated fact and any other number
+      // would be invented — the error/abort verdict carries NO cost claim.
+      // Cost stays derived-only on completed runs, where usage is real.
       const aborted =
         abortSignal?.aborted === true || (err instanceof Error && err.name === 'AbortError');
       const zeroUsage: Usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
       return {
         usage: zeroUsage,
-        ...(costField(modelSpec, zeroUsage)),
         sessionId: record.sessionId,
         denials,
         stopReason: aborted ? 'aborted' : 'error',
@@ -463,10 +480,24 @@ function totalTokensOf(usage: Usage): number {
   return usage.input + usage.output + usage.cacheRead + usage.cacheWrite + (usage.reasoning ?? 0);
 }
 
-/** Derived-only cost field (DD-2): present only when the price map knows the model. */
-function costField(modelSpec: ModelSpec, usage: Usage): { costUSD?: number } {
-  const costUSD = computeCostUSD(modelSpec, usage);
-  return costUSD !== undefined ? { costUSD } : {};
+/** Derived-only cost field (DD-2): present only when the price lookup knows the model. */
+function costField(
+  pricing: (modelSpec: ModelSpec) => PerMillionRates | undefined,
+  modelSpec: ModelSpec,
+  usage: Usage,
+): { costUSD?: number } {
+  const rates = pricing(modelSpec);
+  if (rates === undefined) {
+    return {}; // unknown model — never fabricate
+  }
+  const perMillion = (tokens: number, rate: number | undefined): number =>
+    rate === undefined ? 0 : (tokens / 1_000_000) * rate;
+  const costUSD =
+    perMillion(usage.input, rates.input) +
+    perMillion(usage.output, rates.output) +
+    perMillion(usage.cacheRead, rates.cacheRead) +
+    perMillion(usage.cacheWrite, rates.cacheWrite);
+  return { costUSD };
 }
 
 /** Inputs to the frozen stop-reason mapping (header table). */

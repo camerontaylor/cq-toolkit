@@ -25,14 +25,28 @@
 //                                                  — the model issues ONE
 //                                                    tool call with this
 //                                                    name/input, then
-//                                                    replies with `reply`.
+//                                                    replies with `reply`;
+//       { kind: 'block-until-abort' }              — the model blocks until
+//                                                    the governed signal
+//                                                    fires, then rejects
+//                                                    (the abort test);
+//       { kind: 'fail' }                           — the model fails with a
+//                                                    plain non-abort error
+//                                                    (the error-verdict
+//                                                    test).
 //     The scripted model MUST report token usage (input/output/cacheRead/
 //     cacheWrite, reasoning optional) — the usage contract needs numbers.
-//   - Tool permissions follow the frozen `OpInvocation` policies: `run`
-//     commands with the `echo` prefix MUST be permitted under
-//     'workspace-write' (the isolation test writes a file with
-//     `echo … > note.txt`); a 'read-only' sandbox MUST deny edit/run
-//     (the denial test rides that documented harness mapping).
+//   - Tool permissions follow the frozen `OpInvocation` policies: the
+//     isolation tests WRITE with `echo conformance-marker > note.txt` — a
+//     redirecting command, which token patterns deny by design (shell-
+//     metacharacter guard), so makeDriver MUST permit that write via an
+//     anchored re: pattern (e.g. 're:^echo .* > note\.txt$'); a 'read-only'
+//     sandbox MUST deny edit/run (the denial test rides that documented
+//     harness mapping).
+//   - `spec.pricedModel` — when present, makeDriver must resolve this
+//     ModelSpec onto its scripted model THROUGH its price map (ai-sdk: the
+//     `pricing` option), so the derived-cost test asserts a real costUSD.
+//     The canonical conformance model is NEVER priced.
 //   - I8: run() honors the governed `currentJobContext()` signal — the
 //     abort test wraps a run in `runLadder`, fires the signal mid-run, and
 //     requires stopReason 'aborted'. The scripted model blocks until the
@@ -61,7 +75,11 @@ export type ModelDirective =
   // The model BLOCKS until the governed signal fires, then rejects — the
   // script behind the I8 abort test (makeDriver wires the driver's abort
   // seam; the mock honors it).
-  | { kind: 'block-until-abort' };
+  | { kind: 'block-until-abort' }
+  // The model FAILS outright (a plain non-abort error) — the script behind
+  // the error-verdict test: the driver must RETURN stopReason 'error', never
+  // throw past the seam.
+  | { kind: 'fail' };
 
 /** Per-driver construction hints the suite hands to `makeDriver`. */
 export interface ConformanceSpec {
@@ -69,6 +87,14 @@ export interface ConformanceSpec {
   outputSchema?: z.ZodType;
   /** Script the model's behavior for this driver's runs. */
   directive?: ModelDirective;
+  /**
+   * A ModelSpec the driver's PRICE MAP knows: makeDriver must resolve this
+   * handle onto its scripted model THROUGH its pricing, so the derived-cost
+   * test can assert costUSD is a real number. (The canonical conformance
+   * model is by contract NEVER priced — the absent-costUSD assertion needs
+   * an unknown model to catch fabricating drivers.)
+   */
+  pricedModel?: { provider: string; model: string };
   /** Suite-created temp dir: session store at `<scratchDir>/sessions`, workspaces under it. */
   scratchDir: string;
 }
@@ -341,6 +367,131 @@ export function runDriverConformance(
         // The transcript carries run 1 AND run 2 turns, in order.
         expect(after?.messages.some((m) => m.role === 'user' && m.content === 'resume run one')).toBe(true);
         expect(after?.messages.some((m) => m.role === 'user' && m.content === 'resume run two')).toBe(true);
+      });
+    });
+
+    test('g. costUSD derived-only: ABSENT for the unpriced conformance model (a fabricating driver fails here)', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({
+          directive: { kind: 'reply', text: 'ok' },
+          scratchDir,
+        });
+        const result = await driver.run(invocation());
+        // The canonical conformance model is by contract NOT in any price
+        // map: a driver reporting costUSD for it is fabricating cost.
+        expect(result.costUSD).toBeUndefined();
+      });
+    });
+
+    test('h. costUSD present and finite when the model is priced (derived from real usage)', async () => {
+      await withScratch(async (scratchDir) => {
+        const pricedModel = { provider: 'conformance-priced', model: 'priced-1' };
+        const driver = makeDriver({
+          directive: { kind: 'reply', text: 'ok' },
+          pricedModel,
+          scratchDir,
+        });
+        const result = await driver.run(
+          invocation({ modelSpec: pricedModel, prompt: 'priced run' }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(typeof result.costUSD).toBe('number');
+        expect(Number.isFinite(result.costUSD as number)).toBe(true);
+        expect(result.costUSD as number).toBeGreaterThanOrEqual(0);
+      });
+    });
+
+    test('i. model failure: the driver RETURNS stopReason error — never throws past the seam', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({ directive: { kind: 'fail' }, scratchDir });
+        // The run must RESOLVE with an honest error verdict (carrying the
+        // seam evidence — usage, denials, sessionId) — a throw here fails
+        // the suite.
+        const result = await driver.run(invocation());
+        expect(result.stopReason).toBe('error');
+        expect(result.usage).toBeDefined();
+        expect(Array.isArray(result.denials)).toBe(true);
+        expect(typeof result.sessionId).toBe('string');
+      });
+    });
+
+    test('j. ToolPolicy mode none: no tool ever executes (observable via the session record)', async () => {
+      await withScratch(async (scratchDir) => {
+        const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+        const driver = makeDriver({
+          directive: {
+            kind: 'tool-then-reply',
+            tool: 'run',
+            input: { command: 'echo policy-marker > policy.txt' },
+            reply: 'unused',
+          },
+          scratchDir,
+        });
+        // mode 'none' exposes NO tools; the directed tool call must never
+        // reach the harness. maxTokens bounds the step loop defensively —
+        // whatever verdict the driver lands on, the observable fact is that
+        // the tool never ran.
+        const result = await driver.run(
+          invocation({ toolPolicy: { allow: [], mode: 'none' }, budget: { maxTokens: 25 } }),
+        );
+        const record = await store.load(result.sessionId as string);
+        expect(record?.messages.some((m) => m.role === 'tool')).toBe(false);
+      });
+    });
+
+    test('k. ToolPolicy allowlist: an allowed tool executes; a disallowed tool never does', async () => {
+      await withScratch(async (scratchDir) => {
+        const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+        const policy = { allow: ['read'], mode: 'allowlist' as const };
+        // Allowed tool: executes (its outcome lands in the record/denials).
+        const allowedDriver = makeDriver({
+          directive: {
+            kind: 'tool-then-reply',
+            tool: 'read',
+            input: { path: 'absent.txt' },
+            reply: 'done',
+          },
+          scratchDir,
+        });
+        const allowed = await allowedDriver.run(
+          invocation({ toolPolicy: policy, prompt: 'allowlist allowed' }),
+        );
+        expect(allowed.denials.some((d) => d.tool === 'read')).toBe(true); // executed and refused on the merits
+        const allowedRecord = await store.load(allowed.sessionId as string);
+        expect(allowedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
+        // Disallowed tool: never executes — no tool message for it, and the
+        // side effect (the file) never appears. maxTokens bounds the step
+        // loop the same way as the none-mode test.
+        const deniedDriver = makeDriver({
+          directive: {
+            kind: 'tool-then-reply',
+            tool: 'run',
+            input: { command: 'echo allowlist-marker > out-of-policy.txt' },
+            reply: 'unused',
+          },
+          scratchDir,
+        });
+        const denied = await deniedDriver.run(
+          invocation({ toolPolicy: policy, prompt: 'allowlist denied', budget: { maxTokens: 25 } }),
+        );
+        const deniedRecord = await store.load(denied.sessionId as string);
+        expect(deniedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(false);
+      });
+    });
+
+    test('l. path escape: a read pointing outside the workspace denies at the driver level', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({
+          directive: {
+            kind: 'tool-then-reply',
+            tool: 'read',
+            input: { path: '../../outside-secret.txt' },
+            reply: 'noted',
+          },
+          scratchDir,
+        });
+        const result = await driver.run(invocation({ prompt: 'escape attempt' }));
+        expect(result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape'))).toBe(true);
       });
     });
   });

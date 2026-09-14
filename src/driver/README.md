@@ -71,6 +71,10 @@ Constructor options:
 - `harnessConfig?` — harness tool surface + prompt budget
   (default: `defaultHarnessConfig`).
 - `sessionsDir?` — backing `SessionStore` directory.
+- `pricing?` — price-lookup override for the derived-only `costUSD` rule
+  (default: `priceOf` over the vendored models.dev table). Tests and
+  per-deployment price tables inject here; an `undefined` lookup keeps
+  `costUSD` absent.
 
 Isolation contract (I6): no `sessionRef` → fresh temp workspace +
 fresh empty session record (`harness.tempWorkspace` + `SessionStore.create`);
@@ -82,6 +86,13 @@ Tool loop: harness `buildTools` descriptors adapted to the SDK tool format;
 the frozen `ToolPolicy` filters the surface per-op (allowlist default /
 unrestricted / none); every harness denial is both the tool's output text
 and a verbatim `{ tool, reason }` entry in `WorkerResult.denials`.
+
+Boundary caveat (named in the harness tools header): the harness containment
+is lexical and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
+command can plant a symlink pointing outside the workspace. read/edit
+realpath-recheck existing paths (pre-existing symlinks are denied), but a
+symlink planted after the check is a documented TOCTOU window; the mitigation
+is keeping run command allowlists tight (never allowlist `ln`).
 
 Budget mapping (I8): the driver owns NO wall clock — it forwards the
 governor's `currentJobContext()?.signal` as the SDK `abortSignal` and
