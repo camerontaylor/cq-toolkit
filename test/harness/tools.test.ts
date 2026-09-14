@@ -1,10 +1,13 @@
-// Harness tool-surface tests — PR 10 round-1 fixes 1 and 5:
+// Harness tool-surface tests — PR 10 round-1 fixes 1 and 5, plus issue #18:
 //   - fix 1 (HIGH): token-prefix command patterns must NOT bless shell
 //     metacharacters (the exec shell interprets what the token prefix never
 //     saw); anchored re: patterns are the documented escape hatch.
 //   - fix 5 (MED): pre-existing symlinks pointing outside the workspace are
 //     denied on read/edit (realpath re-check; the TOCTOU window stays
 //     documented, not tested — it is not deterministically exercisable).
+//   - issue #18: exec's maxBuffer is sized above the output cap so a noisy
+//     command returns a TRUNCATED RESULT (capOutput truncates), never the
+//     1 MiB default's string-code rejection dressed up as a run failure.
 import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -198,4 +201,42 @@ describe('symlink hardening (fix 5)', () => {
       await expect(read?.execute({ path: 'src/real.txt' })).resolves.toMatchObject({ ok: true });
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #18 — exec maxBuffer sized above the output cap: capOutput truncates,
+// exec's 1 MiB default never turns noisy output into a 'run failed' denial.
+// ---------------------------------------------------------------------------
+
+describe('run output: maxBuffer sized above the cap (issue #18)', () => {
+  test('a command emitting > 1 MiB returns a truncated RESULT, not a run-failed denial', async () => {
+    await withScratch(async (scratchDir) => {
+      // cap 600k chars → maxBuffer = 600_000 * 4 + 64KiB ≈ 2.4 MB (bytes vs
+      // chars): the 2 MB output fits the buffer — where exec's 1 MiB DEFAULT
+      // would reject with a string-code error — and capOutput truncates it.
+      const capConfig: HarnessConfig = {
+        ...defaultHarnessConfig,
+        tools: {
+          ...defaultHarnessConfig.tools,
+          run: {
+            enabled: true,
+            commandPatterns: ['re:^node -e .*cap-probe.*$'],
+            timeoutMs: 30_000,
+            maxOutputChars: 600_000,
+          },
+        },
+      };
+      const run = buildTools(capConfig, scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({
+        command: `node -e "/* cap-probe */ process.stdout.write('x'.repeat(2 * 1024 * 1024));"`,
+      });
+      expect(result?.ok).toBe(true); // the old default made this a denial
+      if (result?.ok) {
+        expect(result.exitCode).toBe(0);
+        expect(result.truncated).toBe(true);
+        expect(result.output.length).toBeLessThanOrEqual(600_000);
+        expect(result.output).toContain('exit 0');
+      }
+    });
+  }, 30_000);
 });

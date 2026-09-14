@@ -31,11 +31,17 @@
 // lines append in order — the file is the source of truth, the record is the
 // fold (same posture as the kernel journal).
 //
-// CRASH TOLERANCE + APPEND-TIME RECOVERY: `load` tolerates a torn LAST line
-// (crash mid-append) and throws on a corrupt MIDDLE line (evidence
-// corruption). AppendMessage recovers the torn case before writing —
-// truncating back to the last complete line — so the next append cannot glue
-// onto the fragment and brick every future load (see recoverTornTail).
+// CRASH TOLERANCE + APPEND-TIME RECOVERY: `load` tolerates only an
+// UNTERMINATED torn LAST line (a genuine crash mid-append — the file does
+// not end with a newline); a malformed line that was COMPLETELY written
+// (the file ends with a newline) throws the same corrupt-line error as a
+// corrupt MIDDLE line, because evidence corruption is not a torn write.
+// AppendMessage recovers the torn case before writing — truncating back to
+// the last complete line — so the next append cannot glue onto the fragment
+// and brick every future load (see recoverTornTail); that recovery runs
+// INSIDE the store's serialized write chain, so a read-check-truncate-
+// then-append is one step and can never interleave with an in-flight
+// append.
 import { randomBytes } from 'node:crypto';
 import { appendFile, mkdir, mkdtemp, readFile, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -142,7 +148,9 @@ export class SessionStore {
    * a workspace the caller obtained from `tempWorkspace` — nothing is shared
    * with any prior session. Returns the record (its `sessionId` is the
    * OpInvocation.sessionRef / WorkerResult.sessionId handle for later
-   * resumption).
+   * resumption). Session records are worker CONVERSATION EVIDENCE and must
+   * not be world-readable: the store dir is created 0o700 and the file
+   * 0o600 (mode applies at CREATION; the process umask still masks it).
    */
   async create(workspace: string): Promise<SessionRecord> {
     const sessionId = `ses-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
@@ -155,26 +163,39 @@ export class SessionStore {
       createdAt,
       workspace,
     });
-    await mkdir(this.sessionsDir, { recursive: true });
-    await appendFile(this.pathFor(sessionId), `${JSON.stringify(line)}\n`, 'utf8');
+    await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 });
+    await appendFile(this.pathFor(sessionId), `${JSON.stringify(line)}\n`, {
+      encoding: 'utf8',
+      mode: 0o600,
+    });
     return { sessionId, createdAt, workspace, messages: [] };
   }
 
   /**
    * Append one message to `<sessionId>.jsonl`. Validates the message against
    * SessionMessageSchema BEFORE disk (invalid messages are loud errors),
-   * recovers a torn tail first (see recoverTornTail), and refuses unknown
-   * sessions — appending never fabricates a session. Single-writer
-   * discipline applies (same as the journal): one writer per store.
+   * refuses unknown sessions (appending never fabricates one), and performs
+   * torn-tail recovery (see recoverTornTail) INSIDE the chained write
+   * closure — read-check-truncate-then-append is ONE serialized step, so a
+   * recovery can never interleave with this store's in-flight append and
+   * truncate a line that was just written (the file is created 0o600; the
+   * mode applies at creation, umask still masks). Single-writer discipline
+   * applies (same as the journal): one writer per store.
    */
   async appendMessage(sessionId: string, message: SessionMessage): Promise<void> {
     assertSafeSessionId(sessionId);
     const parsed: SessionMessage = SessionMessageSchema.parse(message);
-    await this.assertSessionExists(sessionId);
     const line: SessionMessageLine = { type: 'message', message: parsed };
     const write = async (): Promise<void> => {
-      await mkdir(this.sessionsDir, { recursive: true });
-      await appendFile(this.pathFor(sessionId), `${JSON.stringify(line)}\n`, 'utf8');
+      // Existence + torn-tail recovery INSIDE the chain (issue #18): run
+      // before joining it, a recovery could interleave with an in-flight
+      // append and truncate away a line that was just appended.
+      await this.assertSessionExists(sessionId);
+      await mkdir(this.sessionsDir, { recursive: true, mode: 0o700 });
+      await appendFile(this.pathFor(sessionId), `${JSON.stringify(line)}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+      });
     };
     const next = this.tail.then(write, write);
     this.tail = next.catch(() => undefined);
@@ -233,11 +254,14 @@ export class SessionStore {
   /**
    * Load a session by id: `undefined` when no record exists (unknown
    * sessionRef — a fresh invocation must be started instead of a fake
-   * resume). A torn LAST line is ignored (crash mid-append); an unparsable
-   * MIDDLE line throws (evidence corruption); a header whose sessionId
-   * disagrees with the file it sits in throws (the journal's
-   * identity-match rule). Only a torn HEADER (create() crashed before the
-   * first byte) yields `undefined` — that session never existed.
+   * resume). Only an UNTERMINATED last line is a torn tail (crash
+   * mid-append) and is dropped; a malformed line that was COMPLETELY
+   * written — the file ends with a newline — throws the same corrupt-line
+   * error as a middle line: that is evidence corruption, not a torn write
+   * (issue #18). A header whose sessionId disagrees with the file it sits
+   * in throws (the journal's identity-match rule). Only a torn HEADER
+   * (create() crashed before the first byte) yields `undefined` — that
+   * session never existed.
    */
   async load(sessionId: string): Promise<SessionRecord | undefined> {
     assertSafeSessionId(sessionId);
@@ -249,21 +273,27 @@ export class SessionStore {
       throw err;
     }
     if (raw === '') return undefined; // create() crashed before the header landed
+    // The torn-tail distinction is the file's LAST BYTE (issue #18): a
+    // final newline means the last line was completely written — a
+    // malformed one is corruption and must throw; no newline means a
+    // genuine mid-write fragment, which is what a torn tail IS.
+    const endsWithNewline = raw.endsWith('\n');
     const lines = raw.split('\n');
-    if (lines[lines.length - 1] === '') {
-      lines.pop(); // file ended with a complete newline; the '' split artifact is not a line
+    if (endsWithNewline) {
+      lines.pop(); // the '' split artifact after the final newline is not a line
     }
     let header: SessionHeaderLine | undefined;
     const messages: SessionMessage[] = [];
     for (let i = 0; i < lines.length; i++) {
       const parsed = parseLine(lines[i]);
       if (parsed === null) {
-        if (i === lines.length - 1) {
-          break; // torn tail: crash mid-append, only the LAST line may be lost
+        if (i === lines.length - 1 && !endsWithNewline) {
+          break; // torn tail: a genuine mid-write fragment — only the LAST line may be lost
         }
         throw new Error(
-          `session: corrupt line ${i + 1} of ${this.pathFor(sessionId)} — middle lines must be ` +
-            'valid session lines (only a trailing torn line is tolerated)',
+          `session: corrupt line ${i + 1} of ${this.pathFor(sessionId)} — the line was completely ` +
+            'written but is not a valid session line (only an unterminated trailing fragment ' +
+            '— a real mid-write crash — is tolerated)',
         );
       }
       if (parsed.type === 'session') {

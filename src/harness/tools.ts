@@ -26,12 +26,18 @@
 // containment (lexical, then symlink realpath re-check) → config allowlist →
 // execution (fs / child_process). Each step short-circuits into a denial.
 //
-// SANDBOX MAPPING (driver seam SandboxLevel):
+// SANDBOX MAPPING + TRUST BOUNDARY (driver seam SandboxLevel; issue #28):
+// sandboxPolicy governs the TOOL SURFACE — which tools exist, and what
+// read/edit may touch via the lexical + realpath path guards below. `run`
+// commands execute with HOST PRIVILEGES, scoped to the cwd convention only
+// (cwd = workspace); the command allowlist (token patterns / anchored re:)
+// is the additional GATE over what may run, never a confinement of how.
+// 'workspace-write' does NOT confer OS-level confinement: there is no
+// sandbox-exec/landlock/bwrap in v1 — OS-sandbox enforcement is the
+// recorded T1.8 strategy question.
 //   - 'read-only'       → `edit`/`run` deny with 'sandbox: read-only'; `read`
 //                         stays available.
 //   - 'none' | 'workspace-write' → tools behave per config.
-//   True OS sandboxing is a DRIVER-specific concern; the harness enforces
-//   the workspace boundary + allowlists only.
 //
 // SYMLINK CHANNEL (named limitation + partial hardening): containment is
 // lexical, and the `run` tool is the SYMLINK-PLANTING VECTOR — an allowlisted
@@ -526,7 +532,10 @@ export function buildTools(
       name: 'run',
       description: capDescription(
         'Execute a shell command inside the workspace and capture its stdout, stderr, and exit code. ' +
-          'Input: { command }. Governed by the configured command allowlist, timeout, and output cap.',
+          'Input: { command }. TRUST BOUNDARY: commands run with HOST privileges, scoped to the ' +
+          'workspace-cwd convention only — the configured allowlist, timeout, and output cap are ' +
+          'gates over what may run, not an OS sandbox. Allowlist syntax: whitespace token prefixes, ' +
+          'or anchored re: patterns as the deliberate metacharacter escape hatch.',
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: RunToolInputSchema,
@@ -547,6 +556,15 @@ export function buildTools(
         try {
           const { stdout, stderr } = await execAsync(command, {
             cwd: workspaceAbs,
+            // maxBuffer is BYTES; the output cap is CHARS. Size the buffer
+            // comfortably above the cap so capOutput does the truncating
+            // (4 bytes/char covers UTF-8's worst case, +64KiB slack for the
+            // exit/stdout wrapper): at exec's 1 MiB default a noisy command
+            // rejects with a string-code error BEFORE the cap truncates —
+            // a 'run failed' denial instead of a truncated result (issue #18).
+            ...(runCfg.maxOutputChars !== undefined
+              ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
+              : {}),
             ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
           });
           const capped = capOutput(formatOutcome(0, false, stdout, stderr), runCfg.maxOutputChars);

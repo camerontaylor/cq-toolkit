@@ -1,13 +1,74 @@
-// Session-store tests — PR 10 round-1 fix 2: torn-tail-then-append must not
-// brick the session. load() tolerates a torn last line; appendMessage now
-// recovers it (truncate to the last complete line) BEFORE appending, so the
-// record stays the viable resume path. Evidence corruption (a corrupt line
-// in the middle of a fully-written file) is NOT healed — it stays loud.
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+// Session-store tests — PR 10 round-1 fix 2 + issue #18:
+//   - torn-tail-then-append must not brick the session. load() tolerates a
+//     torn last line; appendMessage now recovers it (truncate to the last
+//     complete line) BEFORE appending, so the record stays the viable resume
+//     path. Evidence corruption (a corrupt line in the middle of a
+//     fully-written file) is NOT healed — it stays loud.
+//   - issue #18's load-side check: only an UNTERMINATED last line is a torn
+//     tail. A malformed line that was completely written (the file ends with
+//     a newline) throws — that is evidence corruption, not a torn write.
+//   - issue #18's append-side serialization: torn-tail recovery runs INSIDE
+//     the write chain, so it can never interleave with an in-flight append.
+//   - issue #18's privacy: the store dir is 0o700, the record file 0o600.
+import { appendFile, mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test, vi } from 'vitest';
 import { SessionStore } from '../../src/harness/session.js';
+
+// TRANSPARENT fs gate for the serialization test (below): when `gate` is
+// null every call delegates untouched; when armed, calls on the gated
+// session file are logged and the gate's marker line parks IN FLIGHT until
+// released. vi.mock (not vi.spyOn) because the node builtin namespace is
+// not redefinable.
+const fsGate = vi.hoisted(() => ({
+  state: null as null | {
+    sessionFile: string;
+    marker: string;
+    events: string[];
+    wait: Promise<void>;
+    release: () => void;
+  },
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const passthroughAppend = (file: unknown, data: unknown, options?: unknown): Promise<void> =>
+    actual.appendFile(
+      file as Parameters<typeof actual.appendFile>[0],
+      data as Parameters<typeof actual.appendFile>[1],
+      options as Parameters<typeof actual.appendFile>[2],
+    );
+  return {
+    ...actual,
+    appendFile: (file: unknown, data: unknown, options?: unknown): Promise<void> => {
+      const gate = fsGate.state;
+      if (gate === null || file !== gate.sessionFile) return passthroughAppend(file, data, options);
+      const text = typeof data === 'string' ? data : '';
+      if (text.includes('"type":"session"')) return passthroughAppend(file, data, options); // the header
+      if (text.includes(gate.marker)) {
+        gate.events.push('append:A');
+        return gate.wait.then(() => passthroughAppend(file, data, options)); // parked IN FLIGHT
+      }
+      gate.events.push('append:B');
+      return passthroughAppend(file, data, options);
+    },
+    readFile: (file: unknown, options?: unknown): Promise<string> => {
+      const gate = fsGate.state;
+      if (gate === null || file !== gate.sessionFile) {
+        return actual.readFile(
+          file as Parameters<typeof actual.readFile>[0],
+          options as Parameters<typeof actual.readFile>[1],
+        ) as Promise<string>;
+      }
+      gate.events.push('read'); // a torn-tail recovery read on the session file
+      return actual.readFile(
+        file as Parameters<typeof actual.readFile>[0],
+        options as Parameters<typeof actual.readFile>[1],
+      ) as Promise<string>;
+    },
+  };
+});
 
 async function withScratch(body: (scratchDir: string) => Promise<void>): Promise<void> {
   const scratchDir = await mkdtemp(join(tmpdir(), 'harness-session-'));
@@ -99,4 +160,132 @@ describe('SessionStore torn-tail recovery (fix 2)', () => {
         await expect(store.load(record.sessionId)).rejects.toThrow(/corrupt line/);
       });
     });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #18 — load-side torn-tail check: the file's LAST BYTE decides. A
+// malformed line followed by a newline was COMPLETELY written: dropping it
+// as a "torn tail" is evidence corruption and must throw.
+// ---------------------------------------------------------------------------
+
+describe('load-side torn-tail check (issue #18: a completed write is not a torn write)', () => {
+  test('(a) malformed last line WITH the trailing newline → load THROWS', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      await appendFile(
+        join(scratchDir, `${record.sessionId}.jsonl`),
+        '{"type":"message","message":{"role":"user"}}\n', // complete write, invalid line
+        'utf8',
+      );
+      await expect(store.load(record.sessionId)).rejects.toThrow(
+        /completely written but is not a valid session line/,
+      );
+    });
+  });
+
+  test('(b) the same malformed line WITHOUT the trailing newline is a genuine torn tail — tolerated, dropped', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      await appendFile(
+        join(scratchDir, `${record.sessionId}.jsonl`),
+        '{"type":"message","message":{"role":"user"}}', // NO trailing newline — mid-write fragment
+        'utf8',
+      );
+      const loaded = await store.load(record.sessionId);
+      expect(loaded).toBeDefined();
+      expect(loaded?.messages).toEqual([]); // the fragment is dropped; the header loads
+    });
+  });
+
+  test('(c) a valid COMPLETE last line still loads', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      await store.appendMessage(record.sessionId, {
+        role: 'user',
+        content: 'complete line',
+        at: '2026-09-14T00:00:00.000Z',
+      });
+      const loaded = await store.load(record.sessionId);
+      expect(loaded?.messages.map((m) => m.content)).toEqual(['complete line']);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #18 — append-side serialization: recovery inside the write chain
+// ---------------------------------------------------------------------------
+
+describe('appendMessage recovery is serialized inside the write chain (issue #18)', () => {
+  afterEach(() => {
+    fsGate.state = null;
+  });
+
+  test('an in-flight append can never be interleaved by a second recovery: B reads only after A wrote', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      const sessionFile = join(scratchDir, `${record.sessionId}.jsonl`);
+      const events: string[] = [];
+      let release!: () => void;
+      const wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      // Arm the fs gate: A's line parks IN FLIGHT on the deferred until the
+      // test releases it; every recovery read on the session file is logged.
+      fsGate.state = { sessionFile, marker: 'in-flight line', events, wait, release };
+
+      // A starts and parks mid-append; B is requested while A is in flight
+      // (two stores on one dir is the driver pattern, but the serialization
+      // property is per store CHAIN — this is its deterministic proof).
+      const a = store.appendMessage(record.sessionId, {
+        role: 'user',
+        content: 'in-flight line',
+        at: '2026-09-14T00:00:00.000Z',
+      });
+      const b = store.appendMessage(record.sessionId, {
+        role: 'assistant',
+        content: 'second line',
+        at: '2026-09-14T00:00:01.000Z',
+      });
+      // Yield macrotask turns: with the OLD shape, B's recovery ran BEFORE
+      // joining the chain and would land here, while A's append is parked.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      // THE FIX: B's recovery read happens only AFTER A's append completed
+      // — read-check-truncate-then-append is one serialized chain step.
+      expect(events.indexOf('append:A')).toBeLessThan(events.lastIndexOf('read'));
+      release();
+      await Promise.all([a, b]);
+      // Nothing was lost: both messages load.
+      const loaded = await store.load(record.sessionId);
+      expect(loaded?.messages.map((m) => m.content)).toEqual(['in-flight line', 'second line']);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Issue #18 — privacy: session records are worker conversation evidence
+// ---------------------------------------------------------------------------
+
+describe('session file modes (issue #18: not world-readable)', () => {
+  test('the store dir is created 0o700 and the record file 0o600 (mode at creation; umask still masks)', async () => {
+    await withScratch(async (scratchDir) => {
+      const sessionsDir = join(scratchDir, 'sessions'); // created BY the store's mkdir
+      const store = new SessionStore(sessionsDir);
+      const record = await store.create(scratchDir);
+      const file = join(sessionsDir, `${record.sessionId}.jsonl`);
+      expect((await stat(sessionsDir)).mode & 0o777).toBe(0o700);
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      // Further appends (file already exists — the creation mode stands).
+      await store.appendMessage(record.sessionId, {
+        role: 'user',
+        content: 'x',
+        at: '2026-09-14T00:00:00.000Z',
+      });
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+    });
+  });
 });
