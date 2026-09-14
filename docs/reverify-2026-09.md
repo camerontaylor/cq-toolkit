@@ -13,11 +13,12 @@ versions is the npm registry (https://registry.npmjs.org) plus, for gitleaks,
 the GitHub release. The "this repo's pin" column below mirrors this repo's
 authoritative pin sources — package.json for the npm pins and
 .github/workflows/denylist.yml for the gitleaks version-and-digest pin. All
-checks dated 2026-09-14. Per the lane brief's dependency rule, T1.4
+checks were executed 2026-09-13 (UTC); this write-up was committed 2026-09-14.
+Per the lane brief's dependency rule, T1.4
 re-confirms the `ai` / `@ai-sdk/*` pins before driver work begins — this
 record is the input to that confirmation, not a substitute for it.
 
-## Runtime dependencies (npm registry, checked 2026-09-14)
+## Runtime dependencies (npm registry, checked 2026-09-13)
 
 | package | current version | license (SPDX, registry) | this repo's pin |
 | --- | --- | --- | --- |
@@ -31,7 +32,7 @@ record is the input to that confirmation, not a substitute for it.
 | `proper-lockfile` | 4.1.2 | MIT | 4.1.2 |
 | `@ast-grep/napi` | 0.45.3 | MIT | 0.45.3 |
 
-Every pin is at the registry-current version as of 2026-09-14 — nothing is
+Every pin is at the registry-current version as of 2026-09-13 — nothing is
 stale; the leader saw the same 7.0.99 for `ai` at pin time. The nine rows
 above cover every runtime dependency in package.json; the devDependencies
 (the `typescript` 6 alias chain, `vitest`, the eslint set, and `@types/node`)
@@ -51,9 +52,14 @@ text at all — the actual terms ship in the tarball's LICENSE.md, which states:
 "© Anthropic PBC. All rights reserved. Use is subject to the Legal Agreements
 outlined here: https://code.claude.com/docs/en/legal-and-compliance" (read from
 https://registry.npmjs.org/@anthropic-ai/claude-agent-sdk/-/claude-agent-sdk-0.3.270.tgz,
-2026-09-14). So the license is not an OSI/SPDX license but Anthropic PBC's
-legal-agreement terms. It ships as an optional peer here precisely so consumers
-of this toolkit are not bound by those terms.
+2026-09-13). So the license is not an OSI/SPDX license but Anthropic PBC's
+legal-agreement terms. This SDK ships as an optional peer dependency: npm
+installs it only when a consumer explicitly opts in, so a consumer who never
+installs it never receives those terms. That is an omission of the dependency,
+not a licence exemption — a consumer who does install or use
+`@anthropic-ai/claude-agent-sdk` is bound by its LICENSE.md terms like any
+other licensee. The optional-peer marking governs what npm fetches by default;
+it does not opt anyone out of terms accepted by installing.
 
 ## gitleaks (CI tool, not an npm dependency of this package)
 
@@ -61,7 +67,7 @@ The gitleaks this repo uses is the Go release pinned — version plus tarball
 digest — in `.github/workflows/denylist.yml`: v8.30.1
 (https://github.com/gitleaks/gitleaks/releases/tag/v8.30.1). Its license is MIT,
 per the GitHub repository metadata (https://api.github.com/repos/gitleaks/gitleaks,
-`license.spdx_id` = MIT, checked 2026-09-14); full text at
+`license.spdx_id` = MIT, checked 2026-09-13); full text at
 https://github.com/gitleaks/gitleaks/blob/master/LICENSE. Disambiguation: the
 unrelated npm package named `gitleaks` (version 1.0.0, ISC,
 https://registry.npmjs.org/gitleaks) is NOT this tool and is not used here in
@@ -72,23 +78,35 @@ any way — the tool comes from the digest-pinned GitHub release only.
 - Repository: https://github.com/anomalyco/models.dev — the community-maintained
   database behind https://models.dev/ ("An open-source database of AI models",
   per the site). The site footer's edit link points at `sst/models.dev`, which
-  GitHub redirects to `anomalyco/models.dev` (checked 2026-09-14).
+  GitHub redirects to `anomalyco/models.dev` (checked 2026-09-13).
 - License, quoted from the repository's LICENSE file
-  (https://github.com/anomalyco/models.dev/blob/dev/LICENSE, read 2026-09-14):
+  (https://github.com/anomalyco/models.dev/blob/dev/LICENSE, read 2026-09-13):
   it opens "MIT License / Copyright (c) 2025 models.dev / Permission is hereby
   granted, free of charge, to any person obtaining a copy of this software and
   associated documentation files..." — the standard MIT grant; GitHub's license
   metadata agrees (`spdx_id` MIT).
-- Verdict: vendoring-allowed — the data repository is MIT-licensed, whose grant
-  permits copying and redistribution provided the copyright notice is preserved.
+- Verdict: vendoring-allowed — for the data classes this toolkit actually
+  vendors: the per-model pricing entries for the eval-matrix families
+  (claude, gpt, glm, deepseek) — each entry carrying the model id and its
+  USD-per-million rates (input, output, and the optional cacheRead/cacheWrite
+  terms) — transcribed from the provider pages into the TypeScript table
+  `src/driver/pricing/data.ts`. Terms basis: the upstream repository's root
+  MIT LICENSE covers the repository's content, including its data files (the
+  upstream README describes the same data as per-provider/per-model TOML with
+  per-model `license` fields and links); the per-model `license` field
+  describes each MODEL's own terms, not the terms of the pricing data itself,
+  so it does not restrict copying the data. The MIT grant conditions copying
+  on carrying the copyright and permission notice; the COMPLETE notice
+  travels in `data.ts`'s header — which compiles into the published `dist` —
+  so the distributed data carries it.
 
-## ADR revisit triggers (status as of 2026-09-14)
+## ADR revisit triggers (status as of 2026-09-13)
 
 | trigger | status | evidence |
 | --- | --- | --- |
-| AI SDK HarnessAgent stabilizes | not fired | docs still say "Harness packages are experimental. Expect breaking changes between releases as this early API gets further refined." — https://ai-sdk.dev/docs/ai-sdk-harnesses/overview (2026-09-14) |
-| pi publishes a stability/semver statement | not fired | pi coding agent still 0.x — 0.85.1 at `@earendil-works/pi-coding-agent` (MIT, registry), the maintained name; the original `@mariozechner/pi-coding-agent` (0.73.1) is deprecated at the registry in its favor ("please use @earendil-works/pi-coding-agent instead going forward"); breaking changes documented in its changelog, no stability statement found — https://www.npmjs.com/package/@earendil-works/pi-coding-agent and https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md (2026-09-14) |
-| models.dev license verified | fired — answered by this document | MIT; see the verdict above. T1.4 may vendor the data with the copyright notice preserved |
-| Anthropic blesses non-Claude routing through the Agent SDK | not fired | no such statement found in the 0.3.270 README or the official docs — https://code.claude.com/docs/en/agent-sdk/overview (2026-09-14) |
-| codex-sdk matures | not fired | `@openai/codex-sdk` remains pre-1.0 (0.154.0, https://registry.npmjs.org/@openai/codex-sdk, 2026-09-14); no stability statement found |
+| AI SDK HarnessAgent stabilizes | not fired | docs still say "Harness packages are experimental. Expect breaking changes between releases as this early API gets further refined." — https://ai-sdk.dev/docs/ai-sdk-harnesses/overview (2026-09-13) |
+| pi publishes a stability/semver statement | not fired | pi coding agent still 0.x — 0.85.1 at `@earendil-works/pi-coding-agent` (MIT, registry), the maintained name; the original `@mariozechner/pi-coding-agent` (0.73.1) is deprecated at the registry in its favor ("please use @earendil-works/pi-coding-agent instead going forward"); breaking changes documented in its changelog, no stability statement found — https://www.npmjs.com/package/@earendil-works/pi-coding-agent and https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md (2026-09-13) |
+| models.dev license verified | fired — answered by this document | MIT for the vendored scope — the eval-matrix pricing entries now transcribed into `src/driver/pricing/data.ts` (the upstream root MIT covers its data files; per-model `license` fields describe the models' own terms, not the data's); see the verdict above. T1.4 may vendor that scope with the copyright notice preserved |
+| Anthropic blesses non-Claude routing through the Agent SDK | not fired | no such statement found in the 0.3.270 README or the official docs — https://code.claude.com/docs/en/agent-sdk/overview (2026-09-13) |
+| codex-sdk matures | not fired | `@openai/codex-sdk` remains pre-1.0 (0.154.0, https://registry.npmjs.org/@openai/codex-sdk, 2026-09-13); no stability statement found |
 | R1 staleness / 6-week re-verify | fired — discharged by this document | this record IS that re-verification (R1/R2 were current as of 2026-09-12) |

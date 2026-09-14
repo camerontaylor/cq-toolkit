@@ -245,16 +245,26 @@ of truth, re-exported by `governor.ts` and pinned to the doc by
 the spike gathered no SIGTERM→SIGKILL-resistance evidence, so the T1.5
 process-ladder measurements stand.
 
-**DD-9 result: CLOSED (T1.6b)** — the api-equivalent budget shipped. Every
-usage-bearing driver result carries `costUSD` labeled
-`costBasis: 'modeled'` (the list-price proxy from `src/driver/pricing`), so
-`maxUsd` binds subscription-routed lanes through the modeled figure
-(primary), and `RunOptions.maxTokens` binds independently as the
-unpriced-model backstop. Folding real usage that carries no `costUSD` under
-a configured `maxUsd` trips the budget loud — never fail open (the
-escapes: price the model, or cap with `maxTokens`), and the seed-time trip
-covers BOTH caps, so a resumed run whose journaled rollup already overruns
-either cap stops before admitting anything. Full disposition:
+**DD-9 result: CLOSED for the governor half (T1.6b)** — what shipped in
+T1.6b is the GOVERNOR's machinery: `GovernorConfig.maxTokens` with the
+parallel token rollup, the modeled-cost labeling, the unpriced-usage
+fail-loud fold, and the seed-time trip over BOTH caps. Every PRICED
+usage-bearing driver result carries `costUSD` labeled `costBasis: 'modeled'`
+(the list-price proxy from `src/driver/pricing`); a result from an unpriced
+model carries NEITHER field. On that basis `maxUsd` binds
+subscription-routed lanes through the modeled figure (primary), and
+`RunOptions.maxTokens` binds independently as the unpriced-model backstop.
+Folding real usage that carries no `costUSD` under a configured `maxUsd`
+trips the budget loud — never fail open (the escapes: price the model, or
+cap with `maxTokens`), and the seed-time trip covers BOTH caps, so a resumed
+run whose journaled rollup already overruns either cap stops before
+admitting anything. NOT yet wired in production: there is NO production
+folding path yet — the drivers never report usage or cost
+(`reportUsage`/`reportCost` are exercised only by custom/test ops) and the
+per-result `observeResult` fold has no production caller;
+`RunOptionsSchema` does not yet accept `maxTokens` (the strict schema
+rejects the option). The driver→governor bridge is review-debt #14. Full
+disposition:
 `docs/dd-9-api-equivalent-budget.md`.
 
 Every timer in the governor flows through the injected `Clock`

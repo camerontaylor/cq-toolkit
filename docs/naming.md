@@ -15,7 +15,7 @@ public npm registry (https://registry.npmjs.org) and GitHub repository search.
 | candidate | npm status | GitHub name collisions | decision |
 | --- | --- | --- | --- |
 | `cq-toolkit` | free (404) — see below | 17 repos match `cq-toolkit in:name`; only exact-name hit besides ours is `csiberlin/CQ-Toolkit` (unrelated personal repo) | chosen |
-| `@camerontaylor/cq-toolkit` | free (404) — see below | not checked — fallback only | fallback; not needed, kept on record |
+| `@camerontaylor/cq-toolkit` | free (404) at T0.5 check time — published by the owner later the same day, see the decision at the foot | not checked — fallback only | fallback; not needed, kept on record |
 | `cq` | taken — 0.0.1 exists (see legacy note below) | not applicable | never a candidate (legacy note below) |
 
 ## Legacy note: the bare short name was taken
@@ -33,16 +33,30 @@ plan §6 the name is to be reserved early rather than left to race the v1
 release.
 
 > **Reservation status: BLOCKED — publish-capable npm credentials missing
-> (2026-09-14).** The lane leader attempted the placeholder publish — a
-> tarball containing only LICENSE + README.md at `0.0.0`, per the plan §6
+> (2026-09-14; superseded — the owner's scoped publish cleared the block, see
+> the decision at the foot of this record).** The lane leader attempted the
+> placeholder publish — a
+> tarball whose payload is LICENSE + README.md — plus the package.json that
+> npm itself always includes in every tarball — at `0.0.0`, per the plan §6
 > allowance (it does not violate the no-staging rule, which governs the v1
-> feature release). Exact procedure, reproducible as written:
+> feature release).
+>
+> Historical note (2026-09-14): this procedure records the blocked attempt
+> verbatim, under the then-chosen unscoped name. The block was cleared the
+> same day — the owner published the placeholder as the scoped
+> `@camerontaylor/cq-toolkit@0.0.0` (the decision at the foot of this
+> record); the procedure stands as recorded — substitute the scoped name if
+> the recipe is ever reused.
+>
+> Exact procedure, reproducible as written:
 >
 > 1. Create a temp dir OUTSIDE this repo and work there. Publishing from the
 >    repo's own manifest would NOT produce the placeholder payload: its
 >    `files` allowlist is `["dist", "policy", "LICENSE", "README.md"]`, so the
 >    tarball would ship dist/ and policy/. The temp-dir manifest override in
->    the next step is what makes the payload LICENSE + README only.
+>    the next step is what keeps the payload to LICENSE + README + the
+>    npm-mandatory package.json (npm never builds a tarball without the
+>    manifest).
 > 2. In that dir, write a minimal package.json:
 >    `{"name":"cq-toolkit","version":"0.0.0","description":"…","license":"MIT","files":["LICENSE","README.md"],"private":false}`
 > 3. Copy LICENSE and README.md from the repo root into that dir.
@@ -58,7 +72,8 @@ release.
 
 Executor re-verification: `npm view cq-toolkit` and
 `npm view @camerontaylor/cq-toolkit` both returned registry 404 at re-check
-time — consistent with the blocked reservation above; the publish attempt and
+time (2026-09-14, before the owner's scoped publish recorded below) —
+consistent with the blocked reservation above; the publish attempt and
 its failure are the lane leader's record, stated here verbatim.
 
 ## GitHub repo-name near-matches (informational only)
@@ -77,10 +92,10 @@ package name.
 ## Sources
 
 - https://registry.npmjs.org/cq-toolkit — 404
-- https://registry.npmjs.org/@camerontaylor%2fcq-toolkit — 404
+- https://registry.npmjs.org/@camerontaylor%2fcq-toolkit — 404 at T0.5 check time (published by the owner later the same day — see the owner decision above)
 - https://registry.npmjs.org/cq — exists, version 0.0.1
 - https://api.github.com/search/repositories?q=cq-toolkit+in:name — 17 results
-- package.json of this repository — `"name": "cq-toolkit"`, `"version": "0.0.0"`
+- package.json of this repository — `"name": "@camerontaylor/cq-toolkit"`, `"version": "0.0.0"` (unscoped `cq-toolkit` was the T0.5-era name; see the owner decision above)
 
 
 ## Owner decision 2026-09-14 — scoped name adopted

@@ -23,8 +23,10 @@ thrown config errors and 127 for a missing binary — binding from phase 1.
 
 ## I2 — no-privileged-reviewer acceptance
 
-**Rule.** A change is acceptable when any non-author review exists, plus either a
-settle of ≥10 minutes since the last commit or an explicit all-clear postdating it.
+**Rule.** A change is acceptable when a non-author review of the last commit's exact
+head state exists — evidence covering an earlier commit never qualifies, no matter
+how long the settle, and no matter when it was resubmitted — plus either a settle
+of ≥10 minutes since that commit or an explicit all-clear that also postdates it.
 Unresolved external threads block; truncated review data fails closed.
 
 **Why.** Requiring a privileged reviewer deadlocks a queue when that reviewer is

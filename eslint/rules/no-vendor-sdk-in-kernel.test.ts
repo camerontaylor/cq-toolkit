@@ -6,6 +6,7 @@
 // src/kernel is a valid case of the CONFIG, not of the rule, and cannot be
 // expressed here — it is covered by the eslint.config.js files scoping.
 import { RuleTester } from 'eslint';
+import tseslint from 'typescript-eslint';
 import { describe, it } from 'vitest';
 import rule from './no-vendor-sdk-in-kernel.mjs';
 
@@ -47,6 +48,10 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
       errors: [{ messageId: 'vendorSdk' }],
     },
     {
+      code: 'import gemini from "@google/genai";',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
       code: 'import p from "ai/provider";',
       errors: [{ messageId: 'vendorSdk' }],
     },
@@ -64,6 +69,19 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
     },
     {
       code: 'require(`@anthropic-ai/claude-agent-sdk`);',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: 'import OpenAI = require("openai");',
+      languageOptions: {
+        ecmaVersion: 'latest',
+        sourceType: 'module',
+        parser: tseslint.parser,
+      },
+      errors: [{ messageId: 'vendorSdk' }],
+    },
+    {
+      code: 'require.resolve("openai");',
       errors: [{ messageId: 'vendorSdk' }],
     },
   ],

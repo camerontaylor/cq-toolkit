@@ -6,15 +6,35 @@
 // https://models.dev/zai, https://models.dev/deepseek). Data repository:
 // https://github.com/anomalyco/models.dev.
 //
-// LICENSE (the DD-3 verdict, verified in docs/reverify-2026-09.md, checked
-// 2026-09-14): the repository's LICENSE file "opens 'MIT License /
-// Copyright (c) 2025 models.dev / Permission is hereby granted, free of
-// charge, to any person obtaining a copy of this software and associated
-// documentation files…' — the standard MIT grant; GitHub's license metadata
-// agrees (spdx_id MIT)." VERDICT (quoted): "vendoring-allowed — the data
-// repository is MIT-licensed, whose grant permits copying and redistribution
-// provided the copyright notice is preserved." This header preserves that
-// notice, as the verdict requires.
+// LICENSE (DD-3; verified in docs/reverify-2026-09.md — checks dated
+// 2026-09-13): the upstream data repository is MIT-licensed (spdx_id MIT).
+// VERDICT (recorded): vendoring-allowed for the scope vendored here — the
+// eval-matrix pricing entries. The upstream notice travels with this table,
+// as the MIT grant conditions copying on it:
+//
+//   models.dev — Copyright (c) 2025 models.dev
+//
+//   Permission is hereby granted, free of charge, to any person obtaining a
+//   copy of this software and associated documentation files (the
+//   "Software"), to deal in the Software without restriction, including
+//   without limitation the rights to use, copy, modify, merge, publish,
+//   distribute, sublicense, and/or sell copies of the Software, and to
+//   permit persons to whom the Software is furnished to do so, subject to
+//   the following conditions:
+//
+//   The above copyright notice and this permission notice shall be included
+//   in all copies or substantial portions of the Software.
+//
+//   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+//   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+//   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+//   IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+//   CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+//   TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+//   SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+//
+// Record pointer: docs/reverify-2026-09.md. Header comments here are synced
+// with that record when it changes.
 //
 // VALUES AS-OF: 2026-09. Rates are USD per MILLION tokens
 // (PerMillionRates). Precision is not load-bearing here: structure and
