@@ -2,7 +2,7 @@
 # by pure fast-forward (I3). Runs on every push to merge-queue; waits until
 # every required check named in {{GATE_CHECKS}} has SUCCEEDED on the gated
 # commit (never promotes unchecked, never promotes a failure), then
-# ff-pushes it to main behind two merge-base guards. This workflow is the
+# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). This workflow is the
 # ONLY component that advances main. See policy/templates/README.md for the
 # token table and the entitlement facts.
 #
@@ -71,6 +71,12 @@ jobs:
         run: |
           set -euo pipefail
           checks="$(echo '{{GATE_CHECKS}}' | tr -d ' ' | tr ',' ' ')"
+          # Fail closed on an empty {{GATE_CHECKS}}: an empty list would run
+          # the wait loop zero times and promote with NO check validated.
+          if [ -z "${checks// /}" ]; then
+            echo "refusing: GATE_CHECKS is empty — the gate would promote with zero checks validated"
+            exit 1
+          fi
           deadline=$(( $(date +%s) + {{GATE_TIMEOUT_MIN}} * 60 ))
           while :; do
             failing=0
@@ -86,7 +92,7 @@ jobs:
             # non-success (a non-success conclusion is already terminal, so
             # it outranks waiting — fail fast instead of waiting out the
             # clock), passing only when EVERY matching row is
-            # completed+success.
+            # completed+success. A `skipped` conclusion is terminal and NEVER a pass: a skipped required check is missing, and missing = failing (invariant I4) — the shell below refuses it explicitly instead of waiting out the clock.
             runs="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?filter=latest" \
               --paginate \
               --jq '.check_runs[] | [.name, .status, (.conclusion // "")] | @tsv')"
@@ -95,7 +101,9 @@ jobs:
                 $1 == c {
                   n++
                   if ($2 != "completed") {
-                    if (v != "failing") { v = "waiting"; d = $2 }
+                    if (v != "failing" && v != "skipped") { v = "waiting"; d = $2 }
+                  } else if ($3 == "skipped") {
+                    if (v != "failing") { v = "skipped"; d = $3 }
                   } else if ($3 != "success") {
                     v = "failing"; d = $3
                   }
@@ -116,6 +124,10 @@ jobs:
                 waiting\ *)
                   echo "waiting: ${check} is ${verdict#waiting } on ${SHA}"
                   waiting=1
+                  ;;
+                skipped\ *)
+                  echo "refusing: ${check} concluded skipped on ${SHA} — a skipped required check is neither pass nor fail (missing = failing, I4)"
+                  failing=1
                   ;;
                 failing\ *)
                   echo "refusing: ${check} completed with conclusion ${verdict#failing } on ${SHA}"
@@ -141,8 +153,11 @@ jobs:
       # only by the guards and the push below; the token input re-keys the
       # origin remote to the promote PAT so the ff-push authenticates
       # with it.
+      # Pinned to an immutable commit SHA; persist-credentials deliberately
+      # stays ON here: this job pushes with the promote PAT and runs no repo
+      # code that could exfiltrate it.
       - name: Check out the merge-queue head (full history, promote-token remote)
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           ref: merge-queue
           fetch-depth: 0
@@ -156,10 +171,19 @@ jobs:
       - name: Fast-forward promote the gated sha to main (guarded)
         run: |
           set -euo pipefail
-          git fetch origin main
+          git fetch origin main merge-queue
           if git merge-base --is-ancestor "${SHA}" origin/main; then
             echo "no-op: ${SHA} is already an ancestor of main (already promoted)"
             exit 0
+          fi
+          # Tip guard: the gate promotes ONLY the current merge-queue tip.
+          # A manual dispatch (or a race with a newer queue push) must never
+          # promote an off-queue or stale commit; the tip's own gate run
+          # supersedes it, so refusing here loses no promotion.
+          queue_tip="$(git rev-parse origin/merge-queue)"
+          if [ "${SHA}" != "${queue_tip}" ]; then
+            echo "refusing: ${SHA} is not the current merge-queue tip (${queue_tip}) — promotion advances main to the tip only"
+            exit 1
           fi
           if ! git merge-base --is-ancestor origin/main "${SHA}"; then
             echo "refusing: main has diverged from merge-queue (origin/main is not an ancestor of ${SHA}) — merge main into merge-queue and let the gate re-run"

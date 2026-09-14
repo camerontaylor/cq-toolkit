@@ -51,9 +51,25 @@ if (process.argv.includes('--update')) {
   // Safe on any counted run (the unparsable-nonzero guard above already
   // failed those): tsc exits 1 whenever errors remain, so refusing nonzero
   // exits would make a lowered-but-nonzero baseline impossible to persist.
+  // Read the existing baseline FIRST: thresholds only tighten, so --update
+  // must never silently raise count past the current baseline (a 0 -> 1
+  // "update" is a regression, not a ratchet turn). A missing or unparsable
+  // baseline is the creation case --update exists for.
+  let previous = null;
+  try {
+    const parsed = JSON.parse(readFileSync(BASELINE, 'utf8'));
+    if (parsed !== null && typeof parsed === 'object' && typeof parsed.count === 'number') {
+      previous = parsed.count;
+    }
+  } catch {
+    // no parsable baseline yet — writing it is the creation case
+  }
+  if (previous !== null && count > previous) {
+    fail(`--update refuses to raise the baseline: ${count} error TS line(s) exceed the current baseline ${previous} — fix the errors; thresholds only tighten`);
+  }
   mkdirSync(dirname(BASELINE), { recursive: true });
   writeFileSync(BASELINE, `{"count": ${count}}\n`);
-  console.log(`ratchet-typecheck: baseline updated to ${count}`);
+  console.log(`ratchet-typecheck: baseline ${previous === null ? 'created' : 'updated'} to ${count}`);
   process.exit(0);
 }
 

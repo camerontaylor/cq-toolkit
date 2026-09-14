@@ -29,7 +29,7 @@ substitution.
 
 | token | used by | meaning |
 | --- | --- | --- |
-| `{{PROMOTE_SECRET}}` | init, gate, sync | NAME of the repository secret holding a PAT with `contents: write` (branch writes: bootstrap push, ff-promote, refs PATCH, merge API), `actions: write` (sync dispatches the gate), and `issues: write` (the divergence alarm) — a fine-grained PAT with those three permissions, or the coarse classic-PAT equivalent. Instantiated files reference it as `${{ secrets.<name> }}` — a name, never a value; a template or instantiation that embeds a token value is a denylist-class bug. |
+| `{{PROMOTE_SECRET}}` | init, gate, sync | NAME of the repository secret holding a PAT with `contents: write` (branch writes: bootstrap push, ff-promote, refs PATCH, merge API), `actions: write` (sync dispatches the gate), `issues: write` (the divergence alarm), and `checks: read` (the gate's required-check wait polls the check-runs API) — a fine-grained PAT with those four permissions, or the coarse classic-PAT equivalent. Instantiated files reference it as `${{ secrets.<name> }}` — a name, never a value; a template or instantiation that embeds a token value is a denylist-class bug. |
 | `{{GATE_CHECKS}}` | gate | comma list of required check names the gate waits for, e.g. `static,denylist` |
 | `{{GATE_TIMEOUT_MIN}}` | gate | minutes the gate waits for the checks before refusing to promote (default 20; never promote unchecked) |
 | `{{RUNNER}}` | required-check.md, affected-tests.md | `runs-on` label, e.g. `ubuntu-latest` |
@@ -109,9 +109,23 @@ component that advances `main`; sync's ahead case never writes `main`
 itself — it dispatches the gate, so there is exactly one promotion path and
 it is always behind the required-check wait and the merge-base guards.
 Never squash, never rewrite history, never force-push, never touch `main`
-by any other path. The gate guards promotion with two merge-base checks, in
-order: if the gated sha is already an ancestor of `main`, the promote is a
-logged no-op; if `main` is not an ancestor of the gated sha (main diverged),
+by any other path. The gate guards promotion with a merge-queue-tip guard
+plus two merge-base checks, in order: if the gated sha is already an
+ancestor of `main`, the promote is a logged no-op; if the gated sha is not
+the CURRENT `merge-queue` tip, the gate refuses (a manual dispatch may never
+promote an off-queue or stale commit — the tip's own gate run supersedes
+it); if `main` is not an ancestor of the gated sha (main diverged),
 the gate refuses and a human merges `main` into `merge-queue`; only then
 does it push `<sha>:refs/heads/main` — an update the server would reject as
 non-ff anyway if the guards had somehow raced.
+
+## Action pinning
+
+Every `uses:` in these templates and their instantiations is pinned to an
+immutable commit SHA (never a mutable `@v5` tag — tags can be retargeted
+after review). Required-check jobs additionally set
+`persist-credentials: false` on checkout: they run repo code, and the
+checkout token must not survive into it. The two queue-mechanics checkouts
+that push with the promote PAT (the gate's promotion checkout and the init
+bootstrap) deliberately KEEP the persisted credential — they run no repo
+code — and say so in a comment beside the pin.

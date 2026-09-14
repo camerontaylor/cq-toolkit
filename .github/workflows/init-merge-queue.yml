@@ -17,7 +17,7 @@ jobs:
       # enough: the only git work here is ls-remote, resolving main's tip,
       # and one ref push of a commit the server already has.
       - name: Check out the repo (tip only, promote-token remote)
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           fetch-depth: 1
           token: ${{ secrets.PROMOTE_TOKEN }}

@@ -49,11 +49,13 @@ see the I4 interplay above):
     runs-on: {{RUNNER}}
     steps:
       - name: Check out the repo (full history)
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
+          # Runs repo code, so the checkout token must not survive checkout.
           fetch-depth: 0
+          persist-credentials: false
       - name: Set up Node {{NODE_VERSION}}
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: {{NODE_VERSION}}
           cache: npm
@@ -75,8 +77,11 @@ see the I4 interplay above):
         run: |
           set -euo pipefail
           if [ -s "${RUNNER_TEMP}/changed.txt" ]; then
-            # shellcheck disable=SC2046
-            npx vitest related --run $(cat "${RUNNER_TEMP}/changed.txt")
+            # Pass the changed-file list as an argument array: an unquoted
+            # $(cat ...) word-splits and globs, corrupting paths with
+            # spaces or glob characters.
+            mapfile -t changed < "${RUNNER_TEMP}/changed.txt"
+            npx vitest related --run "${changed[@]}"
           else
             echo "no changed files selected — falling back to the full suite"
             npm run test

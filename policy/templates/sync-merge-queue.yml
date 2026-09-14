@@ -87,6 +87,11 @@ jobs:
               201)
                 echo "merged main into merge-queue with a merge commit (I3)"
                 ;;
+              204)
+                # 204 (no content) means nothing to merge: merge-queue
+                # already contains main — a concurrent sync got here first.
+                echo "no-op: the merge API returned 204 (merge-queue already contains main)"
+                ;;
               409)
                 # 409 is the ONE predicted failure: the merge API created
                 # nothing because the branches conflict — surface it.
