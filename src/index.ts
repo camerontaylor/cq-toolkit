@@ -1,7 +1,8 @@
 // cq-toolkit public barrel — re-export only, no logic: the frozen T1.1
 // driver-seam and kernel types, the kernel's zod schema mirrors (schema
-// values, generic op-result factory included), and the T1.2 kernel runtime
-// surface (runner, journal, manifest, output helpers).
+// values, generic op-result factory included), the T1.2 kernel runtime
+// surface (runner, journal, manifest, output helpers), and the T1.3 budget
+// governor + rescue lane.
 export type {
   Budget,
   Driver,
@@ -88,3 +89,45 @@ export {
 } from './kernel/journal.js';
 export { runPlan } from './kernel/runner.js';
 export { emitReport, narrate, renderHuman } from './kernel/output.js';
+// Budget governor + rescue lane (T1.3) — re-export only, no logic: the
+// governed-registry seam, the escalation ladder, the honest-stop marker, and
+// the rescue policy table + decision engine. Pure types ride along as
+// `export type`.
+export type {
+  AdmissionDecision,
+  BudgetGovernor,
+  Clock,
+  GovernorConfig,
+  GovernorEvent,
+  JobCancelPort,
+  JobGovernance,
+  LadderOutcome,
+  LadderRung,
+  LadderRungMarker,
+  LadderSpec,
+} from './kernel/governor.js';
+export {
+  DEFAULT_ABORT_GRACE_MS,
+  DEFAULT_KILL_GRACE_MS,
+  governRegistry,
+  governorConfig,
+  realClock,
+  runLadder,
+  withBudgetStop,
+} from './kernel/governor.js';
+export type {
+  RescueAction,
+  RescueDecision,
+  RescueEscalation,
+  RescueGuard,
+  RescueInput,
+  RescueOutcome,
+  RescuePolicy,
+  RescuePolicyRow,
+} from './kernel/rescue.js';
+export {
+  attemptsFromJournal,
+  CONSERVATIVE_RESCUE_POLICY,
+  decideRescue,
+  rescueInputFromJournal,
+} from './kernel/rescue.js';
