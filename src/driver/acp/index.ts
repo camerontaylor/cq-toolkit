@@ -185,9 +185,11 @@
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired, or the prompt settled stopReason
 //      'cancelled'                                        → 'aborted'
-//   2. never-asks evidence at settle, a permission ask with NO answerable
-//      option of the required side, or a failed permission-ANSWER write
-//      (the enforcement channel is broken — Codex P1)       → 'error'
+//   2. never-asks evidence at settle, a DENIED tool reporting a completed
+//      execution (ungated through the answer channel), a permission ask
+//      with NO answerable option of the required side, or a failed
+//      permission-ANSWER write (the enforcement channel is broken —
+//      Codex P1)                                          → 'error'
 //   3. folded usage ≥ Budget.maxTokens                   → 'budget'
 //   4. no wellshaped prompt response (handshake failure, child death) → 'error'
 //   5. stopReason 'end_turn'                             → 'complete'
@@ -232,6 +234,7 @@ import {
   RequestPermissionParamsSchema,
   SessionNewResultSchema,
   SessionUpdateParamsSchema,
+  SetConfigOptionResultSchema,
   AcpRpcError,
   isAuthRequiredError,
   mapWireUsage,
@@ -392,8 +395,13 @@ function newObservation(): RunObservation {
  * can be large) routinely straddles `data`-chunk boundaries and must sit
  * in the buffer intact until its newline arrives. The old 8000-char mirror
  * of the stderr cap destroyed exactly those frames mid-JSON, before onLine
- * could parse them. 1 MiB is a pathological-run bound, not a protocol
- * limit; stderr (human diagnostics, not frames) keeps its 8000-char cap.
+ * could parse them. 1 MiB is a pathological-run bound, not a protocol limit; stderr (human
+ * diagnostics, not frames) keeps its 8000-char cap. ON OVERFLOW the
+ * connection FAILS (failConnection — review-debt #42): a valid frame larger
+ * than the buffer (a permission request whose rawInput embeds file contents
+ * is plausible) must error the run naming the oversized frame, never
+ * truncate — once bytes are dropped the stream can never resynchronize
+ * mid-JSON.
  */
 const STDOUT_LINE_BUFFER_LIMIT = 1_048_576;
 
@@ -446,14 +454,22 @@ class AcpWire {
       // A frame straddling chunk boundaries WAITS here for its newline —
       // the normal case on this wire, not an error (frames are the data;
       // see STDOUT_LINE_BUFFER_LIMIT). The 1 MiB ceiling only bounds a
-      // pathological run: on overflow the accumulated bytes are emitted as
-      // a narration truncation marker (never silent loss) before the
-      // buffer clears.
+      // pathological run: on overflow the connection FAILS (review-debt
+      // #42) — the evidence lands in narration, then every pending request
+      // rejects naming the oversized frame and the child is killed. The
+      // old shape (clear the buffer, keep reading) truncated a possibly
+      // valid frame and kept a connection that can never resynchronize.
       if (this.lineBuffer.length > STDOUT_LINE_BUFFER_LIMIT) {
         this.handlers.onUnparseableLine(
-          `[cq: stdout line buffer overflow — ${this.lineBuffer.length} chars with no newline; truncated, never silently dropped]`,
+          `[cq: stdout line buffer overflow — ${this.lineBuffer.length} chars with no newline; failing the connection rather than truncating a possibly-valid frame]`,
         );
         this.lineBuffer = '';
+        this.failConnection(
+          new Error(
+            `the harness emitted an oversized frame (> ${STDOUT_LINE_BUFFER_LIMIT} chars with no newline) — ` +
+              'the connection cannot resynchronize mid-frame, so the run fails with this evidence',
+          ),
+        );
       }
     });
     child.stderr?.on('data', (chunk: string) => {
@@ -512,6 +528,22 @@ class AcpWire {
   /** Answer an unhandled/unshapeable server request so the vendor sees a diagnosis, never silence. */
   failRequest(id: number | string, message: string): Promise<void> {
     return this.send({ jsonrpc: '2.0', id, error: { code: -32603, message } });
+  }
+
+  /**
+   * Fail the WHOLE connection (review-debt #42): every pending request
+   * rejects with `reason` and the child is killed. Once frame bytes have
+   * been dropped, the newline-delimited stream can never resynchronize
+   * (the next newline would be read as a frame boundary mid-JSON), so the
+   * honest settle is an error verdict carrying `reason` — never silent
+   * truncation, never a run left reading a misframed wire. Idempotent with
+   * the exit path: whatever rejects first wins, and the exit handler finds
+   * the pending table already empty.
+   */
+  private failConnection(reason: Error): void {
+    for (const p of this.pending.values()) p.reject(reason);
+    this.pending.clear();
+    this.child.kill();
   }
 
   private onLine(line: string): void {
@@ -1155,13 +1187,28 @@ export class AcpDriver implements Driver {
     // --- Handshake step 3: THE MODE PIN, before ANY prompt (§1.2
     // amendment). Sessions open in yolo — which never asks — so an
     // unpinned session is a policy void: a failed pin refuses to prompt.
+    // The pin is VERIFIED, not just sent (review-debt #39): a 2xx response
+    // alone proves nothing — the same response can echo the current mode
+    // STILL 'yolo' (or carry no mode echo at all), leaving the policy
+    // silently unenforced while the run proceeds. The echoed
+    // modes.currentModeId must NAME the pinned mode; a non-confirming
+    // response fails the run pre-prompt exactly like a thrown pin (the
+    // never-asks tripwire remains the downstream backstop).
     if (handshakeFailure === undefined && !signalFired && acpSessionId !== undefined) {
       try {
-        await wire.request(ACP_METHODS.sessionSetConfigOption, {
+        const pinRaw = await wire.request(ACP_METHODS.sessionSetConfigOption, {
           sessionId: acpSessionId,
           configId: MODE_CONFIG_ID,
           value: GATING_MODE,
         });
+        const pin = SetConfigOptionResultSchema.safeParse(pinRaw);
+        const confirmedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
+        if (confirmedMode !== GATING_MODE) {
+          handshakeFailure =
+            `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
+            `answered ${confirmedMode === undefined ? 'no mode echo' : `mode '${confirmedMode}'`}) — ` +
+            'an unpinned session is a policy void, refusing to prompt';
+        }
       } catch (err) {
         handshakeFailure =
           `the mode pin failed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE}): ${messageOf(err)} — ` +
@@ -1208,6 +1255,26 @@ export class AcpDriver implements Driver {
           cq: 'never-asks',
           ungatedToolCallIds,
           note: 'tool_call updates arrived with NO preceding session/request_permission for the id — evidence of UNGATED EXECUTION; the tool policy was unenforceable on this run (strategy §2.1)',
+        }),
+      );
+    }
+
+    // --- THE DENIED-EXECUTION TRIPWIRE (review-debt #45): a toolCallId our
+    // answer DENIED that nevertheless reported a COMPLETED execution is
+    // ungated execution through the answer channel — the harness asked,
+    // was told no, and ran the tool anyway. Same posture as never-asks:
+    // the verdict fails loud (a policy that cannot be enforced is not
+    // silently soft); the bypass is narration evidence — a denied id is
+    // never persisted as a governed tool message.
+    const deniedButCompletedIds = [...observation.permissionDecisions.entries()]
+      .filter(([id, decision]) => decision === 'deny' && observation.tools.get(id)?.status === 'completed')
+      .map(([id]) => id);
+    if (deniedButCompletedIds.length > 0) {
+      observation.narration.push(
+        JSON.stringify({
+          cq: 'denied-tool-completed',
+          toolCallIds: deniedButCompletedIds,
+          note: 'a tool_call our answer DENIED reported status completed — the harness executed past the rejection; UNGATED EXECUTION through the answer channel (strategy §2.1)',
         }),
       );
     }
@@ -1269,6 +1336,7 @@ export class AcpDriver implements Driver {
       signalFired,
       answerWriteFailed,
       permissionAnswerFailed,
+      deniedRan: deniedButCompletedIds.length > 0,
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
       measuredUsage,
@@ -1296,6 +1364,7 @@ export class AcpDriver implements Driver {
       signalFired: boolean;
       answerWriteFailed: boolean;
       permissionAnswerFailed: boolean;
+      deniedRan: boolean;
       promptStopReason: string | undefined;
       responded: boolean;
       measuredUsage: Usage | undefined;
@@ -1307,6 +1376,7 @@ export class AcpDriver implements Driver {
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
       answerWriteFailed: inputs.answerWriteFailed,
       permissionAnswerFailed: inputs.permissionAnswerFailed,
+      deniedRan: inputs.deniedRan,
       ungated: inputs.ungated,
       maxTokens: budget.maxTokens,
       usage,
@@ -1656,6 +1726,8 @@ export interface StopReasonInputs {
   answerWriteFailed?: boolean;
   /** True when a permission answer could not be SELECTED (the required side was never offered) — failed enforcement; the run fails even if the vendor ignores the termination and settles the unanswered ask (round-3). */
   permissionAnswerFailed?: boolean;
+  /** A DENIED toolCallId reported a completed execution — ungated through the answer channel (review-debt #45); fails like never-asks. */
+  deniedRan?: boolean;
   /** Never-asks evidence at settle (ungated execution — a policy void is an error, never green). */
   ungated: boolean;
   maxTokens: number | undefined;
@@ -1666,11 +1738,12 @@ export interface StopReasonInputs {
   responded: boolean;
 }
 
-/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → ungated-error → budget → no-response-error → the wire stopReason. */
+/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → denied-execution-error → ungated-error → budget → no-response-error → the wire stopReason. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
   if (inputs.permissionAnswerFailed === true) return 'error'; // the unanswerable ask — failed enforcement even if the vendor settles end_turn anyway
   if (inputs.answerWriteFailed === true) return 'error'; // the broken enforcement channel — fail loud even if a response arrived
+  if (inputs.deniedRan === true) return 'error'; // a denied tool ran anyway — ungated through the answer channel (review-debt #45)
   if (inputs.ungated) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
   if (!inputs.responded) return 'error';

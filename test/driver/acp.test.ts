@@ -40,7 +40,11 @@
 //      depends on the cooperation of the thing being killed), and a tool
 //      result reported via content blocks (no rawOutput) lands in the
 //      record output and in the denial reason (textOfContent-style
-//      extraction).
+//      extraction). Plus the review-debt sweep legs: the mode pin must be CONFIRMED by the
+//      response echo (#39), the denied-execution tripwire (#45), a
+//      structured rawOutput folds at the protocol boundary (#49), an
+//      oversized frame fails the connection (#42), relative PATH entries
+//      resolve absolute (#46), and win32 PATHEXT candidates (#40).
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
@@ -419,7 +423,14 @@ describe('acp driver specifics (fake ACP server)', () => {
           },
           [],
         ),
-        termGraceMs: 500,
+        // The SIGTERM grace gives the fixture's 250 ms settle timer a wide
+        // margin over the failed-selection ladder's SIGKILL escalation
+        // (review-debt #48): the timer starts when the ASK goes out,
+        // BEFORE the driver handles the failed selection — at the old
+        // 500 ms the settle-to-SIGKILL margin was ~250 ms of real time, a
+        // race a loaded runner could lose (fixture killed before its
+        // end_turn folded).
+        termGraceMs: 2000,
         killGraceMs: 500,
       });
       const result = await driver.run(invocation({ prompt: 'tolerant-vendor selection-failure run' }));
@@ -452,6 +463,44 @@ describe('acp driver specifics (fake ACP server)', () => {
       const workspace = record?.workspace as string;
       const ungated = await readFile(join(workspace, 'ungated.txt'), 'utf8');
       expect(ungated).toContain('never-asks-marker');
+    });
+  });
+
+  test('THE DENIED-EXECUTION TRIPWIRE (#45): a denied toolCallId reporting completed is ungated-execution evidence — error, never green', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_DENY_BUT_COMPLETE: the ask fires, the driver answers
+      // reject — and the fixture EXECUTES the tool anyway, reporting the
+      // same toolCallId completed (first-channel-wins keeps the id on the
+      // 'permission' channel, so the never-asks wire alone would miss
+      // this bypass). The verdict fails loud; the bypass is real (the
+      // file exists) but never persisted as a governed tool message.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo denied-but-ran-marker > denied-ran.txt' }),
+            FAKE_ACP_DENY_BUT_COMPLETE: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(
+        invocation({ prompt: 'denied-but-completed run', toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+      );
+      expect(result.stopReason).toBe('error');
+      // `kind` is ABSENT from the ask's toolCall on the recorded wire — the
+      // denial reason says so honestly (the same shape as the reject test).
+      expect(result.denials).toEqual([{ tool: 'run', reason: 'tool policy: not allowlisted (kind unknown)' }]);
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"denied-tool-completed"'));
+      expect(marker !== undefined && marker.includes('call_run_')).toBe(true);
+      const record = await store.load(result.sessionId as string);
+      const workspace = record?.workspace as string;
+      const bypassed = await readFile(join(workspace, 'denied-ran.txt'), 'utf8');
+      expect(bypassed).toContain('denied-but-ran-marker'); // the bypass really happened
+      expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(false); // governed surface only
     });
   });
 
@@ -572,6 +621,24 @@ describe('acp driver specifics (fake ACP server)', () => {
       // No truncation marker — the frame was never treated as an overflow.
       const narration = await narrationOf(store, result.sessionId as string);
       expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(false);
+    });
+  });
+
+  test('an oversized frame fails the CONNECTION (#42): error verdict naming the frame — never silent truncation', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_HUGE_FRAME: a >1 MiB frame prefix with NO newline, never
+      // completed. The old shape narrated a truncation marker and kept
+      // reading — a possibly-valid frame destroyed and the wire misframed
+      // forever. The fixed wire fails the connection: the pending prompt
+      // rejects naming the oversized frame and the run settles 'error'.
+      const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME: '1' }, []));
+      const result = await driver.run(invocation({ prompt: 'oversized frame run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // the turn never settled protocol-side
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(true);
+      const failure = narration.find((line) => line.includes('"prompt-failure"'));
+      expect(failure !== undefined && failure.includes('oversized frame')).toBe(true);
     });
   });
 
@@ -973,6 +1040,27 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('the mode pin must be CONFIRMED: a response echoing yolo (or echoing nothing) fails the run pre-prompt (#39)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_IGNORE_MODE_PIN: the pin request is answered 2xx but the
+      // fixture never applies it — the echo names 'yolo'. A driver that
+      // trusts the 2xx prompts into the policy void; the fixed driver
+      // verifies modes.currentModeId === 'build' and refuses to prompt.
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_IGNORE_MODE_PIN: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'unconfirmed pin run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never prompted — unmeasured
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"handshake-failure"'));
+      expect(marker !== undefined && marker.includes('mode pin was not confirmed')).toBe(true);
+      expect(marker !== undefined && marker.includes("'yolo'")).toBe(true);
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'assistant')).toBe(false); // the prompt never fired
+    });
+  });
+
   test('protocol-version mismatch: a different negotiated integer fails the run pre-prompt, naming BOTH numbers (§3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
@@ -1053,6 +1141,39 @@ describe('acp driver specifics (fake ACP server)', () => {
         { tool: 'edit', reason: 'permission denied: edit is not allowed' },
       ]);
       expect(result.stopReason).toBe('complete'); // the turn settled end_turn; the denial rides the frozen channel
+    });
+  });
+
+  test('a STRUCTURED rawOutput folds: the string-only schema no longer rejects the whole tool_call_update (#49)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_RAW_OUTPUT_JSON: the failed execution's rawOutput is an
+      // OBJECT. The old string-only schema rejected the ENTIRE frame —
+      // terminal status AND output lost (no denial, a card pending
+      // forever). The fold stringifies non-strings at the protocol
+      // boundary, so the status and the denial reason both survive.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'deny-tool',
+            FAKE_ACP_RAW_OUTPUT_JSON: '1',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'x.txt', oldText: 'a', newText: 'b' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'structured rawOutput run' }));
+      expect(result.stopReason).toBe('complete'); // the turn settles end_turn with real usage
+      expect(result.denials).toEqual([
+        { tool: 'edit', reason: '{"error":"permission denied: edit is not allowed"}' }, // stringified at the boundary
+      ]);
+      const record = await store.load(result.sessionId as string);
+      const toolMessage = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'edit');
+      expect(toolMessage !== undefined).toBe(true); // the terminal status survived the fold
+      expect((JSON.parse(toolMessage?.content as string) as { ok: boolean; output: string }).output).toBe(
+        '{"error":"permission denied: edit is not allowed"}',
+      );
     });
   });
 
@@ -1187,4 +1308,24 @@ describe('acp binary resolution (the §3 which-like fold)', () => {
     // IS '/', so that half is inert here — correctness for the documented
     // Windows case, not locally observable behavior.
   });
+
+  test('a RELATIVE PATH ENTRY resolves to absolute before probing (#46) — the result survives the later cwd switch to the workspace', async () => {
+    const seen: string[] = [];
+    const probe: ExecutableProbe = async (candidate) => {
+      seen.push(candidate);
+      return candidate === join(resolve('./tools'), 'acp-server');
+    };
+    const resolved = await resolveAcpCommand(['acp-server'], 'explicit', defaultAcpEndpointTable(), { PATH: './tools' }, probe);
+    // The probe saw the ABSOLUTE candidate (caller-cwd-resolved), never
+    // the raw './tools/acp-server' the old walk probed — a relative
+    // resolution result would break the moment the spawn switched cwd to
+    // the workspace.
+    expect(seen).toEqual([join(resolve('./tools'), 'acp-server')]);
+    expect(resolved.binary).toBe(join(resolve('./tools'), 'acp-server'));
+  });
+
+  // The kernel lane's pathCandidates (merge-queue, right of way) keys the
+  // PATHEXT walk on the HOST platform — the win32 candidate order stays
+  // suite-unobservable on POSIX exactly as issue #40 anticipated; the
+  // walk's two-dir structure above pins the platform-neutral half.
 });

@@ -120,7 +120,11 @@ async function probeExecutable(candidate: string): Promise<boolean> {
  * element resolves like `which`: absolute values are probed as-is;
  * relative path-carrying values resolve against the caller's cwd (the
  * spawn later runs with cwd = the workspace); bare names are searched
- * across every PATH entry.
+ * across every PATH entry — each entry resolved to ABSOLUTE before
+ * probing (review-debt #46: a relative entry's result would break the
+ * later cwd switch to the workspace), and, on win32, across the
+ * entry's PATHEXT-suffixed candidates as well (review-debt #40; the
+ * candidate list comes from pathCandidates, keyed on the HOST platform).
  *
  * `env` is the environment the PATH lookup reads (defaults to
  * `process.env`; tests inject a literal record). A set-but-EMPTY PATH
@@ -223,7 +227,12 @@ async function resolveBinary(
   const pathValue = env['PATH'] ?? '';
   for (const dir of pathValue.split(delimiter)) {
     if (dir === '') continue;
-    for (const candidate of pathCandidates(dir, binary, env)) {
+    // A RELATIVE PATH ENTRY ('./bin') resolves against the caller's cwd
+    // NOW (review-debt #46): joined raw, the candidate is probed relative
+    // to the caller's cwd and returned as a relative path that breaks the
+    // moment the spawn later runs with cwd = the workspace. resolve() on
+    // an absolute entry is a no-op.
+    for (const candidate of pathCandidates(resolve(dir), binary, env)) {
       if (await probe(candidate)) return candidate;
     }
   }
