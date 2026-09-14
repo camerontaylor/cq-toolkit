@@ -51,6 +51,10 @@
 //     abort test wraps a run in `runLadder`, fires the signal mid-run, and
 //     requires stopReason 'aborted'. The scripted model blocks until the
 //     signal fires.
+//   - The driver MUST surface the served model id in `WorkerResult.model`
+//     on a completed run (the observed-model check, leg m, binds all
+//     lanes: the RESPONSE-reported id, present and equal to the requested
+//     `ModelSpec.model`).
 //
 // Each test builds a FRESH driver via makeDriver (no state shared between
 // tests) in a fresh temp scratch dir, removed in a finally block.
@@ -492,6 +496,19 @@ export function runDriverConformance(
         });
         const result = await driver.run(invocation({ prompt: 'escape attempt' }));
         expect(result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape'))).toBe(true);
+      });
+    });
+
+    test('m. observed model: the served model id is present and equals the requested model (the silent-remap defence)', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({ directive: { kind: 'reply', text: 'ok' }, scratchDir });
+        const result = await driver.run(invocation());
+        // A pre-dispatch allowlist cannot catch a server-side remap; only the
+        // RESPONSE can. A driver that hides the served id, or serves a
+        // different model than requested, fails here — every lane that runs
+        // this suite is bound by this check.
+        expect(result.model).toBeDefined();
+        expect(result.model).toBe(invocation().modelSpec.model);
       });
     });
   });

@@ -110,6 +110,15 @@ export interface ToolDenial {
  * `usage`; drivers never report trusted USD.
  */
 export interface WorkerResult {
+  /**
+   * The model id the SERVED response reports — observed, never requested.
+   * A gateway may silently serve a different model than `ModelSpec.model`
+   * asks for (the silent-remap footgun); drivers surface the id their lane
+   * reports on the response, and the shared driver-conformance suite fails
+   * loudly when it is absent or differs from the requested model. Optional:
+   * a lane that cannot observe it reports nothing rather than a guess.
+   */
+  model?: string;
   structuredOutput?: unknown;
   usage: Usage;
   costUSD?: number;

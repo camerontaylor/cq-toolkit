@@ -118,6 +118,7 @@ export const OpInvocationSchema: z.ZodType<OpInvocation> = z.object({
 }).strict();
 
 export const WorkerResultSchema: z.ZodType<WorkerResult> = z.object({
+  model: z.string().optional(),
   structuredOutput: z.unknown().optional(),
   usage: UsageSchema,
   costUSD: z.number().optional(),

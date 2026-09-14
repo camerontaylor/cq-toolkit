@@ -90,6 +90,7 @@
 // EVENT → SEAM MAPPING (stream-json, parsed defensively — a non-JSON line
 // or unknown event shape becomes narration, never a crash):
 //   {type:'system', subtype:'init', session_id}  → CLI session id (marker)
+//   {type:'system', subtype:'init', model}       → servedModel → WorkerResult.model
 //   {type:'assistant', message:{content:[…], usage}} → text blocks →
 //                              transcript; tool_use blocks remembered by id
 //                              → tool names; usage folded (fallback usage)
@@ -106,6 +107,8 @@
 //                              structured_output}  → frozen Usage;
 //                              structuredOutput (when --json-schema);
 //                              the terminal status
+//   {type:'result', model}      → servedModel → WorkerResult.model (init
+//                              first; the result event may overwrite/confirm)
 //   anything else               → narration (collected, persisted)
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
@@ -418,6 +421,9 @@ export class SubprocessDriver implements Driver {
         ? {}
         : costField(this.costUSDOf.bind(this), modelSpec, usage);
     return {
+      // The observed served model: what the endpoint reports it served, not
+      // what ModelSpec.model requested (the remap-detection fact, header).
+      ...(observation.servedModel !== undefined ? { model: observation.servedModel } : {}),
       ...(structured !== undefined ? { structuredOutput: structured } : {}),
       usage,
       ...cost,
@@ -528,6 +534,8 @@ type ResultEvent = Record<string, unknown>;
 interface RunObservation {
   /** CLI-side session id (init/result events) — recorded as a marker message. */
   cliSessionId: string | undefined;
+  /** The model id the CLI reports as served (init/result events) — the observed, never requested id. */
+  servedModel: string | undefined;
   /** Assistant text blocks, in arrival order (the transcript). */
   transcript: string[];
   /** Non-JSON lines and unknown event shapes — evidence, never a crash. */
@@ -553,6 +561,7 @@ interface RunObservation {
 function newObservation(): RunObservation {
   return {
     cliSessionId: undefined,
+    servedModel: undefined,
     transcript: [],
     narration: [],
     stderr: [],
@@ -646,6 +655,7 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
     case 'system': {
       if (event['subtype'] === 'init') {
         observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
+        observation.servedModel = asString(event['model']) ?? observation.servedModel;
         return;
       }
       observation.narration.push(line); // known type, unhandled subtype — evidence
@@ -706,6 +716,7 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
     case 'result': {
       observation.result = event;
       observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
+      observation.servedModel = asString(event['model']) ?? observation.servedModel;
       return;
     }
     default:
