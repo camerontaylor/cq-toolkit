@@ -140,7 +140,15 @@
 //                         'build' written BEFORE the response line (the
 //                         LIVE vendor's shape, probe 2026-09-14: the
 //                         driver must confirm the pin from the
-//                         notification surface)
+//   FAKE_ACP_MODE_DOWNGRADE when '1', a current_mode_update naming 'yolo'
+//                         is broadcast MID-TURN after the confirmed pin
+//                         (the round-2 fix's downgrade-marker persona —
+//                         the marker must narrate it, never classify alone)
+//   FAKE_ACP_PIN_UNSHAPEABLE when '1', the set_config_option answer is an
+//                         UNSHAPEABLE result (modes as a bare string) —
+//                         the not-confirmed evidence must say so
+//                         ('unshapeable pin response'), distinct from an
+//                         absent modes echo
 //   FAKE_ACP_DENY_BUT_COMPLETE when '1' (tool flows), a DENIED tool is
 //                         EXECUTED anyway and reported status 'completed'
 //                         on the same toolCallId (the
@@ -222,6 +230,8 @@ const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
 const IGNORE_MODE_PIN = process.env.FAKE_ACP_IGNORE_MODE_PIN === '1';
 const MODE_PIN_NOTIFICATION = process.env.FAKE_ACP_MODE_PIN_NOTIFICATION === '1';
+const MODE_DOWNGRADE = process.env.FAKE_ACP_MODE_DOWNGRADE === '1';
+const PIN_UNSHAPEABLE = process.env.FAKE_ACP_PIN_UNSHAPEABLE === '1';
 const DENY_BUT_COMPLETE = process.env.FAKE_ACP_DENY_BUT_COMPLETE === '1';
 const RAW_OUTPUT_JSON = process.env.FAKE_ACP_RAW_OUTPUT_JSON === '1';
 const HUGE_FRAME = process.env.FAKE_ACP_HUGE_FRAME === '1';
@@ -552,6 +562,9 @@ function endTurn() {
 
 async function okFlow() {
   materializationUpdates();
+  if (MODE_DOWNGRADE) {
+    notifyUpdate({ sessionUpdate: 'current_mode_update', currentModeId: 'yolo' }); // mid-turn downgrade after the confirmed pin
+  }
   if (HUGE_FRAME) {
     process.stdout.write(HUGE_FRAME_PREFIX); // no newline, never completed — the overflow persona (#42)
     return; // hold the turn open; the driver fails the connection on the buffer overflow
@@ -836,6 +849,12 @@ function onFrame(frame) {
     case 'session/set_config_option':
       if (frame.params?.configId === 'mode' && !IGNORE_MODE_PIN) {
         sessionMode = String(frame.params?.value ?? sessionMode);
+      }
+      if (PIN_UNSHAPEABLE) {
+        // The unshapeable-answer persona: the driver's not-confirmed
+        // evidence must distinguish this from a merely-absent modes echo.
+        send({ jsonrpc: '2.0', id: frame.id, result: { modes: 'garbage' } });
+        return;
       }
       if (MODE_PIN_NOTIFICATION) {
         // The LIVE shape (probe 2026-09-14): no modes echo in the response;

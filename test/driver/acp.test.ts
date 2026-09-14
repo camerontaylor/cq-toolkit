@@ -1085,6 +1085,42 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('a POST-PIN mode downgrade is narrated (cq: mode-downgrade) — evidence, never classified alone (round-3, the round-2 fix pinned)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_MODE_DOWNGRADE: after the confirmed pin (materialization
+      // already reported build) the harness reports yolo MID-TURN. The
+      // settle-time marker must carry the evidence; the verdict stays what
+      // the wire said (the never-asks tripwire remains the error path).
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_MODE_DOWNGRADE: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'downgrade run' }));
+      expect(result.stopReason).toBe('complete');
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"mode-downgrade"'));
+      expect(marker !== undefined && marker.includes("'yolo'")).toBe(true);
+    });
+  });
+
+  test('an UNSHAPEABLE pin answer is the not-confirmed evidence — distinct from an absent modes echo (round-3, the round-2 fix pinned)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_PIN_UNSHAPEABLE: the set_config_option answer carries
+      // modes as a bare string — the safeParse fails, and the failure
+      // evidence must say 'unshapeable pin response', not the ambiguous
+      // 'no mode echo'.
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_PIN_UNSHAPEABLE: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'unshapeable pin run' }));
+      expect(result.stopReason).toBe('error');
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"handshake-failure"'));
+      expect(marker !== undefined && marker.includes('unshapeable pin response')).toBe(true);
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'assistant')).toBe(false); // the prompt never fired
+    });
+  });
+
   test('protocol-version mismatch: a different negotiated integer fails the run pre-prompt, naming BOTH numbers (§3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
