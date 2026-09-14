@@ -1,0 +1,200 @@
+// Endpoint registry for the acp driver — T1.8 (strategy §3).
+//
+// DISCOVERY ONLY — never bundled, never a dependency: stricter than the
+// claude-agent lane's optional peer, the harness binary is an EXTERNAL
+// program the operator installs, full stop. The registry below is plain
+// serializable CONFIG (the same posture as every lane's routing table):
+// per endpoint, the DEFAULT launch argv, the install hint the
+// absent-binary throw names, and human notes. No vendor code, no SDK
+// import, nothing vendored — v1's second vendor is a different default
+// argv, which is the point of the lane.
+//
+// RESOLUTION ORDER (strategy §3): explicit constructor argv FIRST, then
+// the endpoint table's default argv; the chosen argv's first element is
+// then resolved like `which` — an absolute (or path-carrying) binary is
+// used as-is, a bare name is searched on PATH. An UNRESOLVABLE binary is
+// a PRE-DISPATCH THROW naming the binary, the install hint, and the
+// searched PATH — the same posture as the claude-agent lane's absent
+// optional peer: fail loudly before any session exists, never a crash
+// mid-run. Once spawned, run() never throws past the seam.
+//
+// SECRETS: entries carry env var guidance in `notes` as NAMES only —
+// never values. The driver injects the child env at run() time (see
+// index.ts); nothing here reads a key.
+import { access, constants } from 'node:fs/promises';
+import { delimiter, isAbsolute, join, sep } from 'node:path';
+import { z } from 'zod';
+
+// ---------------------------------------------------------------------------
+// The endpoint table — plain data, schema-validated (invalid tables throw loudly)
+// ---------------------------------------------------------------------------
+
+export const AcpEndpointSchema = z.object({
+  /** The DEFAULT launch argv for this endpoint (explicit constructor argv wins). */
+  command: z.array(z.string().min(1)).min(1),
+  /** The install hint the absent-binary pre-dispatch throw names. */
+  installHint: z.string().min(1),
+  /** Human notes: what the harness reads from the environment (NAMES only, never values). */
+  notes: z.string().min(1),
+}).strict();
+
+export const AcpEndpointTableSchema = z.object({
+  endpoints: z.record(z.string(), AcpEndpointSchema),
+}).strict();
+
+export type AcpEndpointEntry = z.infer<typeof AcpEndpointSchema>;
+export type AcpEndpointTable = z.infer<typeof AcpEndpointTableSchema>;
+
+/** The endpoint used when the constructor names none (strategy §3's default argv). */
+export const DEFAULT_ACP_ENDPOINT = 'zcode-acp-server';
+
+/**
+ * The documented default endpoint table — CONFIG as-of 2026-09 (registry
+ * metadata + the live probe, strategy §3's recorded evidence). Treat as
+ * immutable: `resolveAcpCommand` re-validates whatever table it is handed,
+ * but callers should not mutate the exported value. A deployment overrides
+ * it wholesale via the driver's `endpointTable` option.
+ */
+export function defaultAcpEndpointTable(): AcpEndpointTable {
+  return AcpEndpointTableSchema.parse({
+    endpoints: {
+      'zcode-acp-server': {
+        command: ['zcode-acp-server'],
+        installHint: 'npm install -g zcode-acp-server',
+        notes:
+          'Z.AI — bridges headless ZCode over ACP (bins zcode-acp + zcode-acp-server, probed live ' +
+          'at 0.37.3; engines node >=22). Auth is agent-side (authMethod zcode-credentials, the app\'s ' +
+          'own credentials — no client key). When the zcode CLI is not on PATH, the ZCODE_BIN env var ' +
+          'names the desktop-app CLI (e.g. /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs).',
+      },
+      'dsh-acp': {
+        command: ['dsh-acp'],
+        installHint: 'npm install -g @openma/deepseek-harness-acp',
+        notes:
+          'DeepSeek — the @openma/deepseek-harness-acp bin (registry metadata 2026-09: bin dsh-acp → ' +
+          'dist/bin.js). FAST-FOLLOW endpoint: the same driver, a different default argv — nothing in ' +
+          'the lane is zcode-specific (strategy §7).',
+      },
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Resolution — explicit argv first, PATH fallback, absent = pre-dispatch throw
+// ---------------------------------------------------------------------------
+
+/** One resolved launch command (plain data, secret-free). */
+export interface ResolvedAcpCommand {
+  /** The endpoint name resolved ('explicit' when constructor argv won). */
+  endpoint: string;
+  /** The launch argv (first element is the resolved `binary`). */
+  command: readonly string[];
+  /** The resolved binary path (PATH-joined for a bare name; verbatim otherwise). */
+  binary: string;
+  /** Which source won. */
+  source: 'explicit' | 'endpoint';
+}
+
+/** Executable-probe seam (tests inject a no-fs probe; default: fs access X_OK). */
+export type ExecutableProbe = (candidate: string) => Promise<boolean>;
+
+async function probeExecutable(candidate: string): Promise<boolean> {
+  try {
+    await access(candidate, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the launch argv for one run. THROWS BEFORE ANY SPAWN on an
+ * unknown endpoint (naming the known ones) or an absent binary (naming
+ * the binary, the install hint, and the searched PATH) — the strategy §3
+ * pre-dispatch posture.
+ *
+ * `explicitCommand` (the constructor's argv) wins over the endpoint
+ * table; the table's default argv applies otherwise. The first argv
+ * element resolves like `which`: absolute or path-carrying values are
+ * probed as-is; bare names are searched across every PATH entry.
+ *
+ * `env` is the environment the PATH lookup reads (defaults to
+ * `process.env`; tests inject a literal record). A set-but-EMPTY PATH
+ * counts as no PATH.
+ */
+export async function resolveAcpCommand(
+  explicitCommand: readonly string[] | undefined,
+  endpointName: string,
+  table: AcpEndpointTable = defaultAcpEndpointTable(),
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  probe: ExecutableProbe = probeExecutable,
+): Promise<ResolvedAcpCommand> {
+  const parsed: AcpEndpointTable = AcpEndpointTableSchema.parse(table);
+  let command: readonly string[];
+  let endpoint: string;
+  let installHint: string;
+  if (explicitCommand !== undefined) {
+    if (explicitCommand.length === 0) {
+      throw new Error('acp driver: the command option must carry at least the binary (non-empty argv)');
+    }
+    command = [...explicitCommand];
+    endpoint = 'explicit';
+    installHint = installHintFor(command[0] as string, parsed);
+  } else {
+    // Own-property guard (same posture as the claude-agent routing table):
+    // the parsed record inherits Object.prototype, so an endpoint handle
+    // like 'constructor' must not dodge the unknown-endpoint throw.
+    const entry = Object.prototype.hasOwnProperty.call(parsed.endpoints, endpointName)
+      ? parsed.endpoints[endpointName]
+      : undefined;
+    if (entry === undefined) {
+      throw new Error(
+        `acp driver: unknown endpoint '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,
+      );
+    }
+    command = [...entry.command];
+    endpoint = endpointName;
+    installHint = entry.installHint;
+  }
+
+  const binary = command[0] as string;
+  const resolved = await resolveBinary(binary, env, probe);
+  if (resolved !== undefined) {
+    return { endpoint, command: [resolved, ...command.slice(1)], binary: resolved, source: explicitCommand === undefined ? 'endpoint' : 'explicit' };
+  }
+  const pathValue = env['PATH'] ?? '';
+  throw new Error(
+    `acp driver: the harness binary '${binary}' was not found (not absolute/resolvable and not on PATH) — ` +
+      `install it first (${installHint}) or pass an explicit command via the driver's \`command\` option; ` +
+      `refusing pre-dispatch, before any session exists. PATH searched: ${pathValue === '' ? '(empty)' : pathValue}`,
+  );
+}
+
+/** Install hint for an EXPLICIT argv's binary: the registry entry when the basename names one, else generic guidance. */
+function installHintFor(binary: string, table: AcpEndpointTable): string {
+  const entry = Object.values(table.endpoints).find((candidate) => basenameOf(candidate.command[0] ?? '') === basenameOf(binary));
+  return entry?.installHint ?? 'install the harness binary and ensure it is on PATH (see docs/acp-driver.md)';
+}
+
+function basenameOf(pathValue: string): string {
+  const index = pathValue.lastIndexOf(sep);
+  return index === -1 ? pathValue : pathValue.slice(index + 1);
+}
+
+/** which-like resolution: absolute/path-carrying probed verbatim; bare names searched across PATH. Undefined = absent. */
+async function resolveBinary(
+  binary: string,
+  env: Readonly<Record<string, string | undefined>>,
+  probe: ExecutableProbe,
+): Promise<string | undefined> {
+  if (isAbsolute(binary) || binary.includes(sep)) {
+    return (await probe(binary)) ? binary : undefined;
+  }
+  const pathValue = env['PATH'] ?? '';
+  for (const dir of pathValue.split(delimiter)) {
+    if (dir === '') continue;
+    const candidate = join(dir, binary);
+    if (await probe(candidate)) return candidate;
+  }
+  return undefined;
+}

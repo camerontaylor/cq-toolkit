@@ -312,3 +312,46 @@ table), labeled `costBasis: 'modeled'`, absent for unpriced models, and
 NEVER reported on unmeasured error/abort verdicts — the SDK's own
 `total_cost_usd` estimate is deliberately not surfaced (a vendor-side
 cost figure would bypass the derived-only rule).
+
+## First-party driver: `acp` (T1.8)
+
+`src/driver/acp/` — the FOURTH lane: speak the Agent Client Protocol
+(newline-delimited JSON-RPC 2.0 over stdio) to a vendor HARNESS binary
+(`zcode-acp-server` by default; `dsh-acp` as the fast-follow endpoint) as
+a governed worker on the frozen seam. One spawn per run, no daemon, no
+pooling, no retries. The vendor's tools execute in the VENDOR's process;
+our role is the ACP client and the permission authority. Full operator
+docs: **`docs/acp-driver.md`**; the governing strategy + live-probe
+evidence: `docs/acp-driver-strategy.md`.
+
+Files:
+
+- `index.ts` — `AcpDriver implements Driver` (constructor options:
+  `command?`/`endpoint?`/`endpointTable?` (binary discovery, §3 posture),
+  `envNames?`/`modelEnv?` (env var NAMES — never values), `outputSchema?`
+  (prompt-directed JSON), `workspaceRoot?`, `sessionsDir?`, `pricing?`,
+  `termGraceMs?`/`killGraceMs?`, `spawn?` test seam).
+- `protocol.ts` — OUR wire vocabulary: zero vendor imports (I10); the
+  shapes were transcribed from live probes (nested `session/update`
+  payloads, `configOptions` model reporting, kind-based permission
+  options) and include the FULL permission answer table as helpers.
+- `binaries.ts` — the endpoint registry (discovery only — never bundled,
+  never a dependency): explicit argv first, which-like PATH fallback, an
+  absent binary is a PRE-DISPATCH throw naming the binary + install hint.
+- `process.ts` — the I8 scan's exempt file for this lane: the shell-less
+  spawn and the SIGTERM→SIGKILL settle-time termination ladder.
+
+Lane specifics (all cited in the strategy doc): THE MODE PIN — sessions
+open in `yolo`, which never asks, so the driver pins
+`session/set_config_option { configId: 'mode', value: 'build' }` before
+ANY prompt (a failed pin is a pre-prompt error verdict); the permission
+answer table selects by option KIND (optionIds are vendor strings) and
+never answers `cancelled`; the NEVER-ASKS TRIPWIRE records a
+`tool_call` with no preceding permission request as ungated-execution
+evidence and fails the run; `WorkerResult.model` reads the
+POST-MATERIALIZATION `config_option_update` value only (the `session/new`
+entry is the lazy default); usage folds only `PromptResponse.usage`
+(`cachedWriteTokens` folds; `reasoning` is never emitted — thoughtTokens
+additivity is unproven); cancel settles `aborted` on the cancelled prompt
+response. `authenticate` is never called (OQ-1: no auth gate; an
+`auth_required` error fails the run naming the advertised authMethods).
