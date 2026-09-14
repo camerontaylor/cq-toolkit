@@ -363,8 +363,10 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       const result = await driver.run(invocation({ prompt: 'fails on step two' }));
       expect(calls).toBe(2); // step 1 completed, step 2 threw
       expect(result.stopReason).toBe('error');
-      // step 1's usage (folded through onStepFinish → usageFromSdk), NOT zeros
-      expect(result.usage).toEqual({ input: 100, output: 12, cacheRead: 15, cacheWrite: 5, reasoning: 2 });
+      // step 1's usage (folded through onStepFinish → usageFromSdk), NOT zeros.
+      // reasoning is absent by design (merge-queue 11ea275): it is a subset of
+      // outputTokens, so the frozen field stays unset on this lane.
+      expect(result.usage).toEqual({ input: 100, output: 12, cacheRead: 15, cacheWrite: 5 });
       // cost stays UNFABRICATED on the error path — no figure, no basis
       expect(result.costUSD).toBeUndefined();
       expect(result.costBasis).toBeUndefined();

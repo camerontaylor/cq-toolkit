@@ -860,13 +860,15 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
     expect(governor.tripReason).toMatch(/token rollup 125 exceeded cap 100/);
   });
 
-  test('(b) a returned WorkerResult carrying NaN usage folds NOTHING — no throw, no rollup change', async () => {
+  test('(b) a returned WorkerResult carrying NaN usage folds NOTHING — and the runner fails the lossy job loud', async () => {
     const governor = new BudgetGovernor(
       governorConfig({ concurrency: 1, stopOnError: false, maxTokens: 100 }, {}),
     );
     // The defensive WorkerResult guard rejects the lying measurement BEFORE
-    // the completion-time fold: the verdict stays real, the usage stays
-    // zero-evidence, nothing throws post-record.
+    // the completion-time fold: nothing folds, nothing throws post-record.
+    // DOWNSTREAM, the runner (RD-C, post-rebase contract) independently
+    // rejects the non-serializable (NaN-bearing) result as an honest per-job
+    // failure — two fail-loud layers, neither poisons the rollup.
     const lyingOp = async (): Promise<OpResult<unknown>> => ({
       status: 'ok',
       value: {
@@ -881,7 +883,11 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
       { concurrency: 1, stopOnError: false, maxTokens: 100 },
       governRegistry(viewWith(entry('lying', lyingOp)), governor),
     );
-    expect(report.jobs[0]?.result.status).toBe('ok');
+    expect(report.jobs[0]?.result.status).toBe('failed');
+    expect(report.jobs[0]?.result).toMatchObject({
+      status: 'failed',
+      error: expect.stringMatching(/non-serializable result/),
+    });
     expect(governor.usage).toBeUndefined(); // folded NOTHING
     expect(governor.tripped).toBe(false);
   });

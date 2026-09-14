@@ -221,9 +221,6 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     );
   });
 
-  test('buildArgs: stream-json print mode always carries --verbose (the real CLI refuses it otherwise — found live, T1.6)', () => {
-||||||| parent of 33b56f4 (fix(driver): review-debt subprocess fixes (issue #19, #24, #26 subprocess halves))
-  test('buildArgs: stream-json print mode always carries --verbose (the real CLI refuses it otherwise — found live, T1.6)', () => {
   test('buildArgs: the exact headless argv — undocumented flags removed (#19-8)', () => {
     const route = {
       endpoint: 'conformance',
