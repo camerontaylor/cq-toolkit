@@ -52,10 +52,11 @@ by the eslint rule `cq/no-vendor-sdk-in-kernel`, scoped to `src/kernel/**`
 
 ## What lands next
 
-Phase 1 (this phase): plan runner, NDJSON journal, budget governor — all
-consuming these frozen types as-is. Later phases: op families under
-`src/ops/`, the plan library under `src/plans/`, and the CLI layer (which
-owns the {0,1,2,3} exit-code mapping) under `src/cli/`.
+Phase 1 (this phase) has landed: the plan runner, the NDJSON journal, the
+budget governor, and the rescue policy lane — all consuming these frozen
+types as-is. Later phases: op families under `src/ops/`, the plan library
+under `src/plans/`, and the CLI layer (which owns the {0,1,2,3} exit-code
+mapping) under `src/cli/`.
 
 ## Runner, manifest, journal (T1.2)
 
@@ -100,3 +101,237 @@ reason" clause):
   frozen `RunEarlyStopReason` only contains `'budget'`, and honest-stop
   marking is T1.3's — callers read `counts.queued`/`counts.blocked` to see
   what never ran.
+
+## Budget governor (T1.3)
+
+The governor owns WHEN to abort (invariant I8): the per-job wall-clock
+escalation ladder, per-job and per-run attempt caps, the USD rollup cap, and
+the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts` (enforcer)
+and `src/kernel/rescue.ts` (policy table + decision engine).
+
+- **Seam — governed-registry decorator (recorded decision).**
+  `governRegistry(view, governor)` wraps an `OpRegistryView`; every op
+  invocation then runs under admission caps, the in-flight ceiling, and the
+  escalation ladder. Chosen over a `runPlan(plan, opts, registry, gov?)`
+  parameter because it is purely additive — T1.2 call-sites and tests compile
+  and pass unchanged, and the runner stays frozen. The `gov` parameter is the
+  recorded T1.4 runner-integration path (retries must raise the frozen
+  `JobStartedJournalEvent.attempt` field, and only the runner journals
+  dispatches). Consequence, also recorded: the governor NEVER retries inside
+  the wrapper — an in-wrapper retry would hide attempts from the journal
+  (one job-started, two real dispatches), which is journal-dishonest and
+  rejected. Re-dispatch happens at the runPlan level via the rescue lane.
+- **Escalation ladder (per job).** Rungs fire in order, each after its grace,
+  each appending a marker (kind `ladder-rung`: `rung`, `delayMs` since the
+  previous rung, `sinceStartMs`, `delivered`) to `BudgetGovernor.events`:
+  1. `signal` after `perJobWallClockMs` — cooperative cancellation: the op's
+     `AbortSignal`, reached via `currentJobContext()` (the additive ambient
+     channel; the frozen Op contract carries no signal parameter). Always
+     `delivered: true` — the signal is the primitive.
+  2. `timeout` after `abortGraceMs` — the second, harder cancel: the
+     subprocess-timeout semantics placeholder. The op registers a cancel
+     port (`ctx.setCancelPort`) and the rung calls `hardCancel()`;
+     `delivered: false` when no port was registered (the rung still fires
+     and is still recorded).
+  3. `kill` after `killGraceMs` — the SIGKILL-equivalent: `port.kill()` when
+     the op hosts a killable worker, and ALWAYS in-process abandonment — the
+     op promise is detached (its later settlement suppressed, no unhandled
+     rejection), the invocation settles `{status:'budget-exhausted'}`, and
+     the run no longer waits on it. A fake op that ignores the abort signal
+     is therefore still terminated at the final rung — that is the slice-2
+     test.
+  An op that settles early disarms every pending rung. A port primitive that
+  THROWS is recorded on the rung marker (`delivered: false` plus an `error`
+  note — mirrored on the governor's `ladder-rung` event) and the ladder
+  continues: a failing port can never lose a marker, skip the later rungs,
+  or hang the job. `runLadder` is the standalone unit (no registry needed);
+  markers are also returned on the `LadderOutcome`.
+- **Why kills are `budget-exhausted`, not `indeterminate` (recorded
+  decision).** The taxonomy lists "timeout" under `indeterminate` for
+  op-internal losses with no attributable cause; a governor kill has a known
+  cause — a budget bound was hit ("the op did not run (or halted) because a
+  budget bound was hit", frozen wording). This also makes the journal honest
+  and resume-compatible: the terminal record re-runs on resume like any
+  non-ok row.
+- **Caps.** Per-job attempts and the per-run dispatch quota
+  (`Limits.runDispatchQuota` IS the per-run attempt cap) reject at
+  admission: the op never runs and the invocation returns
+  `{status:'budget-exhausted'}`. The in-flight ceiling
+  (`Limits.inFlightCeiling`) is SEPARATE and enforced by FIFO QUEUEING,
+  never by failing (failing waiters would be dishonest — they merely had to
+  wait), so effective parallelism is the frozen
+  min(`RunOptions.concurrency`, ceiling). Admission IS the dispatch
+  decision: quota/attempt counters advance at admit, before in-flight
+  queueing; a dispatch queued when the budget trips is refused
+  (`budget-while-queued`) rather than run.
+- **USD accounting.** Ops report usage and cost through the job context
+  (`reportUsage` / `reportCost`); the governor rolls up and trips at the
+  EFFECTIVE cap = min(`RunOptions.maxUsd`, `Limits.maxUsd`) (frozen
+  precedence; the cap is inclusive — the trip fires when the rollup EXCEEDS
+  it). The kernel never derives cost itself: until the T1.4 price-map layer
+  lands, tests inject cost via `reportCost`. Tripping gates admission only —
+  in-flight jobs were admitted before the trip and their outcomes stay real
+  evidence (aborting them mid-flight would complicate honest attribution;
+  recorded decision).
+- **Honest stop (I9).** `withBudgetStop(report, plan, governor)` annotates a
+  returned report ONLY when the governor actually tripped:
+  `stoppedEarly: true`, `earlyStopReason: 'budget'` (the frozen
+  `RunEarlyStopReason`'s only value — this is its purpose), and
+  never-dispatched rows re-marked `OpResult {status:'budget-exhausted'}`:
+  `queued: …` marker rows always; `blocked: …` marker rows only when their
+  whole dependency obstruction is transitively budget-caused — a blocked row
+  with a definitively-failed dependency keeps its real verdict. Executed
+  rows are never rewritten. Counts are recomputed over the marked rows
+  (mirroring the runner's private state mapping — keep-in-sync note in the
+  source). Today the caller composes
+  `withBudgetStop(await runPlan(...), plan, governor)`; the T1.4 runner
+  integration folds it into runPlan.
+- **Composable with resume.** A run the governor stopped still leaves
+  journal evidence: an in-process kill produces a terminal
+  budget-exhausted record; a hard-crashed job has `job-started` with no
+  terminal event. Both re-enter correctly on `resume: true` (T1.2 replay
+  re-runs every non-ok row). `seedFromRunLog(log, planId, {config?, usdOf?})`
+  is the composition path: it reads ALL of the plan's run journals (the same
+  `<planId>--` prefix + run-started `planId` matchers as resume,
+  oldest-first) and seeds a constructed governor from their ordered
+  concatenation. The raw `BudgetGovernor.seedFromJournal(events, {usdOf?})`
+  requires exactly that concatenation — the latest run's journal alone
+  undercounts re-attested jobs (finish-only events) and chained dispatches.
+  The fold carries per-job attempt ordinals from the frozen attempt field
+  (via `rescue.attemptsFromJournal`), the usage
+  rollup (USD needs the optional `usdOf` price mapping), and the dispatch
+  count (`runDispatchQuota` carries across resume instead of restarting at
+  0) — so a resumed run continues the SAME budget. Under the op-name
+  fallback the op key seeds the SUM of the op's journaled dispatches (the
+  fallback's ordinal IS the op's dispatch count; a max would understate it
+  and let a resumed run exceed the cap). Consequence: budget-exhausted rows
+  are
+  terminal and are NOT auto-retried by resume in any effective sense — a
+  seeded, still-tripped governor re-marks them without op invocation; only
+  an input change (new `inputsHash`, which defeats even ok-skip in T1.2
+  replay) puts them back under the caps as genuinely new work. Without a
+  seed, T1.2 replay re-runs them as fresh dispatches — still under the
+  same caps.
+
+## Governor config
+
+`GovernorConfig` is plain serializable data for now (the one runtime-only
+field is `jobKey`, a function — like the registry's importer, never
+persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
+`RunOptions`/`Limits` surfaces with the min-precedence applied.
+
+| field | meaning | default |
+| --- | --- | --- |
+| `maxUsd` | EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd) | none |
+| `perJobWallClockMs` | rung-1 delay (`Limits.perJobWallClockMs`) | none = no ladder |
+| `abortGraceMs` | rung 1 → rung 2 grace | `DEFAULT_ABORT_GRACE_MS` = 2000 (PRE-SPIKE) |
+| `killGraceMs` | rung 2 → rung 3 grace | `DEFAULT_KILL_GRACE_MS` = 5000 (PRE-SPIKE) |
+| `maxAttemptsPerJob` | per-job attempt cap (effective min) | none |
+| `runDispatchQuota` | per-run dispatch/attempt cap (`Limits.runDispatchQuota`) | none |
+| `inFlightCeiling` | in-flight ceiling — enforced by queueing | none |
+| `jobKey` | job-key extractor (runtime-only) | `input.jobId` convention, else the **op name** |
+
+**DD-1 result: pending T1.6** — the spike that sizes `abortGraceMs` lands
+there. The grace defaults above are documented conservative placeholders,
+marked pre-spike in the source, and are expected to change in T1.6's own PR.
+
+Every timer in the governor flows through the injected `Clock`
+(`new BudgetGovernor(config, clock)`; default `realClock`) — there is no
+naked `setTimeout` in the governor — so slice-2 tests advance virtual time
+deterministically and assert the ladder purely from
+`BudgetGovernor.events` (admissions, refusals, rungs with delays and
+`delivered` flags, completions, the trip, the seed).
+
+## Rescue lane (T1.3)
+
+`src/kernel/rescue.ts` holds the policy TABLE — plain serializable data
+(JSON round-trips losslessly; no functions) — and the pure decision engine
+that consumes it. Invariant I8 in kernel terms: the KERNEL decides WHETHER
+to retry/escalate and WHAT a re-dispatch carries; drivers execute and never
+decide. The kernel never constructs driver objects — escalation is data a
+driver-owning layer maps onto real drivers.
+
+Shape (first matching row wins; `on` matches the LATEST attempt's outcome;
+`op` scopes the row when present):
+
+```ts
+interface RescuePolicyRow {
+  id: string;                 // stable — audit references name the deciding row
+  on: RescueOutcome | 'any';  // 'ok'|'failed'|'needs-human'|'budget-exhausted'|'indeterminate'|'killed'
+  op?: string;                // absent = every op
+  action:
+    | { kind: 'retry';
+        maxAttempts: number;  // MAX TOTAL attempts under this row (1 = never re-dispatch)
+        escalate?: { model?: string; provider?: string; driver?: string };
+        carrySessionRef?: boolean }  // echo the latest attempt's session resume token
+    | { kind: 'skip' };       // explicit conservative termination
+}
+interface RescuePolicy { rows: RescuePolicyRow[] }
+```
+
+`CONSERVATIVE_RESCUE_POLICY = { rows: [] }` rescues nothing.
+
+Decision rules, in order — first termination wins (conservative by
+construction):
+
+1. Guards first. `baseline-failed` (the job's pre-rescue baseline attempt
+   ended in a definitive failure — a real verdict; re-dispatch cannot help)
+   and `human-intervened` (a human owns the next move) terminate with the
+   guard named; NO row overrides a guard — when a guard trips, rescue NEVER
+   retries. A `needs-human` latest outcome auto-trips the human-intervened
+   guard.
+2. No attempts → terminate (`no-attempts`); latest outcome `ok` → terminate
+   (`already-ok`).
+3. No matching row → terminate (`no-policy-row`); a `skip` row → terminate
+   (`policy-skip`).
+4. A `retry` row is bounded by the EFFECTIVE per-job attempt cap =
+   min(`row.maxAttempts`, `Limits.maxAttemptsPerJob`) — at cap, terminate
+   (`attempt-cap`, naming which bound refused). Otherwise re-dispatch as
+   attempt `n+1` carrying the row's escalation (stronger model/driver, as
+   data) and — only when the row says `carrySessionRef` and the latest
+   attempt observed a token — the session resume token (`OpInvocation.sessionRef`
+   on the frozen seam; observed from `WorkerResult.sessionId`).
+
+`attemptsFromJournal(events, jobId)` is the evidence fold: each
+`job-started` opens a dispatch with ordinal max(frozen `attempt` field,
+dispatch occurrence) — the occurrence count carries the truth while the
+runner still writes `attempt: 1`, and the frozen field dominates once real
+attempt numbers land; the matching `job-finished` closes it with the frozen
+result; a start with no finish (crash/torn tail) stays `killed`; an orphan
+finish is a replay re-attestation refreshing the last attempt. From journal
+evidence alone a ladder kill and any other budget-exhausted result fold to
+the same frozen status — refine to `killed` from the governor's event
+stream when available.
+
+Executing a `retry` decision = a resumed `runPlan` whose dispatches honor
+the decision — never an in-wrapper retry (see the governor section). The
+composition harness for that arrives with the op families (T1.4+).
+
+## Recorded design decisions (T1.3)
+
+- **Decorator seam** chosen over the `runPlan` `gov` parameter: purely
+  additive, runner untouched; the `gov` parameter is the recorded T1.4
+  runner-integration path.
+- **Ladder kills settle `budget-exhausted`**, not `indeterminate`: known
+  budget cause; journal stays honest; resume re-runs the row.
+- **No in-wrapper retries**: retries must rise through the runner so
+  `JobStartedJournalEvent.attempt` rises; anything else hides attempts from
+  the journal.
+- **Job-key identity**: the frozen Op contract carries no job id, so caps
+  key on an explicit `jobKey` extractor, the `input.jobId` plan-jobId
+  convention, else the OP NAME — under that fallback every dispatch of an op
+  counts as another attempt of that op, so the per-job attempt cap always
+  exists (a per-dispatch unique key would make it a silent no-op).
+  `seedFromJournal` seeds BOTH keys (journal jobId and op name) so a resumed
+  run's caps hold under either identity. Stable per-job identity needs
+  `config.jobKey` or `input.jobId`.
+- **Seed dedupe**: usage is counted only for journal finishes that close an
+  open start — an orphan finish in a multi-run journal is a replay
+  re-attestation of an already-counted dispatch, and counting it again would
+  double the rollup.
+- **Trip gates admission only**: in-flight jobs complete; their evidence
+  stays real.
+- **USD is observed, never derived**: cost arrives via `reportCost` (tests
+  inject until the T1.4 price-map layer); the kernel computes no cost.
+- **Grace defaults are pre-spike placeholders** (`DEFAULT_ABORT_GRACE_MS`/
+  `DEFAULT_KILL_GRACE_MS`); DD-1 result: pending T1.6.
