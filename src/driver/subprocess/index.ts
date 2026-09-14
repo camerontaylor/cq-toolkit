@@ -189,9 +189,10 @@ export interface SubprocessDriverOptions {
   /**
    * Structured-output schema (data-driven). When set, the CLI is invoked
    * with `--json-schema <zod→JSON Schema>` and the result event's
-   * structured_output lands in WorkerResult.structuredOutput. Per-op schema
-   * registries are a later-lane concern (the frozen OpInvocation cannot
-   * carry a schema).
+   * structured_output is validated against this schema before it lands in
+   * WorkerResult.structuredOutput (a payload that fails is dropped to
+   * narration, never trusted). Per-op schema registries are a later-lane
+   * concern (the frozen OpInvocation cannot carry a schema).
    */
   outputSchema?: ZodType;
   /** Routing table override (default: defaultRoutingTable — as-of 2026-09 provider docs). */
@@ -222,6 +223,8 @@ export interface SubprocessDriverOptions {
  */
 export class SubprocessDriver implements Driver {
   private readonly binary: readonly string[];
+  /** The constructor's original schema — the settle-time structured_output check parses against it. */
+  private readonly outputSchema: ZodType | undefined;
   private readonly outputJsonSchema: string | undefined;
   private readonly routingTable: RoutingTable;
   private readonly termGraceMs: number | undefined;
@@ -234,7 +237,10 @@ export class SubprocessDriver implements Driver {
   constructor(options: SubprocessDriverOptions = {}) {
     this.binary = typeof options.binary === 'string' ? [options.binary] : options.binary ?? ['claude'];
     // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
-    // config error before any run, not a mid-dispatch surprise.
+    // config error before any run, not a mid-dispatch surprise. The original
+    // zod schema is retained alongside the serialized form — the CLI's
+    // structured_output is validated against it post-settle (below).
+    this.outputSchema = options.outputSchema;
     this.outputJsonSchema =
       options.outputSchema === undefined ? undefined : JSON.stringify(z.toJSONSchema(options.outputSchema));
     // An invalid table throws HERE (construction is the closest thing to
@@ -355,6 +361,28 @@ export class SubprocessDriver implements Driver {
     // against the ladder's final marker. Bounded: terminateGracefully
     // always settles (its SIGKILL rung force-resolves).
     if (terminationStarted) await terminationDone;
+
+    // Structured_output is the one vendor field that becomes seam data, so
+    // when a schema was configured it must survive that schema before it can
+    // reach a verdict — the CLI is a vendor boundary, and a payload that
+    // fails is dropped and its rejection recorded as narration, never
+    // trusted (the ai-sdk lane gets the same guarantee from Output.object).
+    const rawStructured = observation.result?.['structured_output'];
+    if (this.outputSchema !== undefined && observation.result !== undefined && rawStructured !== undefined) {
+      const check = this.outputSchema.safeParse(rawStructured);
+      if (check.success) {
+        observation.result['structured_output'] = check.data;
+      } else {
+        delete observation.result['structured_output'];
+        observation.narration.push(
+          JSON.stringify({
+            cq: 'structured-output-rejected',
+            issues: check.error.issues.length,
+            paths: check.error.issues.map((issue) => issue.path.map(String).join('.')),
+          }),
+        );
+      }
+    }
 
     // --- Session persistence (post-settle, OUR vocabulary). A store error
     // here is swallowed: once spawned, the verdict must reach the caller —

@@ -28,7 +28,10 @@
 //                    requested --model). Simulates a gateway silently
 //                    remapping the requested name server-side.
 //   ok               assistant text (FAKE_AGENT_REPLY ?? 'ok') + result
-//   structured-ok    result carries structured_output {answer:'ok'}
+//   structured-ok    result carries structured_output {answer:'ok'};
+//                    FAKE_AGENT_STRUCTURED_RAW overrides the payload
+//                    verbatim with NO --json-schema checking (a lying CLI,
+//                    for observing the driver's own seam validation)
 //   tool-then-reply  ONE tool_use (FAKE_AGENT_TOOL/FAKE_AGENT_INPUT, default
 //                    a read of FAKE_AGENT_PATH ?? 'note.txt') EXECUTED for
 //                    real against cwd (the driver's workspace) — read/run/
@@ -82,6 +85,7 @@ const TOOL_PATH = process.env.FAKE_AGENT_PATH;
 const SLOW_EXIT_MS = Number(process.env.FAKE_AGENT_SLOW_EXIT_MS ?? '0');
 const ALLOWED = process.env.FAKE_AGENT_ALLOWED; // undefined (standalone) = all; '' = none
 const SERVED_MODEL = process.env.FAKE_AGENT_SERVED_MODEL;
+const STRUCTURED_RAW = process.env.FAKE_AGENT_STRUCTURED_RAW;
 const resumeId = flagValue('--resume');
 const jsonSchemaRaw = flagValue('--json-schema');
 const model = flagValue('--model') ?? 'fake-model';
@@ -363,6 +367,19 @@ async function main() {
   }
   if (MODE === 'structured-ok') {
     emitAssistantText(REPLY ?? '{"answer":"ok"}');
+    // FAKE_AGENT_STRUCTURED_RAW: emit this JSON verbatim as structured_output
+    // with NO --json-schema checking — a lying CLI, so the DRIVER's own
+    // schema validation can be observed dropping the payload.
+    if (STRUCTURED_RAW !== undefined) {
+      let parsed;
+      try {
+        parsed = JSON.parse(STRUCTURED_RAW);
+      } catch {
+        parsed = STRUCTURED_RAW;
+      }
+      emitResult({ structured_output: parsed });
+      return;
+    }
     const structured = { answer: 'ok' };
     let schema;
     try {

@@ -395,6 +395,32 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   });
 
+  test('structured output: a schema-violating payload is dropped to narration, never trusted', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // The fixture emits the raw payload verbatim (a lying CLI — no fixture
+      // schema checking), so the driver's own settle-time validation is what
+      // stands between the vendor field and the seam.
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_STRUCTURED_RAW: '{"answer":42}' },
+          [],
+        ),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      const result = await driver.run(invocation({ prompt: 'lying CLI run' }));
+      // The run itself succeeded; only the unrepresentable payload is gone.
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toBeUndefined();
+      // The rejection is evidence, not silence: a plain-JSON narration
+      // marker carrying the zod issue count and paths.
+      const narration = await narrationOf(store, result.sessionId as string);
+      const rejected = narration.find((line) => line.includes('"structured-output-rejected"'));
+      expect(rejected !== undefined && rejected.includes('"issues":1')).toBe(true);
+      expect(rejected !== undefined && rejected.includes('"paths":["answer"]')).toBe(true);
+    });
+  });
+
   test('usage mapping: the fixed fixture numbers become the frozen Usage shape', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));

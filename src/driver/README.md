@@ -152,8 +152,10 @@ none`, `--bare`, `--model <route.model>`, and `--resume <cli-session-id>`
 on sessionRef resume.
 
 Event mapping (stream-json → seam): init `session_id` → CLI session id
-(recorded as a `{role:'tool', toolName:'subprocess-cli-session'}` marker
-in OUR session record — the resume handle for `--resume`); assistant text
+(persisted post-settle to the workspace sidecar file `.cq-cli-session`
+(`CLI_SESSION_FILE` in `index.ts`) — the resume handle passed as
+`--resume` on the next run over the same sessionRef; a missing or
+unreadable sidecar means an honest workspace-only continuation); assistant text
 → transcript; errored `tool_result` events → frozen
 `{tool, reason}` denials; the terminal `result` event → frozen Usage
 (`input_tokens`/`output_tokens`/`cache_read_input_tokens`/
@@ -175,7 +177,7 @@ status, no result event, or a spawn failure → `error`. Once spawned,
 Isolation (I6): no `sessionRef` → fresh temp workspace +
 `SessionStore.create` (cwd = workspace); `sessionRef` →
 `SessionStore.load` resumes the SAME workspace and passes `--resume`
-when the record carries a CLI session marker (a marker-less record
-resumes the workspace only — an honest partial continuation); unknown
+when the workspace carries the CLI session sidecar (a sidecar-less
+workspace resumes the workspace only — an honest partial continuation); unknown
 sessionRef throws. Session turns persist in our `SessionMessage`
 vocabulary only.
