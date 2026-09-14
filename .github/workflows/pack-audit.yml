@@ -70,17 +70,23 @@ jobs:
           # npm always includes). Anything else — test/, scripts/, src/, a
           # stray dotfile — is a violation.
           allowlist='^(package\.json|README\.md|LICENSE|dist|policy)(/.*)?$'
-          violations="$(tar -tzf "${TARBALL}" | sed 's|^package/||' | sed '/^$/d' | grep -vE "${allowlist}" || true)"
+          # The listing is captured ONCE: a `tar | grep -qx` pipeline closes
+          # the pipe on grep's first match, SIGPIPEs tar (exit 141), and
+          # pipefail then fails the assertion even on a match.
+          listing="$(mktemp)"
+          tar -tzf "${TARBALL}" > "${listing}"
+          violations="$(sed 's|^package/||' "${listing}" | sed '/^$/d' | grep -vE "${allowlist}" || true)"
           if [ -n "${violations}" ]; then
             echo "tarball carries paths outside the package.json files allowlist:"
             echo "${violations}"
             exit 1
           fi
           # The two load-bearing artifacts must actually ship.
-          tar -tzf "${TARBALL}" | grep -qx 'package/dist/index.js' \
+          grep -qx 'package/dist/index.js' "${listing}" \
             || { echo 'dist/index.js (the exports main) is missing from the tarball'; exit 1; }
-          tar -tzf "${TARBALL}" | grep -qx 'package/policy/denylist/patterns.yml' \
+          grep -qx 'package/policy/denylist/patterns.yml' "${listing}" \
             || { echo 'policy/denylist/patterns.yml is missing from the tarball'; exit 1; }
+          rm -f "${listing}"
           echo 'tarball paths: only dist/, policy/, LICENSE, README.md, package.json'
       - name: Install pinned gitleaks v8.30.1 (digest-pinned)
         run: |
