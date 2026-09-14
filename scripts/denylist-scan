@@ -818,9 +818,11 @@ const JOBS_KEY_LINE = /^jobs:/;
 // none — a job-level `name:` renames the emitted check run (GitHub reports
 // it under the name, not the id), which is why the override is surfaced.
 // The override scan walks the job's body lines (indent > base, blanks
-// skipped) until the body ends; the FIRST body line whose trimmed form
-// matches /^name:\s*(.+?)\s*$/ wins, and step entries (`- name: ...`) never
-// match because the trimmed line starts with `-`.
+// skipped) until the body ends, matching at the job body's first indent
+// level only — nested mappings (environment.name, with.name) are not
+// overrides. The FIRST body line at that indent whose trimmed form matches
+// /^name:\s*(.+?)\s*$/ wins, and step entries (`- name: ...`) never match
+// because the trimmed line starts with `-`.
 function workflowDeclaresJob(text, jobName) {
   const stripped = text.split(/\r?\n/).map(stripInlineComment);
   const start = stripped.findIndex((l) => JOBS_KEY_LINE.test(l));
@@ -835,10 +837,14 @@ function workflowDeclaresJob(text, jobName) {
     if (ind !== base) continue; // deeper: job body, not a job id
     const kv = /^([A-Za-z_][A-Za-z0-9_-]*):/.exec(line.trim());
     if (kv && kv[1] === jobName) {
+      let bodyBase = null; // the job body's key indent (first non-blank body line)
       for (let j = i + 1; j < stripped.length; j++) {
         const body = stripped[j];
         if (body.trim() === '') continue;
-        if (body.match(/^ */)[0].length <= base) break; // end of this job's body
+        const bodyInd = body.match(/^ */)[0].length;
+        if (bodyInd <= base) break; // end of this job's body
+        if (bodyBase === null) bodyBase = bodyInd;
+        if (bodyInd !== bodyBase) continue; // nested mapping (or malformed shallower line) — not a job-level key
         const name = /^name:\s*(.+?)\s*$/.exec(body.trim());
         if (name) {
           let value = name[1];

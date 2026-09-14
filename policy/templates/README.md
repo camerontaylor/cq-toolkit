@@ -11,7 +11,7 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | file | what it is |
 | --- | --- |
 | `init-merge-queue.yml` | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD |
-| `merge-queue-gate.yml` | on push to `merge-queue`: wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind two merge-base guards |
+| `merge-queue-gate.yml` | on push to `merge-queue`: wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind a merge-queue-tip guard and two merge-base guards |
 | `sync-merge-queue.yml` | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate |
 | `required-check.md` | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example |
 | `affected-tests.md` | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay |

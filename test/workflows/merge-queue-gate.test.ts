@@ -95,6 +95,32 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     return { label, text, progFile };
   });
 
+  // Identity lockstep: the behavioral matrix below can only catch drift the
+  // cases exercise — these string-identity checks catch ALL drift.
+  it('extracted program and guard snippet are byte-identical across the files', () => {
+    const [generated, template] = gates;
+    expect(
+      extractAwkProgram(generated.text),
+      'the files drifted outside the behavioral cases: the awk verdict program',
+    ).toBe(extractAwkProgram(template.text));
+    // Each file quotes its check list differently ('static,denylist'
+    // generated, '{{GATE_CHECKS}}' template) and names the subject of the
+    // guard comment differently ('an empty {{GATE_CHECKS}}' template,
+    // 'an empty gate wait list' generated) — the two sanctioned
+    // token-level divergences of the instantiation. Normalize both to
+    // placeholders before comparing; ANY other drift still fails.
+    const normalize = (text: string): string =>
+      extractFailClosedSnippet(text)
+        .replace(`'static,denylist'`, `'<LIST>'`)
+        .replace(`'{{GATE_CHECKS}}'`, `'<LIST>'`)
+        .replace(`an empty {{GATE_CHECKS}}:`, `an empty <SUBJECT>:`)
+        .replace(`an empty gate wait list:`, `an empty <SUBJECT>:`);
+    expect(
+      normalize(generated.text),
+      'the files drifted outside the behavioral cases: the fail-closed guard snippet',
+    ).toBe(normalize(template.text));
+  });
+
   // 18 real awk spawns (2 programs x 9 cases); a macOS awk cold start costs
   // ~0.5-1s each, so this needs a generous timeout like the ratchet sandbox
   // tests that spawn tsc.

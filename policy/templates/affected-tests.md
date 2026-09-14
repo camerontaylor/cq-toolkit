@@ -69,6 +69,7 @@ see the I4 interplay above):
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
+          # Anonymous fetch works on public repos; a private-repo adopter needs a token for this fetch (persist-credentials: false above) or can drop it — fetch-depth: 0 already holds the history.
           git fetch origin "${BASE_SHA}"
           git diff --name-only "${BASE_SHA}" "${HEAD_SHA}" \
             > "${RUNNER_TEMP}/changed.txt"
@@ -80,7 +81,10 @@ see the I4 interplay above):
             # Pass the changed-file list as an argument array: an unquoted
             # $(cat ...) word-splits and globs, corrupting paths with
             # spaces or glob characters.
-            mapfile -t changed < "${RUNNER_TEMP}/changed.txt"
+            changed=()
+            while IFS= read -r path || [ -n "${path}" ]; do
+              changed+=("${path}")
+            done < "${RUNNER_TEMP}/changed.txt"
             npx vitest related --run "${changed[@]}"
           else
             echo "no changed files selected — falling back to the full suite"

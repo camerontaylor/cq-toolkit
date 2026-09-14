@@ -288,6 +288,13 @@ const selected = selectCells();
 // cells that never contact every provider, so only the providers the
 // selected cells actually touch are required.
 const NEEDED_KEY = { zai: 'ZAI_API_KEY', deepseek: 'DEEPSEEK_API_KEY' };
+// Fail closed on an unmapped provider: a provider absent from NEEDED_KEY
+// would otherwise silently need no key and run unauthenticated.
+const unmapped = selected.find((c) => NEEDED_KEY[c.provider] === undefined);
+if (unmapped !== undefined) {
+  console.error(`demo-eval-axes: no credential mapping for provider '${unmapped.provider}' — refusing to run`);
+  process.exit(1);
+}
 const missing = [
   ...new Set(
     selected

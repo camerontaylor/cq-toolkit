@@ -7,8 +7,8 @@
 # client-side trust. This workflow NEVER advances main itself: when
 # merge-queue is ahead, it dispatches merge-queue-gate — the sole promotion
 # path — so nothing reaches main except behind the gate's required-check
-# wait and merge-base guards. See policy/templates/README.md for the token
-# table and the entitlement facts.
+# wait, the merge-queue-tip guard, and the merge-base guards. See
+# policy/templates/README.md for the token table and the entitlement facts.
 #
 # Instantiate: replace {{PROMOTE_SECRET}} with the NAME of the repo secret
 # holding a PAT with contents:write (branch writes via the refs and merge

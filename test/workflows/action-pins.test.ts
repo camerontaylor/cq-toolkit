@@ -1,11 +1,12 @@
 // Slice C — the action-pinning policy, mechanically enforced:
-//   1. EVERY `uses:` across every generated workflow (all *.yml under
-//      .github/workflows/) and the five template files under
+//   1. EVERY `uses:` across every generated workflow (all *.yml and *.yaml
+//      under .github/workflows/ — GitHub executes both extensions) and the
+//      five template files under
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
-//   2. The persist-credentials split: generated ci.yml and denylist.yml are
-//      required-check jobs that run repo code, so their checkouts must drop
+//   2. The persist-credentials split: generated ci.yml, denylist.yml, and
+//      install-matrix.yml run repo code, so their checkouts must drop
 //      the token (`persist-credentials: false`); the queue-mechanics
 //      workflows (init-merge-queue.yml, merge-queue-gate.yml) keep the
 //      promote PAT by design and must not declare the key at all — their
@@ -46,7 +47,7 @@ function usesRefs(text: string): Array<{ line: number; ref: string }> {
 }
 
 const workflowFiles = readdirSync(WORKFLOWS_DIR)
-  .filter((name) => name.endsWith('.yml'))
+  .filter((name) => /\.ya?ml$/.test(name)) // GitHub executes both .yml and .yaml
   .sort()
   .map((name) => join(WORKFLOWS_DIR, name));
 const pinnedFiles = [...workflowFiles, ...TEMPLATE_FILES.map((rel) => join(ROOT, rel))];
@@ -63,8 +64,8 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(failures, 'mutable or missing action pins').toEqual([]);
   });
 
-  it('generated ci.yml and denylist.yml drop the checkout token (persist-credentials: false)', () => {
-    for (const name of ['ci.yml', 'denylist.yml']) {
+  it('generated ci.yml, denylist.yml, and install-matrix.yml drop the checkout token (persist-credentials: false)', () => {
+    for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
       expect(text, `${name}: required-check checkout must set persist-credentials: false`).toMatch(/^(\s+)persist-credentials: false$/m);
     }
