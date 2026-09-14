@@ -70,6 +70,32 @@ function scriptFor(text: string, list: string): string {
   return `set -euo pipefail\n${substituted}\n`;
 }
 
+// The promotion step's run script: from the `set -euo pipefail` that follows
+// the step's name line through the final `promoted ${SHA} to main by pure
+// fast-forward` echo (inclusive).
+function extractPromotionScript(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const nameLine = lines.findIndex((line) => line.includes('Fast-forward promote the gated sha'));
+  if (nameLine === -1) throw new Error('promotion step not found');
+  let start = -1;
+  for (let i = nameLine + 1; i < lines.length; i++) {
+    if (/^ {10}set -euo pipefail$/.test(lines[i])) {
+      start = i;
+      break;
+    }
+  }
+  if (start === -1) throw new Error('promotion run script not found');
+  let end = -1;
+  for (let i = start; i < lines.length; i++) {
+    if (lines[i].includes('promoted ${SHA} to main by pure fast-forward')) {
+      end = i;
+      break;
+    }
+  }
+  if (end === -1) throw new Error('promotion script tail not found');
+  return lines.slice(start, end + 1).join('\n');
+}
+
 // The verdict matrix: @tsv rows ([name, status, conclusion]) in, exact
 // verdict string out (the string the workflow's case statement receives).
 const VERDICT_CASES: ReadonlyArray<{ name: string; rows: string; expected: string }> = [
@@ -169,5 +195,15 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
         }
       });
     }
+
+    // Identity lockstep: the presence checks above can pass with a one-file
+    // revert; the promotion run script itself must be byte-identical.
+    it('the promotion step run script is byte-identical across the files (identity lockstep)', () => {
+      const [generated, template] = gates;
+      const gen = extractPromotionScript(generated.text);
+      const tmpl = extractPromotionScript(template.text);
+      expect(gen, 'the promotion step drifted between template and instantiation').toBe(tmpl);
+      expect(gen, 'the promotion step must carry no template tokens').not.toContain('{{');
+    });
   });
 });
