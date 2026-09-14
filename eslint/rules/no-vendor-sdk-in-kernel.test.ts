@@ -80,5 +80,9 @@ ruleTester.run('no-vendor-sdk-in-kernel', rule, {
       },
       errors: [{ messageId: 'vendorSdk' }],
     },
+    {
+      code: 'require.resolve("openai");',
+      errors: [{ messageId: 'vendorSdk' }],
+    },
   ],
 });

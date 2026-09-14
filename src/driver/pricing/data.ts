@@ -6,15 +6,13 @@
 // https://models.dev/zai, https://models.dev/deepseek). Data repository:
 // https://github.com/anomalyco/models.dev.
 //
-// LICENSE (the DD-3 verdict, verified in docs/reverify-2026-09.md, checked
-// 2026-09-14): the repository's LICENSE file "opens 'MIT License /
-// Copyright (c) 2025 models.dev / Permission is hereby granted, free of
-// charge, to any person obtaining a copy of this software and associated
-// documentation files…' — the standard MIT grant; GitHub's license metadata
-// agrees (spdx_id MIT)." VERDICT (quoted): "vendoring-allowed — the data
-// repository is MIT-licensed, whose grant permits copying and redistribution
-// provided the copyright notice is preserved." This header preserves that
-// notice, as the verdict requires.
+// LICENSE (DD-3; verified in docs/reverify-2026-09.md — checks dated
+// 2026-09-13): the upstream data repository is MIT-licensed, "Copyright
+// (c) 2025 models.dev" (GitHub license metadata agrees, spdx_id MIT).
+// VERDICT (recorded): vendoring-allowed for the scope vendored here — the
+// eval-matrix pricing entries. The MIT grant conditions copying on carrying
+// the copyright notice; this header carries it and points back at the
+// record. Header comments here are synced with that record when it changes.
 //
 // VALUES AS-OF: 2026-09. Rates are USD per MILLION tokens
 // (PerMillionRates). Precision is not load-bearing here: structure and

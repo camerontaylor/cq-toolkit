@@ -12,17 +12,13 @@ truth; drivers never report trusted USD).
     https://models.dev/anthropic, https://models.dev/openai,
     https://models.dev/zai, https://models.dev/deepseek)
   - Data repository: https://github.com/anomalyco/models.dev
-- License verdict (verified 2026-09-14; full record in
-  `docs/reverify-2026-09.md`): the repository's LICENSE file opens
-  "MIT License / Copyright (c) 2025 models.dev / Permission is hereby
-  granted, free of charge, to any person obtaining a copy of this software
-  and associated documentation files…" — the standard MIT grant; GitHub's
-  license metadata agrees (`spdx_id` MIT).
-- **Verdict (quoted from the re-verification): "vendoring-allowed — the
-  data repository is MIT-licensed, whose grant permits copying and
-  redistribution provided the copyright notice is preserved."** The
-  copyright notice is preserved in `data.ts`'s header, as the verdict
-  requires.
+- License verdict (verified in `docs/reverify-2026-09.md`, checks dated
+  2026-09-13): the upstream data repository is MIT-licensed, "Copyright
+  (c) 2025 models.dev" (GitHub's license metadata agrees, `spdx_id` MIT).
+- **Verdict (from the re-verification): vendoring-allowed for the scope
+  vendored here — the eval-matrix pricing entries.** The MIT grant
+  conditions copying on carrying the copyright notice; `data.ts`'s header
+  carries it and points back at the record.
 
 ## As-of date and refresh rule
 

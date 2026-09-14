@@ -70,11 +70,12 @@ export default {
         }
       },
       CallExpression(node) {
-        if (
-          node.callee.type === 'Identifier' &&
-          node.callee.name === 'require' &&
-          node.arguments.length > 0
-        ) {
+        const isRequire =
+          (node.callee.type === 'Identifier' && node.callee.name === 'require') ||
+          (node.callee.type === 'MemberExpression' &&
+            node.callee.object.type === 'Identifier' &&
+            node.callee.object.name === 'require');
+        if (isRequire && node.arguments.length > 0) {
           checkSource(context, node.arguments[0], node);
         }
       },
