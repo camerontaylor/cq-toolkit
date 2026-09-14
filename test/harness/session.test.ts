@@ -3,7 +3,7 @@
 // recovers it (truncate to the last complete line) BEFORE appending, so the
 // record stays the viable resume path. Evidence corruption (a corrupt line
 // in the middle of a fully-written file) is NOT healed — it stays loud.
-import { appendFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -56,6 +56,22 @@ describe('SessionStore torn-tail recovery (fix 2)', () => {
       ).rejects.toThrow(/ses-torn/);
       // And it still loads as "no session" — the never-established path.
       await expect(store.load('ses-torn')).resolves.toBeUndefined();
+    });
+  });
+
+  test('an empty session file is a never-established session — appending refuses instead of writing a headerless line', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      // create() crashed between open(O_CREAT) and the header write: an EMPTY
+      // file. Pre-fix, appendMessage wrote a headerless message line into it
+      // — every subsequent load threw 'message before header' (the brick).
+      await mkdir(scratchDir, { recursive: true });
+      await writeFile(join(scratchDir, 'ses-empty.jsonl'), '', 'utf8');
+      await expect(
+        store.appendMessage('ses-empty', { role: 'user', content: 'x', at: 'now' }),
+      ).rejects.toThrow(/unknown sessionId 'ses-empty'/);
+      // And it still loads as "no session" — the never-established path.
+      await expect(store.load('ses-empty')).resolves.toBeUndefined();
     });
   });
 

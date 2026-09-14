@@ -45,6 +45,12 @@
 // Mitigation: keep run command allowlists tight (never allowlist `ln`); a
 // realpath-based jail is the follow-up.
 //
+// SYMLINK vs PATH ALLOWLIST: the read/edit allowlist is checked against BOTH
+// the lexical workspace-relative path AND the realpath-derived one (relative
+// to the workspace's realpathed root) — a symlink INSIDE the workspace must
+// not bless its target's location (pattern 'src/**', link src/link →
+// ../secret.txt). Denies when either check misses.
+//
 // PATH PATTERN SEMANTICS (the read/edit allowlist): glob-ish strings matched
 // against the workspace-relative POSIX path ('/' separators), FULL match:
 //   - '**' spans whole path segments (zero or more; as the last segment it
@@ -245,10 +251,14 @@ type CommandVerdict =
  * author owns the full string); a token-prefix match allows only a command
  * free of shell metacharacters. On a denial, `metacharacters` marks the
  * reached-a-token-pattern-but-carried-metacharacters case — the trigger for
- * the distinct denial reason.
+ * the distinct denial reason. A metacharacter-bearing token match does NOT
+ * early-return: the loop keeps scanning so a LATER anchored re: pattern (the
+ * escape hatch the denial points at) can still allow outright, whatever the
+ * pattern order; the metacharacter denial fires only when no pattern allowed.
  */
 function commandVerdict(patterns: readonly CommandPattern[], command: string): CommandVerdict {
   const cmdTokens = command.trim().split(/\s+/);
+  let sawMetacharMatch = false;
   for (const pattern of patterns) {
     if (pattern.kind === 'regex') {
       if (pattern.re.test(command)) return { allowed: true, via: 'regex' };
@@ -256,11 +266,12 @@ function commandVerdict(patterns: readonly CommandPattern[], command: string): C
     }
     if (!pattern.tokens.every((token, i) => cmdTokens[i] === token)) continue;
     if (SHELL_METACHARACTERS.test(command)) {
-      return { allowed: false, metacharacters: true };
+      sawMetacharMatch = true; // keep scanning — a later re: may allow outright
+      continue;
     }
     return { allowed: true, via: 'tokens' };
   }
-  return { allowed: false, metacharacters: false };
+  return { allowed: false, metacharacters: sawMetacharMatch };
 }
 
 // ---------------------------------------------------------------------------
@@ -368,6 +379,33 @@ export function buildTools(
   const pathAllowed = (patterns: readonly string[], abs: string): boolean =>
     compilePathPatterns(patterns).some((re) => re.test(relOf(abs)));
 
+  /**
+   * The full allowlist gate for read/edit: the patterns must allow the
+   * LEXICAL workspace-relative path AND the realpath-derived one (relative
+   * to the workspace's REALPATHED root — `effective` is a true realpath
+   * whenever the requested path exists). The second check closes the
+   * in-workspace symlink bypass: a link inside the workspace must not bless
+   * its target's location (pattern 'src/**', link src/link → ../secret.txt
+   * — the lexical name matches the pattern while the I/O lands on
+   * 'secret.txt'). Denies when EITHER check misses. The realpath-side check
+   * is skipped when the realpathed root is unavailable (the lexical check is
+   * all we have, same posture as resolveRealInside) or when `effective` is
+   * not inside it — the documented ENOENT lexical fallback on a symlinked
+   * workspace root, where the lexical path has no realpath-relative form and
+   * the fs op denies honestly ('file not found') anyway.
+   */
+  const pathAllowedEverywhere = async (
+    patterns: readonly string[],
+    abs: string,
+    effective: string,
+  ): Promise<boolean> => {
+    if (!pathAllowed(patterns, abs)) return false;
+    const root = await workspaceRealRoot();
+    if (root === undefined || !isInside(effective, root)) return true;
+    const realRel = relative(root, effective).split(sep).join('/');
+    return compilePathPatterns(patterns).some((re) => re.test(realRel));
+  };
+
   const invalidInput = (tool: ToolkitToolName, err: z.ZodError): ToolkitToolResult =>
     deny(tool, `invalid input: ${messageOf(err)}`);
 
@@ -395,7 +433,7 @@ export function buildTools(
         if (effective === undefined) {
           return deny('read', `path escape: '${parsed.data.path}' escapes the workspace through a symlink`);
         }
-        if (!pathAllowed(fileCfg.pathPatterns, abs)) {
+        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
         let content: string;
@@ -438,7 +476,7 @@ export function buildTools(
         if (effective === undefined) {
           return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
         }
-        if (!pathAllowed(fileCfg.pathPatterns, abs)) {
+        if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
         let content: string;

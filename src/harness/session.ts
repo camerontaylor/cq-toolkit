@@ -189,9 +189,12 @@ export class SessionStore {
    * resume path. So before appending: a file that does not end with a
    * complete newline (the signature of a torn write — every completed write
    * ends its line) is truncated back to its last complete line. A file with
-   * no complete line at all is a torn HEADER — create() crashed and the
-   * session never existed — so appending throws the unknown-session error
-   * instead of fabricating a headerless file.
+   * no complete line at all — an all-fragment file, or an EMPTY one
+   * (create() crashed between open(O_CREAT) and the header write) — means
+   * the session was never established, so appending throws the
+   * unknown-session error instead of fabricating a headerless file (a
+   * headerless message line would throw 'message before header' on every
+   * future load — the same brick this recovery exists to prevent).
    */
   private async recoverTornTail(sessionId: string): Promise<void> {
     let raw: string;
@@ -201,16 +204,20 @@ export class SessionStore {
       if (isEnoent(err)) {
         throw new Error(
           `session: unknown sessionId '${sessionId}' — create() the session before appending`,
+          { cause: err },
         );
       }
       throw err;
     }
-    if (raw === '' || raw.endsWith('\n')) {
-      return; // nothing torn (empty = load() yields undefined anyway; complete write = clean tail)
+    if (raw.endsWith('\n')) {
+      return; // complete write = clean tail, nothing torn
     }
     const lastComplete = raw.lastIndexOf('\n');
     if (lastComplete === -1) {
-      // All-fragment file: a torn header — the session was never established.
+      // No complete line: an all-fragment file OR an EMPTY one — either way
+      // create() crashed before the header landed and the session was never
+      // established. Appending throws rather than writing a headerless
+      // message line that would brick every future load.
       throw new Error(
         `session: unknown sessionId '${sessionId}' — the session record has no complete line (create() crashed mid-write)`,
       );
