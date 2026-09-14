@@ -62,8 +62,9 @@ nothing in the templates configures it for you.
 
 Personal accounts get merge-queue 422 — why this queue is branch-based; the refs
 PATCH `force=false` is the server-side ff invariant for sync's merge-queue advance,
-while the gate promotes `main` by unforced git push plus its guards. Dated API
-facts live once: `policy/templates/README.md`.
+while the gate promotes `main` by unforced git push behind a merge-queue-tip
+guard plus two merge-base guards. Dated API facts live once:
+`policy/templates/README.md`.
 
 ## I4 — required checks never filter triggers
 

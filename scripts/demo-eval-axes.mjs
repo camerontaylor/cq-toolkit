@@ -51,6 +51,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
+import { EVAL_AXES_PROVIDER_KEYS, requiredKeys, selectCells } from './lib/eval-axes-select.mjs';
 
 // HOST NETWORK QUIRK (found live, 2026-09-14): this host's IPv6 route to
 // api.z.ai hangs (node fetch → ETIMEDOUT) while the IPv4 path works (curl
@@ -64,13 +65,11 @@ net.setDefaultAutoSelectFamily(false);
 
 // --- Environment hygiene (silent) -------------------------------------------
 process.env.ANTHROPIC_API_KEY = ''; // the stale, invalid host key — never used
-if ((process.env.ZAI_API_KEY ?? '') === '') {
+// The source-guarded mapping: assigning `undefined` (an absent Z_AI_API_KEY)
+// to process.env COERCES to the 9-char string "undefined", which would forge
+// a non-empty ZAI_API_KEY out of nothing and defeat the credential gate.
+if ((process.env.ZAI_API_KEY ?? '') === '' && (process.env.Z_AI_API_KEY ?? '') !== '') {
   process.env.ZAI_API_KEY = process.env.Z_AI_API_KEY; // route name mapping, never printed
-}
-const missing = ['ZAI_API_KEY', 'DEEPSEEK_API_KEY'].filter((k) => (process.env[k] ?? '') === '');
-if (missing.length > 0) {
-  console.error(`demo-eval-axes: missing key env var(s): ${missing.join(', ')} — refusing to run`);
-  process.exit(1);
 }
 
 // --- The fixture (identical across every cell) --------------------------------
@@ -266,25 +265,25 @@ const cells = [
   { lane: 'subprocess', provider: 'zai', model: MODEL_GLM },
 ];
 
-// `--only <substring>` runs just the matching cells (e.g. the single-cell
-// compat-wire retry of glm × ai-sdk) — spend discipline for targeted reruns.
-// A missing value, or a value matching NO cell, is a loud usage error —
-// never a silent full run.
-function selectCells() {
-  const onlyIndex = process.argv.indexOf('--only');
-  if (onlyIndex === -1) return cells;
-  const only = process.argv[onlyIndex + 1];
-  const valid = cells.map((c) => `${c.lane}/${c.model}`);
-  if (only === undefined || !cells.some((c) => `${c.lane}/${c.model}`.includes(only))) {
-    console.error(
-      `demo-eval-axes: ${only === undefined ? '--only requires a value' : `no cell matches '${only}'`} — valid cells: ${valid.join(', ')}`,
-    );
-    process.exit(1);
-  }
-  return cells.filter((c) => `${c.lane}/${c.model}`.includes(only));
+// `--only <substring>` selection and the credential gate live in
+// scripts/lib/eval-axes-select.mjs (no dist dependency) so the vitest
+// suite can cover them directly; this script only wires them together.
+let selected;
+try {
+  selected = selectCells(cells, process.argv);
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
 }
-
-const selected = selectCells();
+const { missing, unmapped } = requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, process.env);
+if (unmapped !== null) {
+  console.error(`demo-eval-axes: no credential mapping for provider '${unmapped}' — refusing to run`);
+  process.exit(1);
+}
+if (missing.length > 0) {
+  console.error(`demo-eval-axes: missing key env var(s) for the selected cells: ${missing.join(', ')} — refusing to run`);
+  process.exit(1);
+}
 
 const results = [];
 for (const cell of selected) {

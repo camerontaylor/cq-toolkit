@@ -28,9 +28,10 @@
 //                                      paths, the clean probes, and a
 //                                      byte-copy of patterns.yml at its
 //                                      canonical relative path: every rule
-//                                      must still fire on its own probe, and
-//                                      the clean probes and the copy must
-//                                      produce ZERO findings;
+//                                      must still fire on its own probe (the
+//                                      default-rule overlay must fire on its
+//                                      own probe), and the clean probes and
+//                                      the copy must produce ZERO findings;
 //                                      (4) workflow-I4 — every workflow
 //                                      named in REQUIRED_WORKFLOW_CHECKS
 //                                      (the repo's required checks, each
@@ -39,7 +40,10 @@
 //                                      job; denylist.yml included) must
 //                                      exist, declare a job with exactly
 //                                      its paired check name at the first
-//                                      indent level under `jobs:`, and
+//                                      indent level under `jobs:`; a
+//                                      job-level name: override that
+//                                      differs from the paired check name
+//                                      fails required entries; and
 //                                      its top-level `on:` block must
 //                                      carry BOTH push and pull_request
 //                                      as TOP-LEVEL entries with NO
@@ -109,7 +113,9 @@ const TREE_ALLOWLIST_PATHS = [
 // indent level under `jobs:` — without the pairing, a job rename leaves
 // every I4 leg green while PRs hang unmergeable and the gate times out
 // waiting for a check name nothing produces. Extend when a new required
-// check lands. Each listed file must exist (a missing one fails the
+// check lands. A job-level `name:` override that differs from the paired
+// check name fails the leg too (the check run is reported under the name).
+// Each listed file must exist (a missing one fails the
 // workflow-I4 leg by name, which also keeps the denylist.yml-presence
 // requirement alive) and its `on:` block must be unfiltered.
 // Queue-mechanics workflows (init/gate/sync: dispatch-only,
@@ -517,6 +523,20 @@ function writeProbes(dir, rules) {
   }
 }
 
+// Positive control for the default-rule overlay: the tree config extends
+// gitleaks' default ruleset ([extend] useDefault = true), but every other
+// probe exercises only the custom class:* rules — a silently dead overlay
+// (a dropped or broken extend directive) would keep the self-test green
+// while default secret detection (GitHub PATs, AWS keys, ...) stopped
+// firing. The sample is assembled so no full matchable token ever appears
+// in this script's own source (the production tree scan overlays the same
+// default rules and would flag a literal here). The body is deliberately
+// high-entropy and non-sequential: gitleaks' default github-pat rule gates
+// on entropy and ignores repeating or alphabet-ordered bodies, so either
+// would keep the control dead.
+const DEFAULT_RULE_PROBE_NAME = 'default-rule-probe.txt';
+const DEFAULT_RULE_SAMPLE = `ghp_${'tB3nR9kWxQmZ2vLhG'}${'sYaP7dKxXcMvFsNwEeR'}`;
+
 // Leg 1: one dirty-fixture run with a custom-only config (no default rules,
 // no allowlists). Each rule must have a finding on ITS OWN probe file. Returns
 // the findings, or null on an infra failure (gitleaks itself failed) so the
@@ -554,7 +574,9 @@ function selfTestCleanProbes(tmpRoot, rules, cleanProbes) {
 // policy/denylist/patterns.yml. Asserts (a) every rule still fires on ITS OWN
 // probe, (b) the clean probes produce zero findings under the real config
 // (default-rule overlay included), and (c) the copy produces ZERO findings,
-// proving its allowlist entry actually suppresses it.
+// proving its allowlist entry actually suppresses it. (d) the default-rule
+// overlay actually fires on its own probe (positive control), so a silently
+// dead [extend] useDefault cannot pass the leg.
 function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
   const { res, findings } = scanFixture(tmpRoot, 'tree-config', treeConfigToml(rules), (dir) => {
     writeProbes(dir, rules);
@@ -562,6 +584,7 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
     const copyPath = path.join(dir, PATTERNS_REL);
     fs.mkdirSync(path.dirname(copyPath), { recursive: true });
     fs.copyFileSync(PATTERNS_PATH, copyPath);
+    fs.writeFileSync(path.join(dir, DEFAULT_RULE_PROBE_NAME), `${DEFAULT_RULE_SAMPLE}\n`);
   });
   if (res.status !== 1) {
     console.error(`FAIL tree-config: expected gitleaks exit 1 (probes present), got ${describeExit(res)}`);
@@ -584,6 +607,14 @@ function selfTestTreeConfig(tmpRoot, rules, cleanProbes) {
     for (const f of leaked) {
       console.error(`FAIL tree-config: finding inside the copied patterns.yml (allowlist not suppressing): ${f.File}:${f.StartLine} [${f.RuleID}]`);
     }
+    return false;
+  }
+  const defaultHit = findings.find(
+    (f) => path.basename(String(f.File || '').replace(/\\/g, '/')) === DEFAULT_RULE_PROBE_NAME &&
+      !rules.some((r) => r.id === f.RuleID),
+  );
+  if (defaultHit === undefined) {
+    console.error(`FAIL tree-config: no DEFAULT-rule finding on ${DEFAULT_RULE_PROBE_NAME} — the [extend] useDefault overlay is not firing (default secret detection would be dead while every class rule still passes)`);
     return false;
   }
   return true;
@@ -780,11 +811,28 @@ const JOBS_KEY_LINE = /^jobs:/;
 // text: the block starts at the `jobs:` key line and ends at the next
 // column-0 content line; the base indent is the first indented line's, and
 // a job id is a base-indent line whose key spelling (before the colon) is
-// exactly the wanted name. Deeper lines are job bodies, not job ids.
+// exactly the wanted name (quote-aware: `'static':` matches `static`).
+// Deeper lines are job bodies, not job ids. Returns null when the job id is
+// absent; otherwise an object { nameOverride } where nameOverride is the
+// job-level `name:` value (one leading+trailing ' or " pair stripped) or
+// null when the job declares none — a job-level `name:` renames the emitted
+// check run (GitHub reports it under the name, not the id), which is why
+// the override is surfaced. The override scan walks the job's body lines
+// (indent > base, blanks skipped) until the body ends, matching at the job
+// body's first indent level only — nested mappings (environment.name,
+// with.name) are not overrides. The FIRST body line at that indent whose
+// trimmed form matches the QUOTE-AWARE /^["']?name["']?\s*:\s*(.+?)\s*$/ wins
+// (`'name': Static` is YAML-valid), and step entries (`- name: ...`) never
+// match because the trimmed line starts with `-`. A FLOW-style or ALIASED
+// job value — a same-line `{...}` mapping, a next-line `{...}` mapping, or
+// a `*alias`; an `&anchor`-prefixed value is unwrapped before
+// classification, so an anchored flow mapping is still refused — is not
+// parsed by this text leg: it surfaces as { flowDecl: true }, which the
+// caller turns into a loud failure rather than a silent pass.
 function workflowDeclaresJob(text, jobName) {
   const stripped = text.split(/\r?\n/).map(stripInlineComment);
   const start = stripped.findIndex((l) => JOBS_KEY_LINE.test(l));
-  if (start === -1) return false;
+  if (start === -1) return null;
   let base = null;
   for (let i = start + 1; i < stripped.length; i++) {
     const line = stripped[i];
@@ -793,10 +841,45 @@ function workflowDeclaresJob(text, jobName) {
     const ind = line.match(/^ */)[0].length;
     if (base === null) base = ind;
     if (ind !== base) continue; // deeper: job body, not a job id
-    const kv = /^([A-Za-z_][A-Za-z0-9_-]*):/.exec(line.trim());
-    if (kv && kv[1] === jobName) return true;
+    const kv = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?:/.exec(line.trim());
+    if (kv && kv[1] === jobName) {
+      // A flow-style, aliased, or anchored job value (`static: {name: ...}`,
+      // `static: *renamed`, or `static: &job {name: ...}`) is not parseable
+      // by this text leg — surface it so the caller fails the entry loudly.
+      // The &anchor token is stripped before classification.
+      const postColon = line.trim().slice(kv[0].length).trimStart();
+      const val = postColon.replace(/^&\S+\s*/, '');
+      if (val.startsWith('{') || val.startsWith('*')) {
+        return { flowDecl: true };
+      }
+      let bodyBase = null; // the job body's key indent (first non-blank body line)
+      for (let j = i + 1; j < stripped.length; j++) {
+        const body = stripped[j];
+        if (body.trim() === '') continue;
+        const bodyInd = body.match(/^ */)[0].length;
+        if (bodyInd <= base) break; // end of this job's body
+        // A next-line flow mapping or an alias as the job's value is not
+        // parseable by this text leg — surface it (loud failure upstream).
+        // The &anchor token is stripped before classification (an anchored
+        // flow mapping is still refused).
+        const t = body.trimStart().replace(/^&\S+\s*/, '');
+        if (bodyBase === null && t.startsWith('{')) return { flowDecl: true };
+        if (bodyBase === null && t.startsWith('*')) return { flowDecl: true };
+        if (bodyBase === null) bodyBase = bodyInd;
+        if (bodyInd !== bodyBase) continue; // nested mapping (or malformed shallower line) — not a job-level key
+        const name = /^["']?name["']?\s*:\s*(.+?)\s*$/.exec(body.trim());
+        if (name) {
+          let value = name[1];
+          if (value.length >= 2 && ((value.startsWith("'") && value.endsWith("'")) || (value.startsWith('"') && value.endsWith('"')))) {
+            value = value.slice(1, -1);
+          }
+          return { nameOverride: value };
+        }
+      }
+      return { nameOverride: null };
+    }
   }
-  return false;
+  return null;
 }
 
 // Per-workflow checks over the extracted, comment-stripped `on:` block;
@@ -836,8 +919,17 @@ function workflowI4Checks(rel, name, text) {
     console.error(`FAIL workflow-I4: no \`pull_request\` trigger in the \`on:\` block of ${rel}`);
     return false;
   }
-  if (!workflowDeclaresJob(text, pair.check)) {
+  const declared = workflowDeclaresJob(text, pair.check);
+  if (declared !== null && declared.flowDecl) {
+    console.error(`FAIL workflow-I4: required workflow ${rel} declares job "${pair.check}" with a FLOW-style or ALIASED value — not parseable by this text leg; use block style so the emitted check name stays verifiable`);
+    return false;
+  }
+  if (declared === null) {
     console.error(`FAIL workflow-I4: required workflow ${rel} does not declare a job "${pair.check}" at the first indent level under \`jobs:\` — the "${pair.check}" required check name would dangle (restore the job id, or rename the check everywhere at once: the pairing, branch protection, and the gate's wait list)`);
+    return false;
+  }
+  if (declared.nameOverride !== null && declared.nameOverride !== pair.check) {
+    console.error(`FAIL workflow-I4: required workflow ${rel} job "${pair.check}" overrides \`name:\` with "${declared.nameOverride}" — the check run is reported under the NAME, so the "${pair.check}" required check would never report and the gate would wait forever (drop the override, or make it identical to the job id)`);
     return false;
   }
   return true;
