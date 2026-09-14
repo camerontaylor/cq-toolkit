@@ -34,7 +34,7 @@ plan-funded wire.
 > deepseek row (93/10 tokens → $0.00003024) predates the guard and is kept
 > as PRE-GUARD HISTORY below — under the current script that cell fails
 > exactly this way, so the table now matches the script.
-
+>
 > cell ai-sdk/glm-4.6 evidence: the coding-plan OpenAI-compat wire
 > CONNECTED (after pinning node to IPv4-first — see below) and the run
 > COMPLETED, but the endpoint REPORTED serving `glm-5.3-flash` for the

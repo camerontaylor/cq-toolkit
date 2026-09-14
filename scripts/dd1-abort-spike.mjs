@@ -52,13 +52,24 @@
 // production default loader; make the optional peer resolvable for LIVE
 // runs only, without touching package.json/lockfile:
 //   ln -s /tmp/sdk-probe/node_modules/@anthropic-ai node_modules/@anthropic-ai
-import { AiSdkDriver, ClaudeAgentDriver, SessionStore, runLadder } from '../dist/index.js';
+import { AiSdkDriver, ClaudeAgentDriver, SessionStore, defaultHarnessConfig, runLadder } from '../dist/index.js';
 import { AGENT_SESSION_FILE } from '../dist/driver/claude-agent/index.js';
-import { readFile } from 'node:fs/promises';
+import dns from 'node:dns';
+import net from 'node:net';
+import { mkdtemp, readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+
+// HOST NETWORK QUIRK (found live, 2026-09-14 — see docs/dd-1-abort-spike.md
+// and scripts/demo-eval-axes.mjs): this host's IPv6 route to api.z.ai hangs
+// (node fetch → ETIMEDOUT); the IPv4 path works. This script owns its
+// process, so pin node's connect defaults to IPv4-first with family
+// autoselection off. (A library must never set process-global network
+// policy; the driver and kernel stay untouched.)
+dns.setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(false);
 
 const execFileAsync = promisify(execFile);
 
@@ -110,13 +121,27 @@ async function matchingPids(pattern) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * The cwd of one pid, via lsof (macOS has no /proc). Throws when the cwd
+ * cannot be determined — the caller must treat an unverifiable worker as
+ * inconclusive, never as a kill target.
+ */
+async function cwdOfPid(pid) {
+  const { stdout } = await execFileAsync('lsof', ['-a', '-p', String(pid), '-d', 'cwd', '-Fn']);
+  const line = stdout.split('\n').find((l) => l.startsWith('n'));
+  if (line === undefined || line.slice(1) === '') {
+    throw new Error('lsof reported no cwd');
+  }
+  return line.slice(1);
+}
+
 // ---------------------------------------------------------------------------
 // Lane runners — each returns { driver, invocation } for the shared measurement
 // ---------------------------------------------------------------------------
 
-function aiSdkLane() {
+function aiSdkLane(scratchDir) {
   const driver = new AiSdkDriver({
-    sessionsDir: join(tmpdir(), 'dd1-spike', 'sessions'),
+    sessionsDir: join(scratchDir, 'sessions'),
   });
   const invocation = {
     prompt: PROMPT,
@@ -128,11 +153,16 @@ function aiSdkLane() {
   return { driver, invocation, lane: 'ai-sdk' };
 }
 
-function claudeAgentLane() {
+function claudeAgentLane(scratchDir) {
   // The production default loader (dynamic import) resolves the OPTIONAL
   // peer through the node_modules symlink — no package.json/lockfile change.
+  // harnessConfig.workspaceRoot is pinned UNDER the run's own scratch dir:
+  // the agent worker's cwd is therefore unique to THIS run, which is what
+  // the cleanup sweep scopes its kills to (only this run's workers can ever
+  // be killed).
   const driver = new ClaudeAgentDriver({
-    sessionsDir: join(tmpdir(), 'dd1-spike', 'agent-sessions'),
+    sessionsDir: join(scratchDir, 'agent-sessions'),
+    harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
   });
   const invocation = {
     prompt: PROMPT,
@@ -144,13 +174,13 @@ function claudeAgentLane() {
   return { driver, invocation, lane: 'claude-agent' };
 }
 
-/** The claude-agent leg's post-abort observables: CLI transcript growth + worker-process liveness. */
-async function claudeAgentPollEvidence(verdict) {
+/** The claude-agent leg's post-abort observables: CLI transcript growth. */
+async function claudeAgentPollEvidence(verdict, scratchDir) {
   // Transcript-channel evidence only: the lingering-worker poll lives in
   // sweepLingeringWorkers (the authoritative, every-exit-path sweep).
   const evidence = { transcriptCountAtSettle: undefined, transcriptCountAfterPoll: undefined };
   try {
-    const record = await new SessionStore(join(tmpdir(), 'dd1-spike', 'agent-sessions')).load(verdict.sessionId);
+    const record = await new SessionStore(join(scratchDir, 'agent-sessions')).load(verdict.sessionId);
     const workspace = record.workspace;
     const agentSessionId = (await readFile(join(workspace, AGENT_SESSION_FILE), 'utf8')).trim();
     const sdk = await import('@anthropic-ai/claude-agent-sdk');
@@ -179,23 +209,42 @@ async function claudeAgentPollEvidence(verdict) {
 /**
  * The ALWAYS-ON cleanup sweep (run on EVERY exit path): find lingering
  * agent worker processes and SIGKILL each — a bounded experiment must
- * never leave a spending process behind. Per-pid kill errors are
- * swallowed (the process died between the check and the kill, or the pid
- * was recycled — best-effort cleanup, not evidence); a pgrep EXECUTION
- * failure is reported so the verdict can go inconclusive instead of
- * claiming an all-clear that was never observed.
+ * never leave a spending process behind.
+ *
+ * SCOPED TO THIS RUN: `pgrep -f` matches ANY agent-SDK worker on the host,
+ * so the candidate list alone must never be a kill list. A candidate is
+ * killed only when its CWD (via lsof) sits under THIS run's scratch dir —
+ * the lanes pin harnessConfig.workspaceRoot (the worker's cwd) under it,
+ * so only this run's workers can ever qualify. A candidate whose cwd
+ * cannot be verified is left alone and reported, turning the verdict
+ * inconclusive; a pgrep/lsof EXECUTION failure is likewise reported, never
+ * an empty all-clear. Per-pid kill errors are swallowed (the process died
+ * between the check and the kill — best-effort cleanup, not evidence).
  */
-async function sweepLingeringWorkers() {
+async function sweepLingeringWorkers(scratchDir) {
   const result = { lingeringWorkerPids: [], lingeringPidsKilled: [], processCheckError: undefined };
-  let pids;
+  let candidates;
   try {
-    pids = await matchingPids('claude-agent-sdk');
+    candidates = await matchingPids('claude-agent-sdk');
   } catch (err) {
     result.processCheckError = err instanceof Error ? err.message : String(err);
     return result;
   }
-  result.lingeringWorkerPids = pids;
-  for (const pid of pids) {
+  // macOS /var ↔ /private/var: tmp paths are symlinks, and lsof reports the
+  // RESOLVED cwd — compare against the resolved scratch root.
+  const realScratch = await realpath(scratchDir);
+  for (const pid of candidates) {
+    let cwd;
+    try {
+      cwd = await cwdOfPid(pid);
+    } catch (err) {
+      result.processCheckError =
+        `could not verify worker pid ${pid} (unverified workers are never killed): ${err instanceof Error ? err.message : String(err)}`;
+      continue;
+    }
+    const ours = cwd === scratchDir || cwd === realScratch || cwd.startsWith(scratchDir + '/') || cwd.startsWith(realScratch + '/');
+    if (!ours) continue; // someone else's worker — never touched
+    result.lingeringWorkerPids.push(pid);
     try {
       process.kill(Number(pid), 'SIGKILL');
       result.lingeringPidsKilled.push(pid);
@@ -207,8 +256,12 @@ async function sweepLingeringWorkers() {
 }
 
 async function measure(laneName) {
+  // The run's own scratch dir — sessions AND workspaces live under it, so
+  // any worker this run spawned has its cwd here and the cleanup sweep can
+  // identify (and only kill) THIS run's workers.
+  const scratchDir = await mkdtemp(join(tmpdir(), 'dd1-abort-spike-'));
   const { driver, invocation, lane } =
-    laneName === 'claude-agent' ? claudeAgentLane() : aiSdkLane();
+    laneName === 'claude-agent' ? claudeAgentLane(scratchDir) : aiSdkLane(scratchDir);
 
   const startedAt = Date.now();
   let verdict;
@@ -232,7 +285,7 @@ async function measure(laneName) {
     // CLI worker may still be spending, so find and kill it, then report
     // honestly (an absent verdict is no evidence that spend stopped).
     await sleep(POLL_MS);
-    const sweep = await sweepLingeringWorkers();
+    const sweep = await sweepLingeringWorkers(scratchDir);
     return {
       lane,
       wallClockMs: WALL_CLOCK_MS,
@@ -254,7 +307,7 @@ async function measure(laneName) {
   let usageAfterPoll = verdict.usage;
   let pollEvidence = {};
   if (lane === 'claude-agent') {
-    pollEvidence = await claudeAgentPollEvidence(verdict);
+    pollEvidence = await claudeAgentPollEvidence(verdict, scratchDir);
     usageAfterPoll = {
       ...verdict.usage,
       transcriptMessagesAfterPoll: pollEvidence.transcriptCountAfterPoll,
@@ -271,7 +324,7 @@ async function measure(laneName) {
   // process poll the early path runs): whatever it finds is merged into the
   // evidence and killed, so the recorded lingering-worker fact and the
   // cleanup always describe the final state of the machine.
-  const sweep = await sweepLingeringWorkers();
+  const sweep = await sweepLingeringWorkers(scratchDir);
   if (pollEvidence.processCheckError === undefined && sweep.processCheckError !== undefined) {
     pollEvidence.processCheckError = sweep.processCheckError;
   }

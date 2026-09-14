@@ -43,11 +43,10 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 **Tolerance, stated precisely — three different claims:**
 
 1. **Driver fold vs independent recompute** (the normalization check that
-   CAN be exact): every completed cell's `costUSD` equals a recompute of the
-   same fold from the reported usage and the published rates, within 1e-9
-   USD. Observed: equality in the TWO completed cells (the agent lanes —
-   both raw-chat cells were failed by the identity guards, below). Every
-   lane lands inside this tolerance.
+   CAN be exact): the fold-agreement claim is scoped to the cells that
+   completed — the two completed agent-lane cells show exact fold
+   agreement (≤1e-9 USD); the two raw-chat cells failed the identity
+   guards and establish no fold claim.
 2. **Vendored table vs provider pages**: the GLM-4.6 and deepseek-chat rows
    match Z.AI's and DeepSeek's official per-million rates as re-checked
    today — the modeled figure is the api-equivalent list-price math, not an
