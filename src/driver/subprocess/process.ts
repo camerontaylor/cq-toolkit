@@ -113,7 +113,7 @@ export interface ManagedChild {
 /** Whole-text TAIL retention + line streaming for one stdio pipe. */
 interface StreamCollector {
   onChunk(chunk: string): void;
-  /** Emit a final unterminated line at close (a truncated stream is still evidence). */
+  /** Emit the final pending line at close (a truncated stream is still evidence). */
   flush(): void;
   /** The retained TAIL (≤ the retention cap) — evidence hygiene, not the whole stream. */
   readonly text: string;
@@ -123,61 +123,78 @@ interface StreamCollector {
 
 /**
  * Collect one pipe's text and stream its complete lines (no trailing
- * newline) to listeners. Retention is bounded (issue #19): only the TAIL up
- * to `maxRetainedBytes` is kept — past the cap the head is dropped and
- * counted. The LINE listeners always see every line: the cap bounds the
- * buffer, never the evidence stream.
+ * newline) to listeners. The memory bound is ABSOLUTE (issue #19 + review):
+ * BOTH retained buffers — the `tail` and the pending unterminated line —
+ * are capped at `maxRetainedBytes` each, so a subprocess emitting one
+ * arbitrarily large line cannot grow the collector unbounded; past a cap
+ * the head is dropped and counted. Lines UNDER the cap are emitted whole by
+ * the listeners; a line that outgrew the cap emits as its retained TAIL
+ * (the cap bounds the buffer, never the under-cap evidence stream).
  */
 function createCollector(
   listeners: Array<(line: string) => void>,
   maxRetainedBytes: number,
 ): StreamCollector {
-  let tail = '';
-  let tailBytes = 0;
+  const tailBuf = { text: '', bytes: 0 };
+  const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
-  let rest = '';
-  // Trim the retained tail back under the cap, cutting whole characters off
-  // the head; the dropped count is measured in real bytes (Buffer.byteLength).
-  const trimToCap = (): void => {
-    if (tailBytes <= maxRetainedBytes) return;
+  // Trim a buffer back under the cap, cutting whole characters off the
+  // head; the dropped count is measured in real bytes (Buffer.byteLength).
+  // Only the TAIL's trims count toward droppedBytes: the pending line is a
+  // suffix of the same stream, so everything its trim drops sits inside the
+  // head the tail's trim drops anyway — counting both would inflate.
+  const trimToCap = (buf: { text: string; bytes: number }): void => {
+    if (buf.bytes <= maxRetainedBytes) return;
     let cut = 0;
     let cutBytes = 0;
-    while (cut < tail.length && tailBytes - cutBytes > maxRetainedBytes) {
-      cutBytes += Buffer.byteLength(tail[cut]);
+    while (cut < buf.text.length && buf.bytes - cutBytes > maxRetainedBytes) {
+      cutBytes += Buffer.byteLength(buf.text[cut]);
       cut += 1;
     }
-    droppedBytes += cutBytes;
-    tail = tail.slice(cut);
-    tailBytes -= cutBytes;
+    if (buf === tailBuf) droppedBytes += cutBytes;
+    buf.text = buf.text.slice(cut);
+    buf.bytes -= cutBytes;
   };
   return {
     onChunk(chunk: string): void {
-      rest += chunk;
-      let index = rest.indexOf('\n');
+      const chunkBytes = Buffer.byteLength(chunk);
+      restBuf.text += chunk;
+      restBuf.bytes += chunkBytes;
+      // Complete lines split FIRST and emit WHOLE — the trim below runs on
+      // the remaining pending (unterminated) line only, so an under-cap
+      // line is never head-dropped by a burst that carried it.
+      let index = restBuf.text.indexOf('\n');
       while (index !== -1) {
-        const line = rest.slice(0, index);
-        rest = rest.slice(index + 1);
+        const line = restBuf.text.slice(0, index);
+        restBuf.text = restBuf.text.slice(index + 1);
+        restBuf.bytes -= Buffer.byteLength(line) + 1; // + the consumed '\n'
         for (const listener of listeners) listener(line);
-        index = rest.indexOf('\n');
+        index = restBuf.text.indexOf('\n');
       }
-      tail += chunk;
-      tailBytes += Buffer.byteLength(chunk);
-      trimToCap();
+      // Bound the PENDING line — a single unterminated line must not grow
+      // `rest` unbounded; past the cap its head is dropped (its drops are a
+      // subset of the tail's, see trimToCap) and flush emits the tail.
+      trimToCap(restBuf);
+      tailBuf.text += chunk;
+      tailBuf.bytes += chunkBytes;
+      trimToCap(tailBuf);
     },
     flush(): void {
-      if (rest !== '') {
-        const finalLine = rest;
-        rest = '';
-        // Retention bookkeeping FIRST, then the line is emitted to listeners
-        // IN FULL — the cap bounds the buffer, never the evidence stream.
-        tail += finalLine;
-        tailBytes += Buffer.byteLength(finalLine);
-        trimToCap();
+      if (restBuf.text !== '') {
+        // The pending bytes were ALREADY retained chunk-by-chunk in the
+        // tail (onChunk appends every chunk), so flush only CLEARS the
+        // pending buffer and emits the final line to the listeners — the
+        // close result's text ends with it exactly once, and droppedBytes
+        // is untouched (review thread: no double retention, no phantom
+        // drops).
+        const finalLine = restBuf.text;
+        restBuf.text = '';
+        restBuf.bytes = 0;
         for (const listener of listeners) listener(finalLine);
       }
     },
     get text(): string {
-      return tail;
+      return tailBuf.text;
     },
     get droppedBytes(): number {
       return droppedBytes;

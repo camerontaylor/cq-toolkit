@@ -507,6 +507,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // workspace, where the earlier placement was a tamper vector.
       const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${AGENT_SESSION_FILE}`);
       await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
+      // 0o600 — the sidecar is evidence like the records it sits beside,
+      // never world-readable (review thread: mode was umask-default 0o666).
+      expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600);
       const noSidecarInWorkspace = async (): Promise<void> => {
         const files = await readdir(record1!.workspace);
         expect(files.filter((f) => f.endsWith(AGENT_SESSION_FILE))).toEqual([]);

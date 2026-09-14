@@ -33,12 +33,15 @@
 // explicit and testable; the top-level probe THROWS on 'broken' with the
 // underlying error attached.
 //
-// Resolution-target matching: the specifier must appear as the QUOTED
-// resolution target in the message (node: `Cannot find package '<spec>'`;
-// vitest's module runner: `Could not resolve "<spec>"`) — because an
-// ERR_MODULE_NOT_FOUND for a TRANSITIVE dependency names the SDK's own
-// dist path as the IMPORTING module, and a bare substring match would
-// misread that as absence.
+// Resolution-target matching, restricted to the KNOWN resolution-error
+// shapes (review thread): the specifier must appear as the QUOTED
+// resolution target in one of exactly two shapes — node's
+// `Cannot find package '<spec>'` (with ERR_MODULE_NOT_FOUND) or the module
+// runner's `Could not resolve "<spec>"`. Everything else is 'broken': a
+// module-init error that merely MENTIONS the specifier (quoted or not) is
+// a broken install, not absence — and an ERR_MODULE_NOT_FOUND for a
+// TRANSITIVE dependency names the SDK's own dist path as the IMPORTING
+// module, which must also stay 'broken'.
 import { mkdtemp, stat, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -47,23 +50,25 @@ import { ClaudeAgentDriver, SDK_MODULE_SPECIFIER } from '../../src/driver/claude
 import type { OpInvocation } from '../../src/driver/types.js';
 
 /**
- * Classify ONE import rejection (issue #29): 'absent' when the top-level
- * SDK_MODULE_SPECIFIER itself could not be resolved (its quoted
- * resolution-target form in the message — with ERR_MODULE_NOT_FOUND, or
- * bare under vitest's module-runner wrapper); 'broken' for everything
- * else, including an ERR_MODULE_NOT_FOUND whose resolution target is a
- * DIFFERENT specifier (a missing transitive dependency) and any
- * non-ENOENT-shaped failure (module-init throw, incompatible runtime, …).
+ * Classify ONE import rejection (issue #29 + review): 'absent' ONLY for the
+ * known resolution-error shapes naming the top-level SDK_MODULE_SPECIFIER
+ * as the resolution target — node's ERR_MODULE_NOT_FOUND +
+ * `Cannot find package '<spec>'`, or the module runner's
+ * `Could not resolve "<spec>"`. Everything else — a transitive
+ * ERR_MODULE_NOT_FOUND, a module-init error that merely MENTIONS the
+ * specifier, an incompatible runtime, junk — is 'broken'.
  */
 export function classifySdkPresence(err: unknown): 'absent' | 'broken' {
   if (typeof err !== 'object' || err === null) return 'broken';
   const code = (err as { code?: unknown }).code;
   const message = (err as { message?: unknown }).message;
   if (typeof message !== 'string') return 'broken';
-  const quotedTarget =
-    message.includes(`'${SDK_MODULE_SPECIFIER}'`) || message.includes(`"${SDK_MODULE_SPECIFIER}"`);
-  if (code === 'ERR_MODULE_NOT_FOUND' || quotedTarget) {
-    return quotedTarget ? 'absent' : 'broken';
+  if (
+    (code === 'ERR_MODULE_NOT_FOUND' &&
+      message.includes(`Cannot find package '${SDK_MODULE_SPECIFIER}'`)) ||
+    message.includes(`Could not resolve "${SDK_MODULE_SPECIFIER}"`)
+  ) {
+    return 'absent';
   }
   return 'broken';
 }
@@ -181,5 +186,26 @@ describe('classifySdkPresence (issue #29: genuinely absent vs broken install)', 
     ).toBe('broken');
     expect(classifySdkPresence(undefined)).toBe('broken');
     expect(classifySdkPresence('boom')).toBe('broken');
+  });
+
+  test('a non-resolution error that merely MENTIONS the specifier → broken (review thread)', () => {
+    // A module-init failure whose message happens to contain the quoted
+    // specifier is a BROKEN INSTALL — the old quoted-substring rule would
+    // have skipped it as "absent".
+    expect(
+      classifySdkPresence(
+        new TypeError(
+          `Cannot read properties of undefined (reading 'query') of "${SDK_MODULE_SPECIFIER}"`,
+        ),
+      ),
+    ).toBe('broken');
+    // …and a resolution error whose target is a DIFFERENT quoted package
+    // stays broken even though the message carries the SDK's own path.
+    expect(
+      classifySdkPresence({
+        code: 'ERR_MODULE_NOT_FOUND',
+        message: `Could not resolve "some-transitive-dep" imported from node_modules/${SDK_MODULE_SPECIFIER}/dist/index.js`,
+      }),
+    ).toBe('broken');
   });
 });

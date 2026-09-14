@@ -353,10 +353,10 @@ trusted. Usage maps the result vocabulary (`input_tokens` /
 `cache_creation_input_tokens`); `reasoning` is deliberately OMITTED —
 the SDK's `thinkingTokens` are already counted inside `output_tokens`,
 so a separate field would double-count every total (Budget.maxTokens
-classification); the frozen field stays optional for lanes whose
-reasoning is additive. `costUSD` is
-derived-only via the `pricing` lookup (default: the vendored models.dev
-table), labeled `costBasis: 'modeled'`, absent for unpriced models, and
+classification). Invariant across the seam: `reasoning` is an `output`
+breakdown and must already be included in `output` — the frozen field
+stays optional for lanes that REPORT the breakdown, never for additive
+accounting. `costUSD` is
 NEVER reported on unmeasured error/abort verdicts — the SDK's own
 `total_cost_usd` estimate is deliberately not surfaced (a vendor-side
 cost figure would bypass the derived-only rule).

@@ -959,12 +959,13 @@ async function persistObservation(
     // Best-effort: the sidecar is the NEXT run's resume handle; a failed
     // write costs a workspace-only continuation, never this run's verdict.
     // Stored beside the session records, keyed by sessionId (issue #26) —
-    // NOT in the model-visible workspace (the tamper vector, header).
+    // NOT in the model-visible workspace (the tamper vector, header) — and
+    // 0o600 like the records it sits beside (never world-readable).
     try {
       await writeFile(
         join(store.sessionsDir, `${record.sessionId}${AGENT_SESSION_FILE}`),
         `${agentSessionId}\n`,
-        'utf8',
+        { encoding: 'utf8', mode: 0o600 },
       );
     } catch {
       // deliberately swallowed — resume degrades honestly (no resume option)

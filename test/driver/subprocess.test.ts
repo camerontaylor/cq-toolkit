@@ -22,7 +22,7 @@
 // 'conformance-priced' endpoint extension of the default table) so no test
 // needs a real provider key; the remap test alone uses the DEFAULT table to
 // pin the DeepSeek footgun to the shipped config.
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -398,6 +398,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${CLI_SESSION_FILE}`);
       const cliId = (await readFile(sidecarPath, 'utf8')).trim();
       expect(cliId).toMatch(/^fake-cli-/);
+      // 0o600 — the sidecar is evidence like the records it sits beside,
+      // never world-readable (review thread: mode was umask-default 0o666).
+      expect((await stat(sidecarPath)).mode & 0o777).toBe(0o600);
       const noSidecarInWorkspace = async (): Promise<void> => {
         const files = await readdir(workspace);
         expect(files.filter((f) => f.endsWith(CLI_SESSION_FILE))).toEqual([]);
@@ -766,4 +769,55 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(DEFAULT_MAX_RETAINED_BYTES).toBe(1_048_576);
     });
   });
+
+  test('a single unterminated line ~3x the cap stays bounded: head dropped, tail emitted (review 3)', async () => {
+    await withScratch(async (scratchDir) => {
+      const cap = 16 * 1024;
+      const tailMark = 'TAIL-MARKER';
+      // ONE line of exactly 3× cap with NO trailing newline — the shape the
+      // review flagged: the pending line used to grow `rest` unbounded.
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write('${'x'.repeat(3 * cap - tailMark.length - 1)}' + '-${tailMark}');`,
+        ],
+        cwd: scratchDir,
+        maxRetainedBytes: cap,
+      });
+      const seen: string[] = [];
+      child.onStdoutLine((line) => seen.push(line));
+      const close = await child.close;
+      // The memory bound is ABSOLUTE: after each chunk, BOTH buffers (the
+      // retained tail and the pending line) are ≤ cap — at close only the
+      // tail remains, ≤ cap, so total retained never approaches 3× cap.
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(cap);
+      expect(close.droppedBytes).toBeGreaterThan(0); // the head was really dropped
+      // The flushed pending line is its retained TAIL, not the dropped head.
+      expect(seen).toHaveLength(1);
+      expect(seen[0]?.endsWith(`-${tailMark}`)).toBe(true);
+      expect(seen[0]?.startsWith('x')).toBe(true); // the kept bytes are the line's own tail
+    });
+  }, 20_000);
+
+  test('an unterminated final line is retained EXACTLY once — flush adds no phantom drops (review 4)', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', `process.stdout.write('complete line\\n'); process.stdout.write('final-fragment');`],
+        cwd: scratchDir,
+        maxRetainedBytes: 64 * 1024,
+      });
+      const seen: string[] = [];
+      child.onStdoutLine((line) => seen.push(line));
+      const close = await child.close;
+      expect(seen).toEqual(['complete line', 'final-fragment']);
+      // Nothing exceeded the cap → zero REAL drops; the old flush re-appended
+      // the pending line to the already-retained text (double retention and,
+      // past a cap, phantom droppedBytes).
+      expect(close.droppedBytes).toBe(0);
+      expect(close.stdout).toBe('complete line\nfinal-fragment');
+      expect(close.stdout.split('final-fragment')).toHaveLength(2); // exactly one occurrence
+    });
+  }, 20_000);
 });
