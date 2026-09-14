@@ -31,7 +31,7 @@ import { z } from 'zod';
 import { SubprocessDriver, buildArgs } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
-import { RoutingTableSchema, defaultRoutingTable } from '../../src/driver/subprocess/routing.js';
+import { RoutingTableSchema, defaultRoutingTable, routeFor } from '../../src/driver/subprocess/routing.js';
 import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
 import { spawnManaged } from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
@@ -212,6 +212,15 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
 }
 
 describe('subprocess driver specifics (fake agent CLI)', () => {
+  test('routeFor rejects prototype keys — constructor/toString are not providers (mirror of the claude-agent guard)', () => {
+    expect(() => routeFor({ provider: 'constructor', model: 'deepseek-chat' }, defaultRoutingTable())).toThrow(
+      /unknown provider 'constructor'/,
+    );
+    expect(() => routeFor({ provider: 'toString', model: 'deepseek-chat' }, defaultRoutingTable())).toThrow(
+      /unknown provider 'toString'/,
+    );
+  });
+
   test('buildArgs: stream-json print mode always carries --verbose (the real CLI refuses it otherwise — found live, T1.6)', () => {
     const args = buildArgs({
       route: {

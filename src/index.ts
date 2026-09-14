@@ -262,3 +262,14 @@ export {
 // is the silent-remap defence.
 export type { ClaudeAgentDriverOptions } from './driver/claude-agent/index.js';
 export { ClaudeAgentDriver } from './driver/claude-agent/index.js';
+export type {
+  EndpointEntry,
+  EndpointTable,
+  ResolvedEndpoint,
+} from './driver/claude-agent/routing.js';
+export {
+  defaultEndpointTable,
+  resolveEndpoint,
+  EndpointEntrySchema,
+  EndpointTableSchema,
+} from './driver/claude-agent/routing.js';
