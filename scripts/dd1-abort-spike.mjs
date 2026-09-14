@@ -146,12 +146,9 @@ function claudeAgentLane() {
 
 /** The claude-agent leg's post-abort observables: CLI transcript growth + worker-process liveness. */
 async function claudeAgentPollEvidence(verdict) {
-  const evidence = {
-    transcriptCountAtSettle: undefined,
-    transcriptCountAfterPoll: undefined,
-    lingeringWorkerPids: [],
-    processCheckError: undefined,
-  };
+  // Transcript-channel evidence only: the lingering-worker poll lives in
+  // sweepLingeringWorkers (the authoritative, every-exit-path sweep).
+  const evidence = { transcriptCountAtSettle: undefined, transcriptCountAfterPoll: undefined };
   try {
     const record = await new SessionStore(join(tmpdir(), 'dd1-spike', 'agent-sessions')).load(verdict.sessionId);
     const workspace = record.workspace;
@@ -172,21 +169,42 @@ async function claudeAgentPollEvidence(verdict) {
     evidence.pollError = err instanceof Error ? err.message : String(err);
     await sleep(POLL_MS);
   }
-  // The process check is INDEPENDENT of the transcript channel, and its own
-  // failure is inconclusive — never an empty (all-clear) pid list. A pgrep
-  // execution failure (unavailable, not executable, signal) throws out of
-  // matchingPids and lands here; exit-1 "no matches" returns [] legitimately.
-  try {
-    evidence.lingeringWorkerPids = await matchingPids('claude-agent-sdk');
-  } catch (err) {
-    evidence.processCheckError = err instanceof Error ? err.message : String(err);
-  }
   return evidence;
 }
 
 // ---------------------------------------------------------------------------
 // The measurement
 // ---------------------------------------------------------------------------
+
+/**
+ * The ALWAYS-ON cleanup sweep (run on EVERY exit path): find lingering
+ * agent worker processes and SIGKILL each — a bounded experiment must
+ * never leave a spending process behind. Per-pid kill errors are
+ * swallowed (the process died between the check and the kill, or the pid
+ * was recycled — best-effort cleanup, not evidence); a pgrep EXECUTION
+ * failure is reported so the verdict can go inconclusive instead of
+ * claiming an all-clear that was never observed.
+ */
+async function sweepLingeringWorkers() {
+  const result = { lingeringWorkerPids: [], lingeringPidsKilled: [], processCheckError: undefined };
+  let pids;
+  try {
+    pids = await matchingPids('claude-agent-sdk');
+  } catch (err) {
+    result.processCheckError = err instanceof Error ? err.message : String(err);
+    return result;
+  }
+  result.lingeringWorkerPids = pids;
+  for (const pid of pids) {
+    try {
+      process.kill(Number(pid), 'SIGKILL');
+      result.lingeringPidsKilled.push(pid);
+    } catch {
+      // deliberately swallowed per-pid (see header comment)
+    }
+  }
+  return result;
+}
 
 async function measure(laneName) {
   const { driver, invocation, lane } =
@@ -204,17 +222,32 @@ async function measure(laneName) {
     { op: 'dd1-abort-spike', jobKey: `dd1-${laneName}`, attempt: 1 },
   );
   const settledAtMs = Date.now() - startedAt;
+  // Detached at rung 3: the worker never settled cooperatively after the
+  // governed signal and the ladder escalated to the kill rung — evidence
+  // of the very failure the spike hunts, whatever else the verdict says.
+  const detachedAtRung3 = ladderOutcome.outcome === 'killed';
 
   if (verdict === undefined) {
+    // No-verdict exit path — the sweep STILL runs: a detached SDK query /
+    // CLI worker may still be spending, so find and kill it, then report
+    // honestly (an absent verdict is no evidence that spend stopped).
+    await sleep(POLL_MS);
+    const sweep = await sweepLingeringWorkers();
     return {
       lane,
       wallClockMs: WALL_CLOCK_MS,
+      pollMs: POLL_MS,
       settledAtMs,
       ladderOutcome: ladderOutcome.outcome,
+      detachedAtRung3,
+      ...sweep,
       stopReason: undefined,
       usageAtAbort: undefined,
       error: 'the run never produced a verdict — see ladderOutcome',
-      spendStopped: false,
+      spendStopped: 'inconclusive',
+      inconclusiveReason: detachedAtRung3
+        ? 'the run never produced a verdict and the ladder reached rung 3 (kill) — the worker never settled cooperatively'
+        : 'the run never produced a verdict — see ladderOutcome',
     };
   }
 
@@ -232,6 +265,18 @@ async function measure(laneName) {
     // parity between lanes is honest.
     await sleep(POLL_MS);
     pollEvidence.note = 'in-process lane: no post-settle accrual channel exists to observe';
+  }
+
+  // The cleanup sweep runs on THIS path too (it is the same post-abort
+  // process poll the early path runs): whatever it finds is merged into the
+  // evidence and killed, so the recorded lingering-worker fact and the
+  // cleanup always describe the final state of the machine.
+  const sweep = await sweepLingeringWorkers();
+  if (pollEvidence.processCheckError === undefined && sweep.processCheckError !== undefined) {
+    pollEvidence.processCheckError = sweep.processCheckError;
+  }
+  if (sweep.lingeringWorkerPids.length > 0) {
+    pollEvidence.lingeringWorkerPids = sweep.lingeringWorkerPids;
   }
 
   const grew = pollEvidence.transcriptCountAtSettle !== undefined &&
@@ -262,6 +307,12 @@ async function measure(laneName) {
     // pid list was never observed, so "no survivors" cannot be claimed.
     spendStopped = 'inconclusive';
     inconclusiveReason = `process-check failed: ${pollEvidence.processCheckError}`;
+  } else if (detachedAtRung3) {
+    // The ladder had to escalate to the kill rung: the cooperative settle
+    // failed. Spend did NOT verifiably stop — the worker was killed, not
+    // obeying — and the sweep above cleaned up whatever survived.
+    spendStopped = 'inconclusive';
+    inconclusiveReason = 'the ladder reached rung 3 (kill) — the worker never settled cooperatively after the governed signal';
   } else {
     spendStopped = verdict.stopReason === 'aborted' && settledPromptly && !grew && !lingered;
   }
@@ -273,6 +324,7 @@ async function measure(laneName) {
     settledAtMs,
     settleLatencyMs: settledAtMs - WALL_CLOCK_MS,
     ladderOutcome: ladderOutcome.outcome,
+    detachedAtRung3,
     stopReason: verdict.stopReason,
     usageAtAbort: verdict.usage,
     costUSDAtAbort: verdict.costUSD ?? null,
@@ -281,6 +333,7 @@ async function measure(laneName) {
     ...(inconclusiveReason !== undefined ? { inconclusiveReason } : {}),
     grewAfterAbort: pollEvidence.transcriptCountAtSettle !== undefined ? grew === true : undefined,
     lingeringWorkerPids: pollEvidence.lingeringWorkerPids ?? [],
+    lingeringPidsKilled: sweep.lingeringPidsKilled,
     pollError: pollEvidence.pollError,
     processCheckError: pollEvidence.processCheckError,
     pollNote: pollEvidence.note,
