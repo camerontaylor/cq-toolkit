@@ -40,6 +40,11 @@
 //   -p                          headless print mode; the PROMPT rides stdin
 //                               (no argv-length ceiling on caller data)
 //   --output-format stream-json newline-delimited JSON events on stdout
+//   --verbose                   REQUIRED by the real CLI with `-p
+//                               --output-format stream-json` (print mode
+//                               rejects stream-json without it — found live,
+//                               CLI 2.1.270, T1.6 slice 4; a no-op for CLIs
+//                               that don't know the flag)
 //   --json-schema <json>        only when the constructor's outputSchema is
 //                               set (zod→JSON Schema via z.toJSONSchema;
 //                               the OpInvocation seam cannot carry a schema,
@@ -540,6 +545,10 @@ export function buildArgs(inputs: ArgBuildInputs): string[] {
   const args: string[] = [
     '-p', // headless print mode; the prompt rides stdin
     '--output-format', 'stream-json',
+    // The real CLI refuses `-p --output-format stream-json` without
+    // --verbose (found live against CLI 2.1.270, T1.6 slice 4) — always
+    // emitted so stream-json parses on every lane.
+    '--verbose',
   ];
   if (inputs.outputJsonSchema !== undefined) {
     args.push('--json-schema', inputs.outputJsonSchema);

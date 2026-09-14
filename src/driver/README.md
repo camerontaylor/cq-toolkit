@@ -149,7 +149,9 @@ Files:
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
 
 Argv surface (headless reference): `-p` (prompt rides stdin),
-`--output-format stream-json`, `--json-schema <schema>` when
+`--output-format stream-json`, `--verbose` (the real CLI refuses stream-json
+print mode without it — found live, CLI 2.1.270, T1.6 slice 4),
+`--json-schema <schema>` when
 `outputSchema` is set, `--allowedTools <names>` (ALWAYS present — the
 harness tool surface ∩ the frozen ToolPolicy; an empty value with
 `--permission-prompts none` is exactly mode `none`), `--permission-prompts
