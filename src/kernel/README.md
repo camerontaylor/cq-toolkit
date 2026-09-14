@@ -225,16 +225,25 @@ persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
 | `maxUsd` | EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd) | none |
 | `maxTokens` | EFFECTIVE run token cap = `RunOptions.maxTokens` (DD-9's parallel token rollup; no Limits half in v1) — independent of `maxUsd`, same exceeds-cap trip semantics | none |
 | `perJobWallClockMs` | rung-1 delay (`Limits.perJobWallClockMs`) | none = no ladder |
-| `abortGraceMs` | rung 1 → rung 2 grace | `DEFAULT_ABORT_GRACE_MS` = 2000 (PRE-SPIKE) |
-| `killGraceMs` | rung 2 → rung 3 grace | `DEFAULT_KILL_GRACE_MS` = 5000 (PRE-SPIKE) |
+| `abortGraceMs` | rung 1 → rung 2 grace | `DEFAULT_ABORT_GRACE_MS` = 5000 (DD-1 spike result — docs/dd-1-abort-spike.md) |
+| `killGraceMs` | rung 2 → rung 3 grace | `DEFAULT_KILL_GRACE_MS` = 5000 (conservative; no spike evidence to move it) |
 | `maxAttemptsPerJob` | per-job attempt cap (effective min) | none |
 | `runDispatchQuota` | per-run dispatch/attempt cap (`Limits.runDispatchQuota`) | none |
 | `inFlightCeiling` | in-flight ceiling — enforced by queueing | none |
 | `jobKey` | job-key extractor (runtime-only) | `input.jobId` convention, else the **op name** |
 
-**DD-1 result: pending T1.6** — the spike that sizes `abortGraceMs` lands
-there. The grace defaults above are documented conservative placeholders,
-marked pre-spike in the source, and are expected to change in T1.6's own PR.
+**DD-1 result: CLOSED (T1.6 spike)** — the abort spike ran LIVE on both
+governed lanes (method + numbers: `docs/dd-1-abort-spike.md`): a governed
+abort settles ≈6 ms after the signal on the ai-sdk lane and ≈2.0 s on the
+claude-agent lane (SDK CLI-worker teardown; the post-abort poll verified no
+transcript growth and no surviving worker process — abort stops spend
+client-side in both lanes). The spike-derived `DEFAULT_ABORT_GRACE_MS` =
+5000 (≈2.5× the measured worst cooperative settle; the pre-spike 2000 sat
+exactly AT it) lives in `src/kernel/governor.config.ts` — the single source
+of truth, re-exported by `governor.ts` and pinned to the doc by
+`test/kernel/governor-config.test.ts`. `DEFAULT_KILL_GRACE_MS` stays 5000:
+the spike gathered no SIGTERM→SIGKILL-resistance evidence, so the T1.5
+process-ladder measurements stand.
 
 **DD-9 result: CLOSED (T1.6b)** — the api-equivalent budget shipped. Every
 usage-bearing driver result carries `costUSD` labeled
@@ -346,5 +355,8 @@ composition harness for that arrives with the op families (T1.4+).
   stays real.
 - **USD is observed, never derived**: cost arrives via `reportCost` (tests
   inject until the T1.4 price-map layer); the kernel computes no cost.
-- **Grace defaults are pre-spike placeholders** (`DEFAULT_ABORT_GRACE_MS`/
-  `DEFAULT_KILL_GRACE_MS`); DD-1 result: pending T1.6.
+- **Grace defaults are spike-derived where measurement exists**:
+  `DEFAULT_ABORT_GRACE_MS` = 5000 from the DD-1 spike
+  (docs/dd-1-abort-spike.md; single source of truth
+  `src/kernel/governor.config.ts`); `DEFAULT_KILL_GRACE_MS` = 5000 stays
+  conservative (no spike evidence to move it).

@@ -1,0 +1,81 @@
+# The agent-SDK install matrix — T1.6 slice 2.
+#
+# `@anthropic-ai/claude-agent-sdk` is an OPTIONAL peer dependency of this
+# package: the claude-agent driver lane (src/driver/claude-agent/) loads it
+# lazily by dynamic import at run() time and feature-detects it — importing
+# or building this package must never require it to exist. This workflow is
+# the mechanical proof of that ADR claim, both halves, on every PR:
+#   - without-peer: a plain `npm ci` (the optional peer is NOT installed)
+#     — the typecheck ratchet, lint, full suite, and build must pass with
+#     the SDK absent.
+#   - with-peer: the same gates after installing the pinned peer
+#     (`--no-save`, so the lockfile stays peer-free) — the driver lane must
+#     also be correct WITH the real package present. The suite itself never
+#     contacts the network or a real CLI in either half (every test injects
+#     a mock module through the driver's `sdkLoader` seam).
+#
+# Trigger note (I4 posture): this workflow is not a required check, but its
+# `on:` block is deliberately simple and UNFILTERED — pull_request +
+# workflow_dispatch, no path/branch filters — so the denylist sanity check
+# parses it and the matrix runs on every PR regardless of touched files.
+name: install-matrix
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  without-peer:
+    name: build+test without the optional agent SDK peer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      # Plain ci: the optional peer is NOT installed (never in the lockfile).
+      - name: Install dependencies (optional peer absent)
+        run: npm ci
+      # The typecheck gate IS this ratchet step (same posture as ci.yml).
+      - name: Typecheck ratchet
+        run: node scripts/ratchet-typecheck.mjs
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm run test
+      - name: Build
+        run: npm run build
+
+  with-peer:
+    name: build+test with the optional agent SDK peer
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+      - name: Set up Node 24
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies (optional peer absent)
+        run: npm ci
+      # The pinned peer, installed WITHOUT saving: package.json keeps the
+      # SDK as an optional peerDependency only and the lockfile stays
+      # peer-free — this half proves the with-peer posture, not a dependency
+      # change.
+      - name: Install the optional agent SDK peer (pinned, no-save)
+        run: npm install --no-save @anthropic-ai/claude-agent-sdk@0.3.270
+      - name: Typecheck ratchet
+        run: node scripts/ratchet-typecheck.mjs
+      - name: Lint
+        run: npm run lint
+      - name: Test
+        run: npm run test
+      - name: Build
+        run: npm run build

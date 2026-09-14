@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
-import { SubprocessDriver } from '../../src/driver/subprocess/index.js';
+import { SubprocessDriver, buildArgs } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import { RoutingTableSchema, defaultRoutingTable } from '../../src/driver/subprocess/routing.js';
@@ -212,6 +212,23 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
 }
 
 describe('subprocess driver specifics (fake agent CLI)', () => {
+  test('buildArgs: stream-json print mode always carries --verbose (the real CLI refuses it otherwise — found live, T1.6)', () => {
+    const args = buildArgs({
+      route: {
+        endpoint: 'conformance',
+        baseUrl: 'http://127.0.0.1:1/anthropic',
+        env: { ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY', ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY' },
+        model: 'conformance-1',
+      },
+      allowedToolNames: ['read'],
+      outputJsonSchema: undefined,
+      resumeCliSessionId: undefined,
+    });
+    const jsonIndex = args.indexOf('--output-format');
+    expect(args.slice(jsonIndex, jsonIndex + 2)).toEqual(['--output-format', 'stream-json']);
+    expect(args[jsonIndex + 2]).toBe('--verbose'); // -p + stream-json WITHOUT --verbose is rejected by the real CLI
+  });
+
   test('THE REMAP TEST: unknown model on the default routing table throws BEFORE any spawn', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
