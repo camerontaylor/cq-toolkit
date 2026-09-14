@@ -122,6 +122,7 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z.object({
   structuredOutput: z.unknown().optional(),
   usage: UsageSchema,
   costUSD: z.number().optional(),
+  costBasis: z.enum(['modeled', 'billed']).optional(),
   sessionId: z.string().optional(),
   denials: z.array(ToolDenialSchema),
   stopReason: DriverStopReasonSchema,
