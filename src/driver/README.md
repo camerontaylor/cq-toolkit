@@ -334,10 +334,16 @@ seam.
 
 Isolation (I6): no `sessionRef` → fresh temp workspace +
 `SessionStore.create`; `sessionRef` → `SessionStore.load` resumes the
-SAME workspace and passes `Options.resume` when the workspace carries the
-agent session sidecar `.cq-cli-session` (`AGENT_SESSION_FILE` — a
-sidecar-less workspace resumes the workspace only, an honest partial
-continuation); unknown sessionRef throws. Session turns persist in our
+SAME workspace and passes `Options.resume` when the sessions store
+carries the agent session sidecar for that sessionId
+(`<sessionsDir>/<sessionId>.cq-cli-session`, `AGENT_SESSION_FILE` —
+issue #26 design (b), matching the subprocess lane: RELOCATED out of the
+model-visible workspace, where the harness edit tool's `**/*` glob
+includes dotfiles and the earlier placement let the model read or alter
+its own resume handle; keyed by sessionId beside the session records the
+handle is exactly as precise and out of its reach; a sidecar-less
+session resumes the workspace only, an honest partial continuation);
+unknown sessionRef throws. Session turns persist in our
 `SessionMessage` vocabulary only. Structured output rides the SDK's
 NATIVE `outputFormat: { type: 'json_schema' }` path; the result's
 `structured_output` is validated against the configured zod schema

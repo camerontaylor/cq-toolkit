@@ -23,7 +23,8 @@
 //      pricing override → costUSD + costBasis 'modeled' / unpriced → both
 //      absent, OBSERVED-model surfacing (a served id ≠ requested id is
 //      surfaced, not hidden), the NO-ALLOWLIST rule (any model id
-//      dispatches verbatim), resume via the workspace sidecar → Options.resume,
+//      dispatches verbatim), resume via the relocated STORE sidecar →
+//      Options.resume (never in the model-visible workspace, issue #26),
 //      the env endpoint injection, the ToolPolicy mode-none surface (no MCP
 //      server, empty allowedTools), the sandbox mapping, and the
 //      structured-output schema rejection (a bad payload is dropped, never
@@ -494,19 +495,29 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
-  test('resume: the sidecar-written agent session id rides Options.resume; the same workspace continues', async () => {
+  test('resume: the STORE sidecar agent session id rides Options.resume; the same workspace continues (#26)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const { driver, calls } = driverWithCalls(scratchDir, { directive: { kind: 'reply', text: 'run one' } });
       const run1 = await driver.run(invocation({ prompt: 'resume run one' }));
       const record1 = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(run1.sessionId as string);
       expect(record1).toBeDefined();
-      // The agent's session id, sidecar-written into the workspace it resumes.
-      await expect(readFile(join(record1!.workspace, AGENT_SESSION_FILE), 'utf8')).resolves.toBe('agent-cli-1\n');
+      // The agent's session id, sidecar-written BESIDE the session records
+      // keyed by sessionId (issue #26 design (b)) — NOT in the model-visible
+      // workspace, where the earlier placement was a tamper vector.
+      const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${AGENT_SESSION_FILE}`);
+      await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
+      const noSidecarInWorkspace = async (): Promise<void> => {
+        const files = await readdir(record1!.workspace);
+        expect(files.filter((f) => f.endsWith(AGENT_SESSION_FILE))).toEqual([]);
+      };
+      await noSidecarInWorkspace();
       const run2 = await driver.run(invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }));
       expect(run2.sessionId).toBe(run1.sessionId);
       expect(optionsOf(calls, 1)['resume']).toBe('agent-cli-1');
       expect(optionsOf(calls, 1)['cwd']).toBe(optionsOf(calls, 0)['cwd']); // the SAME workspace
+      // The resumed run still leaves NO resume handle in the workspace.
+      await noSidecarInWorkspace();
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
