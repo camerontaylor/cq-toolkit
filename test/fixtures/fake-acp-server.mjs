@@ -15,6 +15,9 @@
 //     + configOptions carrying the LAZY model value 'builtin:zai\<model>'.
 //   - session/load { sessionId, cwd, mcpServers } → continues the RECORDED
 //     session id (the resume path; handled in every mode).
+//   - unstable_resumeSession { sessionId, cwd, mcpServers } → the §6 rung-2
+//     resume (same param shape, NO history replay) — exercisable with
+//     FAKE_ACP_NO_LOADSESSION=1 + FAKE_ACP_RESUME=1.
 //   - session/set_config_option { configId: 'mode', value } → switches the
 //     session mode (the driver's pin lands here; tool-then-reply replies
 //     echo '[mode:<mode>]' so a test can observe the pin took effect).
@@ -52,6 +55,22 @@
 //                         a driver that folds them false-fires the
 //                         never-asks tripwire, leaks prior-turn text into
 //                         the transcript, and synthesizes a phantom denial)
+//   FAKE_ACP_REPLAY_WITH_TAIL  when '1', like FAKE_ACP_REPLAY, then the
+//                         load RESPONSE LINE and a POST-load
+//                         agent_message_chunk (POST_LOAD_TAIL_TEXT) go out
+//                         in ONE stdout flush — the tail frame post-dates
+//                         the response line and MUST fold (the round-2
+//                         chunk-boundary regression: a gate cleared only at
+//                         the load await's continuation drops it, because
+//                         the whole same-flush chunk is processed before
+//                         any continuation runs)
+//   FAKE_ACP_NO_LOADSESSION  when '1', the initialize answer reports
+//                         agentCapabilities.loadSession: false — the §6
+//                         resume gate must fall BELOW rung 1
+//   FAKE_ACP_RESUME       when '1', the initialize answer advertises
+//                         sessionCapabilities { list, resume, fork }
+//                         (probe-verbatim shape) — §6 rung 2,
+//                         unstable_resumeSession, becomes exercisable
 //   FAKE_ACP_STRING_REQUEST_IDS  when '1', session/request_permission ids
 //                         are JSON-RPC STRINGS (protocol-legal; the
 //                         reference vendor sends numbers) — the answer
@@ -101,7 +120,17 @@ const SERVED_MODEL = process.env.FAKE_ACP_SERVED_MODEL;
 const REQUESTED_MODEL = process.env.FAKE_ACP_MODEL ?? 'fake-model';
 const PROTOCOL_VERSION = Number(process.env.FAKE_ACP_PROTOCOL_VERSION ?? '1');
 const REPLAY = process.env.FAKE_ACP_REPLAY === '1';
+const REPLAY_WITH_TAIL = process.env.FAKE_ACP_REPLAY_WITH_TAIL === '1';
+const NO_LOADSESSION = process.env.FAKE_ACP_NO_LOADSESSION === '1';
+const ADVERTISE_RESUME = process.env.FAKE_ACP_RESUME === '1';
 const STRING_REQUEST_IDS = process.env.FAKE_ACP_STRING_REQUEST_IDS === '1';
+
+// The POST-load tail marker (FAKE_ACP_REPLAY_WITH_TAIL=1): emitted in the
+// SAME stdout flush as the session/load response line, so it post-dates
+// the settle — a correct driver folds it into THIS run's transcript. The
+// chunk-boundary test asserts this text verbatim.
+const POST_LOAD_TAIL_TEXT =
+  'POST-LOAD tail chunk — same flush as the load response, post-dates the settle, must fold';
 
 const USAGE = {
   totalTokens: 20,
@@ -485,7 +514,13 @@ function onFrame(frame) {
         result: {
           protocolVersion: PROTOCOL_VERSION, // the agent never declines — it answers its latest (OQ-5)
           agentInfo: { name: 'fake-acp-server', title: 'Fake ACP', version: '0.0.0' },
-          agentCapabilities: { loadSession: true, promptCapabilities: { image: false, audio: false, embeddedContext: false } },
+          agentCapabilities: {
+            loadSession: !NO_LOADSESSION, // FAKE_ACP_NO_LOADSESSION drops the §6 gate below rung 1
+            promptCapabilities: { image: false, audio: false, embeddedContext: false },
+            // Probe-verbatim shape (strategy §7): sessionCapabilities is a
+            // member of agentCapabilities with EMPTY-object members.
+            ...(ADVERTISE_RESUME ? { sessionCapabilities: { list: {}, resume: {}, fork: {} } } : {}),
+          },
           authMethods: [
             {
               id: 'fake-credentials',
@@ -518,6 +553,47 @@ function onFrame(frame) {
       acpSessionId = sid;
       sessionMode = 'yolo';
       if (REPLAY) replayPriorTurnHistory(); // BEFORE the response — the reference-recorded replay shape
+      if (REPLAY_WITH_TAIL) {
+        // The chunk-boundary shape (round-2 review): the bait replay
+        // history, then the load RESPONSE LINE and a POST-load update in
+        // ONE stdout flush — the tail post-dates the response line and
+        // MUST fold, whatever a promise-continuation-level gate does.
+        replayPriorTurnHistory();
+        const response = {
+          jsonrpc: '2.0',
+          id: frame.id,
+          result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
+        };
+        const tail = {
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: {
+            sessionId: acpSessionId,
+            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: POST_LOAD_TAIL_TEXT } },
+          },
+        };
+        process.stdout.write(`${JSON.stringify(response)}\n${JSON.stringify(tail)}\n`); // ONE flush
+        return;
+      }
+      send({
+        jsonrpc: '2.0',
+        id: frame.id,
+        result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
+      });
+      return;
+    }
+    case 'unstable_resumeSession': {
+      // §6 rung 2 — the middle rung the reference names
+      // unstable_resumeSession when sessionCapabilities.resume is
+      // advertised: same { sessionId, cwd, mcpServers } param shape as
+      // load (the Devin quirk generalizes), NO history replay.
+      const sid = frame.params?.sessionId;
+      if (typeof sid !== 'string' || sid === '') {
+        send({ jsonrpc: '2.0', id: frame.id, error: { code: -32602, message: 'unstable_resumeSession requires sessionId' } });
+        return;
+      }
+      acpSessionId = sid;
+      sessionMode = 'yolo';
       send({
         jsonrpc: '2.0',
         id: frame.id,

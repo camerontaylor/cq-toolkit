@@ -22,12 +22,17 @@
 //     "close" is killing the spawned child).
 //   session/load { sessionId, cwd, mcpServers: [] } on a sessionRef whose
 //     workspace sidecar carries a harness session id AND the agent
-//     advertises loadSession — else session/new { cwd, mcpServers: [] }
-//     (mcpServers never omitted — the recorded Devin quirk generalizes to
-//     "keep the param present"). History that replays via session/update
-//     BEFORE the load response is counted into a discard sink — none of
-//     it is this run's observation; the wire fold starts after the load
-//     settles (strategy §6). No authenticate call, EVER: OQ-1 is
+//     advertises loadSession; else unstable_resumeSession
+//     { sessionId, cwd, mcpServers: [] } when sessionCapabilities.resume
+//     is advertised (no history replay on this rung); else session/new
+//     { cwd, mcpServers: [] } — the HONEST-PARTIAL rung (mcpServers never
+//     omitted — the recorded Devin quirk generalizes to "keep the param
+//     present"). History that replays via session/update BEFORE the load
+//     response LINE is counted into a discard sink — none of it is this
+//     run's observation; the fold restarts AT that line (cleared per
+//     WIRE LINE, so a frame sharing the response's flush but arriving
+//     after it post-dates the settle and folds — strategy §6). No
+//     authenticate call, EVER: OQ-1 is
 //     answered (no gate; the agent self-handles credentials); an
 //     auth_required error fails the run naming the advertised authMethods.
 //   session/set_config_option { configId: 'mode', value: 'build' } — THE
@@ -78,8 +83,10 @@
 // session/request_permission for the same id is recorded as evidence of
 // UNGATED EXECUTION and the verdict is 'error' — fail loud, because a
 // policy that cannot be enforced is not silently soft. (Evaluation happens
-// AT SETTLE, first-channel-wins per id, so a gate that fires late still
-// counts.)
+// AT SETTLE, FIRST-WRITE-WINS per id: a tool_call that arrived BEFORE any
+// gate for its id is the bypass evidence — a gate firing only afterward
+// never reclassifies it — while an id whose gate fired FIRST stays gated,
+// whatever arrives later.)
 //
 // USAGE (the step-2-corrected fold): ONLY the PromptResponse.usage folds —
 // `usage_update` frames are context-window telemetry and are dropped
@@ -117,10 +124,12 @@
 //     throw: a fake resume is worse than a loud one). The SAME workspace
 //     continues; the vendor conversation continues only through the
 //     protocol: the sidecar file `.cq-cli-session` carries the ACP session
-//     id recorded post-settle by a prior run, and session/load replays it
-//     when the agent advertises loadSession. A sidecar-less workspace, or
-//     an agent without loadSession, is an HONEST PARTIAL continuation
-//     (workspace-only — narrated, never fabricated). A sidecar, not a
+//     id recorded post-settle by a prior run, and the §6 gate replays it
+//     per the ADVERTISED capabilities: loadSession → session/load, else
+//     sessionCapabilities.resume → unstable_resumeSession. A sidecar-less
+//     workspace, or an agent advertising NEITHER, is an HONEST PARTIAL
+//     continuation (workspace-only — narrated, never fabricated). A
+//     sidecar, not a
 //     record message: role 'tool' in a session record means A TOOL RAN.
 //   - Persisted in OUR vocabulary: the user prompt (pre-run); ONE role
 //     'tool' message per IN-POLICY tool execution (an allow-answered id
@@ -352,6 +361,17 @@ interface WireHandlers {
    * the vendor's pending ask never resolves, and the turn hangs.
    */
   onServerRequest(method: string, id: number | string, params: unknown): void;
+  /**
+   * A RESPONSE line has arrived — fired SYNCHRONOUSLY at WIRE-LINE
+   * processing time, BEFORE the pending request's promise resolves and
+   * BEFORE any later line of the same data chunk is processed. `result`
+   * is the response's result member (undefined on an error response).
+   * The session/load replay window clears HERE, not in the load-branch
+   * promise continuation: a session/update flushed back-to-back with the
+   * load response post-dates the settle and must fold (round-2 review —
+   * the continuation-level clearing dropped it).
+   */
+  onResponseLine(result: unknown): void;
   onUnparseableLine(line: string): void;
   onStderrLine(line: string): void;
 }
@@ -379,6 +399,15 @@ class AcpWire {
         if (line !== '') this.onLine(line);
         nl = this.lineBuffer.indexOf('\n');
       }
+      // The stdout mirror of stderr's 8000-cap: a run this long was never
+      // a well-framed line — narrate the truncation (never silent loss)
+      // and reset before the buffer can grow unbounded.
+      if (this.lineBuffer.length > 8000) {
+        this.handlers.onUnparseableLine(
+          `[cq: stdout line buffer overflow — ${this.lineBuffer.length} chars with no newline; truncated, never silently dropped]`,
+        );
+        this.lineBuffer = '';
+      }
     });
     child.stderr?.on('data', (chunk: string) => {
       this.stderrBuffer += chunk;
@@ -393,9 +422,13 @@ class AcpWire {
     });
     this.exit = acpExitPromise(child);
     void this.exit.then(() => {
-      // The trailing partial stderr line (no final newline — often the
-      // death diagnosis) flushes at exit: 'close' fires only after stdio
-      // is flushed, so nothing can arrive after this.
+      // Trailing partial lines flush at exit ('close' fires only after
+      // stdio is flushed, so nothing can arrive after this): stderr's is
+      // often the death diagnosis; stdout's is an unterminated wire line,
+      // which still gets its parse-or-narrate chance — same symmetry.
+      const trailingStdout = this.lineBuffer;
+      this.lineBuffer = '';
+      if (trailingStdout.trim() !== '') this.onLine(trailingStdout);
       const trailing = this.stderrBuffer;
       this.stderrBuffer = '';
       if (trailing.trim() !== '') this.handlers.onStderrLine(trailing);
@@ -464,6 +497,12 @@ class AcpWire {
     // string-id response was never ours and stays narration evidence
     // (a null id cannot occur: InboundFrameSchema rejects it).
     if (numericId !== undefined && (frame.result !== undefined || frame.error !== undefined)) {
+      // The LINE-level response hook fires FIRST — synchronously, before
+      // the pending resolution (which only schedules the await's
+      // continuation) and before any later line of this data chunk is
+      // processed. This is what makes the replay window a WIRE-LINE gate:
+      // every frame after this line already post-dates the settle.
+      this.handlers.onResponseLine(frame.result);
       const pending = this.pending.get(numericId);
       if (pending === undefined) {
         this.handlers.onUnparseableLine(line); // a response to an id we never sent — evidence
@@ -604,19 +643,21 @@ export class AcpDriver implements Driver {
       childEnv[this.modelEnv] = modelSpec.model;
     }
 
-    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
-
-    // --- Protocol-level resume handle: the ACP session id a prior run
-    // recorded in the workspace sidecar (absent → workspace-only continuation).
-    const resumeAcpSessionId = await readAcpSessionId(workspace);
-
-    // --- Governed cancellation (I8): checked before the spawn (an
-    // already-cancelled invocation never spawns).
+    // --- Governed cancellation (I8): checked before the user-turn append
+    // AND before the spawn — the envNames hoist rationale applies
+    // identically: an already-cancelled invocation must leave neither a
+    // dangling user turn in the record nor a spawn.
     const governed = currentJobContext();
     const signal = governed?.signal;
     if (signal?.aborted === true) {
       return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'aborted' };
     }
+
+    await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
+
+    // --- Protocol-level resume handle: the ACP session id a prior run
+    // recorded in the workspace sidecar (absent → workspace-only continuation).
+    const resumeAcpSessionId = await readAcpSessionId(workspace);
 
     // --- The one spawn. From here on, run() NEVER throws past the seam.
     const observation = newObservation();
@@ -648,14 +689,28 @@ export class AcpDriver implements Driver {
     // request while the run is cancelling.
     let pendingPermissionId: number | string | undefined;
     // The session/load REPLAY window (strategy §6): true from the
-    // session/load write until its response resolves. Every session/update
-    // inside the window is REPLAYED HISTORY — counted into the discard
-    // sink below, never folded into THIS run's observation (a replayed
-    // tool_call must not mark toolFirstSeen, a replayed chunk must not
-    // join the transcript, a replayed failed status must not synthesize a
-    // denial, a replayed model value must not feed servedModel).
+    // session/load write until its RESPONSE LINE arrives. Every
+    // session/update inside the window is REPLAYED HISTORY — counted into
+    // the discard sink below, never folded into THIS run's observation (a
+    // replayed tool_call must not mark toolFirstSeen, a replayed chunk
+    // must not join the transcript, a replayed failed status must not
+    // synthesize a denial, a replayed model value must not feed
+    // servedModel). The flag clears at the WIRE-LINE level
+    // (wire.onResponseLine) — synchronously, before any later line of the
+    // same data chunk is processed — so a frame flushed back-to-back with
+    // the load response post-dates the settle and folds; clearing only at
+    // the await's continuation (the round-1 shape) dropped it.
     let replaying = false;
     let replayedFrameCount = 0;
+    // True while the session-establishment request (load / resume / new)
+    // is in flight. Its RESPONSE LINE carries the authoritative sessionId,
+    // which the onResponseLine hook adopts AT LINE LEVEL — a same-chunk
+    // post-response update must pass the session-id gate, and the
+    // continuation that assigns acpSessionId cannot run until the WHOLE
+    // chunk has been processed (the handshake is strictly sequential, so
+    // within this window the only response that can arrive is the
+    // establishment's own).
+    let establishing = false;
 
     const graceOpts = (): AcpGraceLadderOptions => ({
       ...(this.termGraceMs !== undefined ? { termGraceMs: this.termGraceMs } : {}),
@@ -722,16 +777,23 @@ export class AcpDriver implements Driver {
       const decision = decidePermission(toolPolicy, sandboxPolicy.level, identity, request.toolCall.kind);
       const selection = selectPermissionAnswer(decision.decision, request.options);
       if (!selection.ok) {
-        // A deny with NO reject option offered — the run FAILS (strategy
-        // §2.1); 'cancelled' is only legal on a real cancellation, never
-        // as an answer. Killing the child settles the pending prompt
-        // request via the wire's exit path.
+        // A decision whose required side was NOT OFFERED — an allow with
+        // no allow option, or a deny with no reject option — FAILS THE
+        // RUN (strategy §2.1); 'cancelled' is only legal on a real
+        // cancellation, never as an answer. Killing the child settles the
+        // pending prompt request via the wire's exit path. The narration
+        // names WHICH side failed (selection.side — both sides fail the
+        // same way loudly).
         observation.narration.push(
           JSON.stringify({
             cq: 'permission-answer-failed',
+            side: selection.side,
             toolCallId,
             offered: request.options.map((option) => ({ optionId: option.optionId, kind: option.kind })),
-            note: 'no reject option offered on the deny side — the run fails; never answered cancelled',
+            note:
+              selection.side === 'allow'
+                ? 'no allow option offered on the allow side — the run fails; never answered cancelled'
+                : 'no reject option offered on the deny side — the run fails; never answered cancelled',
           }),
         );
         void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
@@ -777,6 +839,22 @@ export class AcpDriver implements Driver {
         }
       },
       onServerRequest: handleServerRequest,
+      onResponseLine: (result) => {
+        // The replay window clears AT THE RESPONSE LINE — synchronously,
+        // before any frame later in the same data chunk is gated (the
+        // round-1 shape cleared only at the await's continuation, which
+        // runs after the WHOLE chunk is processed, dropping same-chunk
+        // post-load updates).
+        replaying = false;
+        // The establishment response's sessionId is authoritative: adopt
+        // it at line level so a same-chunk post-response update passes the
+        // session-id gate below (the continuation that assigns
+        // acpSessionId runs too late for that frame).
+        if (establishing) {
+          const sid = sessionIdOf(result);
+          if (sid !== undefined) acpSessionId = sid;
+        }
+      },
       onUnparseableLine: (line) => observation.narration.push(line.slice(0, 2000)),
       onStderrLine: (line) => observation.stderr.push(line),
     });
@@ -832,6 +910,7 @@ export class AcpDriver implements Driver {
     // wire integer is the only version that binds — strategy §3).
     let initAuthMethods: readonly string[] = [];
     let agentSupportsLoad = false;
+    let agentSupportsResume = false;
     let negotiatedVersion: number | undefined;
     let handshakeFailure: string | undefined;
     if (!signalFired) {
@@ -855,26 +934,35 @@ export class AcpDriver implements Driver {
         } else {
           initAuthMethods = (init.authMethods ?? []).map((method) => method.id);
           agentSupportsLoad = init.agentCapabilities?.loadSession === true;
+          // The §6 middle rung's advertisement: sessionCapabilities.resume
+          // present (the probe-verbatim `{ list: {}, resume: {}, fork: {} }`
+          // — advertised means the member exists, however empty).
+          agentSupportsResume = init.agentCapabilities?.sessionCapabilities?.resume !== undefined;
         }
       } catch (err) {
         handshakeFailure = `initialize failed: ${messageOf(err)}`;
       }
     }
 
-    // --- Handshake step 2: session/load (protocol resume) or session/new.
+    // --- Handshake step 2: session establishment — the THREE-RUNG resume
+    // gate (strategy §6, the reference's own gate order), else session/new.
     if (handshakeFailure === undefined && !signalFired) {
+      establishing = true;
       try {
         if (sessionRef !== undefined && resumeAcpSessionId !== undefined && agentSupportsLoad) {
-          // History replays via session/update BEFORE the response
-          // (strategy §6) — the replaying flag routes the whole window
-          // into the discard sink: none of it is this run's observation.
-          // The flag clears when THIS await resolves (the load response),
-          // so the mode pin and everything after folds normally; only a
-          // config_option_update arriving AFTER the load settles can feed
-          // servedModel — session/new/load configOptions stay the
-          // never-folded lazy defaults (header, §5). cwd + mcpServers
-          // stay present (the recorded Devin quirk generalizes: keep the
-          // params present).
+          // RUNG 1 — session/load when agentCapabilities.loadSession is
+          // advertised. History replays via session/update BEFORE the
+          // response (strategy §6) — the replaying flag routes the whole
+          // window into the discard sink: none of it is this run's
+          // observation. The flag clears the moment the load RESPONSE
+          // LINE arrives (wire.onResponseLine — synchronously, before any
+          // later line of the same chunk is processed), so a frame
+          // flushed back-to-back with the response post-dates the settle
+          // and folds normally; only a config_option_update arriving
+          // AFTER the load settles can feed servedModel — session/new/
+          // load configOptions stay the never-folded lazy defaults
+          // (header, §5). cwd + mcpServers stay present (the recorded
+          // Devin quirk generalizes: keep the params present).
           replaying = true;
           try {
             const loadedRaw = await wire.request(ACP_METHODS.sessionLoad, {
@@ -885,7 +973,7 @@ export class AcpDriver implements Driver {
             const loaded = SessionNewResultSchema.safeParse(loadedRaw);
             acpSessionId = loaded.success ? loaded.data.sessionId : resumeAcpSessionId;
           } finally {
-            replaying = false;
+            replaying = false; // belt-and-suspenders: the response line already cleared it
             if (replayedFrameCount > 0) {
               observation.narration.push(
                 JSON.stringify({
@@ -896,16 +984,32 @@ export class AcpDriver implements Driver {
               );
             }
           }
+        } else if (sessionRef !== undefined && resumeAcpSessionId !== undefined && agentSupportsResume) {
+          // RUNG 2 — unstable_resumeSession when sessionCapabilities.resume
+          // is advertised (strategy §6: the reference's own middle rung;
+          // NO history replay on this rung, so no replay window). The same
+          // { sessionId, cwd, mcpServers } param shape as load — the Devin
+          // quirk generalizes to "keep the params present".
+          const resumedRaw = await wire.request(ACP_METHODS.unstableResumeSession, {
+            sessionId: resumeAcpSessionId,
+            cwd: workspace,
+            mcpServers: [],
+          });
+          const resumed = SessionNewResultSchema.safeParse(resumedRaw);
+          acpSessionId = resumed.success ? resumed.data.sessionId : resumeAcpSessionId;
         } else {
+          // RUNG 3 (and the fresh-run path) — session/new. Reaching here
+          // WITH a recorded sidecar means NEITHER resume capability is
+          // advertised: the honest-partial rung, narrated.
           const createdRaw = await wire.request(ACP_METHODS.sessionNew, { cwd: workspace, mcpServers: [] });
           const created = SessionNewResultSchema.parse(createdRaw);
           acpSessionId = created.sessionId;
-          if (sessionRef !== undefined && resumeAcpSessionId !== undefined && !agentSupportsLoad) {
+          if (sessionRef !== undefined && resumeAcpSessionId !== undefined) {
             observation.narration.push(
               JSON.stringify({
                 cq: 'resume-partial',
                 acpSessionId: resumeAcpSessionId,
-                note: 'the harness does not advertise loadSession — workspace-only continuation (the sidecar handle was recorded but is unusable)',
+                note: 'the harness advertises NEITHER loadSession NOR sessionCapabilities.resume — workspace-only continuation (the sidecar handle was recorded but is unusable)',
               }),
             );
           }
@@ -916,6 +1020,8 @@ export class AcpDriver implements Driver {
             `${initAuthMethods.length > 0 ? initAuthMethods.join(', ') : '(none)'}; this driver never calls ` +
             'authenticate: the harness is expected to arrive pre-authenticated (OQ-1)'
           : `session establishment failed: ${messageOf(err)}`;
+      } finally {
+        establishing = false;
       }
     }
 
@@ -1217,7 +1323,9 @@ export function composePrompt(prompt: string, outputSchema: ZodType | undefined)
  * envelope OR an unknown update kind becomes narration — the stream's
  * junk is evidence, never a crash). Known kinds the seam cannot carry are
  * dropped SILENTLY (narration is reserved for genuinely unshapeable
- * frames, so a clean run persists no narration at all).
+ * frames); the ONE deliberate narration on a well-framed stream is
+ * `agent_thought_chunk`'s fact (below) — so a clean run on a
+ * NON-THINKING vendor persists no narration at all.
  */
 export function foldSessionUpdate(observation: RunObservation, params: unknown): void {
   const checked = SessionUpdateParamsSchema.safeParse(params);

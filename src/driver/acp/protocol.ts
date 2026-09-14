@@ -44,12 +44,18 @@ export const ACP_PROTOCOL_VERSION = 1;
 /** The ACP error code for "authenticate first" — pass-through-unless-demanded (OQ-1: no gate on the reference vendor). */
 export const AUTH_REQUIRED_ERROR_CODE = -32000;
 
-/** Method names — the strategy §1.2 subset plus the two inbound-only methods. */
+/**
+ * Method names — the strategy §1.2 subset, the two inbound-only methods,
+ * and the §6 resume gate's middle rung (`unstable_resumeSession`, the
+ * reference's own name for the resume-when-`sessionCapabilities.resume`
+ * request — a method name carrying the session id in params).
+ */
 export const ACP_METHODS = {
   initialize: 'initialize',
   authenticate: 'authenticate',
   sessionNew: 'session/new',
   sessionLoad: 'session/load',
+  unstableResumeSession: 'unstable_resumeSession',
   sessionPrompt: 'session/prompt',
   sessionCancel: 'session/cancel',
   sessionSetConfigOption: 'session/set_config_option',
@@ -376,16 +382,18 @@ export type PermissionDecision = 'allow' | 'deny';
 
 /**
  * The answer-table application: resolve a decision to an optionId, or
- * report the offered options when the required side was not offered (a
- * deny with no reject option fails the run — the caller names them).
+ * report the FAILED SIDE plus the offered options when the required side
+ * was not offered (a deny with no reject option — or an allow with no
+ * allow option — fails the run; the caller names the side and the
+ * options).
  */
 export function selectPermissionAnswer(
   decision: PermissionDecision,
   options: readonly PermissionOption[],
-): { ok: true; answer: PermissionAnswer } | { ok: false; offered: readonly PermissionOption[] } {
+): { ok: true; answer: PermissionAnswer } | { ok: false; offered: readonly PermissionOption[]; side: PermissionDecision } {
   const optionId = decision === 'allow' ? selectAllowOptionId(options) : selectRejectOptionId(options);
   if (optionId === undefined) {
-    return { ok: false, offered: options };
+    return { ok: false, offered: options, side: decision };
   }
   return { ok: true, answer: { outcome: { outcome: 'selected', optionId } }};
 }
@@ -427,6 +435,15 @@ export const InitializeResultSchema = z.looseObject({
   })).optional(),
   agentCapabilities: z.looseObject({
     loadSession: z.unknown().optional(),
+    // Probe-verbatim (2026-09-15): `sessionCapabilities: { list: {},
+    // resume: {}, fork: {} }` INSIDE agentCapabilities — the §6 resume
+    // gate's middle rung reads `resume` (advertised = the member is
+    // present, however empty).
+    sessionCapabilities: z.looseObject({
+      list: z.unknown().optional(),
+      resume: z.unknown().optional(),
+      fork: z.unknown().optional(),
+    }).optional(),
   }).optional(),
 });
 

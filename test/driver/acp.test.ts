@@ -14,14 +14,18 @@
 //      ANSWER-TABLE legs (allow selects allow_once; the allow_always
 //      fallback when only allow_always is offered; reject selects
 //      reject_once by vendor-string optionId; a deny with no reject
-//      option fails the run naming the offered options), the never-asks
-//      tripwire, served-model surfacing + the FAKE_ACP_SERVED_MODEL
-//      mismatch demonstration (the observed-model check catches it —
-//      the subprocess remap test's framing), usage mapping (fixed
-//      numbers, NO reasoning field), the resume sidecar discipline,
-//      cancel → 'aborted' over the governed signal, the mode-pin
-//      observability, the protocol-version mismatch verdict, and the
-//      prompt-directed-JSON drop rule.
+//      option AND an allow with no allow option each fail the run,
+//      narrating WHICH side failed), the never-asks tripwire, the
+//      replay window (bait-before-response discarded; a post-load frame
+//      sharing the response's stdout flush FOLDS — the line-level gate),
+//      the THREE-RUNG resume gate (session/load → unstable_resumeSession
+//      → the honest partial, narrated), served-model surfacing + the
+//      FAKE_ACP_SERVED_MODEL mismatch demonstration (the observed-model
+//      check catches it — the subprocess remap test's framing), usage
+//      mapping (fixed numbers, NO reasoning field), the resume sidecar
+//      discipline, cancel → 'aborted' over the governed signal, the
+//      mode-pin observability, the protocol-version mismatch verdict,
+//      and the prompt-directed-JSON drop rule.
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -341,6 +345,35 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('answer table: an ALLOW decision with no allow option fails the run, narrating the ALLOW side — not the deny wording', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            // A reject-only option set: the ALLOW side has NO answer —
+            // the mirror image of the deny-side deadlock (round-2 review:
+            // both sides fail the run loudly, each narrated as its OWN
+            // side, never mislabeled).
+            FAKE_ACP_OPTIONS: JSON.stringify([{ optionId: 'only_reject', kind: 'reject_once' }]),
+          },
+          [],
+        ),
+      );
+      // Unrestricted policy → the decision is ALLOW → no allow option
+      // exists → the run fails.
+      const result = await driver.run(invocation({ prompt: 'allow-deadlock run' }));
+      expect(result.stopReason).toBe('error'); // never answered 'cancelled'; never hung
+      const narration = await narrationOf(store, result.sessionId as string);
+      const failed = narration.find((line) => line.includes('"permission-answer-failed"'));
+      expect(failed !== undefined && failed.includes('"side":"allow"')).toBe(true);
+      expect(failed !== undefined && failed.includes('no allow option offered on the allow side')).toBe(true);
+      expect(failed !== undefined && failed.includes('no reject option offered')).toBe(false);
+    });
+  });
+
   test('THE NEVER-ASKS TRIWIRE: an ungated tool_call is evidence + an error verdict — never green', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
@@ -440,6 +473,72 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('resume gate rung 2: unstable_resumeSession when only sessionCapabilities.resume is advertised — the recorded handle resumes (strategy §6)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls1: SpawnCall[] = [];
+      const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
+      const run1 = await first.run(invocation({ prompt: 'rung2 run one' }));
+      const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
+      const acpId = (await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim();
+
+      const calls2: SpawnCall[] = [];
+      // loadSession NOT advertised + sessionCapabilities.resume advertised:
+      // the §6 middle rung — the driver must send unstable_resumeSession
+      // (method + the recorded session id in params) instead of falling
+      // straight to the honest partial.
+      const second = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_NO_LOADSESSION: '1', FAKE_ACP_RESUME: '1' },
+          calls2,
+        ),
+      );
+      const run2 = await second.run(invocation({ prompt: 'rung2 run two', sessionRef: run1.sessionId }));
+      expect(run2.stopReason).toBe('complete');
+      const record = await store.load(run2.sessionId as string);
+      // The resume REQUEST carried the recorded session id: the fixture
+      // adopted it and the echo proves protocol-side continuity (the
+      // partial rung would have session/new'd a FRESH id and echoed THAT).
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`)),
+      ).toBe(true);
+      // NOT the honest-partial rung: no partial narration.
+      const narration = await narrationOf(store, run2.sessionId as string);
+      expect(narration.some((line) => line.includes('"resume-partial"'))).toBe(false);
+    });
+  });
+
+  test('resume gate rung 3: neither capability advertised — the honest-partial narration names BOTH (the sidecar was recorded but is unusable)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls1: SpawnCall[] = [];
+      const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
+      const run1 = await first.run(invocation({ prompt: 'rung3 run one' }));
+      const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
+      const acpId = (await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim();
+      expect(acpId).toMatch(/^fake-acp-/); // the sidecar was WRITTEN — rung 3 gates only its USE
+
+      const calls2: SpawnCall[] = [];
+      const second = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_NO_LOADSESSION: '1' }, calls2),
+      );
+      const run2 = await second.run(invocation({ prompt: 'rung3 run two', sessionRef: run1.sessionId }));
+      expect(run2.stopReason).toBe('complete'); // honest partial, never a failure
+      const record = await store.load(run2.sessionId as string);
+      // The echo carries a FRESH session id (session/new), never the
+      // recorded handle — workspace-only continuation.
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`)),
+      ).toBe(false);
+      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('resumed from acp session'))).toBe(
+        true,
+      );
+      const narration = await narrationOf(store, run2.sessionId as string);
+      const partial = narration.find((line) => line.includes('"resume-partial"'));
+      expect(partial !== undefined && partial.includes(acpId)).toBe(true);
+      expect(partial !== undefined && partial.includes('NEITHER loadSession NOR sessionCapabilities.resume')).toBe(true);
+    });
+  });
+
   test('session/load REPLAY: replayed prior-turn frames are suppressed — honest verdict, clean transcript, the count is the evidence', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls1: SpawnCall[] = [];
@@ -470,6 +569,44 @@ describe('acp driver specifics (fake ACP server)', () => {
       ).toBe(true);
       // The discard sink narrates the COUNT (honest evidence, never the
       // content): all three replayed frames were counted and discarded.
+      const narration = await narrationOf(store, run2.sessionId as string);
+      const marker = narration.find((line) => line.includes('"replayed-frames-discarded"'));
+      expect(marker !== undefined && marker.includes('"count":3')).toBe(true);
+      expect(narration.some((line) => line.includes('"never-asks"'))).toBe(false);
+    });
+  });
+
+  test('the replay window is LINE-gated: a post-load update sharing the load response flush FOLDS; the pre-response bait is still discarded', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls1: SpawnCall[] = [];
+      const first = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok' }, calls1));
+      const run1 = await first.run(invocation({ prompt: 'tail run one' }));
+
+      const calls2: SpawnCall[] = [];
+      // The resumed run's session/load emits the bait replay history, then
+      // the RESPONSE LINE and a post-load agent_message_chunk in ONE stdout
+      // flush. The tail post-dates the load settle: a driver that clears
+      // the replay flag only at the load await's continuation processes the
+      // WHOLE flush first and drops it (the round-2 chunk-boundary bug);
+      // the wire-line gate folds it.
+      const second = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_REPLAY_WITH_TAIL: '1' }, calls2),
+      );
+      const run2 = await second.run(invocation({ prompt: 'tail run two', sessionRef: run1.sessionId }));
+      expect(run2.stopReason).toBe('complete'); // the bait never false-fired the tripwire
+      expect(run2.denials).toEqual([]); // the replayed failed status synthesized no phantom denial
+      const record = await store.load(run2.sessionId as string);
+      // THE REGRESSION: the same-flush POST-load tail chunk FOLDED into
+      // this run's transcript — and the resume echo folded after it.
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('POST-LOAD tail chunk')),
+      ).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('resumed from acp session')),
+      ).toBe(true);
+      // The PRE-response bait frames are still suppressed: no replayed
+      // text, exactly the three-frame discard count, no never-asks.
+      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('REPLAYED'))).toBe(false);
       const narration = await narrationOf(store, run2.sessionId as string);
       const marker = narration.find((line) => line.includes('"replayed-frames-discarded"'));
       expect(marker !== undefined && marker.includes('"count":3')).toBe(true);

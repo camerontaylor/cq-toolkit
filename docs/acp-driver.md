@@ -149,11 +149,16 @@ silently soft.
 
 - **I6 isolation:** no `sessionRef` → fresh temp workspace + fresh
   record + a fresh ACP session. `sessionRef` → the SAME workspace
-  continues; the vendor conversation continues via `session/load` using
-  the ACP session id in the workspace sidecar `.cq-cli-session` (written
-  when the harness advertises `loadSession`; a sidecar-less workspace or
-  an agent without `loadSession` is an honest workspace-only
-  continuation). Unknown `sessionRef` throws pre-dispatch.
+  continues; the vendor conversation continues through the resume gate
+  (strategy §6, the reference's own order): `session/load` when the
+  harness advertises `loadSession`, else `unstable_resumeSession` when
+  `sessionCapabilities.resume` is advertised, else an honest
+  workspace-only continuation — using the ACP session id in the
+  workspace sidecar `.cq-cli-session`. The sidecar is written whenever a
+  run established an ACP session; the advertised capabilities gate only
+  its USE on the next run (a sidecar-less workspace, or an agent
+  advertising neither capability, is that honest partial continuation).
+  Unknown `sessionRef` throws pre-dispatch.
 - **I8 budget:** the driver owns NO wall clock — the governed
   `currentJobContext()?.signal` fires `session/cancel`, and the run
   settles on the cancelled PROMPT RESPONSE (stopReason `cancelled` →
