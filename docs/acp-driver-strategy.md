@@ -85,6 +85,11 @@ Its live message flow, in order:
 5. **session/request_permission** (agent → client REQUEST): the real
    handler either auto-accepts (see §2.1) or surfaces the request and
    parks a promise on the UI's answer (acp-agent.ts:3195-3238).
+   **STEP-2 SHAPE PIN (live wire):** `session/update` payloads are
+   NESTED — the discriminating kind lives at
+   `params.update.sessionUpdate` and text at `params.update.content`,
+   NOT at `params.sessionUpdate.*` as a flat reading of the union would
+   suggest. The driver's fold reads the nested shape exclusively.
 6. **session/cancel** (client → agent NOTIFICATION): the stop path writes
    `connection.cancel({ sessionId })` through a per-stop ledger that
    tracks each cancel write's delivery (acp-agent.ts:2493-2530; also
@@ -123,14 +128,34 @@ binary is expected to arrive pre-authenticated (env/config at spawn;
 ### 1.2 The subset v1 implements
 
 Exactly: `initialize` (with integer protocol-version negotiation and a
-loud mismatch error, §3) → `session/new` → `session/prompt` → consume
-`session/update` (a FILTER: fold `usage_update`-independent facts only —
-see §1.3 — and keep `agent_message_chunk` text for the structured-output
-attempt, §4) → answer `session/request_permission` declaratively (§2.1)
-→ `session/cancel` on the governed abort signal (§2.3), with `authenticate`
-implemented ONLY IF the live spike shows a harness gates `session/new`
-behind `auth_required` (§1.3, OQ-1). The conformance fixture (§7) is a
-fake ACP server speaking exactly this subset over stdio.
+loud mismatch error, §3) → `session/new` → `session/set_config_option`
+(THE MODE PIN — added by the step-2 amendment, below) → `session/prompt`
+→ consume `session/update` (a FILTER: fold `usage_update`-independent
+facts only — see §1.3 — and keep `agent_message_chunk` text for the
+structured-output attempt, §4) → answer `session/request_permission`
+declaratively (§2.1) → `session/cancel` on the governed abort signal
+(§2.3). `authenticate` is NOT implemented — and now KNOWN-UNNEEDED, not
+merely unproven: OQ-1 is ANSWERED (no gate; one authMethod,
+`zcode-credentials`, agent self-handles; `session/new` succeeds with no
+authenticate call). The pass-through-unless-demanded posture stands: if a
+harness ever answers `auth_required` anyway, the run fails loud NAMING
+the advertised authMethods — never a silent retry with credentials we do
+not hold. The conformance fixture (§7) is a fake ACP server speaking
+exactly this subset over stdio.
+
+**THE MODE PIN (step-2 amendment — the live probes made this subset
+member mandatory, OQ-4):** sessions are created in mode `yolo` (available
+modes `plan/build/edit/yolo/auto` on the reference vendor), and `yolo`
+NEVER ASKS — tools execute ungated. The permission boundary (§2.1) is
+the ONLY gate this lane owns, and it exists only in a client-chosen mode,
+so BEFORE ANY PROMPT the driver pins the gating mode with ONE
+`session/set_config_option { configId: 'mode', value: 'build' }` request
+(live-verified: in `build`, every gated tool call produced exactly one
+`session/request_permission`, honored on both the allow and the deny
+side). A failed pin is a pre-prompt error verdict — an unpinned session
+is a policy void, not a degraded run — and the never-asks tripwire (§2.1)
+remains the backstop for a harness that accepts the pin and still does
+not ask.
 
 ### 1.3 The will-NOT-implement-in-v1 list (each against the frozen seam)
 
@@ -346,16 +371,26 @@ touch. Therefore:
 - **Usage mapping:** `PromptResponse.usage` → frozen `Usage`:
   `inputTokens → input`, `outputTokens → output`,
   `cachedReadTokens → cacheRead` (the reference mapper,
-  acp-agent.ts:677-684). **`cacheWrite` is 0-by-protocol** — ACP's
-  carried usage has no cache-write field at all (mapper cites three
-  fields only); frozen `Usage` requires the field, so it folds as 0 with
-  that fact recorded here. **`reasoning` is OMITTED** — ACP reports no
-  reasoning token count, and the frozen field is additive-only-when-
-  reported-outside-output (`src/driver/types.ts:36-41`); thought CONTENT
-  (`agent_thought_chunk`) is not a token count and must not be
-  converted into one. On `aborted`/`error` verdicts the driver folds
+  acp-agent.ts:677-684), and — **step-2 CORRECTION from the live wire** —
+  `cachedWriteTokens → cacheWrite`: the carried usage DOES have a
+  cache-write field on this vendor (OQ-3, verbatim on the wire), so the
+  earlier "`cacheWrite` is 0-by-protocol" claim is wrong on this lane and
+  the field FOLDS instead of hardcoding 0. **`reasoning` is OMITTED** —
+  the same live probe shows `thoughtTokens` EXISTS on the wire, but its
+  ADDITIVITY is unknown (whether the vendor counts thought tokens inside
+  `outputTokens` or outside it; the sample turn reported
+  `thoughtTokens: 0`, so the wire itself cannot say), and the frozen
+  field is additive-only-when-reported-outside-output
+  (`src/driver/types.ts:36-41`) — folding it on a guess would
+  double-count every total that sums the frozen Usage fields (the
+  Budget.maxTokens classification). Same rule as the claude-agent lane:
+  an unproven-additive count stays unlifted. Thought CONTENT
+  (`agent_thought_chunk`) is not a token count and must not be converted
+  into one. On `aborted`/`error` verdicts the driver folds
   whatever the final response actually carried and never invents the
-  rest — cost is never reported on an unmeasured verdict.
+  rest — cost is never reported on an unmeasured verdict (the live
+  cancel probe: the cancelled response carried `usage: null`; that fold
+  is zeros, no cost).
 - **costUSD:** OUR modeled figure, never vendor-reported USD — the
   T1.6b posture unchanged on a new lane (`docs/dd-9-api-equivalent-budget.md`
   §3): derived from the folded usage through the vendored models.dev
@@ -465,19 +500,25 @@ posture as the weakest existing lane, stated without cosmetics:
 ## 5. The observed-model check and eval posture
 
 - **`WorkerResult.model` (leg m binds):** the driver surfaces whatever
-  model id the HARNESS reports as served — the honest candidates on the
-  wire are the session's reported model/config state (session/new
-  response fields or a `config_option_update` with a `model`-category
-  option; the reference reads model identity through exactly this
-  unstable-tier machinery, acp-agent.ts:2864-2872; the degrade
-  message at acp-agent.ts:3621-3623). A harness that
-  reports NOTHING fails the conformance suite — that failure is
+  model id the HARNESS reports as served. **STEP-2 SHAPE PINS (OQ-2,
+  answered live):** the id is reported in TWO places — `session/new`
+  result `configOptions[]` (entry `id: 'model'`, category `'model'`,
+  `currentValue` in `providerId\modelId` format, backslash separator —
+  the vendor's own encoding) and AGAIN as a `config_option_update`
+  session update once the session materializes on first use. The two
+  DISAGREE by design: the session/new entry is the LAZY default
+  (`builtin:zai\GLM-5.3` on the probe); the update carries the
+  MATERIALIZED truth (`builtin:bigmodel\GLM-5.3` — the providerId
+  CHANGES between the two). `WorkerResult.model` therefore reads the
+  POST-MATERIALIZATION `config_option_update` value ONLY — the
+  session/new default is never surfaced (surfacing it would be the exact
+  misobservation leg m exists to catch). A harness that reports NOTHING
+  materialized fails the conformance suite — that failure is
   INTENDED PRESSURE, the same silent-remap defence as every lane
   (conformance leg m, test/driver/conformance.ts:509; "a driver that
   hides the served id … fails"), and the driver will NOT substitute the
   requested `ModelSpec.model` to pass it (that would manufacture the
-  exact fact leg m exists to catch). What zcode-acp-server actually
-  reports as a model id is unknown-until-spike (OQ-2).
+  exact fact leg m exists to catch).
 - **Eval wires request what the wire serves (conductor decision
   2026-09-14):** eval cells on this lane request the model id the
   zcode/deepseek harness actually serves (observed in the spike, as
@@ -731,8 +772,10 @@ document BEFORE driver code lands.
 
 **ACHIEVABLE WITHIN BUDGET AS SCOPED — conditional on the live spike
 answering OQ-2/OQ-5 without hitting a checkpoint-blocked trigger.** The
-subset is four methods, one notification, and one client callback
-(§1.2); every hard design question (declarative permissions, sandbox
+subset is five methods, one notification, and one client callback
+(§1.2; the fifth — the mode pin — was ADDED by the step-2 amendment
+after the probes showed the unpinned default is a policy void); every
+hard design question (declarative permissions, sandbox
 honesty, cancel semantics, usage provenance, session mapping) has a
 settled answer above, most of them pre-answered by the reference's own
 mechanics, which are cited and deliberately re-derived rather than
