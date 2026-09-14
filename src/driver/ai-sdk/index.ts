@@ -382,6 +382,13 @@ function defaultSessionsDir(): string {
  * Production provider registry — real @ai-sdk provider instances, built
  * lazily per run() call so environment API keys are read AT CALL TIME. A
  * missing key throws a clear error before dispatch.
+ *
+ * The `zai` handle defaults to the GLM CODING PLAN's OpenAI-compatible
+ * endpoint (https://api.z.ai/api/coding/paas/v4 — the plan-funded wire,
+ * owner-verified 2026-09-14: the pay-as-you-go /api/paas/v4 rejects the
+ * plan key with 429 insufficient-balance BY DESIGN, while the coding
+ * endpoint answers 200). ZAI_BASE_URL overrides the base URL for
+ * deployments on the pay-as-you-go wire.
  */
 function defaultProviders(): Record<string, ProviderFactory> {
   const requireKey = (provider: string, envName: string): string => {
@@ -394,7 +401,11 @@ function defaultProviders(): Record<string, ProviderFactory> {
   return {
     anthropic: (modelId) => createAnthropic({ apiKey: requireKey('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(modelId),
     openai: (modelId) => createOpenAI({ apiKey: requireKey('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
-    zai: (modelId) => createZai({ apiKey: requireKey('zai', 'ZAI_API_KEY') }).languageModel(modelId),
+    zai: (modelId) =>
+      createZai({
+        apiKey: requireKey('zai', 'ZAI_API_KEY'),
+        baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
+      }).languageModel(modelId),
     deepseek: (modelId) => createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
   };
 }

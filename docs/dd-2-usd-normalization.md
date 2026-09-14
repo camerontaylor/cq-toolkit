@@ -37,15 +37,15 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | claude-agent | glm-4.6 (glm-4.6) | 382 | 95 | 0 | 0 | (382×0.6 + 95×2.2)/1e6 = $0.00043820 | $0.00043820 | YES — exact |
 | subprocess | glm-4.6 (glm-4.6) | 1132 | 26 | 0 | 0 | (1132×0.6 + 26×2.2)/1e6 = $0.00073640 | $0.00073640 | YES — exact |
-| ai-sdk | glm-4.6 (glm-4.6) | 99 | 76 | 0 | 0 | (99×0.6 + 76×2.2)/1e6 = $0.00022660 | $0.00022660 | YES — exact |
 | ai-sdk | deepseek-chat (served: deepseek-flash) | 93 | 10 | 0 | 0 | (93×0.28 + 10×0.42)/1e6 = $0.00003024 | $0.00003024 | YES — exact |
+| ai-sdk | glm-4.6 (served: **glm-5.3-flash** — coding wire) | — | — | — | — | — | absent | FAILED — served-model mismatch |
 
 **Tolerance, stated precisely — three different claims:**
 
 1. **Driver fold vs independent recompute** (the normalization check that
    CAN be exact): every completed cell's `costUSD` equals a recompute of the
    same fold from the reported usage and the published rates, within 1e-9
-   USD. Observed: equality in all four completed cells. Every lane lands
+   USD. Observed: equality in all three completed cells. Every lane lands
    inside this tolerance.
 2. **Vendored table vs provider pages**: the GLM-4.6 and deepseek-chat rows
    match Z.AI's and DeepSeek's official per-million rates as re-checked
@@ -54,40 +54,44 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 3. **Cross-lane usage comparability** (the check that CANNOT be exact):
    usage is deliberately NOT expected to agree across lanes — the identical
    user prompt rides different harness scaffolding. For ~16 prompt tokens,
-   the raw chat lane sent 93–99 input tokens (chat framing); the agent SDK
+   the raw chat lane sent 93 input tokens (chat framing); the agent SDK
    lane sent 382 (agent system prompt + tool-surface description); the CLI
    lane sent 1132 (the CLI's full system prompt). The modeled cost
-   differences across lanes for the same model ($0.00023 → $0.00074 on
-   glm-4.6, ~3×) are almost entirely that fixed scaffolding overhead, not
+   differences across lanes for the same model ($0.00044 → $0.00074 on
+   glm-4.6) are almost entirely that fixed scaffolding overhead, not
    model behavior — which is exactly the fact a per-lane costUSD makes
    visible, and the reason eval budgets must be compared WITHIN a lane or
    normalized through this same fold.
 
-## The glm × ai-sdk wire history (why the axis is the driver, not the wire)
+## The glm × ai-sdk wire history (owner-verified endpoint facts)
 
-The ai-sdk × glm-4.6 cell originally failed on Z.AI's OpenAI-compat API
-(`https://api.z.ai/api/paas/v4`): HTTP 429, code 1113 "Insufficient balance
-or no resource package. Please recharge." — while the SAME key completed
-runs over the anthropic-compat endpoint in the same minute. This was NOT a
-key-name mixup (the demo script maps the rendered `Z_AI_API_KEY` onto the
-drivers' `ZAI_API_KEY` convention at startup; that mapping is load-bearing
-and every other live cell ran through it): the plan key funds only the
-anthropic-compat route, and the pay-as-you-go API it does not cover is the
-wire the ai-sdk lane's default zai provider speaks.
+OWNER-VERIFIED (2026-09-14, same key, this host): the GLM Coding Plan funds
+exactly TWO wires — the coding OpenAI-compatible endpoint
+(`https://api.z.ai/api/coding/paas/v4` → 200) and the anthropic-compat
+endpoint (`/api/anthropic/v1/messages` → 200). The pay-as-you-go wire
+(`/api/paas/v4`) rejects the plan key with HTTP 429, code 1113
+"Insufficient balance or no resource package" — by design, not a fault.
+The ai-sdk driver's `zai` handle now DEFAULTS to the coding endpoint
+(`ZAI_BASE_URL` overrides), so the lane runs on plan-funded infrastructure.
 
-Per the acceptance row (the AXIS is the driver), the cell was re-run with
-the driver instance still `AiSdkDriver` but a `providers` override
-constructing `@ai-sdk/anthropic` at the compat endpoint. Two client-side
-construction faults were found and fixed en route (zero spend each): the
-SDK rejects passing both `apiKey` and `authToken`; and `baseURL` must carry
-`/v1` — the SDK appends `/messages`, and Z.AI's gateway answers the
-missing-`/v1` path with an HTTP-200-wrapped `{"msg":"404 NOT_FOUND"}`
-envelope (invisible to status-only probing). One host network quirk needed
-a committed fix: node/undici hangs on its IPv6 route to api.z.ai
-(ETIMEDOUT; curl and the agent CLI survive via happy-eyeballs/IPv4), so the
-cell's custom `fetch` pins `family: 4` over `node:https`. Final result:
-complete, served `glm-4.6`, fold exact — the row above. Full history:
-`docs/eval-axes-demo.md`.
+Current cell outcome: over the coding wire the run CONNECTED and COMPLETED,
+but the endpoint silently served `glm-5.3-flash` for the requested
+`glm-4.6` — the served-model-mismatch guard failed the cell with that
+evidence (no retry; a remap is endpoint configuration). This is the
+silent-remap footgun observed live on Z.AI's coding wire, and it has a
+pricing consequence the guard exists to prevent: glm-5.3-flash lists at
+$0.15/$0.50 per Mtok vs glm-4.6's $0.60/$2.20, so accepting the row would
+have priced glm-5.3-flash tokens at glm-4.6 rates (~4× overstated). The
+interim anthropic-compat-wire measurement (99/76 tokens → $0.00022660,
+endpoint served glm-4.6 truthfully) remains a recorded historical datum
+from the superseded workaround — the same fixture over that wire did NOT
+remap, so the remap is a property of the coding wire, not of the driver.
+Full history: `docs/eval-axes-demo.md`.
+
+Host network note: this host's IPv6 route to api.z.ai hangs (node fetch →
+ETIMEDOUT; curl and the agent CLI survive via happy-eyeballs/IPv4). The
+demo script pins its OWN process to IPv4-first with family autoselection
+off — the driver and kernel set no process-global network policy.
 
 ## Modeled vs billed — DD-9 observed live
 

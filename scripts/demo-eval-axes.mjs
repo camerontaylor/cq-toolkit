@@ -8,11 +8,12 @@
 //   axis 1 — model × ai-sdk lane:   { zai/glm-4.6, deepseek/deepseek-chat }
 //   axis 2 — glm-4.6 × lane:        { ai-sdk, claude-agent, subprocess }
 //
-// (the ai-sdk × glm cell belongs to both axes — four unique runs). The AXIS
-// is the driver, not the provider wire: the glm × ai-sdk cell rides the
-// anthropic-compat wire (@ai-sdk/anthropic at Z.AI's compat endpoint)
-// because the plan key funds only that endpoint — see makeDriver and
-// docs/eval-axes-demo.md.
+// (the ai-sdk × glm cell belongs to both axes — four unique runs). The glm
+// × ai-sdk cell rides the GLM Coding Plan's OpenAI-COMPATIBLE endpoint —
+// the ai-sdk driver's zai provider defaults to it (owner-verified
+// 2026-09-14: /api/paas/v4 is the pay-as-you-go wire, unfunded by design;
+// /api/coding/paas/v4 is the plan-funded OpenAI-compat wire) — see
+// makeDriver and docs/eval-axes-demo.md.
 //
 // SPEND BOUNDS — what actually bounds a live run here (round-1 review
 // wording): each cell is dispatched through the kernel's escalation ladder
@@ -42,12 +43,22 @@
 // Standalone by design — never runs in `npm test` (CI has no keys, no
 // network). Usage: zsh -lic 'node scripts/demo-eval-axes.mjs'
 import { AiSdkDriver, ClaudeAgentDriver, SessionStore, SubprocessDriver, runLadder } from '../dist/index.js';
-import { createAnthropic } from '@ai-sdk/anthropic';
 import { priceOf } from '../dist/driver/pricing/index.js';
+import dns from 'node:dns';
+import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { mkdtemp } from 'node:fs/promises';
-import https from 'node:https';
+
+// HOST NETWORK QUIRK (found live, 2026-09-14): this host's IPv6 route to
+// api.z.ai hangs (node fetch → ETIMEDOUT) while the IPv4 path works (curl
+// and the agent CLI survive via happy-eyeballs/IPv4). This demo OWNS its
+// process, so pin node's connect defaults to IPv4-first with family
+// autoselection off — verified live: default → ETIMEDOUT, this pin → 200.
+// (A library must never set process-global network policy; the driver and
+// kernel stay untouched.)
+dns.setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(false);
 
 // --- Environment hygiene (silent) -------------------------------------------
 process.env.ANTHROPIC_API_KEY = ''; // the stale, invalid host key — never used
@@ -89,100 +100,15 @@ function recomputeCost(modelSpec, usage) {
   );
 }
 
-/**
- * IPv4-pinned fetch for the compat wire (documented in
- * docs/eval-axes-demo.md): on this host, node/undici resolves api.z.ai with
- * IPv6 addresses first and the v6 route HANGS (ETIMEDOUT) — curl and the
- * agent CLI survive via happy-eyeballs/IPv4, plain fetch does not.
- * createAnthropic accepts a custom fetch, so this cell pins family 4 over
- * node:https (POST JSON in, JSON out — the provider's non-streaming shape).
- */
-function ipv4Fetch(input, init = {}) {
-  return new Promise((resolve, reject) => {
-    const url = new URL(typeof input === 'string' ? input : input.url);
-    const headers = new Headers(init.headers ?? (typeof input !== 'string' ? input.headers : undefined));
-    const signal = init.signal;
-    // The governed wall-clock abort rides init.signal — it MUST reach the
-    // socket, or a DNS/TLS stall (or a slow response body) survives the
-    // ladder and a retry starts a second paid request while the first one
-    // lives.
-    const onAbort = () => {
-      // Forward the abort reason where trivial: the caller sees the
-      // governed cancellation, not a generic socket error.
-      req.destroy(signal?.reason instanceof Error ? signal.reason : new Error('ipv4Fetch: aborted by the governed signal'));
-    };
-    const cleanup = () => signal?.removeEventListener('abort', onAbort);
-    const req = https.request(
-      {
-        hostname: url.hostname,
-        path: `${url.pathname}${url.search}`,
-        method: init.method ?? 'POST',
-        headers: Object.fromEntries(headers.entries()),
-        family: 4,
-        timeout: 120_000,
-      },
-      (res) => {
-        const chunks = [];
-        res.on('data', (c) => chunks.push(c));
-        res.on('end', () => {
-          cleanup();
-          resolve(new Response(Buffer.concat(chunks).toString('utf8'), {
-            status: res.statusCode,
-            statusText: res.statusMessage,
-            headers: res.headers,
-          }));
-        });
-        res.on('error', (err) => {
-          cleanup();
-          reject(err);
-        });
-      },
-    );
-    if (signal !== undefined) {
-      if (signal.aborted) onAbort();
-      else signal.addEventListener('abort', onAbort, { once: true });
-    }
-    req.on('timeout', () => req.destroy(new Error('ipv4Fetch: socket timeout')));
-    req.on('error', (err) => {
-      cleanup();
-      reject(err);
-    });
-    if (init.body !== undefined) req.write(init.body);
-    req.end();
-  });
-}
-
 async function makeDriver(lane, provider, scratchDir) {
   const sessionsDir = join(scratchDir, `sessions-${lane}`);
   if (lane === 'ai-sdk') {
-    if (provider === 'zai') {
-      // WIRE SUBSTITUTION (documented in docs/eval-axes-demo.md): the eval
-      // AXIS is the DRIVER, not the provider wire. The plan key funds only
-      // Z.AI's anthropic-compat endpoint (the OpenAI-compat API rejects it,
-      // 429 code 1113), so this cell's `zai` provider handle is resolved
-      // through @ai-sdk/anthropic pointed at that endpoint — the driver
-      // instance is still AiSdkDriver; only the wire under it changes.
-      // Both auth spellings were proven individually against this endpoint
-      // (x-api-key via a completion-bearing curl probe; bearer via the CLI's
-      // AUTH_TOKEN), but the SDK rejects passing BOTH — use exactly one:
-      // apiKey (the x-api-key header). baseURL MUST carry /v1: the SDK
-      // appends /messages to it, and Z.AI's gateway answers the missing-
-      // /v1 path with an HTTP-200-wrapped {"msg":"404 NOT_FOUND"} envelope
-      // (found live — status-only probing hid it). fetch is IPv4-pinned —
-      // see ipv4Fetch above.
-      return new AiSdkDriver({
-        providers: {
-          zai: (modelId) =>
-            createAnthropic({
-              apiKey: process.env.ZAI_API_KEY,
-              baseURL: 'https://api.z.ai/api/anthropic/v1',
-              fetch: ipv4Fetch,
-            }).languageModel(modelId),
-        },
-        sessionsDir,
-      });
-    }
-    return new AiSdkDriver({ sessionsDir }); // deepseek: native wire
+    // The standard zai provider construction (defaultProviders) now carries
+    // the GLM Coding Plan's OpenAI-compatible endpoint as its DEFAULT base
+    // URL (owner-verified 2026-09-14 — the plan-funded wire; the
+    // pay-as-you-go /api/paas/v4 rejects the plan key with 429 by design).
+    // The script leaves ZAI_BASE_URL unset so that default applies.
+    return new AiSdkDriver({ sessionsDir });
   }
   if (lane === 'claude-agent') return new ClaudeAgentDriver({ sessionsDir });
   if (lane === 'subprocess') return new SubprocessDriver({ sessionsDir });

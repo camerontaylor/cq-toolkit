@@ -14,52 +14,57 @@ anthropic-compat endpoint (`https://api.z.ai/api/anthropic`, auth vars
 host `ANTHROPIC_API_KEY` was neutralized (empty) before every run.
 
 **THE AXIS IS THE DRIVER, NOT THE PROVIDER WIRE:** the glm × ai-sdk cell
-rides the anthropic-compat wire — the driver instance is still `AiSdkDriver`
-with a `providers` override constructing `@ai-sdk/anthropic` at Z.AI's
-compat endpoint — because the plan key funds only that endpoint (the
-OpenAI-compat API rejects it; full history below).
+runs through the standard `zai` provider construction, whose DEFAULT base
+URL is now the GLM Coding Plan's OpenAI-compatible endpoint
+(`https://api.z.ai/api/coding/paas/v4`, `ZAI_BASE_URL` overrides) — the
+plan-funded wire.
 
 | lane | provider | model | served model | stopReason | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | ai-sdk | deepseek | deepseek-chat | **deepseek-flash** | complete | 93 | 10 | 0 | 0 | $0.00003024 | yes |
 | claude-agent | zai | glm-4.6 | glm-4.6 | complete | 382 | 95 | 0 | 0 | $0.00043820 | yes |
 | subprocess | zai | glm-4.6 | glm-4.6 | complete | 1132 | 26 | 0 | 0 | $0.00073640 | yes |
-| ai-sdk | zai | glm-4.6 | glm-4.6 | complete | 99 | 76 | 0 | 0 | $0.00022660 | yes |
+| ai-sdk | zai | glm-4.6 | **glm-5.3-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
 
-The glm × ai-sdk rate math: (99×$0.60 + 76×$2.20)/1e6 = **$0.00022660** —
-the driver's derived figure equals the independent recompute exactly. The
-endpoint served the requested id (`glm-4.6` — no remap on this wire); the
-cell's larger output-token count (76 vs the agent lanes' 26/95) reflects
-GLM's thinking blocks riding the output stream on the raw chat wire.
+> cell ai-sdk/glm-4.6 evidence: the coding-plan OpenAI-compat wire
+> CONNECTED (after pinning node to IPv4-first — see below) and the run
+> COMPLETED, but the endpoint REPORTED serving `glm-5.3-flash` for the
+> requested `glm-4.6` — the served-model-mismatch guard rejected the cell.
+> A silent remap, observed live on Z.AI's coding wire: glm-5.3-flash lists
+> at $0.15/$0.50 per Mtok vs glm-4.6's $0.60/$2.20, so honoring the row
+> would have priced glm-5.3-flash tokens at glm-4.6 rates (~4× overstated).
+> The guard exists for exactly this; no retry was issued (a remap is
+> endpoint configuration, not transient).
 
 > **History of the glm × ai-sdk cell (all evidence live, kept for honesty):**
 >
-> 1. **First failure — wrong WIRE, not wrong key.** The cell originally ran
+> 1. **First failure — the pay-as-you-go wire.** The cell originally ran
 >    over Z.AI's OpenAI-compat API (`https://api.z.ai/api/paas/v4`), which
 >    rejected the key with HTTP 429, code 1113 "Insufficient balance or no
->    resource package. Please recharge." — a spend/billing failure, recorded
->    and not retried past the attempt cap. This was NOT a key-name mixup:
->    the script maps the rendered `Z_AI_API_KEY` onto the drivers'
->    `ZAI_API_KEY` convention at startup (that mapping is load-bearing and
->    the deepseek/claude-agent/subprocess cells all ran live through it);
->    the same key completes runs on the anthropic-compat endpoint seconds
->    later. The plan key simply funds only the anthropic-compat route —
->    DD-9's modeled-vs-billed distinction observed live.
-> 2. **The retry — same driver, compat wire.** Per the acceptance row (the
->    AXIS is the driver), the cell was re-run with the `providers` override
->    constructing `@ai-sdk/anthropic` at the compat endpoint. Two client-
->    side construction faults were found and fixed on the way, each costing
->    zero spend: the SDK rejects passing BOTH `apiKey` and `authToken`; and
->    `baseURL` must carry `/v1` — the SDK appends `/messages`, and Z.AI's
->    gateway answers the missing-`/v1` path with an HTTP-200-wrapped
->    `{"msg":"404 NOT_FOUND"}` envelope (invisible to status-only probing;
->    found by reading the body).
-> 3. **The host network quirk.** node/undici resolves api.z.ai with IPv6
->    addresses first and this host's v6 route to it hangs (ETIMEDOUT);
->    curl and the agent CLI survive via happy-eyeballs/IPv4. The cell's
->    custom `fetch` pins `family: 4` over `node:https` (committed, in the
->    script).
-> 4. **Final state:** complete, served glm-4.6, fold exact — the row above.
+>    resource package. Please recharge." OWNER-VERIFIED ENDPOINT FACTS
+>    (2026-09-14, same key, this host): `/api/paas/v4` → 429 — the
+>    pay-as-you-go wire, unfunded by design; `/api/coding/paas/v4` → 200 —
+>    the GLM Coding Plan's OpenAI-compatible endpoint; `/api/anthropic/
+>    v1/messages` → 200 — the plan's anthropic-compat endpoint. The plan
+>    funds exactly TWO wires; the pay-as-you-go wire is not one of them.
+> 2. **The interim workaround (superseded).** The cell was briefly run
+>    through an `@ai-sdk/anthropic` override at the anthropic-compat
+>    endpoint (99/76 tokens → $0.00022660, served glm-4.6 truthfully —
+>    a genuine measurement of that wire, recorded for the record). The
+>    owner corrected the approach: the coding wire is the funded
+>    OpenAI-compat one, so the workaround was reverted and the DRIVER now
+>    defaults there (previous commit history carries the details).
+> 3. **The coding-wire run (current row).** Over `/api/coding/paas/v4` the
+>    run connected and completed — and the endpoint silently served
+>    `glm-5.3-flash` for `glm-4.6`. The served-model-mismatch guard failed
+>    the cell with that evidence. The same fixture over the
+>    anthropic-compat wire had served `glm-4.6` truthfully — the remap is
+>    a property of the coding wire, not of the driver.
+> 4. **Host network note.** This host's IPv6 route to api.z.ai hangs
+>    (node fetch → ETIMEDOUT; curl/CLI survive via happy-eyeballs). The
+>    demo script pins its own process to IPv4-first with family
+>    autoselection off (verified live: default → ETIMEDOUT, pinned → 200).
+>    The driver and kernel set no process-global network policy.
 
 Notes:
 

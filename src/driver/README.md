@@ -68,7 +68,11 @@ Constructor options:
   `run()` time over { anthropic, openai, zai, deepseek } with API keys read
   from the environment AT CALL TIME (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `ZAI_API_KEY`, `DEEPSEEK_API_KEY`); unknown provider or missing key
-  throws BEFORE dispatch. The conformance suite injects mocks here.
+  throws BEFORE dispatch. The `zai` handle defaults to the GLM Coding
+  Plan's OpenAI-compatible endpoint
+  (`https://api.z.ai/api/coding/paas/v4` — the plan-funded wire;
+  `ZAI_BASE_URL` overrides, e.g. for the pay-as-you-go
+  `https://api.z.ai/api/paas/v4`). The conformance suite injects mocks here.
 - `outputSchema?` — a zod schema; when set, the SDK structured-output path
   (`Output.object`) runs and the parsed value lands in
   `WorkerResult.structuredOutput`. Data-driven; per-op schema registries
