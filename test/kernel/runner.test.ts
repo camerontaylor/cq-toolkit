@@ -340,6 +340,28 @@ describe('runPlan — execution semantics', () => {
     expect(state.calls).toEqual([]); // no op ever ran
   });
 
+  test('duplicate plan job ids throw before anything runs or is journaled', async () => {
+    const { state, op } = makeFake();
+    const plan: Plan = {
+      id: 'plan-dup',
+      jobs: [
+        { id: 'a', op: 'fake', input: { jobId: 'a' } },
+        { id: 'a', op: 'fake', input: { jobId: 'a-again' } }, // duplicate
+        { id: 'b', op: 'fake', input: { jobId: 'b' }, dependsOn: ['a'] },
+      ],
+    };
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', jobInputSchema, op)),
+      ),
+    ).rejects.toThrow(/duplicate job id 'a'/);
+    expect(state.calls).toEqual([]); // zero invocations
+    // Nothing journaled: the rejection happened before the run existed.
+    await expect(openRunLog(dir).runs()).resolves.toEqual([]);
+  });
+
   test('unknown op name fails that job at execution time with a clear error', async () => {
     const plan: Plan = {
       id: 'plan-ghost-op',

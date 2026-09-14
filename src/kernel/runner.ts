@@ -31,10 +31,11 @@
 //
 // Replay (opts.resume === true — which REQUIRES journalDir; requesting resume
 // without one throws before a runId exists or anything is journaled): find
-// the LATEST prior run
-// for this planId in the dir (runs() is oldest-first; matched on the
-// run-started event's planId — the frozen RunStartedJournalEvent DOES carry
-// planId, so no prefix matching is needed). A job whose latest prior
+// the LATEST prior run for this planId in the dir. runs() is oldest-first;
+// only files whose runId carries this plan's exact `<planId>--` prefix are
+// even PARSED (candidate pre-filter — a corrupt journal of ANOTHER plan
+// cannot block this plan's resume), and the run-started event's planId is
+// the exact matcher (the frozen RunStartedJournalEvent DOES carry planId). A job whose latest prior
 // job-finished has result `ok` AND opId === job.op AND inputsHash === the
 // manifest hash is SKIPPED: zero op invocation, its JobOutcome reconstructed
 // from that journal event. Everything else re-runs — continue-from-first-
@@ -43,10 +44,12 @@
 // opId/inputsHash/result/usage after hash verification: each run's journal is
 // then self-contained, so the latest-run rule survives chained resumes.
 //
-// Journal-less mode (no journalDir): the same events are collected in memory
-// and nothing is persisted; both paths emit identical event sequences through
-// one emit function, so journal.deriveJobStatuses over the in-memory list
-// yields the same derived states as over the file.
+// Journal-less mode (no journalDir): emit becomes a no-op sink. The same
+// event SEQUENCE is produced through the same emit call sites, but nothing
+// is buffered — no caller or test consumes an in-memory list, and the
+// journaled file is the record when persistence is on. Fold semantics are
+// mode-independent: journal.deriveJobStatuses over a journaled run's file
+// yields the same derived states the runner computed.
 //
 // Counts policy (frozen RunCounts — all six states, zeros included):
 //   - executed/skipped jobs map by result: ok→done, failed→failed,
@@ -208,6 +211,18 @@ export async function runPlan(
   if (opts.resume === true && opts.journalDir === undefined) {
     throw new Error('runPlan: resume: true requires journalDir (there is nothing to replay from)');
   }
+  // Full-plan validation BEFORE any filtering: duplicate job ids would make
+  // the run internally inconsistent (id-keyed sets collapse them while array
+  // views keep both), so they are plan corruption — thrown here, loud and
+  // early, consistent with topoOrder's contract (which only ever sees the
+  // post-pre-pass subset).
+  const seenJobIds = new Set<string>();
+  for (const job of plan.jobs) {
+    if (seenJobIds.has(job.id)) {
+      throw new Error(`runPlan: duplicate job id '${job.id}'`);
+    }
+    seenJobIds.add(job.id);
+  }
 
   const runId = makeRunId(plan.id);
   const manifest = makeManifest(plan);
@@ -215,14 +230,16 @@ export async function runPlan(
     manifest.jobs.map((job): [string, ManifestJob] => [job.id, job]),
   );
 
-  // One journal surface for both modes: events are ALWAYS built the same way;
-  // with a journalDir they are validated + appended to `<runId>.ndjson`,
-  // otherwise only kept in memory. (The fold over this list — journal
-  // deriveJobStatuses — is mode-independent by construction.)
-  const events: JournalEvent[] = [];
+  // One journal surface for both modes: events are ALWAYS produced through
+  // the same emit call sites in the same order; with a journalDir they are
+  // validated + appended to `<runId>.ndjson`, otherwise the sink is a no-op.
+  // Journal-less runs keep the identical event-SEQUENCE semantics without
+  // buffering an unconsumed array — the journaled file is the record (no
+  // caller or test consumes an in-memory list). The fold over the sequence —
+  // journal deriveJobStatuses over a journaled run's file — is
+  // mode-independent by construction.
   const runLog: RunLog | undefined = opts.journalDir !== undefined ? openRunLog(opts.journalDir) : undefined;
   const emit = async (event: JournalEvent): Promise<void> => {
-    events.push(event);
     if (runLog) await runLog.append(runId, event);
   };
 
@@ -230,8 +247,15 @@ export async function runPlan(
   const replay = new Map<string, JobFinishedJournalEvent>();
   if (opts.resume === true && runLog) {
     const runIds = await runLog.runs(); // oldest first
+    // Exact candidate pre-filter: runIds embed the plan id
+    // (`<planId>--<timestamp>--<random>`), so only THIS plan's files are ever
+    // parsed. The run-started planId check below remains the exact matcher
+    // (it rejects a pathological id that merely shares the prefix); the
+    // filter's job is blast radius — a corrupt middle line in ANOTHER plan's
+    // journal cannot block THIS plan's resume.
+    const candidates = runIds.filter((candidateId) => candidateId.startsWith(`${plan.id}--`));
     let latestEvents: JournalEvent[] | undefined;
-    for (const priorRunId of runIds) {
+    for (const priorRunId of candidates) {
       const priorEvents = await runLog.read(priorRunId);
       let priorPlanId: string | undefined;
       for (const event of priorEvents) {
@@ -429,9 +453,12 @@ export async function runPlan(
   const counts = emptyCounts();
   for (const entry of entries.values()) counts[entry.state] += 1;
 
-  // Rollups: only over jobs that reported usage/cost, keys omitted otherwise.
+  // Rollups: only over jobs that reported usage, keys omitted otherwise.
+  // Per-job/run costUSD is NOT computed here: cost is derived by the
+  // price-map layer (T1.4) from usage — runPlan never fabricates cost
+  // (frozen journal events carry usage only). RunReport keeps its optional
+  // costUSD field for that layer.
   let usage: Usage | undefined;
-  let costUSD: number | undefined;
   const usageRows = rows.filter((row) => row.usage !== undefined);
   if (usageRows.length > 0) {
     let reasoning: number | undefined;
@@ -449,10 +476,6 @@ export async function runPlan(
     }
     usage = { input, output, cacheRead, cacheWrite, ...(reasoning !== undefined ? { reasoning } : {}) };
   }
-  const costRows = rows.filter((row) => row.costUSD !== undefined);
-  if (costRows.length > 0) {
-    costUSD = costRows.reduce((sum, row) => sum + (row.costUSD as number), 0);
-  }
 
   return {
     runId,
@@ -460,6 +483,5 @@ export async function runPlan(
     counts,
     jobs: rows,
     ...(usage !== undefined ? { usage } : {}),
-    ...(costUSD !== undefined ? { costUSD } : {}),
   };
 }
