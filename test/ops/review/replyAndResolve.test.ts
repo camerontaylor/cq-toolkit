@@ -29,10 +29,13 @@
 //   mutation riding `-f query=` with NO variable named `query` — the I11
 //   collision rule), the no-push configuration, result record shapes
 //   (created comment ids / thread ids / injected nowMs; 'unknown' when the
-//   response body is unmineable), seam-level throw isolation for the main
-//   run, and the fileDispatchLog behaviors (missing = empty, corrupt = loud
-//   throw, record = ATOMIC write-tmp-then-rename — interleaved load/record
-//   cycles never leave a truncated log).
+//   response body is unmineable), resolve confirmation (only a response
+//   with isResolved=true records; {} / data-null / false → failed,
+//   retried), empty-body rejection, seam-level throw isolation for the
+//   main run, and the fileDispatchLog behaviors (missing = empty, mid-file
+//   corruption = loud throw, truncated FINAL line = tolerated, record =
+//   single-line append — interleaved load/record cycles never lose a
+//   record or leave a truncated PRIOR line).
 //
 // The gh seam is INJECTED (fakes routing on argv, recording invocation
 // order); no spawned process, no network, no real clocks (nowMs injected).
@@ -490,6 +493,52 @@ describe('non-conforming gh outcomes', () => {
     expect(await log.load()).toEqual([{ actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW }]);
   });
 
+  test.each([
+    ['an EMPTY response object', {}],
+    ['a null data payload', { data: null }],
+    ['an isResolved:false thread', { data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: false } } } }],
+    ['a response with no thread', { data: { resolveReviewThread: {} } }],
+  ])('a resolve confirmed by NOTHING (%s) → failed with "resolve mutation did not land", unrecorded', async (_label, stdoutBody) => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) =>
+          label === 'resolve:PRRT_1' ? { code: 0, stdout: JSON.stringify(stdoutBody), stderr: '' } : undefined,
+        ),
+        log,
+      ),
+    );
+    // Exit 0 + no errors is not proof: the response must CONFIRM the
+    // resolve. The reply sibling was unaffected.
+    expect(result.posted.map((r) => r.actionId)).toEqual(['r1']);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.action.actionId).toBe('s1');
+    expect(result.failed[0]?.error).toContain('resolve mutation did not land');
+    // NOT recorded — the next run retries it.
+    expect(await log.load()).toEqual([{ actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW }]);
+  });
+
+  test('a resolve the response CONFIRMS (isResolved true) is recorded exactly like a landed success', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkResolve('s1', 'PRRT_1')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) =>
+          label === 'resolve:PRRT_1'
+            ? { code: 0, stdout: JSON.stringify({ data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: true } } } }), stderr: '' }
+            : undefined,
+        ),
+        log,
+      ),
+    );
+    expect(result.failed).toEqual([]);
+    expect(result.posted).toEqual([{ actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW }]);
+    expect(await log.load()).toEqual([{ actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW }]);
+  });
+
   test('a THROWN main-run gh seam failure fails just that action with the throw message — siblings proceed', async () => {
     const calls: GhCall[] = [];
     const base = recordingGh(calls);
@@ -606,6 +655,8 @@ describe('pre-flight validation', () => {
     ['empty actionId', REPO, [mkReply('', 1201)]],
     ['bad threadRootRestId', REPO, [mkReply('r1', 0)]],
     ['empty threadId', REPO, [mkResolve('s1', '')]],
+    ['whitespace reply body', REPO, [mkReply('r1', 1201, '   ')]],
+    ['empty issue-comment body', REPO, [mkIssue('i1', '')]],
   ])('%s throws before a single gh invocation or push', async (_label, optsPartial, actions) => {
     const calls: GhCall[] = [];
     const pushCalls: string[][] = [];
@@ -648,31 +699,48 @@ describe('fileDispatchLog', () => {
     }
   });
 
-  test('a corrupt log file throws a CLEAR error — dispatching on an unreadable log would duplicate posts', async () => {
+  test('MID-FILE corruption throws a CLEAR error — dispatching on an unreadable log would duplicate posts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
       const path = join(dir, 'dispatch.jsonl');
-      await writeFile(path, '{"actionId":"r1","kind":"review_reply"\n', 'utf8');
+      // A broken line with MORE records after it is not a truncated tail —
+      // it is real corruption: load must refuse loudly.
+      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      const third: DispatchRecord = { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW };
+      await writeFile(path, `${JSON.stringify(first)}\n{"actionId":"r2","kind":\n${JSON.stringify(third)}\n`, 'utf8');
       const log = fileDispatchLog(path);
-      await expect(log.load()).rejects.toThrow(/corrupt.*line 1/s);
-      // record() reads-before-write, so it fails the same way — the loud
-      // refusal is the point, never a silent truncation.
-      await expect(
-        log.record({ actionId: 'r2', kind: 'issue_comment', resultRef: '8002', at: NOW }),
-      ).rejects.toThrow(/corrupt/);
+      await expect(log.load()).rejects.toThrow(/corrupt.*line 2.*later lines follow/s);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
   });
 
-  test('record is ATOMIC (tmp + rename): N interleaved load/record cycles always leave parseable content', async () => {
+  test('a TRUNCATED FINAL line (a crash mid-append) is TOLERATED — prior records load, the record is retriable', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      // The second line was cut off mid-write by a crash — no newline, no
+      // closing brace.
+      await writeFile(path, `${JSON.stringify(first)}\n{"actionId":"r2","kind`, 'utf8');
+      const log = fileDispatchLog(path);
+      // The intact prefix loads; the truncated tail is dropped, NOT thrown.
+      // The r2 record never landed, so its action stays retriable.
+      expect(await log.load()).toEqual([first]);
+      expect(await fileDispatchLog(path).load()).toEqual([first]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('record APPENDS one line: N interleaved load/record cycles always leave parseable content', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
       const path = join(dir, 'dispatch.jsonl');
       const log = fileDispatchLog(path);
       // Interleave loads (including ones racing the record) with records;
-      // after EVERY cycle the on-disk log must parse line-by-line — a
-      // non-atomic rewrite could leave a truncated (unparseable) file here.
+      // after EVERY cycle the on-disk log must parse line-by-line — an
+      // append can only ever add whole lines, and loads never rewrite.
       for (let cycle = 0; cycle < 20; cycle++) {
         await Promise.all([
           log.load(),
@@ -686,9 +754,8 @@ describe('fileDispatchLog', () => {
           expect(() => JSON.parse(line)).not.toThrow();
         }
       }
-      // Every record survived (records are per-cycle sequential, so the
-      // read-modify-write chain never loses one), and a FRESH log instance
-      // sees the whole history.
+      // Every record survived (appends never overwrite), and a FRESH log
+      // instance sees the whole history.
       const history = await fileDispatchLog(path).load();
       expect(history).toHaveLength(20);
       expect(history.map((r) => r.actionId)).toEqual(Array.from({ length: 20 }, (_v, i) => `r${i}`));

@@ -10,9 +10,10 @@
 //      new-commit, responder-reply (new review id), responder-reply (new
 //      issue id), thread-resolved.
 //   3. Multiple reasons → all present in order, summary lists every kind.
-//   4. The null-headSha rule: both null → NO new-commit reason (both-null
-//      snapshots equal); one null → counts as MOVED (null can never equal
-//      a sha — fail toward "something happened").
+//   4. The STRICT head sha: snapshots carry a VERIFIED string headSha — a
+//      PR payload without a usable head.sha THROWS (a headless snapshot
+//      could never see new-commit movement); identical shas → nothing,
+//      different shas → new-commit.
 //   5. snapshotPrState against a routed fake GhFn: head.sha extracted,
 //      both REST collections collected, resolved ids from GraphQL, `at` =
 //      injected nowMs; the graphql call passes EXACTLY ONE `-f query=`
@@ -23,8 +24,9 @@
 //      variants differ — neither shape may fail).
 //   7. Untrustworthy fetches throw loudly (server-side GraphQL errors;
 //      missing reviewThreads payload; non-array REST payload; MIXED page
-//      payload `[[c1],"junk"]` — flat() would silently DROP the array
-//      pages) — a throw can never be misread as NO PROGRESS.
+//      payload `[[c1],"junk"]`; missing/non-string head sha; comment
+//      entries without a numeric id; RESOLVED thread nodes without a
+//      string id) — a throw can never be misread as NO PROGRESS.
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv) — no spawned
 // process, no network, no real clocks.
@@ -48,12 +50,14 @@ const flagValue = (args: string[], name: string): string => {
 
 /** What the routed fake serves per endpoint. */
 interface FakeGhFixture {
-  headSha?: string | null;
+  /** undefined → a healthy default head; null → headless PR; number → a
+   * non-string sha (the strict-payload fixtures). */
+  headSha?: string | number | null;
   /** Raw JSON payloads for the two REST collections (either slurp shape). */
   pullsComments?: unknown;
   issuesComments?: unknown;
-  /** GraphQL reviewThreads nodes. */
-  threads?: Array<{ id: string; isResolved: boolean }>;
+  /** GraphQL reviewThreads nodes (id/isResolved widened for bad fixtures). */
+  threads?: Array<{ id: unknown; isResolved: unknown }>;
 }
 
 /** The recorded gh invocations, as compact labels. */
@@ -83,11 +87,13 @@ const fakeGh = (fixture: FakeGhFixture, calls?: string[][]): GhFn =>
       const body = path.includes('/issues/') ? fixture.issuesComments : fixture.pullsComments;
       return { code: 0, stdout: JSON.stringify(body ?? []), stderr: '' };
     }
-    return {
-      code: 0,
-      stdout: JSON.stringify({ head: fixture.headSha === undefined ? null : { sha: fixture.headSha } }),
-      stderr: '',
-    };
+    const prBody =
+      fixture.headSha === undefined
+        ? { head: { sha: 'abc123' } }
+        : fixture.headSha === null
+          ? { head: null }
+          : { head: { sha: fixture.headSha } };
+    return { code: 0, stdout: JSON.stringify(prBody), stderr: '' };
   };
 
 const snapshotOpts = (fixture: FakeGhFixture, calls?: string[][]): SnapshotPrStateOpts => ({
@@ -202,28 +208,11 @@ describe('progress signals', () => {
     expect(outcome.summary).toBe('PROGRESS: new-commit, responder-reply, thread-resolved');
   });
 
-  test('BOTH headShas null → no new-commit reason (nothing else moved → NO PROGRESS)', () => {
-    const outcome = verifyPrOutcome(baseSnapshot({ headSha: null }), baseSnapshot({ headSha: null }), {
-      responderLogin: null,
-    });
+  test('identical head shas → no new-commit reason (the sha is a VERIFIED string; only a real difference moves)', () => {
+    const outcome = verifyPrOutcome(baseSnapshot(), baseSnapshot(), { responderLogin: null });
     expect(outcome.progress).toBe(false);
     expect(outcome.reasons).toEqual([]);
     expect(outcome.summary).toBe('NO PROGRESS');
-  });
-
-  test.each([
-    ['before null → after sha', null, 'def456'],
-    ['before sha → after null', 'abc123', null],
-  ])('ONE null headSha counts as MOVED (%s) → new-commit reason', (_label, beforeSha, afterSha) => {
-    const outcome = verifyPrOutcome(
-      baseSnapshot({ headSha: beforeSha }),
-      baseSnapshot({ headSha: afterSha }),
-      { responderLogin: null },
-    );
-    expect(outcome.progress).toBe(true);
-    expect(outcome.reasons).toHaveLength(1);
-    expect(outcome.reasons[0]?.kind).toBe('new-commit');
-    expect(outcome.summary).toBe('PROGRESS: new-commit');
   });
 });
 
@@ -391,9 +380,66 @@ describe('untrustworthy fetches throw loudly', () => {
         }),
       /MIXED page payload/,
     ],
+    [
+      'a PR payload with NO head (a headless snapshot could never see new-commit movement)',
+      async (run: GhFn) =>
+        snapshotPrState({
+          ...COORDS,
+          run: async (args) => {
+            const path = args.find((a) => a.startsWith('repos/')) ?? '';
+            if (path.includes('/pulls/') && !path.includes('/comments')) {
+              return { code: 0, stdout: JSON.stringify({ head: null }), stderr: '' };
+            }
+            return run(args);
+          },
+          nowMs: NOW,
+        }),
+      /no usable head sha/,
+    ],
+    [
+      'a PR payload with a NON-STRING head sha',
+      async (run: GhFn) =>
+        snapshotPrState({
+          ...COORDS,
+          run: async (args) => {
+            const path = args.find((a) => a.startsWith('repos/')) ?? '';
+            if (path.includes('/pulls/') && !path.includes('/comments')) {
+              return { code: 0, stdout: JSON.stringify({ head: { sha: 123 } }), stderr: '' };
+            }
+            return run(args);
+          },
+          nowMs: NOW,
+        }),
+      /no usable head sha/,
+    ],
   ])('%s → snapshotPrState rejects', async (_label, runWith, pattern) => {
     const base = fakeGh({ headSha: 'abc123' });
     await expect(runWith(base)).rejects.toThrow(pattern);
+  });
+
+  test('a REST comment entry WITHOUT a numeric id throws (filtering would silently shrink the reply evidence)', async () => {
+    await expect(
+      snapshotPrState(
+        snapshotOpts({
+          headSha: 'abc123',
+          pullsComments: [{ id: 9001 }, { id: 'not-a-number' }],
+        }),
+      ),
+    ).rejects.toThrow(/comment entry without a numeric id/);
+  });
+
+  test('a RESOLVED reviewThread node WITHOUT a string id throws (a filtered id would hide a resolved thread)', async () => {
+    await expect(
+      snapshotPrState(
+        snapshotOpts({
+          headSha: 'abc123',
+          threads: [
+            { id: 'PRRT_1', isResolved: true },
+            { id: 456, isResolved: true },
+          ],
+        }),
+      ),
+    ).rejects.toThrow(/RESOLVED reviewThread node without a string id/);
   });
 
   test('validation fails loud before any argv is built', async () => {

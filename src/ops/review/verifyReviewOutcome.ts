@@ -6,13 +6,18 @@
 //
 // The contract (each clause pinned in test/ops/review/verifyReviewOutcome.test.ts):
 //   - snapshotPrState captures the before/after evidence (I/O through the
-//     gh seam only; `at` is the injected nowMs, never Date.now).
+//     gh seam only; `at` is the injected nowMs, never Date.now). STRICT
+//     payloads: a PR object without a usable head.sha, a REST comment
+//     entry without a numeric id, or a RESOLVED reviewThread node without
+//     a string id each THROW — filtering would silently shrink the
+//     evidence and a shrunk snapshot can only ever under-report movement
+//     (a missed responder reply reads as NO PROGRESS).
 //   - verifyPrOutcome is PURE: same snapshots (+ responder option) →
 //     deep-equal outcome. Progress needs ANY ONE signal:
-//       new-commit      — after.headSha !== before.headSha (both null → no
-//                         signal; one null → counts as moved — a null can
-//                         never EQUAL a sha, and treating null-vs-sha as a
-//                         move fails toward "something happened").
+//       new-commit      — after.headSha !== before.headSha (snapshots are
+//                         head-sha VERIFIED at capture time — snapshotPrState
+//                         throws without one — so identical shas mean no
+//                         signal and any difference means the PR moved).
 //       responder-reply — a review- or issue-comment id present in `after`
 //                         and absent from `before` (REST-counted: GraphQL
 //                         lags fresh writes, REST does not — the workstream
@@ -49,8 +54,10 @@
 //     GraphQL variable may be named `query` (the variables are owner/name/
 //     pr, exactly as in fetchReviewState).
 //   - Any fetch that cannot produce a trustworthy snapshot (server-side
-//     GraphQL errors, missing payload pieces, non-array REST payloads)
-//     THROWS — a throw can never be mistaken for "NO PROGRESS".
+//     GraphQL errors, missing payload pieces, non-array or MIXED REST
+//     payloads, a PR object without a usable head sha, comment entries
+//     without numeric ids, resolved threads without string ids) THROWS —
+//     a throw can never be mistaken for "NO PROGRESS".
 import { ghJson } from './gh.js';
 import type { GhFn } from './gh.js';
 
@@ -58,8 +65,12 @@ import type { GhFn } from './gh.js';
 export interface PrSnapshot {
   /** When the snapshot was taken: the injected nowMs. */
   at: number;
-  /** Head commit sha, or null when unresolvable. */
-  headSha: string | null;
+  /**
+   * REST head commit sha — VERIFIED present: snapshotPrState throws on a
+   * PR payload without a usable head.sha rather than snapshot headless
+   * (a headless snapshot could not see new-commit movement).
+   */
+  headSha: string;
   /** REST review-comment ids (the pulls/{pr}/comments collection). */
   reviewCommentIds: number[];
   /** REST issue-comment ids (the issues/{pr}/comments collection). */
@@ -162,15 +173,25 @@ const slurpedComments = (payload: unknown, path: string): Array<{ id?: unknown }
   return flat as Array<{ id?: unknown }>;
 };
 
-/** Extract the numeric REST ids from a raw comment list (non-numeric ids skipped). */
-const commentIds = (raws: Array<{ id?: unknown }>): number[] =>
-  raws
-    .map((raw) => raw.id)
-    .filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id));
+/**
+ * Extract the numeric REST ids from a raw comment list. STRICT: an entry
+ * without a safe-integer id is a payload this module cannot trust —
+ * filtering it out would silently shrink the reply-novelty evidence (a
+ * missed responder reply reads as NO PROGRESS) — so it throws.
+ */
+const commentIds = (raws: Array<{ id?: unknown }>, path: string): number[] =>
+  raws.map((raw, index) => {
+    if (typeof raw?.id === 'number' && Number.isSafeInteger(raw.id)) {
+      return raw.id;
+    }
+    throw new Error(
+      `gh api ${path} returned a comment entry without a numeric id (entry ${index}) — snapshot untrustworthy`,
+    );
+  });
 
 /** Fetch one REST comment collection paginated, tolerant of both slurp shapes. */
 const fetchRestCommentIds = async (run: GhFn, path: string): Promise<number[]> =>
-  commentIds(slurpedComments(await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']), path));
+  commentIds(slurpedComments(await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']), path), path);
 
 /**
  * Capture one instant of the PR's state: REST head sha, REST comment id
@@ -191,13 +212,20 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     throw new Error(`snapshotPrState: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`);
   }
 
-  // Head sha: the plain PR REST object; absent/unusable → null.
+  // Head sha: the plain PR REST object. STRICT — a payload without a
+  // usable head.sha is a snapshot that could never see new-commit
+  // movement, i.e. an untrustworthy one: throw, never a silent null.
   const pr = await ghJson<{ head?: { sha?: unknown } | null }>(opts.run, [
     'api',
     `repos/${opts.owner}/${opts.repo}/pulls/${opts.pr}`,
   ]);
-  const headSha =
-    typeof pr?.head?.sha === 'string' && pr.head.sha !== '' ? pr.head.sha : null;
+  const sha = pr?.head?.sha;
+  if (typeof sha !== 'string' || sha === '') {
+    throw new Error(
+      `gh api repos/${opts.owner}/${opts.repo}/pulls/${opts.pr} returned no usable head sha — snapshot untrustworthy`,
+    );
+  }
+  const headSha: string = sha;
 
   const reviewCommentIds = await fetchRestCommentIds(
     opts.run,
@@ -232,9 +260,21 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
       `gh api graphql returned no reviewThreads payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
     );
   }
-  const resolvedThreadIds = nodes
-    .filter((node) => node.isResolved === true && typeof node.id === 'string')
-    .map((node) => node.id as string);
+  // Resolution state is STRICT too: a RESOLVED node without a string id
+  // would be silently dropped by a filter — shrinking the thread-resolved
+  // evidence — so it throws instead.
+  const resolvedThreadIds: string[] = [];
+  for (const node of nodes) {
+    if (node.isResolved !== true) {
+      continue;
+    }
+    if (typeof node.id !== 'string' || node.id === '') {
+      throw new Error(
+        `gh api graphql returned a RESOLVED reviewThread node without a string id — snapshot untrustworthy`,
+      );
+    }
+    resolvedThreadIds.push(node.id);
+  }
 
   return {
     at: opts.nowMs,
@@ -262,8 +302,9 @@ export function verifyPrOutcome(
 ): VerifyOutcome {
   const reasons: ProgressReason[] = [];
 
-  // new-commit: plain !== is exactly the null rule — both null → equal →
-  // no signal; null vs sha (either side) → moved; sha vs different sha → moved.
+  // new-commit: plain !== — snapshots are head-sha VERIFIED at capture
+  // time (snapshotPrState throws without one), so identical shas → no
+  // signal; any difference → the PR moved.
   if (before.headSha !== after.headSha) {
     reasons.push({
       kind: 'new-commit',

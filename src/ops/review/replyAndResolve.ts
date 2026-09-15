@@ -35,7 +35,9 @@
 //      window) — it is recorded and counted in skippedAlreadyResolved, so
 //      the re-run converges instead of failing forever.
 //   f. Every success is recorded via dispatchLog.record before the next
-//      action starts (no interleaving, no batching of records).
+//      action starts (no interleaving, no batching of records) — and for a
+//      resolve, success means the mutation RESPONSE confirmed
+//      isResolved=true, not merely exit 0.
 //
 // The transport mirrors E1/E2 shapes: REST posts ride `gh api -X POST` with
 // argv-only flags (`-F in_reply_to=<id>` — typed coercion like `-F pr=`;
@@ -47,7 +49,7 @@
 //
 // Structure purity: no Date.now (nowMs is injected), no direct I/O —
 // everything goes through opts.run, opts.push.run, and the DispatchLog.
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { appendFile, readFile } from 'node:fs/promises';
 import { GhError } from './gh.js';
 import type { GhFn, GhResult } from './gh.js';
 
@@ -108,15 +110,17 @@ export interface DispatchLog {
 
 /**
  * The file-backed DispatchLog: one JSON record per line (JSON-lines-ish).
- * `load` reads the whole file — a missing file is an EMPTY log (first run),
- * a corrupt file THROWS with a clear message (dispatching on top of an
- * unreadable log would silently duplicate every prior post, so the failure
- * is loud, never tolerant). `record` re-reads, appends, and rewrites the
- * whole file ATOMICALLY: the new content is written to `<path>.tmp` in the
- * SAME directory and `fs.rename`d over the target — rename(2) within one
- * directory is atomic, so a crash mid-write can only ever truncate the
- * throwaway tmp file, never the log itself. A fresh process on the next run
- * sees every record.
+ * `load` reads the whole file — a missing file is an EMPTY log (first run).
+ * It parses line-by-line and is CRASH-TOLERANT AT THE TAIL: `record` is a
+ * single-line `appendFile`, so a crash mid-append can only truncate the
+ * FINAL line — a truncated tail line is tolerated (dropped; the action was
+ * never truly recorded, so the next run retries it safely), while a broken
+ * line MID-FILE (more records follow it) still throws a clear message:
+ * dispatching on top of an unreadable log would silently duplicate prior
+ * posts, so mid-file corruption stays loud, never tolerant. `record`
+ * appends exactly one newline-terminated line — no read-modify-write, so
+ * interleaved loads/records can never lose a record and a crash can never
+ * damage PRIOR lines.
  */
 export function fileDispatchLog(path: string): DispatchLog {
   const load = async (): Promise<DispatchRecord[]> => {
@@ -131,30 +135,35 @@ export function fileDispatchLog(path: string): DispatchLog {
     }
     const records: DispatchRecord[] = [];
     const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i].trim();
+    // Trailing newline(s) are termination, not content.
+    let lastContent = lines.length - 1;
+    while (lastContent >= 0 && (lines[lastContent] ?? '').trim() === '') {
+      lastContent -= 1;
+    }
+    for (let i = 0; i <= lastContent; i++) {
+      const line = (lines[i] ?? '').trim();
       if (line === '') continue;
       try {
         records.push(JSON.parse(line) as DispatchRecord);
       } catch {
+        if (i === lastContent) {
+          // Truncated FINAL line — a crash mid-append. Drop it: the record
+          // never landed, so the action stays retriable on the next run.
+          break;
+        }
         throw new Error(
-          `fileDispatchLog: dispatch log at ${JSON.stringify(path)} is corrupt (line ${i + 1} does not parse as JSON) — refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
+          `fileDispatchLog: dispatch log at ${JSON.stringify(path)} is corrupt (line ${i + 1} does not parse as JSON, and later lines follow it) — refusing to dispatch on top of an unreadable log; fix or remove the file and re-run`,
         );
       }
     }
     return records;
   };
   const record = async (entry: DispatchRecord): Promise<void> => {
-    const prior = await load();
-    const lines = [...prior.map((r) => JSON.stringify(r)), JSON.stringify(entry)];
-    // Write-then-rename, never a plain rewrite: an in-place writeFile that
-    // dies halfway leaves a TRUNCATED log — every prior record gone, the
-    // next run a duplicate-post machine. The tmp file lives in the target's
-    // directory so the rename stays within one filesystem (cross-device
-    // rename fails).
-    const tmpPath = `${path}.tmp`;
-    await writeFile(tmpPath, `${lines.join('\n')}\n`, 'utf8');
-    await rename(tmpPath, path);
+    // Single-line append — each record lands as its own newline-terminated
+    // line. No read-modify-write: interleaved loads can never race a
+    // rewrite, and a crash mid-append can only truncate THIS line (which
+    // load tolerates as a never-recorded, retriable action).
+    await appendFile(path, `${JSON.stringify(entry)}\n`, 'utf8');
   };
   return { load, record };
 }
@@ -239,6 +248,15 @@ const RESOLVE_MUTATION = `mutation ($threadId: ID!) {
 interface GraphqlPayload {
   /** Server-side GraphQL errors — non-empty means the mutation did not land. */
   errors?: Array<{ message?: string }>;
+  /** The mutation's effect — the ONLY proof a resolve landed. */
+  data?: {
+    resolveReviewThread?: {
+      thread?: {
+        id?: unknown;
+        isResolved?: unknown;
+      } | null;
+    } | null;
+  } | null;
 }
 
 /**
@@ -297,6 +315,11 @@ export async function replyAndResolve(
     if (action.kind === 'resolve_thread' && action.threadId === '') {
       throw new Error(
         `replyAndResolve: action ${JSON.stringify(action.actionId)} has an empty threadId — must be the GraphQL reviewThread node id`,
+      );
+    }
+    if ((action.kind === 'review_reply' || action.kind === 'issue_comment') && action.body.trim() === '') {
+      throw new Error(
+        `replyAndResolve: action ${JSON.stringify(action.actionId)} has an empty/whitespace body — a contentless post would surface as a phantom "addressed" reply`,
       );
     }
   }
@@ -455,6 +478,18 @@ export async function replyAndResolve(
         continue;
       }
       failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages}` });
+      continue;
+    }
+    // Exit 0 + no errors is still not PROOF: the mutation's EFFECT must be
+    // visible in the response — resolveReviewThread.thread.isResolved ===
+    // true. Anything else (an empty object, data null, isResolved false)
+    // means the resolve mutation did not land: fail loud, leave unrecorded
+    // — the next run retries it.
+    if (payload.data?.resolveReviewThread?.thread?.isResolved !== true) {
+      failed.push({
+        action,
+        error: `gh api graphql response did not confirm the resolve (resolveReviewThread.thread.isResolved !== true) — resolve mutation did not land, left unrecorded for retry`,
+      });
       continue;
     }
     const record: DispatchRecord = {

@@ -7,20 +7,26 @@
 //      nothing saved) and `rev-parse FETCH_HEAD` NAMES the fetched commit;
 //      every reuse candidate must sit AT that sha.
 //   2. Registry hit whose entry still points at truth (branch AND fetched
-//      sha) → reused, and NO worktree list/add ever runs.
-//   3. STALE registry entries — directory gone, wrong branch, or RIGHT
-//      branch at a STALE sha — are pruned and resolution continues; a
-//      stale-sha entry is followed by a RE-CREATE at the fetched sha via
-//      `worktree add -B <branch> <path> FETCH_HEAD`.
-//   4. The porcelain scan reuse path requires BRANCH match AND SHA match:
-//      a tree parked on the branch name at an old sha (local memory the
-//      fetch exists to override — including foreign/sweep-family trees) is
-//      skipped, never reused, never registered.
+//      sha) → reused, and NO worktree list/add ever runs. A STALE entry is
+//      NOT pruned up front — the prune is the successful re-registration
+//      (the overwrite), so a run that wedges leaves the pointer intact.
+//   3. REFRESH CONVERGENCE: a branch-matching tree at a STALE sha — ours,
+//      inside worktreeRoot — is REMOVED non-forced (`worktree remove`, no
+//      --force) and the tree is RE-CREATED at the fetched sha via
+//      `add -B <branch> <path> <sha>` at that same spot; a DIRTY stale
+//      tree refuses the remove, the throw carries git's stderr, and the
+//      registry entry survives.
+//   4. OWNERSHIP: reuse is eligible only INSIDE worktreeRoot; a
+//      branch+sha-valid tree OUTSIDE the root is surfaced in the result's
+//      `foreign` list (never claimed, never removed); a foreign tree
+//      holding the branch refuses the create (git's double-checkout
+//      refusal) and the throw names it — freeing it is the human's call.
 //   5. The create path: `pr-<pr>-<sanitized-branch>` under worktreeRoot
 //      (default `<repoRoot>/.cq-review-worktrees`), added with
-//      `-B <branch> <path> FETCH_HEAD` so the new tree sits AT the fetched
-//      sha, registered with the injected clock, reused=false; an add
-//      FAILURE throws with git's stderr and leaves the registry untouched.
+//      `-B <branch> <path> <expectedSha>` so the new tree sits AT the
+//      fetched sha, registered with the injected clock, reused=false; an
+//      add FAILURE throws with git's stderr and leaves the registry (and
+//      any stale entry) untouched.
 //   6. Sanitization mapping: branch-name characters outside
 //      [A-Za-z0-9._-] become '-' — `/` can never smuggle a directory hop;
 //      the `pr-<pr>-` prefix disambiguates sanitize collisions
@@ -30,9 +36,11 @@
 //      stderr and prunes NOTHING (review ops never silently destroys
 //      trees; callers wrap work in try/finally — this is the primitive,
 //      not the policy).
-//   8. THE DOMAIN RULE, pinned behaviorally: review ops reuses ONLY a tree
-//      matching the PR branch AND the fetched sha — sweep-family trees on
-//      other branches (or on the branch at a stale sha) are unreachable.
+//   8. THE DOMAIN RULE, pinned behaviorally: review ops reuses ONLY an OWN
+//      (in-root) tree matching the PR branch AND the fetched sha —
+//      sweep-family trees on other branches neither block nor get claimed,
+//      and a sweep tree HOLDING the branch blocks the create until a human
+//      frees it (review ops never touches it).
 //   9. fileWorktreeRegistry: missing file = empty registry; round-trip
 //      save/load; a corrupt file throws a clear error.
 //
@@ -147,18 +155,29 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
         if (model.addFails !== undefined) {
           return { code: model.addFails.code, stdout: '', stderr: model.addFails.stderr };
         }
-        // The ONLY add shape review ops uses: add -B <branch> <path>
-        // FETCH_HEAD — `-B` (re)points the branch at FETCH_HEAD, so the new
-        // tree's HEAD lands at the fetched truth. (The model does not
-        // simulate git's double-checkout refusal; the addFails seam covers
-        // refusal scenarios.)
-        if (args[4] !== '-B' || args[7] !== 'FETCH_HEAD') {
+        // The ONLY add shape review ops uses: add -B <branch> <path> <sha>.
+        if (args[4] !== '-B') {
           return { code: 2, stdout: '', stderr: `fake git: unexpected add argv ${JSON.stringify(args)}` };
         }
         const branch = args[5] ?? '';
         const path = args[6] ?? '';
-        model.worktrees.push({ path, branch, head: model.fetchHeadSha ?? SHA_B });
-        model.headOf[path] = { branch, head: model.fetchHeadSha ?? SHA_B };
+        const commitish = args[7] ?? '';
+        // git's DOUBLE-CHECKOUT REFUSAL: `-B` does not bypass it — while
+        // ANY other registered tree holds the branch, the add refuses with
+        // git's message. `worktree remove` clears the hold.
+        const holder = model.worktrees.find((wt) => wt.branch === branch && wt.path !== path);
+        if (holder !== undefined) {
+          return { code: 128, stdout: '', stderr: `fatal: '${branch}' is already checked out at '${holder.path}'` };
+        }
+        if (model.worktrees.some((wt) => wt.path === path)) {
+          return { code: 128, stdout: '', stderr: `fatal: '${path}' is already a registered worktree` };
+        }
+        // `-B` (re)points the branch at the requested commit: the new
+        // tree's HEAD lands at that sha (FETCH_HEAD resolves to the
+        // fetched truth).
+        const head = commitish === 'FETCH_HEAD' ? (model.fetchHeadSha ?? SHA_B) : commitish;
+        model.worktrees.push({ path, branch, head });
+        model.headOf[path] = { branch, head };
         return { code: 0, stdout: `Preparing worktree (checking out '${branch}')\n`, stderr: '' };
       }
       if (verb === 'remove') {
@@ -283,7 +302,7 @@ describe('registry consult', () => {
       const registry = memRegistry({ '7': { path: dir, branch: BRANCH, createdAt: NOW - 1000 } });
       const model = mkModel([], { headOf: { [dir]: { branch: BRANCH, head: SHA_B } } });
       const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
-      expect(result).toEqual({ path: dir, reused: true, branch: BRANCH });
+      expect(result).toEqual({ path: dir, reused: true, branch: BRANCH, foreign: [] });
       // fetch → FETCH_HEAD → the entry's branch rev-parse → its sha
       // rev-parse — no scan, no add.
       expect(calls.map((args) => args[2])).toEqual(['fetch', 'rev-parse', 'rev-parse', 'rev-parse']);
@@ -297,31 +316,33 @@ describe('registry consult', () => {
     }
   });
 
-  test('a STALE entry whose directory is GONE is pruned, and the scan reuse path takes over', async () => {
+  test('a STALE entry whose directory is GONE is left un-pruned, and the scan reuse path takes over', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
       '7': { path: '/repo/.cq-review-worktrees/ghost', branch: BRANCH, createdAt: NOW - 1000 },
     });
+    const candidate = '/repo/.cq-review-worktrees/pr-7-pr-7-fix';
     const model = mkModel([
       { path: '/repo', branch: 'main', head: SHA_MAIN },
-      { path: '/elsewhere/pr-7-fix', branch: BRANCH, head: SHA_B },
+      { path: candidate, branch: BRANCH, head: SHA_B },
     ]);
     const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
-    // The dead entry was pruned BEFORE the scan; the scan found the branch
-    // checked out elsewhere AT THE FETCHED SHA and registered it.
-    expect(result).toEqual({ path: '/elsewhere/pr-7-fix', reused: true, branch: BRANCH });
-    expect(registry.calls).toEqual(['load', 'save', 'save']);
+    // The dead entry was SKIPPED (never pruned up front — no prune-save);
+    // the scan found the branch checked out in OUR root AT THE FETCHED sha
+    // and the register overwrote the stale entry.
+    expect(result).toEqual({ path: candidate, reused: true, branch: BRANCH, foreign: [] });
+    expect(registry.calls).toEqual(['load', 'save']);
     expect(registry.current()).toEqual({
-      '7': { path: '/elsewhere/pr-7-fix', branch: BRANCH, createdAt: NOW },
+      '7': { path: candidate, branch: BRANCH, createdAt: NOW },
     });
     // The dead directory short-circuits BEFORE rev-parse (no git call for
     // the ghost); after FETCH_HEAD comes the porcelain scan, then the
     // sha probe against the candidate.
     expect(calls[2]).toEqual(['-C', '/repo', 'worktree', 'list', '--porcelain']);
-    expect(calls[3]).toEqual(['-C', '/elsewhere/pr-7-fix', 'rev-parse', 'HEAD']);
+    expect(calls[3]).toEqual(['-C', candidate, 'rev-parse', 'HEAD']);
   });
 
-  test('a STALE entry pointing at the WRONG branch is pruned, and a fresh tree is created', async () => {
+  test('a STALE entry pointing at the WRONG branch is skipped, and a fresh tree is created (the register overwrites the stale entry)', async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-stale-'));
     try {
       const calls: string[][] = [];
@@ -335,8 +356,9 @@ describe('registry consult', () => {
       });
       const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
       expect(result.reused).toBe(false);
-      // The stale entry was pruned, then the create path registered the new tree.
-      expect(registry.calls).toEqual(['load', 'save', 'save']);
+      expect(result.foreign).toEqual([]);
+      // NO up-front prune: load, then the create's register — ONE save.
+      expect(registry.calls).toEqual(['load', 'save']);
       expect(registry.current()['7']?.path).toBe(join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`));
       // rev-parse ran against the stale tree and exposed the wrong branch.
       expect(calls[2]).toEqual(['-C', staleDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
@@ -346,33 +368,83 @@ describe('registry consult', () => {
     }
   });
 
-  test('a STALE entry at the WRONG SHA — branch matches, tree lags origin — is pruned and the tree is RE-CREATED at the fetched sha via add -B … FETCH_HEAD', async () => {
+  test('a STALE entry at the WRONG SHA — branch matches, tree lags origin — CONVERGES: the stale in-root tree is REMOVED non-forced and RE-CREATED at the fetched sha via add -B … <sha>', async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-stalesha-'));
     try {
       const calls: string[][] = [];
-      // The round-1 tree still exists on disk, still HAS the branch checked
-      // out — but at sha A, while origin moved to sha B. Branch match alone
-      // must NOT read as reuse.
-      const staleDir = join(repoRoot, 'stale-tree');
-      await mkdir(staleDir, { recursive: true });
-      const registry = memRegistry({ '7': { path: staleDir, branch: BRANCH, createdAt: NOW - 1000 } });
-      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
-        headOf: { [staleDir]: { branch: BRANCH, head: SHA_A } },
-      });
-      const newPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      // The round-1 tree still exists, still holds the branch — at sha A
+      // while origin moved to sha B — at exactly the path the create wants.
+      const stalePath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      await mkdir(stalePath, { recursive: true });
+      const registry = memRegistry({ '7': { path: stalePath, branch: BRANCH, createdAt: NOW - 1000 } });
+      const model = mkModel([
+        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: stalePath, branch: BRANCH, head: SHA_A },
+      ]);
       const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
-      // The stale entry was pruned; the tree was re-created at the fetched sha.
-      expect(result).toEqual({ path: newPath, reused: false, branch: BRANCH });
-      expect(registry.calls).toEqual(['load', 'save', 'save']);
+      // The refresh CONVERGED at the same path, at the fetched sha.
+      expect(result).toEqual({ path: stalePath, reused: false, branch: BRANCH, foreign: [] });
+      // The stale entry was overwritten by the successful register — load
+      // plus ONE save, no up-front prune.
+      expect(registry.calls).toEqual(['load', 'save']);
       expect(registry.current()).toEqual({
-        '7': { path: newPath, branch: BRANCH, createdAt: NOW },
+        '7': { path: stalePath, branch: BRANCH, createdAt: NOW },
       });
-      // The branch matched, so the SHA probe is what exposed the staleness…
-      expect(calls).toContainEqual(['-C', staleDir, 'rev-parse', 'HEAD']);
-      // …and the re-create rides `-B <branch> <path> FETCH_HEAD`: the new
-      // tree sits AT the fetched sha (the model's add -B moves the branch).
-      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, newPath, 'FETCH_HEAD']);
-      expect(model.headOf[newPath]).toEqual({ branch: BRANCH, head: SHA_B });
+      // The exact refresh walk: the consult probes exposed the staleness
+      // (branch ok, sha A), the scan re-probed, the NON-FORCED remove
+      // freed the branch hold, and `-B … <expectedSha>` landed the tree AT
+      // the fetched truth.
+      expect(calls).toEqual([
+        ['-C', repoRoot, 'fetch', 'origin', BRANCH],
+        ['-C', repoRoot, 'rev-parse', 'FETCH_HEAD'],
+        ['-C', stalePath, 'rev-parse', '--abbrev-ref', 'HEAD'],
+        ['-C', stalePath, 'rev-parse', 'HEAD'],
+        ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
+        ['-C', stalePath, 'rev-parse', 'HEAD'],
+        ['-C', repoRoot, 'worktree', 'remove', stalePath],
+        ['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, stalePath, SHA_B],
+      ]);
+      expect(calls.some((args) => args.includes('--force'))).toBe(false);
+      // The hold was cleared by the remove; the new tree sits at the
+      // fetched sha (the main tree is untouched).
+      expect(model.worktrees).toEqual([
+        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: stalePath, branch: BRANCH, head: SHA_B },
+      ]);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a stale tree that is DIRTY cannot be refreshed away — the remove refuses, the throw carries git stderr, and the registry entry SURVIVES', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-dirty-'));
+    try {
+      const calls: string[][] = [];
+      const stalePath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      await mkdir(stalePath, { recursive: true });
+      const registry = memRegistry({ '7': { path: stalePath, branch: BRANCH, createdAt: NOW - 1000 } });
+      const model = mkModel(
+        [
+          { path: '/repo', branch: 'main', head: SHA_MAIN },
+          { path: stalePath, branch: BRANCH, head: SHA_A },
+        ],
+        {
+          removeFails: {
+            code: 128,
+            stderr: 'fatal: ... contains modified or untracked files, use --force to delete it',
+          },
+        },
+      );
+      await expect(
+        resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
+      ).rejects.toThrow(/worktree remove.*failed.*contains modified or untracked files/s);
+      // The stale entry was NEVER pruned: the machine-readable pointer
+      // survives the wedged run for the next one.
+      expect(registry.calls).toEqual(['load']);
+      expect(registry.current()['7']).toEqual({ path: stalePath, branch: BRANCH, createdAt: NOW - 1000 });
+      // The tree itself is untouched — review ops never force-destroys.
+      expect(model.worktrees).toHaveLength(2);
+      expect(calls.some((args) => args.includes('--force'))).toBe(false);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
@@ -383,29 +455,30 @@ describe('registry consult', () => {
 // c. Existing-worktree scan reuse (BRANCH match AND SHA match)
 // ---------------------------------------------------------------------------
 
-describe('existing-worktree scan reuse', () => {
-  test('a worktree already checked out on the PR branch AT THE FETCHED SHA is registered and returned — zero adds (add would refuse anyway)', async () => {
+describe('existing-worktree scan reuse (BRANCH match AND SHA match, INSIDE the root)', () => {
+  test('an OWN worktree already checked out on the PR branch AT THE FETCHED SHA is registered and returned — zero adds (add would refuse anyway)', async () => {
     const calls: string[][] = [];
     const registry = memRegistry();
+    const ownPath = '/repo/.cq-review-worktrees/pr-7-pr-7-fix';
     const model = mkModel([
       { path: '/repo', branch: 'main', head: SHA_MAIN },
-      { path: '/elsewhere/pr-7-fix', branch: BRANCH, head: SHA_B },
+      { path: ownPath, branch: BRANCH, head: SHA_B },
       { path: '/other/thing', branch: 'unrelated', head: SHA_MAIN },
     ]);
     const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
-    expect(result).toEqual({ path: '/elsewhere/pr-7-fix', reused: true, branch: BRANCH });
+    expect(result).toEqual({ path: ownPath, reused: true, branch: BRANCH, foreign: [] });
     // fetch → FETCH_HEAD → worktree list → sha probe; no add.
     expect(calls.map((args) => args[2])).toEqual(['fetch', 'rev-parse', 'worktree', 'rev-parse']);
     expect(calls[2]).toEqual(['-C', '/repo', 'worktree', 'list', '--porcelain']);
-    expect(calls[3]).toEqual(['-C', '/elsewhere/pr-7-fix', 'rev-parse', 'HEAD']);
+    expect(calls[3]).toEqual(['-C', ownPath, 'rev-parse', 'HEAD']);
     expect(calls.some((args) => args.includes('add'))).toBe(false);
     expect(registry.current()).toEqual({
-      '7': { path: '/elsewhere/pr-7-fix', branch: BRANCH, createdAt: NOW },
+      '7': { path: ownPath, branch: BRANCH, createdAt: NOW },
     });
   });
 
-  test('a branch-matching tree at a STALE sha is SKIPPED — the scan never reuses local memory', async () => {
-    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-scanstale-'));
+  test('a branch-matching stale tree OUTSIDE the root holds the branch — review ops never frees foreign trees: the create refuses and names the holder', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-foreignstale-'));
     try {
       const calls: string[][] = [];
       const registry = memRegistry();
@@ -413,17 +486,17 @@ describe('existing-worktree scan reuse', () => {
         { path: '/repo', branch: 'main', head: SHA_MAIN },
         { path: '/elsewhere/pr-7-fix', branch: BRANCH, head: SHA_A },
       ]);
-      const newPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
-      // The stale tree was probed and rejected on sha — resolution fell
-      // through to the create path instead of reusing it.
+      // The out-of-root stale tree is skipped (not at the sha, not ours to
+      // remove) — but it HOLDS the branch, so the create is refused and
+      // git's stderr names the holder. Nothing was registered.
+      await expect(
+        resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
+      ).rejects.toThrow(/already checked out at '\/elsewhere\/pr-7-fix'/);
+      expect(registry.calls).toEqual(['load']);
+      expect(registry.current()).toEqual({});
+      // The foreign tree was probed but NEVER removed.
       expect(calls).toContainEqual(['-C', '/elsewhere/pr-7-fix', 'rev-parse', 'HEAD']);
-      expect(result).toEqual({ path: newPath, reused: false, branch: BRANCH });
-      // The stale tree was NEVER registered; only the fresh tree is.
-      expect(registry.current()).toEqual({
-        '7': { path: newPath, branch: BRANCH, createdAt: NOW },
-      });
-      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, newPath, 'FETCH_HEAD']);
+      expect(calls.some((args) => args.includes('remove'))).toBe(false);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
@@ -435,7 +508,7 @@ describe('existing-worktree scan reuse', () => {
 // ---------------------------------------------------------------------------
 
 describe('create path', () => {
-  test('no registry entry and no existing checkout → add -B … FETCH_HEAD under the DEFAULT worktreeRoot, registered, reused=false', async () => {
+  test('no registry entry and no existing checkout → add -B … <expectedSha> under the DEFAULT worktreeRoot, registered, reused=false', async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-create-'));
     try {
       const calls: string[][] = [];
@@ -443,7 +516,9 @@ describe('create path', () => {
       const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
       const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
       const expectedPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
-      expect(result).toEqual({ path: expectedPath, reused: false, branch: BRANCH });
+      expect(result).toEqual({ path: expectedPath, reused: false, branch: BRANCH, foreign: [] });
+      // The create rides the RESOLVED sha (not the FETCH_HEAD name): the
+      // tree is pinned to the exact commit the fetch landed on.
       expect(calls.find((args) => args.includes('add'))).toEqual([
         '-C',
         repoRoot,
@@ -452,7 +527,7 @@ describe('create path', () => {
         '-B',
         BRANCH,
         expectedPath,
-        'FETCH_HEAD',
+        SHA_B,
       ]);
       expect(registry.current()).toEqual({
         '7': { path: expectedPath, branch: BRANCH, createdAt: NOW },
@@ -480,7 +555,7 @@ describe('create path', () => {
         '-B',
         BRANCH,
         join(explicit, `pr-${PR}-${BRANCH}`),
-        'FETCH_HEAD',
+        SHA_B,
       ]);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -502,6 +577,8 @@ describe('create path', () => {
       );
       const addArgs = calls.find((args) => args.includes('add'));
       expect(addArgs?.[6]).toBe(join(repoRoot, '.cq-review-worktrees', 'pr-7-feature-fix-42_x-retest'));
+      // The create rides the RESOLVED sha.
+      expect(addArgs?.[7]).toBe(SHA_B);
       // The added DIRECTORY is one path segment under the worktree root.
       expect(addArgs?.[6]?.startsWith(join(repoRoot, '.cq-review-worktrees') + '/')).toBe(true);
       expect(addArgs?.[6]?.slice((join(repoRoot, '.cq-review-worktrees') + '/').length)).not.toContain('/');
@@ -527,6 +604,61 @@ describe('create path', () => {
         resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
       ).rejects.toThrow(/worktree add -B pr-7-fix.*failed.*already checked out/s);
       expect(registry.calls).toEqual(['load']); // load happened, save NEVER did
+      expect(registry.current()).toEqual({});
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ownership boundary — foreign trees are surfaced, never claimed/removed
+// ---------------------------------------------------------------------------
+
+describe('ownership boundary — foreign trees are surfaced, never claimed', () => {
+  test('a branch+sha-valid tree OUTSIDE the root is returned in foreign[] and never claimed — an OWN valid tree is still reused', async () => {
+    const calls: string[][] = [];
+    const registry = memRegistry();
+    const foreignPath = '/elsewhere/foreign-pr-7-fix';
+    const ownPath = '/repo/.cq-review-worktrees/pr-7-pr-7-fix';
+    const model = mkModel([
+      { path: '/repo', branch: 'main', head: SHA_MAIN },
+      { path: foreignPath, branch: BRANCH, head: SHA_B },
+      { path: ownPath, branch: BRANCH, head: SHA_B },
+    ]);
+    const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
+    // The OWN in-root tree was reused; the foreign at-sha tree was only
+    // SURFACED — never claimed, never registered, never removed.
+    expect(result).toEqual({
+      path: ownPath,
+      reused: true,
+      branch: BRANCH,
+      foreign: [{ path: foreignPath, branch: BRANCH }],
+    });
+    expect(registry.current()).toEqual({
+      '7': { path: ownPath, branch: BRANCH, createdAt: NOW },
+    });
+    expect(calls).toContainEqual(['-C', foreignPath, 'rev-parse', 'HEAD']);
+    expect(calls.some((args) => args.includes('add'))).toBe(false);
+    expect(calls.some((args) => args.includes('remove'))).toBe(false);
+  });
+
+  test('a foreign at-sha tree holding the branch blocks the create — the refusal names the foreign holder (freeing it is the human’s call)', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-foreignhold-'));
+    try {
+      const calls: string[][] = [];
+      const registry = memRegistry();
+      const model = mkModel([
+        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: '/elsewhere/foreign-pr-7-fix', branch: BRANCH, head: SHA_B },
+      ]);
+      // No in-root candidate can satisfy reuse, and the foreign holder
+      // refuses `add -B` — the throw carries git's stderr naming it, and
+      // nothing is registered.
+      await expect(
+        resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
+      ).rejects.toThrow(/worktree add -B.*failed.*already checked out at '\/elsewhere\/foreign-pr-7-fix'/s);
+      expect(registry.calls).toEqual(['load']);
       expect(registry.current()).toEqual({});
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -587,23 +719,43 @@ describe('removePrWorktree', () => {
   test('a registry entry pointing ELSEWHERE survives the removal — only its own path is pruned', async () => {
     const calls: string[][] = [];
     // The entry describes a RE-CREATED tree at a new location; the caller
-    // is removing a DIFFERENT (old) path.
+    // is removing a DIFFERENT (old) in-root path.
     const entryPath = '/repo/.cq-review-worktrees/pr-7-pr-7-fix';
+    const oldPath = '/repo/.cq-review-worktrees/pr-7-pr-7-fix.old';
     const registry = memRegistry({
       '7': { path: entryPath, branch: BRANCH, createdAt: NOW - 1000 },
     });
-    const model = mkModel([{ path: '/elsewhere/old-tree', branch: BRANCH, head: SHA_A }]);
+    const model = mkModel([{ path: oldPath, branch: BRANCH, head: SHA_A }]);
     await removePrWorktree({
       ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
-      path: '/elsewhere/old-tree',
+      path: oldPath,
     });
     // git removed the requested tree…
-    expect(calls[calls.length - 1]).toEqual(['-C', '/repo', 'worktree', 'remove', '/elsewhere/old-tree']);
+    expect(calls[calls.length - 1]).toEqual(['-C', '/repo', 'worktree', 'remove', oldPath]);
     expect(model.worktrees).toEqual([]);
     // …but the registry entry describes a DIFFERENT path and SURVIVES
     // (load ran; save never did — nothing was pruned).
     expect(registry.current()['7']).toEqual({ path: entryPath, branch: BRANCH, createdAt: NOW - 1000 });
     expect(registry.calls).toEqual(['load']);
+  });
+
+  test('a path OUTSIDE the worktreeRoot is refused before git runs — the registry and the foreign tree are untouched', async () => {
+    const calls: string[][] = [];
+    const registry = memRegistry({
+      '7': { path: '/repo/.cq-review-worktrees/pr-7-pr-7-fix', branch: BRANCH, createdAt: NOW - 1000 },
+    });
+    const model = mkModel([{ path: '/elsewhere/foreign-pr-7-fix', branch: BRANCH, head: SHA_B }]);
+    await expect(
+      removePrWorktree({
+        ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
+        path: '/elsewhere/foreign-pr-7-fix',
+      }),
+    ).rejects.toThrow(/removePrWorktree: refusing to remove.*outside the review worktreeRoot/s);
+    // No git call at all; the foreign tree and the registry both intact.
+    expect(calls).toEqual([]);
+    expect(model.worktrees).toHaveLength(1);
+    expect(registry.current()['7']).toBeDefined();
+    expect(registry.calls).toEqual([]);
   });
 });
 
@@ -614,13 +766,13 @@ describe('removePrWorktree', () => {
 describe('domain boundary vs the sweep ops worktree', () => {
   // When the sweep family lands (`createOrReuseWorktree` — package-keyed
   // trees under a sweep root), THIS is the rule that keeps the domains
-  // apart, behaviorally: review ops can only ever reuse a tree matching the
-  // PR branch AND the fetched origin sha. A sweep tree parked on the branch
-  // name at an old sha — or on any other branch — is unreachable: the scan
-  // skips it and resolution creates the review's OWN pr-keyed tree. The
-  // argv walk below pins that no sweep path is ever returned, registered,
-  // or added to.
-  test('sweep-family trees on other branches — or on the PR branch at a stale sha — are never reused', async () => {
+  // apart, behaviorally: review ops reuses ONLY an OWN (in-root) tree
+  // matching the PR branch AND the fetched sha. Sweep trees on OTHER
+  // branches neither block the create nor get claimed; a sweep tree
+  // HOLDING the branch blocks the create until a human frees it — review
+  // ops never removes it (pinned in the scan + ownership tests).
+
+  test('sweep-family trees on other branches are invisible: no claim, no block, the create lands under the review root', async () => {
     const calls: string[][] = [];
     const registry = memRegistry();
     const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-domain-'));
@@ -629,30 +781,52 @@ describe('domain boundary vs the sweep ops worktree', () => {
       const sweepB = join(repoRoot, '.sweep-worktrees', 'pkg-b');
       const model = mkModel([
         { path: repoRoot, branch: 'main', head: SHA_MAIN },
-        // Branch match but STALE sha — exactly the tree finding 1 forbids
-        // reusing.
-        { path: sweepA, branch: BRANCH, head: SHA_A },
-        // Fetched sha but WRONG branch — not this PR's checkout.
+        { path: sweepA, branch: 'pkg-a-branch', head: SHA_A },
         { path: sweepB, branch: 'pkg-b-branch', head: SHA_B },
       ]);
       const expectedPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
       const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
-      expect(result).toEqual({ path: expectedPath, reused: false, branch: BRANCH });
-      // The full argv walk: fetch → FETCH_HEAD → scan → probe the
-      // branch-matching candidate (rejected on sha) → create at the fetched
-      // sha. Nothing else is ever invoked.
+      expect(result).toEqual({ path: expectedPath, reused: false, branch: BRANCH, foreign: [] });
+      // The full argv walk: fetch → FETCH_HEAD → scan → create AT the
+      // fetched sha. No sweep path is ever probed (no branch-matching
+      // candidate), returned, or registered.
       expect(calls).toEqual([
         ['-C', repoRoot, 'fetch', 'origin', BRANCH],
         ['-C', repoRoot, 'rev-parse', 'FETCH_HEAD'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
-        ['-C', sweepA, 'rev-parse', 'HEAD'],
-        ['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, expectedPath, 'FETCH_HEAD'],
+        ['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, expectedPath, SHA_B],
       ]);
-      // Neither sweep path was returned or registered — only the review's
-      // own pr-keyed tree.
       expect(registry.current()).toEqual({
         '7': { path: expectedPath, branch: BRANCH, createdAt: NOW },
       });
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a sweep-family tree HOLDING the PR branch (parked at a stale sha, outside the root) blocks the create and the refusal names it — review ops never frees it', async () => {
+    const calls: string[][] = [];
+    const registry = memRegistry();
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-domain2-'));
+    try {
+      const sweepA = join(repoRoot, '.sweep-worktrees', 'pkg-a');
+      const model = mkModel([
+        { path: repoRoot, branch: 'main', head: SHA_MAIN },
+        { path: sweepA, branch: BRANCH, head: SHA_A },
+      ]);
+      // The sweep tree is probed (branch match), found stale, NOT removed
+      // (foreign, never ours) — and its branch-hold refuses the create
+      // with git's stderr naming the sweep path: the run ends AT the
+      // refused add, nothing registered.
+      const expectedPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      await expect(
+        resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
+      ).rejects.toThrow(/already checked out at .*pkg-a/s);
+      expect(calls).toContainEqual(['-C', sweepA, 'rev-parse', 'HEAD']);
+      expect(calls.some((args) => args.includes('remove'))).toBe(false);
+      // The LAST call is the refused create — nothing ran after it.
+      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, expectedPath, SHA_B]);
+      expect(registry.current()).toEqual({});
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
