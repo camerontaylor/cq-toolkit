@@ -62,9 +62,10 @@ jobs:
         env:
           PR_BASE: ${{ github.base_ref }}
         run: |
-          # Env-indirection doctrine: no textual ${{ }} interpolation inside
+          # Env-indirection doctrine: expression interpolation never appears in
           # the run script (expression values reach the shell as env vars,
-          # never as interpolated text). GITHUB_EVENT_NAME is an Actions
+          # never as interpolated text — an empty expression inside a run
+          # block is a startup failure). GITHUB_EVENT_NAME is an Actions
           # default environment variable.
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             node scripts/ratchet-check.mjs check --base "origin/${PR_BASE}"
