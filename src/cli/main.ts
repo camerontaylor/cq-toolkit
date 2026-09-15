@@ -32,10 +32,11 @@
 // EXIT CODES: 0 ok; 1 failed/thrown; 2 usage — arg-shaped errors the CLI
 // detects itself, never derived from the taxonomy; 3 needs-human/budget.
 // runCli NEVER throws: every path returns a number, and a runtime throw
-// (op crash, missing plan file, registry defect) is caught per subcommand,
+// (op crash, journal failure, registry defect) is caught per subcommand,
 // narrated, and returned as 1 with stdout left EMPTY — no result ever
 // existed.
 import { get, list } from '../registry/index.js';
+import { OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
@@ -234,7 +235,9 @@ function renderOpHelp(name: string, inputSchema: unknown): string {
   return renderSubHelp(
     name,
     inputSchema,
-    ['--help'],
+    // --json is accepted for EVERY subcommand (it drives narration mode) and
+    // --help is the reserved help flag — list both, like renderRunPlanHelp.
+    ['--json', '--help'],
     [JSON_VALUES_NOTE],
   );
 }
@@ -256,7 +259,7 @@ function renderRunPlanHelp(): string {
 
 /**
  * The dispatcher proper. Returns the process exit code on every path; only
- * genuinely runtime failures (op crash, missing plan file, registry scan
+ * genuinely runtime failures (op crash, journal failure, registry scan
  * defect) escape as throws — caught by runCli's top level → 1.
  */
 async function dispatchCli(
@@ -303,9 +306,11 @@ async function dispatchCli(
       return EXIT_CODES.ok;
     }
     try {
-      // Runtime throws (missing plan file, journal failure, plan corruption
-      // raised by the runner) → narrated exit 1; arg-shaped failures are
-      // narrated exits 2 INSIDE runPlanCommand.
+      // Input defects are narrated exits 2 INSIDE runPlanCommand (missing or
+      // irregular plan file, corrupted content, and the kernel's own
+      // 'runPlan: ' input-validation class); runtime throws (journal
+      // open/write failure, a post-stat read race) escape as throws →
+      // narrated exit 1 below.
       return await runPlanCommand(parsed.flags, io, mode, opts);
     } catch (err) {
       narrate(io, `run-plan threw: ${messageOf(err)}`);
@@ -324,6 +329,15 @@ async function dispatchCli(
     io.stdout(renderOpHelp(sub, entry.inputSchema));
     return EXIT_CODES.ok;
   }
+  // --ops-root is RESERVED for run-plan: an op subcommand receiving it is a
+  // usage error (op inputs own their schema keys — no hidden flag collision
+  // with a schema field). run-plan keeps the flag: RunPlanInputSchema.opsRoot
+  // needs it, so this check is op-branch only. The runCli-level {opsRoot} DI
+  // (embedding/tests) is unaffected — only the FLAG is reserved.
+  if (Object.hasOwn(parsed.flags, 'ops-root')) {
+    narrate(io, '--ops-root is a run-plan flag (op inputs own their schema keys)');
+    return EXIT_CODES.usage;
+  }
   // Strip the reserved mode flags — the op's schema sees only its own keys
   // (ops map flags by EXACT schema key; see the header for the run-plan
   // kebab-case exception).
@@ -340,10 +354,35 @@ async function dispatchCli(
   }
   try {
     const op = await entry.importer();
-    const result = await op(check.data);
-    writeResultJson(io, result); // the ONE stdout artifact
-    narrateOpResult(io, sub, result, mode); // failures-only; silent in json mode
-    return exitCodeForOpResult(result);
+    // The op's TypeScript return type is no runtime guarantee: ops load from
+    // RUNTIME registries, so the direct-dispatch path validates the returned
+    // value with the kernel's own mirror before ANY stdout artifact or
+    // exit-code derivation (the plan path gets the same two probes via
+    // runPlan's executeOp; this is their direct-path counterpart).
+    const raw: unknown = await op(check.data);
+    const checked = OpResultSchema.safeParse(raw);
+    if (!checked.success) {
+      narrate(io, `${sub} returned an invalid result: ${issueMessage(checked.error)}`);
+      return EXIT_CODES.thrown;
+    }
+    // JSON-losslessness probe (the one the runner applies before
+    // journalling): stringify with a replacer that throws on non-finite
+    // numbers — an artifact that cannot survive serialization must not be
+    // emitted.
+    try {
+      JSON.stringify(checked.data, (_key, value: unknown) => {
+        if (typeof value === 'number' && !Number.isFinite(value)) {
+          throw new Error(`non-finite number ${String(value)}`);
+        }
+        return value;
+      });
+    } catch (probeErr) {
+      narrate(io, `${sub} returned an invalid result: ${messageOf(probeErr)}`);
+      return EXIT_CODES.thrown;
+    }
+    writeResultJson(io, checked.data); // the ONE stdout artifact
+    narrateOpResult(io, sub, checked.data, mode); // failures-only; silent in json mode
+    return exitCodeForOpResult(checked.data);
   } catch (err) {
     // Thrown (uncaught exception) → 1, decided HERE (the caller of the
     // exit-code functions); stdout stays empty — no result ever existed.

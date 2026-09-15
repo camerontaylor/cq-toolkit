@@ -46,9 +46,20 @@ export function writeResultJson(io: CliIo, value: unknown): void {
   io.stdout(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-/** One narration line to stderr with the `cq:` prefix. Never stdout (I1). */
+/**
+ * One narration line to stderr with the `cq:` prefix. Never stdout (I1).
+ *
+ * One narrate() call is EXACTLY ONE `cq: `-prefixed stderr line: the OpResult
+ * contract permits arbitrary multi-line error/reason/detail strings, and an
+ * embedded newline would emit an unprefixed continuation line that breaks the
+ * line-based narration contract — so embedded newlines (CR, LF, CRLF) are
+ * flattened to the literal two-character `\n` escape before writing.
+ * (narrateRunReport pre-splits renderHuman output and narrates line by line;
+ * this guard covers every other caller and any detail text.)
+ */
 export function narrate(io: CliIo, message: string): void {
-  io.stderr(`cq: ${message}\n`);
+  const oneLine = message.replace(/\r\n?|\n/g, '\\n');
+  io.stderr(`cq: ${oneLine}\n`);
 }
 
 /**

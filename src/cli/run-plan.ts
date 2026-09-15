@@ -16,20 +16,21 @@
 // --resume map 1:1. This kebab convenience is run-plan-ONLY: op subcommands
 // map flags by EXACT schema key (the asymmetry is documented in main.ts).
 //
-// ERROR SHAPES (the 1-vs-2 line): arg-shaped problems are exit 2 —
-// schema-invalid flags, and corrupted plan FILE CONTENT (unparseable JSON or
-// a PlanSchema failure). Runtime throws are exit 1 — a file-read throwing
-// (ENOENT/EISDIR on the plan path) is LET THROUGH to main.ts's catch, which
-// narrates and returns 1 'thrown'; likewise runPlan's own thrown invariants
-// (plan corruption, resume:true without journalDir — the runner owns that
-// invariant) and journal failures all propagate. No result ever existed on a
-// throw, so stdout stays empty.
+// ERROR SHAPES (the 1-vs-2 line): all INPUT defects are exit 2 —
+// schema-invalid flags; a --plan path that is missing or not a regular file;
+// corrupted plan FILE CONTENT (unparseable JSON or a PlanSchema failure); and
+// the kernel's own input-validation class, a thrown error whose message starts
+// with 'runPlan: ' (duplicate job ids, the concurrency bound, resume:true
+// without journalDir). RUNTIME throws are exit 1 — anything else (a journal
+// open/write failure, a file read that raced the stat gate) propagates to
+// main.ts's catch, which narrates and returns 1 'thrown'. No result ever
+// existed on a throw, so stdout stays empty.
 //
 // GOVERNED COMPOSITION (kernel README, "Budget governor") — I9 is not
 // optional; every run goes through the recorded pipeline:
 //   new BudgetGovernor(governorConfig(runOptions, {}))
 //   withBudgetStop(await runPlan(plan, runOptions, governRegistry(view, governor)), plan, governor)
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { z } from 'zod';
 import {
   BudgetGovernor,
@@ -39,7 +40,7 @@ import {
 } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import { PlanSchema } from '../kernel/schema.js';
-import type { OpRegistryEntry, Plan, RunOptions } from '../kernel/types.js';
+import type { OpRegistryEntry, Plan, RunOptions, RunReport } from '../kernel/types.js';
 import { list } from '../registry/index.js';
 import { EXIT_CODES, exitCodeForRunReport } from './exit.js';
 import {
@@ -138,10 +139,21 @@ export async function runPlanCommand(
   }
   const input = check.data;
 
-  // File-read errors (ENOENT, EISDIR, …) are RUNTIME throws, not arg errors:
-  // they propagate to main.ts's catch → narrated + exit 1 'thrown' (stdout
-  // stays empty — no result ever existed). Arg-shaped errors are 2; runtime
-  // throws are 1.
+  // INPUT defect (exit 2), not a runtime throw: a --plan path that does not
+  // exist or is not a regular file is arg-shaped, consistent with the other
+  // input defects (reviewer A medium 2 — schema-invalid content was already
+  // 2 while a missing/directory plan path surfaced as a thrown 1).
+  const planStat = await stat(input.plan).catch(() => undefined);
+  if (planStat === undefined || !planStat.isFile()) {
+    narrate(io, `invalid input for 'run-plan': plan file ${input.plan} is not a readable file`);
+    return EXIT_CODES.usage;
+  }
+
+  // The file exists and is regular (per the stat gate); a read error here is
+  // a post-gate race or permission failure — a RUNTIME throw, not an arg
+  // error: it propagates to main.ts's catch → narrated + exit 1 'thrown'
+  // (stdout stays empty — no result ever existed). Arg-shaped errors are 2;
+  // runtime throws are 1.
   const raw = await readFile(input.plan, 'utf8');
   let plan: Plan;
   try {
@@ -179,7 +191,21 @@ export async function runPlanCommand(
     ...(input.resume ? { resume: true } : {}),
   };
   const governor = new BudgetGovernor(governorConfig(runOptions, {}));
-  const rawReport = await runPlan(plan, runOptions, governRegistry(view, governor));
+  let rawReport: RunReport;
+  try {
+    rawReport = await runPlan(plan, runOptions, governRegistry(view, governor));
+  } catch (err) {
+    // Kernel-input-class throws (message starts with 'runPlan: ': duplicate
+    // job ids, the concurrency bound, resume:true without journalDir) are
+    // INPUT defects → exit 2, consistent with the schema/content defects
+    // above. Any other throw (a journal open/write failure, …) stays a
+    // RUNTIME throw → propagates to main.ts's catch → narrated exit 1.
+    if (messageOf(err).startsWith('runPlan: ')) {
+      narrate(io, `invalid input for 'run-plan': ${messageOf(err)}`);
+      return EXIT_CODES.usage;
+    }
+    throw err;
+  }
   const report = withBudgetStop(rawReport, plan, governor);
 
   // Output: the ONE stdout artifact first, then failures-only narration

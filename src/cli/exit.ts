@@ -37,6 +37,11 @@ export function exitCodeForOpResult(r: OpResult<unknown>): 0 | 1 | 3 {
     case 'needs-human':
     case 'budget-exhausted':
       return EXIT_CODES.needsHuman;
+    default:
+      // Defense against a taxonomy the CLI predates: the frozen union makes
+      // this branch unreachable today, but an unknown status maps as
+      // thrown-class (1) rather than silently falling through to ok.
+      return EXIT_CODES.thrown;
   }
 }
 
@@ -62,7 +67,16 @@ export function exitCodeForRunReport(r: RunReport): 0 | 1 | 3 {
     return EXIT_CODES.needsHuman;
   }
   const failedRow = r.jobs.some(
-    (row) => row.result.status === 'failed' || row.result.status === 'indeterminate',
+    (row) =>
+      row.result.status === 'failed' ||
+      row.result.status === 'indeterminate' ||
+      // Default branch (defense against a taxonomy the CLI predates —
+      // unreachable for the frozen five): any status outside the known set
+      // maps as thrown-class (1), never silently as ok. Needs-human/budget →
+      // 3 still dominates this check (the order above is untouched).
+      (row.result.status !== 'ok' &&
+        row.result.status !== 'needs-human' &&
+        row.result.status !== 'budget-exhausted'),
   );
   return failedRow ? EXIT_CODES.thrown : EXIT_CODES.ok;
 }
