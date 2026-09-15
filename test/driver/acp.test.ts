@@ -203,17 +203,29 @@ describe('win32 .cmd/.bat shim spawn translation (review-debt #54/#55)', () => {
     // keyed on the injected platform so it is testable everywhere.
     expect(argvForShimSpawn('C:\\tools\\zcode-acp-server.cmd', ['--flag', 'v'], 'win32')).toEqual({
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', 'C:\\tools\\zcode-acp-server.cmd --flag v'],
+      args: ['/d', '/s', '/c', '"C:\\tools\\zcode-acp-server.cmd --flag v"'],
       windowsVerbatimArguments: true,
     });
     expect(argvForShimSpawn('C:\\tools\\dsh.BAT', [], 'win32')).toEqual({
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', 'C:\\tools\\dsh.BAT'],
+      args: ['/d', '/s', '/c', '"C:\\tools\\dsh.BAT"'],
       windowsVerbatimArguments: true,
     });
     // Case-insensitive extension match (PATHEXT is uppercase by default,
     // but a lowercase-suffixed shim is the same file).
     expect(argvForShimSpawn('C:\\x\\tool.CMD', ['a'], 'win32')?.command).toBe('cmd.exe');
+    // Element boundaries survive: a space-bearing path and a two-word
+    // argument each stay ONE element, inside the ONE outer quote pair
+    // that /s strips (PR #111 + PR #119 reviews).
+    const quoted = argvForShimSpawn(
+      'C:\\Program Files\\nodejs\\zcode-acp-server.cmd',
+      ['--prompt', 'two words'],
+      'win32',
+    );
+    expect(quoted.command).toBe('cmd.exe');
+    expect(quoted.args[3]).toBe(
+      `""C:\\Program Files\\nodejs\\zcode-acp-server.cmd" --prompt "two words""`,
+    );
   });
 
   test('everything else passes through verbatim: exes, scripts, and any non-win32 platform', () => {

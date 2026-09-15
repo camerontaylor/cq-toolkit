@@ -74,9 +74,16 @@ export function argvForShimSpawn(
   platform: NodeJS.Platform = process.platform,
 ): { command: string; args: string[]; windowsVerbatimArguments: boolean } {
   if (platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    // ONE OUTER QUOTE PAIR around the whole /c string (PR #119 review,
+    // Codex P1): with /s and verbatim args, cmd strips the FIRST and LAST
+    // quote of the string after /c — without the outer pair it strips the
+    // element-level quotes this translation exists to preserve (a
+    // space-bearing shim path still parsed as its first token). The outer
+    // pair is the documented sacrifice; the element quotes survive.
+    const inner = [cmdQuote(command), ...args.map(cmdQuote)].join(' ');
     return {
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', [cmdQuote(command), ...args.map(cmdQuote)].join(' ')],
+      args: ['/d', '/s', '/c', `"${inner}"`],
       windowsVerbatimArguments: true,
     };
   }

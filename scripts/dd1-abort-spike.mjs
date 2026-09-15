@@ -414,11 +414,15 @@ if (verdictJson.error !== undefined || verdictJson.spendStopped !== true) {
       : `spendStopped=${String(verdictJson.spendStopped)}` +
         (verdictJson.inconclusiveReason !== undefined ? ` — ${verdictJson.inconclusiveReason}` : '');
   console.error(`dd1-abort-spike: ABORT VERDICT FAILED for lane '${lane}': ${why}`);
-  // exitCode, not exit (PR #101 review, Codex P2): process.exit forcibly
-  // terminates before a piped stdout drains, truncating the verdict JSON
-  // this evidence path exists to deliver. exitCode lets the process end
-  // naturally after the streams flush — the exit status is identical (1).
-  process.exitCode = 1;
+  // Drain, THEN a bounded exit (PR #114 review, Codex P1): a bare
+  // process.exit truncates a piped stdout before the verdict JSON drains
+  // (the PR #101 finding) — but exitCode ALONE lets a detached rung-3
+  // in-process request's network handles keep the event loop alive,
+  // burning the workflow's 30-minute timeout while spend may continue.
+  // The write callback fires once the buffer is flushed: bounded, but
+  // never truncated.
+  process.stdout.write('', () => process.exit(1)); // flush-drain, then the bounded exit
+  process.exitCode = 1; // the callback above owns the bound; this is the fallback
 } else {
   console.error(`dd1-abort-spike: abort verdict passed for lane '${lane}' (spend verifiably stopped)`);
 }

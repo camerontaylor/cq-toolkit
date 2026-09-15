@@ -922,13 +922,15 @@ describe('proposeBaselineUpdate', () => {
     });
   });
 
-  test('git-accurate END scoping: legal prefixes/bases the old per-component rules over-rejected (PR #110 review)', async () => {
+  test('git-accurate scoping, VERIFIED against check-ref-format: whole-ref dots, per-component .lock (PR #110/#118 reviews)', async () => {
     await seedBaseline(TARGET, METRIC, 10);
     const effects = makeFakeEffects();
-    // A prefix ending '.lock' or '.' composes with the digest and the
-    // COMPOSED head passes check-ref-format; a mid-ref '.lock' component
-    // and a mid-ref trailing-dot component are legal refs.
-    for (const headPrefix of ['release.lock', 'main.', 'ratchet.lock/nightly']) {
+    // Verified 2026-09-16 with `git check-ref-format --branch`: the
+    // trailing-DOT rule binds the complete ref's END only ('release./main'
+    // VALID, 'main.' invalid) — but *.lock binds EVERY component
+    // ('ratchet.lock/nightly' INVALID per git's own docs). A prefix ending
+    // '.lock' or '.' composes with the digest into a legal head.
+    for (const headPrefix of ['release.lock', 'main.']) {
       const result = await createProposeBaselineUpdate(effects)(
         proposeInput({ headPrefix, improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
       );
@@ -937,7 +939,6 @@ describe('proposeBaselineUpdate', () => {
         expect(result.value.head, headPrefix).toMatch(new RegExp(`^${headPrefix.replace(/[.]/g, '\\.')}-[0-9a-f]{12}$`));
       }
     }
-    // A base with a mid-ref trailing-dot component is a legal ref.
     const midDot = await createProposeBaselineUpdate(effects)(
       proposeInput({
         base: 'release./main',
@@ -945,6 +946,17 @@ describe('proposeBaselineUpdate', () => {
       }),
     );
     expect(midDot.status).toBe('ok');
+    // A .lock COMPONENT anywhere is invalid — prefix or base.
+    for (const bad of ['ratchet.lock/nightly', 'a/b.lock/c']) {
+      const asPrefix = await createProposeBaselineUpdate(effects)(
+        proposeInput({ headPrefix: bad, improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      );
+      expect(asPrefix.status, bad).toBe('failed');
+      const asBase = await createProposeBaselineUpdate(effects)(
+        proposeInput({ base: bad, improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      );
+      expect(asBase.status, bad).toBe('failed');
+    }
   });
 
   test('an UNDERSCORE-bearing headPrefix is accepted (review-debt #87: git allows _ in ref segments)', async () => {

@@ -1148,6 +1148,19 @@ describe('formatViolations', () => {
     expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
+  test('an identity STRING containing the unit-key TEXT does not false-fire the key check (PR #118 review, Codex P2)', () => {
+    // A target value like `contains "unit": nope` embeds the key text
+    // INSIDE a JSON string; the unanchored key regex treated it as a unit
+    // property and rejected a perfectly valid tightening. The anchor
+    // (^\s*) matches only real property positions.
+    const diff = fullRewrite(
+      REL,
+      body('lower-is-better', 5, { target: 'contains "unit": nope' }),
+      body('lower-is-better', 3, { target: 'contains "unit": nope' }),
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
   test('malformed direction escapes on BOTH sides at equal values fail closed (PR #108 review, CodeRabbit Major)', () => {
     // Both sides carry `direction: "lower-is-\x"` — decode fails for both,
     // which previously read as NEITHER side having a direction, letting
