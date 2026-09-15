@@ -152,9 +152,9 @@ function emptyFailureSetReason(exitCode: number | null): string {
  * rejected runner → `failed` (the runner never produced evidence). A
  * timed-out check (`CheckCommand.timeoutMs`) surfaces as exitCode null →
  * `indeterminate` — never a hang, never clean. At the op boundary
- * (registry schema) `timeoutMs` defaults to 600_000ms — the 10-minute
- * floor for JSON-dispatched checks; the library-level CheckCommand stays
- * timeout-optional.
+ * (registry schema) `timeoutMs` defaults to 600_000ms — a 10-minute
+ * default for JSON-dispatched checks (a zod `.default`, not a minimum);
+ * the library-level CheckCommand stays timeout-optional.
  */
 export function makeCheckRunner(run: RunCheck): Op<CheckRunnerInput, FailureSet> {
   return async (input) => {
