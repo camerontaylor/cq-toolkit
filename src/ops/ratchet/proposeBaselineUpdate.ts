@@ -114,7 +114,16 @@ function errorMessage(err: unknown): string {
  * suppression on GITHUB_TOKEN-created PRs would drop the required I4 check).
  */
 export interface BaselinePrEffects {
-  /** The open PR whose head branch equals `head`, or null when none is open. */
+  /**
+   * The open PR whose head branch equals `head`, or null when none is open.
+   * SEAM CONTRACT for implementations (review-debt #87 round-3, item 6):
+   * GitHub allows ONE head with MULTIPLE open PRs against DIFFERENT bases,
+   * so an implementation must disambiguate on the (head, base) PAIR — the
+   * proposal op only ever means "the open PR for this head against the
+   * input's base" (H4's wiring receives the base alongside the head; the
+   * narrow head-only signature stays because the op passes its own single
+   * base through the wiring, not because the base is irrelevant).
+   */
   findOpenPrByHead(head: string): Promise<{ number: number; url: string } | null>;
   /**
    * Commit `files` (full file contents — renderBaseline bytes) on branch
@@ -166,15 +175,20 @@ const COMMIT_MESSAGE = 'chore(ratchet): tighten baselines (proposeBaselineUpdate
 const DEFAULT_HEAD_PREFIX = 'ratchet/propose';
 
 /** Branch ref-name characters (the remaining check-ref-format rules live in violatesRefRules). */
-const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./-]*$/;
+const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 /**
  * The check-ref-format rules that matter for a branch name (the proposal's
- * head prefix AND its base): non-empty, ref-name characters only, no
- * leading or trailing slash, no '//' doubled slash, no '..' walk-up, and no
- * dot-leading path segment ('.hidden' cannot be a branch component).
- * Anything violating this could not exist as a git ref at all — and could
- * not ride clean markdown into the PR body either.
+ * head prefix AND its base): non-empty, ref-name characters only (underscore
+ * INCLUDED — review-debt #87 round-3: git allows '_' in ref segments; the
+ * old class was stricter than git), no leading or trailing slash, no '//'
+ * doubled slash, no '..' walk-up, no dot-leading path segment ('.hidden'
+ * cannot be a branch component), no TRAILING-dot segment ('main.' is
+ * rejected by check-ref-format), and no segment ending '.lock'
+ * ('release.lock', 'ratchet.lock/nightly' — git reserves *.lock for reflock
+ * files; a branch named after one cannot exist). Anything violating this
+ * could not exist as a git ref at all — and could not ride clean markdown
+ * into the PR body either.
  */
 function violatesRefRules(value: string): boolean {
   return (
@@ -182,7 +196,9 @@ function violatesRefRules(value: string): boolean {
     value.endsWith('/') ||
     value.includes('//') ||
     value.includes('..') ||
-    value.split('/').some((segment) => segment.startsWith('.'))
+    value.split('/').some(
+      (segment) => segment.startsWith('.') || segment.endsWith('.') || segment.endsWith('.lock'),
+    )
   );
 }
 
@@ -541,10 +557,18 @@ export function createProposeBaselineUpdate(
       const prNumber = typeof upsert.number === 'number' ? upsert.number : (open?.number ?? null);
       const prUrl =
         typeof upsert.url === 'string' && upsert.url !== '' ? upsert.url : (open?.url ?? null);
+      // The VERDICT follows the upsert's `created` flag when the impl
+      // reports one (review-debt #87 round-3): the find result is stale by
+      // construction — a PR found open can be closed/merged between find
+      // and upsert, and the impl's fresh creation is then the truth. The
+      // find result remains the FALLBACK for an impl that reports no flag
+      // (same wide-seam posture as the identity fields above).
+      const verdictFromUpsert: 'created' | 'updated' | undefined =
+        upsert.created === true ? 'created' : upsert.created === false ? 'updated' : undefined;
       return {
         status: 'ok',
         value: {
-          proposal: open !== null ? 'updated' : 'created',
+          proposal: verdictFromUpsert ?? (open !== null ? 'updated' : 'created'),
           prNumber,
           prUrl,
           head,
