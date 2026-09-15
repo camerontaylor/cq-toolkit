@@ -1,18 +1,32 @@
 // complexity adapter — lane H slice 2.
 //
 // Two accepted shapes for the same metric: a pre-averaged summary
-// ({averageComplexity: n}, passed through verbatim) or an array of
-// per-entity records ({Complexity: n}) whose arithmetic mean becomes the
-// value, rounded half-up to 2 decimals so identical records always produce
-// identical baseline bytes. Empty arrays, records without a numeric
-// Complexity, negative values → null: non-passing evidence (I5), never a
-// fabricated pass.
+// ({averageComplexity: n}) or an array of per-entity records
+// ({Complexity: n}) whose arithmetic mean becomes the value. Both paths
+// round HALF-UP to 2 decimals so identical inputs always produce identical
+// baseline bytes — in the integer domain (roundRatioHalfUp2), because the
+// binary double for an exact decimal half (1.005 → 100.499999…, not 100.5)
+// rounds the wrong way under naive float scaling. Empty arrays, records
+// without a finite non-negative Complexity, negative values → null:
+// non-passing evidence (I5), never a fabricated pass.
 import type { MetricAdapter, MetricReading } from '../registry.js';
 
-// Math.round sends exact halves toward +Infinity; inputs are validated
-// non-negative before this runs, so this IS half-up — and deterministic.
+/** Half-up rounding of a non-negative integer-scaled ratio: (sum*100)/count. */
+function halfUp(y: number): number {
+  return Math.floor(y + 0.5);
+}
+
+function roundRatioHalfUp2(num: number, den: number): number {
+  return halfUp(num / den);
+}
+
 function roundHalfUp2(x: number): number {
-  return Math.round(x * 100) / 100;
+  // x*100 carries a few-ulp binary representation error (exact decimal 1.005
+  // arrives as 100.49999999999999), so the half decision adds a RELATIVE
+  // epsilon: far larger than the ulp-level noise of one multiply, far smaller
+  // than the 0.5 half-step it guards — it can only rescue a true half, never
+  // flip a non-half.
+  return roundRatioHalfUp2(x * 100 + Math.abs(x * 100) * Number.EPSILON * 8, 1) / 100;
 }
 
 export const complexity: MetricAdapter = {
@@ -25,17 +39,17 @@ export const complexity: MetricAdapter = {
       for (const record of raw) {
         if (typeof record !== 'object' || record === null) return null;
         const cx = (record as Record<string, unknown>)['Complexity'];
-        if (typeof cx !== 'number' || !Number.isFinite(cx)) return null;
+        if (typeof cx !== 'number' || !Number.isFinite(cx) || cx < 0) return null;
         sum += cx;
       }
-      const value = roundHalfUp2(sum / raw.length);
-      if (!Number.isFinite(value) || value < 0) return null;
+      const value = roundRatioHalfUp2(sum * 100, raw.length) / 100;
+      if (!Number.isFinite(value)) return null;
       return { value, unit: 'avg-cx' };
     }
     if (typeof raw === 'object' && raw !== null) {
       const avg = (raw as Record<string, unknown>)['averageComplexity'];
       if (typeof avg !== 'number' || !Number.isFinite(avg) || avg < 0) return null;
-      return { value: avg, unit: 'avg-cx' };
+      return { value: roundHalfUp2(avg), unit: 'avg-cx' };
     }
     return null;
   },

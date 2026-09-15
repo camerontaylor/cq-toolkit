@@ -8,10 +8,13 @@
 //     trailing newline. The same baseline always renders to the same bytes,
 //     so a re-capture cannot produce a spurious diff.
 //   - parseBaseline is STRICT: zod validates the full schema (extra keys fail
-//     rather than being silently stripped) and violations throw a plain Error
-//     with a clear message.
+//     rather than being silently stripped, `value` must be finite — JSON's
+//     1e999 parses to Infinity — and `capturedAt` must be a parseable
+//     ISO-8601 instant) and violations throw a plain Error with a clear
+//     message.
 // tightens/loosens are pure comparators: equal values are neither, so an
 // unchanged metric never rewrites a baseline.
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 
 /** Which way the metric's "better" points. */
@@ -38,9 +41,11 @@ const BaselineFileSchema: z.ZodType<BaselineFile> = z.object({
   target: z.string(),
   metric: z.string(),
   direction: z.enum(['lower-is-better', 'higher-is-better']),
-  value: z.number(),
+  value: z.number().finite(),
   unit: z.string().optional(),
-  capturedAt: z.string(),
+  capturedAt: z.string().refine((s) => !Number.isNaN(Date.parse(s)), {
+    message: 'capturedAt must be a parseable ISO-8601 timestamp',
+  }),
 }).strict();
 
 /** Serialize a baseline deterministically: schema-order keys, 2-space indent, trailing newline. */
@@ -86,9 +91,19 @@ function sanitizeSegment(raw: string): string {
     .replace(/^-+|-+$/g, '');
 }
 
-/** Deterministic repo-relative path for one (target, metric) baseline. */
+/**
+ * 8-hex disambiguator over the RAW (unsanitized) pair: distinct originals keep
+ * distinct baseline paths even when sanitization collapses them
+ * ('src/kernel' and 'src-kernel' both sanitize to 'src-kernel'). NUL-separated
+ * so ('ab', 'c') and ('a', 'bc') hash differently.
+ */
+function hash8(target: string, metric: string): string {
+  return createHash('sha256').update(`${target}\u0000${metric}`, 'utf8').digest('hex').slice(0, 8);
+}
+
+/** Deterministic, collision-proof repo-relative path for one (target, metric) baseline. */
 export function baselineRelPath(target: string, metric: string): string {
-  return `baselines/${sanitizeSegment(target)}--${sanitizeSegment(metric)}.json`;
+  return `baselines/${sanitizeSegment(target)}--${sanitizeSegment(metric)}--${hash8(target, metric)}.json`;
 }
 
 /** True when `next` improves on `prev` for direction `d`; equal values are never a tighten. */

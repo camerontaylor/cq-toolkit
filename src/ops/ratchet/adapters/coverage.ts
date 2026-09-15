@@ -26,7 +26,11 @@ export const coverage: MetricAdapter = {
     const detail: Record<string, unknown> = {};
     for (const key of ['branches', 'functions', 'statements'] as const) {
       const value = pctOf(record[key]);
-      if (value !== undefined && Number.isFinite(value)) detail[key] = value;
+      // Detail rides along only when it is a believable pct, same [0,100]
+      // bound as the primary value; junk detail is dropped, not fatal.
+      if (value !== undefined && Number.isFinite(value) && value >= 0 && value <= 100) {
+        detail[key] = value;
+      }
     }
     return Object.keys(detail).length === 0
       ? { value: pct, unit: 'pct' }

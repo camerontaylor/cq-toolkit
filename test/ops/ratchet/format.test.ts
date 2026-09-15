@@ -1,4 +1,4 @@
-// Lane H slice 1 — tests for the baseline file format
+// Lane H slice 1 (+ round-1 fix) — tests for the baseline file format
 // (src/ops/ratchet/format.ts).
 //
 // Pinned here:
@@ -8,14 +8,18 @@
 //      newline, so JSON.parse → render reproduces byte-identical text.
 //   2. parseBaseline is loud on garbage: unparsable JSON, wrong
 //      schemaVersion, missing/typed-wrong keys, unknown direction, extra
-//      keys (strict schema) all throw a plain Error with a clear message.
-//   3. baselineRelPath sanitization: lowercase, runs of non-[a-z0-9] collapse
-//      to a single '-', leading/trailing '-' stripped, '--' separating
-//      target from metric.
+//      keys (strict schema), NON-FINITE values (JSON 1e999 parses to
+//      Infinity), and unparseable capturedAt timestamps all throw a plain
+//      Error with a clear message.
+//   3. baselineRelPath: sanitization (lowercase, runs of non-[a-z0-9]
+//      collapse to a single '-', leading/trailing '-' stripped) PLUS an
+//      8-hex sha256 disambiguator over the RAW pair, so originals that
+//      sanitize identically ('src/kernel' vs 'src-kernel') still get
+//      distinct, deterministic paths.
 //   4. tightens/loosens are pure comparators for both directions; equal
 //      values are neither.
 //
-// Determinism: fixed ISO timestamp, no Date.now(), no Math.random().
+// Determinism: fixed ISO timestamps, no Date.now(), no Math.random().
 import { describe, expect, test } from 'vitest';
 import {
   baselineRelPath,
@@ -73,7 +77,9 @@ describe('renderBaseline / parseBaseline', () => {
   });
 
   test('render imposes schema key order regardless of input insertion order', () => {
-    expect(renderBaseline(baselineScrambledKeys())).toBe(renderBaseline(baseline({ unit: 'errors' })));
+    expect(renderBaseline(baselineScrambledKeys())).toBe(
+      renderBaseline(baseline({ unit: 'errors' })),
+    );
   });
 
   test('render is exactly 2-space JSON with one trailing newline', () => {
@@ -112,7 +118,9 @@ describe('parseBaseline rejections', () => {
     ['wrong schemaVersion', JSON.stringify({ ...RAW_BASE, schemaVersion: 2 })],
     ['missing required value', JSON.stringify({ ...RAW_BASE, value: undefined })],
     ['non-numeric value', JSON.stringify({ ...RAW_BASE, value: 'three' })],
+    ['a non-finite value (JSON 1e999 parses to Infinity)', JSON.stringify(RAW_BASE).replace('"value":3', '"value":1e999')],
     ['unknown direction', JSON.stringify({ ...RAW_BASE, direction: 'sideways' })],
+    ['an unparseable capturedAt', JSON.stringify({ ...RAW_BASE, capturedAt: 'not a timestamp' })],
     ['an extra key (strict schema)', JSON.stringify({ ...RAW_BASE, extra: true })],
   ])('%s throws a clear Error', (_label, text) => {
     expect(() => parseBaseline(text)).toThrow(/^baseline: /);
@@ -124,22 +132,38 @@ describe('parseBaseline rejections', () => {
       /schema violation.*direction/,
     );
   });
+
+  test('a valid capturedAt with a timezone offset still parses', () => {
+    expect(() =>
+      parseBaseline(JSON.stringify({ ...RAW_BASE, capturedAt: '2026-09-15T02:00:00+02:00' })),
+    ).not.toThrow();
+  });
 });
 
 describe('baselineRelPath', () => {
   test.each([
-    ['typecheck', 'typecheck-count', 'baselines/typecheck--typecheck-count.json'],
-    ['Src/Kernel', 'Typecheck Count', 'baselines/src-kernel--typecheck-count.json'],
-    ['  spaced  target  ', 'metric!!', 'baselines/spaced-target--metric.json'],
-    ['A//B', 'C--D', 'baselines/a-b--c-d.json'],
-    ['---lead---', '___trail___', 'baselines/lead--trail.json'],
-    ['Ünicode Târget', 'métric', 'baselines/nicode-t-rget--m-tric.json'],
+    ['typecheck', 'typecheck-count', 'baselines/typecheck--typecheck-count--f818e46f.json'],
+    ['Src/Kernel', 'Typecheck Count', 'baselines/src-kernel--typecheck-count--ca5599f1.json'],
+    ['  spaced  target  ', 'metric!!', 'baselines/spaced-target--metric--e720baed.json'],
+    ['A//B', 'C--D', 'baselines/a-b--c-d--63e50bf9.json'],
+    ['---lead---', '___trail___', 'baselines/lead--trail--ce9c228b.json'],
+    ['Ünicode Târget', 'métric', 'baselines/nicode-t-rget--m-tric--d5aaf618.json'],
   ])('target %j + metric %j → %j', (target, metric, expected) => {
     expect(baselineRelPath(target, metric)).toBe(expected);
   });
 
   test('is deterministic: same inputs, same path', () => {
     expect(baselineRelPath('a b', 'c d')).toBe(baselineRelPath('a b', 'c d'));
+  });
+
+  test('sanitization collisions stay distinct: the disambiguator hashes the RAW pair', () => {
+    // Both sanitize to src-kernel / m, but the raw pairs differ.
+    expect(baselineRelPath('src/kernel', 'm')).toBe('baselines/src-kernel--m--1f3222c9.json');
+    expect(baselineRelPath('src-kernel', 'm')).toBe('baselines/src-kernel--m--8007c124.json');
+    expect(baselineRelPath('src/kernel', 'm')).not.toBe(baselineRelPath('src-kernel', 'm'));
+    expect(baselineRelPath('src/a.ts', 'm')).toBe('baselines/src-a-ts--m--1876373a.json');
+    expect(baselineRelPath('src-a.ts', 'm')).toBe('baselines/src-a-ts--m--2194db1d.json');
+    expect(baselineRelPath('src/a.ts', 'm')).not.toBe(baselineRelPath('src-a.ts', 'm'));
   });
 });
 

@@ -9,6 +9,12 @@
 // Failure direction, named: a null reading is NON-PASSING EVIDENCE (I5) —
 // "cannot verify this metric", never "the metric passes". Callers must treat
 // null as a hold, not a pass.
+//
+// Serializable boundary: adapters and sources are RUNTIME-ONLY composition
+// wiring (like the kernel's OpRegistryEntry). Op inputs never carry them —
+// the kernel's makeManifest structuredClones Job.input, and functions cannot
+// survive that clone — so op inputs reference them by id (metric id,
+// catalog sourceId) instead.
 import type { Direction } from './format.js';
 
 /** One measured value plus optional adapter-defined metadata. */

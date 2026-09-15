@@ -1,4 +1,4 @@
-// Lane H slice 1 — tests for the metric adapter registry
+// Lane H slice 1 (+ round-1 fix) — tests for the metric adapter registry
 // (src/ops/ratchet/registry.ts) and the typecheck-count adapter
 // (src/ops/ratchet/adapters/typecheckCount.ts).
 //
@@ -8,8 +8,10 @@
 //      module-level, so every test uses fresh ids; vitest isolates module
 //      state per test file, so these cannot leak.
 //   2. typecheckCount extract: structured {count} objects (top-level or
-//      nested) are read verbatim (a structured 0 is a real zero); negative
-//      and non-finite counts are null; raw compiler text is counted by
+//      nested) are read verbatim (a structured 0 is a real zero); counts
+//      must be non-negative INTEGERS (0.5 → null); cyclic source data
+//      terminates as null (or still extracts when a count is reachable)
+//      instead of recursing forever; raw compiler text is counted by
 //      /error TS\d+:/ lines; text with no error lines (empty or otherwise)
 //      and non-text non-object garbage are null — non-passing evidence
 //      (I5), never a fabricated pass.
@@ -66,6 +68,12 @@ describe('typecheckCount', () => {
     'src/b.ts(4,1): error TS2304: Cannot find name \'missing\'.\n' +
     'src/c.ts(9,3): error TS2345: Argument of type \'x\' is not assignable.\n';
 
+  // Cyclic source data: the visited-set must bound the descent either way.
+  const cyclicNoCount: Record<string, unknown> = { name: 'loop' };
+  cyclicNoCount['self'] = cyclicNoCount;
+  const cyclicWithCount: Record<string, unknown> = { count: 5 };
+  cyclicWithCount['self'] = cyclicWithCount;
+
   const extractCases: Array<[string, unknown, number | null]> = [
     // [label, raw, expected value (null = extract returns null)]
     ['flat count object', { count: 3 }, 3],
@@ -73,9 +81,12 @@ describe('typecheckCount', () => {
     ['structured zero is a real zero', { count: 0 }, 0],
     ['raw tsc output with several errors', TSC_OUTPUT, 3],
     ['negative count', { count: -1 }, null],
+    ['non-integer count (a fraction of an error is unusable)', { count: 0.5 }, null],
     ['non-finite count', { count: Number.POSITIVE_INFINITY }, null],
     ['NaN count', { count: Number.NaN }, null],
     ['count key present but not numeric', { count: 'many' }, null],
+    ['cyclic data without a count terminates as null', cyclicNoCount, null],
+    ['cyclic data with a reachable count still extracts', cyclicWithCount, 5],
     ['empty text', '', null],
     ['clean-build-style text (no error lines)', 'Successfully ran, all good.', null],
     ['object without any count', { errors: 'many', summary: 'bad' }, null],
