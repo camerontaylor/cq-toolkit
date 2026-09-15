@@ -169,7 +169,12 @@ if (base !== null) {
       }\n${diff.stderr ?? ''}`,
     );
   }
-  const verdict = engine.checkDiffMonotonicity(normalizeBaselineDiffValues(diff.stdout));
+  // The normalization key is the EXACT coverage-baseline path (review-debt
+  // #120), not a path prefix: engine.baselineRelPath computes the same
+  // deterministic path the committed baseline must live at.
+  const verdict = engine.checkDiffMonotonicity(
+    normalizeBaselineDiffValues(diff.stdout, engine.baselineRelPath('coverage', 'coverage')),
+  );
   if (verdict.ok === false) {
     for (const line of engine.formatViolations(verdict.violations)) {
       console.error(`ratchet-check: ${line}`);

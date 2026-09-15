@@ -217,17 +217,33 @@ if (repoSlug === '') {
   fail('gh returned an empty repo slug (nameWithOwner) — cannot address the remote');
 }
 
+// gh pr-list scoping + state recheck (review-debt #120): GitHub allows one
+// head with MULTIPLE open PRs against different bases, so a head-only list
+// can return the wrong PR — every list is scoped to (head, base), and a
+// listed PR is RE-CHECKED via pr view before it is treated as open (a PR
+// closed between the list and the edit still lists-editable; the state is
+// the truth, and a non-open PR routes to the fresh-create path).
+function listOpenProposalPrs(head, base) {
+  const list = parseGhJson(
+    runGh(['pr', 'list', '--head', head, '--base', base, '--state', 'open', '--json', 'number,url']),
+    [],
+  );
+  return list.filter((pr) => {
+    // Full --json object (never -q: parseGhJson handles JSON, and -q prints
+    // a bare string — review-debt #120's own PR-105 finding shape).
+    const viewed = parseGhJson(runGh(['pr', 'view', String(pr.number), '--json', 'state']), {});
+    return viewed?.state === 'OPEN';
+  });
+}
+
 const effects = {
   async findOpenPrByHead(head) {
-    const list = parseGhJson(runGh(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url']), []);
+    const list = listOpenProposalPrs(head, BASE);
     return list.length > 0 ? { number: list[0].number, url: list[0].url } : null;
   },
 
   async commitAndUpsertPr({ head, base, title, body, commitMessage, files }) {
-    const existing = parseGhJson(
-      runGh(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url']),
-      [],
-    );
+    const existing = listOpenProposalPrs(head, base);
     // Remember where the checkout started: the effects switch branches, and
     // the finally below returns it (a local propose must not strand the
     // developer on ratchet/propose-*).

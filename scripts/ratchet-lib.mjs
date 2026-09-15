@@ -322,7 +322,7 @@ function diffHeaderPath(line) {
  * through byte-identical, so a `"value": 1.5` in a source-file hunk is
  * never touched.
  */
-export function normalizeBaselineDiffValues(diff) {
+export function normalizeBaselineDiffValues(diff, exactCoverageBaselinePath) {
   const out = [];
   let isCoverageSection = false;
   let inHunk = false;
@@ -337,8 +337,17 @@ export function normalizeBaselineDiffValues(diff) {
       const path = diffHeaderPath(line);
       // Assigned PER HEADER, never only-if-matches: a sibling file's header
       // must RESET the flag, so a non-coverage section following a coverage
-      // one can never inherit its normalization.
-      isCoverageSection = path !== null && COVERAGE_BASELINE_SECTION.test(path);
+      // one can never inherit its normalization. Keyed on the EXACT
+      // coverage-baseline path when the caller provides it (review-debt
+      // #120: a path-prefix regex would also catch an unrelated baseline
+      // whose target merely starts with 'coverage' — exact identity, not
+      // similarity); the prefix remains the fallback for callers without
+      // an engine at hand.
+      isCoverageSection =
+        path !== null &&
+        (exactCoverageBaselinePath !== undefined
+          ? path === exactCoverageBaselinePath
+          : COVERAGE_BASELINE_SECTION.test(path));
       out.push(line);
       continue;
     }

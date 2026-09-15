@@ -560,6 +560,14 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
     // removed line whose own content was `-- /dev/null`) is evidence
     // movement, not file lifecycle.
     const header = headerRegion(section);
+    // BELT-AND-BRACES COMPOSITION (review-debt #120 item 2, pinned here):
+    // these lifecycle skips are per-DIFF by design — the two-PR
+    // delete-then-re-add-LOOSER composition (PR 1 deletes the baseline, PR
+    // 2 re-adds it looser) crosses TWO diffs and is invisible to any
+    // single-diff guard. The LIVE checkRatchet leg catches it: PR 2's run
+    // finds the baseline MISSING (PR 1 deleted it) and fails closed (I5 —
+    // missing evidence is never passing evidence). Both legs are
+    // load-bearing; neither alone is the whole defense.
     if (hasMarker(header, 'new file mode') || hasMarker(header, '--- /dev/null')) {
       continue; // added baseline: capture committing data, not a loosening
     }

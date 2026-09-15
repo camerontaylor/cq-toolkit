@@ -79,8 +79,9 @@ check to point at — silently absent, worse than failing. A job-level `if:` is 
 only skip because it still reports a conclusion.
 
 **Enforcement (today).** The unfiltered `on: push / pull_request` triggers of
-`.github/workflows/ci.yml` (instantiated from `policy/templates/required-check.md`)
-and of `.github/workflows/denylist.yml`, which predates the templates and carries
+`.github/workflows/ci.yml` (instantiated from `policy/templates/required-check.md`),
+of `.github/workflows/ratchet.yml` (a required check since H4 — review-debt #120
+updated this enumeration), and of `.github/workflows/denylist.yml`, which predates the templates and carries
 only their trigger shape (its steps are the scan itself — not regenerable from
 the template; `policy/templates/README.md`), policed by the denylist-scan
 self-test's workflow-I4 leg over `REQUIRED_WORKFLOW_CHECKS` (each entry pairing
