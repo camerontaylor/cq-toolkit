@@ -254,6 +254,25 @@ describe('fixture-root DI (test/fixtures/cli-ops)', () => {
     expect(names).toEqual(['boom', 'budget', 'echo', 'garbage', 'indet', 'needshuman']);
   });
 
+  test('a BACKSLASH-bearing ops root is REFUSED loudly — it is unaddressable as an ESM module (review-debt #85)', async () => {
+    // A POSIX directory legitimately named with a backslash (e.g. an
+    // --ops-root like /tmp/a\b): Node parses import specifiers with URL
+    // semantics where '\' splits as a path separator, so the raw path
+    // resolves to a DIFFERENT (nonexistent) path — and empirically neither
+    // escape form can rescue it (a percent-encoded file URL is rejected:
+    // "must not include encoded '/' or '\'"). Verified against Node
+    // 2026-09-16; the scan therefore refuses loudly with the reason
+    // instead of a confusing not-found or a silent family skip.
+    const tmp = await makeTmpOpsRoot('cq-registry-bs-');
+    const bsRoot = `${tmp}\\dir`; // a child dir whose NAME contains a backslash
+    await mkdir(bsRoot, { recursive: true });
+    await mkdir(join(bsRoot, 'bsfam'), { recursive: true });
+    await writeFile(join(bsRoot, 'bsfam', 'registry.js'), registrySource('bsop'));
+    await expect(list({ opsRoot: bsRoot })).rejects.toThrow(
+      /contains a backslash .* ESM import addressing treats '\\' as a path separator/s,
+    );
+  });
+
   test("get('echo') yields an entry whose importer() is an async op fn", async () => {
     const entry = await get('echo', { opsRoot: join(fixtureOps) });
     if (entry === undefined) throw new Error('fixture family: no registry entry named echo');

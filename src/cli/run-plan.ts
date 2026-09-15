@@ -268,15 +268,22 @@ export async function runPlanCommand(
     // Kernel-input-class throws are INPUT defects → exit 2, consistent with
     // the schema/content defects above: messages starting 'runPlan: '
     // (duplicate job ids, the concurrency bound, resume:true without
-    // journalDir) and messages starting 'journal: ' — the runId
+    // journalDir), messages starting 'journal: ' — the runId
     // filename-safety assert (assertSafeRunId, via makeRunId inside runPlan)
     // fires on a PlanSchema-valid plan whose id is journal-unsafe ('bad/id'):
     // the id would become `<runId>.ndjson`, so the defect is still the plan
-    // INPUT, not a runtime failure. Any other throw (a journal open/write
-    // failure, …) stays a RUNTIME throw → propagates to main.ts's catch →
-    // narrated exit 1.
+    // INPUT, not a runtime failure — and messages starting 'topoOrder: '
+    // (the kernel manifest's dependency-cycle throw, review-debt #84): a
+    // CYCLIC PLAN FILE is an invalid plan, not a runtime crash, so it maps
+    // to the documented usage path (exit 2) instead of a narrated exit 1.
+    // Any other throw (a journal open/write failure, …) stays a RUNTIME
+    // throw → propagates to main.ts's catch → narrated exit 1.
     const message = messageOf(err);
-    if (message.startsWith('runPlan: ') || message.startsWith('journal: ')) {
+    if (
+      message.startsWith('runPlan: ') ||
+      message.startsWith('journal: ') ||
+      message.startsWith('topoOrder: ')
+    ) {
       narrateIfHuman(io, mode, `invalid input for 'run-plan': ${message}`);
       return EXIT_CODES.usage;
     }
