@@ -173,17 +173,17 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
               .object({
                 name: z.string().min(1),
                 required: z.boolean().optional(),
-                oneOf: z.array(z.string()).optional(),
+                oneOf: z.array(z.string().min(1)).optional(),
                 pattern: z.string().min(1).optional(),
               })
               .strict(),
           )
           .optional(),
-        outcomeTrailer: z.string().optional(),
+        outcomeTrailer: z.string().min(1).optional(),
         implications: z
           .array(
             z
-              .object({ outcomeValue: z.string(), subjectPattern: z.string().min(1) })
+              .object({ outcomeValue: z.string().min(1), subjectPattern: z.string().min(1) })
               .strict(),
           )
           .optional(),

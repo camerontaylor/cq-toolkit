@@ -20,7 +20,10 @@
 //     the gate never fishes trailers out of the middle of a message.
 //   - Regex sources arrive as strings and are compiled with `new RegExp`;
 //     callers own their trustworthiness (same contract as the hack
-//     detector's pattern config).
+//     detector's pattern config). Residual DoS note: a caller-owned source
+//     can exhibit catastrophic backtracking when checked against a
+//     subject/trailer value; the boundary is same-principal config, and
+//     callers own that trust.
 import type { Op } from '../../kernel/types.js';
 
 /** One trailer rule: presence (`required`) plus a value shape (`oneOf` / `pattern`). */
@@ -119,7 +122,9 @@ const TRAILER_LINE_RE = /^[A-Za-z][A-Za-z0-9-]*: .+$/;
 /**
  * Git folded-trailer continuation: a trailer's value may continue on
  * indented lines. Inside a trailer paragraph these neither void the block
- * nor start a new trailer — they extend the previous trailer's value.
+ * nor start a new trailer — they extend the previous trailer's value,
+ * space-joined, so single-line value patterns (like the shipped `^.+$`)
+ * keep matching folded values.
  */
 const CONTINUATION_LINE_RE = /^[ \t]/;
 
@@ -252,8 +257,9 @@ function checkMessage(message: string, config: CheckedConfig): CommitViolation[]
  * must be either a trailer line or an indented continuation of the
  * previous trailer's value (git folded trailers) — one other non-trailer
  * line (prose) voids the whole block. Continuation content is folded into
- * the value joined by newlines, verbatim trimmed. First occurrence wins
- * for a repeated trailer name.
+ * the value joined by SINGLE SPACES, so single-line value patterns keep
+ * matching folded values. First occurrence wins for a repeated trailer
+ * name.
  */
 function trailersOf(lines: string[]): Map<string, string> {
   const paragraphs: string[][] = [];
@@ -288,7 +294,7 @@ function trailersOf(lines: string[]): Map<string, string> {
   for (const line of last) {
     if (CONTINUATION_LINE_RE.test(line)) {
       const previous = entries[entries.length - 1];
-      previous.value = `${previous.value}\n${line.trim()}`;
+      previous.value = `${previous.value} ${line.trim()}`;
       continue;
     }
     const separator = line.indexOf(': ');

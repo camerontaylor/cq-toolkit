@@ -18,16 +18,21 @@
 //   - The op is a SCANNER, not a validator: diff text that still parses
 //     line-by-line yields best-effort findings (often none) — a malformed
 //     diff is never a `failed` op. The one `failed` path is configuration
-//     whose regex sources do not compile; the one `indeterminate` path is
-//     non-blank input with NO diff structure at all (no `diff --git`
-//     header, no `@@` hunk header, no +/- body lines) — "clean" must stay
+//     whose regex sources do not compile (checked before the input-shape
+//     guard, so a config error is never masked by an input verdict); the
+//     one `indeterminate` path is non-blank input with NO diff structure
+//     at all — no `diff --git` header, no `@@` hunk header, no `---`/`+++`
+//     header pair; bare +/- text never qualifies — so "clean" stays
 //     distinguishable from "could not see a diff" (I5). The parser
 //     understands standard two-party unified diffs only: combined `@@@`
 //     merge diffs are not understood and scan as best-effort nothing.
 //   - Regex sources arrive as strings and are compiled with `new RegExp`.
 //     Callers own their trustworthiness: a pattern source is arbitrary
 //     code-adjacent input, and only RE.source semantics are exercised
-//     here — still, never forward untrusted strings as patterns.
+//     here — still, never forward untrusted strings as patterns. Residual
+//     DoS note: a caller-owned source can exhibit catastrophic
+//     backtracking at scan time; the boundary is same-principal config,
+//     and callers own that trust.
 import type { Op } from '../../kernel/types.js';
 
 /**
@@ -80,11 +85,12 @@ export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Objec
 
 /**
  * Shipped test-file shapes (regex sources, matched case-insensitively),
- * frozen. Consulted ONLY against the OLD path of a DELETED-file section —
- * matching `oldPath` (not `newPath`) is what makes the detection correct:
- * a deletion's new path is `/dev/null`, so the old path is the only path
- * that says what KIND of file disappeared, and a deleted file section is
- * reported when its old path matches one of these shapes.
+ * frozen. Consulted against the OLD path of a file section — the path that
+ * says what KIND of file the change took away — and against the section's
+ * NEW path to confirm the file did not merely move within test-land: a
+ * section counts as removed-from-the-test-run only when its old path
+ * matches one of these shapes and its new path (possibly `/dev/null`,
+ * i.e. deleted) matches none.
  */
 export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
   '\\.test\\.[tj]sx?$',
@@ -197,18 +203,23 @@ const TAUTOLOGY_RE = /\bexpect\((.*?)\)\.toBe\(((?:[^()]|\([^()]*\))*)\)/g;
  * sources do not compile. Only ADDED lines are ever scanned; removed and
  * context lines are invisible to every heuristic.
  */
+/**
+ * The `gates.hackDetector` op: `ok` in every case where the diff text was
+ * scanned line-by-line — an EMPTY findings array is a clean diff, and
+ * diff-shaped text that parses imperfectly is best-effort scanned (the op
+ * is a scanner, not a validator: it never certifies diff well-formedness).
+ * `indeterminate` is reserved for non-blank input carrying NO diff
+ * structure at all — "clean" must never be silently conflated with
+ * "nothing recognizable to scan" (I5). `failed` is reserved for config
+ * whose regex sources do not compile, checked BEFORE the input-shape
+ * guard so a config error is never masked by an input verdict. Only
+ * ADDED lines are ever scanned; removed and context lines are invisible
+ * to every heuristic.
+ */
 export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input) => {
-  // "Clean" must stay distinguishable from "could not see a diff" (I5):
-  // non-blank text with no diff structure at all is `indeterminate`, never
-  // a silent empty scan.
-  if (input.diff.trim() !== '' && !looksLikeDiff(input.diff)) {
-    return {
-      status: 'indeterminate',
-      detail: 'input does not parse as a unified diff',
-    };
-  }
   const tamper = input.tamper ?? {};
   const skipOnlySource = tamper.skipOnlyPattern ?? DEFAULT_SKIP_ONLY_PATTERN;
+  const detectDeletedTests = tamper.detectDeletedTests ?? true;
   let config: CompiledConfig;
   try {
     config = {
@@ -219,11 +230,15 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
         regex: new RegExp(p.pattern, (p.flags ?? 'i').replace(/[gy]/g, '')),
         requiresReason: p.requiresReason === true,
       })),
-      testFilePatterns: (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
-        source,
-        regex: new RegExp(source, 'i'),
-      })),
-      detectDeletedTests: tamper.detectDeletedTests ?? true,
+      // Compiled only when the knob is on — mirroring the skipOnly
+      // conditional, unused patterns never get a chance to be invalid.
+      testFilePatterns: detectDeletedTests
+        ? (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
+            source,
+            regex: new RegExp(source, 'i'),
+          }))
+        : [],
+      detectDeletedTests,
       skipOnly:
         tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
@@ -234,6 +249,15 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
       return { status: 'failed', error: `invalid pattern config for hackDetector: ${messageOf(err)}` };
     }
     throw err;
+  }
+  // "Clean" must stay distinguishable from "could not see a diff" (I5):
+  // non-blank text with no diff structure at all is `indeterminate`, never
+  // a silent empty scan.
+  if (input.diff.trim() !== '' && !looksLikeDiff(input.diff)) {
+    return {
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    };
   }
   return { status: 'ok', value: scanDiff(input.diff, config) };
 };
@@ -262,7 +286,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       }
       if (line.startsWith('+++ ')) {
         newPath = headerPathOf(line.slice(4));
-        reportDeletedTestFile(findings, config, oldPath, oldHeader, newPath);
+        reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
         continue;
       }
       const hunk = HUNK_HEADER_RE.exec(line);
@@ -295,31 +319,38 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   return findings;
 }
 
-/** Deleted test file: old path matches a test-file shape, new path is /dev/null. */
-function reportDeletedTestFile(
+/**
+ * Removed-from-the-test-run detection: the OLD path matches a test-file
+ * shape and the NEW path does not. Covers both deletion (`/dev/null` never
+ * matches) and a rename OUT of test-land — either way the tests leave the
+ * run, which is the tamper this guard exists for. A rename WITHIN test
+ * patterns stays unflagged.
+ */
+function reportTestFileRemoval(
   findings: TamperFinding[],
   config: CompiledConfig,
   oldPath: string | null,
   oldHeader: string | null,
   newPath: string | null,
 ): void {
-  if (!config.detectDeletedTests || newPath !== '/dev/null') {
+  if (!config.detectDeletedTests || newPath === null) {
     return;
   }
-  if (oldPath === null || oldPath === '/dev/null') {
+  const from = oldPath;
+  if (from === null || from === '/dev/null') {
     return;
   }
-  const matched = config.testFilePatterns.find((p) => p.regex.test(oldPath as string));
-  if (!matched) {
+  const matched = config.testFilePatterns.find((p) => p.regex.test(from));
+  if (!matched || config.testFilePatterns.some((p) => p.regex.test(newPath))) {
     return;
   }
   findings.push({
     kind: 'deleted-test-file',
-    file: oldPath,
+    file: from,
     line: null,
     pattern: matched.source,
-    snippet: oldHeader ?? `--- a/${oldPath}`,
-    message: `test file deleted by this change: ${oldPath}`,
+    snippet: oldHeader ?? `--- a/${from}`,
+    message: `removed from the test run (deleted or renamed out of test patterns): ${from}`,
   });
 }
 
@@ -394,15 +425,26 @@ function headerPathOf(rest: string): string {
 }
 
 /**
- * Structural sniff for the I5 guard: does the text carry ANY unified-diff
- * shape — a `diff --git` header, an `@@` hunk header, or +/- body lines?
- * Without one of these the input is prose, not a scannable diff.
+ * Structural sniff for the I5 guard: does the text carry REAL unified-diff
+ * structure — a `diff --git` header, an `@@` hunk header, or a
+ * `---`/`+++` header PAIR? Bare +/- text alone is just prose with
+ * decoration and never qualifies.
  */
 function looksLikeDiff(diff: string): boolean {
-  return diff.split(/\r?\n/).some(
-    (line) =>
-      line.startsWith('diff --git ') || line.startsWith('@@') || line.startsWith('+') || line.startsWith('-'),
-  );
+  let sawMinusHeader = false;
+  let sawPlusHeader = false;
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith('diff --git ') || line.startsWith('@@')) {
+      return true;
+    }
+    if (line.startsWith('--- ')) {
+      sawMinusHeader = true;
+    }
+    if (line.startsWith('+++ ')) {
+      sawPlusHeader = true;
+    }
+  }
+  return sawMinusHeader && sawPlusHeader;
 }
 
 /** Error message of an unknown throwable, for `failed` results. */

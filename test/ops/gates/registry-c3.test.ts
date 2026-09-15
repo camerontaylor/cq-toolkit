@@ -167,6 +167,31 @@ describe('CommitGateInputSchema (full input, and only it)', () => {
       }).success,
     ).toBe(false);
   });
+
+  test('rejects empty outcomeTrailer, empty oneOf elements, and empty outcomeValue', () => {
+    expect(
+      CommitGateInputSchema.safeParse({ ...VALID, config: { ...VALID.config, outcomeTrailer: '' } })
+        .success,
+    ).toBe(false);
+    expect(
+      CommitGateInputSchema.safeParse({
+        ...VALID,
+        config: {
+          ...VALID.config,
+          trailers: [{ name: 'Outcome', required: true, oneOf: [''] }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      CommitGateInputSchema.safeParse({
+        ...VALID,
+        config: {
+          ...VALID.config,
+          implications: [{ outcomeValue: '', subjectPattern: '^chore' }],
+        },
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('the C3 importers resolve to working pure ops', () => {

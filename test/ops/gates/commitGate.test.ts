@@ -282,10 +282,22 @@ describe('commitGate trailer-block parsing', () => {
       ].join('\n'),
       config: {
         trailers: [
-          { name: 'Notes', required: true, pattern: '^audited the new clock skew tolerance\\nline-by-line against the TTL table$' },
+          { name: 'Notes', required: true, pattern: '^audited the new clock skew tolerance line-by-line against the TTL table$' },
           { name: 'Confidence', required: true, pattern: '^[0-9]+(\\.[0-9]+)?$' },
         ],
       },
+    });
+    expect(result).toEqual({ status: 'ok', value: { ok: true, violations: [] } });
+  });
+
+  test('a folded trailer satisfies the shipped single-line value pattern (space-joined)', async () => {
+    const result = await commitGate({
+      message: messageOf('fix(test): re-baseline the eviction suite', [
+        'Confidence: 0.9',
+        'Tested: vitest suite',
+        '  plus the typecheck',
+        'Outcome: code-bug',
+      ]),
     });
     expect(result).toEqual({ status: 'ok', value: { ok: true, violations: [] } });
   });

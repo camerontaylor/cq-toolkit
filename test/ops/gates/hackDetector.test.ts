@@ -39,9 +39,41 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
         line: null,
         pattern: '\\.test\\.[tj]sx?$',
         snippet: '--- a/src/legacy/printer.test.ts',
-        message: 'test file deleted by this change: src/legacy/printer.test.ts',
+        message:
+          'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
       },
     ]);
+  });
+
+  test('rename-test-out.diff → the renamed-away tests are removed from the run (flagged)', async () => {
+    expect(await findingsOf(fixture('rename-test-out.diff'))).toEqual([
+      {
+        kind: 'deleted-test-file',
+        file: 'src/legacy/printer.test.ts',
+        line: null,
+        pattern: '\\.test\\.[tj]sx?$',
+        snippet: '--- a/src/legacy/printer.test.ts',
+        message:
+          'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
+      },
+    ]);
+  });
+
+  test('a rename WITHIN test patterns stays unflagged', async () => {
+    const diff = [
+      'diff --git a/src/legacy/printer.test.ts b/src/legacy/printer.e2e.test.ts',
+      'similarity index 91%',
+      'rename from src/legacy/printer.test.ts',
+      'rename to src/legacy/printer.e2e.test.ts',
+      '--- a/src/legacy/printer.test.ts',
+      '+++ b/src/legacy/printer.e2e.test.ts',
+      '@@ -1,3 +1,3 @@',
+      " import { expect } from 'vitest';",
+      "-const label = printLabel('ab');",
+      "+const label = printLabel('abc');",
+      ' export {};',
+    ].join('\n');
+    expect(await findingsOf(diff)).toEqual([]);
   });
 
   test('add-skip.diff → two new-skip-only findings at new-file lines 11 and 14', async () => {
@@ -243,7 +275,8 @@ describe('hackDetector: suppression config', () => {
         line: null,
         pattern: '\\.test\\.[tj]sx?$',
         snippet: '--- "a/src/with space/printer.test.ts"',
-        message: 'test file deleted by this change: src/with space/printer.test.ts',
+        message:
+          'removed from the test run (deleted or renamed out of test patterns): src/with space/printer.test.ts',
       },
     ]);
   });
@@ -413,6 +446,22 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
     });
   });
 
+  test('bare +/- lines are prose, not diff structure: indeterminate', async () => {
+    const result = await hackDetector({ diff: '+ hello\n+ world\n- goodbye' });
+    expect(result).toEqual({
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    });
+  });
+
+  test('a lone --- header without a +++ pair is not diff structure either', async () => {
+    const result = await hackDetector({ diff: '--- a/src/x.ts\nsome prose under it' });
+    expect(result).toEqual({
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    });
+  });
+
   test('diff-shaped but broken text is best-effort scanned: ok with empty findings', async () => {
     expect(await findingsOf('diff --git a/x b/x\n@@ garbage @@\n+// @ts-ignore\n')).toEqual([]);
   });
@@ -433,6 +482,14 @@ describe('hackDetector: tamper toggles', () => {
     const result = await hackDetector({
       diff: fixture('deleted-test.diff'),
       tamper: { detectDeletedTests: false },
+    });
+    expect(result).toEqual({ status: 'ok', value: [] });
+  });
+
+  test('invalid testFilePatterns never compile when the knob is off: no throw, no failed', async () => {
+    const result = await hackDetector({
+      diff: fixture('deleted-test.diff'),
+      tamper: { detectDeletedTests: false, testFilePatterns: ['('] },
     });
     expect(result).toEqual({ status: 'ok', value: [] });
   });
