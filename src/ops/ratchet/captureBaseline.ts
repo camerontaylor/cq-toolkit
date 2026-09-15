@@ -18,7 +18,9 @@
 // fabricated pass and never a fabricated baseline; the same holds when the
 // source or adapter THROWS (a throw never crosses the op seam — and
 // rejections are not assumed to be Errors: any thrown value is mapped to a
-// message). The write path does not trust its own output either: a
+// message). A type-violating adapter — undefined or any non-object where a
+// MetricReading was declared — is treated the same: non-passing evidence
+// (I5), not a crash. The write path does not trust its own output either: a
 // non-finite reading and an unparseable capturedAt both fail the capture.
 // A corrupt EXISTING baseline is likewise a failure, as is an EXISTING
 // baseline whose identity (target, metric, direction, unit) disagrees with
@@ -183,7 +185,11 @@ export function createCaptureBaseline(
         error: `ratchet: metric '${input.metric}' adapter failed — ${errorMessage(err)}`,
       };
     }
-    if (reading === null) {
+    // A type-violating adapter (declared MetricReading | null) can return
+    // undefined — or any non-object — at runtime; null, undefined, and
+    // non-objects are all the same I5 non-passing evidence, never a
+    // TypeError on a later `.value` dereference.
+    if (reading == null || typeof reading !== 'object') {
       return {
         status: 'failed',
         error:

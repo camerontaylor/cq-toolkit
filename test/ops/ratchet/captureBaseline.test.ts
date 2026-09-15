@@ -63,6 +63,7 @@ const UNIT_SHIFTING_METRIC = 'unit-shifting';
 const NULL_UNIT_METRIC = 'null-unit';
 const BAD_DIRECTION_METRIC = 'bad-direction';
 const BIGINT_UNIT_METRIC = 'bigint-unit';
+const UNDEFINED_READING_METRIC = 'undefined-reading';
 const REL = baselineRelPath(TARGET, METRIC);
 
 let ws: string;
@@ -127,6 +128,14 @@ beforeAll(() => {
     // the render itself must be contained by the op seam.
     extract: () => ({ value: 1, unit: 1n }) as unknown as MetricReading,
   });
+  registerAdapter({
+    id: UNDEFINED_READING_METRIC,
+    direction: 'lower-is-better',
+    // A type-violating adapter: returns undefined instead of the declared
+    // MetricReading | null — the op must treat it as I5 non-passing
+    // evidence, never dereference it.
+    extract: () => undefined as unknown as MetricReading,
+  });
 });
 
 // Sources are composition-time wiring (round-1 fix): they live in this
@@ -140,6 +149,7 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [NULL_UNIT_METRIC, () => Promise.resolve({ count: 1 })],
   [BAD_DIRECTION_METRIC, () => Promise.resolve({ count: 1 })],
   [BIGINT_UNIT_METRIC, () => Promise.resolve({ count: 1 })],
+  [UNDEFINED_READING_METRIC, () => Promise.resolve({ count: 1 })],
   [UNIT_SHIFTING_METRIC, () => Promise.resolve(sourceRaw)],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
@@ -291,6 +301,19 @@ describe('captureBaseline', () => {
       status: 'failed',
       error: expect.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
     });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a type-violating adapter returning undefined fails as no-summary (no throw)', async () => {
+    await expect(
+      capture(captureInput({ metric: UNDEFINED_READING_METRIC, sourceId: UNDEFINED_READING_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'undefined-reading' has no metrics summary.*never a pass/s,
+      ),
+    });
+    // The failure fabricated no evidence — nothing was written.
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
