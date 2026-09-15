@@ -476,6 +476,39 @@ describe('plan registry (src/plans) — .ts discovery + skip rules', () => {
 });
 
 describe('root barrel aliases (src/index.js)', () => {
+  test('the root barrel exposes the ratchet surface (review-debt #66)', async () => {
+    // The ratchet family index was an empty placeholder, so the barrel's
+    // `export *` line exported nothing — installed-package consumers could
+    // not reach any ratchet functionality. The populated family index now
+    // delivers the factories, helpers, guard, adapter registry, and the
+    // shipped adapters through the SAME star-export line.
+    const barrel = await import('../../src/index.js');
+    for (const name of [
+      'createCaptureBaseline',
+      'pruneBaselines',
+      'resolveBaselinesDir',
+      'createCheckRatchet',
+      'createProposeBaselineUpdate',
+      'DEFAULT_PR_TOKEN',
+      'renderBaseline',
+      'parseBaseline',
+      'baselineRelPath',
+      'tightens',
+      'loosens',
+      'isIso8601Instant',
+      'checkDiffMonotonicity',
+      'formatViolations',
+      'registerAdapter',
+      'getAdapter',
+      'listAdapters',
+      'complexity',
+      'coverage',
+      'typecheckCount',
+    ]) {
+      expect(Object.hasOwn(barrel, name), name).toBe(true);
+    }
+  });
+
   test('exposes listOps/getOp; the generic list/get names never sit on the barrel', async () => {
     const barrel = await import('../../src/index.js');
     // Aliases of the same registry seam, not re-implementations.

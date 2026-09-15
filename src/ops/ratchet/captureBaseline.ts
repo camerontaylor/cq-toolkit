@@ -48,9 +48,11 @@
 // start at all returns the zero outcome with `error` describing the fault
 // (including a baselines dir that resolves outside the ws — P1).
 import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import { lock } from 'proper-lockfile';
+import type { LockOptions } from 'proper-lockfile';
 import type { FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
-import type { Op } from '../../kernel/types.js';
+import type { Op, OpResult } from '../../kernel/types.js';
 import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline } from './format.js';
 import type { BaselineFile } from './format.js';
 import { getAdapter } from './registry.js';
@@ -327,128 +329,189 @@ export function createCaptureBaseline(
       }
     }
 
-    let existingText: string | null = null;
-    try {
-      existingText = await readFile(absPath, 'utf8');
-    } catch (err) {
-      if (!isEnoent(err)) {
+    // Per-path mutual exclusion (review-debt #68): a plan with two
+    // dependency-free capture jobs for the SAME (target, metric) executes
+    // its wave concurrently; without serialization both read the same
+    // prior file and race their publishes — the last rename wins
+    // nondeterministically, one reported lifecycle disagrees with the
+    // persisted evidence, and the looser measurement can be left behind.
+    // proper-lockfile (the same dependency the ledger lane binds) wraps
+    // the whole read→identity→publish critical section per ABSOLUTE path:
+    // same-path captures serialize, different paths never contend. A
+    // rejected release is an indeterminate fault, never a swallowed ok;
+    // lock acquisition itself failing (a wedged foreign lock past the
+    // backoff) is indeterminate too — the baseline was NOT written.
+    const readModifyPublish = async (): Promise<OpResult<CaptureBaselineOutcome>> => {
+      let existingText: string | null = null;
+      try {
+        existingText = await readFile(absPath, 'utf8');
+      } catch (err) {
+        if (!isEnoent(err)) {
+          return {
+            status: 'indeterminate',
+            detail: `ratchet: could not read existing baseline '${relPath}' — ${errorMessage(err)}`,
+          };
+        }
+      }
+
+      let previous: number | null = null;
+      let lifecycle: CaptureBaselineOutcome['lifecycle'] = 'created';
+      if (existingText !== null) {
+        let existing: BaselineFile;
+        try {
+          existing = parseBaseline(existingText);
+        } catch (err) {
+          return {
+            status: 'failed',
+            error:
+              `ratchet: existing baseline '${relPath}' is corrupt and was not overwritten — ` +
+              `${errorMessage(err)}`,
+          };
+        }
+        // Identity check BEFORE the value is trusted: a file at the expected
+        // path that belongs to another identity — mistaken move, adapter
+        // direction change, UNIT change — is never accepted as `previous` nor
+        // overwritten: values in different units are never the same ratchet
+        // evidence. Every disagreeing field is named.
+        const disagreements: string[] = [];
+        if (existing.target !== input.target) {
+          disagreements.push(`target '${existing.target}' → '${input.target}'`);
+        }
+        if (existing.metric !== input.metric) {
+          disagreements.push(`metric '${existing.metric}' → '${input.metric}'`);
+        }
+        if (existing.direction !== direction) {
+          disagreements.push(`direction '${existing.direction}' → '${direction}'`);
+        }
+        if (existing.unit !== unit) {
+          const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
+          disagreements.push(`unit ${renderUnit(existing.unit)} → ${renderUnit(unit)}`);
+        }
+        if (disagreements.length > 0) {
+          return {
+            status: 'failed',
+            error:
+              `ratchet: existing baseline '${relPath}' for metric '${input.metric}' disagrees on ` +
+              `${disagreements.join('; ')} — incomparable scale — refusing to overwrite`,
+          };
+        }
+        previous = existing.value;
+        lifecycle = existing.value === value ? 'unchanged' : 'updated';
+        // Equal value AND identical bytes: the file is already exactly what this
+        // capture would write — leave it untouched (no spurious mtime churn).
+        if (lifecycle === 'unchanged' && bytes === existingText) {
+          return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
+        }
+      }
+
+      let tempPath: string | undefined;
+      let tempCreated = false;
+      try {
+        // Atomic publish: bytes land in a unique temp file in the SAME
+        // directory, then rename over the target — a crash mid-write can
+        // never leave a torn baseline at the target path. The temp is created
+        // EXCLUSIVELY ('wx'): the PID/counter name is predictable, and a
+        // pre-planted symlink there would make a plain 'w' write follow it
+        // and truncate the outside target. EEXIST advances the counter —
+        // bounded retries, then indeterminate. Cleanup below only ever
+        // removes a temp THIS invocation actually created: exhausted retries
+        // collide on pre-existing entries that must stay untouched.
+        for (let attempt = 0; attempt < 5; attempt++) {
+          const candidate = join(
+            dirname(absPath),
+            `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
+          );
+          let handle: FileHandle;
+          try {
+            handle = await open(candidate, 'wx');
+          } catch (err) {
+            if ((err as { code?: unknown }).code !== 'EEXIST' || attempt === 4) throw err;
+            continue;
+          }
+          // OWNED FROM THE OPEN, not from a completed write (review-debt
+          // #69): writeFile(flag 'wx') marks ownership only AFTER the bytes
+          // land, so a fault mid-write (ENOSPC, I/O error) left the
+          // just-created zero-length temp behind as debris. The handle
+          // sequence owns the file the moment the exclusive open succeeds —
+          // a faulting write still reaches the cleanup unlink below.
+          tempPath = candidate;
+          tempCreated = true;
+          try {
+            await handle.writeFile(bytes);
+          } finally {
+            await handle.close();
+          }
+          break;
+        }
+        if (tempCreated === false || tempPath === undefined) {
+          throw new Error('all temp candidates already existed');
+        }
+        await rename(tempPath, absPath);
+      } catch (err) {
+        // Best-effort temp cleanup: a failed publish must not litter
+        // baselines/ with .tmp debris (unlink errors are swallowed — the
+        // indeterminate verdict already names the primary fault). Ownership
+        // guard: only a temp created by THIS invocation is removed — a
+        // colliding pre-existing entry is never ours to delete.
+        if (tempPath !== undefined && tempCreated) {
+          await unlink(tempPath).catch(() => undefined);
+        }
         return {
           status: 'indeterminate',
-          detail: `ratchet: could not read existing baseline '${relPath}' — ${errorMessage(err)}`,
+          detail: `ratchet: writing baseline '${relPath}' failed — ${errorMessage(err)}`,
         };
       }
-    }
+      return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
 
-    let previous: number | null = null;
-    let lifecycle: CaptureBaselineOutcome['lifecycle'] = 'created';
-    if (existingText !== null) {
-      let existing: BaselineFile;
-      try {
-        existing = parseBaseline(existingText);
-      } catch (err) {
-        return {
-          status: 'failed',
-          error:
-            `ratchet: existing baseline '${relPath}' is corrupt and was not overwritten — ` +
-            `${errorMessage(err)}`,
-        };
-      }
-      // Identity check BEFORE the value is trusted: a file at the expected
-      // path that belongs to another identity — mistaken move, adapter
-      // direction change, UNIT change — is never accepted as `previous` nor
-      // overwritten: values in different units are never the same ratchet
-      // evidence. Every disagreeing field is named.
-      const disagreements: string[] = [];
-      if (existing.target !== input.target) {
-        disagreements.push(`target '${existing.target}' → '${input.target}'`);
-      }
-      if (existing.metric !== input.metric) {
-        disagreements.push(`metric '${existing.metric}' → '${input.metric}'`);
-      }
-      if (existing.direction !== direction) {
-        disagreements.push(`direction '${existing.direction}' → '${direction}'`);
-      }
-      if (existing.unit !== unit) {
-        const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
-        disagreements.push(`unit ${renderUnit(existing.unit)} → ${renderUnit(unit)}`);
-      }
-      if (disagreements.length > 0) {
-        return {
-          status: 'failed',
-          error:
-            `ratchet: existing baseline '${relPath}' for metric '${input.metric}' disagrees on ` +
-            `${disagreements.join('; ')} — incomparable scale — refusing to overwrite`,
-        };
-      }
-      previous = existing.value;
-      lifecycle = existing.value === value ? 'unchanged' : 'updated';
-      // Equal value AND identical bytes: the file is already exactly what this
-      // capture would write — leave it untouched (no spurious mtime churn).
-      if (lifecycle === 'unchanged' && bytes === existingText) {
-        return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
-      }
-    }
-
-    let tempPath: string | undefined;
-    let tempCreated = false;
+    };
     try {
-      // Atomic publish: bytes land in a unique temp file in the SAME
-      // directory, then rename over the target — a crash mid-write can
-      // never leave a torn baseline at the target path. The temp is created
-      // EXCLUSIVELY ('wx'): the PID/counter name is predictable, and a
-      // pre-planted symlink there would make a plain 'w' write follow it
-      // and truncate the outside target. EEXIST advances the counter —
-      // bounded retries, then indeterminate. Cleanup below only ever
-      // removes a temp THIS invocation actually created: exhausted retries
-      // collide on pre-existing entries that must stay untouched.
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const candidate = join(
-          dirname(absPath),
-          `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
+      const release = await lock(absPath, CAPTURE_LOCK_OPTIONS);
+      return await Promise.resolve()
+        .then(readModifyPublish)
+        .then(
+          (outcome) =>
+            // A rejected release is a fault: the critical section ran, but
+            // the lock state is unknown — report indeterminate naming it.
+            release()
+              .then(() => outcome)
+              .catch((releaseErr: unknown) => ({
+                status: 'indeterminate',
+                detail: `ratchet: lock release failed for baseline '${relPath}' — ${errorMessage(releaseErr)}`,
+              } as OpResult<CaptureBaselineOutcome>)),
+          (sectionErr: unknown) =>
+            // The section already returned its own verdicts; a THROW here
+            // is unexpected — release best-effort and surface it.
+            release()
+              .catch(() => undefined)
+              .then(() => { throw sectionErr; }),
         );
-        let handle: FileHandle;
-        try {
-          handle = await open(candidate, 'wx');
-        } catch (err) {
-          if ((err as { code?: unknown }).code !== 'EEXIST' || attempt === 4) throw err;
-          continue;
-        }
-        // OWNED FROM THE OPEN, not from a completed write (review-debt
-        // #69): writeFile(flag 'wx') marks ownership only AFTER the bytes
-        // land, so a fault mid-write (ENOSPC, I/O error) left the
-        // just-created zero-length temp behind as debris. The handle
-        // sequence owns the file the moment the exclusive open succeeds —
-        // a faulting write still reaches the cleanup unlink below.
-        tempPath = candidate;
-        tempCreated = true;
-        try {
-          await handle.writeFile(bytes);
-        } finally {
-          await handle.close();
-        }
-        break;
-      }
-      if (tempCreated === false || tempPath === undefined) {
-        throw new Error('all temp candidates already existed');
-      }
-      await rename(tempPath, absPath);
     } catch (err) {
-      // Best-effort temp cleanup: a failed publish must not litter
-      // baselines/ with .tmp debris (unlink errors are swallowed — the
-      // indeterminate verdict already names the primary fault). Ownership
-      // guard: only a temp created by THIS invocation is removed — a
-      // colliding pre-existing entry is never ours to delete.
-      if (tempPath !== undefined && tempCreated) {
-        await unlink(tempPath).catch(() => undefined);
-      }
       return {
         status: 'indeterminate',
-        detail: `ratchet: writing baseline '${relPath}' failed — ${errorMessage(err)}`,
+        detail: `ratchet: could not acquire the capture lock for baseline '${relPath}' — ${errorMessage(err)}`,
       };
     }
-    return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
   };
 }
+
+/**
+ * proper-lockfile tuning for the capture critical section (review-debt
+ * #68), mirroring the ledger store's staleness policy: no realpath (the
+ * baseline may not exist yet on a first capture), stale comfortably above
+ * the worst-case all-sync section (the write is a small JSON file, but the
+ * same sync-section-blocks-the-mtime-refresh reasoning applies — PR #78's
+ * review). The acquire backoff is deliberately SHORT (≈1.6s cumulative):
+ * the contention this lock exists for is same-process wave concurrency
+ * (holders release in milliseconds), while a persistent acquire fault —
+ * e.g. a read-only baselines dir — must surface as a fast indeterminate,
+ * never a half-minute retry burn. A crashed holder's lock goes stale at
+ * 30s and is stolen by a LATER capture.
+ */
+const CAPTURE_LOCK_OPTIONS: LockOptions = {
+  realpath: false,
+  stale: 30_000,
+  retries: { retries: 6, factor: 2, minTimeout: 25 },
+};
 
 /** Temp-name salt: uniqueness within a process; EEXIST collisions (planted or raced) advance the counter, bounded. */
 let tempFileCounter = 0;
