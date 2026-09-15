@@ -706,7 +706,13 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never settled protocol-side
       const narration = await narrationOf(store, result.sessionId as string);
-      expect(narration.some((line) => line.includes('oversized frame') && line.includes('exceeds the'))).toBe(true);
+      // EITHER bound branch may fire depending on how the OS chunks the
+      // 1.1 MB write: the complete-line bound (this test's subject) or the
+      // unterminated-accumulation overflow — both fail the connection.
+      const bounded =
+        narration.some((line) => line.includes('exceeds the')) ||
+        narration.some((line) => line.includes('stdout line buffer overflow'));
+      expect(bounded).toBe(true);
       const failure = narration.find((line) => line.includes('"prompt-failure"'));
       expect(failure !== undefined && failure.includes('oversized frame')).toBe(true);
     });
