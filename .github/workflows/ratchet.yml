@@ -9,12 +9,18 @@
 #     committed; the guard judged it on the way in).
 #
 # Invariant I4: this workflow triggers on its declared events with NO
-# paths-ignore and no path filters anywhere — skips live in the branch
-# filters and the job-level if only, of which there are none: the ratchet
-# never skips. The check name is 'ratchet' (the job's name:); registration in
-# branch protection is attempted out-of-band by the lane leader, not here.
-# Instantiated per policy/templates/required-check.md conventions — the
-# action pins are the repo's immutable-commit pins (same as ci.yml).
+# paths-ignore and no path filters anywhere — including the push trigger,
+# which is deliberately UNFILTERED (no `branches:`): a branch filter on a
+# required-check workflow is the listed-shape I4 violation the denylist-scan
+# leg fails, and the ratchet must run on every push the way it runs on every
+# PR. More pushes just means the check runs more often — harmless and
+# doctrine-clean. Pull_request carries its target-branch filter (merge-queue)
+# only because the queue mechanics define which PRs exist. Skips live nowhere:
+# the ratchet never skips. The check name is 'ratchet' (the job's name:);
+# registration in branch protection is attempted out-of-band by the lane
+# leader, not here. Instantiated per policy/templates/required-check.md
+# conventions — the action pins are the repo's immutable-commit pins (same as
+# ci.yml).
 name: ratchet
 
 on:
@@ -22,9 +28,6 @@ on:
     branches:
       - merge-queue
   push:
-    branches:
-      - main
-      - merge-queue
   workflow_dispatch:
 
 permissions:

@@ -98,11 +98,15 @@ evidence, never a pass.
 summary read as zero lets a broken run — missing compiler, panicked tool, rejected
 flag — certify cleanliness nobody measured.
 
-**Enforcement (partial today).** `scripts/ratchet-typecheck.mjs` enforces both
-halves for the typecheck baseline (`baselines/typecheck.json`): a missing baseline
-fails with the I5 message, a count above baseline fails with "thresholds only
-tighten", and `--update` refuses nonzero-exit runs with no parsable error lines.
-Phase 2 (H4) replaces it with `src/ops/ratchet`, the same rule over every summary.
+**Enforcement.** The engine-based ratchet runners enforce both halves through
+`src/ops/ratchet` (H4): `scripts/ratchet-typecheck.mjs` reads the live typecheck
+through `createCheckRatchet` against the committed per-(target, metric) baseline
+under `baselines/` — a missing baseline fails with the I5 message, a count above
+baseline fails with "only tightening passes", and a nonzero-exit run with no
+parsable diagnostics is refused before the engine ever sees a reading. The same
+rule now covers every wired summary (`scripts/ratchet-check.mjs` also checks the
+coverage baseline and, with `--base`, runs the diff monotonicity guard over a
+PR's baseline changes).
 
 ## I6 — every worker is a fresh isolated invocation
 

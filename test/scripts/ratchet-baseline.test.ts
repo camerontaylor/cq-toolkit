@@ -95,4 +95,26 @@ describe('ratchet-typecheck (self-host swap): the driver over the built engine',
       expect(res.stderr).toContain('ratchet-lib-selfhost: ok');
     },
   );
+
+  it(
+    'ratchet-propose: a tokenless run is the gate — skip message, exit 0, nothing measured',
+    { timeout: 60_000 },
+    () => {
+      // The propose workflow has NO job-level if (the env context is
+      // unavailable at job-if evaluation): the SCRIPT is the token gate. It
+      // must exit 0 with the skip narration BEFORE any build/measurement —
+      // a tokenless runner is a green no-op, never a red run. The token is
+      // scrubbed from the env so a developer's local export cannot flip this
+      // into the effects path (which additionally refuses dirty worktrees).
+      const env = { ...process.env };
+      delete env.CQ_AUTOMATION_TOKEN;
+      const res = spawnSync(process.execPath, ['scripts/ratchet-propose.mjs'], {
+        cwd: ROOT,
+        encoding: 'utf8',
+        env,
+      });
+      expect(res.status, outputOf(res)).toBe(0);
+      expect(res.stderr).toContain('CQ_AUTOMATION_TOKEN not set; skipping proposal');
+    },
+  );
 });

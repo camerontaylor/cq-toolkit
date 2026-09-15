@@ -71,9 +71,11 @@ substitution.
 ## The bootstrap rule
 
 Every hand-carried workflow is the same template that ships in `policy/` —
-nothing is throwaway except the placeholder ratchet script
-(`scripts/ratchet-typecheck.mjs`, whose baseline lives in
-`baselines/typecheck.json`). Concretely, in this repo: `.github/workflows/ci.yml`
+nothing is throwaway. The placeholder ratchet script was replaced (H4) by the
+engine-based runners `scripts/ratchet-typecheck.mjs` and
+`scripts/ratchet-check.mjs`, whose committed baselines live in `baselines/`
+(one schemaVersion-1 file per (target, metric), written by
+`createCaptureBaseline`). Concretely, in this repo: `.github/workflows/ci.yml`
 is `required-check.md` instantiated, the three queue workflows are the three
 `.yml` templates instantiated, and `denylist.yml` (which predates the
 templates) carries the required-check trigger shape with the denylist job

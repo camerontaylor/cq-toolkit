@@ -11,7 +11,9 @@
 // defines only the timer globals for fixtures, so everything here comes
 // through node: imports — the same style the runner scripts use.
 import process from 'node:process';
-import { deepEqual, equal, ok } from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
+import { deepEqual, equal, ok, rejects, throws } from 'node:assert/strict';
 import { dirname, join } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -19,10 +21,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '../..');
 const lib = await import(pathToFileURL(join(ROOT, 'scripts/ratchet-lib.mjs')).href);
 
 let failures = 0;
-/** Tiny assertion runner: one check = one named expectation, diff on failure. */
-function check(name, fn) {
+/** Tiny assertion runner: one check = one named expectation, diff on failure. Async-aware. */
+async function check(name, fn) {
   try {
-    fn();
+    await fn();
   } catch (err) {
     failures++;
     process.stderr.write(`ratchet-lib-selfhost: FAIL ${name}\n${err?.message ?? err}\n`);
@@ -31,12 +33,12 @@ function check(name, fn) {
 
 const engine = await lib.loadEngine();
 
-check('loadEngine returns the op factories as functions', () => {
+await check('loadEngine returns the op factories as functions', () => {
   ok(typeof engine.createCheckRatchet === 'function');
   ok(typeof engine.createCaptureBaseline === 'function');
   ok(typeof engine.createProposeBaselineUpdate === 'function');
 });
-check('loadEngine returns the registry + format + guard surface', () => {
+await check('loadEngine returns the registry + format + guard surface', () => {
   ok(typeof engine.registerAdapter === 'function');
   ok(typeof engine.getAdapter === 'function');
   ok(typeof engine.listAdapters === 'function');
@@ -46,23 +48,23 @@ check('loadEngine returns the registry + format + guard surface', () => {
   ok(typeof engine.checkDiffMonotonicity === 'function');
   ok(typeof engine.formatViolations === 'function');
 });
-check('the driver-side adapters are the engine-authored ones', () => {
+await check('the driver-side adapters are the engine-authored ones', () => {
   equal(engine.adapters.typecheckCount.id, 'typecheck-count');
   equal(engine.adapters.typecheckCount.direction, 'lower-is-better');
   equal(engine.adapters.coverage.id, 'coverage');
   equal(engine.adapters.coverage.direction, 'higher-is-better');
 });
-check('registration wires the registry (getAdapter/listAdapters see them)', () => {
+await check('registration wires the registry (getAdapter/listAdapters see them)', () => {
   engine.registerAdapter(engine.adapters.typecheckCount);
   engine.registerAdapter(engine.adapters.coverage);
   deepEqual(engine.listAdapters(), ['coverage', 'typecheck-count']);
   equal(engine.getAdapter('typecheck-count')?.direction, 'lower-is-better');
   equal(engine.getAdapter('coverage')?.direction, 'higher-is-better');
 });
-check('typecheckCount extracts the structured count (object form)', () => {
+await check('typecheckCount extracts the structured count (object form)', () => {
   deepEqual(engine.adapters.typecheckCount.extract({ count: 3 }), { value: 3, unit: 'errors' });
 });
-check('coverage extracts total.lines.pct with detail', () => {
+await check('coverage extracts total.lines.pct with detail', () => {
   deepEqual(
     engine.adapters.coverage.extract({
       total: { lines: { pct: 87.5 }, branches: { pct: 80 }, functions: { pct: 90 }, statements: { pct: 88 } },
@@ -70,20 +72,20 @@ check('coverage extracts total.lines.pct with detail', () => {
     { value: 87.5, unit: 'pct', detail: { branches: 80, functions: 90, statements: 88 } },
   );
 });
-check('typecheckEvidence: status 0 -> the authoritative object zero', () => {
+await check('typecheckEvidence: status 0 -> the authoritative object zero', () => {
   deepEqual(lib.typecheckEvidence(engine.adapters.typecheckCount, { status: 0, stdout: '', stderr: '' }), {
     evidence: { count: 0 },
     rawText: '',
   });
 });
-check('typecheckEvidence: errored-but-parsable run -> the raw text itself', () => {
+await check('typecheckEvidence: errored-but-parsable run -> the raw text itself', () => {
   const stdout = 'src/a.ts(1,7): error TS2322: boom\n';
   deepEqual(
     lib.typecheckEvidence(engine.adapters.typecheckCount, { status: 1, stdout, stderr: '' }),
     { evidence: stdout, rawText: stdout },
   );
 });
-check('typecheckEvidence: nonzero exit, no parsable diagnostics -> null (I5)', () => {
+await check('typecheckEvidence: nonzero exit, no parsable diagnostics -> null (I5)', () => {
   const { evidence } = lib.typecheckEvidence(engine.adapters.typecheckCount, {
     status: 1,
     stdout: 'npm error missing script',
@@ -91,7 +93,7 @@ check('typecheckEvidence: nonzero exit, no parsable diagnostics -> null (I5)', (
   });
   equal(evidence, null);
 });
-check('normalizeCoverageSummary rounds total.lines.pct to integer percent', () => {
+await check('normalizeCoverageSummary rounds total.lines.pct to integer percent', () => {
   const rounded = lib.normalizeCoverageSummary({ total: { lines: { pct: 93.46 } } });
   equal(rounded.total.lines.pct, 93); // 93.46 and CI's 93.38 are the same ratchet reading
   const half = lib.normalizeCoverageSummary({ total: { lines: { pct: 92.5 } } });
@@ -122,7 +124,7 @@ function baselineValueDiff(oldValue, newValue) {
     ' }',
   ].join('\n');
 }
-check('normalizeBaselineDiffValues rewrites fractional values on -, + AND context lines only in baselines sections', () => {
+await check('normalizeBaselineDiffValues rewrites fractional values on -, + AND context lines only in baselines sections', () => {
   const diff = [
     `diff --git a/${BASELINE_FILE} b/${BASELINE_FILE}`,
     `--- a/${BASELINE_FILE}`,
@@ -139,7 +141,7 @@ check('normalizeBaselineDiffValues rewrites fractional values on -, + AND contex
   ok(normalized.includes('   "value": 92,'));
   ok(normalized.includes('93.46') === false);
 });
-check('normalizeBaselineDiffValues leaves non-baseline files byte-identical', () => {
+await check('normalizeBaselineDiffValues leaves non-baseline files byte-identical', () => {
   const diff = [
     'diff --git a/src/x.ts b/src/x.ts',
     '--- a/src/x.ts',
@@ -150,13 +152,13 @@ check('normalizeBaselineDiffValues leaves non-baseline files byte-identical', ()
   ].join('\n');
   equal(lib.normalizeBaselineDiffValues(diff), diff);
 });
-check('guard verdict (a): re-basis 93.46 -> 93 is an equal no-op — pass', () => {
+await check('guard verdict (a): re-basis 93.46 -> 93 is an equal no-op — pass', () => {
   const verdict = engine.checkDiffMonotonicity(
     lib.normalizeBaselineDiffValues(baselineValueDiff('93.46', '93')),
   );
   deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
 });
-check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
+await check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
   const verdict = engine.checkDiffMonotonicity(
     lib.normalizeBaselineDiffValues(baselineValueDiff('93', '92')),
   );
@@ -167,11 +169,60 @@ check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
     `${BASELINE_FILE}: metric coverage loosened 93 → 92 — only tightening diffs pass`,
   ]);
 });
-check('guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)', () => {
+await check('guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)', () => {
   const verdict = engine.checkDiffMonotonicity(
     lib.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
   );
   deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
+});
+
+// gh output parsing (PR-105 round-1 finding 2): `gh pr list --json number,url`
+// emits a JSON ARRAY (empty array / NOTHING when no matches — an empty string
+// means zero PRs, not an error); `gh ... -q <query>` emits a BARE STRING that
+// must never be JSON.parsed; malformed non-empty output throws loudly.
+await check('parseGhJson: literal gh pr list output shapes (array, empty, whitespace, garbage)', () => {
+  deepEqual(
+    lib.parseGhJson('[{"number":105,"url":"https://github.com/camerontaylor/cq-toolkit/pull/105"}]', []),
+    [{ number: 105, url: 'https://github.com/camerontaylor/cq-toolkit/pull/105' }],
+  );
+  deepEqual(lib.parseGhJson('[]', []), []);
+  deepEqual(lib.parseGhJson('', []), []); // no open PRs — gh prints nothing
+  deepEqual(lib.parseGhJson('  \n\t ', []), []); // whitespace-only = empty
+  deepEqual(lib.parseGhJson(undefined, []), []);
+  throws(() => lib.parseGhJson('no open PRs', []), SyntaxError); // mangled output: loud, never silent-empty
+});
+await check('parseGhJson: -q query output is a bare string and is NOT force-parsed as JSON', () => {
+  equal(String('camerontaylor/cq-toolkit'.trim()), 'camerontaylor/cq-toolkit'); // the repoSlug path: trim, no parse
+  throws(() => lib.parseGhJson('camerontaylor/cq-toolkit'), SyntaxError); // JSON.parse here was the bug
+});
+
+// GIT_ASKPASS auth (PR-105 round-1 finding 5): the token reaches git through
+// the askpass file's ENVIRONMENT — never its bytes, never a URL/argv/config.
+await check('withGitAskpass: env-only token, no token bytes on disk, cleanup on success AND injected failure', async () => {
+  const TOKEN = 'fake-token-abc123';
+  let askpassPath = null;
+  await lib.withGitAskpass(TOKEN, async (gitEnv) => {
+    askpassPath = gitEnv.GIT_ASKPASS;
+    equal(gitEnv.GIT_TERMINAL_PROMPT, '0');
+    equal(gitEnv.CQ_AUTOMATION_TOKEN, TOKEN);
+    ok(existsSync(askpassPath));
+    // The script's BYTES never contain the token (env-only); running it with
+    // the token in ITS env prints exactly the token (the askpass contract).
+    ok(readFileSync(askpassPath, 'utf8').includes(TOKEN) === false);
+    const out = spawnSync('sh', [askpassPath], { env: gitEnv, encoding: 'utf8' });
+    equal(out.stdout.trim(), TOKEN);
+  });
+  ok(existsSync(askpassPath) === false); // cleaned up on success
+  // Abnormal exit (injected failure): the temp plumbing is still removed.
+  await rejects(lib.withGitAskpass(TOKEN, async (gitEnv) => {
+    askpassPath = gitEnv.GIT_ASKPASS;
+    throw new Error('injected failure');
+  }), /injected failure/);
+  ok(existsSync(askpassPath) === false);
+  // And the git-config channel carries no token — there is no authed URL by
+  // construction; this pins the invariant against regressions.
+  const cfg = spawnSync('git', ['config', '-l'], { cwd: ROOT, encoding: 'utf8' });
+  ok(cfg.stdout.includes(TOKEN) === false);
 });
 
 if (failures > 0) {

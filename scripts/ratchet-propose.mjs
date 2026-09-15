@@ -17,9 +17,13 @@
 // GITHUB_TOKEN-authored proposal would never run the required I4 check (the
 // diff monotonicity guard) — an uncheckable ratchet bypass. When both vars
 // are present we warn and proceed with CQ_AUTOMATION_TOKEN only. The token
-// is never echoed: every subprocess result is redacted before printing, and
-// the authed push URL is written to .git/config only for the duration of the
-// push (best-effort restored in a finally).
+// is never echoed (every subprocess result is redacted before printing) and
+// never lands on disk or in git state: git authenticates through a temp
+// GIT_ASKPASS script whose bytes contain no token (it echoes the token from
+// ITS environment) and which is removed in a finally — no authed URL ever
+// touches argv or .git/config. The effects also return the checkout to its
+// original branch in a finally, so a local run never strands the developer
+// on ratchet/propose-*.
 import { spawnSync } from 'node:child_process';
 import { lstatSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -27,9 +31,11 @@ import {
   ROOT,
   fail,
   loadEngine,
+  parseGhJson,
   runCoverageRaw,
   runTypecheckRaw,
   typecheckEvidence,
+  withGitAskpass,
 } from './ratchet-lib.mjs';
 
 /** The proposal target branch (the op validates it as a git ref). */
@@ -175,8 +181,8 @@ const ghEnv = () => {
   return e;
 };
 
-function runGit(args, { allowFail = false } = {}) {
-  const res = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: MAX_BUFFER });
+function runGit(args, { allowFail = false, env = process.env } = {}) {
+  const res = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: MAX_BUFFER, env });
   if (!allowFail && (res.error || res.status !== 0)) {
     throw new Error(
       `git ${args[0]} failed: ${res.error ? res.error.message : `exit ${res.status}`}\n` +
@@ -197,27 +203,38 @@ function runGh(args) {
   return res.stdout ?? '';
 }
 
-const repoSlug = JSON.parse(
-  runGh(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']),
-);
+// `gh repo view --json nameWithOwner -q .nameWithOwner` prints a BARE
+// STRING (the -q template's result) — parse it as exactly that, never as
+// JSON (PR-105 round-1 finding: JSON.parse of it threw on every happy path).
+const repoSlug = runGh(['repo', 'view', '--json', 'nameWithOwner', '-q', '.nameWithOwner']).trim();
+if (repoSlug === '') {
+  fail('gh returned an empty repo slug (nameWithOwner) — cannot address the remote');
+}
 
 const effects = {
   async findOpenPrByHead(head) {
-    const list = JSON.parse(runGh(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url']));
+    const list = parseGhJson(runGh(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url']), []);
     return list.length > 0 ? { number: list[0].number, url: list[0].url } : null;
   },
 
   async commitAndUpsertPr({ head, base, title, body, commitMessage, files }) {
-    const existing = JSON.parse(
+    const existing = parseGhJson(
       runGh(['pr', 'list', '--head', head, '--state', 'open', '--json', 'number,url']),
+      [],
     );
-    // Authed push URL for the duration only; restored in the finally so the
-    // token never lingers in .git/config after the run.
-    const originalUrl = runGit(['remote', 'get-url', 'origin']).stdout.trim();
-    runGit(['remote', 'set-url', 'origin', `https://x-access-token:${token}@github.com/${repoSlug}.git`]);
-    try {
-      runGit(['fetch', 'origin', base]);
-      const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`]).stdout.trim();
+    // Remember where the checkout started: the effects switch branches, and
+    // the finally below returns it (a local propose must not strand the
+    // developer on ratchet/propose-*).
+    const originalBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
+    // Auth via GIT_ASKPASS (withGitAskpass): the token rides in the git child
+    // ENV only — never in a URL, argv, or .git/config; the temp askpass file
+    // is cleaned up in the helper's own finally, even on abnormal exit.
+    // `-c credential.helper=` clears any inherited helper so the askpass path
+    // is the only credential source.
+    await withGitAskpass(token, async (gitEnv) => {
+      const cred = ['-c', 'credential.helper='];
+      runGit([...cred, 'fetch', 'origin', base], { env: gitEnv });
+      const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`], { env: gitEnv }).stdout.trim();
       if (localHead !== '') {
         runGit(['checkout', head]); // reuse: idempotent re-run keeps its history
       } else {
@@ -243,16 +260,26 @@ const effects = {
       }
       // Lease push: a TRUE lease against the remote head when it exists
       // (idempotent re-push), a plain create when it does not.
-      runGit(['fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], { allowFail: true });
-      const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`]).stdout.trim();
+      runGit([...cred, 'fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], { allowFail: true, env: gitEnv });
+      const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`], { env: gitEnv }).stdout.trim();
       if (expected !== '') {
-        runGit(['push', `--force-with-lease=refs/heads/${head}:${expected}`, 'origin', `${head}:refs/heads/${head}`]);
+        runGit([...cred, 'push', `--force-with-lease=refs/heads/${head}:${expected}`, 'origin', `${head}:refs/heads/${head}`], { env: gitEnv });
       } else {
-        runGit(['push', 'origin', `${head}:refs/heads/${head}`]);
+        runGit([...cred, 'push', 'origin', `${head}:refs/heads/${head}`], { env: gitEnv });
       }
-    } finally {
-      spawnSync('git', ['remote', 'set-url', 'origin', originalUrl], { cwd: ROOT, encoding: 'utf8' });
-    }
+    }).finally(() => {
+      // Return the checkout to where it started — unless this run never
+      // switched (already on the proposal head, or a detached CI checkout,
+      // which is nothing to restore).
+      if (originalBranch === '' || originalBranch === 'HEAD' || originalBranch === head) return;
+      const back = spawnSync('git', ['checkout', originalBranch], { cwd: ROOT, encoding: 'utf8' });
+      if (back.error || back.status !== 0) {
+        console.error(
+          `ratchet-propose: note — could not return to the original branch '${originalBranch}': ` +
+            `exit ${back.status ?? '?'} (the proposal itself succeeded)`,
+        );
+      }
+    });
     if (existing.length > 0) {
       const n = existing[0].number;
       runGh(['pr', 'edit', String(n), '--title', title, '--body', body]);

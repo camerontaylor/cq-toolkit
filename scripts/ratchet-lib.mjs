@@ -16,7 +16,15 @@
 // below echo the tool output so the failure is debuggable, not silent.
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -41,13 +49,56 @@ export function fail(message) {
 const SHELL_ON_WINDOWS = process.platform === 'win32';
 
 /**
- * Build the engine the scripts consume. Runs unconditionally (a stale dist
- * would silently certify evidence with an older engine — the self-host trust
- * chain wants dist built from THIS tree, and ci.yml invokes the typecheck
- * ratchet before any build step, so dist/ does not exist there yet). tsc6 is
- * checked-emit: a build error fails loudly here, never downstream.
+ * Newest file mtime under src/ (recursive), or 0 when unreadable — the
+ * freshness baseline for the ensureDist reuse heuristic. Any stat fault
+ * degrades to "never fresh", i.e. rebuild.
+ */
+function newestSrcMtimeMs() {
+  let newest = 0;
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const abs = join(dir, entry.name);
+      if (entry.isDirectory()) walk(abs);
+      else newest = Math.max(newest, statSync(abs).mtimeMs);
+    }
+  };
+  try {
+    walk(join(ROOT, 'src'));
+  } catch {
+    return 0;
+  }
+  return newest;
+}
+
+/**
+ * Build the engine the scripts consume — ONLY when dist is stale: dist is
+ * reused when `dist/index.js` (and the ratchet engine entry the scripts
+ * import) exists and is NEWER than every file under src/; anything else
+ * (missing, unreadable, or any src file newer than dist) triggers a rebuild.
+ *
+ * TRADEOFF, deliberate: a CI cold checkout has no dist and always builds
+ * (correct and expected — ci.yml invokes the typecheck ratchet before any
+ * build step); a local run saves the ~4s rebuild whenever dist is genuinely
+ * fresh. The mtime heuristic's known weakness is a hand-touched dist (or a
+ * clock skew) masking a stale engine — accepted for the LOCAL fast path
+ * because the engine is frozen between lane merges; CI's cold checkout is
+ * the trust-critical path and it never reuses. tsc6 is checked-emit: a build
+ * error fails loudly here, never downstream.
  */
 export function ensureDist() {
+  try {
+    const marker = statSync(join(ROOT, 'dist', 'index.js'));
+    const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
+    if (
+      marker.isFile() &&
+      engineEntry.isFile() &&
+      marker.mtimeMs >= newestSrcMtimeMs()
+    ) {
+      return; // dist exists and is newer than every src file — reuse it
+    }
+  } catch {
+    // no dist yet (CI cold checkout) or unreadable — fall through to build
+  }
   const res = spawnSync('npm', ['run', 'build'], {
     cwd: ROOT,
     encoding: 'utf8',
@@ -60,6 +111,50 @@ export function ensureDist() {
         res.error ? res.error.message : `exit ${res.status}`
       }\n${res.stdout ?? ''}${res.stderr ?? ''}`,
     );
+  }
+}
+
+/**
+ * Parse `gh` CLI output per its ACTUAL shapes (PR-105 round-1 finding: the
+ * old code JSON.parse'd the `-q` query output, which is a BARE STRING, so
+ * the happy path always threw). Rules: output is trimmed; EMPTY output maps
+ * to the caller's fallback (a `gh pr list` with no matches prints nothing —
+ * that is zero PRs, not an error); a `--json` payload (e.g. `gh pr list
+ * --json number,url` emitting a JSON array) parses as JSON; malformed
+ * non-empty output THROWS — mangled forge output is a loud driver failure,
+ * never silently-empty evidence.
+ */
+export function parseGhJson(text, fallback = null) {
+  const trimmed = String(text ?? '').trim();
+  if (trimmed === '') return fallback;
+  return JSON.parse(trimmed);
+}
+
+/**
+ * Run `fn` with a git child-env that authenticates over HTTPS via
+ * GIT_ASKPASS — the token NEVER appears in a URL, argv, or .git/config (the
+ * set-url approach this replaces embedded it in all three). The askpass
+ * script's BYTES contain no token either: it echoes $CQ_AUTOMATION_TOKEN
+ * from ITS environment (git prompts are fed the token as both username and
+ * password — the form GitHub accepts), and the script is written 0700 into a
+ * fresh temp dir. `fn`'s returned value passes through; the temp dir is
+ * removed in a finally, so an abnormal exit (any throw) cannot leave the
+ * token-bearing plumbing behind. GIT_TERMINAL_PROMPT=0 keeps a credential
+ * failure a loud error, never an interactive hang.
+ */
+export async function withGitAskpass(token, fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'ratchet-askpass-'));
+  const askpass = join(dir, 'askpass.sh');
+  writeFileSync(askpass, '#!/bin/sh\nprintf \'%s\\n\' "$CQ_AUTOMATION_TOKEN"\n', { mode: 0o700 });
+  try {
+    return await fn({
+      ...process.env,
+      CQ_AUTOMATION_TOKEN: token, // the askpass reads the token from ITS env
+      GIT_ASKPASS: askpass,
+      GIT_TERMINAL_PROMPT: '0',
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 }
 
