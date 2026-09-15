@@ -83,6 +83,56 @@ describe('vitest-json adapter (real captured fixture)', () => {
     });
   });
 
+  test('a summary counting tests over an empty testResults body is indeterminate (numTotalTests flavor)', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      numTotalTests: 2,
+      numFailedTests: 0,
+      testResults: [],
+    });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 0 });
+    expect(result).toEqual({
+      verdict: 'indeterminate',
+      reason: 'summary counts tests but testResults carries no suite entries',
+    });
+  });
+
+  test('a summary counting failed tests over an empty testResults body is indeterminate (numFailedTests flavor)', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      numTotalTests: 0,
+      numFailedTests: 1,
+      testResults: [],
+    });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 0 });
+    expect(result).toEqual({
+      verdict: 'indeterminate',
+      reason: 'summary counts tests but testResults carries no suite entries',
+    });
+  });
+
+  test('success:true alongside a numFailedTests count is indeterminate (self-contradiction)', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      numTotalTests: 1,
+      numFailedTests: 1,
+      testResults: [
+        {
+          name: '/tmp/a.test.ts',
+          status: 'passed',
+          assertionResults: [
+            { title: 'passes', fullName: 'passes', status: 'passed', failureMessages: [] },
+          ],
+        },
+      ],
+    });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 0 });
+    expect(result).toEqual({
+      verdict: 'indeterminate',
+      reason: 'summary claims success but also counts failed tests',
+    });
+  });
+
   test('a testResult without an assertionResults array is indeterminate, not coerced empty', () => {
     const stdout = JSON.stringify({
       success: true,

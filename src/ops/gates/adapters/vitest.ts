@@ -105,16 +105,42 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
       });
     }
   }
-  if (failures.length === 0 && report.success === false) {
-    // Adapter-domain I5 knowledge: `success` exists only in the vitest
-    // shape, and success:false with zero extracted failures is
-    // contradictory evidence — never certified clean.
-    return {
-      verdict: 'indeterminate',
-      reason: 'summary reports a failing run but no failure details were extracted',
-    };
+  const contradiction = summaryContradiction(
+    report,
+    report.numTotalTests,
+    report.testResults,
+    failures.length,
+  );
+  if (contradiction !== null) {
+    return { verdict: 'indeterminate', reason: contradiction };
   }
   return { verdict: 'parsed', set: { tool: 'vitest', failures, exitCode: raw.exitCode } };
+}
+
+/**
+ * Summary-vs-body consistency (I5): a lying summary is contradictory
+ * evidence in EITHER direction, never certified clean — a failing summary
+ * with no extracted failures, success claimed alongside a failed-test
+ * count, or a test count over an empty body. Returns the contradiction
+ * reason, or null when summary and body agree.
+ */
+function summaryContradiction(
+  report: Record<string, unknown>,
+  numTotalTests: number,
+  testResults: unknown[],
+  failureCount: number,
+): string | null {
+  const numFailedTests = typeof report.numFailedTests === 'number' ? report.numFailedTests : 0;
+  if (report.success === false && failureCount === 0) {
+    return 'summary reports a failing run but no failure details were extracted';
+  }
+  if ((numTotalTests > 0 || numFailedTests > 0) && testResults.length === 0) {
+    return 'summary counts tests but testResults carries no suite entries';
+  }
+  if (report.success === true && numFailedTests > 0) {
+    return 'summary claims success but also counts failed tests';
+  }
+  return null;
 }
 
 /** The test title, titles-chain style: ancestorTitles joined with the title. */
