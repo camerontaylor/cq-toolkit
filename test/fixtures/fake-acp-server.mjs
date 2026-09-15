@@ -255,6 +255,14 @@ const RAW_OUTPUT_JSON = process.env.FAKE_ACP_RAW_OUTPUT_JSON === '1';
 const HUGE_FRAME = process.env.FAKE_ACP_HUGE_FRAME === '1';
 const HUGE_FRAME_AFTER_REPLY = process.env.FAKE_ACP_HUGE_FRAME_AFTER_REPLY === '1';
 const HUGE_FRAME_COMPLETE = process.env.FAKE_ACP_HUGE_FRAME_COMPLETE === '1';
+// The no-observed-model persona (PR #37 review, Codex P2): measured usage
+// settles the turn, but the config_option_update NEVER arrives — the
+// driver must leave the cost ABSENT rather than price the requested id.
+const NO_SERVED_MODEL = process.env.FAKE_ACP_NO_SERVED_MODEL === '1';
+// The foreign-session permission persona (PR #37 review, Codex P2): the
+// session/request_permission names a session that is NOT this run's —
+// the driver must reject it before any answer/evidence effects.
+const FOREIGN_PERMISSION_SESSION = process.env.FAKE_ACP_FOREIGN_PERMISSION_SESSION === '1';
 
 // The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL=1), signal half: the
 // termination is IGNORED — only the unignorable SIGKILL rung reaches this
@@ -460,7 +468,7 @@ function askPermission(toolCallId, title, input, onAnswered) {
     id,
     method: 'session/request_permission',
     params: {
-      sessionId: acpSessionId,
+      sessionId: FOREIGN_PERMISSION_SESSION ? `${acpSessionId}::foreign` : acpSessionId,
       toolCall: { toolCallId, rawInput: input, title, content: [], locations: [] },
       options,
     },
@@ -571,7 +579,7 @@ async function executeTool(name, input) {
 // ---------------------------------------------------------------------------
 
 function materializationUpdates() {
-  emitConfigOptionUpdate();
+  if (!NO_SERVED_MODEL) emitConfigOptionUpdate(); // the NO_SERVED_MODEL persona: the model echo never arrives
   emitModeUpdate();
   notifyUpdate({ sessionUpdate: 'usage_update', used: 10, size: 1000000 }); // context telemetry — the driver drops it
 }

@@ -347,7 +347,14 @@ export const PermissionOptionSchema = z.looseObject({
 
 export type PermissionOption = z.infer<typeof PermissionOptionSchema>;
 
-/** The inbound request's params (the toolCall mirrors the probe: title leads with the tool name, kind ABSENT on the reference vendor). */
+/**
+ * The inbound request's params (the toolCall mirrors the probe: title
+ * leads with the tool name, kind ABSENT on the reference vendor).
+ * `sessionId` stays WIRE-optional (vendor-verbatim) — the HANDLER enforces
+ * the scope: an ask that does not name the run's active session exactly
+ * is rejected before any answer-table or evidence effects (PR #37
+ * review, Codex P2).
+ */
 export const RequestPermissionParamsSchema = z.looseObject({
   sessionId: z.string().optional(),
   toolCall: z.looseObject({
@@ -514,14 +521,22 @@ export type PromptResponse = z.infer<typeof PromptResponseSchema>;
  * cachedReadTokens, cachedWriteTokens }`. The SDK marks the field
  * UNSTABLE; the published v1 schema page omits it — both facts recorded,
  * neither changes the fold.
+ *
+ * Every token field is constrained to a finite non-negative integer (PR
+ * #37 review, Codex P2) — the same requirement the CLI lanes impose
+ * before accounting. A negative or fractional count from a broken
+ * harness makes the whole usage UNSHAPEABLE (mapWireUsage → undefined,
+ * no measurement), never a corrupted fold: a negative count must not
+ * drag totalTokensOf() below Budget.maxTokens or produce a negative
+ * modeled cost. zod's .int() rejects NaN and ±Infinity by definition.
  */
 export const UsageWireSchema = z.looseObject({
-  inputTokens: z.number(),
-  outputTokens: z.number(),
-  cachedReadTokens: z.number().optional(),
-  cachedWriteTokens: z.number().optional(),
-  thoughtTokens: z.number().optional(),
-  totalTokens: z.number().optional(),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  cachedReadTokens: z.number().int().nonnegative().optional(),
+  cachedWriteTokens: z.number().int().nonnegative().optional(),
+  thoughtTokens: z.number().int().nonnegative().optional(),
+  totalTokens: z.number().int().nonnegative().optional(),
 });
 
 /**
