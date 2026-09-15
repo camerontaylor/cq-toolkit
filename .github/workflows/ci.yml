@@ -45,10 +45,12 @@ jobs:
         run: npm run build
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
-  # FROM SOURCE — the built artifact drives a real governed plan (two jobs
-  # through the subprocess driver and the fake agent CLI fixture) and the
-  # script asserts the report shape, the journal evidence, and the I1 output
-  # contract. A companion job, not a required check: REQUIRED_WORKFLOW_CHECKS
+  # FROM SOURCE — the BUILT CLI drives a real governed plan: the smoke spawns
+  # `node dist/cli.js run-plan` (two jobs through the CLI's governed
+  # composition, the fixture ops family via --ops-root, the subprocess
+  # driver, and the fake agent CLI fixture) and asserts the report shape,
+  # the journal evidence, and the I1 output contract. A companion job, not a
+  # required check: REQUIRED_WORKFLOW_CHECKS
   # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static},
   # so this job's presence cannot dangle a branch-protection wait.
   from-source:
@@ -67,7 +69,8 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      # The smoke imports the BUILT barrel (dist/index.js) — emitting dist/
+      # The smoke spawns the BUILT CLI (`node dist/cli.js run-plan`) with the
+      # fixture ops family (test/fixtures/cli-smoke-ops) — emitting dist/
       # is the from-source point, so build runs unconditionally here (the
       # static job's build above is its own job's emit gate).
       - name: Build
