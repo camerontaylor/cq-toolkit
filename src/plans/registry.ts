@@ -107,7 +107,8 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     //   - a POSIX path containing `#`, `?`, or `%`: the raw path would
     //     truncate (`#` starts a fragment, `?` a query) or misparse (`%`
     //     starts an invalid escape) → convert too (pathToFileURL
-    //     percent-escapes them).
+    //     percent-escapes them). (A backslash is NOT this case — it is
+    //     unaddressable either way and refused above, review-debt #85.)
     //   - every other POSIX path: keep the plain path — it is already a
     //     valid specifier, and the vitest module runner resolves
     //     sibling-relative imports inside plan modules against the file-URL
@@ -116,6 +117,17 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     // TypeScript must NOT statically resolve this specifier — plan modules
     // are discovered at runtime.
     const modulePath = path.join(root, file);
+    // A POSIX path containing a backslash is UNADDRESSABLE as an ESM
+    // module (review-debt #85) — neither the raw specifier (re-resolves
+    // with the backslash as a separator) nor a percent-encoded file URL
+    // (rejected: "must not include encoded '/' or '\\'") can import it.
+    // Refuse loudly with the reason; win32 is exempt (backslash is its
+    // separator and the conversion below handles it).
+    if (process.platform !== 'win32' && modulePath.includes('\\')) {
+      throw new Error(
+        `plan scan: the plan module path '${modulePath}' contains a backslash — Node's ESM import addressing treats '\\' as a path separator on every platform, so the module cannot be imported; rename the file or directory`,
+      );
+    }
     const specifier =
       process.platform === 'win32' || /[#?%]/.test(modulePath)
         ? pathToFileURL(modulePath).href

@@ -449,7 +449,20 @@ async function dispatchCli(
   // spurious exit-1 'thrown' instead of a usage error. Failures of async
   // schemas stay usage errors (2). The run-plan schema path stays on plain
   // safeParse (static, sync — see run-plan.ts).
-  const check = await entry.inputSchema.safeParseAsync(input);
+  // The schema gate runs in its OWN mode-aware try (review-debt #83):
+  // safeParseAsync can THROW (a refinement/transform that throws is a
+  // throw, not issues) — an escaped throw would reach the last-resort
+  // 'cq: threw:' narration and crack the empty-stderr machine protocol
+  // under --json. A throwing schema is still an input-validation fault:
+  // the usage path (exit 2, stderr silent in machine mode) keeps the
+  // documented protocol whatever the registry's schema does.
+  let check: Awaited<ReturnType<typeof entry.inputSchema.safeParseAsync>>;
+  try {
+    check = await entry.inputSchema.safeParseAsync(input);
+  } catch (err) {
+    narrateIfHuman(io, mode, `invalid input for '${sub}': schema gate threw — ${messageOf(err)}`);
+    return EXIT_CODES.usage;
+  }
   if (!check.success) {
     narrateIfHuman(io, mode, `invalid input for '${sub}': ${issueMessage(check.error)}`);
     return EXIT_CODES.usage;

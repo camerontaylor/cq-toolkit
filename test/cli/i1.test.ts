@@ -324,6 +324,35 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
     expect(err).not.toMatch(/threw/);
   });
 
+  test('async-refinement schema THROWING: still the usage path (2), and machine mode keeps stderr EMPTY (review-debt #83)', async () => {
+    // safeParseAsync can THROW (a refinement/transform that throws is a
+    // throw, not issues) — before the schema gate got its own mode-aware
+    // try, the escape reached the last-resort 'cq: threw:' narration even
+    // under --json, cracking the empty-stderr machine protocol. The throw
+    // is still an input-validation fault: usage path, exit 2.
+    const tmp = await makeTmpOpsRoot('cq-i1-asyncthrow-');
+    await mkdir(join(tmp, 'throwfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'throwfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'asyncthrow', inputSchema: z.object({}).strict().refine(() => { throw new Error('refinement exploded'); }), importer: async () => async () => ({ status: 'ok', value: 'never-runs' }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    const human = await capture(['asyncthrow'], { opsRoot: tmp });
+    expect(human.code).toBe(2);
+    expect(human.out).toBe('');
+    expect(human.err).toMatch(/invalid input for 'asyncthrow': schema gate threw — refinement exploded/);
+    expect(human.err).not.toMatch(/threw:/); // never the last-resort crash narration
+    const machine = await capture(['asyncthrow', '--json'], { opsRoot: tmp });
+    expect(machine.code).toBe(2);
+    expect(machine.out).toBe('');
+    expect(machine.err).toBe(''); // machine mode: stderr stays EMPTY, protocol intact
+  });
+
   test('lossless-result probes: a Map-valued ok result → exit 1, stdout empty, invalid result', async () => {
     // The SILENTLY-lossy class the stringify probe passes (Map stringifies
     // as {}): assertJsonLossless — the runner's mirror walk — must reject it
@@ -569,6 +598,25 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
       ].join('\n'),
     );
     await expect(list({ opsRoot: tmp })).rejects.toThrow(/reserved CLI key 'json'/);
+  });
+
+  test('a CYCLIC plan file is an invalid plan (exit 2), never a narrated runtime crash (review-debt #84)', async () => {
+    // topoOrder throws 'topoOrder: dependency cycle among jobs: …' for a
+    // PlanSchema-valid but cyclic plan — a plan-INPUT defect. Before the
+    // classifier knew the prefix, this surfaced as a CLI crash (exit 1,
+    // 'cq: run-plan threw:') instead of the documented invalid-plan path.
+    const { planPath } = await writePlanFile({
+      id: 'i1-cycle',
+      jobs: [
+        { id: 'a', op: 'echo', input: { msg: 'hi' }, dependsOn: ['b'] },
+        { id: 'b', op: 'echo', input: { msg: 'lo' }, dependsOn: ['a'] },
+      ],
+    });
+    const { code, out, err } = await capture(['run-plan', `--plan=${planPath}`, `--ops-root=${opsRoot}`]);
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid input for 'run-plan': topoOrder: dependency cycle among jobs/);
+    expect(err).not.toMatch(/threw:/);
   });
 
   // Root bypasses directory permission bits, so the EACCES precondition

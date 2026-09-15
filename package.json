@@ -13,6 +13,9 @@
   "exports": {
     ".": "./dist/index.js"
   },
+  "bin": {
+    "cq": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc6 -p tsconfig.build.json",
     "typecheck": "tsc6 -p tsconfig.json",

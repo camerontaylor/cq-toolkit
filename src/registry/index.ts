@@ -188,7 +188,9 @@ async function scanOps(
     //     truncate (`#` starts a fragment, `?` a query) or misparse (`%`
     //     starts an invalid escape) → convert too (pathToFileURL
     //     percent-escapes them, e.g. `/tmp/cq#work/ops` →
-    //     `file:///tmp/cq%23work/ops`).
+    //     `file:///tmp/cq%23work/ops`). (A backslash is NOT this case —
+    //     it is unaddressable either way and refused above, review-debt
+    //     #85.)
     //   - every other POSIX path: keep the plain path — it is already a
     //     valid specifier, and the vitest module runner resolves the NESTED
     //     relative dynamic imports inside a family registry (the
@@ -199,6 +201,20 @@ async function scanOps(
     // TypeScript must NOT statically resolve this specifier — families are
     // discovered at runtime.
     const registryPath = path.join(root, family, 'registry.js');
+    // A POSIX path containing a backslash is UNADDRESSABLE as an ESM
+    // module (review-debt #85), and neither escape form can rescue it —
+    // verified against Node: the raw specifier re-resolves with the
+    // backslash as a path separator (a silent WRONG path → cannot-find),
+    // and a percent-encoded file URL is rejected outright ("Invalid
+    // module … must not include encoded '/' or '\\' characters"). Refuse
+    // loudly with the reason instead of a confusing not-found or a silent
+    // family skip; win32 is exempt (backslash IS its separator, and the
+    // file-URL conversion below handles it).
+    if (process.platform !== 'win32' && registryPath.includes('\\')) {
+      throw new Error(
+        `ops scan: the family registry path '${registryPath}' contains a backslash — Node's ESM import addressing treats '\\' as a path separator on every platform, so the registry module cannot be imported; rename the directory`,
+      );
+    }
     const registrySpecifier =
       process.platform === 'win32' || /[#?%]/.test(registryPath)
         ? pathToFileURL(registryPath).href
