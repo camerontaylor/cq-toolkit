@@ -1,0 +1,149 @@
+// Ledger lane C4 — registry-slice test evidence: the two entries
+// (ledger.record, ledger.query) validate the full input and only it —
+// strict unknown-key rejection, because a smuggled field would cross the
+// plain-JSON boundary the input-driven store binding depends on — and
+// their importers resolve end-to-end through the REAL pathLedgerStore (the
+// one place real fs is allowed here, mirroring C1's subprocessRunCheck
+// precedent): a record→query round trip over a mkdtemp file, cleaned up
+// per test.
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'vitest';
+import { registry } from '../../../src/ops/ledger/registry.js';
+import { LedgerQueryInputSchema, LedgerRecordInputSchema } from '../../../src/ops/ledger/registry.js';
+import { parseLedger } from '../../../src/ops/ledger/store.js';
+import type { OpRegistryEntry } from '../../../src/kernel/types.js';
+
+let scratchDir = '';
+
+afterEach(async () => {
+  if (scratchDir !== '') {
+    await rm(scratchDir, { recursive: true, force: true });
+    scratchDir = '';
+  }
+});
+
+function entryNamed(name: string): OpRegistryEntry {
+  const entry = registry.find((candidate) => candidate.name === name);
+  if (!entry) {
+    throw new Error(`${name} missing from the ledger registry`);
+  }
+  return entry;
+}
+
+describe('ledger registry: the two C4 entries', () => {
+  test('the registry names the lane ops', () => {
+    expect(registry.map((entry) => entry.name)).toEqual(['ledger.record', 'ledger.query']);
+  });
+});
+
+describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only it)', () => {
+  test('accepts the plain JSON a dispatcher sends (storePath-based, optional fields included)', () => {
+    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 'sig-a' }).success).toBe(true);
+    expect(
+      LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 'sig-a', component: 'c', note: 'n' })
+        .success,
+    ).toBe(true);
+    expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json' }).success).toBe(true);
+  });
+
+  test('rejects smuggled unknown keys at every level (strict)', () => {
+    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', memoize: true }).success).toBe(
+      false,
+    );
+    expect(
+      LedgerRecordInputSchema.safeParse({
+        storePath: 'l.json',
+        signature: 's',
+        thresholds: { suppressAt: 1, escalateAt: 2, cache: true },
+      }).success,
+    ).toBe(false);
+    expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json', store: {} }).success).toBe(false);
+  });
+
+  test('rejects missing/empty storePath and out-of-bounds signatures', () => {
+    expect(LedgerRecordInputSchema.safeParse({ signature: 's' }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ storePath: '', signature: 's' }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: '' }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's'.repeat(501) }).success).toBe(
+      false,
+    );
+    expect(LedgerQueryInputSchema.safeParse({}).success).toBe(false);
+  });
+});
+
+describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdtemp file)', () => {
+  test('ledger.record: record → suppress → escalate against a real file, including the mkdir -p parent', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    // A missing parent directory: the save must create it.
+    const storePath = join(scratchDir, 'state', 'nested', 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    await expect(op({ storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+    await expect(op({ storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 2, escalated: false },
+    });
+    await expect(op({ storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'needs-human',
+      reason: 'error signature exceeded escalation threshold: sig-a (count 3 ≥ 3)',
+    });
+    // The committed bytes are the canonical format: parseable, sorted.
+    expect(parseLedger(await readFile(storePath, 'utf8'))).toEqual({
+      version: 1,
+      entries: [{ signature: 'sig-a', count: 3 }],
+    });
+  });
+
+  test('ledger.query: the importer-bound query reads the same file the record wrote', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    const record = await entryNamed('ledger.record').importer();
+    const query = await entryNamed('ledger.query').importer();
+    await record({ storePath, signature: 'sig-z' });
+    await record({ storePath, signature: 'sig-a' });
+    await record({ storePath, signature: 'sig-a' });
+    await expect(query({ storePath })).resolves.toEqual({
+      status: 'ok',
+      value: {
+        entries: [
+          { signature: 'sig-a', count: 2 },
+          { signature: 'sig-z', count: 1 },
+        ],
+        knownNoise: ['sig-a'],
+        needsHuman: [],
+      },
+    });
+  });
+
+  test('the store is input-driven: two paths keep independent counts', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const op = await entryNamed('ledger.record').importer();
+    const firstPath = join(scratchDir, 'one.json');
+    const secondPath = join(scratchDir, 'two.json');
+    await op({ storePath: firstPath, signature: 'sig-a' });
+    await op({ storePath: firstPath, signature: 'sig-a' });
+    await expect(op({ storePath: secondPath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+  });
+
+  test('a corrupt committed file is failed (a LedgerFormatError from parseLedger, mapped by the op)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    const record = await entryNamed('ledger.record').importer();
+    await record({ storePath, signature: 'sig-b' });
+    const corrupted = (await readFile(storePath, 'utf8')).replace('"count": 1', '"count": 0');
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(storePath, corrupted, 'utf8');
+    const result = await record({ storePath, signature: 'sig-b' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('ledger: schema violation');
+    }
+  });
+});
