@@ -316,3 +316,27 @@ export {
   selectPermissionAnswer,
   selectRejectOptionId,
 } from './driver/acp/protocol.js';
+// Registry + CLI family lines (T1.4-era barrel rule: one `export *` line per
+// planned op family, added ahead of time by lane I; family index modules are
+// empty until each family's owning lane populates them). The REGISTRY line is
+// deliberately NOT a star-export: the generic `list`/`get` names would sit on
+// the root barrel and silently collide with the first family barrel that ever
+// exports either name (star-export ambiguity), so they are re-exported
+// aliased as `listOps`/`getOp`; `defaultOpsRoot` is distinctive enough to
+// stay bare.
+export {
+  defaultOpsRoot,
+  list as listOps,
+  get as getOp,
+  listWithDiagnostics as listOpsWithDiagnostics,
+} from './registry/index.js';
+export * from './ops/gates/index.js';
+export * from './ops/ledger/index.js';
+export * from './ops/review/index.js';
+export * from './ops/merge/index.js';
+export * from './ops/ratchet/index.js';
+export * from './ops/sweep/index.js';
+export * from './ops/pr/index.js';
+export * from './ops/analyze/index.js';
+export * from './plans/index.js';
+export * from './driver/index.js';

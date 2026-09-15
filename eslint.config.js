@@ -6,11 +6,13 @@
 // kernel implementation code lands in phase 1.
 import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
+import noCliBeyondRegistryKernel from './eslint/rules/no-cli-beyond-registry-kernel.mjs';
 import noVendorSdkInKernel from './eslint/rules/no-vendor-sdk-in-kernel.mjs';
 
 const cq = {
   rules: {
     'no-vendor-sdk-in-kernel': noVendorSdkInKernel,
+    'no-cli-beyond-registry-kernel': noCliBeyondRegistryKernel,
   },
 };
 
@@ -35,6 +37,18 @@ export default [
     plugins: { cq },
     rules: {
       'cq/no-vendor-sdk-in-kernel': 'error',
+    },
+  },
+  {
+    // I1 boundary ("no-logic-in-CLI"): the CLI stays a thin dispatcher over
+    // the registry + kernel — ./ intra-CLI siblings, ../registry/,
+    // ../kernel/, node: builtins, and 'zod' ONLY in the schema-defining
+    // subcommand module (src/cli/run-plan.ts). NO ../ops, ../driver,
+    // ../harness, ../plans, or vendor packages.
+    files: ['src/cli/**', 'src/cli.ts'],
+    plugins: { cq },
+    rules: {
+      'cq/no-cli-beyond-registry-kernel': ['error', { zodFiles: ['src/cli/run-plan.ts'] }],
     },
   },
   {
