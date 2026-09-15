@@ -16,14 +16,14 @@ prevents opening the PR.
 
 ### Cycle 1
 
-- Gates before review (ratchet / lint / test / git diff --check exits):
+- Gates before review (ratchet / lint / test / diff checks: base-to-HEAD, staged, unstaged exits):
 - Command (verbatim):
 - Reviewed HEAD: <!-- sha at review time -->
 - Dirty-diff identity: <!-- sha256 of `git diff --binary --full-index HEAD` after staging own new files; "clean tree" if committed -->
 - Log location: <!-- saved NDJSON path, outside the repo -->
 - Completion:
 - Findings (critical / major / minor / trivial):
-- Gates after addressing (ratchet / lint / test / git diff --check exits):
+- Gates after addressing (ratchet / lint / test / diff checks: base-to-HEAD, staged, unstaged exits):
 
 ### Cycle 2
 
@@ -33,7 +33,7 @@ prevents opening the PR.
 - Log location:
 - Completion:
 - Findings (critical / major / minor / trivial):
-- Gates after addressing (ratchet / lint / test / git diff --check exits):
+- Gates after addressing (ratchet / lint / test / diff checks: base-to-HEAD, staged, unstaged exits):
 
 ## Adjudications — every critical/major; remaining minors if material
 
@@ -46,7 +46,9 @@ prevents opening the PR.
 - [ ] `node scripts/ratchet-typecheck.mjs` — exit 0
 - [ ] `npm run lint` — exit 0
 - [ ] `npm run test` — exit 0
-- [ ] `git diff --check` — clean
+- [ ] `git diff --check "$BASE" HEAD` — clean (immutable base above)
+- [ ] `git diff --check --cached` — clean (staged)
+- [ ] `git diff --check` — clean (unstaged tracked)
 
 CI on the PR: build, from-source smoke, denylist scan + self-test.
 

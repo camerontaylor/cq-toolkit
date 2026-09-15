@@ -37,7 +37,9 @@ full intended PR diff before creating a PR. Full protocol:
   results.
 - Run the deterministic gates three times: before cycle 1, after cycle-1
   addressing (before cycle 2), and after cycle-2 addressing. Both cycles
-  include their addressing.
+  include their addressing. Whitespace/conflict-marker checks cover the
+  pinned base through HEAD, staged changes, and unstaged tracked changes
+  separately (commands in the protocol §5); stage your own new files first.
 - Adjudicate every critical/major finding: fix the technically valid ones,
   reject false positives with concrete reasons. Minor findings only when
   materially beneficial. Record dispositions concisely.

@@ -116,9 +116,19 @@ never block indefinitely, never treat a long silence as completion.
 
 Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
-`node scripts/ratchet-typecheck.mjs`, `npm run lint`, `npm run test`,
-`git diff --check`. Capture actual exits (no pipeline tail masking). Both
-cycles include their addressing.
+`node scripts/ratchet-typecheck.mjs`, `npm run lint`, `npm run test`, and
+the three whitespace/conflict-marker checks below. Use the immutable `BASE`
+from §3 and stage your own new files before these checks so they are covered:
+
+```bash
+git diff --check "$BASE" HEAD  # committed PR changes
+git diff --check --cached     # staged changes, including new files
+git diff --check              # unstaged tracked changes
+```
+
+Record each command's actual exit (no pipeline tail masking). All three
+diff checks must pass; a clean worktree alone does not check committed
+changes. Both cycles include their addressing.
 
 1. **Cycle 1.** Run the review over the full intended diff. Build a task
    list from the findings. Address them: fix technically valid
@@ -174,7 +184,9 @@ its actual exits in the PR body:
 - `node scripts/ratchet-typecheck.mjs`
 - `npm run lint`
 - `npm run test`
-- `git diff --check` (whitespace/conflict-marker hygiene)
+- `git diff --check "$BASE" HEAD` (committed PR changes)
+- `git diff --check --cached` (staged changes)
+- `git diff --check` (unstaged tracked changes)
 
 CI runs on the PR: build, from-source smoke, denylist scan + self-test.
 Never alter source or baselines to hide a failure.
