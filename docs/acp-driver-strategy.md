@@ -276,7 +276,8 @@ leading token, with `kind` recorded alongside in the denial reason;
 conformance exercises the mapping through the fake server (§7). If the spike shows the vendor's titles are unstable
 free-text, the honest fallback is documented here FIRST: treat any
 unmatched title as a deny (fail-closed is always available), never as an
-allow.
+allow. If the vendor's titles prove unstable free-text, the same
+fail-closed fallback applies (standing rule — OQ-4 is answered).
 
 **The deny path lands in `WorkerResult.denials`:** the permission
 boundary is where the driver KNOWS both facts, so the frozen
