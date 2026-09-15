@@ -57,18 +57,19 @@ export class GhError extends Error {
  * The default GhFn: spawns `opts.bin`, else CQ_GH_BIN, else `'gh'` (CQ_GH_BIN
  * is the seam CLI-driven tests use to substitute a fake gh script), captures
  * both streams, and resolves with code + streams. The environment passes
- * through unchanged; args go to execve directly (no shell, no quoting). A
- * spawn failure (e.g. binary missing — no `close` may follow) resolves, not
- * rejects, with the shell's command-not-found code 127 and the OS error as
- * stderr: the seam is total.
+ * through unchanged, layered with `opts.env` overrides (the test seam for
+ * scenario/log plumbing like CQ_GH_SCENARIO and CQ_GH_LOG); args go to execve
+ * directly (no shell, no quoting). A spawn failure (e.g. binary missing — no
+ * `close` may follow) resolves, not rejects, with the shell's
+ * command-not-found code 127 and the OS error as stderr: the seam is total.
  */
-export function makeGhRunner(opts?: { bin?: string }): GhFn {
+export function makeGhRunner(opts?: { bin?: string; env?: Record<string, string> }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
       const bin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
       let stdout = '';
       let stderr = '';
-      const child = spawn(bin, args, { env: process.env });
+      const child = spawn(bin, args, { env: { ...process.env, ...opts?.env } });
       child.stdout.on('data', (chunk: Buffer) => {
         stdout += chunk.toString();
       });

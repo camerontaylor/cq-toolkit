@@ -1,0 +1,57 @@
+{
+  "routes": [
+    {
+      "when": { "subcommand": "graphql" },
+      "file": "e1-graphql.json"
+    },
+    {
+      "when": { "containsAll": ["pulls/7/comments"] },
+      "pages": [
+        [
+          { "id": 100, "node_id": "PRRT_1", "user": { "login": "reviewer" }, "body": "T1 root (REST copy)", "created_at": "2026-09-14T10:00:00Z" },
+          { "id": 101, "node_id": "N101", "user": { "login": "pr-author" }, "body": "fresh responder reply: fixed in 0123456", "created_at": "2026-09-15T09:00:00Z", "in_reply_to_id": 100 },
+          { "id": 102, "node_id": "N102", "user": { "login": "reviewer" }, "body": "reviewer follow-up on T1", "created_at": "2026-09-15T10:00:00Z", "in_reply_to_id": 100 },
+          { "id": 103, "node_id": "PRRT_3", "user": { "login": "someone-else" }, "body": "T3 root (REST copy)", "created_at": "2026-09-14T10:10:00Z" },
+          { "id": 104, "node_id": "PRRT_2", "user": { "login": "reviewer" }, "body": "T2 root (REST copy)", "created_at": "2026-09-14T10:05:00Z" },
+          { "id": 105, "node_id": "UNMATCHED_105", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:00:00Z" },
+          { "id": 106, "node_id": "UNMATCHED_106", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:01:00Z" },
+          { "id": 107, "node_id": "UNMATCHED_107", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:02:00Z" },
+          { "id": 108, "node_id": "UNMATCHED_108", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:03:00Z" },
+          { "id": 109, "node_id": "UNMATCHED_109", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:04:00Z" },
+          { "id": 110, "node_id": "UNMATCHED_110", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:05:00Z" },
+          { "id": 111, "node_id": "UNMATCHED_111", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:06:00Z" },
+          { "id": 112, "node_id": "UNMATCHED_112", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:07:00Z" },
+          { "id": 113, "node_id": "UNMATCHED_113", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:08:00Z" },
+          { "id": 114, "node_id": "UNMATCHED_114", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:09:00Z" },
+          { "id": 115, "node_id": "UNMATCHED_115", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:10:00Z" },
+          { "id": 116, "node_id": "UNMATCHED_116", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:11:00Z" },
+          { "id": 117, "node_id": "UNMATCHED_117", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:12:00Z" },
+          { "id": 118, "node_id": "UNMATCHED_118", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:13:00Z" },
+          { "id": 119, "node_id": "UNMATCHED_119", "user": { "login": "ghost" }, "body": "another tool's conversation", "created_at": "2026-09-14T12:14:00Z" }
+        ],
+        [
+          { "id": 120, "node_id": "N120", "user": { "login": "reviewer" }, "body": "T3 reply 1", "created_at": "2026-09-15T08:00:00Z", "in_reply_to_id": 103 },
+          { "id": 121, "node_id": "N121", "user": { "login": "someone-else" }, "body": "T3 reply 2", "created_at": "2026-09-15T08:10:00Z", "in_reply_to_id": 103 },
+          { "id": 122, "node_id": "N122", "user": { "login": "reviewer" }, "body": "T3 reply 3", "created_at": "2026-09-15T08:20:00Z", "in_reply_to_id": 103 },
+          { "id": 123, "node_id": "N123", "user": { "login": "someone-else" }, "body": "T3 reply 4", "created_at": "2026-09-15T08:30:00Z", "in_reply_to_id": 103 },
+          { "id": 124, "node_id": "N124", "user": { "login": "reviewer" }, "body": "T3 reply 5", "created_at": "2026-09-15T08:40:00Z", "in_reply_to_id": 103 },
+          { "id": 125, "node_id": "N125", "user": { "login": "someone-else" }, "body": "T3 reply 6", "created_at": "2026-09-15T08:50:00Z", "in_reply_to_id": 103 },
+          { "id": 126, "node_id": "N126", "user": { "login": "reviewer" }, "body": "T3 reply 7", "created_at": "2026-09-15T09:10:00Z", "in_reply_to_id": 103 },
+          { "id": 127, "node_id": "N127", "user": { "login": "someone-else" }, "body": "T3 reply 8", "created_at": "2026-09-15T09:20:00Z", "in_reply_to_id": 103 },
+          { "id": 128, "node_id": "N128", "user": { "login": "reviewer" }, "body": "T3 reply 9", "created_at": "2026-09-15T09:30:00Z", "in_reply_to_id": 103 },
+          { "id": 129, "node_id": "N129", "user": { "login": "someone-else" }, "body": "T3 reply 10", "created_at": "2026-09-15T09:40:00Z", "in_reply_to_id": 103 },
+          { "id": 130, "node_id": "N130", "user": { "login": "reviewer" }, "body": "T3 reply 11", "created_at": "2026-09-15T09:50:00Z", "in_reply_to_id": 103 }
+        ]
+      ]
+    },
+    {
+      "when": { "containsAll": ["issues/7/comments"] },
+      "pages": [
+        [
+          { "id": 900, "node_id": "IC_1", "user": { "login": "bystander" }, "body": "general PR conversation", "created_at": "2026-09-14T09:00:00Z" },
+          { "id": 901, "node_id": "IC_2", "user": { "login": "pr-author" }, "body": "thanks, tracking", "created_at": "2026-09-14T09:30:00Z" }
+        ]
+      ]
+    }
+  ]
+}
