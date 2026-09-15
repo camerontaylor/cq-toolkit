@@ -158,8 +158,26 @@ const COMMIT_MESSAGE = 'chore(ratchet): tighten baselines (proposeBaselineUpdate
 /** Default head-branch prefix. */
 const DEFAULT_HEAD_PREFIX = 'ratchet/propose';
 
-/** Head-prefix ref-name characters (plus the trailing-slash and '..' rules checked alongside). */
-const HEAD_PREFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./-]*$/;
+/** Branch ref-name characters (the remaining check-ref-format rules live in violatesRefRules). */
+const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./-]*$/;
+
+/**
+ * The check-ref-format rules that matter for a branch name (the proposal's
+ * head prefix AND its base): non-empty, ref-name characters only, no
+ * leading or trailing slash, no '//' doubled slash, no '..' walk-up, and no
+ * dot-leading path segment ('.hidden' cannot be a branch component).
+ * Anything violating this could not exist as a git ref at all — and could
+ * not ride clean markdown into the PR body either.
+ */
+function violatesRefRules(value: string): boolean {
+  return (
+    REF_PATTERN.test(value) === false ||
+    value.endsWith('/') ||
+    value.includes('//') ||
+    value.includes('..') ||
+    value.split('/').some((segment) => segment.startsWith('.'))
+  );
+}
 
 /** One tighten going into the proposal (superset of the outcome's applied row). */
 interface AppliedEntry {
@@ -227,19 +245,23 @@ export function createProposeBaselineUpdate(
       if (typeof input.headPrefix !== 'string') {
         return { status: 'failed', error: "ratchet: invalid input — 'headPrefix' must be a string" };
       }
-      // A git ref, not free text: ref-name characters only, no leading or
-      // trailing slash, no '..' walk-up (the check-ref-format rules that
-      // matter for a branch prefix) — else the head could not exist at all.
-      if (
-        HEAD_PREFIX_PATTERN.test(input.headPrefix) === false ||
-        input.headPrefix.endsWith('/') ||
-        input.headPrefix.includes('..')
-      ) {
+      // A git ref, not free text (see violatesRefRules) — else the head
+      // could not exist at all.
+      if (violatesRefRules(input.headPrefix)) {
         return {
           status: 'failed',
           error: "ratchet: invalid input — 'headPrefix' would form an invalid git ref",
         };
       }
+    }
+    // The base branch gets the same ref discipline: the proposal PR must
+    // target a ref that can exist, and a free-text base could smuggle
+    // markdown into the body's target line.
+    if (violatesRefRules(input.base)) {
+      return {
+        status: 'failed',
+        error: "ratchet: invalid input — 'base' would form an invalid git ref",
+      };
     }
     if (Array.isArray(input.improvements) === false) {
       return { status: 'failed', error: "ratchet: invalid input — 'improvements' must be an array" };
@@ -469,7 +491,7 @@ export function createProposeBaselineUpdate(
           `- \`${a.path}\` (${mdSafe(a.target)} / ${mdSafe(a.metric)}): ${a.oldValue} → ${a.newValue} (${a.direction})`,
       ),
       '',
-      `Target branch: \`${input.base}\`. The required I4 check (checkDiffMonotonicity) must pass before merge.`,
+      `Target branch: \`${mdSafe(input.base)}\`. The required I4 check (checkDiffMonotonicity) must pass before merge.`,
     ].join('\n');
 
     // Idempotency: find-then-upsert. A found PR is UPDATED on its own head —

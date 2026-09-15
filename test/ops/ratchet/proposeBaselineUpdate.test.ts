@@ -139,6 +139,7 @@ async function seedBaseline(
   metric: string,
   value: number,
   direction: Direction = 'lower-is-better',
+  unit?: string,
 ): Promise<string> {
   const rel = baselineRelPath(target, metric);
   await mkdir(join(ws, 'baselines'), { recursive: true });
@@ -150,6 +151,7 @@ async function seedBaseline(
       metric,
       direction,
       value,
+      unit,
       capturedAt: BASELINE_CAPTURED_AT,
     }),
     'utf8',
@@ -237,6 +239,38 @@ describe('proposeBaselineUpdate', () => {
     const content = effects.prs.get([...effects.prs.keys()][0])?.files[0]?.content ?? '';
     const onPr = JSON.parse(content) as { capturedAt?: string };
     expect(Number.isNaN(Date.parse(onPr.capturedAt ?? 'x'))).toBe(false);
+    // The clock-default bytes must be FULLY committed-evidence shaped: the
+    // strict parser accepts them, not merely a lenient Date.parse.
+    expect(() => parseBaseline(content)).not.toThrow();
+    expect(parseBaseline(content).capturedAt).toBe(onPr.capturedAt);
+  });
+
+  test('a tightening preserves the baseline unit ("errors" rides into the committed proposal bytes)', async () => {
+    await seedBaseline(TARGET, METRIC, 10, 'lower-is-better', 'errors');
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const expected: BaselineFile = {
+      schemaVersion: 1,
+      target: TARGET,
+      metric: METRIC,
+      direction: 'lower-is-better',
+      value: 7,
+      unit: 'errors',
+      capturedAt: CAPTURED_AT,
+    };
+    // Byte-render matches renderBaseline with the unit intact, and the
+    // proposal file parses back carrying that unit.
+    expect(pr?.files[0]?.content).toBe(renderBaseline(expected));
+    expect(parseBaseline(pr?.files[0]?.content ?? '').unit).toBe('errors');
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 10, newValue: 7 }] },
+    });
   });
 
   test('re-running the SAME improvements updates the SAME open PR — still exactly one, no second create', async () => {
@@ -752,7 +786,16 @@ describe('proposeBaselineUpdate', () => {
   test('headPrefix must form a valid git ref (arg-error table)', async () => {
     const effects = makeFakeEffects();
     const propose = createProposeBaselineUpdate(effects);
-    for (const bad of ['', '/leading', 'trailing/', 'has..dots', 'has space', 'under_score']) {
+    for (const bad of [
+      '',
+      '/leading',
+      'trailing/',
+      'ratchet//propose',
+      'ratchet/.hidden',
+      'has..dots',
+      'has space',
+      'under_score',
+    ]) {
       await expect(propose(proposeInput({ headPrefix: bad }))).resolves.toEqual({
         status: 'failed',
         error: "ratchet: invalid input — 'headPrefix' would form an invalid git ref",
@@ -783,6 +826,56 @@ describe('proposeBaselineUpdate', () => {
       status: 'ok',
       value: { head: expect.stringMatching(/^ratchet\/nightly\.v1-beta-[0-9a-f]{12}$/) },
     });
+  });
+
+  test('base gets the same git-ref discipline (arg-error table)', async () => {
+    const effects = makeFakeEffects();
+    const propose = createProposeBaselineUpdate(effects);
+    for (const bad of [
+      '',
+      '/lead',
+      'trail/',
+      'dou//ble',
+      'do..ts',
+      'seg/.hidden',
+      '.dot',
+      'has space',
+      'under_score',
+    ]) {
+      await expect(propose(proposeInput({ base: bad }))).resolves.toEqual({
+        status: 'failed',
+        error: "ratchet: invalid input — 'base' would form an invalid git ref",
+      });
+    }
+    // Ref validation fires at the boundary: no effects call ever happened.
+    expect(effects.findCalls()).toBe(0);
+    expect(effects.upsertCalls()).toBe(0);
+  });
+
+  test('a hostile base never reaches the PR body: refused at the boundary; a clean base renders in the target line', async () => {
+    // A base carrying markdown-breaking characters fails ref validation —
+    // it can never render into the body at all (the mdSafe render of base
+    // is defense-in-depth behind that refusal).
+    const hostile = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(hostile)(proposeInput({ base: 'ma`in\nbranch' })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: "ratchet: invalid input — 'base' would form an invalid git ref",
+    });
+    expect(hostile.upsertCalls()).toBe(0);
+    // A clean base renders in the body's target line and rides the upsert.
+    await seedBaseline(TARGET, METRIC, 10);
+    const clean = makeFakeEffects();
+    await createProposeBaselineUpdate(clean)(
+      proposeInput({
+        base: 'release/main',
+        improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
+      }),
+    );
+    const pr = clean.prs.get([...clean.prs.keys()][0]);
+    expect(pr?.body).toContain('Target branch: `release/main`.');
+    expect(pr?.base).toBe('release/main');
   });
 
   test('input validation: null input, non-string ws/base, non-finite value → failed verdicts', async () => {
