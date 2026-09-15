@@ -33,7 +33,7 @@ export interface TrailerRule {
   /** When true, absence of the trailer is a violation (default false — optional). */
   required?: boolean;
   /** Allowed values, checked exactly (trailer names like `Outcome`). */
-  oneOf?: string[];
+  oneOf?: readonly string[];
   /** Regex source the trailer's value must match (callers own trustworthiness). */
   pattern?: string;
 }
@@ -98,20 +98,28 @@ export interface CommitGateReport {
 export const DEFAULT_SUBJECT_PATTERN =
   '^(fix|feat|chore|test|docs|refactor|perf|build|ci|style)(\\([^)]+\\))?!?: .+';
 
-/** The shipped trailer taxonomy, frozen: Confidence and Tested required (numeric / non-empty), Not-tested optional, Outcome constrained to the implication table's values. */
-export const DEFAULT_COMMIT_TRAILERS: readonly TrailerRule[] = Object.freeze([
-  { name: 'Confidence', required: true, pattern: '^[0-9]+(\\.[0-9]+)?$' },
-  { name: 'Tested', required: true, pattern: '^.+$' },
-  { name: 'Not-tested', required: false, pattern: '^.+$' },
-  { name: 'Outcome', required: true, oneOf: ['broken-test', 'code-bug', 'todo'] },
-]);
+/** The shipped trailer taxonomy, DEEP-FROZEN (array, rule objects, and oneOf arrays): Confidence and Tested required (numeric / non-empty), Not-tested optional, Outcome constrained to the implication table's values. */
+export const DEFAULT_COMMIT_TRAILERS: readonly TrailerRule[] = Object.freeze(
+  [
+    { name: 'Confidence', required: true, pattern: '^[0-9]+(\\.[0-9]+)?$' },
+    { name: 'Tested', required: true, pattern: '^.+$' },
+    { name: 'Not-tested', required: false, pattern: '^.+$' },
+    {
+      name: 'Outcome',
+      required: true,
+      oneOf: Object.freeze(['broken-test', 'code-bug', 'todo']),
+    },
+  ].map((rule) => Object.freeze(rule)),
+);
 
-/** The shipped subject implications, frozen: what the Outcome says must be what the subject did. */
-export const DEFAULT_COMMIT_IMPLICATIONS: readonly SubjectImplication[] = Object.freeze([
-  { outcomeValue: 'broken-test', subjectPattern: '^fix\\(test\\):' },
-  { outcomeValue: 'code-bug', subjectPattern: '^fix(\\(|:)' },
-  { outcomeValue: 'todo', subjectPattern: '^chore\\(test\\): todo' },
-]);
+/** The shipped subject implications, DEEP-FROZEN (array and implication objects): what the Outcome says must be what the subject did. */
+export const DEFAULT_COMMIT_IMPLICATIONS: readonly SubjectImplication[] = Object.freeze(
+  [
+    { outcomeValue: 'broken-test', subjectPattern: '^fix\\(test\\):' },
+    { outcomeValue: 'code-bug', subjectPattern: '^fix(\\(|:)' },
+    { outcomeValue: 'todo', subjectPattern: '^chore\\(test\\): todo' },
+  ].map((implication) => Object.freeze(implication)),
+);
 
 /** The outcome trailer the default implication table speaks about. */
 export const DEFAULT_OUTCOME_TRAILER = 'Outcome';

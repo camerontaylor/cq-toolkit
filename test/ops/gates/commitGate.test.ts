@@ -7,7 +7,11 @@
 // trailer) and status discipline (ok:false is still a `status:'ok'` op;
 // only an uncompilable regex is `failed`). All pure — zero I/O.
 import { describe, expect, test } from 'vitest';
-import { commitGate } from '../../../src/ops/gates/commitGate.js';
+import {
+  DEFAULT_COMMIT_IMPLICATIONS,
+  DEFAULT_COMMIT_TRAILERS,
+  commitGate,
+} from '../../../src/ops/gates/commitGate.js';
 import type { CommitGateConfig } from '../../../src/ops/gates/commitGate.js';
 
 /** A full commit message: subject, body paragraph, trailing trailer block. */
@@ -349,6 +353,23 @@ describe('commitGate trailer-block parsing', () => {
 });
 
 describe('commitGate config genericity', () => {
+  test('the shipped defaults are DEEP-frozen: mutation attempts throw in strict mode', () => {
+    expect(Object.isFrozen(DEFAULT_COMMIT_TRAILERS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_COMMIT_TRAILERS[0])).toBe(true);
+    expect(Object.isFrozen(DEFAULT_COMMIT_IMPLICATIONS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_COMMIT_IMPLICATIONS[0])).toBe(true);
+    expect(() => {
+      (DEFAULT_COMMIT_TRAILERS[0] as { required: boolean }).required = false;
+    }).toThrow(TypeError);
+    expect(DEFAULT_COMMIT_TRAILERS[0]?.required).toBe(true);
+    const outcome = DEFAULT_COMMIT_TRAILERS.find((rule) => rule.name === 'Outcome');
+    expect(Object.isFrozen(outcome?.oneOf)).toBe(true);
+    expect(() => {
+      (outcome?.oneOf as string[]).push('shipping');
+    }).toThrow(TypeError);
+    expect(outcome?.oneOf).toEqual(['broken-test', 'code-bug', 'todo']);
+  });
+
   test('custom trailers REPLACE the shipped taxonomy: only custom rules are enforced', async () => {
     const config: CommitGateConfig = {
       trailers: [{ name: 'Reviewed-by', required: true, pattern: '^.+$' }],

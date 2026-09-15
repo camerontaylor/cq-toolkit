@@ -114,7 +114,7 @@ export const DEFAULT_SKIP_ONLY_PATTERN = '\\b(describe|it|test)\\s*\\.\\s*(skip|
  */
 export interface TamperConfig {
   /** Regex sources for what counts as a test file (see the shipped default). */
-  testFilePatterns?: string[];
+  testFilePatterns?: readonly string[];
   /** Flag whole deleted test files (default true). */
   detectDeletedTests?: boolean;
   /** Flag added skip/only markers (default true). */
@@ -130,7 +130,7 @@ export interface HackDetectorInput {
   /** The full unified diff text to scan (as `git diff` produces it). */
   diff: string;
   /** Suppression signatures; when supplied this list REPLACES the shipped defaults. */
-  suppressionPatterns?: SuppressionPattern[];
+  suppressionPatterns?: readonly SuppressionPattern[];
   /** Tamper-heuristic tuning; defaults per {@link TamperConfig}. */
   tamper?: TamperConfig;
 }
@@ -200,21 +200,9 @@ const TAUTOLOGY_RE = /\bexpect\((.*?)\)\.toBe\(((?:[^()]|\([^()]*\))*)\)/g;
  * `indeterminate` is reserved for non-blank input carrying NO diff
  * structure at all — "clean" must never be silently conflated with "nothing
  * recognizable to scan" (I5). `failed` is reserved for config whose regex
- * sources do not compile. Only ADDED lines are ever scanned; removed and
- * context lines are invisible to every heuristic.
- */
-/**
- * The `gates.hackDetector` op: `ok` in every case where the diff text was
- * scanned line-by-line — an EMPTY findings array is a clean diff, and
- * diff-shaped text that parses imperfectly is best-effort scanned (the op
- * is a scanner, not a validator: it never certifies diff well-formedness).
- * `indeterminate` is reserved for non-blank input carrying NO diff
- * structure at all — "clean" must never be silently conflated with
- * "nothing recognizable to scan" (I5). `failed` is reserved for config
- * whose regex sources do not compile, checked BEFORE the input-shape
- * guard so a config error is never masked by an input verdict. Only
- * ADDED lines are ever scanned; removed and context lines are invisible
- * to every heuristic.
+ * sources do not compile, checked BEFORE the input-shape guard so a config
+ * error is never masked by an input verdict. Only ADDED lines are ever
+ * scanned; removed and context lines are invisible to every heuristic.
  */
 export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input) => {
   const tamper = input.tamper ?? {};
@@ -268,6 +256,9 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let oldPath: string | null = null;
   let oldHeader: string | null = null;
   let newPath: string | null = null;
+  let renameFrom: string | null = null;
+  let renameFromHeader: string | null = null;
+  let renameTo: string | null = null;
   let inHunk = false;
   let newLine = 0;
   for (const line of diff.split(/\r?\n/)) {
@@ -275,10 +266,28 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       oldPath = null;
       oldHeader = null;
       newPath = null;
+      renameFrom = null;
+      renameFromHeader = null;
+      renameTo = null;
       inHunk = false;
       continue;
     }
     if (!inHunk) {
+      if (line.startsWith('rename from ') && renameFrom === null) {
+        renameFromHeader = line;
+        renameFrom = extendedHeaderPathOf(line.slice('rename from '.length));
+        continue;
+      }
+      if (line.startsWith('rename to ') && renameTo === null && renameFrom !== null) {
+        renameTo = extendedHeaderPathOf(line.slice('rename to '.length));
+        // A pure `git mv` (100% similarity) has NO ---/+++ headers and no
+        // hunks, so this is the section's ONLY removal evaluation; for a
+        // MODIFIED rename the later +++ route stays suppressed because
+        // renameTo is already set — one evaluation per section, no
+        // duplicate findings.
+        reportTestFileRemoval(findings, config, renameFrom, renameFromHeader, renameTo);
+        continue;
+      }
       if (line.startsWith('--- ')) {
         oldHeader = line;
         oldPath = headerPathOf(line.slice(4));
@@ -286,7 +295,9 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       }
       if (line.startsWith('+++ ')) {
         newPath = headerPathOf(line.slice(4));
-        reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
+        if (renameTo === null) {
+          reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
+        }
         continue;
       }
       const hunk = HUNK_HEADER_RE.exec(line);
@@ -321,10 +332,11 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
 
 /**
  * Removed-from-the-test-run detection: the OLD path matches a test-file
- * shape and the NEW path does not. Covers both deletion (`/dev/null` never
- * matches) and a rename OUT of test-land — either way the tests leave the
- * run, which is the tamper this guard exists for. A rename WITHIN test
- * patterns stays unflagged.
+ * shape and the NEW path does not. Covers deletion (`/dev/null` never
+ * matches), a rename OUT of test-land, and a pure `git mv` (which carries
+ * `rename from`/`rename to` extended headers and no hunks at all) — either
+ * way the tests leave the run, which is the tamper this guard exists for.
+ * A rename WITHIN test patterns stays unflagged.
  */
 function reportTestFileRemoval(
   findings: TamperFinding[],
@@ -408,13 +420,22 @@ function scanAddedLine(
   }
 }
 
-/** Path from a `---`/`+++` header body: `/dev/null`, or the path sans a/ b/ prefix. */
-function headerPathOf(rest: string): string {
+/**
+ * Path from a `rename from`/`rename to` header body: a bare repo-relative
+ * path (no a/ b/ prefix in git's extended headers), possibly quoted.
+ */
+function extendedHeaderPathOf(rest: string): string {
   let trimmed = rest.replace(/\t.*$/, '').trim();
   // git double-quotes paths containing spaces or special characters.
   if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
     trimmed = trimmed.slice(1, -1);
   }
+  return trimmed;
+}
+
+/** Path from a `---`/`+++` header body: `/dev/null`, or the path sans a/ b/ prefix. */
+function headerPathOf(rest: string): string {
+  const trimmed = extendedHeaderPathOf(rest);
   if (trimmed === '/dev/null') {
     return '/dev/null';
   }
@@ -426,25 +447,23 @@ function headerPathOf(rest: string): string {
 
 /**
  * Structural sniff for the I5 guard: does the text carry REAL unified-diff
- * structure — a `diff --git` header, an `@@` hunk header, or a
- * `---`/`+++` header PAIR? Bare +/- text alone is just prose with
- * decoration and never qualifies.
+ * structure — a `diff --git` header, a line matching the hunk-header SHAPE
+ * (any `@@`-prefixed prose line does not count), or a `---`/`+++` header
+ * PAIR on ADJACENT lines (a lone `--- ` never qualifies)? Anything else is
+ * prose with decoration and never certifies a scannable diff.
  */
 function looksLikeDiff(diff: string): boolean {
-  let sawMinusHeader = false;
-  let sawPlusHeader = false;
+  let previousWasMinusHeader = false;
   for (const line of diff.split(/\r?\n/)) {
-    if (line.startsWith('diff --git ') || line.startsWith('@@')) {
+    if (line.startsWith('diff --git ') || HUNK_HEADER_RE.test(line)) {
       return true;
     }
-    if (line.startsWith('--- ')) {
-      sawMinusHeader = true;
+    if (line.startsWith('+++ ') && previousWasMinusHeader) {
+      return true;
     }
-    if (line.startsWith('+++ ')) {
-      sawPlusHeader = true;
-    }
+    previousWasMinusHeader = line.startsWith('--- ');
   }
-  return sawMinusHeader && sawPlusHeader;
+  return false;
 }
 
 /** Error message of an unknown throwable, for `failed` results. */

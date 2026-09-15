@@ -11,6 +11,7 @@ import { describe, expect, test } from 'vitest';
 import {
   DEFAULT_SKIP_ONLY_PATTERN,
   DEFAULT_SUPPRESSION_PATTERNS,
+  DEFAULT_TEST_FILE_PATTERNS,
   hackDetector,
 } from '../../../src/ops/gates/hackDetector.js';
 import type { SuppressionPattern, TamperFinding } from '../../../src/ops/gates/hackDetector.js';
@@ -23,7 +24,7 @@ function fixture(name: string): string {
 /** The findings of a clean scan — asserts the op status is ok first. */
 async function findingsOf(
   diff: string,
-  suppressionPatterns?: SuppressionPattern[],
+  suppressionPatterns?: readonly SuppressionPattern[],
 ): Promise<TamperFinding[]> {
   const result = await hackDetector({ diff, suppressionPatterns });
   expect(result.status).toBe('ok');
@@ -52,11 +53,54 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
         file: 'src/legacy/printer.test.ts',
         line: null,
         pattern: '\\.test\\.[tj]sx?$',
-        snippet: '--- a/src/legacy/printer.test.ts',
+        snippet: 'rename from src/legacy/printer.test.ts',
         message:
           'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
       },
     ]);
+  });
+
+  test('rename-test-pure.diff → a pure git mv out of test-land is flagged (no ---/+++ headers)', async () => {
+    expect(await findingsOf(fixture('rename-test-pure.diff'))).toEqual([
+      {
+        kind: 'deleted-test-file',
+        file: 'src/legacy/printer.test.ts',
+        line: null,
+        pattern: '\\.test\\.[tj]sx?$',
+        snippet: 'rename from src/legacy/printer.test.ts',
+        message:
+          'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
+      },
+    ]);
+  });
+
+  test('a PURE rename WITHIN test patterns stays unflagged', async () => {
+    const diff = [
+      'diff --git a/src/legacy/printer.test.ts b/src/legacy/printer.e2e.test.ts',
+      'similarity index 100%',
+      'rename from src/legacy/printer.test.ts',
+      'rename to src/legacy/printer.e2e.test.ts',
+    ].join('\n');
+    expect(await findingsOf(diff)).toEqual([]);
+  });
+
+  test('a modified rename is evaluated ONCE (rename headers route; no +++ duplicate)', async () => {
+    const diff = [
+      'diff --git a/src/solo.test.ts b/src/solo.util.ts',
+      'similarity index 74%',
+      'rename from src/solo.test.ts',
+      'rename to src/solo.util.ts',
+      '--- a/src/solo.test.ts',
+      '+++ b/src/solo.util.ts',
+      '@@ -1,3 +1,3 @@',
+      ' const a = 1;',
+      '-const b = 2;',
+      '+const b = 3;',
+      ' export { a, b };',
+    ].join('\n');
+    const findings = await findingsOf(diff);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]?.file).toBe('src/solo.test.ts');
   });
 
   test('a rename WITHIN test patterns stays unflagged', async () => {
@@ -336,6 +380,18 @@ describe('hackDetector: suppression config', () => {
     ]);
   });
 
+  test('the frozen defaults pass STRAIGHT into the readonly config fields, no casts', async () => {
+    // A type-level pin: readonly string[] / readonly SuppressionPattern[]
+    // config fields must accept the frozen shipped defaults verbatim.
+    const direct = await hackDetector({
+      diff: fixture('suppression-added.diff'),
+      suppressionPatterns: DEFAULT_SUPPRESSION_PATTERNS,
+      tamper: { testFilePatterns: DEFAULT_TEST_FILE_PATTERNS },
+    });
+    const implicit = await hackDetector({ diff: fixture('suppression-added.diff') });
+    expect(direct).toEqual(implicit);
+  });
+
   test('a custom pattern source that does not compile is a `failed` op, never a crash', async () => {
     const result = await hackDetector({ diff: '+anything', suppressionPatterns: [{ name: 'bad', pattern: '(' }] });
     expect(result.status).toBe('failed');
@@ -462,6 +518,26 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
     });
   });
 
+  test('@@-bulleted prose is not diff structure: indeterminate', async () => {
+    const result = await hackDetector({
+      diff: 'meeting notes @@ everyone attends\naction items @@ follow up',
+    });
+    expect(result).toEqual({
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    });
+  });
+
+  test('a --- line with a NON-ADJACENT +++ is not diff structure: indeterminate', async () => {
+    const result = await hackDetector({
+      diff: '--- a/src/x.ts\nprose between the headers\n+++ b/src/x.ts\n+// @ts-ignore',
+    });
+    expect(result).toEqual({
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    });
+  });
+
   test('diff-shaped but broken text is best-effort scanned: ok with empty findings', async () => {
     expect(await findingsOf('diff --git a/x b/x\n@@ garbage @@\n+// @ts-ignore\n')).toEqual([]);
   });
@@ -492,6 +568,38 @@ describe('hackDetector: tamper toggles', () => {
       tamper: { detectDeletedTests: false, testFilePatterns: ['('] },
     });
     expect(result).toEqual({ status: 'ok', value: [] });
+  });
+
+  test('garbage skipOnlyPattern never compiles when the knob is off (lazy-compile symmetry)', async () => {
+    const result = await hackDetector({
+      diff: fixture('add-skip.diff'),
+      tamper: { detectNewSkipOnly: false, skipOnlyPattern: '(' },
+    });
+    expect(result).toEqual({ status: 'ok', value: [] });
+  });
+
+  test('a "\\ No newline at end of file" marker is metadata, never content or a line slot', async () => {
+    const diff = [
+      'diff --git a/src/tail.ts b/src/tail.ts',
+      'index 1111111..2222222 100644',
+      '--- a/src/tail.ts',
+      '+++ b/src/tail.ts',
+      '@@ -1,2 +1,2 @@',
+      ' const a = 1;',
+      '-const b = 2;',
+      '+// @ts-ignore',
+      '\\ No newline at end of file',
+    ].join('\n');
+    expect(await findingsOf(diff)).toEqual([
+      {
+        kind: 'suppression',
+        file: 'src/tail.ts',
+        line: 2,
+        pattern: '@ts-ignore',
+        snippet: '// @ts-ignore',
+        message: 'added suppression "@ts-ignore"',
+      },
+    ]);
   });
 
   test('an empty testFilePatterns list replaces the default shapes (no test-file match)', async () => {
