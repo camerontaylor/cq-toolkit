@@ -1,11 +1,14 @@
 // prWorktree — E3 slice 3 (goal E3; UC §2 row 38): resolve THE worktree for
-// a PR — reuse the tree already checked out on the PR's branch, else create
-// one. The PR'S HEAD REF IS TRUTH: `refs/pull/<pr>/head` is fetched from
-// origin before any resolution decision — it exists for EVERY PR, fork or
-// same-repo alike — so every path below acts on what the remote actually
-// has, not on local memory, and the local branch label follows the fetched
-// sha. One tree PER-PR, not per-batch — E4 dispatches batches sequentially
-// against this tree (I6 isolation is invocation-level, not tree-level).
+// a PR — reuse the tree already checked out on the PR's review branch, else
+// create one. The PR'S HEAD REF IS TRUTH: `refs/pull/<pr>/head` is fetched
+// from origin before any resolution decision — it exists for EVERY PR, fork
+// or same-repo alike — so every path below acts on what the remote actually
+// has, not on local memory. The LOCAL BRANCH IS A LABEL WE OWN, keyed by PR
+// (cq-review/pr-<n>): the PR's actual head lives at refs/pull/<n>/head and
+// is never checked out directly, so two PRs sharing a headRefName (forks,
+// stacked PRs) can never collide. One tree PER-PR, not per-batch — E4
+// dispatches batches sequentially against this tree (I6 isolation is
+// invocation-level, not tree-level).
 //
 // DOMAIN BOUNDARY (asserted, not incidental): this is the REVIEW-OPS
 // worktree — keyed by PR, rooted at `<repoRoot>/.cq-review-worktrees`. It is
@@ -15,37 +18,37 @@
 // suite pins this rule by name.
 //
 // Resolution order (each step pinned by a test):
-//   a. `git -C <repoRoot> fetch origin <headRefName>` — nonzero → THROW:
-//      the branch's truth is unavailable and nothing must be guessed.
+//   a. `git -C <repoRoot> fetch origin refs/pull/<pr>/head` — nonzero →
+//      THROW: the PR head's truth is unavailable and nothing must be guessed.
 //   b. Registry consult: an entry for the pr that still POINTS AT TRUTH
-//      (directory exists AND `git -C <entryPath> rev-parse --abbrev-ref
-//      HEAD` prints headRefName AND `git -C <entryPath> rev-parse HEAD`
-//      prints the fetched sha) → reuse it. A STALE entry is left in place
-//      until a fresh resolution succeeds — the prune happens only AFTER a
-//      successful create/register (the overwrite), so a run that wedges
-//      mid-flight leaves the machine-readable pointer intact for the next
-//      run instead of destroying it at the first failed check.
+//      (directory exists AND is inside worktreeRoot AND `git -C <entryPath>
+//      rev-parse --abbrev-ref HEAD` prints OUR LABEL (cq-review/pr-<n>) AND
+//      `git -C <entryPath> rev-parse HEAD` prints the fetched sha) → reuse
+//      it. A STALE entry is left in place until a fresh resolution succeeds
+//      — the prune happens only AFTER a successful create/register (the
+//      overwrite), so a run that wedges mid-flight leaves the machine-
+//      readable pointer intact for the next run instead of destroying it at
+//      the first failed check.
 //   c. Existing-worktree scan (`git worktree list --porcelain`, parsed
 //      blocks). The OWNERSHIP RULE: reuse is eligible only for trees INSIDE
-//      worktreeRoot — branch+sha-valid trees OUTSIDE the root are never
-//      claimed; they are surfaced in the result's `foreign` list (surface,
-//      never claim). Within the root, a candidate must match the branch AND
-//      sit at the fetched sha to be reused; a branch-matching tree at a
-//      STALE sha is this module's own round-1 leftovers — it is REMOVED
+//      worktreeRoot carrying OUR LABEL at the fetched sha — a foreign tree
+//      can never match, because it never carries our label (the foreign[]
+//      surfacing is kept as defense-in-depth). Within the root, our label
+//      at a STALE sha is this module's own leftovers — it is REMOVED
 //      non-forced (`worktree remove`, no --force; a dirty tree refuses and
 //      its stderr propagates as the throw — the safe outcome) so the create
-//      below can converge onto the same spot. Foreign trees are never
-//      removed.
-//   d. Create: `git -C <repoRoot> worktree add -B <headRefName>
+//      below can converge onto the same spot; so is ANY tree squatting on
+//      this PR's target path (a branch rename left it there). Foreign trees
+//      are never removed.
+//   d. Create: `git -C <repoRoot> worktree add -B cq-review/pr-<n>
 //      <worktreeRoot>/pr-<pr>-<sanitized-branch> <expectedSha>` — the `-B`
-//      (re)points the branch at the fetched truth and the new tree sits AT
+//      (re)points OUR LABEL at the fetched truth and the new tree sits AT
 //      the fetched sha, not at whatever the local ref remembered; register
 //      (overwriting any stale entry — the post-success prune) and return it
-//      as NOT reused. `add -B` refuses while ANY other tree holds the
-//      branch — including a foreign at-sha tree: the scan cannot satisfy
-//      reuse-in-root, the create fails with git's stderr naming the holder,
-//      and the human must free the branch (remove/relocate the foreign
-//      tree) or point worktreeRoot at the existing tree.
+//      as NOT reused. `add -B` refuses while ANY other tree holds the label
+//      — the create fails with git's stderr naming the holder, and the
+//      human must free the branch (remove/relocate the holder) or point
+//      worktreeRoot at the existing tree.
 //
 // The `[A-Za-z0-9._-]` sanitization: branch names are user data ("release/
 // 1.0 +fix me") and the worktree directory name must stay one path segment —
@@ -75,11 +78,21 @@ import type { GhFn } from './gh.js';
 export interface WorktreeRegistryEntry {
   /** Absolute worktree directory. */
   path: string;
-  /** The branch the entry believes is checked out there. */
+  /** The review branch LABEL the entry believes is checked out there (see reviewBranchFor). */
   branch: string;
   /** When the entry was (re)registered: the injected nowMs of that run. */
   createdAt: number;
 }
+
+/**
+ * The LOCAL branch label review ops owns: keyed by PR, never by the PR's
+ * headRefName. The PR's actual head lives at refs/pull/<n>/head and is
+ * never checked out directly — the label is ours to (re)point at the
+ * fetched sha, which keeps two PRs sharing a headRefName (forks, stacked
+ * PRs) from colliding: their labels — and therefore their trees — can
+ * never match across PRs.
+ */
+export const reviewBranchFor = (pr: number): string => `cq-review/pr-${pr}`;
 
 /**
  * The PR → worktree registry. Keys are PR numbers as DECIMAL STRINGS
@@ -154,33 +167,35 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     }
   };
   /**
-   * proper-lockfile lstats the locked target to track staleness, so an
-   * ABSENT registry is materialized as the valid empty map before locking
-   * (load treats a missing file as empty anyway; `{}` is its on-disk form).
+   * Materialize an ABSENT registry as the valid empty map. CALLED UNDER THE
+   * LOCK and NON-REPLACING (flag 'wx'): a concurrent creator's file is kept
+   * as-is (EEXIST), so a delayed creation can never clobber a populated map
+   * with {} — the CTX-6 ordering, preserved.
    */
   const ensureTarget = async (): Promise<void> => {
     try {
-      await stat(path);
+      await writeFile(path, `{}\n`, { encoding: 'utf8', flag: 'wx' });
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-        await writeFile(path, `{}\n`, 'utf8');
-        return;
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw err;
       }
-      throw err;
     }
   };
 
   /** Serialize every mutation behind the lockfile's bounded-retry acquire. */
   const withLock = async <T>(mutate: () => Promise<T>): Promise<T> => {
-    await ensureTarget();
     let release: (() => Promise<void>) | undefined;
     try {
+      // THE LOCK COMES FIRST: nothing touches the target before it is held.
+      // realpath:false lets proper-lockfile lock a NOT-YET-EXISTING target
+      // (the registry is materialized inside the critical section).
       release = await lock(path, {
         // A crashed holder's lock goes stale and may be broken after 10s.
         stale: 10_000,
         // Bounded acquire retries — a failure within the bound is LOUD
         // (thrown, naming the path), never an unserialized write.
         retries: { retries: 5, minTimeout: 25, maxTimeout: 200 },
+        realpath: false,
       });
     } catch (err) {
       throw new Error(
@@ -194,6 +209,7 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
       );
     }
     try {
+      await ensureTarget();
       return await mutate();
     } finally {
       await release();
@@ -425,13 +441,15 @@ export async function resolvePrWorktree(
     );
   }
   const expectedSha = fetchHead.stdout.trim();
+  // The LOCAL branch label we own (keyed by PR) — see reviewBranchFor.
+  const reviewBranch = reviewBranchFor(opts.pr);
 
   const map = await opts.registry.load();
 
   // (b) Registry consult — the entry must still POINT AT TRUTH: the
-  // directory exists AND git says headRefName is checked out there AND that
-  // checkout sits AT the fetched sha (a round-1 tree at a stale commit is
-  // exactly what this check exists to catch). A STALE entry is NOT pruned
+  // directory exists AND git says OUR LABEL (reviewBranch) is checked out
+  // there AND that checkout sits AT the fetched sha (a round-1 tree at a
+  // stale commit is exactly what this check exists to catch). A STALE entry is NOT pruned
   // here: the prune is the successful re-registration at the end (the
   // overwrite) — pruning up-front would destroy the machine-readable
   // pointer precisely when the run is about to wedge on a refused add.
@@ -447,7 +465,7 @@ export async function resolvePrWorktree(
       (await (async () => {
         const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
         const branch = await opts.run(branchArgs);
-        if (branch.code !== 0 || branch.stdout.trim() !== opts.headRefName) {
+        if (branch.code !== 0 || branch.stdout.trim() !== reviewBranch) {
           return false;
         }
         const headArgs = ['-C', entry.path, 'rev-parse', 'HEAD'];
@@ -455,12 +473,13 @@ export async function resolvePrWorktree(
         return head.code === 0 && head.stdout.trim() === expectedSha;
       })());
     if (valid) {
-      return { path: entry.path, reused: true, branch: opts.headRefName, foreign: [] };
+      return { path: entry.path, reused: true, branch: reviewBranch, foreign: [] };
     }
   }
 
   // (c) Existing-worktree scan — with the OWNERSHIP RULE and the refresh
-  // rule. A candidate on the PR branch is probed for the fetched sha:
+  // rule. A candidate carrying OUR LABEL is probed for the fetched sha (a
+  // foreign tree never carries the label, so it can never match):
   //   - INSIDE worktreeRoot + at sha  → OURS: reuse (register, return).
   //   - INSIDE worktreeRoot + stale   → OUR round-1 leftovers: remove them
   //     NON-FORCED so the create can converge onto the same spot (a dirty
@@ -488,19 +507,19 @@ export async function resolvePrWorktree(
     // reclaim regardless of its checked-out branch (the path is the PR's
     // slot, not the branch's).
     const atTargetPath = candidate.path === targetPath;
-    if (candidate.branch !== opts.headRefName && !atTargetPath) {
+    if (candidate.branch !== reviewBranch && !atTargetPath) {
       continue;
     }
     const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
     const head = await opts.run(headArgs);
     const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
     if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
-      if (candidate.branch === opts.headRefName && atSha) {
+      if (candidate.branch === reviewBranch && atSha) {
         foreign.push({ path: candidate.path, branch: candidate.branch });
       }
       continue;
     }
-    if (candidate.branch === opts.headRefName && atSha) {
+    if (candidate.branch === reviewBranch && atSha) {
       existing = candidate;
       break;
     }
@@ -516,32 +535,33 @@ export async function resolvePrWorktree(
     }
   }
   if (existing !== null) {
-    await opts.registry.update(key, { path: existing.path, branch: opts.headRefName, createdAt: opts.nowMs });
-    return { path: existing.path, reused: true, branch: opts.headRefName, foreign };
+    await opts.registry.update(key, { path: existing.path, branch: reviewBranch, createdAt: opts.nowMs });
+    return { path: existing.path, reused: true, branch: reviewBranch, foreign };
   }
 
   // (d) Create: one directory per PR, `pr-<pr>-<sanitized-branch>` (the PR
   // prefix disambiguates sanitize collisions like feat/x vs feat-x — see
   // the module doc), sanitized to a single boring path segment; the root is
-  // created on demand. `-B <headRefName> … <expectedSha>` (re)points the
-  // branch at the FETCHED COMMIT, so the new tree sits AT TRUTH rather than
-  // at whatever the local ref last remembered. Nonzero add → throw with
+  // created on demand. `-B <reviewBranch> … <expectedSha>` (re)points OUR
+  // LABEL at the FETCHED COMMIT, so the new tree sits AT TRUTH rather than
+  // at whatever the local ref last remembered (the label is pr-keyed — two
+  // PRs sharing a headRefName can never collide). Nonzero add → throw with
   // stderr (git's refusal names any foreign branch-holder) — nothing is
   // registered for a tree that does not exist, and any stale registry
   // entry was never pruned, so the pointer survives for the next run.
   await mkdir(worktreeRoot, { recursive: true });
   const wtPath = targetPath;
-  const addArgs = ['-C', opts.repoRoot, 'worktree', 'add', '-B', opts.headRefName, wtPath, expectedSha];
+  const addArgs = ['-C', opts.repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
   const add = await opts.run(addArgs);
   if (add.code !== 0) {
-    throw gitFail(`worktree add -B ${opts.headRefName} ${wtPath} ${expectedSha} failed`, add.code, add.stderr, addArgs);
+    throw gitFail(`worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed`, add.code, add.stderr, addArgs);
   }
   // The post-success prune: registering the fresh tree OVERWRITES any stale
   // entry — only now, with the new truth on disk, is the old pointer retired
   // (the update is a per-key load-merge-save: concurrent resolves for other
   // PRs never lose their entries to this write).
-  await opts.registry.update(key, { path: wtPath, branch: opts.headRefName, createdAt: opts.nowMs });
-  return { path: wtPath, reused: false, branch: opts.headRefName, foreign };
+  await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
+  return { path: wtPath, reused: false, branch: reviewBranch, foreign };
 }
 
 /**
