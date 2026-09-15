@@ -10,6 +10,14 @@
 // default. The mode is data (PlanBatchConfig), not a behavior switch buried
 // in code: R3 may tune the config AS DATA, but the default stays isolated.
 //
+// WORKTREE COMPOSITION (the I6 × E3 seam, stated precisely): in this phase,
+// isolated batches are strictly SEQUENTIAL consumers of the SHARED PER-PR
+// worktree that E3's prWorktree resolves — I6 isolation means a fresh
+// worker INVOCATION whose context is scoped by the dispatch log, NOT a
+// distinct tree per worker. Per-batch distinct trees (keying worktree
+// resolution by pr+batch) is the named phase-3 E4 dispatch decision if
+// parallel fixers ever land.
+//
 // What batches:
 //   - ONLY `verdict === 'actionable'` items. `responded` and `skip` are
 //     "nothing to do" (the responder holds the last word; bot notices /
@@ -18,7 +26,9 @@
 //     none of them may reach a fixer worker.
 //   - Isolated mode: one batch per actionable item, `worktreeHint: null` —
 //     the actual per-PR worktree resolution belongs to E3's `prWorktree`
-//     op; batches carry only the hint slot, never the worktree itself.
+//     op; batches carry only the hint slot, never the worktree itself, and
+//     isolated batches consume that one per-PR worktree strictly
+//     sequentially (see WORKTREE COMPOSITION above).
 //   - Shared mode: items grouped by `path` when sharedGroupBy is 'file'
 //     (stable: first-appearance order of paths; a null path is its OWN
 //     bucket — it never mixes with a concrete path), then every group is
@@ -48,9 +58,13 @@ import type { ClassifiedItem, Classification } from './classifyThreads.js';
  */
 export interface PlanBatchConfig {
   /**
-   * 'isolated' (default, I6): one batch per actionable item, each destined
-   * for its own fresh worktree/invocation. 'shared': items may share the
-   * PR worktree — grouped per config.sharedGroupBy.
+   * 'isolated' (default, I6): one batch per actionable item — a fresh
+   * worker invocation per item, dispatched SEQUENTIALLY against the shared
+   * per-PR worktree. I6 isolation is invocation + dispatch-log-scoped
+   * context, NOT a distinct tree per worker; per-batch distinct trees
+   * (worktree resolution keyed by pr+batch) are the named phase-3 E4
+   * dispatch decision. 'shared': items may share the PR worktree — grouped
+   * per config.sharedGroupBy.
    */
   worktreeMode: 'isolated' | 'shared';
   /**
@@ -84,7 +98,13 @@ export const defaultPlanBatchConfig: PlanBatchConfig = {
  * actual per-PR worktree is E3's `prWorktree` op's concern, not this
  * module's; shared batches hint at the single shared PR worktree. */
 export interface PlannedBatch {
-  /** Whether this batch wants an isolated worktree or the shared one. */
+  /**
+   * 'isolated' (default): one item, one fresh worker invocation — in this
+   * phase a SEQUENTIAL consumer of the shared per-PR worktree (isolation
+   * is invocation + dispatch-log-scoped context, NOT a distinct tree per
+   * worker; distinct per-batch trees are the named E4 dispatch decision).
+   * 'shared': multiple items, one shared worktree.
+   */
   mode: 'isolated' | 'shared';
   /** Batch-level worktree hint (see interface doc). Null when isolated. */
   worktreeHint: string | null;
@@ -133,7 +153,8 @@ export function planReviewBatch(
   const actionable = items.filter((item) => item.verdict === 'actionable');
 
   if (config.worktreeMode === 'isolated') {
-    // I6 default: one fresh isolated invocation per actionable item.
+    // I6 default: one fresh isolated invocation per actionable item,
+    // dispatched sequentially against the shared per-PR worktree.
     return actionable.map((item) => ({
       mode: 'isolated' as const,
       worktreeHint: null,

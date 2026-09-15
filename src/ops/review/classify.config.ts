@@ -106,23 +106,42 @@ export const defaultClassifyConfig: ClassifyConfig = {
   // phrasing (that is how humans write real feedback). R3 refines AS DATA,
   // under the same anchoring rule.
   skipPatterns: [
-    // "CodeRabbit ... skipped ..." — the bot punted on this PR.
-    /\bCodeRabbit\b.*\bskipped\b/i,
+    // "CodeRabbit ... skipped ..." — the bot punted on this PR. Built in the
+    // SAME family form as its siblings (it used to be the one unanchored,
+    // unbounded pattern, and a human mentioning CodeRabbit mid-sentence
+    // alongside "skipped" was eaten): identity at LINE START (every line,
+    // `m`), the `(?!-)` hyphenated-mention guard, and a bounded [^\n]{0,80}
+    // window before the skip verb.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\bskipped\b/im,
     // A known bot/tool identity at LINE START followed within one line by
-    // "failed"/"error" — the tool's own failure notice. The trailing \b
-    // after the identity mirrors the `\bCodeRabbit\b` shape, and the
-    // `(?!-)` guard keeps a HYPHENATED tool-name MENTION from reading as
-    // the tool speaking ("Codex-style tooling failed us here — please fix
-    // the harness manually." is a human's sentence; \b alone is satisfied
-    // before the hyphen and would eat it).
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:failed|error)\b/i,
-    // Tooling self-skip caused by a configuration/setup problem.
-    /\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/i,
+    // "failed"/"error" — the tool's own failure notice. The `m` flag makes
+    // ^ match at EVERY line start, so a notice landing on line 2+ of a
+    // multi-line comment (a bot that appends its failure below a preamble)
+    // still fires. The trailing \b after the identity mirrors the
+    // `\bCodeRabbit\b` shape, and the `(?!-)` guard keeps a HYPHENATED
+    // tool-name MENTION from reading as the tool speaking ("Codex-style
+    // tooling failed us here — please fix the harness manually." is a
+    // human's sentence; \b alone is satisfied before the hyphen and would
+    // eat it).
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:failed|error)\b/im,
+    // Tooling self-skip caused by a configuration/setup problem — a known
+    // bot/tool identity at LINE START (every line, via `m`), same anchoring
+    // as its siblings: a human's "This configuration error makes skipping
+    // validation unsafe" is exactly how real feedback reads, so the old
+    // mid-line form silently ate it (Codex, PR71). The `(?!-)` guard after
+    // the identity mirrors the failure-notice pattern above — a hyphenated
+    // tool-name MENTION ("Codex-style tooling hit a configuration problem,
+    // so we're skipping …") is a human's sentence, not the tool speaking.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/im,
     // A bot/tool identity LEADING the line delivering its self-skip
     // verdict ("CodeRabbit is skipping this PR", "Codex: not reviewing
-    // until CI settles") — identity-anchored so a human's "I'm not
-    // reviewing the migrations this pass, but …" is never eaten.
-    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/i,
+    // until CI settles") — identity-anchored, on EVERY line (`m`), so a
+    // human's "I'm not reviewing the migrations this pass, but …" is never
+    // eaten. The `(?!-)` guard after the identity mirrors its siblings — a
+    // hyphenated tool-name MENTION ("Codex-style tooling is not reviewing
+    // generated files correctly") is a human's sentence, not the tool
+    // speaking.
+    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b(?!-)[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
   ],
   responderIs: 'pr-author',
   // Unknown timestamp = brand-new for ordering purposes: an un-timestamped

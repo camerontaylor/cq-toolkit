@@ -1,4 +1,4 @@
-// review op family barrel — goals E1+E2 (address-review fetch + classify
+// review op family barrel — goals E1+E2+E3 (address-review fetch + classify
 // lanes): re-export only, no logic. ./threads.js is the shared review-thread
 // vocabulary — the single surface the merge ops family counts unresolved
 // threads through (WS-F imports nothing else from review/); ./gh.js is the
@@ -34,3 +34,37 @@ export type { ClassifiedItem, Classification, ThreadVerdict } from './classifyTh
 export { classifyThreads } from './classifyThreads.js';
 export type { PlanBatchConfig, PlannedBatch } from './planReviewBatch.js';
 export { defaultPlanBatchConfig, planReviewBatch } from './planReviewBatch.js';
+// E3 — the close-out half of the review loop: batch actions as data with
+// push-before-post ordering + dispatch replay (replyAndResolve), the
+// REST-counted anti-hallucination verify with its explicit NO PROGRESS
+// contract (verifyReviewOutcome), and per-PR worktree resolution with the
+// registry (prWorktree — origin branch is truth, never the sweep worktree).
+export type {
+  DispatchLog,
+  DispatchRecord,
+  IssueCommentAction,
+  ReplyAndResolveOpts,
+  ReplyAndResolveResult,
+  ResolveThreadAction,
+  ReviewAction,
+  ReviewReplyAction,
+} from './replyAndResolve.js';
+export { fileDispatchLog, replyAndResolve } from './replyAndResolve.js';
+export type {
+  PrSnapshot,
+  ProgressReason,
+  SnapshotPrStateOpts,
+  VerifyOutcome,
+} from './verifyReviewOutcome.js';
+export { snapshotPrState, verifyPrOutcome } from './verifyReviewOutcome.js';
+export type {
+  PrWorktreeOpts,
+  RegistryMap,
+  WorktreeRegistry,
+  WorktreeRegistryEntry,
+} from './prWorktree.js';
+export {
+  fileWorktreeRegistry,
+  removePrWorktree,
+  resolvePrWorktree,
+} from './prWorktree.js';
