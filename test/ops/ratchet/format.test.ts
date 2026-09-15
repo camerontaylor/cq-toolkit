@@ -151,12 +151,12 @@ describe('parseBaseline rejections', () => {
 
 describe('baselineRelPath', () => {
   test.each([
-    ['typecheck', 'typecheck-count', 'baselines/typecheck--typecheck-count--f818e46f24dc.json'],
-    ['Src/Kernel', 'Typecheck Count', 'baselines/src-kernel--typecheck-count--ca5599f16a99.json'],
-    ['  spaced  target  ', 'metric!!', 'baselines/spaced-target--metric--e720baedc948.json'],
-    ['A//B', 'C--D', 'baselines/a-b--c-d--63e50bf9095e.json'],
-    ['---lead---', '___trail___', 'baselines/lead--trail--ce9c228bc566.json'],
-    ['Ünicode Târget', 'métric', 'baselines/nicode-t-rget--m-tric--d5aaf618a6b2.json'],
+    ['typecheck', 'typecheck-count', 'baselines/typecheck--typecheck-count--7caef1e76077.json'],
+    ['Src/Kernel', 'Typecheck Count', 'baselines/src-kernel--typecheck-count--93aceaac2de8.json'],
+    ['  spaced  target  ', 'metric!!', 'baselines/spaced-target--metric--3c41aca96a84.json'],
+    ['A//B', 'C--D', 'baselines/a-b--c-d--c1e23fc740c4.json'],
+    ['---lead---', '___trail___', 'baselines/lead--trail--020a02ae9fbf.json'],
+    ['Ünicode Târget', 'métric', 'baselines/nicode-t-rget--m-tric--536a3544d515.json'],
   ])('target %j + metric %j → %j', (target, metric, expected) => {
     expect(baselineRelPath(target, metric)).toBe(expected);
   });
@@ -167,12 +167,24 @@ describe('baselineRelPath', () => {
 
   test('sanitization collisions stay distinct: the disambiguator hashes the RAW pair', () => {
     // Both sanitize to src-kernel / m, but the raw pairs differ.
-    expect(baselineRelPath('src/kernel', 'm')).toBe('baselines/src-kernel--m--1f3222c9fccf.json');
-    expect(baselineRelPath('src-kernel', 'm')).toBe('baselines/src-kernel--m--8007c124e9e7.json');
+    expect(baselineRelPath('src/kernel', 'm')).toBe('baselines/src-kernel--m--c5a017414243.json');
+    expect(baselineRelPath('src-kernel', 'm')).toBe('baselines/src-kernel--m--b180868681af.json');
     expect(baselineRelPath('src/kernel', 'm')).not.toBe(baselineRelPath('src-kernel', 'm'));
-    expect(baselineRelPath('src/a.ts', 'm')).toBe('baselines/src-a-ts--m--1876373ace6e.json');
-    expect(baselineRelPath('src-a.ts', 'm')).toBe('baselines/src-a-ts--m--2194db1df002.json');
+    expect(baselineRelPath('src/a.ts', 'm')).toBe('baselines/src-a-ts--m--abd1fa9cf408.json');
+    expect(baselineRelPath('src-a.ts', 'm')).toBe('baselines/src-a-ts--m--cec0ee3a4ce6.json');
     expect(baselineRelPath('src/a.ts', 'm')).not.toBe(baselineRelPath('src-a.ts', 'm'));
+  });
+
+  test('raw pairs containing NUL stay distinct (canonical-JSON digest input)', () => {
+    // Under a NUL-delimited digest input these two pairs hashed the same
+    // bytes; the canonical-JSON encoding is injective, so they cannot. Both
+    // sanitize to the same readable segments ('a' / 'x'), so only the
+    // digest tells them apart.
+    const pathA = baselineRelPath('a\u0000-', 'x');
+    const pathB = baselineRelPath('a', '-\u0000x');
+    expect(pathA).not.toBe(pathB);
+    expect(pathA).toBe('baselines/a--x--df7fef1ed594.json');
+    expect(pathB).toBe('baselines/a--x--196e0c1abf6d.json');
   });
 
   const LONG_PATH_TARGET = `src/${'a/b/'.repeat(99)}deep.ts`; // 411 chars of deep nesting

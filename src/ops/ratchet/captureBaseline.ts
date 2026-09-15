@@ -84,7 +84,7 @@ export interface CaptureBaselineInput {
 export type SourceCatalog = ReadonlyMap<string, MetricSource>;
 
 export interface CaptureBaselineOutcome {
-  /** Repo-relative baseline path, e.g. 'baselines/typecheck--typecheck-count--f818e46f24dc.json'. */
+  /** Repo-relative baseline path, e.g. 'baselines/typecheck--typecheck-count--7caef1e76077.json'. */
   path: string;
   value: number;
   /** The previously recorded value; null when none existed. */

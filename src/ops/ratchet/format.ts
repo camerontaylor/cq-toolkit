@@ -146,11 +146,17 @@ function sanitizeSegment(raw: string): string {
  * 12-hex (48-bit) disambiguator over the RAW (unsanitized) pair: distinct
  * originals stay collision-resistant in their baseline paths even when
  * sanitization collapses them ('src/kernel' and 'src-kernel' both sanitize
- * to 'src-kernel'). NUL-separated so ('ab', 'c') and ('a', 'bc') hash
- * differently. Deterministic: same pair, same digest.
+ * to 'src-kernel'). The digest input is the canonical JSON of the raw pair
+ * (JSON.stringify([target, metric])) — an injective encoding, so even a raw
+ * pair containing NUL itself cannot alias a different pair (a
+ * NUL-delimited concatenation could: ('a\0-', 'x') vs ('a', '-\0x')).
+ * Deterministic: same pair, same digest.
  */
 function pathDigest(target: string, metric: string): string {
-  return createHash('sha256').update(`${target}\u0000${metric}`, 'utf8').digest('hex').slice(0, 12);
+  return createHash('sha256')
+    .update(JSON.stringify([target, metric]), 'utf8')
+    .digest('hex')
+    .slice(0, 12);
 }
 
 /**
