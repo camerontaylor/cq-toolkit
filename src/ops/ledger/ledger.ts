@@ -20,8 +20,11 @@
 //     read or persist), never a fabricated ok and never a thrown error
 //     across the op seam.
 import type { Op } from '../../kernel/types.js';
+import { sortEntries } from './order.js';
+// TYPE-ONLY import of the store format: erased at compile time, so this
+// module has ZERO runtime import of ./store.js and its optional node:fs
+// adapter never loads into pure decision-op consumers.
 import type { LedgerEntry, LedgerFile } from './store.js';
-import { sortEntries } from './store.js';
 
 /**
  * Recurrence thresholds. The invariant suppressAt < escalateAt is validated
@@ -56,6 +59,17 @@ export const DEFAULT_THRESHOLD: Readonly<LedgerThresholds> = Object.freeze({
 export interface LedgerStore {
   load(): LedgerFile;
   save(file: LedgerFile): void;
+  /**
+   * Optional mutual exclusion around the record op's load→mutate→save
+   * critical section. Sync or thenable (the op awaits the result):
+   * {@link pathLedgerStore} implements it with proper-lockfile, so
+   * concurrent recorders of one storePath — including across processes —
+   * cannot lose increments. A store WITHOUT `lock` is SINGLE-CALLER by
+   * contract: concurrent records through it may lose updates and that is
+   * the store's declared operating mode, not the op's concern. The
+   * read-only query never takes the lock.
+   */
+  lock?: <T>(fn: () => T) => T | Promise<T>;
 }
 
 /**
@@ -70,9 +84,9 @@ export interface LedgerRecordInput {
   storePath: string;
   /** The error signature to record (1..500 chars). */
   signature: string;
-  /** Owning component; backfilled onto the entry only when it has none. */
+  /** Owning component (≤ 200 chars); backfilled onto the entry only when it has none. */
   component?: string;
-  /** Free-form note; backfilled onto the entry only when it has none. */
+  /** Free-form note (≤ 500 chars); backfilled onto the entry only when it has none. */
   note?: string;
   /** Per-call threshold overrides (resolved pair validated). */
   thresholds?: { suppressAt?: number; escalateAt?: number };
@@ -111,6 +125,12 @@ export interface LedgerView {
 /** Library-level signature bound, mirroring the registry schema's bound. */
 const SIGNATURE_MAX_CHARS = 500;
 
+/** Library-level component bound, mirroring the registry schema's bound. */
+const COMPONENT_MAX_CHARS = 200;
+
+/** Library-level note bound, mirroring the registry schema's bound. */
+const NOTE_MAX_CHARS = 500;
+
 /**
  * Build the `ledger.record` op over an input-driven store selector. The
  * selector receives the op input and returns the store to use — the
@@ -120,13 +140,17 @@ const SIGNATURE_MAX_CHARS = 500;
  *
  * Per call: load (a missing ledger starts empty), find the signature —
  * new → count 1, inserted in canonical order; existing → count + 1, with
- * component/note backfilled only onto fields that are absent — then persist.
- * A record always changes the ledger (the count grows), so the op always
- * saves; there is no unchanged fast path to suppress. Result mapping:
- * count < escalateAt → `ok` with the new count; count ≥ escalateAt →
- * `needs-human` whose reason names signature, count, and threshold. An
- * invalid signature or resolved-threshold pair, or a store load/save
- * failure, is `failed` — never a throw across the op seam.
+ * component/note backfilled only onto fields that are absent — then
+ * persist. The WHOLE load→mutate→save critical section runs inside
+ * `store.lock` when the store provides one (awaited; a store without
+ * `lock` is single-caller by contract), so concurrent records of one
+ * storePath cannot lose increments. A record always changes the ledger
+ * (the count grows), so the op always saves; there is no unchanged fast
+ * path to suppress. Result mapping: count < escalateAt → `ok` with the
+ * new count; count ≥ escalateAt → `needs-human` whose reason names
+ * signature, count, and threshold. An invalid signature, field bound, or
+ * resolved-threshold pair, or a lock/store fault, is `failed` — never a
+ * throw across the op seam.
  */
 export function makeLedgerRecord(
   storeFor: (input: LedgerRecordInput) => LedgerStore,
@@ -135,38 +159,59 @@ export function makeLedgerRecord(
     const thresholds = resolvedThresholdsOrFault(input.thresholds);
     if ('fault' in thresholds) return { status: 'failed', error: thresholds.fault };
     const { escalateAt } = thresholds.thresholds;
-    const signatureFault = signatureFaultOf(input.signature);
-    if (signatureFault !== null) return { status: 'failed', error: signatureFault };
+    const boundaryFault =
+      signatureFaultOf(input.signature) ??
+      lengthFaultOf('component', input.component, COMPONENT_MAX_CHARS) ??
+      lengthFaultOf('note', input.note, NOTE_MAX_CHARS);
+    if (boundaryFault !== null) return { status: 'failed', error: boundaryFault };
     let store: LedgerStore;
-    let file: LedgerFile;
     try {
       store = storeFor(input);
-      file = store.load();
     } catch (err) {
       return { status: 'failed', error: `ledger: could not load the error ledger — ${messageOf(err)}` };
     }
-    const entries = file.entries;
-    const index = entries.findIndex((entry) => entry.signature === input.signature);
-    let updated: LedgerEntry;
-    let nextEntries: LedgerEntry[];
-    if (index === -1) {
-      updated = { signature: input.signature, count: 1 };
-      if (input.component !== undefined) updated.component = input.component;
-      if (input.note !== undefined) updated.note = input.note;
-      nextEntries = sortEntries([...entries, updated]);
-    } else {
-      const existing = entries[index] as LedgerEntry;
-      updated = { ...existing, count: existing.count + 1 };
-      if (updated.component === undefined && input.component !== undefined) {
-        updated.component = input.component;
+    // The critical section is deliberately ALL-SYNC (load, mutate, save):
+    // within a process it cannot interleave; the lock makes it exclusive
+    // across processes (pathLedgerStore) and serializing for locking fakes.
+    const applyRecord = (): LedgerEntry => {
+      let file: LedgerFile;
+      try {
+        file = store.load();
+      } catch (err) {
+        throw new StoreFault(`ledger: could not load the error ledger — ${messageOf(err)}`);
       }
-      if (updated.note === undefined && input.note !== undefined) updated.note = input.note;
-      nextEntries = entries.map((entry, i) => (i === index ? updated : entry));
-    }
+      const entries = file.entries;
+      const index = entries.findIndex((entry) => entry.signature === input.signature);
+      let updated: LedgerEntry;
+      let nextEntries: LedgerEntry[];
+      if (index === -1) {
+        updated = { signature: input.signature, count: 1 };
+        if (input.component !== undefined) updated.component = input.component;
+        if (input.note !== undefined) updated.note = input.note;
+        nextEntries = sortEntries([...entries, updated]);
+      } else {
+        const existing = entries[index] as LedgerEntry;
+        updated = { ...existing, count: existing.count + 1 };
+        if (updated.component === undefined && input.component !== undefined) {
+          updated.component = input.component;
+        }
+        if (updated.note === undefined && input.note !== undefined) updated.note = input.note;
+        nextEntries = entries.map((entry, i) => (i === index ? updated : entry));
+      }
+      try {
+        store.save({ version: 1, entries: nextEntries });
+      } catch (err) {
+        throw new StoreFault(`ledger: could not save the error ledger — ${messageOf(err)}`);
+      }
+      return updated;
+    };
+    const { lock } = store;
+    let updated: LedgerEntry;
     try {
-      store.save({ version: 1, entries: nextEntries });
+      updated = lock !== undefined ? await lock(applyRecord) : applyRecord();
     } catch (err) {
-      return { status: 'failed', error: `ledger: could not save the error ledger — ${messageOf(err)}` };
+      if (err instanceof StoreFault) return { status: 'failed', error: err.message };
+      return { status: 'failed', error: `ledger: could not update the error ledger — ${messageOf(err)}` };
     }
     return updated.count >= escalateAt
       ? {
@@ -247,6 +292,22 @@ function signatureFaultOf(signature: string): string | null {
   }
   return null;
 }
+
+/** Boundary validation of an optional bounded field: at most `max` chars when present. */
+function lengthFaultOf(field: string, value: string | undefined, max: number): string | null {
+  if (value !== undefined && value.length > max) {
+    return `ledger: ${field} exceeds ${String(max)} characters (${String(value.length)})`;
+  }
+  return null;
+}
+
+/**
+ * A store fault raised INSIDE the record critical section, carrying its
+ * already-formatted `failed` message: the outer lock wrapper rethrows it
+ * verbatim so a load fault stays a load fault (and a save fault a save
+ * fault) even when a store lock wraps the section.
+ */
+class StoreFault extends Error {}
 
 /** Error message of an unknown throwable, for `failed` results. */
 function messageOf(err: unknown): string {

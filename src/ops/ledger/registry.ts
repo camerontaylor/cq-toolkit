@@ -34,17 +34,17 @@ export const LedgerThresholdsOverrideSchema = z
 /**
  * Registry-time mirror of {@link LedgerRecordInput}: the full input, and
  * only it. `storePath` is REQUIRED — the registry-bound store is built per
- * dispatch from this path. `signature` is bounded at 1..500: an empty
- * signature is noise, and an unbounded one would let one input bloat the
- * committed file. Strict: an unknown key must fail loudly, not be silently
- * stripped.
+ * dispatch from this path. String fields are bounded: an empty signature
+ * is noise, and unbounded signature (500) / component (200) / note (500)
+ * would let one input bloat the committed file. Strict: an unknown key
+ * must fail loudly, not be silently stripped.
  */
 export const LedgerRecordInputSchema: z.ZodType<LedgerRecordInput> = z
   .object({
     storePath: z.string().min(1),
     signature: z.string().min(1).max(500),
-    component: z.string().optional(),
-    note: z.string().optional(),
+    component: z.string().max(200).optional(),
+    note: z.string().max(500).optional(),
     thresholds: LedgerThresholdsOverrideSchema.optional(),
   })
   .strict();

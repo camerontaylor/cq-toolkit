@@ -341,3 +341,101 @@ describe('ledger.query — read-only, deterministic, canonical', () => {
     );
   });
 });
+
+describe('ledger.record — component/note bounds (mirroring the registry schema)', () => {
+  test('an oversized component or note is failed without touching the store', async () => {
+    const store = memoryStore();
+    await expect(record(store, { signature: 'sig-a', component: 'c'.repeat(201) })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: component exceeds 200 characters (201)',
+    });
+    await expect(record(store, { signature: 'sig-a', note: 'n'.repeat(501) })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: note exceeds 500 characters (501)',
+    });
+    expect(store.saves()).toBe(0);
+  });
+
+  test('component at exactly 200 and note at exactly 500 are accepted', async () => {
+    const store = memoryStore();
+    await expect(
+      record(store, { signature: 'sig-a', component: 'c'.repeat(200), note: 'n'.repeat(500) }),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+  });
+});
+
+describe('ledger.record — the store lock (concurrent records of one storePath)', () => {
+  /**
+   * A store whose lock queues each critical section behind the previous one
+   * and delays acquisition by a tick — the async-delayed interleaving
+   * window the review describes. Within a single process a sync load→save
+   * batch cannot interleave anyway; the lock's lost-update value is
+   * CROSS-PROCESS (pathLedgerStore binds proper-lockfile). What this pins
+   * here is that the op routes the WHOLE load→mutate→save through the lock
+   * and AWAITS it: every parallel record comes back with its own numeric
+   * count and the file ends at exactly N.
+   */
+  function lockingStore(entries: LedgerEntry[] = []): LedgerStore & { lockCalls: () => number } {
+    let file: LedgerFile = { version: 1, entries };
+    let lockCallCount = 0;
+    let tail: Promise<unknown> = Promise.resolve();
+    const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+    return {
+      load: () => structuredClone(file),
+      save: (next) => {
+        file = structuredClone(next);
+      },
+      lock: (fn) => {
+        lockCallCount++;
+        const run = tail.then(async () => {
+          await delay(2);
+          return fn();
+        });
+        tail = run.catch(() => undefined);
+        return run;
+      },
+      lockCalls: () => lockCallCount,
+    };
+  }
+
+  test('8 parallel records through a locking store end at count 8, one lock call per record', async () => {
+    const store = lockingStore();
+    const record = makeLedgerRecord(() => store);
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => record({ storePath: 'unused-by-the-fake', signature: 'sig-a' })),
+    );
+    // Each record observed its OWN increment — the counts 1..8 each appear
+    // exactly once (ok values for counts 1–2, the reason string above that).
+    const observed = results
+      .map((result) =>
+        result.status === 'ok'
+          ? result.value.count
+          : result.status === 'needs-human'
+            ? Number(/count (\d+)/.exec(result.reason)?.[1])
+            : Number.NaN,
+      )
+      .sort((a, b) => a - b);
+    expect(observed).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(results.filter((result) => result.status === 'needs-human')).toHaveLength(6);
+    const query = await makeLedgerQuery(() => store)({ storePath: 'unused-by-the-fake' });
+    expect(query.status === 'ok' && query.value.entries).toEqual([{ signature: 'sig-a', count: 8 }]);
+    expect(store.lockCalls()).toBe(8);
+  });
+
+  test('a throwing lock is failed (the op ran but could not enter the critical section)', async () => {
+    const store: LedgerStore = {
+      load: () => ({ version: 1, entries: [] }),
+      save: () => undefined,
+      lock: () => {
+        throw new Error('lock stolen');
+      },
+    };
+    await expect(makeLedgerRecord(() => store)({ storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: could not update the error ledger — lock stolen',
+    });
+  });
+});

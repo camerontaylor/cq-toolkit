@@ -20,10 +20,16 @@
 // is the sync node:fs adapter the registry importer binds — the only
 // node:fs touch in the lane's storage (sync for v1: ledger entries are one
 // small JSON file, and the ops are async at the Op boundary regardless).
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
+import { lockSync } from 'proper-lockfile';
+import type { LockOptions } from 'proper-lockfile';
 import { z } from 'zod';
 import type { LedgerStore } from './ledger.js';
+import { compareSignatures, sortEntries } from './order.js';
+
+/** The canonical signature order lives in the tiny pure ./order.js (see its header). */
+export { sortEntries } from './order.js';
 
 /** One recurring error signature and its recurrence count (≥ 1). */
 export interface LedgerEntry {
@@ -54,28 +60,6 @@ export class LedgerFormatError extends Error {
   }
 }
 
-/**
- * The canonical signature order: byte-wise ascending. Implemented as
- * code-point comparison, which is exactly UTF-8 byte order (a UTF-8
- * property), so the sort does not drift with locale collation and a
- * non-BMP signature orders by its true bytes, not its surrogate pair.
- */
-export function sortEntries(entries: readonly LedgerEntry[]): LedgerEntry[] {
-  return [...entries].sort((a, b) => compareSignatures(a.signature, b.signature));
-}
-
-/** Code-point (UTF-8 byte order) comparison of two signatures. */
-function compareSignatures(a: string, b: string): number {
-  const shared = Math.min(a.length, b.length);
-  for (let i = 0; i < shared; i++) {
-    const ca = a.codePointAt(i) as number;
-    const cb = b.codePointAt(i) as number;
-    if (ca !== cb) return ca < cb ? -1 : 1;
-    if (ca > 0xffff) i++; // consumed a surrogate pair as one code point
-  }
-  return a.length - b.length;
-}
-
 const LedgerEntrySchema: z.ZodType<LedgerEntry> = z
   .object({
     signature: z.string().min(1),
@@ -95,11 +79,13 @@ const LedgerFileSchema: z.ZodType<LedgerFile> = z
 /**
  * Serialize a ledger deterministically: entries sorted by
  * {@link sortEntries}, keys in schema order (signature, count, component,
- * note), 2-space indent, exactly one trailing newline. Write-side guards
- * reject what the output's own parser would reject — a non-integer count
- * (JSON.stringify would render NaN to null) and duplicate signatures (the
- * store never collapses them; the ledger owns normalization) — so
- * `parseLedger(serializeLedger(file))` holds for every accepted file.
+ * note), 2-space indent, exactly one trailing newline. The write side
+ * guards ONLY what its own output could not parse back — a non-integer
+ * count (JSON.stringify would render NaN to null) and duplicate signatures
+ * (the store never collapses them; the ledger owns normalization). It does
+ * NOT re-validate the rest of the schema: a wrong version or an empty
+ * signature passes through, so file-level trust is the caller's —
+ * parseLedger is the strict entry for anything read back.
  */
 export function serializeLedger(file: LedgerFile): string {
   const seen = new Set<string>();
@@ -174,8 +160,13 @@ export function parseLedger(text: string): LedgerFile {
  * `path`. Load of a missing file yields the empty ledger (missing entries
  * start empty — recording is the only writer); any other read fault, or a
  * corrupt committed file (via parseLedger), throws — the ops map that to
- * `failed`, the read-only query likewise. Save serializes through
- * {@link serializeLedger} (byte-deterministic) and mkdir -p's the parent.
+ * `failed`, the read-only query likewise. Save is an ATOMIC publish
+ * ({@link publishAtomic}): unique temp file, exclusive create, rename over
+ * the target — a crash mid-write can never leave a torn ledger at the path,
+ * and a pre-planted symlink there is replaced, never followed. `lock` (see
+ * {@link LedgerStore.lock}) is implemented with proper-lockfile's sync
+ * adapter around the ledger path, so record's load→mutate→save critical
+ * section is mutually exclusive ACROSS processes too.
  */
 export function pathLedgerStore(path: string): LedgerStore {
   return {
@@ -190,15 +181,97 @@ export function pathLedgerStore(path: string): LedgerStore {
       return parseLedger(text);
     },
     save: (file) => {
+      publishAtomic(path, serializeLedger(file));
+    },
+    lock: (fn) => {
+      // The lockfile (a <path>.lock directory) needs its parent to exist —
+      // on a first record the ledger file itself does not yet.
       mkdirSync(dirname(path), { recursive: true });
-      writeFileSync(path, serializeLedger(file), 'utf8');
+      const release = lockSync(path, LOCK_OPTIONS);
+      try {
+        return fn();
+      } finally {
+        try {
+          release();
+        } catch {
+          // Best-effort release: fn's outcome (already computed) outranks a
+          // compromised-lock release fault; staleness bounds any leftover.
+        }
+      }
     },
   };
+}
+
+/**
+ * proper-lockfile tuning: no realpath (the ledger may not exist yet on a
+ * first record) and bounded staleness. Acquire is FAIL-FAST — the sync
+ * adapter supports no retries — so a contended lock surfaces as the op's
+ * `failed` (naming the lock fault) instead of a hang; the staleness check
+ * clears locks left by crashed processes.
+ */
+const LOCK_OPTIONS: LockOptions = {
+  realpath: false,
+  stale: 5000,
+};
+
+/** Temp-name salt: uniqueness within a process; EEXIST collisions advance the counter, bounded. */
+let tempFileCounter = 0;
+
+/**
+ * Atomic publish (the ratchet lane's captureBaseline pattern, implemented
+ * fresh for this family): bytes land in a unique temp file in the SAME
+ * directory — created EXCLUSIVELY ('wx'), so a pre-planted symlink at the
+ * temp path fails the open (EEXIST) instead of being followed — then rename
+ * over the target. rename swaps the directory ENTRY, so a symlink at the
+ * target is replaced, never written through, and a crash mid-write can
+ * never leave a torn file at the target path. Bounded EEXIST retries, then
+ * the fault surfaces; a failed publish removes only a temp THIS call
+ * created (best-effort) and rethrows the primary fault.
+ */
+function publishAtomic(targetPath: string, bytes: string): void {
+  mkdirSync(dirname(targetPath), { recursive: true });
+  let tempPath: string | undefined;
+  let tempCreated = false;
+  try {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      tempPath = join(
+        dirname(targetPath),
+        `.${basename(targetPath)}.${process.pid}.${++tempFileCounter}.tmp`,
+      );
+      try {
+        writeFileSync(tempPath, bytes, { flag: 'wx' });
+        tempCreated = true;
+        break;
+      } catch (err) {
+        if (!isEexist(err) || attempt === 4) throw err;
+      }
+    }
+    if (tempCreated === false || tempPath === undefined) {
+      throw new Error('all temp candidates already existed');
+    }
+    renameSync(tempPath, targetPath);
+  } catch (err) {
+    if (tempPath !== undefined && tempCreated) {
+      try {
+        unlinkSync(tempPath);
+      } catch {
+        // Best-effort cleanup: the primary fault is rethrown below.
+      }
+    }
+    throw err;
+  }
 }
 
 /** True when a thrown value is a node:fs ENOENT (the missing-file case). */
 function isEnoent(err: unknown): boolean {
   return (
     typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'ENOENT'
+  );
+}
+
+/** True when a thrown value is a node:fs EEXIST (temp-name collision). */
+function isEexist(err: unknown): boolean {
+  return (
+    typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'EEXIST'
   );
 }
