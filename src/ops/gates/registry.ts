@@ -53,8 +53,11 @@ export const BaselineProbeInputSchema: z.ZodType<BaselineProbeInput> = z
     }),
     bail: z
       .object({
-        bailPatterns: z.array(z.string()).optional(),
-        maxBailRetries: z.number().int().nonnegative().optional(),
+        // min(1): an empty pattern makes includes('') vacuously true —
+        // a permanent bail on every attempt.
+        bailPatterns: z.array(z.string().min(1)).optional(),
+        // Bounded at the JSON boundary: retries multiply wall clock.
+        maxBailRetries: z.number().int().min(0).max(10).optional(),
       })
       .strict()
       .optional(),

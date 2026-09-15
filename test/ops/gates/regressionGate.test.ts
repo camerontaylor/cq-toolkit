@@ -4,8 +4,10 @@
 // shuffled permutations of identical sets always yield no-regression, and
 // injecting one novel failure into any permutation always yields regression
 // with exactly that failure reported. All pure — zero I/O, zero subprocesses.
+import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
+import { adapterByName, parseCheckOutput } from '../../../src/ops/gates/index.js';
 import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
 
 /** A FailureSet over the given failures, tool/exitCode filler. */
@@ -234,6 +236,32 @@ describe('regressionGate decision table', () => {
     expect(result.detail).toContain('unobservable exit code');
   });
 
+  test('I5 guard: null exit code discredits a NON-EMPTY final (partial evidence) → indeterminate', async () => {
+    const result = await regressionGate({
+      base: setOf([]),
+      final: { tool: 'eslint', failures: [failureOf({ line: 10 })], exitCode: null },
+    });
+    expect(result.status).toBe('indeterminate');
+    if (result.status !== 'indeterminate') {
+      return;
+    }
+    expect(result.detail).toContain('final');
+    expect(result.detail).toContain('partial evidence');
+  });
+
+  test('I5 guard: null exit code discredits a NON-EMPTY base → indeterminate', async () => {
+    const result = await regressionGate({
+      base: { tool: 'eslint', failures: [failureOf({ line: 10 })], exitCode: null },
+      final: setOf([]),
+    });
+    expect(result.status).toBe('indeterminate');
+    if (result.status !== 'indeterminate') {
+      return;
+    }
+    expect(result.detail).toContain('base');
+    expect(result.detail).toContain('partial evidence');
+  });
+
   test('a custom config tightens buckets: lineBucketSize 1 makes line 5 → 6 a regression', async () => {
     const config = { lineBucketSize: 1 };
     const loose = await regressionGate({
@@ -342,5 +370,47 @@ describe('regressionGate ordering-invariance property (seeded, deterministic)', 
       expect(result.value.novelFailures[0]).toBe(novelFailure);
       expect(result.value.preExistingCount).toBe(seedFailures.length);
     }
+  });
+});
+
+describe('regressionGate × real vitest fixture (adapter → gate integration)', () => {
+  // The REAL committed capture, through the REAL adapter entry point — this
+  // pins adapter→gate shape compatibility against drift. The fixture's
+  // failure is location-less (line null), so the content-matching regime is
+  // exercised end to end.
+  const stdout = readFileSync(new URL('../../fixtures/check-outputs/vitest.json', import.meta.url), 'utf8');
+  const parsed = parseCheckOutput(adapterByName('vitest-json'), { stdout, stderr: '', exitCode: 1 });
+  if (parsed.verdict !== 'parsed') {
+    throw new Error('the committed vitest fixture must parse');
+  }
+  const fixtureFailure: CheckFailure = parsed.set.failures[0];
+
+  test('a hand-built base with different content → regression with the REAL fixture failure as novel', async () => {
+    const handBuilt: CheckFailure = { ...fixtureFailure, message: 'a different test failed' };
+    const result = await regressionGate({
+      base: { tool: 'vitest', failures: [handBuilt], exitCode: 1 },
+      final: parsed.set,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('regression');
+    expect(result.value.novelFailures).toEqual([fixtureFailure]);
+    expect(result.value.fixedFailures).toEqual([handBuilt]);
+  });
+
+  test('the same fixture failure on both sides → no-regression (adapter shape is gate-compatible)', async () => {
+    const result = await regressionGate({
+      base: { tool: 'vitest', failures: [{ ...fixtureFailure }], exitCode: 1 },
+      final: parsed.set,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('no-regression');
+    expect(result.value.novelFailures).toEqual([]);
+    expect(result.value.preExistingCount).toBe(1);
   });
 });

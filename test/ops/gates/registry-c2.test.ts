@@ -37,13 +37,19 @@ describe('BaselineProbeInputSchema (full input, and only it)', () => {
     });
   });
 
-  test('accepts the optional bail object (patterns, nonneg int retries)', () => {
+  test('accepts the optional bail object (patterns, bounded retry count)', () => {
     expect(
       BaselineProbeInputSchema.safeParse({
         ...VALID,
         bail: { bailPatterns: ['custom doom'], maxBailRetries: 0 },
       }).success,
     ).toBe(true);
+  });
+
+  test('bounds bail values: maxBailRetries 10 accepted, 11 rejected; an empty pattern is rejected', () => {
+    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 10 } }).success).toBe(true);
+    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 11 } }).success).toBe(false);
+    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { bailPatterns: [''] } }).success).toBe(false);
   });
 
   test('REJECTS a smuggled baseline or cache field (strict unknown keys, I7)', () => {

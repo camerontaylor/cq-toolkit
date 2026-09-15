@@ -177,10 +177,11 @@ describe('fingerprintFailure location-less content matching (line null keys by m
     ).toBe(canonical);
   });
 
-  test('messages are capped at 200 chars: the 200-char prefix is the identity', () => {
-    const atCap = fingerprintFailure(failureOf({ ...locationLess, message: 'a'.repeat(200) }));
-    expect(fingerprintFailure(failureOf({ ...locationLess, message: 'a'.repeat(250) }))).toBe(atCap);
-    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${'a'.repeat(199)}b` }))).not.toBe(atCap);
+  test('long messages keep full-length distinctness: NO prefix-collision cap', () => {
+    const sharesPrefix = `suite > ${'a'.repeat(200)}`;
+    const first = fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}one` }));
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}two` }))).not.toBe(first);
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}one` }))).toBe(first);
   });
 
   test('case is preserved: distinct test names that differ only in case stay distinct', () => {

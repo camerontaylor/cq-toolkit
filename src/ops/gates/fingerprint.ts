@@ -50,9 +50,6 @@ export interface FingerprintConfig {
 const FNV_OFFSET_BASIS = 0x811c9dc5;
 const FNV_PRIME = 0x01000193;
 
-/** Location-less messages are keyed by their first line, capped at this many characters. */
-const MESSAGE_COMPONENT_CAP = 200;
-
 /** Config with defaults applied — the single place bucket sizes are chosen. */
 function resolveConfig(cfg?: FingerprintConfig): Required<FingerprintConfig> {
   return {
@@ -132,15 +129,13 @@ function failureKey(f: CheckFailure, cfg: Required<FingerprintConfig>): string {
 
 /**
  * Location-less identity: first line of the message, whitespace runs
- * collapsed, trimmed, capped at 200 chars. Case is PRESERVED — distinct
- * test names that differ only in case stay distinct.
+ * collapsed, trimmed. Case is PRESERVED — distinct test names that differ
+ * only in case stay distinct. NO length cap: hashing is O(n) anyway, and a
+ * cap would only mint a prefix-collision class (two long distinct names
+ * sharing a prefix would key identically).
  */
 function normalizeMessage(message: string): string {
-  return message
-    .split('\n', 1)[0]
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, MESSAGE_COMPONENT_CAP);
+  return message.split('\n', 1)[0].replace(/\s+/g, ' ').trim();
 }
 
 /** Backslashes to posix separators, then strip `rootDir` (also posix-normalized) when the path is under it. */
