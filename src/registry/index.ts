@@ -9,9 +9,11 @@
 //   - `name`       — the globally unique op name (unique across ALL families).
 //   - `inputSchema`— a zod schema validating the JSON-serializable op input
 //                    before dispatch.
-//   - `importer`   — `() => Promise<Op>`; the op module
-//                    `src/ops/<family>/<name>.ts` DEFAULT-exports the op
-//                    function, and `importer` lazily dynamic-imports it.
+//   - `importer`   — `() => Promise<Op>`; canonical form
+//                    `async () => (await import('./<name>.js')).default` —
+//                    the op module `src/ops/<family>/<name>.ts` DEFAULT-exports
+//                    the op function, and the importer unwraps the module
+//                    namespace to it (lazy: the module loads only on dispatch).
 //
 // Aggregation here NEVER imports an op module or a family registry module at
 // construction: importing this module does no fs work and no dynamic imports.
