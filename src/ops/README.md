@@ -22,7 +22,13 @@ follows this; the central registry and the CLI discover families through it):
   `export *` line per family).
 - The central aggregation (src/registry) scans the ops root at runtime —
   one level of family directories — and TOLERATES families whose
-  registry.ts has not landed yet (the import rejection simply contributes
-  no entries), but THROWS on malformed entries (non-array registry export,
-  missing name, schema without `.parse`, non-function importer) or a
-  duplicate op name across families. Results are cached per resolved root.
+  registry.ts has not landed yet (only a not-found naming the requested
+  `registry.js` itself counts as absent; a present-but-broken registry
+  throws loudly), but THROWS on malformed entries (non-array registry
+  export, missing name, schema without `.parse`, non-function importer) or
+  a duplicate op name across families. Results are cached per resolved
+  root. Consumers reach the registry through the root barrel as
+  `listOps`/`getOp` (aliased — the generic `list`/`get` names stay off the
+  barrel to avoid star-export collisions with family exports) or import
+  `src/registry/index.js` directly; family-facing TYPE imports come from
+  the kernel types (src/kernel/types.js) or `src/registry/types.js`.

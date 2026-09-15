@@ -21,10 +21,18 @@
 // directory scan of the ops root (one level: family directories), then a lazy
 // dynamic import of each family's `registry.js`, then (only when an op is
 // actually dispatched) the entry's own `importer()` pulls the op module in.
-// Missing family registries are expected (families land in later phases): an
-// import that rejects simply contributes no entries. Defects that DO surface
-// loudly: a registry export that is not an array, a malformed entry, or a
-// duplicate op name across families — all throw immediately.
+// ABSENT vs BROKEN (the tolerance is narrow): an ABSENT family registry is
+// expected (families land in later phases) and contributes no entries — but
+// only a not-found rejection whose resolution target IS the requested family
+// `registry.js` itself is treated as absent (classifier mirrors the SDK
+// presence idiom: code ERR_MODULE_NOT_FOUND + `Cannot find module '<path>'`,
+// or the module runner's `Could not resolve "<path>"`). A PRESENT-but-broken
+// registry — a syntax error, an evaluation throw, a not-found for a
+// TRANSITIVE dependency of the registry module, any other rejection — throws
+// loudly, naming the family, the requested path, and the original message
+// (attached as `cause`). Defects that also surface loudly: a registry export
+// that is not an array, a malformed entry, or a duplicate op name across
+// families — all throw immediately.
 //
 // Results are cached per resolved ops root (as a promise), so repeated
 // list()/get() calls do not rescan or re-import.
@@ -69,6 +77,27 @@ export async function get(
   return (await list(opts)).find((entry) => entry.name === name);
 }
 
+/**
+ * Classify ONE family-registry import rejection: 'absent' ONLY for the known
+ * resolution-error shapes naming the REQUESTED registry path itself as the
+ * quoted resolution target — node's `ERR_MODULE_NOT_FOUND` +
+ * `Cannot find module '<path>'` (or the module runner's
+ * `Could not resolve "<path>"`). Everything else — a not-found for a
+ * TRANSITIVE dependency of the registry module (the requested path appears
+ * only as the IMPORTING module, never as the quoted target), a syntax error,
+ * an evaluation throw, junk — is 'broken'.
+ */
+function isAbsentFamilyRegistry(err: unknown, target: string): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  const message = (err as { message?: unknown }).message;
+  if (typeof message !== 'string') return false;
+  return (
+    (code === 'ERR_MODULE_NOT_FOUND' && message.includes(`Cannot find module '${target}'`)) ||
+    message.includes(`Could not resolve "${target}"`)
+  );
+}
+
 /** One directory scan + lazy family-registry imports, per resolved root. */
 async function scanOps(root: string): Promise<OpRegistryEntry[]> {
   let dirents: Dirent[];
@@ -89,11 +118,19 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
   for (const family of families) {
     // Plain string concatenation into import(): TypeScript must NOT
     // statically resolve this specifier — families are discovered at runtime.
+    const registryPath = root + '/' + family + '/registry.js';
     let mod: unknown;
     try {
-      mod = await import(root + '/' + family + '/registry.js');
-    } catch {
-      continue; // family registry absent — the family lands in a later phase
+      mod = await import(registryPath);
+    } catch (err) {
+      if (isAbsentFamilyRegistry(err, registryPath)) {
+        continue; // absent family registry — the family lands in a later phase
+      }
+      throw new Error(
+        `op family '${family}': registry module ${registryPath} failed to load ` +
+          `(broken registry): ${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
     }
     const registry = (mod as { registry?: unknown }).registry;
     if (!Array.isArray(registry)) {

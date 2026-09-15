@@ -9,10 +9,15 @@
 // this registry. Discovery is lazy: importing this module does no fs work and
 // no dynamic imports; the first listPlans()/getPlan() call scans this
 // directory (same directory this file lives in), dynamic-imports every
-// sibling `*.js` file except `registry.js`, `index.js`, and `*.test.js`, and
-// collects the modules that export a valid `plan`. A sibling without a
-// `plan` export is simply not a plan module; a malformed `plan` export or a
-// duplicate plan name throws immediately.
+// sibling module file in BOTH layouts — `*.js` (the compiled dist layout)
+// and `*.ts` (the source layout, exactly what phase-3 lanes add; a `.d.ts`
+// declaration file is not a module and is never imported) — except the
+// reserved stems `registry` and `index` (whatever their extension) and
+// `*.test.*` siblings, and collects the modules that export a valid `plan`.
+// The discovered filename is imported AS-IS: under vitest a `.ts` import
+// transforms fine, and in dist the only siblings present are `.js`. A
+// sibling without a `plan` export is simply not a plan module; a malformed
+// `plan` export or a duplicate plan name throws immediately.
 //
 // Results are cached per resolved plans root (as a promise), so repeated
 // listPlans()/getPlan() calls do not rescan or re-import.
@@ -57,6 +62,18 @@ export async function getPlan(
   return (await listPlans(opts)).find((entry) => entry.name === name);
 }
 
+/**
+ * The module stem of a discovered sibling filename, or `undefined` when the
+ * file is not an importable plan-module candidate: only `.js` (dist layout)
+ * and `.ts` (source layout) qualify — a `.d.ts` declaration file is
+ * ambient typing, never a module.
+ */
+function planModuleStem(file: string): string | undefined {
+  if (file.endsWith('.d.ts')) return undefined;
+  if (file.endsWith('.js') || file.endsWith('.ts')) return file.slice(0, -3);
+  return undefined;
+}
+
 /** One directory scan + lazy sibling imports, per resolved root. */
 async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
   let dirents: Dirent[];
@@ -69,13 +86,16 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     throw err;
   }
   const files = dirents
-    .filter((dirent) => dirent.isFile() && dirent.name.endsWith('.js'))
+    .filter((dirent) => dirent.isFile() && planModuleStem(dirent.name) !== undefined)
     .map((dirent) => dirent.name)
     .sort();
   const entries: PlanRegistryEntry[] = [];
   const fileOf = new Map<string, string>(); // plan name -> module (integrity)
   for (const file of files) {
-    if (file === 'registry.js' || file === 'index.js' || file.endsWith('.test.js')) {
+    // Reserved names are skipped by STEM, whatever the layout's extension,
+    // and so are test siblings in either layout (`foo.test.js`/`foo.test.ts`).
+    const stem = planModuleStem(file) ?? '';
+    if (stem === 'registry' || stem === 'index' || stem.endsWith('.test')) {
       continue;
     }
     // Plain string concatenation into import(): TypeScript must NOT
