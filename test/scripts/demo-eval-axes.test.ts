@@ -112,8 +112,10 @@ describe.skipIf(!existsSync(join(ROOT, 'dist', 'index.js')))('demo-eval-axes: th
   it('#30 discriminator: a zai-only selection demands only ZAI_API_KEY, never DEEPSEEK_API_KEY', () => {
     // No keys in env at all: the OLD unconditional gate listed BOTH key vars
     // here; the selective gate must name ZAI_API_KEY only (the glm cells
-    // never contact DeepSeek).
-    const res = runDemo(['--only', 'glm-4.6']);
+    // never contact DeepSeek). The --only substring is the CURRENT cell id
+    // (the cells now carry the served model ids — glm-5.3-flash, not the
+    // requested glm-4.6): exactly one zai cell matches.
+    const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
     expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
     expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
     expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
@@ -122,8 +124,9 @@ describe.skipIf(!existsSync(join(ROOT, 'dist', 'index.js')))('demo-eval-axes: th
   it('a selected deepseek cell still demands DEEPSEEK_API_KEY (refusal precedes any dispatch)', () => {
     // ZAI_API_KEY='x' is never used: the credential gate refuses before
     // makeDriver — the selected deepseek cells are never constructed, no
-    // network is touched, no paid call is made.
-    const res = runDemo(['--only', 'deepseek-chat'], { ZAI_API_KEY: 'x' });
+    // network is touched, no paid call is made. (The current cell id is
+    // deepseek-flash — the served id — matched by substring.)
+    const res = runDemo(['--only', 'deepseek-flash'], { ZAI_API_KEY: 'x' });
     expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
     expect(res.stderr).toContain('DEEPSEEK_API_KEY');
   });

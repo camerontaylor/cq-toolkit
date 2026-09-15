@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "target": "typecheck",
+  "metric": "typecheck-count",
+  "direction": "lower-is-better",
+  "value": 0,
+  "unit": "errors",
+  "capturedAt": "2026-09-15T15:56:23.211Z"
+}

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "target": "coverage",
+  "metric": "coverage",
+  "direction": "higher-is-better",
+  "value": 93,
+  "unit": "pct",
+  "capturedAt": "2026-09-15T19:20:25.084Z"
+}
