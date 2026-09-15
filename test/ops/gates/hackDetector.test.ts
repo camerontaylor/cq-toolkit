@@ -370,14 +370,20 @@ describe('hackDetector: suppression config', () => {
     expect(await findingsOf(diff)).toEqual([]);
   });
 
-  test('the shipped defaults are frozen (referencable, not mutable)', () => {
+  test('the shipped defaults are DEEP-frozen: mutation attempts throw in strict mode', () => {
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS[0])).toBe(true);
+    expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS[3])).toBe(true);
     expect(DEFAULT_SUPPRESSION_PATTERNS.map((p) => p.name)).toEqual([
       'eslint-disable',
       '@ts-ignore',
       '@ts-expect-error',
       'istanbul ignore',
     ]);
+    expect(() => {
+      (DEFAULT_SUPPRESSION_PATTERNS[1] as { pattern: string }).pattern = '\\bnever\\b';
+    }).toThrow(TypeError);
+    expect(DEFAULT_SUPPRESSION_PATTERNS[1]?.pattern).toBe('@ts-ignore\\b');
   });
 
   test('the frozen defaults pass STRAIGHT into the readonly config fields, no casts', async () => {

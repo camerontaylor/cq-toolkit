@@ -63,8 +63,9 @@ export interface SuppressionPattern {
 }
 
 /**
- * The shipped suppression signatures, frozen: consumers can reference them
- * and pass their own list (which REPLACES this one — not extends — per
+ * The shipped suppression signatures, DEEP-FROZEN (array and signature
+ * objects): consumers can reference them and pass their own list (which
+ * REPLACES this one — not extends — per
  * {@link HackDetectorInput.suppressionPatterns}) but never mutate it. The
  * `@ts-*` sources anchor only at the token's END: a leading `\b` before
  * `@` can never fire in JS regexes (`@` is a non-word character, so no
@@ -76,12 +77,14 @@ export interface SuppressionPattern {
  * real thing — the accepted noise direction, traded deliberately against
  * missing real suppressions.
  */
-export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Object.freeze([
-  { name: 'eslint-disable', pattern: '\\beslint-disable\\b' },
-  { name: '@ts-ignore', pattern: '@ts-ignore\\b' },
-  { name: '@ts-expect-error', pattern: '@ts-expect-error\\b', requiresReason: true },
-  { name: 'istanbul ignore', pattern: '\\bistanbul\\s+ignore\\b' },
-]);
+export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Object.freeze(
+  [
+    { name: 'eslint-disable', pattern: '\\beslint-disable\\b' },
+    { name: '@ts-ignore', pattern: '@ts-ignore\\b' },
+    { name: '@ts-expect-error', pattern: '@ts-expect-error\\b', requiresReason: true },
+    { name: 'istanbul ignore', pattern: '\\bistanbul\\s+ignore\\b' },
+  ].map((pattern) => Object.freeze(pattern)),
+);
 
 /**
  * Shipped test-file shapes (regex sources, matched case-insensitively),
