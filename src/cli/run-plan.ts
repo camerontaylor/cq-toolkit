@@ -28,7 +28,10 @@
 //
 // GOVERNED COMPOSITION (kernel README, "Budget governor") — I9 is not
 // optional; every run goes through the recorded pipeline:
-//   new BudgetGovernor(governorConfig(runOptions, {}))
+//   new BudgetGovernor(governorConfig(runOptions, {})) — or, when --resume
+//   names a journal dir, seedFromRunLog(openRunLog(journalDir), plan.id,
+//   { config }) so the resumed run continues the SAME budget (construction
+//   site below)
 //   withBudgetStop(await runPlan(plan, runOptions, governRegistry(view, governor)), plan, governor)
 import { readFile, stat } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
@@ -37,8 +40,10 @@ import {
   BudgetGovernor,
   governRegistry,
   governorConfig,
+  seedFromRunLog,
   withBudgetStop,
 } from '../kernel/governor.js';
+import { openRunLog } from '../kernel/journal.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import { PlanSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry, Plan, RunOptions, RunReport } from '../kernel/types.js';
@@ -131,7 +136,12 @@ export async function runPlanCommand(
 ): Promise<number> {
   // Kebab → camel normalization of flag keys (documented in the header).
   // Reserved mode flags (--json/--help/-h) are main.ts's business — ignored.
-  const normalizedFlags: Record<string, unknown> = {};
+  // The record is NULL-PROTOTYPE (same idiom as parseFlags in main.ts): a
+  // plain {} would route `--__proto__=…` through the inherited __proto__
+  // ACCESSOR — the key would never become an own property (the strict schema
+  // would silently stop seeing it) and the parsed value would re-point this
+  // record's prototype instead.
+  const normalizedFlags: Record<string, unknown> = Object.create(null);
   for (const [rawKey, value] of Object.entries(flags)) {
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
     if (key === 'json' || key === 'help' || key === 'h') continue;
@@ -215,7 +225,8 @@ export async function runPlanCommand(
     get: (name) => entryByName.get(name) as OpRegistryEntry<never, never> | undefined,
   };
 
-  // Governed composition — the recorded seam, not optional (I9).
+  // Governed composition — the recorded seam, not optional (I9). The
+  // construction is ordered AFTER the plan parse: seeding keys on plan.id.
   const runOptions: RunOptions = {
     concurrency: input.concurrency,
     stopOnError: input.stopOnError,
@@ -224,7 +235,26 @@ export async function runPlanCommand(
     ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
     ...(input.resume ? { resume: true } : {}),
   };
-  const governor = new BudgetGovernor(governorConfig(runOptions, {}));
+  const config = governorConfig(runOptions, {});
+  let governor: BudgetGovernor;
+  if (input.resume === true && input.journalDir !== undefined) {
+    // Resume continues the SAME budget, not a fresh one (kernel README,
+    // "Composable with resume"): a plain `new BudgetGovernor(...)` here would
+    // make a cumulative --max-tokens/--max-usd cap bind only to the resumed
+    // process, discarding the prior runs' usage rollup and dispatch count.
+    // seedFromRunLog seeds from ALL `<planId>--` journals in the dir,
+    // oldest-first (the ordered concatenation seedFromJournal requires), so
+    // the seeded cap can trip before the resumed run admits anything.
+    // No `usdOf` is passed: USD seeding needs a price map the CLI does not
+    // own (cost stays derived-only) — the token/rollup and dispatch-count
+    // seeds, the caps this CLI exposes, work without it. (The kernel's DD-9
+    // fail-loud applies on its own: a resumed run under --max-usd with
+    // unpriced prior usage trips rather than fail open.)
+    governor = await seedFromRunLog(openRunLog(input.journalDir), plan.id, { config });
+  } else {
+    // Fresh runs start at zero — unchanged.
+    governor = new BudgetGovernor(config);
+  }
   let rawReport: RunReport;
   try {
     rawReport = await runPlan(plan, runOptions, governRegistry(view, governor));

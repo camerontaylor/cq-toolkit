@@ -31,8 +31,10 @@
 // TRANSITIVE dependency of the registry module, any other rejection — throws
 // loudly, naming the family, the requested path, and the original message
 // (attached as `cause`). Defects that also surface loudly: a registry export
-// that is not an array, a malformed entry, or a duplicate op name across
-// families — all throw immediately.
+// that is not an array, a malformed entry, a duplicate op name across
+// families, or a shape-bearing object input schema that is not `.strict()`
+// (unknown-key rejection is load-bearing — see the scan loop below) — all
+// throw immediately.
 //
 // Results are cached per resolved ops root (as a promise), so repeated
 // list()/get() calls do not rescan or re-import.
@@ -212,6 +214,33 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
             throw new Error(
               `op family '${family}': op '${e.name}' input schema declares the reserved CLI key ` +
                 `'${key}' (op input schemas must not declare reserved keys: json, help, h)`,
+            );
+          }
+        }
+        // Strictness enforcement (the convention makes `.strict()`
+        // load-bearing): unknown keys must FAIL parsing (the CLI maps the
+        // zod issue to exit 2), so a family that forgets `.strict()` and
+        // ships a default `z.object({...})` silently STRIPS typo'd keys —
+        // the exact loss the convention exists to prevent. Probed live
+        // against zod 4 (4.6.4): strictness is visible on the object def's
+        // `catchall` — `.strict()`/`z.strictObject()` set it to a `never`
+        // schema, default (strip-mode) objects leave it undefined, and
+        // `.loose()`/`.passthrough()` set `unknown` (unknown keys pass, so
+        // non-strict too). Refinements (`.refine`/`.superRefine`) mutate the
+        // SAME ZodObject def, so the marker stays visible through them.
+        // Known limitation (left unjudged, not guessed at): wrapper schemas
+        // (`z.object({...}).strict().optional()`, `.default()`, `.pipe()`,
+        // `.catch()`, `.readonly()`) hide the object def entirely, and
+        // non-object schemas (string, array, record, union) expose no
+        // `shape` — a non-strict object behind a wrapper passes this gate.
+        const def = (e.inputSchema as { def?: { type?: unknown; catchall?: { def?: { type?: unknown } } } })
+          .def;
+        if (def?.type === 'object') {
+          const catchallType = def.catchall?.def?.type;
+          if (catchallType !== 'never') {
+            throw new Error(
+              `op family '${family}': op '${e.name}' input schema must be .strict() — ` +
+                'the convention makes unknown-key rejection load-bearing (src/ops/README.md)',
             );
           }
         }

@@ -34,7 +34,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { exitCodeForOpResult, exitCodeForRunReport } from '../../src/cli/exit.js';
 import { parseFlags, runCli, type RunCliOptions } from '../../src/cli/main.js';
 import { narrate, type CliIo } from '../../src/cli/output.js';
-import { PlanSchema, RunReportSchema } from '../../src/kernel/schema.js';
+import { JournalEventSchema, PlanSchema, RunReportSchema } from '../../src/kernel/schema.js';
 import type { OpResult, RunReport } from '../../src/kernel/types.js';
 import { get, list } from '../../src/registry/index.js';
 
@@ -269,7 +269,10 @@ describe('result-validation gate (CX1) — no artifact for an invalid op result'
 // generated .js under <repo>/node_modules (ESM via "type":"module", zod
 // bare-importable) with INLINE importers — the same shape as the inf probe
 // above; no nested './op.js' importers are needed here (the fixture family
-// test/fixtures/cli-ops pins that convention).
+// pins that convention). The asyncfam schemas carry .strict() because
+// registration now enforces it (see the registry strictness gate); the async
+// refinement rides the same schema — exactly what the safeParseAsync gate
+// pins.
 describe('4530779 pins: async-schema gate, lossless-result probes, reserved valued flags', () => {
   test('async-refinement schema ACCEPTED: exit 0 with the artifact (safeParseAsync gate)', async () => {
     // zod 4: a schema carrying an ASYNC refinement throws on a PLAIN
@@ -284,7 +287,7 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
       [
         "import { z } from 'zod';",
         'export const registry = [',
-        "  { name: 'asyncok', inputSchema: z.object({}).refine(async () => true), importer: async () => async () => ({ status: 'ok', value: 'async-ran' }) },",
+        "  { name: 'asyncok', inputSchema: z.object({}).strict().refine(async () => true), importer: async () => async () => ({ status: 'ok', value: 'async-ran' }) },",
         '];',
         '',
       ].join('\n'),
@@ -307,7 +310,7 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
       [
         "import { z } from 'zod';",
         'export const registry = [',
-        "  { name: 'asyncbad', inputSchema: z.object({}).refine(async () => false), importer: async () => async () => ({ status: 'ok', value: 'never-runs' }) },",
+        "  { name: 'asyncbad', inputSchema: z.object({}).strict().refine(async () => false), importer: async () => async () => ({ status: 'ok', value: 'never-runs' }) },",
         '];',
         '',
       ].join('\n'),
@@ -592,6 +595,123 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
       }
     },
   );
+});
+
+// b2602ca successor pins (PR 64 wave-4): resume SEEDS the governor from the
+// journal (a cumulative --max-tokens cap must bind the resumed run to its
+// prior runs' usage — I9 honesty), and run-plan's kebab→camel normalizer
+// keeps the null-prototype flags record so --__proto__ reaches the strict
+// schema as the unknown key it is (exit 2), instead of vanishing through the
+// inherited accessor.
+describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => {
+  /**
+   * Hand-written prior-run journal, field-for-field against the frozen
+   * JournalEventSchema: run-started (runId/at/planId), job-started
+   * (runId/at/jobId/op/attempt — REQUIRED: the seed's usage fold counts only
+   * a finish that CLOSES an open start), job-finished (runId/at/jobId/opId/
+   * inputsHash/result/usage). The file name is `<planId>--<seg>--<hex>` —
+   * the candidate tail shape journal.candidateRunsForPlan requires. The
+   * inputsHash is deliberately NOT the current job input's hash, so replay's
+   * ok-skip is defeated and the job is genuinely re-dispatched into the
+   * (hopefully seeded) governor.
+   */
+  async function writePriorJournal(journalDir: string, planId: string): Promise<void> {
+    const runId = `${planId}--0001--abcd`;
+    const at = '2026-01-01T00:00:00.000Z';
+    const events = [
+      { type: 'run-started', runId, at, planId },
+      { type: 'job-started', runId, at, jobId: 'a', op: 'echo', attempt: 1 },
+      {
+        type: 'job-finished',
+        runId,
+        at,
+        jobId: 'a',
+        opId: 'echo',
+        inputsHash: 'prior-run-hash-not-the-current-inputs',
+        result: { status: 'ok', value: { echo: 'hi' } },
+        usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    ];
+    for (const event of events) {
+      expect(() => JournalEventSchema.parse(event)).not.toThrow();
+    }
+    await mkdir(journalDir, { recursive: true });
+    await writeFile(
+      join(journalDir, `${runId}.ndjson`),
+      events.map((event) => JSON.stringify(event)).join('\n') + '\n',
+    );
+  }
+
+  test('resume + seeded usage trips --max-tokens: exit 3, earlyStopReason budget (without the seed this exits 0)', async () => {
+    const { planPath, journalDir } = await writePlanFile({
+      id: 'i1-resume',
+      jobs: [
+        { id: 'a', op: 'echo', input: { msg: 'hi' } },
+        { id: 'b', op: 'echo', input: { msg: 'again' }, dependsOn: ['a'] },
+      ],
+    });
+    await writePriorJournal(journalDir, 'i1-resume');
+    const { code, out } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--resume',
+      '--max-tokens=10',
+    ]);
+    // The seeded 100-token rollup (echo reports no usage of its own) trips
+    // the 10-token cap AT SEED: job a's re-dispatch is refused
+    // (budget-exhausted) and b, gated behind a, is re-marked by the
+    // honest-stop pass → earlyStopReason 'budget' → exit 3.
+    expect(code).toBe(3);
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.counts['budget-exhausted']).toBe(2);
+    expect(report.jobs.map((row) => row.result.status)).toEqual([
+      'budget-exhausted',
+      'budget-exhausted',
+    ]);
+  });
+
+  test('the same journal + cap WITHOUT --resume starts at zero: exit 0 (the pin has teeth)', async () => {
+    const { planPath, journalDir } = await writePlanFile({
+      id: 'i1-resume',
+      jobs: [
+        { id: 'a', op: 'echo', input: { msg: 'hi' } },
+        { id: 'b', op: 'echo', input: { msg: 'again' }, dependsOn: ['a'] },
+      ],
+    });
+    await writePriorJournal(journalDir, 'i1-resume');
+    const { code, out } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--max-tokens=10',
+    ]);
+    expect(code).toBe(0); // fresh governor — the prior run's usage is not loaded
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.counts.done).toBe(2);
+  });
+
+  test('run-plan null-proto normalizer: --__proto__ is an OWN key → the strict schema rejects it (exit 2)', async () => {
+    // With the plain-{} record this flag silently vanished (inherited
+    // __proto__ accessor) and the run proceeded to stat('p') — the narration
+    // said "not a readable file". The null-proto record makes the key an own
+    // property, so RunPlanInputSchema's unknown-key check fires: the exact
+    // narration below is the proof the flag was SEEN, not dropped.
+    const { code, out, err } = await capture([
+      'run-plan',
+      '--plan=p',
+      '--__proto__={"plan":"/etc/passwd"}',
+    ]);
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid input for 'run-plan'/);
+    expect(err).toMatch(/Unrecognized key: "__proto__"/);
+    expect(err).not.toMatch(/not a readable file/);
+  });
 });
 
 // Lossless PARITY PIN (r3 F3): src/cli/output.ts's assertJsonLossless and the

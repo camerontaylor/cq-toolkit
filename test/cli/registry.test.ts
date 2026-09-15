@@ -177,6 +177,48 @@ describe('registry integrity defects reject loudly', () => {
     );
     await expect(list({ opsRoot: tmp })).rejects.toThrow(/'x'/);
   });
+
+  test('a non-strict object inputSchema (default z.object, no .strict()) rejects at scan', async () => {
+    // The convention makes unknown-key rejection LOAD-BEARING (a typo'd flag
+    // must exit 2, not be silently stripped), so a shape-bearing object
+    // schema without the strictness marker is the same class of loud defect
+    // as a malformed entry. The structural probe (probed live on zod
+    // 4.6.4): `.strict()` shows up as the object def's `catchall` set to a
+    // `never` schema — absent on strip-mode objects, `unknown` on loose.
+    const tmp = await makeTmpOpsRoot('cq-registry-nonstrict-');
+    await mkdir(join(tmp, 'nonstrict'), { recursive: true });
+    await writeFile(
+      join(tmp, 'nonstrict', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'strips-typo', inputSchema: z.object({ a: z.string() }), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/must be \.strict\(\)/);
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/strips-typo/);
+  });
+
+  test('strict through a refinement stays accepted: .strict().refine passes the gate', async () => {
+    // The positive edge of the discriminator: refine/superRefine mutate the
+    // SAME ZodObject def, so the strictness marker stays visible — the gate
+    // must not reject compositions the convention allows.
+    const tmp = await makeTmpOpsRoot('cq-registry-strictref-');
+    await mkdir(join(tmp, 'strictref'), { recursive: true });
+    await writeFile(
+      join(tmp, 'strictref', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'strictref', inputSchema: z.object({ a: z.string() }).strict().refine(() => true), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    await expect(list({ opsRoot: tmp })).resolves.toHaveLength(1);
+  });
 });
 
 describe('absent vs broken family registries (the narrow tolerance)', () => {
