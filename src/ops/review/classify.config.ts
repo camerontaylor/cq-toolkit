@@ -116,8 +116,15 @@ export const defaultClassifyConfig: ClassifyConfig = {
     // the harness manually." is a human's sentence; \b alone is satisfied
     // before the hyphen and would eat it).
     /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:failed|error)\b/i,
-    // Tooling self-skip caused by a configuration/setup problem.
-    /\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/i,
+    // Tooling self-skip caused by a configuration/setup problem — a known
+    // bot/tool identity at LINE START, same anchoring as its siblings: a
+    // human's "This configuration error makes skipping validation unsafe"
+    // is exactly how real feedback reads, so the old mid-line form silently
+    // ate it (Codex, PR71). The `(?!-)` guard after the identity mirrors
+    // the failure-notice pattern above — a hyphenated tool-name MENTION
+    // ("Codex-style tooling hit a configuration problem, so we're
+    // skipping …") is a human's sentence, not the tool speaking.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/i,
     // A bot/tool identity LEADING the line delivering its self-skip
     // verdict ("CodeRabbit is skipping this PR", "Codex: not reviewing
     // until CI settles") — identity-anchored so a human's "I'm not

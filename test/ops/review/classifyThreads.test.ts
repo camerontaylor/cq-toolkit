@@ -912,7 +912,7 @@ describe('default skipPatterns', () => {
   test.each([
     ['CodeRabbit skipped', 'CodeRabbit skipped this PR because the diff was empty'],
     ['bot-anchored failure', 'coderabbitai failed to post the review: error 500'],
-    ['configuration problem skip', 'configuration problem detected — skipping this run'],
+    ['configuration problem skip', 'CodeRabbit: configuration problem detected — skipping this run'],
     ['bot self-skip (skipping)', 'CodeRabbit is skipping this PR — no reviewable diff'],
     ['bot self-skip (not reviewing)', 'chatgpt-codex-connector: not reviewing this run'],
   ])('bot-anchored pattern (%s) fires → bot_skip_notice', (_label, body) => {
@@ -964,6 +964,41 @@ describe('default skipPatterns', () => {
       ),
     ).toEqual([
       { kind: 'thread', id: 'TH2', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+    ]);
+  });
+
+  test('a HUMAN configuration-error sentence ("… makes skipping validation unsafe") must NOT skip → actionable (Codex, PR71)', () => {
+    // The configuration/setup-error skip pattern anchors on a bot identity
+    // at LINE START like its siblings: this sentence's mid-line
+    // "configuration error … skipping" used to match the unanchored form
+    // and was silently skipped — it is a human demanding a fix.
+    expect(
+      itemsOf(
+        baseState({
+          threads: [
+            thread({
+              id: 'TH4',
+              body: 'This configuration error makes skipping validation unsafe; please fix it.',
+            }),
+          ],
+        }),
+      ),
+    ).toEqual([
+      { kind: 'thread', id: 'TH4', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+    ]);
+  });
+
+  test('a bot configuration-error notice ("CodeRabbit: configuration error, skipping review") → skip (bot_skip_notice)', () => {
+    // The same pattern still fires on the tool's own notice — the identity
+    // LEADS the line, so the skip is the tool's verdict, not a human's.
+    expect(
+      itemsOf(
+        baseState({
+          restIssueComments: [restComment({ id: 624, body: 'CodeRabbit: configuration error, skipping review' })],
+        }),
+      ),
+    ).toEqual([
+      { kind: 'comment', id: '624', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
     ]);
   });
 
