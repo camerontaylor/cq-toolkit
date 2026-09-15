@@ -21,15 +21,15 @@
     "denylist": "./scripts/denylist-scan"
   },
   "dependencies": {
-    "ai": "7.0.99",
     "@ai-sdk/anthropic": "4.0.53",
+    "@ai-sdk/deepseek": "3.0.44",
     "@ai-sdk/openai": "4.0.66",
     "@ai-sdk/zai": "3.0.10",
-    "@ai-sdk/deepseek": "3.0.44",
-    "zod": "4.6.4",
+    "@ast-grep/napi": "0.45.3",
+    "ai": "7.0.99",
     "p-limit": "7.3.2",
     "proper-lockfile": "4.1.2",
-    "@ast-grep/napi": "0.45.3"
+    "zod": "4.6.4"
   },
   "peerDependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.270"
@@ -40,11 +40,12 @@
     }
   },
   "devDependencies": {
-    "typescript": "npm:@typescript/typescript6@6.0.2",
-    "vitest": "5.0.0",
-    "eslint": "10.10.0",
     "@eslint/js": "10.0.1",
+    "@types/node": "26.5.1",
+    "@vitest/coverage-v8": "5.0.0",
+    "eslint": "10.10.0",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.70.0",
-    "@types/node": "26.5.1"
+    "vitest": "5.0.0"
   }
 }

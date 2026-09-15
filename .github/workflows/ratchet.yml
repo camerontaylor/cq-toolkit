@@ -1,0 +1,63 @@
+# ratchet — lane H slice 2 (goal H4): the REQUIRED ratchet check workflow.
+#
+# Runs the check-mode ratchet on every PR into the merge queue and on every
+# push to main/merge-queue:
+#   - pull_request: `ratchet-check check --base origin/<base_ref>` — live
+#     typecheck + coverage baselines AND the diff monotonicity guard over the
+#     PR's changes (a PR may only TIGHTEN committed baselines).
+#   - push: `ratchet-check check` — live baselines only (the diff is already
+#     committed; the guard judged it on the way in).
+#
+# Invariant I4: this workflow triggers on its declared events with NO
+# paths-ignore and no path filters anywhere — skips live in the branch
+# filters and the job-level if only, of which there are none: the ratchet
+# never skips. The check name is 'ratchet' (the job's name:); registration in
+# branch protection is attempted out-of-band by the lane leader, not here.
+# Instantiated per policy/templates/required-check.md conventions — the
+# action pins are the repo's immutable-commit pins (same as ci.yml).
+name: ratchet
+
+on:
+  pull_request:
+    branches:
+      - merge-queue
+  push:
+    branches:
+      - main
+      - merge-queue
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ratchet-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ratchet:
+    name: ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo (full history — the guard needs the base diff)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          fetch-depth: 0
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Ratchet check
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            node scripts/ratchet-check.mjs check --base "origin/${{ github.base_ref }}"
+          else
+            node scripts/ratchet-check.mjs check
+          fi
