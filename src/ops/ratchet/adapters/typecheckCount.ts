@@ -9,16 +9,18 @@
 // no inputs found). ANSI escape sequences (tsc --pretty colors) are
 // stripped before matching. An unanchored /error TS\d+:/ would also count
 // displayed SOURCE lines that merely quote the literal text
-// (const message = "error TS1234:"). Counts must be non-negative INTEGERS
-// (an error count is cardinal; 0.5 errors is unusable evidence).
+// (const message = "error TS1234:"). RESIDUAL LIMITATION: a displayed
+// source line quoting a FULL diagnostic header (const msg =
+// "src/a.ts(1,7): error TS2322: boom";) still counts — shape matching
+// cannot distinguish it from a real header; the object form ({count: n})
+// is the authoritative path. Counts must be non-negative SAFE integers: an
+// error count is a cardinality, so a fraction, or anything beyond 2^53-1
+// (not a representable cardinality — it would permanently distort the
+// ratchet), is unusable evidence.
 // Text evidence cannot distinguish a clean build from output that is not a
 // compiler log at all, so text with zero diagnostic headers yields null —
 // non-passing evidence (I5), never a fabricated 0 pass. Callers that KNOW
 // the count supply the object form, where a structured 0 is a real zero.
-// Counts must be non-negative SAFE integers: an error count is a
-// cardinality, so a fraction, or anything beyond 2^53-1 (not a
-// representable cardinality — it would permanently distort the ratchet),
-// is unusable evidence.
 // Cyclic source data is bounded by a visited-set: a cycle yields
 // "no count here", never unbounded recursion.
 import type { MetricAdapter, MetricReading } from '../registry.js';

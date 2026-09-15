@@ -17,9 +17,11 @@
 //      paths that may contain spaces, pretty `path:line:col -`, and
 //      location-free `error TSxxxx:` heads, with ANSI escapes stripped
 //      first) — quoted diagnostic text in displayed source lines never
-//      counts; text with no headers (empty or otherwise) and non-text
-//      non-object garbage are null — non-passing evidence (I5), never a
-//      fabricated pass.
+//      counts, EXCEPT a line quoting a FULL header (documented limitation:
+//      shape matching cannot tell it from a real header; the object form is
+//      authoritative); text with no headers (empty or otherwise) and
+//      non-text non-object garbage are null — non-passing evidence (I5),
+//      never a fabricated pass.
 import { describe, expect, test } from 'vitest';
 import { typecheckCount } from '../../../src/ops/ratchet/adapters/typecheckCount.js';
 import { getAdapter, listAdapters, registerAdapter } from '../../../src/ops/ratchet/registry.js';
@@ -119,6 +121,7 @@ describe('typecheckCount', () => {
     ['location-free diagnostic header counts', TSC_LOCATION_FREE, 1],
     ['ANSI-colored pretty header counts', TSC_ANSI_PRETTY, 1],
     ['ANSI-colored quoted source text still does not count', TSC_ANSI_QUOTED, null],
+    ['a source line quoting a FULL header still counts (documented limitation)', 'const msg = "src/a.ts(1,7): error TS2322: boom";', 1],
     ['quoted diagnostic text in a source line is not counted', TSC_OUTPUT_WITH_QUOTED_TEXT, 1],
     ['a file of only quoted diagnostic text yields null', 'const message = "error TS1234:";\nconst other = "error TS9999:";', null],
     ['negative count', { count: -1 }, null],

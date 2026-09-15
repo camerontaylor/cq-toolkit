@@ -27,7 +27,8 @@
 // directory, so a crash mid-write can never leave a torn baseline at the
 // target path — and a failed publish cleans up its temp file (best-effort).
 // P1 containment: before any read or mutation the baselines dir is
-// realpath-resolved and must stay INSIDE the resolved ws; a symlinked
+// realpath-resolved and must be a STRICT DESCENDANT of the resolved ws (a
+// baselines → ws self-symlink would make prune scan the ws root); a symlinked
 // baselines dir pointing outside fails the capture and makes prune return
 // the zero outcome with `error` — nothing outside the workspace is ever
 // touched — and containment runs BEFORE the existing-baseline read, so a
@@ -80,12 +81,13 @@ function errorMessage(err: unknown): string {
 }
 
 /**
- * P1 containment: the baselines dir must resolve INSIDE the resolved ws.
- * realpath resolves intermediate symlinks, so a symlinked baselines dir
- * pointing outside the workspace fails the prefix check — neither capture
- * nor prune may touch anything outside the ws. `missing` (ENOENT) is
- * reported separately: for capture it means a vanishing dir mid-op, for
- * prune the ordinary no-baselines-yet case.
+ * P1 containment: the baselines dir must resolve to a STRICT DESCENDANT of
+ * the resolved ws. realpath resolves intermediate symlinks, so a symlinked
+ * baselines dir pointing outside the workspace — or AT the workspace
+ * itself, which would make prune scan the ws root — fails the prefix
+ * check; neither capture nor prune may touch anything outside (or at) the
+ * ws. `missing` (ENOENT) is reported separately: for capture it means a
+ * vanishing dir mid-op, for prune the ordinary no-baselines-yet case.
  */
 async function resolveBaselinesDir(
   ws: string,
@@ -104,11 +106,11 @@ async function resolveBaselinesDir(
     };
   }
   const prefix = wsReal.endsWith(sep) ? wsReal : wsReal + sep;
-  if (dirReal !== wsReal && dirReal.startsWith(prefix) === false) {
+  if (dirReal.startsWith(prefix) === false) {
     return {
       ok: false,
       missing: false,
-      error: `baselines dir '${baselinesDir}' resolves outside the workspace ('${dirReal}') — refusing to touch it`,
+      error: `baselines dir '${baselinesDir}' does not resolve to a strict descendant of the workspace ('${dirReal}') — refusing to touch it`,
     };
   }
   return { ok: true, dir: dirReal };
@@ -210,6 +212,21 @@ export function createCaptureBaseline(
       unit: reading.unit,
       capturedAt: input.capturedAt ?? new Date().toISOString(),
     });
+
+    // Boundary self-check: capture never publishes bytes it cannot parse
+    // back — a third-party adapter shape (e.g. unit: null serialized as
+    // "unit": null, or a bogus direction) would otherwise land as a
+    // baseline file that fails its own parser.
+    try {
+      parseBaseline(bytes);
+    } catch (err) {
+      return {
+        status: 'failed',
+        error:
+          `ratchet: metric '${input.metric}' produced an unparsable baseline — refusing to publish — ` +
+          `${errorMessage(err)}`,
+      };
+    }
 
     // P1 containment BEFORE any read of the baselines dir: ensure it exists,
     // then resolve both paths and require baselines to stay inside the ws.

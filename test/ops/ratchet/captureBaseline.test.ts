@@ -47,8 +47,8 @@ import type {
   SourceCatalog,
 } from '../../../src/ops/ratchet/captureBaseline.js';
 import { baselineRelPath, parseBaseline, renderBaseline } from '../../../src/ops/ratchet/format.js';
-import type { BaselineFile } from '../../../src/ops/ratchet/format.js';
-import type { MetricSource } from '../../../src/ops/ratchet/registry.js';
+import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
+import type { MetricReading, MetricSource } from '../../../src/ops/ratchet/registry.js';
 import { registerAdapter } from '../../../src/ops/ratchet/registry.js';
 
 const CAPTURED_AT = '2026-09-15T00:00:00.000Z';
@@ -59,6 +59,8 @@ const THROWING_METRIC = 'throwing-adapter';
 const OBJECT_THROWING_METRIC = 'object-throwing-adapter';
 const CRAFTED_INFINITE_METRIC = 'crafted-infinite';
 const UNIT_SHIFTING_METRIC = 'unit-shifting';
+const NULL_UNIT_METRIC = 'null-unit';
+const BAD_DIRECTION_METRIC = 'bad-direction';
 const REL = baselineRelPath(TARGET, METRIC);
 
 let ws: string;
@@ -102,6 +104,20 @@ beforeAll(() => {
       return { value: record.count, unit: record.unit };
     },
   });
+  registerAdapter({
+    id: NULL_UNIT_METRIC,
+    direction: 'lower-is-better',
+    // A third-party adapter shape the type system cannot see through:
+    // unit: null serializes as "unit": null and the rendered baseline
+    // would fail its own parser — the publish self-check must refuse it.
+    extract: () => ({ value: 1, unit: null }) as unknown as MetricReading,
+  });
+  registerAdapter({
+    id: BAD_DIRECTION_METRIC,
+    // A cast-bogus direction on the adapter object itself.
+    direction: 'sideways' as unknown as Direction,
+    extract: () => ({ value: 1, unit: 'x' }),
+  });
 });
 
 // Sources are composition-time wiring (round-1 fix): they live in this
@@ -112,6 +128,8 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [THROWING_METRIC, () => Promise.resolve({ count: 1 })],
   [OBJECT_THROWING_METRIC, () => Promise.resolve({ count: 1 })],
   [CRAFTED_INFINITE_METRIC, () => Promise.resolve({ count: 1 })],
+  [NULL_UNIT_METRIC, () => Promise.resolve({ count: 1 })],
+  [BAD_DIRECTION_METRIC, () => Promise.resolve({ count: 1 })],
   [UNIT_SHIFTING_METRIC, () => Promise.resolve(sourceRaw)],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
@@ -295,6 +313,30 @@ describe('captureBaseline', () => {
     ).resolves.toEqual({
       status: 'failed',
       error: expect.stringMatching(/metric 'crafted-infinite'.*unusable reading/s),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a probe adapter returning unit null fails the publish self-check (no file)', async () => {
+    await expect(
+      capture(captureInput({ metric: NULL_UNIT_METRIC, sourceId: NULL_UNIT_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'null-unit' produced an unparsable baseline — refusing to publish.*unit/s,
+      ),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a probe adapter with a bogus direction fails the publish self-check (no file)', async () => {
+    await expect(
+      capture(captureInput({ metric: BAD_DIRECTION_METRIC, sourceId: BAD_DIRECTION_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'bad-direction' produced an unparsable baseline — refusing to publish.*direction/s,
+      ),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
@@ -527,6 +569,54 @@ describe('captureBaseline', () => {
     });
   });
 
+  test('a metric-field disagreement fails the identity check, untouched', async () => {
+    // Planted at the expected path: a fully valid baseline whose metric
+    // field names some other metric.
+    const foreign = renderBaseline({
+      schemaVersion: 1,
+      target: TARGET,
+      metric: 'other-metric',
+      direction: 'lower-is-better',
+      value: 4,
+      unit: 'errors',
+      capturedAt: CAPTURED_AT,
+    });
+    await mkdir(join(ws, 'baselines'), { recursive: true });
+    await writeFile(join(ws, REL), foreign, 'utf8');
+    sourceRaw = { count: 3 };
+    await expect(capture(captureInput())).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /disagrees on metric 'other-metric' → 'typecheck-count' — incomparable scale/,
+      ),
+    });
+    expect(await readFile(join(ws, REL), 'utf8')).toBe(foreign);
+  });
+
+  test('a direction disagreement fails the identity check, untouched', async () => {
+    // Adapter direction flipped vs the existing baseline: same target,
+    // metric, and unit — only the direction disagrees.
+    const flipped = renderBaseline({
+      schemaVersion: 1,
+      target: TARGET,
+      metric: METRIC,
+      direction: 'higher-is-better',
+      value: 4,
+      unit: 'errors',
+      capturedAt: CAPTURED_AT,
+    });
+    await mkdir(join(ws, 'baselines'), { recursive: true });
+    await writeFile(join(ws, REL), flipped, 'utf8');
+    sourceRaw = { count: 3 };
+    await expect(capture(captureInput())).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /disagrees on direction 'higher-is-better' → 'lower-is-better' — incomparable scale/,
+      ),
+    });
+    expect(await readFile(join(ws, REL), 'utf8')).toBe(flipped);
+  });
+
   test('a symlinked baselines dir pointing outside ws fails capture (nothing written outside)', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
     try {
@@ -534,7 +624,7 @@ describe('captureBaseline', () => {
       sourceRaw = { count: 3 };
       await expect(capture(captureInput())).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/resolves outside the workspace \('.*cq-outside-[^']*'\) — refusing/s),
+        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\) — refusing/s),
       });
       await expect(readdir(outside)).resolves.toEqual([]); // nothing written outside
     } finally {
@@ -564,7 +654,7 @@ describe('captureBaseline', () => {
       expect(result.status).toBe('failed');
       await expect(capture(captureInput())).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/resolves outside the workspace/),
+        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
       });
       expect(await readFile(join(outside, basename(REL)), 'utf8')).toBe(bytes); // untouched
     } finally {
@@ -582,12 +672,37 @@ describe('captureBaseline', () => {
         kept: 0,
         skipped: [],
         unreadable: [],
-        error: expect.stringMatching(/resolves outside the workspace \('.*cq-outside-[^']*'\)/),
+        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\)/),
       });
       expect(await readFile(join(outside, 'stale.json'), 'utf8')).toBe('precious');
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  test('baselines symlinked to the ws itself fails capture (strict-descendant containment)', async () => {
+    await symlink(ws, join(ws, 'baselines'), 'dir');
+    sourceRaw = { count: 3 };
+    await expect(capture(captureInput())).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+    });
+    // The ws root is untouched — no baseline landed at its top level.
+    await expect(readdir(ws)).resolves.toEqual(['baselines']);
+  });
+
+  test('baselines symlinked to the ws itself: prune reports the fault, scans nothing', async () => {
+    await symlink(ws, join(ws, 'baselines'), 'dir');
+    await expect(pruneBaselines({ ws, live: [] })).resolves.toEqual({
+      deleted: [],
+      kept: 0,
+      skipped: [],
+      unreadable: [],
+      error: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+    });
+    // The ws root was never scanned (a *.json there would have been
+    // classified for deletion) — nothing changed.
+    await expect(readdir(ws)).resolves.toEqual(['baselines']);
   });
 
   test('a failed publish cleans up its temp file (no *.tmp debris)', async () => {
