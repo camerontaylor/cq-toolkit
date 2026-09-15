@@ -249,13 +249,22 @@ describe('ledger.query is fs-READ-ONLY (the read-only pin)', () => {
         needsHuman: [],
       },
     });
-    // A query over a MISSING path (parent included) must not mkdir either.
+    // A query over a MISSING path (parent included) must not mkdir either —
+    // including NESTED missing segments: clean absence under an in-root
+    // ancestor stays the empty ledger (the contrast case for the
+    // dangling-symlink queries, which must fault).
     await expect(query({ root: scratchDir, storePath: join(scratchDir, 'missing', 'ledger.json') })).resolves.toEqual(
       {
         status: 'ok',
         value: { entries: [], knownNoise: [], needsHuman: [] },
       },
     );
+    await expect(
+      query({ root: scratchDir, storePath: join(scratchDir, 'missing', 'deeper', 'ledger.json') }),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: { entries: [], knownNoise: [], needsHuman: [] },
+    });
 
     // No files, dirs, or lock dirs appeared: the tree is byte-identical.
     expect(await treeSnapshot(scratchDir)).toEqual(before);
@@ -441,7 +450,41 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     const outside = join(scratchDir, 'outside');
     await mkdir(outside);
     await symlink(outside, join(root, 'sub'));
-    expect(() => store.load()).toThrow(/strict descendant.*refusing to read/s);
+    expect(() => store.load()).toThrow(/does not resolve inside root.*refusing to read/s);
+  });
+
+  test('a query over a dangling symlink with FURTHER absent segments below it is a fault, never an ok empty view (nested ENOENT)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    // escape dangles AND another component is missing below it: the
+    // immediate parent lstat-ENOENTs, so the one-level parent check would
+    // read "absent parent ⇒ empty ledger" — the ancestor walk must instead
+    // stop AT the dangling link and refuse (PR #93 review, Codex P2 +
+    // CodeRabbit Major).
+    await symlink(join(scratchDir, 'outside'), join(root, 'escape'));
+    const query = await entryNamed('ledger.query').importer();
+    const result = await query({ root, storePath: join(root, 'escape', 'missing', 'ledger.json') });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('does not resolve');
+    }
+  });
+
+  test('a direct-store load through an escaping symlink with FURTHER absent segments below it fails, never the empty ledger', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const target = join(root, 'escape', 'sub', 'ledger.json');
+    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const store = pathLedgerStore(root, target);
+    // The escape points at an EXISTING outside dir, but both 'sub' and the
+    // ledger are absent THROUGH the link — the ancestor walk stops at the
+    // link, resolves it outside the root, and refuses.
+    const outside = join(scratchDir, 'outside');
+    await mkdir(outside);
+    await symlink(outside, join(root, 'escape'));
+    expect(() => store.load()).toThrow(/does not resolve inside root.*refusing to read/s);
   });
 });
 
@@ -594,5 +637,32 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
     expect(parseLedger(await readFile(storePath, 'utf8')).entries).toEqual([
       { signature: 'sig-a', count: 2 },
     ]);
+  });
+
+  test('an unreadable target metadata PROPAGATES from the mode probe — never a silent 0600 replacement (non-ENOENT lstat faults)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    const stateDir = join(root, 'state');
+    await mkdir(stateDir, { recursive: true });
+    const storePath = join(stateDir, 'ledger.json');
+    const record = await entryNamed('ledger.record').importer();
+    await record({ root, storePath, signature: 'sig-a' });
+    await chmod(storePath, 0o640);
+    const before = await readFile(storePath, 'utf8');
+    // Deny search on the containing dir: lstat of the target now fails
+    // EACCES. The publish must fail with THAT fault (the message names the
+    // lstat), not swallow it and swap the 0640 ledger for a 0600
+    // replacement (PR #93 review, CodeRabbit Minor).
+    await chmod(stateDir, 0o000);
+    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const store = pathLedgerStore(root, storePath);
+    try {
+      expect(() => store.save({ version: 1, entries: [{ signature: 'sig-b', count: 1 }] })).toThrow(/lstat/);
+    } finally {
+      await chmod(stateDir, 0o755);
+    }
+    // The refused publish changed nothing: same bytes, same mode.
+    expect(await readFile(storePath, 'utf8')).toBe(before);
+    expect((await stat(storePath)).mode & 0o777).toBe(0o640);
   });
 });

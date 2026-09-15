@@ -243,34 +243,46 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
       } catch (err) {
         if (!isEnoent(err)) throw err;
         // ENOENT from realpath is NOT always "the ledger file is missing"
-        // (PR #78 review, Codex P2): a DANGLING or ESCAPING intermediate
-        // symlink also leaves the target unresolvable, and reading that as
-        // an empty in-root ledger would hand dispatch an ok view with all
-        // suppression silently dropped. The file is genuinely absent only
-        // under a parent that is itself absent (no dirs ⇒ no file ⇒ the
-        // empty ledger) or that RESOLVES to a strict in-root descendant —
-        // a parent that exists but will not resolve is a containment
-        // fault, never an empty ledger.
+        // (PR #78 review, Codex P2; nested case PR #93 review, Codex P2 +
+        // CodeRabbit Major): a DANGLING or ESCAPING intermediate symlink —
+        // with or without further absent segments below it — also leaves
+        // the target unresolvable, and reading that as an empty in-root
+        // ledger would hand dispatch an ok view with all suppression
+        // silently dropped. The file is genuinely absent only when the
+        // nearest EXISTING ancestor of the parent (lstat — a dangling
+        // symlink still lstats, so the walk STOPS at the link instead of
+        // skipping past it) resolves inside the root under the stage-A
+        // prefix rule (the ancestor may BE the root: every segment below
+        // it absent is clean absence). An ancestor that exists but will
+        // not resolve, or that resolves outside the root, is a containment
+        // fault — never an empty ledger.
         const parentDir = dirname(targetAbs);
-        try {
-          lstatSync(parentDir);
-        } catch (parentErr) {
-          if (isEnoent(parentErr)) return { version: 1, entries: [] };
-          throw parentErr;
+        let existing = parentDir;
+        for (;;) {
+          try {
+            lstatSync(existing);
+            break;
+          } catch (walkErr) {
+            if (!isEnoent(walkErr)) throw walkErr;
+            const up = dirname(existing);
+            if (up === existing) throw walkErr; // pathological: even '/' unresolved
+            existing = up;
+          }
         }
-        let realParent: string;
+        let realAncestor: string;
         try {
-          realParent = realpathSync(parentDir);
-        } catch (parentErr) {
-          throw new Error(`ledger parent for '${target}' does not resolve — ${messageOf(parentErr)}`, {
-            cause: parentErr,
+          realAncestor = realpathSync(existing);
+        } catch (ancestorErr) {
+          throw new Error(`ledger path for '${target}' does not resolve — ${messageOf(ancestorErr)}`, {
+            cause: ancestorErr,
           });
         }
-        const fault = strictDescendantFault(rootReal, join(realParent, base));
-        if (fault !== null) {
-          throw new Error(`${fault} — an intermediate symlink escapes the root; refusing to read it`, {
-            cause: err,
-          });
+        const rel = relative(rootReal, realAncestor);
+        if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+          throw new Error(
+            `'${target}' does not resolve inside root '${rootReal}' — an intermediate symlink escapes the root; refusing to read it`,
+            { cause: err },
+          );
         }
         return { version: 1, entries: [] };
       }
@@ -450,8 +462,12 @@ function publishAtomic(targetPath: string, bytes: string): void {
   try {
     const existing = lstatSync(targetPath);
     if (existing.isFile()) mode = existing.mode & 0o777;
-  } catch {
-    // Absent target: the restrictive default stands.
+  } catch (err) {
+    // Absent target: the restrictive default stands. Any OTHER fault —
+    // e.g. EACCES on an unreadable target's metadata — PROPAGATES (PR #93
+    // review, CodeRabbit Minor): a publish that cannot KNOW the existing
+    // mode must not silently swap the target for a 0600 replacement.
+    if (!isEnoent(err)) throw err;
   }
   let tempPath: string | undefined;
   let tempCreated = false;
