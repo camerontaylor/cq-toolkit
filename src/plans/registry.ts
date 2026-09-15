@@ -98,18 +98,28 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     if (stem === 'registry' || stem === 'index' || stem.endsWith('.test')) {
       continue;
     }
-    // Discovered-path import, win32-safe (same rationale as the family scan
-    // in src/registry/index.ts): a constructed plain fs path cannot be
-    // imported on win32 (`import('C:\\...')` parses `c:` as a URL scheme —
-    // ERR_UNSUPPORTED_ESM_URL_SCHEME), so there the path is converted to a
-    // FILE URL first (pathToFileURL). POSIX keeps the plain path: it is
-    // already a valid specifier, and the vitest module runner resolves
-    // sibling-relative imports inside plan modules against the file-URL
-    // module id AS AN FS PATH, breaking plan discovery under test.
+    // Discovered-path import, URL-safe (same rationale as the family scan
+    // in src/registry/index.ts). Node parses import specifiers with URL
+    // semantics, so the conversion has three cases:
+    //   - win32: a plain fs path cannot be imported (`import('C:\\...')`
+    //     parses `c:` as a URL scheme — ERR_UNSUPPORTED_ESM_URL_SCHEME) →
+    //     convert to a FILE URL (pathToFileURL).
+    //   - a POSIX path containing `#`, `?`, or `%`: the raw path would
+    //     truncate (`#` starts a fragment, `?` a query) or misparse (`%`
+    //     starts an invalid escape) → convert too (pathToFileURL
+    //     percent-escapes them).
+    //   - every other POSIX path: keep the plain path — it is already a
+    //     valid specifier, and the vitest module runner resolves
+    //     sibling-relative imports inside plan modules against the file-URL
+    //     module id AS AN FS PATH, breaking plan discovery under test. The
+    //     caveat stays true exactly for these normal POSIX paths.
     // TypeScript must NOT statically resolve this specifier — plan modules
     // are discovered at runtime.
     const modulePath = path.join(root, file);
-    const specifier = process.platform === 'win32' ? pathToFileURL(modulePath).href : modulePath;
+    const specifier =
+      process.platform === 'win32' || /[#?%]/.test(modulePath)
+        ? pathToFileURL(modulePath).href
+        : modulePath;
     const mod: unknown = await import(specifier);
     const plan = (mod as { plan?: unknown }).plan;
     if (plan === undefined || plan === null) {

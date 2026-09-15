@@ -31,6 +31,7 @@
 //   new BudgetGovernor(governorConfig(runOptions, {}))
 //   withBudgetStop(await runPlan(plan, runOptions, governRegistry(view, governor)), plan, governor)
 import { readFile, stat } from 'node:fs/promises';
+import type { Stats } from 'node:fs';
 import { z } from 'zod';
 import {
   BudgetGovernor,
@@ -107,6 +108,17 @@ function issueMessage(error: unknown): string {
 }
 
 /**
+ * Mode-aware narration for run-plan's INPUT-defect exits (the suppression
+ * matrix in main.ts's header): mode 'json' → nothing on stderr (machine
+ * mode — the exit code carries the verdict); mode 'human' → the one `cq:`
+ * stderr line. Runtime throws narrate in main.ts's catch, same matrix.
+ */
+function narrateIfHuman(io: CliIo, mode: NarrationMode, message: string): void {
+  if (mode === 'json') return;
+  narrate(io, message);
+}
+
+/**
  * Run one plan file through the governed kernel. Returns the process exit
  * code (never throws for arg-shaped problems — those are narrated exits;
  * runtime throws propagate to main.ts's catch → 1).
@@ -124,8 +136,9 @@ export async function runPlanCommand(
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
     if (key === 'json' || key === 'help' || key === 'h') continue;
     if (Object.hasOwn(normalizedFlags, key)) {
-      narrate(
+      narrateIfHuman(
         io,
+        mode,
         `invalid input for 'run-plan': duplicate flag '--${rawKey}' after kebab-case normalization`,
       );
       return EXIT_CODES.usage;
@@ -134,7 +147,7 @@ export async function runPlanCommand(
   }
   const check = RunPlanInputSchema.safeParse(normalizedFlags);
   if (!check.success) {
-    narrate(io, `invalid input for 'run-plan': ${issueMessage(check.error)}`);
+    narrateIfHuman(io, mode, `invalid input for 'run-plan': ${issueMessage(check.error)}`);
     return EXIT_CODES.usage;
   }
   const input = check.data;
@@ -143,9 +156,26 @@ export async function runPlanCommand(
   // exist or is not a regular file is arg-shaped, consistent with the other
   // input defects (reviewer A medium 2 — schema-invalid content was already
   // 2 while a missing/directory plan path surfaced as a thrown 1).
-  const planStat = await stat(input.plan).catch(() => undefined);
+  // Stat-error classification: only ENOENT (missing path) and ENOTDIR (a
+  // non-directory path component) mean "this path cannot be a readable plan
+  // file" — arg-shaped → treated as the input defect below. Any OTHER stat
+  // error (EACCES, EIO, …) is a RUNTIME failure, not knowledge about the
+  // argument: it is rethrown and propagates to main.ts's catch → exit 1
+  // 'thrown'.
+  let planStat: Stats | undefined;
+  try {
+    planStat = await stat(input.plan);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+    planStat = undefined;
+  }
   if (planStat === undefined || !planStat.isFile()) {
-    narrate(io, `invalid input for 'run-plan': plan file ${input.plan} is not a readable file`);
+    narrateIfHuman(
+      io,
+      mode,
+      `invalid input for 'run-plan': plan file ${input.plan} is not a readable file`,
+    );
     return EXIT_CODES.usage;
   }
 
@@ -163,7 +193,11 @@ export async function runPlanCommand(
     // A zod error is flattened to the one-line issue form (narration stays
     // line-based); a JSON.parse error narrates its own message.
     const detail = hasIssues(err) ? issueMessage(err) : messageOf(err);
-    narrate(io, `invalid input for 'run-plan': plan file '${input.plan}' is not a valid plan: ${detail}`);
+    narrateIfHuman(
+      io,
+      mode,
+      `invalid input for 'run-plan': plan file '${input.plan}' is not a valid plan: ${detail}`,
+    );
     return EXIT_CODES.usage;
   }
 
@@ -201,7 +235,7 @@ export async function runPlanCommand(
     // above. Any other throw (a journal open/write failure, …) stays a
     // RUNTIME throw → propagates to main.ts's catch → narrated exit 1.
     if (messageOf(err).startsWith('runPlan: ')) {
-      narrate(io, `invalid input for 'run-plan': ${messageOf(err)}`);
+      narrateIfHuman(io, mode, `invalid input for 'run-plan': ${messageOf(err)}`);
       return EXIT_CODES.usage;
     }
     throw err;

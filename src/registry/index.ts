@@ -134,19 +134,30 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
     .map((dirent) => dirent.name)
     .sort();
   for (const family of families) {
-    // Discovered-path import, win32-safe: a constructed plain fs path cannot
-    // be imported on win32 (`import('C:\\...')` parses `c:` as a URL scheme
-    // — ERR_UNSUPPORTED_ESM_URL_SCHEME), so there the path is converted to a
-    // FILE URL first (pathToFileURL). POSIX keeps the plain path: it is
-    // already a valid specifier, and the vitest module runner resolves the
-    // NESTED relative dynamic imports inside a family registry (the
-    // convention's canonical `import('./<name>.js')` importer) against the
-    // file-URL module id AS AN FS PATH — importing registries via file URLs
-    // breaks every family's lazy importers under vitest. TypeScript must NOT
-    // statically resolve this specifier — families are discovered at runtime.
+    // Discovered-path import, URL-safe. Node parses import specifiers with
+    // URL semantics, so the conversion has three cases:
+    //   - win32: a plain fs path cannot be imported (`import('C:\\...')`
+    //     parses `c:` as a URL scheme — ERR_UNSUPPORTED_ESM_URL_SCHEME) →
+    //     convert to a FILE URL (pathToFileURL).
+    //   - a POSIX path containing `#`, `?`, or `%`: the raw path would
+    //     truncate (`#` starts a fragment, `?` a query) or misparse (`%`
+    //     starts an invalid escape) → convert too (pathToFileURL
+    //     percent-escapes them, e.g. `/tmp/cq#work/ops` →
+    //     `file:///tmp/cq%23work/ops`).
+    //   - every other POSIX path: keep the plain path — it is already a
+    //     valid specifier, and the vitest module runner resolves the NESTED
+    //     relative dynamic imports inside a family registry (the
+    //     convention's canonical `import('./<name>.js')` importer) against
+    //     the file-URL module id AS AN FS PATH — importing registries via
+    //     file URLs breaks every family's lazy importers under vitest. The
+    //     caveat stays true exactly for these normal POSIX paths.
+    // TypeScript must NOT statically resolve this specifier — families are
+    // discovered at runtime.
     const registryPath = path.join(root, family, 'registry.js');
     const registrySpecifier =
-      process.platform === 'win32' ? pathToFileURL(registryPath).href : registryPath;
+      process.platform === 'win32' || /[#?%]/.test(registryPath)
+        ? pathToFileURL(registryPath).href
+        : registryPath;
     let mod: unknown;
     try {
       mod = await import(registrySpecifier);
@@ -185,6 +196,25 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
           `op family '${family}': op '${e?.name}' registry entry must have an 'importer' ` +
             `function (() => Promise<Op>)`,
         );
+      }
+      // Reserved CLI keys can never be op input fields (src/ops/README.md):
+      // `json`/`help`/`h` are reserved on EVERY subcommand (narration mode /
+      // help surface) and are stripped before the schema ever sees the input,
+      // so a schema declaring one — a REQUIRED reserved field especially —
+      // could never receive it through its subcommand. Enforced at
+      // registration time for schemas that expose a structural `.shape`
+      // (same idiom as the CLI's help rendering); dynamic zod compositions
+      // without a usable shape are unaffected.
+      const shape = (e.inputSchema as { shape?: unknown }).shape;
+      if (typeof shape === 'object' && shape !== null && !Array.isArray(shape)) {
+        for (const key of Object.keys(shape)) {
+          if (key === 'json' || key === 'help' || key === 'h') {
+            throw new Error(
+              `op family '${family}': op '${e.name}' input schema declares the reserved CLI key ` +
+                `'${key}' (op input schemas must not declare reserved keys: json, help, h)`,
+            );
+          }
+        }
       }
       const previous = familyOf.get(e.name);
       if (previous !== undefined) {

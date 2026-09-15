@@ -32,6 +32,28 @@
 // raw-token gate runs before the help/mode branches — while the bare
 // spellings keep their mode/help behavior.
 //
+// MACHINE-MODE ERROR SUPPRESSION (the exact narration matrix): the bare
+// `--json` flag resolves the NarrationMode immediately after flag parsing;
+// from that point the exit code carries the verdict and error narration is
+// SUPPRESSED — stderr stays EMPTY, stdout stays the artifact-or-empty:
+//   suppressed when mode === 'json' (mode known):
+//     - op input-validation failure                      → exit 2
+//     - op invalid-result gates (result-schema mirror +  → exit 1
+//       JSON-losslessness probes)
+//     - op throw                                         → exit 1
+//     - run-plan input defects (every exit-2 class in    → exit 2
+//       run-plan.ts)
+//     - run-plan thrown                                  → exit 1
+//   ALWAYS narrated (usage-class errors, all pre-parse or arg-shaped — a
+//   machine consumer relying on --json got a usage error, and the exit code
+//   is the contract there):
+//     - missing subcommand / unknown subcommand
+//     - flag-syntax errors (duplicate flags), positional tokens
+//     - valued-reserved rejections (--json=x / --help=x / --h=x)
+//     - --ops-root passed to an op subcommand
+//     - the runCli last-resort catch (mode not resolved at that scope)
+//   Human mode keeps narration on every path (the failures-only convention).
+//
 // EXIT CODES: 0 ok; 1 failed/thrown; 2 usage — arg-shaped errors the CLI
 // detects itself, never derived from the taxonomy; 3 needs-human/budget.
 // runCli NEVER throws: every path returns a number, and a runtime throw
@@ -64,6 +86,18 @@ function messageOf(err: unknown): string {
 }
 
 /**
+ * Mode-aware narration for the POST-PARSE error sites (the suppression
+ * matrix in the header): mode 'json' → nothing on stderr (machine mode —
+ * stdout stays the artifact-or-empty and the exit code carries the verdict);
+ * mode 'human' → the one `cq:` stderr line. Usage-class errors detected
+ * before the mode is knowable narrate unconditionally via plain narrate().
+ */
+function narrateIfHuman(io: CliIo, mode: NarrationMode, message: string): void {
+  if (mode === 'json') return;
+  narrate(io, message);
+}
+
+/**
  * Flattened zod issue message, accessed STRUCTURALLY — no zod import (the
  * CLI boundary bans it): `<path>: <message>` joined by '; '.
  */
@@ -90,7 +124,14 @@ function issueMessage(error: unknown): string {
  * (the caller narrates + exits 2).
  */
 export function parseFlags(tokens: string[]): { flags: Record<string, unknown>; unknown: string[] } {
-  const flags: Record<string, unknown> = {};
+  // Prototype-free record: a plain `{}` makes `--__proto__=...` invoke the
+  // inherited `__proto__` ACCESSOR instead of creating an own property (the
+  // own-property duplicate check evaded, inherited `help`/`json` truthiness
+  // visible). Object.create(null) has no prototype, so every assignment —
+  // `__proto__` included — creates an own data property. Consumers use
+  // prototype-agnostic operations only (Object.hasOwn, Object.keys,
+  // Object.entries, spread) — none rely on `{}`-prototype methods.
+  const flags: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
   const unknown: string[] = [];
   const put = (dash: string, key: string, rawValue: string | undefined, token: string): void => {
     if (key === '') {
@@ -366,7 +407,8 @@ async function dispatchCli(
       // narrated exit 1 below.
       return await runPlanCommand(parsed.flags, io, mode, opts);
     } catch (err) {
-      narrate(io, `run-plan threw: ${messageOf(err)}`);
+      // Runtime throw → 1; machine mode suppresses the narration line.
+      narrateIfHuman(io, mode, `run-plan threw: ${messageOf(err)}`);
       return EXIT_CODES.thrown;
     }
   }
@@ -409,7 +451,7 @@ async function dispatchCli(
   // safeParse (static, sync — see run-plan.ts).
   const check = await entry.inputSchema.safeParseAsync(input);
   if (!check.success) {
-    narrate(io, `invalid input for '${sub}': ${issueMessage(check.error)}`);
+    narrateIfHuman(io, mode, `invalid input for '${sub}': ${issueMessage(check.error)}`);
     return EXIT_CODES.usage;
   }
   try {
@@ -422,7 +464,7 @@ async function dispatchCli(
     const raw: unknown = await op(check.data);
     const checked = OpResultSchema.safeParse(raw);
     if (!checked.success) {
-      narrate(io, `${sub} returned an invalid result: ${issueMessage(checked.error)}`);
+      narrateIfHuman(io, mode, `${sub} returned an invalid result: ${issueMessage(checked.error)}`);
       return EXIT_CODES.thrown;
     }
     // JSON-losslessness probes — the runner's full pre-journal gate applied
@@ -447,7 +489,7 @@ async function dispatchCli(
       }
       assertJsonLossless(checked.data);
     } catch (probeErr) {
-      narrate(io, `${sub} returned an invalid result: ${messageOf(probeErr)}`);
+      narrateIfHuman(io, mode, `${sub} returned an invalid result: ${messageOf(probeErr)}`);
       return EXIT_CODES.thrown;
     }
     writeResultJson(io, checked.data); // the ONE stdout artifact
@@ -456,7 +498,8 @@ async function dispatchCli(
   } catch (err) {
     // Thrown (uncaught exception) → 1, decided HERE (the caller of the
     // exit-code functions); stdout stays empty — no result ever existed.
-    narrate(io, `${sub} threw: ${messageOf(err)}`);
+    // Machine mode suppresses the narration line (mode is known here).
+    narrateIfHuman(io, mode, `${sub} threw: ${messageOf(err)}`);
     return EXIT_CODES.thrown;
   }
 }
