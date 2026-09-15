@@ -343,6 +343,40 @@ describe('crash replay — reply recorded at post time, resolve retried', () => 
 // ---------------------------------------------------------------------------
 
 describe('per-action failure isolation', () => {
+  test('WITHHOLDING: a failed review_reply withholds every resolve in the batch — the thread is never hidden behind a missing reply', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkResolve('res1', 'PRRT_kwA')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) => (label === 'reply:1201' ? { code: 1, stdout: '', stderr: 'gh: comment rejected' } : undefined)),
+        log,
+      ),
+    );
+    expect(result.pushed).toBe(true);
+    // The reply failed…
+    expect(result.failed[0]?.action.actionId).toBe('r1');
+    // …and the resolve was WITHHELD: not executed, not recorded, retriable.
+    expect(result.withheld).toBe(1);
+    expect(result.failed.some((f) => f.action.actionId === 'res1')).toBe(true);
+    expect(result.failed.find((f) => f.action.actionId === 'res1')?.error).toContain('withheld');
+    expect(calls.map((c) => c.label)).toEqual(['reply:1201']);
+    expect((await log.load()).map((r) => r.actionId)).toEqual([]);
+  });
+
+  test('WITHHOLDING releases on the next run: the reply lands, the resolve executes', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkResolve('res1', 'PRRT_kwA')],
+      baseOpts(recordingGh(calls), log),
+    );
+    expect(result.pushed).toBe(true);
+    expect(result.withheld).toBe(0);
+    expect(result.posted.map((r) => r.actionId)).toEqual(['r1', 'res1']);
+    expect(result.failed).toHaveLength(0);
+  });
+
   test('a MIDDLE reply failing does not stop the others — it lands in failed with the GhError-ish message and is NOT recorded', async () => {
     const calls: GhCall[] = [];
     const log = memLog();

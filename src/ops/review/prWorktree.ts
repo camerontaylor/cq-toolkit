@@ -11,7 +11,7 @@
 // invocation-level, not tree-level).
 //
 // DOMAIN BOUNDARY (asserted, not incidental): this is the REVIEW-OPS
-// worktree — keyed by PR, rooted at `<repoRoot>/.cq-review-worktrees`. It is
+// worktree — keyed by PR, rooted at `<repoRoot>/.git/cq-review-worktrees`. It is
 // NOT the package-keyed sweep worktree: `createOrReuseWorktree` in the sweep
 // ops family is a different domain with different keys and a different
 // lifetime, and review ops must never consult it (and vice versa). The test
@@ -70,7 +70,7 @@
 // never Date.now); the only direct fs touch is the worktreeRoot mkdir and
 // the registry entry's directory-existence check.
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join, sep } from 'node:path';
+import { basename, dirname, join, resolve as pathResolve, sep } from 'node:path';
 import { lock } from 'proper-lockfile';
 import type { GhFn } from './gh.js';
 
@@ -261,7 +261,7 @@ export interface PrWorktreeOpts {
   registry: WorktreeRegistry;
   /** The injected clock stamping registry entries — never Date.now. */
   nowMs: number;
-  /** Root for created worktrees; defaults to `<repoRoot>/.cq-review-worktrees`. */
+  /** Root for created worktrees; defaults to `<repoRoot>/.git/cq-review-worktrees`. */
   worktreeRoot?: string;
 }
 
@@ -407,7 +407,13 @@ export async function resolvePrWorktree(
   opts: PrWorktreeOpts,
 ): Promise<{ path: string; reused: boolean; branch: string; foreign: Array<{ path: string; branch: string }> }> {
   validateOpts(opts);
-  const worktreeRoot = opts.worktreeRoot ?? join(opts.repoRoot, '.cq-review-worktrees');
+  // ALL paths are resolved ABSOLUTE before use: mkdir() resolves from the
+  // process cwd while `git -C <repoRoot> <relative-path>` resolves from
+  // INSIDE repoRoot — a relative repoRoot would otherwise split the same
+  // worktreeRoot across two real locations (one per resolver). Absolute
+  // everywhere means one location, whichever cwd the caller runs from.
+  const repoRoot = pathResolve(opts.repoRoot);
+  const worktreeRoot = pathResolve(opts.worktreeRoot ?? join(repoRoot, '.git', 'cq-review-worktrees'));
   const key = String(opts.pr);
 
   // (a) THE PR'S HEAD REF IS TRUTH — fetched from the BASE repo before any
@@ -420,7 +426,7 @@ export async function resolvePrWorktree(
   // at that sha downstream — the label follows the truth, never the other
   // way round. A fetch failure means the PR head's state is unknown:
   // throw, touch nothing.
-  const fetchArgs = ['-C', opts.repoRoot, 'fetch', 'origin', `refs/pull/${opts.pr}/head`];
+  const fetchArgs = ['-C', repoRoot, 'fetch', 'origin', `refs/pull/${opts.pr}/head`];
   const fetch = await opts.run(fetchArgs);
   if (fetch.code !== 0) {
     throw gitFail(
@@ -430,7 +436,7 @@ export async function resolvePrWorktree(
       fetchArgs,
     );
   }
-  const fetchHeadArgs = ['-C', opts.repoRoot, 'rev-parse', 'FETCH_HEAD'];
+  const fetchHeadArgs = ['-C', repoRoot, 'rev-parse', 'FETCH_HEAD'];
   const fetchHead = await opts.run(fetchHeadArgs);
   if (fetchHead.code !== 0) {
     throw gitFail(
@@ -494,7 +500,7 @@ export async function resolvePrWorktree(
   //     RECLAIMABLE: the path is the PR's slot, not the branch's — a tree
   //     left there by a branch rename is removed non-forced exactly like
   //     the stale-sha case, and the create lands in the freed slot.
-  const listArgs = ['-C', opts.repoRoot, 'worktree', 'list', '--porcelain'];
+  const listArgs = ['-C', repoRoot, 'worktree', 'list', '--porcelain'];
   const list = await opts.run(listArgs);
   if (list.code !== 0) {
     throw gitFail('worktree list failed', list.code, list.stderr, listArgs);
@@ -506,7 +512,8 @@ export async function resolvePrWorktree(
     // RECLAIM RULE: a tree sitting at THIS PR key's target path is ours to
     // reclaim regardless of its checked-out branch (the path is the PR's
     // slot, not the branch's).
-    const atTargetPath = candidate.path === targetPath;
+    const atTargetPath =
+      (await canonicalize(candidate.path)) === (await canonicalize(targetPath));
     if (candidate.branch !== reviewBranch && !atTargetPath) {
       continue;
     }
@@ -523,7 +530,7 @@ export async function resolvePrWorktree(
       existing = candidate;
       break;
     }
-    const removeArgs = ['-C', opts.repoRoot, 'worktree', 'remove', candidate.path];
+    const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
     const remove = await opts.run(removeArgs);
     if (remove.code !== 0) {
       throw gitFail(
@@ -551,7 +558,7 @@ export async function resolvePrWorktree(
   // entry was never pruned, so the pointer survives for the next run.
   await mkdir(worktreeRoot, { recursive: true });
   const wtPath = targetPath;
-  const addArgs = ['-C', opts.repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
+  const addArgs = ['-C', repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
   const add = await opts.run(addArgs);
   if (add.code !== 0) {
     throw gitFail(`worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed`, add.code, add.stderr, addArgs);
@@ -581,13 +588,16 @@ export async function resolvePrWorktree(
  */
 export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }): Promise<void> {
   validateOpts(opts);
-  const worktreeRoot = opts.worktreeRoot ?? join(opts.repoRoot, '.cq-review-worktrees');
+  // Absolute everywhere (see resolvePrWorktree): mkdir/`-C`/paths must not
+  // straddle two resolvers.
+  const repoRoot = pathResolve(opts.repoRoot);
+  const worktreeRoot = pathResolve(opts.worktreeRoot ?? join(repoRoot, '.git', 'cq-review-worktrees'));
   if (!(await isInsideRoot(opts.path, worktreeRoot))) {
     throw new Error(
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,
     );
   }
-  const removeArgs = ['-C', opts.repoRoot, 'worktree', 'remove', opts.path];
+  const removeArgs = ['-C', repoRoot, 'worktree', 'remove', opts.path];
   const result = await opts.run(removeArgs);
   if (result.code !== 0) {
     throw gitFail(

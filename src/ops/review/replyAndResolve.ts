@@ -307,6 +307,12 @@ export interface ReplyAndResolveResult {
   posted: DispatchRecord[];
   /** Per-action failures — NOT recorded; they retry on the next run. */
   failed: Array<{ action: ReviewAction; error: string }>;
+  /**
+   * Resolve actions withheld this run because a review_reply in the same
+   * batch failed — resolving would hide the unanswered thread. Withheld
+   * resolves land in `failed` (unrecorded, retried once the reply lands).
+   */
+  withheld: number;
   /** Actions skipped because their actionId was already dispatched. */
   skippedAlreadyDispatched: number;
   /**
@@ -441,6 +447,7 @@ export async function replyAndResolve(
           failed: [],
           skippedAlreadyDispatched: 0,
           skippedAlreadyResolved: 0,
+          withheld: 0,
         };
       }
     } catch (err) {
@@ -451,6 +458,7 @@ export async function replyAndResolve(
         failed: [],
         skippedAlreadyDispatched: 0,
         skippedAlreadyResolved: 0,
+        withheld: 0,
       };
     }
   }
@@ -463,6 +471,7 @@ export async function replyAndResolve(
   const failed: Array<{ action: ReviewAction; error: string }> = [];
   let skippedAlreadyDispatched = 0;
   let skippedAlreadyResolved = 0;
+  let withheld = 0;
 
   // (c) REPLY-BEFORE-RESOLVE: the input order is preserved within each
   // phase; every post precedes every resolve.
@@ -552,7 +561,20 @@ export async function replyAndResolve(
     });
   }
 
+  // WITHHOLDING: a resolve whose sibling reply failed is withheld —
+  // resolving would hide the unanswered conversation, and the retry would
+  // then post the reply onto an already-resolved thread. Withheld resolves
+  // are unrecorded failures: they retry once the reply lands.
+  const replyFailed = failed.some((f) => f.action.kind === 'review_reply');
   for (const action of resolves) {
+    if (replyFailed) {
+      failed.push({
+        action,
+        error: 'withheld: a review_reply in this batch failed — resolving would hide the unanswered thread',
+      });
+      withheld += 1;
+      continue;
+    }
     await runExclusive(async () => {
       await refreshSeenUnderLock();
       if (seen.has(action.actionId)) {
@@ -633,5 +655,5 @@ export async function replyAndResolve(
     });
   }
 
-  return { pushed: true, posted, failed, skippedAlreadyDispatched, skippedAlreadyResolved };
+  return { pushed: true, posted, failed, skippedAlreadyDispatched, skippedAlreadyResolved, withheld };
 }
