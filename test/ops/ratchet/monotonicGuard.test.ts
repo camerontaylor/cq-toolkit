@@ -540,6 +540,14 @@ describe('checkDiffMonotonicity', () => {
       ['  "direction": "sideways",', '  "value": 3,'],
       ['  "direction": "sideways",', '  "value": 2,'],
     ],
+    [
+      // Codex P1: valid JSON parsing to Infinity — parseBaseline would
+      // reject the committed file, so the diff is corrupt evidence and
+      // loosens(80, Infinity, …) must never wave it through.
+      'a non-finite value literal (1e999 → Infinity)',
+      ['  "value": 80,'],
+      ['  "value": 1e999,'],
+    ],
   ])('a modified section with %s fails closed as unparsable (I5: never a pass)', (_label, minus, plus) => {
     const diff = modifiedSection(REL, minus, plus);
     expect(checkDiffMonotonicity(diff)).toEqual({

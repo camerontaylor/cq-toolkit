@@ -45,7 +45,9 @@
 //
 // FAIL-CLOSED (I5: non-passing evidence, never a pass) — a MODIFIED section
 // whose value pair is missing or unpairable (truncated hunks, renamed
-// fields), or whose direction cannot be reconstructed from ANY line in the
+// fields), or NON-FINITE on either side (`"value": 1e999` is valid JSON
+// parsing to Infinity — parseBaseline would reject the committed file as
+// corrupt), or whose direction cannot be reconstructed from ANY line in the
 // section (± or context — e.g. a baseline whose body omits direction
 // entirely, or a non-Direction string on the governing side) yields
 // why:'unparsable baseline diff'. Everything else is judged: a value-only
@@ -297,6 +299,15 @@ function judgeModified(
   const direction = newDir ?? oldDir;
   const oldValue: number | undefined = valuesMoved ? Number(oldSide.value.last) : undefined;
   const newValue: number | undefined = valuesMoved ? Number(newSide.value.last) : undefined;
+  // Codex P1 (round 3, code-freeze fix): `"value": 1e999` is valid JSON
+  // that parses to Infinity — parseBaseline rejects the committed baseline
+  // as non-finite, so a diff moving the threshold onto a non-finite number
+  // is corrupt evidence in the making. Comparing it raw would wave the
+  // diff through (loosens(80, Infinity, 'higher-is-better') is false), so
+  // a non-finite value on EITHER side fails closed.
+  if (valuesMoved && (Number.isFinite(oldValue) === false || Number.isFinite(newValue) === false)) {
+    return [unparsable()];
+  }
   const metric = newSide.metric.last ?? oldSide.metric.last;
   const target = newSide.target.last ?? oldSide.target.last;
   const violations: BaselineViolation[] = [];
