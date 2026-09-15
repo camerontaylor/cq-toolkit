@@ -883,6 +883,27 @@ export class AcpDriver implements Driver {
         return;
       }
       const request = parsed.data;
+      // SESSION-SCOPE GATE (PR #37 review, Codex P2): a permission ask is
+      // answerable only when it names THIS run's session. A stale or
+      // foreign session's ask — one naming no session at all, or arriving
+      // before establishment resolved an id — is failed with a named
+      // reason and records NOTHING: a foreign ask reusing a tool-call id
+      // must not mark that id permission-first (the never-asks tripwire's
+      // bypass) nor arm the pending ask.
+      if (acpSessionId === undefined || request.sessionId !== acpSessionId) {
+        observation.narration.push(
+          JSON.stringify({
+            cq: 'permission-not-scoped',
+            sessionId: request.sessionId ?? null,
+            toolCallId: request.toolCall.toolCallId,
+            note: 'session/request_permission did not name the active session — rejected before any answer-table or evidence effects',
+          }),
+        );
+        void wire.failRequest(id, 'session/request_permission rejected: not the active session').catch(
+          () => undefined,
+        );
+        return;
+      }
       const toolCallId = request.toolCall.toolCallId;
       // The gate FIRED for this id — first-write-wins (a tool_call that
       // already arrived first keeps its never-asks evidence).
@@ -1477,13 +1498,23 @@ export class AcpDriver implements Driver {
       promptStopReason: inputs.promptStopReason,
       responded: inputs.responded,
     });
-    // Derived-only cost (DD-2), keyed by the OBSERVED model when the
-    // harness reported one (pricing the requested id would attribute the
-    // wrong rates — §5); only on a verdict carrying a REAL measurement.
-    const pricedModel: ModelSpec =
-      observation.servedModel !== undefined ? { ...modelSpec, model: observation.servedModel } : modelSpec;
+    // Derived-only cost (DD-2), keyed by the OBSERVED model ONLY (PR #37
+    // review, Codex P2): when the harness reported measured usage but
+    // never echoed the post-materialization model, the cost stays ABSENT —
+    // pricing the requested spec would attribute modeled rates to an
+    // UNVERIFIED model (the remap risk this lane treats as real, §5).
+    // Under a configured maxUsd the absent cost then trips the governor's
+    // unpriced-usage check (DD-9: fail loud, never silently mispriced).
+    // The result's `model` field follows the same rule above — observed
+    // only, never requested.
     const cost =
-      inputs.measuredUsage === undefined ? {} : costField(this.costUSDOf.bind(this), pricedModel, usage);
+      inputs.measuredUsage === undefined || observation.servedModel === undefined
+        ? {}
+        : costField(
+            this.costUSDOf.bind(this),
+            { ...modelSpec, model: observation.servedModel },
+            usage,
+          );
     return {
       // The observed served model: the POST-MATERIALIZATION value the
       // harness reported, never the requested id (the remap-detection

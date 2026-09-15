@@ -64,6 +64,7 @@ import { spawnAcpProcess } from '../../src/driver/acp/process.js';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
+import { mapWireUsage } from '../../src/driver/acp/protocol.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { runLadder } from '../../src/kernel/governor.js';
@@ -623,6 +624,78 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect('reasoning' in result.usage).toBe(false);
       expect(result.costUSD).toBeUndefined(); // unpriced model — derived-only
       expect(result.costBasis).toBeUndefined();
+    });
+  });
+
+  test('mapWireUsage: invalid token counts are NO measurement — negative/fractional/NaN/Infinity never reach accounting (PR #37 review, Codex P2)', () => {
+    // The probed live sample folds unchanged (input INCLUSIVE of cache,
+    // derived by subtraction — the committed arithmetic).
+    expect(
+      mapWireUsage({ totalTokens: 15722, inputTokens: 15719, outputTokens: 3, cachedReadTokens: 11648, cachedWriteTokens: 0 }),
+    ).toEqual({ input: 4071, output: 3, cacheRead: 11648, cacheWrite: 0 });
+    // Every field rejects an invalid count by making the WHOLE usage
+    // unshapeable: undefined, never zeros-that-look-measured and never a
+    // corrupted fold (a negative inputToken could drag a total below
+    // Budget.maxTokens; a negative outputToken a negative modeled cost).
+    const badUsages: unknown[] = [
+      { inputTokens: -1, outputTokens: 3 },
+      { inputTokens: 15, outputTokens: -2 },
+      { inputTokens: 1.5, outputTokens: 5 },
+      { inputTokens: 15, outputTokens: 5, cachedReadTokens: -1 },
+      { inputTokens: 15, outputTokens: 5, cachedWriteTokens: 2.5 },
+      { inputTokens: 15, outputTokens: 5, thoughtTokens: Number.NaN },
+      { inputTokens: 15, outputTokens: 5, totalTokens: Number.POSITIVE_INFINITY },
+    ];
+    for (const usage of badUsages) {
+      expect(mapWireUsage(usage)).toBeUndefined();
+    }
+  });
+
+  test('measured usage with NO observed served model: the cost is ABSENT even for a priced requested id — never silently priced (PR #37 review, Codex P2)', async () => {
+    await withScratch(async (scratchDir) => {
+      // FAKE_ACP_NO_SERVED_MODEL: the turn settles end_turn WITH usage but
+      // the config_option_update never arrives. Pricing is trivially
+      // satisfied for every spec, so the old requested-spec fallback would
+      // surface a cost here; the fix keeps it absent (the DD-9 unpriced
+      // trip then binds under a maxUsd instead of a silent misprice).
+      const driver = new AcpDriver({
+        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_NO_SERVED_MODEL: '1' }, []),
+        pricing: () => ({ input: 3, output: 15, cacheRead: 0, cacheWrite: 0 }),
+      });
+      const result = await driver.run(invocation({ prompt: 'no-observed-model run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 }); // real measurement kept
+      expect(result.model).toBeUndefined(); // observed-only, never requested
+      expect(result.costUSD).toBeUndefined(); // never the requested-spec fallback
+      expect(result.costBasis).toBeUndefined();
+    });
+  });
+
+  test('a session/request_permission naming a FOREIGN session is rejected: no answer, no evidence — the ungated tool card fails the run (PR #37 review, Codex P2)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_FOREIGN_PERMISSION_SESSION: the ask names a session that
+      // is not this run's. The driver must fail the request BEFORE any
+      // answer-table or evidence effects — the foreign ask must not mark
+      // its toolCallId permission-first (the never-asks bypass) — and the
+      // vendor's subsequent tool card, ungated by any accepted ask, fails
+      // the run exactly like any never-asks evidence.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: '{"path":"a.txt"}',
+            FAKE_ACP_FOREIGN_PERMISSION_SESSION: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'foreign-ask run' }));
+      expect(result.stopReason).toBe('error'); // ungated execution is an error, never green
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"permission-not-scoped"'))).toBe(true);
+      expect(narration.some((line) => line.includes('"never-asks"'))).toBe(true); // the bypass is closed
     });
   });
 
