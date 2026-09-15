@@ -165,6 +165,33 @@ describe('baselineRelPath', () => {
     expect(baselineRelPath('src-a.ts', 'm')).toBe('baselines/src-a-ts--m--2194db1df002.json');
     expect(baselineRelPath('src/a.ts', 'm')).not.toBe(baselineRelPath('src-a.ts', 'm'));
   });
+
+  const LONG_PATH_TARGET = `src/${'a/b/'.repeat(99)}deep.ts`; // 411 chars of deep nesting
+  const LONG_WORD_TARGET = 'w'.repeat(200); // single 200-char word
+
+  test('very long targets stay within filesystem component limits', () => {
+    for (const target of [LONG_PATH_TARGET, LONG_WORD_TARGET]) {
+      const path = baselineRelPath(target, 'typecheck-count');
+      expect(path.length).toBeLessThanOrEqual(255);
+      for (const segment of path.split('/')) {
+        expect(segment.length).toBeLessThanOrEqual(255);
+      }
+      // The human-readable part is truncated; the digest still differs from
+      // the short-prefix world.
+      expect(path.startsWith('baselines/')).toBe(true);
+    }
+  });
+
+  test('two distinct 200-char targets differing only past char 80 keep distinct paths', () => {
+    const a = `${'x'.repeat(199)}a`;
+    const b = `${'x'.repeat(199)}b`;
+    const pathA = baselineRelPath(a, 'm');
+    const pathB = baselineRelPath(b, 'm');
+    // Same truncated human-readable prefix (first 80 sanitized chars)...
+    expect(pathA.slice(0, 'baselines/'.length + 80)).toBe(pathB.slice(0, 'baselines/'.length + 80));
+    // ...but the digests hash the UNtruncated raw pair, so paths stay distinct.
+    expect(pathA).not.toBe(pathB);
+  });
 });
 
 describe('tightens / loosens', () => {

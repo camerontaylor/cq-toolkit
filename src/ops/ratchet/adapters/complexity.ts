@@ -3,30 +3,36 @@
 // Two accepted shapes for the same metric: a pre-averaged summary
 // ({averageComplexity: n}) or an array of per-entity records
 // ({Complexity: n}) whose arithmetic mean becomes the value. Both paths
-// round HALF-UP to 2 decimals so identical inputs always produce identical
-// baseline bytes — in the integer domain (roundRatioHalfUp2), because the
-// binary double for an exact decimal half (1.005 → 100.499999…, not 100.5)
-// rounds the wrong way under naive float scaling. Empty arrays, records
-// without a finite non-negative Complexity, negative values → null:
-// non-passing evidence (I5), never a fabricated pass.
+// share ONE half-up-to-2-decimals rounding core so identical inputs always
+// produce identical baseline bytes; the core guards the half decision with
+// a relative epsilon, because the binary doubles for exact decimal halves
+// round the wrong way under naive float scaling (1.005 arrives as
+// 100.49999999999999 — via the direct multiply AND via the accumulated sum
+// feeding the array ratio). Empty arrays, records without a finite
+// non-negative Complexity, negative or overflow values → null: non-passing
+// evidence (I5), never a fabricated pass.
 import type { MetricAdapter, MetricReading } from '../registry.js';
 
-/** Half-up rounding of a non-negative integer-scaled ratio: (sum*100)/count. */
+/**
+ * Half-up rounding of a positive scaled ratio, guarded: the *100 scaling and
+ * the sum accumulation carry a few-ulp binary representation error (exact
+ * decimal 1.005 arrives as 100.49999999999999), so the half decision scales
+ * y by (1 + 8*EPSILON) — far larger than that ulp-level noise, far smaller
+ * than the 0.5 half-step it must not flip: it can only rescue a true half,
+ * never flip a non-half (a true just-below like 1.00499 sits ~1000x the
+ * guard away from the 1.005 half).
+ */
 function halfUp(y: number): number {
-  return Math.floor(y + 0.5);
+  return Math.floor(y * (1 + Number.EPSILON * 8) + 0.5);
 }
 
+/** halfUp over an integer-domain ratio (numerator already *100-scaled), result back on the 2-decimal scale by /100. */
 function roundRatioHalfUp2(num: number, den: number): number {
   return halfUp(num / den);
 }
 
 function roundHalfUp2(x: number): number {
-  // x*100 carries a few-ulp binary representation error (exact decimal 1.005
-  // arrives as 100.49999999999999), so the half decision adds a RELATIVE
-  // epsilon: far larger than the ulp-level noise of one multiply, far smaller
-  // than the 0.5 half-step it guards — it can only rescue a true half, never
-  // flip a non-half.
-  return roundRatioHalfUp2(x * 100 + Math.abs(x * 100) * Number.EPSILON * 8, 1) / 100;
+  return roundRatioHalfUp2(x * 100, 1) / 100;
 }
 
 export const complexity: MetricAdapter = {

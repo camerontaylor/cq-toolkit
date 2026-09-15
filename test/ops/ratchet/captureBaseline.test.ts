@@ -303,6 +303,20 @@ describe('captureBaseline', () => {
     expect(names).toEqual([basename(REL)]);
   });
 
+  test('a 400+ char deep-nested target captures cleanly (truncated segments, no ENAMETOOLONG)', async () => {
+    sourceRaw = { count: 1 };
+    const deepTarget = `src/${'a/b/'.repeat(99)}deep.ts`; // 411 chars
+    const result = await capture(captureInput({ target: deepTarget }));
+    expect(result.status).toBe('ok');
+    const relPath = baselineRelPath(deepTarget, METRIC);
+    expect(relPath.length).toBeLessThanOrEqual(255);
+    for (const segment of relPath.split('/')) {
+      expect(segment.length).toBeLessThanOrEqual(255);
+    }
+    // The write itself succeeded — no ENAMETOOLONG — and the file is readable.
+    await expect(readFile(join(ws, relPath), 'utf8')).resolves.toContain('"target"');
+  });
+
   test('corrupt existing baseline fails and is left untouched', async () => {
     sourceRaw = { count: 3 };
     await mkdir(join(ws, 'baselines'), { recursive: true });

@@ -8,14 +8,16 @@
 //      (out-of-range detail is dropped, not fatal); boundaries 0 and 100
 //      are valid; out-of-range, missing, non-numeric and non-object raws
 //      are null.
-//   2. complexity: pre-averaged {averageComplexity} is rounded half-up to
-//      2 decimals with a relative-epsilon guard (binary-unrepresentable
-//      halves like 1.005 → 1.01 and 2.675 → 2.68), and an input whose
-//      *100 scaling overflows to non-finite (1e307) is null; {Complexity}
-//      record arrays become the arithmetic mean rounded half-up in the
-//      INTEGER domain (sum*100 / count), so 201/200 → 1.01 exactly; any
-//      negative record is rejected before aggregation; empty arrays and
-//      junk are null.
+//   2. complexity: pre-averaged {averageComplexity} and {Complexity} record
+//      arrays share ONE half-up-to-2-decimals rounding core with a
+//      relative-epsilon guard (binary-unrepresentable halves like
+//      1.005 → 1.01 and 2.675 → 2.68 round up on BOTH paths — through the
+//      direct multiply AND through the accumulated sum feeding the array
+//      ratio), while a true just-below like 1.00499 stays down; an input
+//      whose *100 scaling overflows to non-finite (1e307) is null; the
+//      array ratio runs in the INTEGER domain (sum*100 / count), so
+//      201/200 → 1.01 exactly; any negative record is rejected before
+//      aggregation; empty arrays and junk are null.
 import { describe, expect, test } from 'vitest';
 import { complexity } from '../../../src/ops/ratchet/adapters/complexity.js';
 import { coverage } from '../../../src/ops/ratchet/adapters/coverage.js';
@@ -83,6 +85,9 @@ describe('complexity', () => {
     ['records: repeating decimal rounds up', [{ Complexity: 1 }, { Complexity: 2 }, { Complexity: 2 }], { value: 1.67, unit: 'avg-cx' }],
     ['records: exact-binary half rounds half-up', [{ Complexity: 0.125 }], { value: 0.13, unit: 'avg-cx' }],
     ['records: 201/200 integer-domain half-up', records201of200, { value: 1.01, unit: 'avg-cx' }],
+    ['records: decimal half rounds half-up through the ratio', [{ Complexity: 1.005 }], { value: 1.01, unit: 'avg-cx' }],
+    ['records: true just-below-half stays down', [{ Complexity: 1.00499 }], { value: 1, unit: 'avg-cx' }],
+    ['records: mixed decimals (2.675 + 1.005, mean 1.84)', [{ Complexity: 2.675 }, { Complexity: 1.005 }], { value: 1.84, unit: 'avg-cx' }],
     ['records: single value', [{ Complexity: 4 }], { value: 4, unit: 'avg-cx' }],
     ['records: negative record rejected before aggregation', [{ Complexity: -1 }, { Complexity: 2 }], null],
     ['empty array', [], null],

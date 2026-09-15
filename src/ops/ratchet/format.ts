@@ -83,12 +83,21 @@ export function parseBaseline(text: string): BaselineFile {
   return parsed.data;
 }
 
-/** Collapse a target/metric to a path segment: lowercase, [a-z0-9-] only, no doubled or edge dashes. */
+/**
+ * Human-readable segment budget: truncating each sanitized segment keeps
+ * every path component under the 255-byte filesystem limit for ANY input,
+ * and loses NO distinctness — the digest (computed over the UNtruncated raw
+ * pair) carries identity, so distinct long inputs still get distinct paths.
+ */
+const MAX_SEGMENT_CHARS = 80;
+
+/** Collapse a target/metric to a path segment: lowercase, [a-z0-9-] only, no doubled or edge dashes, ≤80 chars. */
 function sanitizeSegment(raw: string): string {
   return raw
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '');
+    .replace(/^-+|-+$/g, '')
+    .slice(0, MAX_SEGMENT_CHARS);
 }
 
 /**
@@ -106,7 +115,10 @@ function pathDigest(target: string, metric: string): string {
  * Deterministic repo-relative path for one (target, metric) baseline —
  * collision-RESISTANT, not collision-proof: the 48-bit raw-pair digest makes
  * a sanitization collision practically impossible without pretending a
- * 48-bit space cannot ever clash.
+ * 48-bit space cannot ever clash. Each sanitized segment is truncated to
+ * {@link MAX_SEGMENT_CHARS} chars, so the longest component
+ * (80 + 2 + 80 + 2 + 12 + 5) stays far under the 255-byte filesystem limit
+ * for any input.
  */
 export function baselineRelPath(target: string, metric: string): string {
   return `baselines/${sanitizeSegment(target)}--${sanitizeSegment(metric)}--${pathDigest(target, metric)}.json`;
