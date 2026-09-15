@@ -155,6 +155,12 @@
 //                         ungated-through-the-answer persona,
 //                         review-debt #45 — the driver's
 //                         denied-execution tripwire must fail the run)
+//   FAKE_ACP_LATE_FAIL    when '1' (with DENY_BUT_COMPLETE), AFTER the
+//                         completed report a further update for the same
+//                         toolCallId reports status 'failed' (CodeRabbit
+//                         P1: the completed evidence must be LATCHED at
+//                         the fold — the mutable final status must not
+//                         erase the bypass evidence)
 //   FAKE_ACP_RAW_OUTPUT_JSON when '1' (a FAILED tool execution), the
 //                         tool_call_update rawOutput is an OBJECT
 //                         { error: <text> } instead of a string
@@ -167,6 +173,12 @@
 //                         driver's stdout line buffer overflows — the
 //                         connection must FAIL and the run settle error;
 //                         the turn never settles protocol-side)
+//   FAKE_ACP_HUGE_FRAME_AFTER_REPLY when '1', a VALID turn settles
+//                         end_turn FIRST and the oversized unterminated
+//                         frame is written AFTER the response (CodeRabbit
+//                         P2: the pending table is empty at failConnection
+//                         — the verdict must still pin error via the
+//                         connection-failure evidence, measurement folded)
 //   ok               materialization updates + reply (FAKE_ACP_REPLY ??
 //                    'ok') + end_turn with usage
 //   tool-then-reply  ONE gated tool call: request_permission round-trip
@@ -233,8 +245,10 @@ const MODE_PIN_NOTIFICATION = process.env.FAKE_ACP_MODE_PIN_NOTIFICATION === '1'
 const MODE_DOWNGRADE = process.env.FAKE_ACP_MODE_DOWNGRADE === '1';
 const PIN_UNSHAPEABLE = process.env.FAKE_ACP_PIN_UNSHAPEABLE === '1';
 const DENY_BUT_COMPLETE = process.env.FAKE_ACP_DENY_BUT_COMPLETE === '1';
+const LATE_FAIL = process.env.FAKE_ACP_LATE_FAIL === '1';
 const RAW_OUTPUT_JSON = process.env.FAKE_ACP_RAW_OUTPUT_JSON === '1';
 const HUGE_FRAME = process.env.FAKE_ACP_HUGE_FRAME === '1';
+const HUGE_FRAME_AFTER_REPLY = process.env.FAKE_ACP_HUGE_FRAME_AFTER_REPLY === '1';
 
 // The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL=1), signal half: the
 // termination is IGNORED — only the unignorable SIGKILL rung reaches this
@@ -575,6 +589,14 @@ async function okFlow() {
     emitChunk(REPLY ?? 'ok');
   }
   endTurn();
+  if (HUGE_FRAME_AFTER_REPLY) {
+    // The post-response overflow persona (CodeRabbit P2): a VALID turn
+    // settles end_turn FIRST, then the harness emits an oversized
+    // unterminated frame. The pending table is empty when the connection
+    // fails — the verdict must still pin error (connection-failed), with
+    // the real measurement folded.
+    process.stdout.write(HUGE_FRAME_PREFIX);
+  }
 }
 
 async function resumeEchoFlow() {
@@ -678,6 +700,17 @@ async function toolFlow({ alwaysFail }) {
       // OBJECT; the fold must stringify it, not reject the frame.
       ...(ok || OMIT_RAW_OUTPUT ? {} : { rawOutput: RAW_OUTPUT_JSON ? { error: text } : text }),
     });
+    if (LATE_FAIL && !allowed) {
+      // A further update for the SAME toolCallId reporting failed — the
+      // mutable-final-status shape the latch must survive (CodeRabbit P1).
+      notifyUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        status: 'failed',
+        content: [{ type: 'text', text: 'late failure after the completed report' }],
+        rawOutput: 'late failure after the completed report',
+      });
+    }
     emitChunk(`${REPLY ?? 'noted the tool result'} [permission:${optionId}] [mode:${sessionMode}]`);
     endTurn();
   });

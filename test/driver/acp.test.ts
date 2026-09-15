@@ -504,6 +504,33 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('the completed bypass evidence is LATCHED: a later failed update for the same id cannot erase it (CodeRabbit P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // DENY_BUT_COMPLETE + LATE_FAIL: denied → completed (the bypass) →
+      // then a further update reports failed for the same id. The mutable
+      // final status must not wipe the latch: the verdict stays 'error'.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo latch-marker > latch.txt' }),
+            FAKE_ACP_DENY_BUT_COMPLETE: '1',
+            FAKE_ACP_LATE_FAIL: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(
+        invocation({ prompt: 'latch run', toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+      );
+      expect(result.stopReason).toBe('error'); // latched — the late failed status did not downgrade it
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"denied-tool-completed"'))).toBe(true);
+    });
+  });
+
   test('the probe-recorded placeholder permission card is not the tool execution: the run stays a clean complete', async () => {
     await withScratch(async (scratchDir, store) => {
       // The strategy records the bridge's placeholder card — title
@@ -639,6 +666,30 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(true);
       const failure = narration.find((line) => line.includes('"prompt-failure"'));
       expect(failure !== undefined && failure.includes('oversized frame')).toBe(true);
+    });
+  });
+
+  test('an oversized frame AFTER a settled turn still pins the verdict error — the connection failure is verdict evidence (CodeRabbit P2)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // HUGE_FRAME_AFTER_REPLY + IGNORE_CANCEL: a valid turn settles
+      // end_turn FIRST, then the (signal-tolerant) harness emits the
+      // oversized unterminated frame DURING the settle ladder's term
+      // grace. The pending table is empty at failConnection (nothing left
+      // to reject) — the stored connection failure must still pin 'error',
+      // with the REAL measurement folded (the response did arrive).
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME_AFTER_REPLY: '1', FAKE_ACP_IGNORE_CANCEL: '1' },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'post-reply overflow run' }));
+      expect(result.stopReason).toBe('error'); // pinned past the green-looking response
+      expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 }); // the real measurement folds
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(true);
+      expect(narration.some((line) => line.includes('"connection-failed"'))).toBe(true);
     });
   });
 

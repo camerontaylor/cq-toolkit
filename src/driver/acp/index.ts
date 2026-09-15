@@ -187,9 +187,9 @@
 //      'cancelled'                                        → 'aborted'
 //   2. never-asks evidence at settle, a DENIED tool reporting a completed
 //      execution (ungated through the answer channel), a permission ask
-//      with NO answerable option of the required side, or a failed
+//      with NO answerable option of the required side, a failed
 //      permission-ANSWER write (the enforcement channel is broken —
-//      Codex P1)                                          → 'error'
+//      Codex P1), or a failed connection (oversized frame) → 'error'
 //   3. folded usage ≥ Budget.maxTokens                   → 'budget'
 //   4. no wellshaped prompt response (handshake failure, child death) → 'error'
 //   5. stopReason 'end_turn'                             → 'complete'
@@ -369,6 +369,8 @@ interface RunObservation {
   permissionDecisions: Map<string, 'allow' | 'deny'>;
   /** toolCallIds already carrying a denial (dedupe across the two channels). */
   deniedToolCallIds: Set<string>;
+  /** DENIED toolCallIds that reported a COMPLETED execution — latched AT THE FOLD (a later status update must not erase the bypass evidence). */
+  deniedCompletedIds: Set<string>;
   /** The frozen denials, in denial order (answer-side + execution-failure side). */
   denials: ToolDenial[];
 }
@@ -384,6 +386,7 @@ function newObservation(): RunObservation {
     toolFirstSeen: new Map(),
     permissionDecisions: new Map(),
     deniedToolCallIds: new Set(),
+    deniedCompletedIds: new Set(),
     denials: [],
   };
 }
@@ -544,10 +547,14 @@ class AcpWire {
    * the pending table already empty.
    */
   private failConnection(reason: Error): void {
+    this.connectionFailure = reason;
     for (const p of this.pending.values()) p.reject(reason);
     this.pending.clear();
     this.child.kill();
   }
+
+  /** The reason failConnection fired, when it did — verdict evidence even when no request was pending at the time. */
+  connectionFailure: Error | undefined;
 
   private onLine(line: string): void {
     let data: unknown;
@@ -1282,9 +1289,7 @@ export class AcpDriver implements Driver {
     // the verdict fails loud (a policy that cannot be enforced is not
     // silently soft); the bypass is narration evidence — a denied id is
     // never persisted as a governed tool message.
-    const deniedButCompletedIds = [...observation.permissionDecisions.entries()]
-      .filter(([id, decision]) => decision === 'deny' && observation.tools.get(id)?.status === 'completed')
-      .map(([id]) => id);
+    const deniedButCompletedIds = [...observation.deniedCompletedIds];
     if (deniedButCompletedIds.length > 0) {
       observation.narration.push(
         JSON.stringify({
@@ -1343,6 +1348,15 @@ export class AcpDriver implements Driver {
       }
     }
 
+    // A failed connection (the oversized-frame path) pins the verdict
+    // 'error' even when a prompt response had already arrived — the wire's
+    // integrity broke mid-run, and 'complete' would hide that (the
+    // answerWriteFailed mirror). The measured usage still folds.
+    const connectionFailure = wire.connectionFailure;
+    if (connectionFailure !== undefined) {
+      observation.narration.push(JSON.stringify({ cq: 'connection-failed', message: connectionFailure.message }));
+    }
+
     // --- Failure records land in narration BEFORE persistence (evidence,
     // not silence) — the verdict itself has no error-message field.
     if (handshakeFailure !== undefined) {
@@ -1368,6 +1382,7 @@ export class AcpDriver implements Driver {
       signalFired,
       answerWriteFailed,
       permissionAnswerFailed,
+      connectionFailed: connectionFailure !== undefined,
       deniedRan: deniedButCompletedIds.length > 0,
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
@@ -1396,6 +1411,7 @@ export class AcpDriver implements Driver {
       signalFired: boolean;
       answerWriteFailed: boolean;
       permissionAnswerFailed: boolean;
+      connectionFailed: boolean;
       deniedRan: boolean;
       promptStopReason: string | undefined;
       responded: boolean;
@@ -1408,6 +1424,7 @@ export class AcpDriver implements Driver {
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
       answerWriteFailed: inputs.answerWriteFailed,
       permissionAnswerFailed: inputs.permissionAnswerFailed,
+      connectionFailed: inputs.connectionFailed,
       deniedRan: inputs.deniedRan,
       ungated: inputs.ungated,
       maxTokens: budget.maxTokens,
@@ -1628,6 +1645,15 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
       existing.status = update.status ?? existing.status;
       existing.identity = permissionToolIdentity(existing.title, existing.kind);
       observation.tools.set(id, existing);
+      // THE LATCH (CodeRabbit P1 on this PR): the completed report IS the
+      // bypass evidence — a later update for the same id (failed, pending)
+      // overwrites the mutable status and would erase it at settle. Latch
+      // at fold time, when the answer's decision is already known; a
+      // tool_call that completed BEFORE its gate is never-asks evidence
+      // instead (first-write-wins).
+      if (existing.status === 'completed' && observation.permissionDecisions.get(id) === 'deny') {
+        observation.deniedCompletedIds.add(id);
+      }
       // The SECOND denial channel: an execution that RAN and failed — not
       // one we denied at the answer (deduped per toolCallId).
       if (
@@ -1768,6 +1794,8 @@ export interface StopReasonInputs {
   permissionAnswerFailed?: boolean;
   /** A DENIED toolCallId reported a completed execution — ungated through the answer channel (review-debt #45); fails like never-asks. */
   deniedRan?: boolean;
+  /** The wire failed (the oversized-frame connection failure) — integrity broke mid-run; fails even when a response had arrived. */
+  connectionFailed?: boolean;
   /** Never-asks evidence at settle (ungated execution — a policy void is an error, never green). */
   ungated: boolean;
   maxTokens: number | undefined;
@@ -1778,11 +1806,12 @@ export interface StopReasonInputs {
   responded: boolean;
 }
 
-/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → denied-execution-error → ungated-error → budget → no-response-error → the wire stopReason. */
+/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → connection-failure → denied-execution-error → ungated-error → budget → no-response-error → the wire stopReason. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
   if (inputs.permissionAnswerFailed === true) return 'error'; // the unanswerable ask — failed enforcement even if the vendor settles end_turn anyway
   if (inputs.answerWriteFailed === true) return 'error'; // the broken enforcement channel — fail loud even if a response arrived
+  if (inputs.connectionFailed === true) return 'error'; // the wire failed mid-run (oversized frame) — fail loud even if a response arrived
   if (inputs.deniedRan === true) return 'error'; // a denied tool ran anyway — ungated through the answer channel (review-debt #45)
   if (inputs.ungated) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
