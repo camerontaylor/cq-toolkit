@@ -5,8 +5,9 @@
 //   1. The FULL decision table, one test per row (rows 1–15 of the module
 //      doc): threads (resolved / responder-authored / bot-skip / outdated /
 //      responder-last-word / fallback), reviews (responder-authored /
-//      bot-skip / dismissed / already-answered / approval-or-empty-summary
-//      / fallback), top-level comments (responder-authored / bot-skip /
+//      bot-skip / dismissed / already-answered / empty-body triple —
+//      approval_no_body | commented_no_body | empty_summary_no_state — /
+//      fallback), top-level comments (responder-authored / bot-skip /
 //      fallback).
 //   2. Row-order precedence: threads (resolved beats outdated 1 > 4;
 //      responder-authored beats bot-skip and outdated 2 > 3, 2 > 4) and
@@ -25,8 +26,10 @@
 //   5. Two verdicts demand a REAL reply timestamp: ANSWERING a review
 //      (row 10) and a thread's LAST WORD (row 5) — a null/unparseable
 //      reply never speaks (fails toward actionable), under either
-//      treatNullCreatedAtAs value — and the answer may live in EITHER
-//      comment collection (restReviewComments or restIssueComments).
+//      treatNullCreatedAtAs value. Summary-answer evidence is TOP-LEVEL
+//      issue comments ONLY (restIssueComments): thread replies
+//      (restReviewComments) answer threads via row 5 and never void a
+//      review summary.
 //   6. nowMs is the ONLY clock: moving the injected nowMs moves the
 //      null-submittedAt fallback and thread last-word ordering.
 //   7. Both-values coverage for the flip-able config flags
@@ -130,7 +133,9 @@ const itemsOf = (
 type ClassifyConfigOf = Parameters<typeof classifyThreads>[2];
 
 // ---------------------------------------------------------------------------
-// The decision table — rows 1–14, one test each
+// The decision table — rows 1–15, one test each (16 cases: row 11 carries
+// two case flavors, APPROVED and null-state; COMMENTED/CHANGES_REQUESTED
+// arms live in the approval describe below)
 // ---------------------------------------------------------------------------
 
 interface RowCase {
@@ -207,13 +212,16 @@ const ROW_CASES: RowCase[] = [
     expected: [{ kind: 'review', id: 'R9', verdict: 'skip', path: null, reason: 'review_dismissed' }],
   },
   {
-    name: 'row 10 — a responder reply postdates the review → skip (review_already_answered)',
+    name: 'row 10 — a responder TOP-LEVEL issue comment postdates the review → skip (review_already_answered)',
     state: baseState({
       reviews: [review({ id: 'R10', body: 'Please change X', submittedAt: T1 })],
-      restReviewComments: [restComment({ id: 501, authorLogin: 'pr-author', createdAt: T2 })],
+      restIssueComments: [restComment({ id: 501, authorLogin: 'pr-author', createdAt: T2 })],
     }),
     expected: [
       { kind: 'review', id: 'R10', verdict: 'skip', path: null, reason: 'review_already_answered' },
+      // The answer itself also classifies (row 13: the responder's own
+      // comment is not feedback).
+      { kind: 'comment', id: '501', verdict: 'skip', path: null, reason: 'responder_authored' },
     ],
   },
   {
@@ -337,6 +345,32 @@ describe('row-order precedence — threads', () => {
       { kind: 'thread', id: 'TP4', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
     ]);
   });
+
+  test('row 3 beats row 4 — a bot-notice body on an OUTDATED thread → skip, not blocked', () => {
+    expect(
+      itemsOf(
+        baseState({
+          threads: [thread({ id: 'TP5', isOutdated: true, body: 'CodeRabbit skipped this run' })],
+        }),
+      ),
+    ).toEqual([
+      { kind: 'thread', id: 'TP5', verdict: 'skip', path: 'src/a.ts', reason: 'bot_skip_notice' },
+    ]);
+  });
+
+  test('row 4 beats row 5 — an OUTDATED thread where the responder holds the last word → blocked, not responded', () => {
+    expect(
+      itemsOf(
+        baseState({
+          threads: [
+            thread({ id: 'TP6', isOutdated: true, replies: [said('reviewer', T1), said('pr-author', T2)] }),
+          ],
+        }),
+      ),
+    ).toEqual([
+      { kind: 'thread', id: 'TP6', verdict: 'blocked', path: 'src/a.ts', reason: 'outdated_unresolved' },
+    ]);
+  });
 });
 
 describe('row-order precedence — reviews (documented ordering)', () => {
@@ -373,15 +407,21 @@ describe('row-order precedence — reviews (documented ordering)', () => {
   test('row 9 precedes row 10 — a dismissed review with a postdating responder reply → review_dismissed', () => {
     // Documented call: a voided review stays void regardless of reply
     // timing — dismissal answers the "should anyone act on this" question
-    // more strongly than a reply does.
+    // more strongly than a reply does. (The reply is real row-10 evidence
+    // — a top-level issue comment — so the precedence is genuinely
+    // exercised.)
     expect(
       itemsOf(
         baseState({
           reviews: [review({ id: 'RP4', state: 'DISMISSED', submittedAt: T1 })],
-          restReviewComments: [restComment({ id: 511, authorLogin: 'pr-author', createdAt: T2 })],
+          restIssueComments: [restComment({ id: 511, authorLogin: 'pr-author', createdAt: T2 })],
         }),
       ),
-    ).toEqual([{ kind: 'review', id: 'RP4', verdict: 'skip', path: null, reason: 'review_dismissed' }]);
+    ).toEqual([
+      { kind: 'review', id: 'RP4', verdict: 'skip', path: null, reason: 'review_dismissed' },
+      // The evidence comment itself classifies too (row 13).
+      { kind: 'comment', id: '511', verdict: 'skip', path: null, reason: 'responder_authored' },
+    ]);
   });
 
   test('row 9 precedes row 11 — a dismissed EMPTY-body review → review_dismissed, not empty_summary_no_state', () => {
@@ -467,7 +507,7 @@ describe('null timestamps fall back per treatNullCreatedAtAs', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RN1', submittedAt: null })],
-        restReviewComments: [restComment({ id: 512, authorLogin: 'pr-author', createdAt: T1 })],
+        restIssueComments: [restComment({ id: 512, authorLogin: 'pr-author', createdAt: T1 })],
       }),
     );
     expect(items[0]?.verdict).toBe('actionable');
@@ -478,7 +518,7 @@ describe('null timestamps fall back per treatNullCreatedAtAs', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RN2', submittedAt: null })],
-        restReviewComments: [restComment({ id: 513, authorLogin: 'pr-author', createdAt: T1 })],
+        restIssueComments: [restComment({ id: 513, authorLogin: 'pr-author', createdAt: T1 })],
       }),
       NOW,
       { ...defaultClassifyConfig, treatNullCreatedAtAs: 'epochMs' },
@@ -491,7 +531,7 @@ describe('null timestamps fall back per treatNullCreatedAtAs', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RN3', submittedAt: T1 })],
-        restReviewComments: [restComment({ id: 514, authorLogin: 'pr-author', createdAt: T1 })],
+        restIssueComments: [restComment({ id: 514, authorLogin: 'pr-author', createdAt: T1 })],
       }),
     );
     expect(items[0]?.verdict).toBe('actionable');
@@ -507,7 +547,7 @@ describe('answering requires a real reply timestamp', () => {
   test('a null-createdAt reply NEVER answers — the same state stays actionable whatever nowMs is', () => {
     const state = baseState({
       reviews: [review({ id: 'RW1', body: 'Please change X', submittedAt: T2 })],
-      restReviewComments: [restComment({ id: 521, authorLogin: 'pr-author', createdAt: null })],
+      restIssueComments: [restComment({ id: 521, authorLogin: 'pr-author', createdAt: null })],
     });
     // nowMs after the review: the ordering fallback alone would have made
     // this "answered" under the old code — flipped: an un-timestamped
@@ -529,7 +569,7 @@ describe('answering requires a real reply timestamp', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RW2', submittedAt: T1 })],
-        restReviewComments: [restComment({ id: 522, authorLogin: 'pr-author', createdAt: 'not-a-date' })],
+        restIssueComments: [restComment({ id: 522, authorLogin: 'pr-author', createdAt: 'not-a-date' })],
       }),
     );
     expect(items[0]?.verdict).toBe('actionable');
@@ -540,7 +580,7 @@ describe('answering requires a real reply timestamp', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RW3', submittedAt: T1 })],
-        restReviewComments: [restComment({ id: 523, authorLogin: 'pr-author', createdAt: null })],
+        restIssueComments: [restComment({ id: 523, authorLogin: 'pr-author', createdAt: null })],
       }),
       NOW,
       { ...defaultClassifyConfig, treatNullCreatedAtAs: 'epochMs' },
@@ -553,7 +593,7 @@ describe('answering requires a real reply timestamp', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RW4', submittedAt: T2 })],
-        restReviewComments: [restComment({ id: 524, authorLogin: 'pr-author', createdAt: T3 })],
+        restIssueComments: [restComment({ id: 524, authorLogin: 'pr-author', createdAt: T3 })],
       }),
     );
     expect(items[0]?.verdict).toBe('skip');
@@ -587,11 +627,14 @@ describe('answering requires a real reply timestamp', () => {
 });
 
 // ---------------------------------------------------------------------------
-// The answer may live in EITHER comment collection (row 10)
+// Summary-answer evidence is TOP-LEVEL issue comments ONLY (row 10):
+// thread replies (restReviewComments) address threads via row 5 and never
+// void a review summary — otherwise one late reply would fail-open every
+// older unaddressed summary.
 // ---------------------------------------------------------------------------
 
-describe('the answer scan covers both comment collections', () => {
-  test('a responder answer in restIssueComments ONLY → the review skips (review_already_answered)', () => {
+describe('the answer scan covers TOP-LEVEL issue comments only', () => {
+  test('a responder answer in restIssueComments → the review skips (review_already_answered)', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RC1', submittedAt: T1 })],
@@ -602,16 +645,57 @@ describe('the answer scan covers both comment collections', () => {
     expect(items[0]?.reason).toBe('review_already_answered');
   });
 
-  test('a postdating comment by SOMEONE ELSE in either collection → still actionable', () => {
+  test('a postdating comment by SOMEONE ELSE in the issue collection → still actionable', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RC2', submittedAt: T1 })],
-        restReviewComments: [restComment({ id: 642, authorLogin: 'bystander', createdAt: T2 })],
         restIssueComments: [restComment({ id: 643, authorLogin: 'passerby', createdAt: T3 })],
       }),
     );
     expect(items[0]?.verdict).toBe('actionable');
     expect(items[0]?.reason).toBe('review_summary_needs_response');
+  });
+
+  test('multi-round — a late responder THREAD reply does NOT void the older unaddressed summary', () => {
+    // Review A is older and unaddressed; review B is newer. The only
+    // responder activity is a THREAD reply (restReviewComments), which
+    // answers its thread (row 5's business) — under the old either-
+    // collection scope it would have voided BOTH summaries (fail-open).
+    const items = itemsOf(
+      baseState({
+        reviews: [
+          review({ id: 'R-old', body: 'Please fix X', submittedAt: T1 }),
+          review({ id: 'R-new', body: 'Please fix Y', submittedAt: T3 }),
+        ],
+        restReviewComments: [restComment({ id: 644, authorLogin: 'pr-author', createdAt: T3 })],
+      }),
+    );
+    const byId = new Map(items.map((entry) => [entry.id, entry]));
+    // A: stays actionable — thread replies are not summary evidence.
+    expect(byId.get('R-old')?.verdict).toBe('actionable');
+    expect(byId.get('R-old')?.reason).toBe('review_summary_needs_response');
+    // B: judged on its OWN evidence — none postdates it either → actionable.
+    expect(byId.get('R-new')?.verdict).toBe('actionable');
+    expect(byId.get('R-new')?.reason).toBe('review_summary_needs_response');
+  });
+
+  test('multi-round control — a responder TOP-LEVEL issue comment postdating review A → A skips', () => {
+    const items = itemsOf(
+      baseState({
+        reviews: [
+          review({ id: 'R-old2', body: 'Please fix X', submittedAt: T1 }),
+          review({ id: 'R-new2', body: 'Please fix Y', submittedAt: T3 }),
+        ],
+        restIssueComments: [restComment({ id: 645, authorLogin: 'pr-author', createdAt: T2 })],
+      }),
+    );
+    const byId = new Map(items.map((entry) => [entry.id, entry]));
+    // A: the postdating top-level answer is real evidence → skip.
+    expect(byId.get('R-old2')?.verdict).toBe('skip');
+    expect(byId.get('R-old2')?.reason).toBe('review_already_answered');
+    // B: submitted after the answer → per its own evidence, outstanding.
+    expect(byId.get('R-new2')?.verdict).toBe('actionable');
+    expect(byId.get('R-new2')?.reason).toBe('review_summary_needs_response');
   });
 });
 
@@ -756,6 +840,25 @@ describe('approval and empty-summary reviews (row 11)', () => {
     expect(items[0]?.reason).toBe('review_summary_needs_response');
   });
 
+  test('a COMMENTED review with an EMPTY body → skip (commented_no_body)', () => {
+    const items = itemsOf(
+      baseState({ reviews: [review({ id: 'RA6', state: 'COMMENTED', body: '  \n' })] }),
+    );
+    expect(items[0]?.verdict).toBe('skip');
+    expect(items[0]?.reason).toBe('commented_no_body');
+  });
+
+  test('an EMPTY-body review with state CHANGES_REQUESTED stays ACTIONABLE — the state itself is signal', () => {
+    // Documented row-11 choice: requested changes are outstanding work
+    // even without accompanying prose — only APPROVED/COMMENTED/null
+    // empty bodies skip.
+    const items = itemsOf(
+      baseState({ reviews: [review({ id: 'RA7', state: 'CHANGES_REQUESTED', body: '' })] }),
+    );
+    expect(items[0]?.verdict).toBe('actionable');
+    expect(items[0]?.reason).toBe('review_summary_needs_response');
+  });
+
   test.each([
     { flag: true, verdict: 'skip', reason: 'approval_no_body' },
     { flag: false, verdict: 'actionable', reason: 'review_summary_needs_response' },
@@ -769,6 +872,22 @@ describe('approval and empty-summary reviews (row 11)', () => {
           { ...defaultClassifyConfig, skipApprovalReviews: flag },
         ),
       ).toEqual([{ kind: 'review', id: 'RA5', verdict, path: null, reason }]);
+    },
+  );
+
+  test.each([
+    { flag: true, verdict: 'skip', reason: 'commented_no_body' },
+    { flag: false, verdict: 'actionable', reason: 'review_summary_needs_response' },
+  ])(
+    'skipApprovalReviews=$flag — an empty-body COMMENTED review → $verdict ($reason)',
+    ({ flag, verdict, reason }) => {
+      expect(
+        itemsOf(
+          baseState({ reviews: [review({ id: 'RA8', state: 'COMMENTED', body: '' })] }),
+          NOW,
+          { ...defaultClassifyConfig, skipApprovalReviews: flag },
+        ),
+      ).toEqual([{ kind: 'review', id: 'RA8', verdict, path: null, reason }]);
     },
   );
 });
@@ -811,6 +930,23 @@ describe('default skipPatterns', () => {
       ),
     ).toEqual([
       { kind: 'thread', id: 'TH1', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+    ]);
+  });
+
+  test('a HYPHENATED tool-name mention ("Codex-style tooling failed us here") must NOT skip → actionable', () => {
+    // Round-3 pattern fix: the identity requires a trailing \b AND must
+    // not run into a hyphen — \b alone is satisfied before '-', which
+    // would read this human sentence as the tool's own failure notice.
+    expect(
+      itemsOf(
+        baseState({
+          threads: [
+            thread({ id: 'TH3', body: 'Codex-style tooling failed us here — please fix the harness manually.' }),
+          ],
+        }),
+      ),
+    ).toEqual([
+      { kind: 'thread', id: 'TH3', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
     ]);
   });
 

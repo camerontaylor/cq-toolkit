@@ -27,15 +27,20 @@
 //     7. authored by the responder (config)              → skip       (responder_authored)
 //     8. body matches a config.skipPatterns entry        → skip       (bot_skip_notice)
 //     9. state === 'DISMISSED' && skipDismissedReviews   → skip       (review_dismissed)
-//    10. a responder comment with a REAL parsed createdAt
-//        strictly greater than submittedAt (or its nowMs
-//        fallback) exists in restReviewComments OR
-//        restIssueComments — the natural answer to a
-//        review summary is often a top-level comment     → skip       (review_already_answered)
+//    10. a responder TOP-LEVEL issue comment with a REAL parsed createdAt
+//        strictly greater than submittedAt (or its nowMs fallback)
+//        exists in state.restIssueComments — summary-answer evidence is
+//        ISSUE comments ONLY: thread replies (restReviewComments)
+//        address threads via row 5 and never count as summary answers
+//        (otherwise one late reply would void every older unaddressed
+//        summary — fail-open)                        → skip       (review_already_answered)
 //    11. EMPTY body && (state === 'APPROVED' →
-//        approval_no_body; state === null →
-//        empty_summary_no_state), gated on
+//        approval_no_body; state === 'COMMENTED' →
+//        commented_no_body; state === null →
+//        empty_summary_no_state; CHANGES_REQUESTED stays
+//        actionable — the state itself is signal), gated on
 //        config.skipApprovalReviews                      → skip       (approval_no_body |
+//                                                                     commented_no_body |
 //                                                                     empty_summary_no_state)
 //    12. else                                            → actionable (review_summary_needs_response)
 //
@@ -144,9 +149,8 @@ interface RowContext {
   nowMs: number;
   /** The R3-tunable heuristics (classify.config.ts). */
   config: ClassifyConfig;
-  /** Flat REST review comments — row 10's answer scan (collection 1). */
-  restReviewComments: readonly RestComment[];
-  /** Flat REST issue comments — row 10's answer scan (collection 2). */
+  /** Flat REST issue comments — row 10's answer scan (the ONLY summary-
+   * answer evidence; thread replies answer threads via row 5). */
   restIssueComments: readonly RestComment[];
 }
 
@@ -353,14 +357,16 @@ const reviewDismissedRow: RowFn<ReviewSummary> = (review, ctx) =>
 
 /** Row 10 — a responder reply postdating the review means its summary is
  * already answered (workstream contract: review-body summaries skip when a
- * responder reply postdates them). The answer may live in EITHER comment
- * collection — restReviewComments or restIssueComments (the natural answer
- * to a review summary is often a top-level comment). Strictly greater:
+ * responder reply postdates them). Summary-answer evidence comes from
+ * TOP-LEVEL issue comments ONLY (state.restIssueComments): thread replies
+ * (restReviewComments) address THREADS — that is row 5's business — and
+ * never count as summary answers; counting them would let one late reply
+ * void every older unaddressed summary (fail-open). Strictly greater:
  * equal ms do not count. The reply needs a REAL parsed timestamp — a
  * null/unparseable reply never answers (fails toward actionable). */
 const reviewAlreadyAnsweredRow: RowFn<ReviewSummary> = (review, ctx) => {
   const submittedMs = toMs(review.submittedAt, ctx.nowMs, ctx.config);
-  const answered = [...ctx.restReviewComments, ...ctx.restIssueComments].some((comment) => {
+  const answered = ctx.restIssueComments.some((comment) => {
     if (!isResponder(comment.authorLogin, ctx.responder)) {
       return false;
     }
@@ -370,19 +376,28 @@ const reviewAlreadyAnsweredRow: RowFn<ReviewSummary> = (review, ctx) => {
   return answered ? reviewItem(review, 'skip', 'review_already_answered') : null;
 };
 
-/** Row 11 — an approval WITHOUT text is not outstanding feedback, and
- * neither is a stateless review with no body (config.skipApprovalReviews):
- * `approval_no_body` for APPROVED, `empty_summary_no_state` for a null
- * state. Deliberately AFTER the answered row and BEFORE the fallback: a
- * NON-empty body — approved or not — stays on the content rows and reaches
- * the fallback as actionable (fails toward action: the approver may have
- * noted follow-ups). */
+/** Row 11 — a review WITHOUT text is not outstanding feedback, gated on
+ * config.skipApprovalReviews, one reason per arm:
+ *   - state 'APPROVED' → `approval_no_body` — "approved" with no note
+ *     means the reviewer is satisfied;
+ *   - state 'COMMENTED' → `commented_no_body` — the reviewer wrapped up
+ *     with no words; nothing actionable survives;
+ *   - state null → `empty_summary_no_state` — no verdict and no words.
+ * An EMPTY body with state 'CHANGES_REQUESTED' stays ACTIONABLE on
+ * purpose: the state itself is signal — requested changes are outstanding
+ * work even without accompanying prose. A NON-empty body always stays on
+ * the content rows above regardless of state (fails toward action: the
+ * reviewer may have noted follow-ups). Deliberately AFTER the answered
+ * row and BEFORE the fallback. */
 const approvalNoBodyRow: RowFn<ReviewSummary> = (review, ctx) => {
   if (!ctx.config.skipApprovalReviews || review.body.trim() !== '') {
     return null;
   }
   if (review.state === 'APPROVED') {
     return reviewItem(review, 'skip', 'approval_no_body');
+  }
+  if (review.state === 'COMMENTED') {
+    return reviewItem(review, 'skip', 'commented_no_body');
   }
   if (review.state === null) {
     return reviewItem(review, 'skip', 'empty_summary_no_state');
@@ -469,7 +484,6 @@ export function classifyThreads(
     responder: responderOf(state, config),
     nowMs,
     config,
-    restReviewComments: state.restReviewComments,
     restIssueComments: state.restIssueComments,
   };
   return {

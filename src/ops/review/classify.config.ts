@@ -108,9 +108,14 @@ export const defaultClassifyConfig: ClassifyConfig = {
   skipPatterns: [
     // "CodeRabbit ... skipped ..." — the bot punted on this PR.
     /\bCodeRabbit\b.*\bskipped\b/i,
-    // A known bot/tool identity followed within one line by
-    // "failed"/"error" — the tool's own failure notice.
-    /(?:CodeRabbit|Codex|coderabbitai|chatgpt-codex-connector)[^\n]{0,80}\b(?:failed|error)\b/i,
+    // A known bot/tool identity at LINE START followed within one line by
+    // "failed"/"error" — the tool's own failure notice. The trailing \b
+    // after the identity mirrors the `\bCodeRabbit\b` shape, and the
+    // `(?!-)` guard keeps a HYPHENATED tool-name MENTION from reading as
+    // the tool speaking ("Codex-style tooling failed us here — please fix
+    // the harness manually." is a human's sentence; \b alone is satisfied
+    // before the hyphen and would eat it).
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:failed|error)\b/i,
     // Tooling self-skip caused by a configuration/setup problem.
     /\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/i,
     // A bot/tool identity LEADING the line delivering its self-skip
