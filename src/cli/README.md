@@ -17,10 +17,13 @@ THE I1 CLI CONTRACT (landed):
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
   --stop-on-error).
 - `json`, `help`, and `h` are CLI-reserved keys on every subcommand (narration
-  mode / help surface): op input schemas must not declare them. Bare
-  `--json`/`--help`/`-h` keep their mode/help behavior and never reach op
-  input; a VALUED reserved flag on an op subcommand (`--json=…`) is a usage
-  error (exit 2).
+  mode / help surface): op input schemas must not declare them. VALUED
+  reserved flags (`--json=x`, `--help=x`, `--h=x`) are rejected with exit 2
+  on EVERY subcommand — ops and run-plan alike — by a raw-token gate that
+  runs before the help/mode branches (so `cq echo --help --json=yes` and
+  `cq run-plan --plan=p --json=yes` are usage errors, never a silently
+  ignored flag or a silent human-mode downgrade). Bare `--json`/`--help`/`-h`
+  keep their mode/help behavior and never reach op input.
 - `--help` renders the subcommand's input schema; an unknown subcommand
   exits 2.
 - Unknown-flag enforcement is two-tier: unknown flag SYNTAX (positional

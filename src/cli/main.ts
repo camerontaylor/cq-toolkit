@@ -27,7 +27,10 @@
 // subcommand's input schema as plain text (the one sanctioned non-JSON
 // stdout surface, like the legacy --help) and exits 0. --json switches
 // narration to machine mode (NarrationMode 'json': stderr stays EMPTY,
-// stdout carries the artifact).
+// stdout carries the artifact). A VALUED reserved spelling (`--json=x`,
+// `--help=x`, `--h=x`) is a usage error (exit 2) on EVERY subcommand — the
+// raw-token gate runs before the help/mode branches — while the bare
+// spellings keep their mode/help behavior.
 //
 // EXIT CODES: 0 ok; 1 failed/thrown; 2 usage — arg-shaped errors the CLI
 // detects itself, never derived from the taxonomy; 3 needs-human/budget.
@@ -144,9 +147,11 @@ const RESERVED_FLAG_KEYS: readonly string[] = ['json', 'help', 'h'];
  * `undefined` when none did. A raw-token scan is required because bare
  * `--json` and `--json=true` are indistinguishable in the parsed flags
  * record (both parse to `true`): the bare spellings keep their mode/help
- * behavior, while an explicit `=value` on an OP subcommand would otherwise
- * be silently stripped below — for an op whose schema declares the key that
- * is silent input loss (exit 0 with the value dropped without a trace).
+ * behavior, while an explicit `=value` would otherwise be silently dropped —
+ * stripped for an op whose schema declares the key (silent input loss), and
+ * swallowed by run-plan's normalizer (silent downgrade of `--json=yes` to
+ * human mode). The caller hoists this scan over EVERY subcommand's help/mode
+ * branches, so a valued spelling is a usage error on ops and run-plan alike.
  */
 function reservedFlagWithValue(tokens: readonly string[]): string | undefined {
   for (const token of tokens) {
@@ -323,6 +328,26 @@ async function dispatchCli(
     narrate(io, `unexpected positional argument '${parsed.unknown[0]}' (try --help)`);
     return EXIT_CODES.usage;
   }
+  // A reserved key that arrived WITH an explicit `=value` never runs: the
+  // strips below would otherwise silently drop it (exit 0, key gone) — for an
+  // op whose schema declares the key that is silent input loss, and on
+  // run-plan the normalizer would silently downgrade `--json=yes` to human
+  // mode. The raw-token scan therefore sits HERE — after subcommand
+  // identification, before every per-subcommand help/mode branch — so a
+  // valued reserved spelling (`cq echo --help --json=yes`,
+  // `cq run-plan --plan=p --json=yes`) is a usage error on EVERY subcommand.
+  // Bare --json/--help/-h never carry `=`, so they never trip this scan and
+  // keep their mode/help behavior byte-identical; the global help surface
+  // (`cq --help`, help as the leading argument) stays lenient above it.
+  const reservedKey = reservedFlagWithValue(argv.slice(1));
+  if (reservedKey !== undefined) {
+    narrate(
+      io,
+      `--${reservedKey} is a reserved CLI flag ` +
+        '(op input schemas must not declare reserved keys: json, help, h)',
+    );
+    return EXIT_CODES.usage;
+  }
   // Reserved mode flags — never part of any op input.
   const wantsHelp = parsed.flags['help'] === true || parsed.flags['h'] === true;
   const mode: NarrationMode = parsed.flags['json'] === true ? 'json' : 'human';
@@ -364,20 +389,6 @@ async function dispatchCli(
   // (embedding/tests) is unaffected — only the FLAG is reserved.
   if (Object.hasOwn(parsed.flags, 'ops-root')) {
     narrate(io, '--ops-root is a run-plan flag (op inputs own their schema keys)');
-    return EXIT_CODES.usage;
-  }
-  // A reserved key that arrived WITH an explicit `=value` never runs: the
-  // strip below would otherwise silently drop it (exit 0, key gone) — for an
-  // op whose schema declares the key that is silent input loss. Bare
-  // --json/--help/-h already took their mode/help branch above and never get
-  // here.
-  const reservedKey = reservedFlagWithValue(argv.slice(1));
-  if (reservedKey !== undefined) {
-    narrate(
-      io,
-      `--${reservedKey} is a reserved CLI flag ` +
-        '(op input schemas must not declare reserved keys: json, help, h)',
-    );
     return EXIT_CODES.usage;
   }
   // Strip the reserved mode flags — the op's schema sees only its own keys

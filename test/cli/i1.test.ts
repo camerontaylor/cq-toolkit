@@ -341,9 +341,14 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
   });
 
   test('lossless-result probes: ok WITHOUT a value → exit 1, stdout empty', async () => {
-    // {status:'ok'} is lossy, not absent data: the frozen ok variant
-    // REQUIRES its value (the journal's ok-without-value record is rejected
-    // on read), so it can never become an artifact either.
+    // `{ status: 'ok', value: undefined }` is lossy, not absent data: the
+    // frozen ok variant REQUIRES its value (the journal's ok-without-value
+    // record is rejected on read), so it can never become an artifact either.
+    // The EXPLICIT undefined spelling is required for teeth: a MISSING value
+    // key is already rejected by OpResultSchema at the schema gate (zod 4
+    // treats z.unknown() as presence-required), so only `value: undefined`
+    // passes that gate and reaches the dedicated required-value probe
+    // (main.ts, "ok result without a 'value'").
     const tmp = await makeTmpOpsRoot('cq-i1-novalue-');
     await mkdir(join(tmp, 'novaluefam'), { recursive: true });
     await writeFile(
@@ -351,7 +356,7 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
       [
         "import { z } from 'zod';",
         'export const registry = [',
-        "  { name: 'novalue', inputSchema: z.object({}).strict(), importer: async () => async () => ({ status: 'ok' }) },",
+        "  { name: 'novalue', inputSchema: z.object({}).strict(), importer: async () => async () => ({ status: 'ok', value: undefined }) },",
         '];',
         '',
       ].join('\n'),
@@ -360,6 +365,10 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
     expect(code).toBe(1);
     expect(out).toBe('');
     expect(err).toMatch(/novalue returned an invalid result/);
+    // Pin the required-value probe's own message — this exact narration is
+    // unreachable through the schema gate, so it IS the proof this test
+    // exercised the dedicated check.
+    expect(err).toMatch(/ok result without a 'value'/);
   });
 
   test('reserved key WITH a value (--json=yes) on an op: usage error 2, stdout empty', async () => {
@@ -374,6 +383,102 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
     expect(out).toBe('');
     expect(err).toMatch(/reserved/);
     expect(err).toMatch(/--json is a reserved CLI flag/);
+  });
+
+  test('valued reserved flags win over the help/mode branches: ops and run-plan alike (r3 F2)', async () => {
+    // The raw-token gate is hoisted ABOVE the per-subcommand help/mode
+    // branches: a bare --help on the same invocation no longer shadows a
+    // valued reserved spelling, and run-plan no longer silently downgrades
+    // --json=yes to human mode — every valued spelling is the same usage
+    // error. Bare spellings keep their behavior (the run-plan --help pin
+    // above and the '--json mode' pin above cover those).
+    const opHelp = await capture(['echo', '--help', '--json=yes'], { opsRoot });
+    expect(opHelp.code).toBe(2);
+    expect(opHelp.out).toBe(''); // no help artifact — the gate fired first
+    expect(opHelp.err).toMatch(/--json is a reserved CLI flag/);
+    const runPlanHelp = await capture(['run-plan', '--help', '--json=yes'], { opsRoot });
+    expect(runPlanHelp.code).toBe(2);
+    expect(runPlanHelp.out).toBe('');
+    expect(runPlanHelp.err).toMatch(/--json is a reserved CLI flag/);
+    const runPlanValued = await capture(['run-plan', '--plan=p', '--json=yes'], { opsRoot });
+    expect(runPlanValued.code).toBe(2);
+    expect(runPlanValued.out).toBe('');
+    expect(runPlanValued.err).toMatch(/--json is a reserved CLI flag/);
+    // ...and a valued --help spelling is rejected too (not just --json).
+    const helpValued = await capture(['echo', '--help=x'], { opsRoot });
+    expect(helpValued.code).toBe(2);
+    expect(helpValued.out).toBe('');
+    expect(helpValued.err).toMatch(/--help is a reserved CLI flag/);
+  });
+});
+
+// Lossless PARITY PIN (r3 F3): src/cli/output.ts's assertJsonLossless and the
+// kernel runner's pre-journal walk (src/kernel/runner.ts) are deliberate
+// line-identical mirrors — the direct-dispatch gate and the plan-path gate
+// must keep REJECTING the same values, or the two dispatch paths disagree
+// about what may become an artifact/journal line. This suite holds them
+// together behaviorally: every corpus member must be rejected by BOTH layers
+// (corpus statuses verified against both walks before inclusion — e.g.
+// `Object.create(null)` carrying only a string member is ACCEPTED by both
+// (the documented null-prototype normalization) and is therefore excluded;
+// the null-proto member below carries a Map so both walks reject it).
+describe('lossless parity pin: the CLI walk and the kernel walk reject the same corpus', () => {
+  test('every lossy member: direct dispatch → exit 1 with empty stdout; run-plan → failed rows', async () => {
+    const corpus = [
+      { name: 'lossmap', expr: 'new Map()', type: 'Map' },
+      { name: 'lossdate', expr: 'new Date(0)', type: 'Date' },
+      { name: 'lossset', expr: 'new Set([1])', type: 'Set' },
+      { name: 'lossnullproto', expr: 'Object.assign(Object.create(null), { m: new Map() })', type: 'Map' },
+    ];
+    const tmp = await makeTmpOpsRoot('cq-i1-parity-');
+    await mkdir(join(tmp, 'parityfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'parityfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        ...corpus.map(
+          (member) =>
+            `  { name: '${member.name}', inputSchema: z.object({}).strict(), importer: async () => async () => ({ status: 'ok', value: ${member.expr} }) },`,
+        ),
+        '];',
+        '',
+      ].join('\n'),
+    );
+
+    // (a) Direct dispatch — the CLI-side walk rejects every member BEFORE any
+    // stdout artifact: exit 1 (thrown class), stdout empty.
+    for (const member of corpus) {
+      const { code, out, err } = await capture([member.name], { opsRoot: tmp });
+      expect(code, member.name).toBe(1);
+      expect(out, member.name).toBe('');
+      expect(err, member.name).toMatch(new RegExp(`${member.name} returned an invalid result`));
+      expect(err, member.name).toMatch(new RegExp(`non-plain object of type '${member.type}'`));
+    }
+
+    // (b) Plan path — the same ops through run-plan hit the kernel runner's
+    // pre-journal walk (the other copy): each job records an honest failed
+    // row instead of journaling a lossy result.
+    const plan = {
+      id: 'i1-parity',
+      jobs: corpus.map((member, index) => ({ id: `p${index}`, op: member.name, input: {} })),
+    };
+    const { planPath } = await writePlanFile(plan);
+    const { code, out } = await capture(['run-plan', `--plan=${planPath}`, `--ops-root=${tmp}`]);
+    expect(code).toBe(1); // failed rows map to 1
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.jobs).toHaveLength(corpus.length);
+    expect(report.counts.failed).toBe(corpus.length);
+    for (let index = 0; index < corpus.length; index++) {
+      const row = report.jobs[index];
+      expect(row?.op, `job ${index}`).toBe(corpus[index]?.name);
+      expect(row?.result.status, `job ${index}`).toBe('failed');
+      const error = row?.result.status === 'failed' ? row.result.error : '';
+      // The runner's non-serializable-result marker naming the same walk
+      // defect the direct path named above (/serializable|non-plain/i).
+      expect(error, `job ${index}`).toMatch(/returned a non-serializable result/);
+      expect(error, `job ${index}`).toMatch(/non-plain object of type/);
+    }
   });
 });
 
