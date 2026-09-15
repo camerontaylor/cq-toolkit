@@ -62,13 +62,20 @@ function isEnoent(err: unknown): boolean {
  * error'.
  */
 function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'object' && err !== null) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message !== '') return message;
-    return 'unknown error';
+  // The whole body is guarded (review-debt #72): a hostile thrown object's
+  // `message` getter can itself throw, and a containment helper that
+  // throws inside a catch handler would REPLACE the original fault.
+  try {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'object' && err !== null) {
+      const message = (err as { message?: unknown }).message;
+      if (typeof message === 'string' && message !== '') return message;
+      return 'unknown error';
+    }
+    if (typeof err === 'string') return err;
+  } catch {
+    // the thrown value's message accessor threw — fall through
   }
-  if (typeof err === 'string') return err;
   return 'unknown error';
 }
 
@@ -204,12 +211,27 @@ export function createCheckRatchet(
     // `unit` rides along for the identity check against the committed
     // baseline; only `value` participates in the comparison. A non-finite
     // value is unusable comparison evidence, so it fails the same way.
+    // The adapter's `direction` is snapshotted in the SAME containment
+    // (review-debt #72): it is adapter-owned property too, and it is read
+    // later — at the identity check, the comparison, and the fail reason —
+    // where a throwing/mutating getter would previously have escaped the
+    // op seam. A direction outside the two literals is refused here as
+    // well: garbage would silently flip loosens() to the higher-is-better
+    // branch instead of failing.
     let value: number;
     let unit: string | undefined;
+    let direction: 'lower-is-better' | 'higher-is-better';
     try {
-      const materialized = { value: reading.value, unit: reading.unit };
+      const materialized = { value: reading.value, unit: reading.unit, direction: adapter.direction };
       value = materialized.value;
       unit = materialized.unit;
+      if (materialized.direction !== 'lower-is-better' && materialized.direction !== 'higher-is-better') {
+        return fail(
+          `ratchet: metric '${input.metric}' adapter produced an unusable direction ` +
+            `(${String(materialized.direction)}) — nothing to compare`,
+        );
+      }
+      direction = materialized.direction;
       if (!Number.isFinite(value)) {
         return fail(
           `ratchet: metric '${input.metric}' adapter produced an unusable reading ` +
@@ -284,8 +306,8 @@ export function createCheckRatchet(
     if (baseline.metric !== input.metric) {
       disagreements.push(`metric '${baseline.metric}' → '${input.metric}'`);
     }
-    if (baseline.direction !== adapter.direction) {
-      disagreements.push(`direction '${baseline.direction}' → '${adapter.direction}'`);
+    if (baseline.direction !== direction) {
+      disagreements.push(`direction '${baseline.direction}' → '${direction}'`);
     }
     if (disagreements.length > 0) {
       return fail(
@@ -309,7 +331,7 @@ export function createCheckRatchet(
 
     // Rule 6: the ONLY path to 'pass'. Equal or tightening passes with both
     // values; loosening fails with expected vs actual in the reason.
-    if (loosens(baseline.value, value, adapter.direction)) {
+    if (loosens(baseline.value, value, direction)) {
       return {
         status: 'ok',
         value: {
@@ -319,7 +341,7 @@ export function createCheckRatchet(
           currentValue: value,
           reason:
             `ratchet: metric '${input.metric}' loosened: baseline ${baseline.value} → ` +
-            `current ${value} (${adapter.direction}) — only tightening passes`,
+            `current ${value} (${direction}) — only tightening passes`,
         },
       };
     }
