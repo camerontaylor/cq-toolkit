@@ -191,21 +191,34 @@ function renderGlobalHelp(names: string[]): string {
 }
 
 /**
+ * camelCase → kebab-case at RENDER time, for run-plan's help only: run-plan's
+ * CLI flags are the kebab-case aliases of its camelCase schema keys
+ * (--ops-root for opsRoot), so its help shows the canonical flag forms a user
+ * actually types. Op-schema help keeps the exact schema keys (identity).
+ */
+function camelToKebab(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+}
+
+/**
  * One line per schema field (`  --<key>=<described type>`), then the extra
- * reserved flags, then the notes. When the schema exposes no `.shape`,
- * render a generic line instead of field lines.
+ * reserved flags, then the notes. `renderKey` maps a schema key to the flag
+ * spelling shown (identity everywhere except run-plan — camelToKebab). When
+ * the schema exposes no `.shape`, render a generic line instead of field
+ * lines.
  */
 function renderSubHelp(
   name: string,
   schema: unknown,
   extraFlags: readonly string[],
   notes: readonly string[],
+  renderKey: (key: string) => string = (key) => key,
 ): string {
   const lines: string[] = [`usage: cq ${name} [--key=value ...]`, '', 'flags:'];
   const shape = (schema as unknown as { shape?: Record<string, unknown> }).shape;
   if (typeof shape === 'object' && shape !== null && !Array.isArray(shape)) {
     for (const [key, value] of Object.entries(shape)) {
-      lines.push(`  --${key}=${describeType(value)}`);
+      lines.push(`  --${renderKey(key)}=${describeType(value)}`);
     }
   } else {
     lines.push('  (the input schema does not expose a field list)');
@@ -235,6 +248,7 @@ function renderRunPlanHelp(): string {
       JSON_VALUES_NOTE,
       'run-plan accepts kebab-case aliases for its camelCase keys (--ops-root, --journal-dir, --max-usd, --max-tokens, --stop-on-error); op subcommands take EXACT schema keys.',
     ],
+    camelToKebab, // render the kebab-case canonical flag forms, not schema keys
   );
 }
 
