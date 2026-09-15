@@ -91,9 +91,9 @@ export interface LedgerRecordInput {
   storePath: string;
   /** The error signature to record (1..500 chars). */
   signature: string;
-  /** Owning component (≤ 200 chars); backfilled onto the entry only when it has none. */
+  /** Owning component (non-empty, ≤ 200 chars); backfilled onto the entry only when it has none. */
   component?: string;
-  /** Free-form note (≤ 500 chars); backfilled onto the entry only when it has none. */
+  /** Free-form note (non-empty, ≤ 500 chars); backfilled onto the entry only when it has none. */
   note?: string;
   /** Per-call threshold overrides (resolved pair validated). */
   thresholds?: { suppressAt?: number; escalateAt?: number };
@@ -307,8 +307,9 @@ function signatureFaultOf(signature: string): string | null {
 }
 
 /**
- * Boundary validation of an optional bounded field: a string of at most
- * `max` chars when present. A NON-STRING value (reachable from an untyped
+ * Boundary validation of an optional bounded field: a NON-EMPTY string of
+ * at most `max` chars when present (an empty backfill would pin hollow
+ * metadata permanently). A NON-STRING value (reachable from an untyped
  * caller past any schema) is a fault, never a backfill — a poisoned
  * component would make parseLedger reject the store file forever, and a
  * null must not surface as a TypeError across the op seam.
@@ -317,6 +318,9 @@ function lengthFaultOf(field: string, value: unknown, max: number): string | nul
   if (value === undefined) return null;
   if (typeof value !== 'string') {
     return `ledger: ${field} must be a string (got ${value === null ? 'null' : typeof value})`;
+  }
+  if (value.length < 1) {
+    return `ledger: ${field} must be a non-empty string`;
   }
   if (value.length > max) {
     return `ledger: ${field} exceeds ${String(max)} characters (${String(value.length)})`;

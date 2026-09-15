@@ -383,6 +383,19 @@ describe('ledger.record — component/note bounds (mirroring the registry schema
     });
     expect(store.saves()).toBe(0);
   });
+
+  test('an EMPTY component or note is failed like the schema rejects it (a hollow backfill pins permanently)', async () => {
+    const store = memoryStore();
+    await expect(record(store, { signature: 'sig-a', component: '' })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: component must be a non-empty string',
+    });
+    await expect(record(store, { signature: 'sig-a', note: '' })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: note must be a non-empty string',
+    });
+    expect(store.saves()).toBe(0);
+  });
 });
 
 describe('ledger.record — the store lock (concurrent records of one storePath)', () => {
@@ -454,6 +467,23 @@ describe('ledger.record — the store lock (concurrent records of one storePath)
     await expect(makeLedgerRecord(() => store)({ root: 'unused-root', storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
       status: 'failed',
       error: 'ledger: could not update the error ledger — lock stolen',
+    });
+  });
+
+  test('a FAILED RELEASE after a successful record is failed, never a swallowed ok', async () => {
+    const store: LedgerStore = {
+      load: () => ({ version: 1, entries: [] }),
+      save: () => undefined,
+      // Mimics the shipped lock's release path: the critical section (and
+      // its save) SUCCEEDED, but giving the lock back failed.
+      lock: (fn) =>
+        Promise.resolve(fn()).then(() => {
+          throw new Error('lock release failed — compromised lock');
+        }),
+    };
+    await expect(makeLedgerRecord(() => store)({ root: 'unused-root', storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: could not update the error ledger — lock release failed — compromised lock',
     });
   });
 });

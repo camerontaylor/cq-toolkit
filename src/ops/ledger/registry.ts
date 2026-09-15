@@ -36,8 +36,9 @@ export const LedgerThresholdsOverrideSchema = z
  * only it. `root` + `storePath` are REQUIRED — the registry-bound store is
  * built per dispatch, contained to strict descendants of an existing root
  * (pathLedgerStore's seam check), so a dispatch can never aim the write
- * outside the root. String fields are bounded: an empty signature is
- * noise, and unbounded signature (500) / component (200) / note (500)
+ * outside the root. String fields are bounded and non-empty: an empty
+ * signature is noise, an empty component/note would pin a permanent hollow
+ * backfill, and unbounded signature (500) / component (200) / note (500)
  * would let one input bloat the committed file. Strict: an unknown key
  * must fail loudly, not be silently stripped.
  */
@@ -46,8 +47,8 @@ export const LedgerRecordInputSchema: z.ZodType<LedgerRecordInput> = z
     root: z.string().min(1),
     storePath: z.string().min(1),
     signature: z.string().min(1).max(500),
-    component: z.string().max(200).optional(),
-    note: z.string().max(500).optional(),
+    component: z.string().min(1).max(200).optional(),
+    note: z.string().min(1).max(500).optional(),
     thresholds: LedgerThresholdsOverrideSchema.optional(),
   })
   .strict();

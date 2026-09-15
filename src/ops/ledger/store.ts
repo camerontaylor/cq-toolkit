@@ -157,14 +157,20 @@ export function parseLedger(text: string): LedgerFile {
 
 /**
  * The OPTIONAL shipped store: a containment-checked node:fs adapter over
- * one JSON ledger inside `root`. TRUST SURFACE (the captureBaseline
- * containment rule, enforced at this seam BEFORE any filesystem effect):
- * `root` must exist (realpath — a missing root refuses the store outright)
- * and `target` must resolve (path.resolve — deliberately no realpath: the
- * target may not exist yet) to a STRICT DESCENDANT of the resolved root —
- * never the root itself, never outside it. mkdir -p of the target's parent
- * and the publish happen only after containment passes, so a registry
- * input can never point the write anywhere else.
+ * one JSON ledger inside `root`. TRUST SURFACE — two-stage containment on
+ * REAL paths (the captureBaseline rule):
+ *   - Stage A, at store creation: `root` must exist (realpath — a missing
+ *     root refuses the store outright) and the target's nearest EXISTING
+ *     ancestor must be a strict descendant of the resolved root. BOTH sides
+ *     are realpathed, so a root reached THROUGH a symlinked ancestor
+ *     (macOS /var → /private/var) is normalized, never refused — and a
+ *     lexical check alone cannot lie about where the path really goes.
+ *   - Stage B, on every save and lock AFTER mkdir -p of the target's
+ *     parent: the parent is realpathed and (realParent + basename)
+ *     re-verified against the resolved root — an INTERMEDIATE symlink
+ *     under the root that points outside is refused (naming the escape)
+ *     before anything is written or locked. Load likewise reads through
+ *     the target's REAL path only, after the same re-verification.
  *
  * Load of a missing file yields the empty ledger (missing entries start
  * empty — recording is the only writer); any other read fault, or a corrupt
@@ -175,36 +181,82 @@ export function parseLedger(text: string): LedgerFile {
  * and a pre-planted symlink there is replaced, never followed. `lock` (see
  * {@link LedgerStore.lock}) wraps the ledger path with proper-lockfile,
  * THENABLE and with bounded acquire backoff, so concurrent recorders of one
- * storePath — across processes — serialize instead of being dropped.
+ * storePath — across processes — serialize instead of being dropped; a
+ * rejected release is a fault, never a swallowed success.
  */
 export function pathLedgerStore(root: string, target: string): LedgerStore {
-  const targetAbs = containLedgerTarget(root, target);
+  const { rootReal, targetAbs } = containLedgerTarget(root, target);
+  const base = basename(targetAbs);
+
+  /**
+   * Stage-B containment: the parent must exist by now (mkdir -p ran);
+   * realpath it and re-verify the strict descent of (realParent + basename)
+   * under the resolved root. This is what closes intermediate-symlink
+   * escapes, and comparing realpath-to-realpath is what keeps a symlinked
+   * root prefix a normalization instead of a false refusal.
+   */
+  const verifyParentUnderRoot = (): void => {
+    let realParent: string;
+    try {
+      realParent = realpathSync(dirname(targetAbs));
+    } catch (err) {
+      throw new Error(`ledger parent for '${target}' does not resolve — ${messageOf(err)}`, { cause: err });
+    }
+    const fault = strictDescendantFault(rootReal, join(realParent, base));
+    if (fault !== null) {
+      throw new Error(`${fault} — an intermediate symlink escapes the root; refusing to touch it`);
+    }
+  };
+
   return {
     load: () => {
-      let text: string;
+      // Read through the REAL path only: a missing ledger starts empty; an
+      // existing one is realpathed and containment re-verified before a
+      // byte is parsed — an intermediate symlink escaping the root is a
+      // refusal, never a read of outside content.
+      let realFile: string;
       try {
-        text = readFileSync(targetAbs, 'utf8');
+        realFile = realpathSync(targetAbs);
       } catch (err) {
         if (isEnoent(err)) return { version: 1, entries: [] };
         throw err;
       }
-      return parseLedger(text);
+      const fault = strictDescendantFault(rootReal, realFile);
+      if (fault !== null) {
+        throw new Error(`${fault} — an intermediate symlink escapes the root; refusing to read it`);
+      }
+      return parseLedger(readFileSync(realFile, 'utf8'));
     },
     save: (file) => {
+      mkdirSync(dirname(targetAbs), { recursive: true });
+      verifyParentUnderRoot();
       publishAtomic(targetAbs, serializeLedger(file));
     },
     lock: (fn) => {
       // The lockfile (a <target>.lock directory) needs its parent to exist
       // BEFORE acquire — without it, every attempt fails ENOENT and the
       // retry backoff burns out. On a first record the ledger file itself
-      // does not exist yet; containment has already passed.
+      // does not exist yet; stage-B containment runs after the mkdir.
       mkdirSync(dirname(targetAbs), { recursive: true });
+      verifyParentUnderRoot();
       return lock(targetAbs, LOCK_OPTIONS).then((release) =>
         Promise.resolve()
           .then(fn)
           .then(
-            (value) => release().catch(() => undefined).then(() => value),
+            (value) =>
+              // A rejected release is a fault, not a success: the ledger
+              // op must report `failed` (naming the release failure)
+              // rather than report ok while the lock is compromised.
+              release()
+                .then(() => value)
+                .catch((releaseErr: unknown) => {
+                  throw new Error(
+                    `lock release failed — ${messageOf(releaseErr)}`,
+                    { cause: releaseErr },
+                  );
+                }),
             (err) =>
+              // fn already failed: its fault is primary; release is best-effort.
               release()
                 .catch(() => undefined)
                 .then(() => {
@@ -230,31 +282,72 @@ const LOCK_OPTIONS: LockOptions = {
 };
 
 /**
- * P1 containment, resolved eagerly at store creation (the registry binds a
- * fresh store per dispatch, so every op call re-checks): realpath the root
- * — it must EXIST; path.resolve the target (no realpath — it may not exist
- * yet) and require it to be a STRICT descendant of the resolved root: the
- * relative form must be non-empty (never the root itself), never escape
- * upward ('..' — compared against the separator so a root-child literally
- * named '..foo' stays legal), and never absolute. The resolved target is
- * what every later operation touches.
+ * Stage-A containment, resolved eagerly at store creation (the registry
+ * binds a fresh store per dispatch, so every op call re-checks): realpath
+ * the root — it must EXIST — and verify the target's nearest EXISTING
+ * ancestor is a strict descendant of the resolved root. The comparison is
+ * REALPATH-TO-REALPATH: a root reached through a symlinked ancestor
+ * (macOS /var → /private/var) is normalized instead of refusing every
+ * contained target, and an existing prefix that resolves outside the root
+ * is refused before any mkdir. Stage B (after mkdir -p, per write/lock)
+ * closes the remaining gap: intermediate symlinks created below that
+ * prefix.
  */
-function containLedgerTarget(root: string, target: string): string {
-  let rootAbs: string;
+function containLedgerTarget(root: string, target: string): { rootReal: string; targetAbs: string } {
+  let rootReal: string;
   try {
-    rootAbs = realpathSync(root);
+    rootReal = realpathSync(root);
   } catch (err) {
     if (isEnoent(err)) throw new Error(`root does not resolve: '${root}' does not exist`, { cause: err });
     throw err;
   }
   const targetAbs = resolve(target);
-  const rel = relative(rootAbs, targetAbs);
-  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+  // Nearest existing ancestor: realpath fails ENOENT only while segments
+  // are missing; walk up until something resolves (worst case '/'). The
+  // ancestor is a PREFIX, so it may BE the root (all segments between root
+  // and the target are missing) — only an escape is refused here; the
+  // strictness (never the root itself) is the target's own business and is
+  // re-checked strictly at stage B and on read.
+  let ancestor = dirname(targetAbs);
+  for (;;) {
+    try {
+      ancestor = realpathSync(ancestor);
+      break;
+    } catch (err) {
+      if (!isEnoent(err)) throw err;
+      const parent = dirname(ancestor);
+      if (parent === ancestor) throw err; // pathological: even '/' unresolved
+      ancestor = parent;
+    }
+  }
+  const rel = relative(rootReal, ancestor);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
     throw new Error(
-      `'${target}' does not resolve to a strict descendant of root '${rootAbs}' — refusing to touch it`,
+      `'${target}' does not resolve inside root '${rootReal}' — refusing to touch it`,
     );
   }
-  return targetAbs;
+  return { rootReal, targetAbs };
+}
+
+/**
+ * The captureBaseline descent rule, on REAL paths: `candidate` must be a
+ * strict descendant of `rootReal` — the relative form non-empty (never the
+ * root itself), never escaping upward ('..' — compared against the
+ * separator so a root-child literally named '..foo' stays legal), never
+ * absolute. Returns the fault message naming both paths, or null when
+ * contained.
+ */
+function strictDescendantFault(rootReal: string, candidate: string): string | null {
+  const rel = relative(rootReal, candidate);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return `'${candidate}' does not resolve to a strict descendant of root '${rootReal}'`;
+  }
+  return null;
+}
+
+/** Error message of an unknown throwable, for fault messages. */
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Temp-name salt: uniqueness within a process; EEXIST collisions advance the counter, bounded. */

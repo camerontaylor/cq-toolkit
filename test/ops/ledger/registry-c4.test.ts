@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { registry } from '../../../src/ops/ledger/registry.js';
 import { LedgerQueryInputSchema, LedgerRecordInputSchema } from '../../../src/ops/ledger/registry.js';
+import { makeLedgerRecord } from '../../../src/ops/ledger/ledger.js';
 import { parseLedger, serializeLedger } from '../../../src/ops/ledger/store.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
 
@@ -106,6 +107,15 @@ describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only
       LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: 'n'.repeat(501) })
         .success,
     ).toBe(false);
+  });
+
+  test('rejects an EMPTY component or note (an empty backfill would pin hollow metadata permanently)', () => {
+    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', component: '' }).success).toBe(
+      false,
+    );
+    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: '' }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -231,7 +241,7 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     const result = await op({ root, storePath, signature: 'sig-a' });
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
-      expect(result.error).toContain('strict descendant');
+      expect(result.error).toContain('does not resolve inside root');
     }
     // The refused target was never created.
     await expect(stat(storePath)).rejects.toMatchObject({ code: 'ENOENT' });
@@ -245,7 +255,7 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     const result = await op({ root, storePath: root, signature: 'sig-a' });
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
-      expect(result.error).toContain('strict descendant');
+      expect(result.error).toContain('does not resolve inside root');
     }
   });
 
@@ -261,6 +271,100 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
     }
     // Containment refuses BEFORE any mkdir: the root was never created.
     await expect(stat(root)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  test('a root reached THROUGH a symlinked ancestor accepts contained targets (realpath normalizes, never refuses)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    // tmpdir-style layout: the root is itself a symlink to a real dir, the
+    // way /var/... aliases /private/var/... on stock macOS.
+    const realDir = join(scratchDir, 'real-ws');
+    await mkdir(realDir);
+    const root = join(scratchDir, 'link-to-ws');
+    await symlink(realDir, root);
+    const storePath = join(root, 'ledgers', 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    await expect(op({ root, storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+    // The ledger materialized under the root's REAL location, and a second
+    // record through the symlinked root increments the SAME ledger.
+    await expect(op({ root, storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 2, escalated: false },
+    });
+    expect(parseLedger(await readFile(join(realDir, 'ledgers', 'ledger.json'), 'utf8')).entries).toEqual([
+      { signature: 'sig-a', count: 2 },
+    ]);
+  });
+
+  test('an intermediate symlink UNDER the root pointing outside is refused before any write (stage A: link exists at store creation)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const outside = join(scratchDir, 'outside');
+    await mkdir(outside);
+    await symlink(outside, join(root, 'escape'));
+    const storePath = join(root, 'escape', 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    const result = await op({ root, storePath, signature: 'sig-a' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('does not resolve inside root');
+    }
+    // The escape was refused: nothing landed outside the root.
+    await expect(stat(join(outside, 'ledger.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  test('an intermediate symlink planted AFTER store creation is refused by the stage-B re-verify (naming the escape)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const target = join(root, 'sub', 'ledger.json');
+    // Stage A passes on the clean path; the escape appears before the save.
+    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const store = pathLedgerStore(root, target);
+    const outside = join(scratchDir, 'outside');
+    await mkdir(outside);
+    await symlink(outside, join(root, 'sub'));
+    const record = makeLedgerRecord(() => store);
+    const result = await record({ root, storePath: target, signature: 'sig-a' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('strict descendant');
+      expect(result.error).toContain('intermediate symlink');
+    }
+    // Nothing was written through the link.
+    await expect(stat(join(outside, 'ledger.json'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  test('a DANGLING intermediate symlink fails the record without writing anywhere', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    await symlink(join(scratchDir, 'outside'), join(root, 'escape')); // target never exists
+    const storePath = join(root, 'escape', 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    const result = await op({ root, storePath, signature: 'sig-a' });
+    expect(result.status).toBe('failed');
+    await expect(stat(join(scratchDir, 'outside'))).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  test('a ledger FILE behind an escaping intermediate symlink is refused on read (the load-side twin)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const outside = join(scratchDir, 'outside');
+    await mkdir(outside);
+    await writeFile(join(outside, 'real.json'), '{\n  "version": 1,\n  "entries": []\n}\n', 'utf8');
+    await symlink(join(outside, 'real.json'), join(root, 'ledger.json'));
+    const query = await entryNamed('ledger.query').importer();
+    const result = await query({ root, storePath: join(root, 'ledger.json') });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('strict descendant');
+      expect(result.error).toContain('refusing to read');
+    }
   });
 });
 
