@@ -15,11 +15,15 @@
 //      — no loosening is possible without a value change.
 //   2b. A section can carry BOTH violations at once (loosened under the new
 //       direction AND the flip itself), loosened first.
-//   3. File lifecycle is not a loosening: an ADDED baseline file and a
-//      DELETED baseline file are skipped (counted in filesChecked via the
-//      `+++ b/` path, falling back to the `diff --git` b-side for /dev/null
-//      new-sides); non-baseline sections are ignored entirely
-//      (filesChecked 0).
+//   3. File lifecycle is not a loosening, and comes from METADATA markers
+//      (`new file mode` / `--- /dev/null` for added; `deleted file mode` /
+//      `+++ /dev/null` for deleted), never from content-line counts —
+//      counted in filesChecked via the `+++ b/` path, falling back to the
+//      `diff --git` b-side for /dev/null new-sides. One-sided content
+//      WITHOUT a lifecycle marker fails closed (Codex P1: a plus-only
+//      duplicate-`"value"` insertion would otherwise ride the added-file
+//      skip to a silent threshold raise); non-baseline sections are ignored
+//      entirely (filesChecked 0).
 //   4. Identity fields (direction/metric/target) are recovered from hunk
 //      CONTEXT lines when the ± lines do not carry them — so the REAL git
 //      diff shape, a value-only hunk over a renderBaseline body, is judged
@@ -301,8 +305,50 @@ describe('checkDiffMonotonicity', () => {
     });
   });
 
-  test('a ±count mismatch (two removed values, one added) fails closed — the pair cannot be lined up', () => {
-    const diff = modifiedSection(
+  test('a plus-only section WITHOUT new-file metadata fails closed (Codex P1)', () => {
+    // No `new file mode` / `--- /dev/null`: this is a modification of an
+    // EXISTING baseline that only adds content — counting lines would let
+    // it ride the added-file skip. Unjudgeable → non-passing evidence.
+    const diff = modifiedSection(REL, [], ['  "value": 100,']);
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('a minus-only section WITHOUT deleted-file metadata fails closed (Codex P1)', () => {
+    const diff = modifiedSection(REL, ['  "value": 3,'], []);
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('the duplicate-"value" insertion scenario fails closed, not ok (Codex P1)', () => {
+    // The exact thread scenario: an existing baseline whose PR inserts a
+    // second value line after the first — JSON.parse would honor the LATER
+    // duplicate, silently raising the threshold from 3 to 100. Rendered as
+    // a real -U1 hunk it is plus-only with no lifecycle metadata: it must
+    // be a violation, never a skipped "added file".
+    const diff = [
+      `diff --git a/${REL} b/${REL}`,
+      'index 1111111..2222222 100644',
+      `--- a/${REL}`,
+      `+++ b/${REL}`,
+      '@@ -5,1 +5,2 @@',
+      '  "value": 3,',
+      '+  "value": 100,',
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('a ±count mismatch (two removed values, one added) fails closed — the pair cannot be lined up', () => {    const diff = modifiedSection(
       REL,
       ['  "value": 2,', '  "value": 3,'],
       ['  "value": 4,'],

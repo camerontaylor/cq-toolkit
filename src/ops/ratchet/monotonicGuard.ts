@@ -14,10 +14,17 @@
 //     whose new path matches /^baselines\/.+\.json$/ are judged
 //     (filesChecked counts those); src/, ci/, and every other file is
 //     ignored — the guard judges baseline files only.
-//   - ADDED baseline (no `-` content lines) → skip: a new baseline is
-//     capture committing data, not a loosening of existing evidence.
-//     DELETED baseline (no `+` content lines) → skip: a removed target's
-//     prune is a legitimate file lifecycle. Index/mode-only sections and
+//   - LIFECYCLE comes from diff METADATA, never from content-line counts
+//     (Codex P1): a section is ADDED only when it carries `new file mode`
+//     or `--- /dev/null` — capture committing data, not a loosening of
+//     existing evidence — and DELETED only when it carries `deleted file
+//     mode` or `+++ /dev/null` — a removed target's prune, a legitimate
+//     file lifecycle. An EXISTING-file modification CAN produce one-sided
+//     content (inserting a second `"value": 100` line after the first:
+//     JSON.parse honors the later duplicate and the effective threshold is
+//     silently raised), so a section with content lines on only one side
+//     and NO lifecycle marker FAILS CLOSED as 'unparsable baseline diff'.
+//     Index/mode-only sections (no content lines at all) and
 //     whitespace-only rewrites (the trimmed `-` set equals the trimmed
 //     `+` set) → skip: nothing moved.
 //   - Otherwise the section is MODIFIED: `"value"` — the ratcheted
@@ -264,6 +271,11 @@ function judgeModified(
   return violations;
 }
 
+/** True when any line of the section carries the metadata marker as a prefix. */
+function hasMarker(lines: string[], marker: string): boolean {
+  return lines.some((l) => l.startsWith(marker));
+}
+
 /** Judge a unified diff: do its baseline movements only tighten? Pure — no fs, no sources, no clock. */
 export function checkDiffMonotonicity(diff: string): DiffVerdict {
   const violations: BaselineViolation[] = [];
@@ -273,9 +285,24 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
     if (path === null || BASELINE_PATH.test(path) === false) continue; // judged: baseline files only
     filesChecked += 1;
     const { minus, plus, context } = contentLines(section);
+    // Lifecycle from METADATA (Codex P1) — never from content-line counts:
+    // an existing-file modification can produce one-sided content, and
+    // counting lines would let it ride the added/deleted skips.
+    if (hasMarker(section, 'new file mode') || hasMarker(section, '--- /dev/null')) {
+      continue; // added baseline: capture committing data, not a loosening
+    }
+    if (hasMarker(section, 'deleted file mode') || hasMarker(section, '+++ /dev/null')) {
+      continue; // deleted baseline: prune lifecycle, not a loosening
+    }
     if (minus.length === 0 && plus.length === 0) continue; // index/mode churn only
-    if (plus.length === 0) continue; // deleted baseline: prune lifecycle, not a loosening
-    if (minus.length === 0) continue; // added baseline: capture committing data, not a loosening
+    if (minus.length === 0 || plus.length === 0) {
+      // One-sided content WITHOUT lifecycle metadata: a modification we
+      // cannot confidently judge — a plus-only duplicate-"value" insertion
+      // (the later duplicate wins JSON.parse and silently raises the
+      // threshold), a pure insertion, or a truncated hunk — fail closed.
+      violations.push({ path, why: 'unparsable baseline diff' });
+      continue;
+    }
     if (whitespaceOnly(minus, plus)) continue; // reformat: nothing moved
     violations.push(...judgeModified(path, minus, plus, context));
   }
