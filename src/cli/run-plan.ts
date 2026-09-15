@@ -19,12 +19,16 @@
 // ERROR SHAPES (the 1-vs-2 line): all INPUT defects are exit 2 —
 // schema-invalid flags; a --plan path that is missing or not a regular file;
 // corrupted plan FILE CONTENT (unparseable JSON or a PlanSchema failure); and
-// the kernel's own input-validation class, a thrown error whose message starts
-// with 'runPlan: ' (duplicate job ids, the concurrency bound, resume:true
-// without journalDir). RUNTIME throws are exit 1 — anything else (a journal
-// open/write failure, a file read that raced the stat gate) propagates to
-// main.ts's catch, which narrates and returns 1 'thrown'. No result ever
-// existed on a throw, so stdout stays empty.
+// the kernel's own input-validation class — a thrown error whose message
+// starts with 'runPlan: ' (duplicate job ids, the concurrency bound,
+// resume:true without journalDir) or 'journal: ' (the runId filename-safety
+// assert: a PlanSchema-valid plan whose id cannot become a journal file name,
+// e.g. 'bad/id', thrown by assertSafeRunId inside runPlan when --journal-dir
+// is set — the plan id is still the defective input). RUNTIME throws are
+// exit 1 — anything else (a journal open/write failure, a file read that
+// raced the stat gate) propagates to main.ts's catch, which narrates and
+// returns 1 'thrown'. No result ever existed on a throw, so stdout stays
+// empty.
 //
 // GOVERNED COMPOSITION (kernel README, "Budget governor") — I9 is not
 // optional; every run goes through the recorded pipeline:
@@ -259,13 +263,19 @@ export async function runPlanCommand(
   try {
     rawReport = await runPlan(plan, runOptions, governRegistry(view, governor));
   } catch (err) {
-    // Kernel-input-class throws (message starts with 'runPlan: ': duplicate
-    // job ids, the concurrency bound, resume:true without journalDir) are
-    // INPUT defects → exit 2, consistent with the schema/content defects
-    // above. Any other throw (a journal open/write failure, …) stays a
-    // RUNTIME throw → propagates to main.ts's catch → narrated exit 1.
-    if (messageOf(err).startsWith('runPlan: ')) {
-      narrateIfHuman(io, mode, `invalid input for 'run-plan': ${messageOf(err)}`);
+    // Kernel-input-class throws are INPUT defects → exit 2, consistent with
+    // the schema/content defects above: messages starting 'runPlan: '
+    // (duplicate job ids, the concurrency bound, resume:true without
+    // journalDir) and messages starting 'journal: ' — the runId
+    // filename-safety assert (assertSafeRunId, via makeRunId inside runPlan)
+    // fires on a PlanSchema-valid plan whose id is journal-unsafe ('bad/id'):
+    // the id would become `<runId>.ndjson`, so the defect is still the plan
+    // INPUT, not a runtime failure. Any other throw (a journal open/write
+    // failure, …) stays a RUNTIME throw → propagates to main.ts's catch →
+    // narrated exit 1.
+    const message = messageOf(err);
+    if (message.startsWith('runPlan: ') || message.startsWith('journal: ')) {
+      narrateIfHuman(io, mode, `invalid input for 'run-plan': ${message}`);
       return EXIT_CODES.usage;
     }
     throw err;

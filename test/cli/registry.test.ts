@@ -4,11 +4,16 @@
 // today):
 //   1. The src/ops family scan sees every planned family dir (the scan is
 //      exercised for real, not vacuously).
-//   2. The teeth: every op module a family dir contains (`*.ts` except
-//      registry.ts / index.ts / *.test.ts) must have a matching entry name
-//      in `await list()` — basename === entry.name. Vacuously true today
-//      (no op module has landed yet); the day one lands without a registry
-//      entry, this fails naming the file and the missing entry.
+//   2. The teeth (PER FAMILY): every op module a family dir contains (`*.ts`
+//      except registry.ts / index.ts / *.test.ts) must have a matching entry
+//      name in THAT family's own registry module (source-layout import of
+//      registry.ts through vitest) — basename === entry.name. A global name
+//      set would mask an orphan in family alpha behind family beta's
+//      registered op of the same name. A family with no registry.ts is
+//      skipped only when it also has no op modules — op modules without a
+//      registry stay a violation. Vacuously true today (no op module has
+//      landed yet); the day one lands without a registry entry, this fails
+//      naming the family and the missing entry.
 //   3. Every registry entry has a subcommand: subcommandNames(list()) covers
 //      all entry names plus 'run-plan'; the empty registry still yields
 //      ['run-plan'].
@@ -103,26 +108,57 @@ describe('registry family scan (src/ops)', () => {
     }
   });
 
-  test('no op module without a registry entry', async () => {
-    const entries = await list();
-    const entryNames = new Set(entries.map((entry) => entry.name));
+  test('no op module without a registry entry (scoped per family)', async () => {
+    // The check is PER FAMILY: a single global name set would mask an orphan
+    // — family alpha's uncovered op module hides behind family beta's
+    // registered op of the same name. Each family's candidates are matched
+    // against THAT family's own registry module (imported at source layout —
+    // `registry.ts` — through the vitest module runner). A family with no
+    // registry.ts is skipped ONLY when it also has no candidate op modules;
+    // op modules without a registry.ts stay a violation.
     const families = readdirSync(srcOps, { withFileTypes: true })
       .filter((dirent) => dirent.isDirectory())
       .map((dirent) => dirent.name);
     const violations: string[] = [];
     for (const family of families) {
-      for (const dirent of readdirSync(join(srcOps, family), { withFileTypes: true })) {
-        if (!dirent.isFile() || !dirent.name.endsWith('.ts')) continue;
-        if (
-          dirent.name === 'registry.ts' ||
-          dirent.name === 'index.ts' ||
-          dirent.name.endsWith('.test.ts')
-        ) {
-          continue;
-        }
-        const opName = dirent.name.replace(/\.ts$/, '');
+      const dirents = readdirSync(join(srcOps, family), { withFileTypes: true });
+      const candidateNames = dirents
+        .filter(
+          (dirent) =>
+            dirent.isFile() &&
+            dirent.name.endsWith('.ts') &&
+            dirent.name !== 'registry.ts' &&
+            dirent.name !== 'index.ts' &&
+            !dirent.name.endsWith('.test.ts'),
+        )
+        .map((dirent) => dirent.name.replace(/\.ts$/, ''));
+      const hasRegistry = dirents.some((dirent) => dirent.isFile() && dirent.name === 'registry.ts');
+      if (candidateNames.length === 0 && !hasRegistry) continue; // bare family — nothing to cover
+      if (!hasRegistry) {
+        violations.push(
+          `src/ops/${family}: op module(s) ${candidateNames.join(', ')} but no registry.ts`,
+        );
+        continue;
+      }
+      // Source-layout import of the family's own registry — the .ts specifier
+      // resolves under vitest exactly like every other src import in this
+      // suite; the convention's lazy `import('./<name>.js')` importers are
+      // not invoked here (import only evaluates the module body).
+      let entryNames: Set<string>;
+      try {
+        const mod = (await import(join(srcOps, family, 'registry.ts'))) as {
+          registry?: Array<{ name?: unknown }>;
+        };
+        entryNames = new Set((mod.registry ?? []).map((entry) => String(entry?.name)));
+      } catch (err) {
+        violations.push(
+          `src/ops/${family}/registry.ts failed to load: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        continue;
+      }
+      for (const opName of candidateNames) {
         if (!entryNames.has(opName)) {
-          violations.push(`src/ops/${family}/${dirent.name}: no registry entry named '${opName}'`);
+          violations.push(`src/ops/${family}: no registry entry named '${opName}'`);
         }
       }
     }
@@ -176,6 +212,27 @@ describe('registry integrity defects reject loudly', () => {
       "export const registry = [{ name: 'x' }];\n",
     );
     await expect(list({ opsRoot: tmp })).rejects.toThrow(/'x'/);
+  });
+
+  test("an op named 'run-plan' rejects: the dispatcher owns that name", async () => {
+    // main.ts dispatches 'run-plan' before the registry is ever consulted and
+    // dedups it out of the global help, so such an entry validates but can
+    // never be invoked — registration rejects it as a malformed entry.
+    const tmp = await makeTmpOpsRoot('cq-registry-runplan-');
+    await mkdir(join(tmp, 'runplanfam'), { recursive: true });
+    await writeFile(join(tmp, 'runplanfam', 'registry.js'), registrySource('run-plan'));
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/reserved by the CLI dispatcher/);
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/'run-plan'/);
+  });
+
+  test("an op named '--weird' rejects: leading-dash names parse as flags", async () => {
+    // A name starting with '-' would collide with flag spellings at the
+    // dispatcher — never invocable as a subcommand — so registration rejects.
+    const tmp = await makeTmpOpsRoot('cq-registry-dashname-');
+    await mkdir(join(tmp, 'dashfam'), { recursive: true });
+    await writeFile(join(tmp, 'dashfam', 'registry.js'), registrySource('--weird'));
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/reserved by the CLI dispatcher/);
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/'--weird'/);
   });
 
   test('a non-strict object inputSchema (default z.object, no .strict()) rejects at scan', async () => {

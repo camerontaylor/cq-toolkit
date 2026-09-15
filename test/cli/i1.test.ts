@@ -13,8 +13,10 @@
 //   3. run-plan goes through the governed kernel composition: reports parse
 //      against RunReportSchema; ALL INPUT defects are usage errors (→2) —
 //      a --plan path that is missing or not a regular file, corrupted plan
-//      FILE CONTENT, and the kernel's own 'runPlan: ' input class (duplicate
-//      job ids, resume without a journal dir) — while genuine RUNTIME throws
+//      FILE CONTENT, and the kernel's own input-validation class ('runPlan: '
+//      — duplicate job ids, resume without a journal dir; 'journal: ' — the
+//      runId filename-safety assert on a schema-valid but journal-unsafe plan
+//      id, e.g. 'bad/id', under --journal-dir) — while genuine RUNTIME throws
 //      (a journal-dir pointing at a regular file) narrate 'run-plan threw:'
 //      and exit 1. stdout stays empty on every non-artifact path.
 //   4. Round-trip parity: invoking the op DIRECTLY through the registry and
@@ -897,6 +899,29 @@ describe('run-plan through the governed kernel', () => {
     expect(dirRun.out).toBe('');
     expect(dirRun.err).toMatch(/invalid input for 'run-plan'/);
     expect(dirRun.err).toMatch(/not a readable file/);
+  });
+
+  test('journal-unsafe plan id + --journal-dir: kernel journal assert → exit 2, not 1', async () => {
+    // PlanSchema accepts any string id, but a JOURNALED runId becomes a file
+    // name (`<runId>.ndjson`), so makeRunId → assertSafeRunId throws
+    // `journal: …` from inside runPlan for a schema-valid plan like
+    // id 'bad/id'. The plan id is still the defective INPUT, so the
+    // 'journal: ' classifier maps it to the usage path: exit 2, stdout empty,
+    // stderr naming the journal assert — never the thrown-class exit 1.
+    const { planPath, journalDir } = await writePlanFile({
+      id: 'bad/id',
+      jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+    });
+    const { code, out, err } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+    ]);
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid input for 'run-plan': journal: /);
+    expect(err).toMatch(/runId must match/);
   });
 
   test('duplicate job ids: PlanSchema-valid file, kernel input-class throw → exit 2', async () => {

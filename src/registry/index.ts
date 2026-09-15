@@ -34,7 +34,11 @@
 // that is not an array, a malformed entry, a duplicate op name across
 // families, or a shape-bearing object input schema that is not `.strict()`
 // (unknown-key rejection is load-bearing — see the scan loop below) — all
-// throw immediately.
+// throw immediately — including a NAME that collides with the CLI
+// dispatcher: 'run-plan' (handled by main.ts before the registry is ever
+// consulted) and any name starting with '-' (reads as a flag spelling).
+// Such an entry validates but can never be invoked, and the deduped global
+// help would hide it — a dead op — so registration rejects it.
 //
 // Results are cached per resolved ops root (as a promise), so repeated
 // list()/get() calls do not rescan or re-import.
@@ -185,6 +189,16 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
       if (typeof e?.name !== 'string' || e.name === '') {
         throw new Error(
           `op family '${family}': registry entry must have a non-empty string 'name'`,
+        );
+      }
+      // Dispatcher-colliding names are a malformed entry: 'run-plan' is the
+      // one non-op subcommand (main.ts dispatches it before the registry) and
+      // a leading '-' makes the name read as a flag token — neither can ever
+      // reach get()/dispatch, so accepting them would ship a dead op.
+      if (e.name === 'run-plan' || e.name.startsWith('-')) {
+        throw new Error(
+          `op family '${family}': op name '${e.name}' is reserved by the CLI dispatcher ` +
+            `('run-plan' is the built-in subcommand; names starting with '-' parse as flags)`,
         );
       }
       if (typeof e?.inputSchema?.parse !== 'function') {
