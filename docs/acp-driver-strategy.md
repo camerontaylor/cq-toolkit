@@ -267,12 +267,13 @@ only legal on a real cancellation (spec tool-calls page; §2.3).
 `ToolCallUpdate` — toolCallId, title, kind (read/edit/delete/move/
 search/execute/think/fetch/other), content, locations, rawInput — and NO
 canonical tool name (spec tool-calls page). Our allowlists are authored
-against tool NAMES. v1 defines the matched identity as the request's
-`title` string (the vendor's own tool label, e.g. a shell-command title),
-with `kind` recorded alongside in the denial reason; conformance
-exercises the mapping through the fake server (§7), and the LIVE spike
-records what zcode-acp-server actually puts in `title`/`kind`/`rawInput`
-(OQ-4). If the spike shows the vendor's titles are unstable
+against tool NAMES. v1 defines the matched identity as the request's title's LEADING
+`<toolName>:` token — the live probe (OQ-4, answered) recorded
+zcode-acp-server titles as `Write: /path/to/file` (tool name leading, a
+`: summary` suffix trailing) — and the shipped matcher
+(`permissionToolIdentity`, src/driver/acp/protocol.ts) extracts that
+leading token, with `kind` recorded alongside in the denial reason;
+conformance exercises the mapping through the fake server (§7). If the spike shows the vendor's titles are unstable
 free-text, the honest fallback is documented here FIRST: treat any
 unmatched title as a deny (fail-closed is always available), never as an
 allow.
