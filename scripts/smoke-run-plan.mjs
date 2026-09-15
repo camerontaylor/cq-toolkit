@@ -24,7 +24,8 @@
 // exactly as src/kernel/README.md's "Budget governor" section documents —
 // the old smoke wired this composition BY HAND in a self re-invoked child;
 // a generic CLI child cannot carry that hand wiring, so the usage-fold
-// evidence moved into the fixture op's guards (leg 4 below).
+// evidence moved into the fixture op's guards PLUS the governor-trip child
+// (leg 4 below — two-part evidence; leg 5 is the trip).
 //
 // ASSERTED HERE (the legs):
 //   0. Child exit code 0 — the CLI's own verdict over the whole run.
@@ -51,19 +52,31 @@
 //   4. USAGE/MODEL OBSERVABILITY — each ok row's observable IS the served
 //      model id: the fixture reports the requested --model as served, so
 //      the row must pin 'smoke-1' (never the 'unreported' fallback). The
-//      USAGE FOLD's evidence moved: the old smoke asserted the governor's
-//      rollup ({10,5,2,3} ×2 jobs) INSIDE its hand-wired child, right after
-//      runPlan; a generic CLI child has no governor handle to inspect. At
-//      the CLI boundary the fold is proven by the fixture op's guards
-//      (test/fixtures/cli-smoke-ops/smoke/agent-run.js):
-//        (a) the op REFUSES an ungoverned job context — a dropped
-//            governRegistry wiring fails both jobs and the child exits 1,
-//            failing leg 0;
-//        (b) the op REFUSES a driver result without usage (the old
-//            regression guard, message unchanged);
-//        (c) leg 0's exit 0 + leg 1's two ok rows prove both guards passed
+//      USAGE FOLD's evidence is TWO-PART (the old smoke asserted the
+//      governor's rollup ({10,5,2,3} ×2 jobs) INSIDE its hand-wired child,
+//      right after runPlan; a generic CLI child has no governor handle to
+//      inspect):
+//        (a) THE FIXTURE GUARDS (test/fixtures/cli-smoke-ops/smoke/
+//            agent-run.js): the op REFUSES an ungoverned job context — a
+//            dropped governRegistry wiring fails both jobs and the child
+//            exits 1, failing leg 0 — and it REFUSES a driver result
+//            without usage (the old regression guard, message unchanged).
+//            Leg 0's exit 0 + leg 1's two ok rows prove both guards passed
 //            — i.e. ctx.reportUsage WAS called with the fixture's fixed
-//            usage, once per job, twice here.
+//            usage, once per job, twice here. But guards alone prove
+//            reportUsage was CALLED, not that it is CONNECTED to the
+//            governor — a no-op reportUsage callback would pass all of it.
+//        (b) THE GOVERNOR-TRIP LEG (leg 5 below): a second CLI child runs
+//            the same ops root under --max-tokens=1 — a token-rollup cap
+//            (DD-9: price-independent) that the fixture's FIRST usage
+//            observation must blow ({10,5,2,3} totals 20 tokens > 1). That
+//            trip happens THROUGH the real CLI fold path, so a disconnected
+//            reportUsage never trips it and the capped child exits 0,
+//            failing the smoke — evidence the guards cannot produce.
+//   5. THE GOVERNOR-TRIP LEG — the end-to-end fold proof (4b): the capped
+//      child exits 3 with stdout exactly one RunReport claiming the honest
+//      budget stop (stoppedEarly true, earlyStopReason 'budget') and at
+//      least one budget-exhausted row in its counts.
 //
 // SECRETS: the fixture route's key env var (SMOKE_API_KEY) is set here to a
 // FAKE value — the subprocess driver reads key VALUES from the environment
@@ -83,6 +96,14 @@ import { fileURLToPath } from 'node:url';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = dirname(dirname(SCRIPT_PATH));
+
+// The parent waits on the CLI child with a HARD DEADLINE: a hung child (the
+// fixture's FAKE_AGENT_MODE can script a SIGTERM-ignoring hang) must fail the
+// smoke inside minutes, not stall CI until the runner kills the whole job.
+// Declared before the top-level `await runPlanParent()` below — that call
+// runs the helper synchronously into its timer setup.
+const CHILD_WAIT_MS = 180_000;
+const CHILD_KILL_GRACE_MS = 5_000;
 
 const usage = () => {
   console.error('usage: smoke-run-plan.mjs');
@@ -109,6 +130,7 @@ async function runPlanParent() {
   const { openRunLog, RunReportSchema } = await importDist();
 
   const journalDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-journal-'));
+  const cappedJournalDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-capped-journal-'));
   const planDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-plan-'));
   try {
     const planPath = join(planDir, 'plan.json');
@@ -133,8 +155,7 @@ async function runPlanParent() {
     delete childEnv.FAKE_AGENT_MODE;
     delete childEnv.FAKE_AGENT_SERVED_MODEL;
 
-    const child = spawn(
-      process.execPath,
+    const { code, stdout, stderr } = await runCliChild(
       [
         join(REPO_ROOT, 'dist', 'cli.js'),
         'run-plan',
@@ -144,18 +165,8 @@ async function runPlanParent() {
         '--max-usd=2',
         `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
       ],
-      { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+      childEnv,
     );
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => (stdout += chunk));
-    child.stderr.on('data', (chunk) => (stderr += chunk));
-    const code = await new Promise((resolve, reject) => {
-      child.on('error', reject);
-      child.on('close', resolve);
-    });
 
     // Leg 0 — the CLI's own verdict.
     if (code !== 0) {
@@ -261,16 +272,114 @@ async function runPlanParent() {
       }
     }
 
-    // Leg 4 — the usage fold, observed at the CLI boundary (see the header):
-    // legs 0 + 1 already proved child exit 0 with both rows ok, which is
-    // exactly (a) ∧ (b) ∧ (c) — the fixture op's ungoverned guard and
-    // no-usage guard both passed, so ctx.reportUsage WAS called with the
-    // fixture's fixed usage ×2. The rollup itself lives behind the CLI's
-    // composition, where a generic consumer cannot reach it — by design.
+    // Leg 4 — the usage fold's FIRST half (see the header): legs 0 + 1
+    // already proved child exit 0 with both rows ok, which is exactly the
+    // fixture guards (a) ∧ (b) — the ungoverned guard and the no-usage guard
+    // both passed, so ctx.reportUsage WAS called with the fixture's fixed
+    // usage ×2. That proves reportUsage was CALLED, not that it is CONNECTED
+    // to the governor — leg 5 below proves the connection end-to-end.
 
-    process.stdout.write(`smoke: ok — 2/2 jobs done via dist/cli.js run-plan; journal ${runs[0]}.ndjson; I1 contract held\n`);
+    // Leg 5 — THE GOVERNOR-TRIP LEG: the fold's second half, proven
+    // END-TO-END through the real CLI path (header leg 4b). The fixture op
+    // reports the fake CLI's fixed usage via ctx.reportUsage; the governor's
+    // token cap (DD-9: price-independent) trips when the rollup EXCEEDS the
+    // cap (governor.observeUsage → totalTokensOf), and the fixture's FIRST
+    // observation is already {input:10, output:5, cacheRead:2, cacheWrite:3}
+    // = 20 tokens — so --max-tokens=1 is the smallest guaranteed-tripping
+    // value. A DISCONNECTED reportUsage (the exact regression this leg
+    // exists to catch — leg 4's guards cannot see it) never folds usage into
+    // the governor, the cap never trips, and this child exits 0: every
+    // assertion below fails.
+    //
+    // WHY A SECOND PLAN FILE (the one deliberate deviation from the happy
+    // run): the happy plan's two jobs both dispatch into the concurrency-2
+    // pool at once, so both are ADMITTED before the first usage observation
+    // — a mid-flight trip gates nothing, and withBudgetStop's honesty rule 2
+    // (governor.ts: an honest stop must GATE undispatched work) returns the
+    // report UNANNOTATED (probed live: exit 0, stoppedEarly false,
+    // budget-exhausted 0). The capped plan keeps the two parallel roots
+    // (still --concurrency=2) and hangs a dependency chain behind them
+    // (j3 ← j1, j4 ← j3), so the trip — guaranteed to have fired by the
+    // runner's wave barrier before wave 2 dispatches — deterministically
+    // gates j3 (admission rejection → a real 'budget-exhausted' row) and j4
+    // (never dispatched → the runner's 'blocked: …' marker → transitively
+    // budget-caused → withBudgetStop re-marks it → the stoppedEarly claim).
+    // Everything else is the happy run's discipline: same ops root, its own
+    // temp journal dir, same child environment.
+    const cappedPlanPath = join(planDir, 'plan-capped.json');
+    await writeFile(
+      cappedPlanPath,
+      JSON.stringify(
+        {
+          id: 'smoke-from-source-capped',
+          label: 'T1.7 from-source smoke — governor token-cap trip',
+          jobs: [
+            { id: 'j1', op: 'agent-run', input: { jobId: 'j1' } },
+            { id: 'j2', op: 'agent-run', input: { jobId: 'j2' } },
+            { id: 'j3', op: 'agent-run', input: { jobId: 'j3' }, dependsOn: ['j1'] },
+            { id: 'j4', op: 'agent-run', input: { jobId: 'j4' }, dependsOn: ['j3'] },
+          ],
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
+    const capped = await runCliChild(
+      [
+        join(REPO_ROOT, 'dist', 'cli.js'),
+        'run-plan',
+        `--plan=${cappedPlanPath}`,
+        `--journal-dir=${cappedJournalDir}`,
+        '--concurrency=2',
+        // max-usd deliberately ABSENT: the capped leg isolates the TOKEN cap
+        // (DD-9's price-independent backstop). The happy run's --max-usd=2
+        // not tripping on this price-unknown model is already pinned by its
+        // exit 0 + leg 1's stoppedEarly-false assertion.
+        '--max-tokens=1', // smallest guaranteed trip: the first usage observation totals 20 tokens (> 1)
+        `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
+      ],
+      childEnv,
+    );
+
+    // Leg 5a — the governor's honest stop is the CLI's own verdict: exit 3
+    // (needs-human/budget — exit.ts maps both the budget-exhausted rows and
+    // the earlyStopReason annotation to 3).
+    if (capped.code !== 3) {
+      fail(
+        `the capped child (--max-tokens=1) exited ${capped.code}, expected 3 — the governor's token cap did not honestly stop the run (a disconnected ctx.reportUsage would exit 0 exactly like this)\n--- child stdout ---\n${capped.stdout}--- child stderr ---\n${capped.stderr}`,
+      );
+    }
+    // Leg 5b — the capped run's stdout is exactly one JSON RunReport
+    // (the same I1 artifact contract as leg 1), and it claims the HONEST
+    // budget stop (I9): stoppedEarly true + earlyStopReason 'budget'.
+    let cappedReport;
+    try {
+      cappedReport = RunReportSchema.parse(JSON.parse(capped.stdout));
+    } catch (e) {
+      fail(
+        `the capped child's stdout must be exactly one JSON RunReport\n  (${e instanceof Error ? e.message : String(e)})\n--- stdout ---\n${capped.stdout}`,
+      );
+    }
+    if (cappedReport.stoppedEarly !== true || cappedReport.earlyStopReason !== 'budget') {
+      fail(
+        `the capped child claims stoppedEarly=${cappedReport.stoppedEarly} earlyStopReason=${String(cappedReport.earlyStopReason)} — expected the honest budget stop (I9)`,
+      );
+    }
+    // Leg 5c — at least one row actually landed budget-exhausted: the trip
+    // must be VISIBLE in the report's rows/counts, not just claimed.
+    if (cappedReport.counts['budget-exhausted'] < 1) {
+      fail(
+        `the capped child counts ${JSON.stringify(cappedReport.counts)} — expected counts['budget-exhausted'] >= 1 (the trip must gate real work, not merely annotate)`,
+      );
+    }
+
+    process.stdout.write(
+      `smoke: ok — 2/2 jobs done via dist/cli.js run-plan; governor-trip leg exited 3 (budget honest stop); journal ${runs[0]}.ndjson; I1 contract held\n`,
+    );
   } finally {
     await rm(journalDir, { recursive: true, force: true });
+    await rm(cappedJournalDir, { recursive: true, force: true });
     await rm(planDir, { recursive: true, force: true });
   }
 }
@@ -278,6 +387,83 @@ async function runPlanParent() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Spawn one BUILT-CLI child consumer-style (stdio piped, streams captured)
+ * and await its close — bounded. The child spawns DETACHED, i.e. in its own
+ * POSIX process group, so the deadline can signal the WHOLE group — the CLI
+ * child and its same-group descendants — with SIGTERM, then SIGKILL after a
+ * short grace. On timeout the group is killed, close is awaited (the kill
+ * bounds it), and fail() carries the captured PARTIAL streams; on a normal
+ * close the timer is disarmed and the streams are the complete ones. The
+ * wait races `close` against the timer; the timer never leaks past either
+ * settlement path.
+ */
+async function runCliChild(argv, env) {
+  const child = spawn(process.execPath, argv, {
+    env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true, // own POSIX process group — the negative-pid group kill below reaches the grandchild too
+  });
+  let stdout = '';
+  let stderr = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => (stdout += chunk));
+  child.stderr.on('data', (chunk) => (stderr += chunk));
+  let timedOut = false;
+  const code = await new Promise((resolve, reject) => {
+    let waitTimer;
+    let killTimer;
+    const settle = (fn, value) => {
+      clearTimeout(waitTimer);
+      clearTimeout(killTimer);
+      fn(value);
+    };
+    child.on('error', (err) => settle(reject, err));
+    child.on('close', (c) => settle(resolve, c));
+    waitTimer = setTimeout(() => {
+      timedOut = true;
+      // Negative pid = the process GROUP (spawn detached above): the CLI
+      // child and any same-group descendants die together. (The driver's
+      // OWN agent children lead their own groups — src/driver/subprocess/
+      // process.ts — and are that ladder's kill business; the bound here is
+      // about the parent never STALLING on the CLI child.)
+      if (child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGTERM');
+        } catch {
+          // already gone
+        }
+        killTimer = setTimeout(() => {
+          try {
+            process.kill(-child.pid, 'SIGKILL');
+          } catch {
+            // already gone
+          }
+        }, CHILD_KILL_GRACE_MS);
+      }
+    }, CHILD_WAIT_MS);
+  });
+  if (timedOut) {
+    // The kill backstop above is asynchronous: if the CLI child died on the
+    // SIGTERM while a SIGTERM-ignoring grandchild lingers in the group,
+    // `close` fires before the SIGKILL grace elapses — so deliver SIGKILL to
+    // the group HERE too, before the parent exits, or the hang survives the
+    // smoke as an orphan.
+    if (child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    fail(
+      `the dist/cli.js run-plan child was still running after ${CHILD_WAIT_MS / 1000}s and was killed (SIGTERM to its process group, SIGKILL after ${CHILD_KILL_GRACE_MS / 1000}s grace) — a hung child must fail the smoke, not stall CI\n--- child stdout (partial) ---\n${stdout}--- child stderr (partial) ---\n${stderr}`,
+    );
+  }
+  return { code, stdout, stderr };
+}
 
 /**
  * Import the BUILT barrel for the parent's own assertions (the schema mirror

@@ -19,7 +19,9 @@
 //   DIST         = <repo>/dist/index.js                 → 4 hops up
 //   FAKE_CLI     = <repo>/test/fixtures/fake-agent-cli.mjs → 3 hops up
 
+import { rmSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
+import process from 'node:process';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -42,6 +44,16 @@ const InputSchema = z.object({ jobId: z.string() }).strict();
 // conformance-table posture — the URL is a black hole; the fixture IS the
 // model).
 const scratchDir = await mkdtemp(join(tmpdir(), 'smoke-cli-ops-ws-'));
+// Best-effort scratch cleanup: the mkdtemp dir above would otherwise leak
+// per smoke run; 'exit' fires on every normal/failed exit of the CLI child
+// (a hard-crashed process may skip it — hence best effort).
+process.once('exit', () => {
+  try {
+    rmSync(scratchDir, { recursive: true, force: true });
+  } catch {
+    // best effort — cleanup must never break the op
+  }
+});
 const routingTable = RoutingTableSchema.parse({
   endpoints: {
     ...defaultRoutingTable().endpoints,
