@@ -1148,6 +1148,40 @@ describe('formatViolations', () => {
     expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
+  test('malformed direction escapes on BOTH sides at equal values fail closed (PR #108 review, CodeRabbit Major)', () => {
+    // Both sides carry `direction: "lower-is-\x"` — decode fails for both,
+    // which previously read as NEITHER side having a direction, letting
+    // equal values take the same-value success path. Key presence + decode
+    // now fails closed.
+    const base = fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3));
+    const diff = base
+      .split('\n')
+      .map((line) => (line.includes('"direction": "lower-is-better"') ? `${line[0]}"direction": "lower-is-\\x"` : line))
+      .join('\n');
+    const verdict = checkDiffMonotonicity(diff);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) {
+      expect(verdict.violations[0]?.why).toBe('unparsable baseline diff');
+    }
+  });
+
+  test('an UNTERMINATED unit escape fails closed — key present, value uncapturable (PR #108 review, Codex P1)', () => {
+    // The plus side adds `"unit": "errors\"` (a stray backslash swallows
+    // the closing quote): the value regex matches nothing, and the old
+    // logic read the unit as ABSENT — an added-unit re-scaling could be
+    // waved through. Key presence now fails closed.
+    const base = fullRewrite(REL, body('lower-is-better', 3, { unit: undefined }), body('lower-is-better', 3, { unit: undefined }));
+    const plusAt = base.indexOf('+++ b/');
+    const diff =
+      base.slice(0, plusAt) +
+      base
+        .slice(plusAt)
+        .split('\n')
+        .map((line) => (line.startsWith('+') && line.includes('"value"') ? `${line}\n+    "unit": "errors\\` : line))
+        .join('\n');
+    expect(checkDiffMonotonicity(diff).ok).toBe(false);
+  });
+
   test('a MALFORMED unit escape is fail-closed (the committed file could not parse back)', () => {
     // The plus side's unit body carries an INVALID JSON escape (`\x` is
     // not a JSON escape sequence): the field regex captures it as escape
