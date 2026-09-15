@@ -52,7 +52,13 @@ import { describe, expect, test } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileWorktreeRegistry, removePrWorktree, resolvePrWorktree } from '../../../src/ops/review/prWorktree.js';
+import {
+  fileWorktreeRegistry,
+  nextRegistryTmpNonce,
+  registryTmpPath,
+  removePrWorktree,
+  resolvePrWorktree,
+} from '../../../src/ops/review/prWorktree.js';
 import type {
   PrWorktreeOpts,
   RegistryMap,
@@ -1027,6 +1033,39 @@ describe('fileWorktreeRegistry', () => {
       // Clearing one key leaves the other untouched.
       await registry.update('7', null);
       expect(await registry.load()).toEqual({ '9': entry9 });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('registry tmp names are UNIQUE per save call (a shared .tmp let one rename steal the other’s source)', () => {
+    // The nonce generator is one-up — two calls can never collide…
+    expect(nextRegistryTmpNonce()).not.toBe(nextRegistryTmpNonce());
+    // …and the derived tmp path stays one boring segment beside the target.
+    const a = registryTmpPath('/t/registry.json', nextRegistryTmpNonce());
+    const b = registryTmpPath('/t/registry.json', nextRegistryTmpNonce());
+    expect(a).not.toBe(b);
+    for (const tmp of [a, b]) {
+      expect(tmp.startsWith('/t/registry.json.')).toBe(true);
+      expect(tmp.endsWith('.tmp')).toBe(true);
+      expect(tmp.slice('/t/'.length)).not.toContain('/');
+    }
+  });
+
+  test('update() is SERIALIZED on the file-backed registry: two concurrent updates for different keys BOTH persist', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    try {
+      const path = join(dir, 'worktrees.json');
+      const registry = fileWorktreeRegistry(path);
+      const entry7: WorktreeRegistryEntry = { path: '/t/pr-7', branch: 'b7', createdAt: NOW };
+      const entry9: WorktreeRegistryEntry = { path: '/t/pr-9', branch: 'b9', createdAt: NOW + 1 };
+      // Fired CONCURRENTLY: the `<path>.lock` serializes the load-merge-save
+      // chains, so the second update re-reads the first's entry instead of
+      // clobbering it (an unsynchronized whole-map save would drop one).
+      await Promise.all([registry.update('7', entry7), registry.update('9', entry9)]);
+      const map = await registry.load();
+      expect(map['7']).toEqual(entry7);
+      expect(map['9']).toEqual(entry9);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -67,6 +67,7 @@
 // the registry entry's directory-existence check.
 import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
+import { lock } from 'proper-lockfile';
 import type { GhFn } from './gh.js';
 
 /** One registry entry: where the PR's worktree lives and what it is on. */
@@ -94,24 +95,39 @@ export interface WorktreeRegistry {
   /**
    * MERGE-ON-SAVE for ONE key: load → set the key (null clears it) → save.
    * This NARROWS the whole-map-clobber window (a last writer erasing every
-   * entry it never saw) but does not ELIMINATE it under true concurrency —
-   * two interleaved load→mutate→save sequences can still race. Single-
-   * flight registry access is an E4 dispatch requirement; proper-lockfile
-   * is the named upgrade path if multi-process access ever lands.
+   * entry it never saw) — and the FILE-BACKED registry now ELIMINATES the
+   * race for save/update by SERIALIZING them behind a lockfile beside the
+   * target (`<path>.lock`, proper-lockfile, bounded retries: failure to
+   * acquire within the bound throws loud). The in-memory registry is
+   * unsynchronized (single-threaded tests). Single-flight registry access
+   * remains an E4 dispatch requirement at the worker level.
    */
   update(key: string, entry: WorktreeRegistryEntry | null): Promise<void>;
 }
+
+/**
+ * The unique per-save tmp name: pid + monotonic counter, so two saves can
+ * never share one `.tmp` (a SHARED name let one concurrent rename remove
+ * the other save's source file mid-write). Exposed pure for the
+ * uniqueness pin.
+ */
+export const registryTmpPath = (path: string, nonce: string): string => `${path}.${nonce}.tmp`;
+let registryTmpCounter = 0;
+export const nextRegistryTmpNonce = (): string => `${process.pid}.${(registryTmpCounter += 1)}`;
 
 /**
  * The file-backed WorktreeRegistry: one JSON object mapping decimal PR
  * number strings to entries. A MISSING file is an empty registry (first
  * run); a CORRUPT file (unparseable JSON, or not a plain object) throws a
  * clear error — resolving worktrees on top of an unreadable registry would
- * silently duplicate trees. `save` replaces the whole file ATOMICALLY: the
- * new content is written to `<path>.tmp` in the SAME directory and
- * `fs.rename`d over the target — an interrupted in-place rewrite would
- * leave PARTIAL JSON, and every later load would throw corrupt (the same
- * write-tmp-then-rename pattern as fileDispatchLog's record).
+ * silently duplicate trees. WRITES ARE SERIALIZED AND ATOMIC: save and
+ * update take a lockfile beside the target (`<path>.lock`, proper-lockfile,
+ * bounded retries — a failure to acquire within the bound throws loud
+ * naming the path), and the new content is written to a UNIQUE per-call tmp
+ * file (`<path>.<pid>.<n>.tmp`) then `fs.rename`d over the target — an
+ * interrupted write truncates only the throwaway tmp file, and concurrent
+ * saves can never steal each other's source. The in-memory registry (the
+ * tests' seam) is unsynchronized: single-threaded by construction.
  */
 export function fileWorktreeRegistry(path: string): WorktreeRegistry {
   const load = async (): Promise<RegistryMap> => {
@@ -136,26 +152,76 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
       );
     }
   };
-  const save = async (map: RegistryMap): Promise<void> => {
+  /**
+   * proper-lockfile lstats the locked target to track staleness, so an
+   * ABSENT registry is materialized as the valid empty map before locking
+   * (load treats a missing file as empty anyway; `{}` is its on-disk form).
+   */
+  const ensureTarget = async (): Promise<void> => {
+    try {
+      await stat(path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        await writeFile(path, `{}\n`, 'utf8');
+        return;
+      }
+      throw err;
+    }
+  };
+
+  /** Serialize every mutation behind the lockfile's bounded-retry acquire. */
+  const withLock = async <T>(mutate: () => Promise<T>): Promise<T> => {
+    await ensureTarget();
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await lock(path, {
+        // A crashed holder's lock goes stale and may be broken after 10s.
+        stale: 10_000,
+        // Bounded acquire retries — a failure within the bound is LOUD
+        // (thrown, naming the path), never an unserialized write.
+        retries: { retries: 5, minTimeout: 25, maxTimeout: 200 },
+      });
+    } catch (err) {
+      throw new Error(
+        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing to write unserialized; clear the stale lock and re-run`,
+        { cause: err },
+      );
+    }
+    if (release === undefined) {
+      throw new Error(
+        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing to write unserialized; clear the stale lock and re-run`,
+      );
+    }
+    try {
+      return await mutate();
+    } finally {
+      await release();
+    }
+  };
+
+  const saveUnlocked = async (map: RegistryMap): Promise<void> => {
     // Write-tmp-then-rename, never a plain rewrite: rename(2) within one
     // directory is atomic, so a crash mid-write can only ever truncate the
-    // throwaway tmp file — the registry on disk stays parseable JSON.
-    const tmpPath = `${path}.tmp`;
+    // throwaway tmp file — the registry on disk stays parseable JSON. The
+    // tmp name is UNIQUE per call (pid + counter): a shared `.tmp` name let
+    // one rename remove the other save's source file mid-write.
+    const tmpPath = registryTmpPath(path, nextRegistryTmpNonce());
     await writeFile(tmpPath, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
     await rename(tmpPath, path);
   };
-  const update = async (key: string, entry: WorktreeRegistryEntry | null): Promise<void> => {
-    // Load-merge-save scoped to ONE key: entries for other PRs are read
-    // fresh at write time — narrowing (not eliminating) the whole-map
-    // clobber race; see the interface doc (single-flight is E4's bar).
-    const map = await load();
-    if (entry === null) {
-      delete map[key];
-    } else {
-      map[key] = entry;
-    }
-    await save(map);
-  };
+  const save = (map: RegistryMap): Promise<void> => withLock(() => saveUnlocked(map));
+  const update = (key: string, entry: WorktreeRegistryEntry | null): Promise<void> =>
+    withLock(async () => {
+      // Load-merge-save scoped to ONE key, SERIALIZED by the lockfile:
+      // entries for other PRs are read fresh and written back intact.
+      const map = await load();
+      if (entry === null) {
+        delete map[key];
+      } else {
+        map[key] = entry;
+      }
+      await saveUnlocked(map);
+    });
   return { load, save, update };
 }
 

@@ -54,7 +54,8 @@
 // Owner/repo spellings are validated by gh.ts's shared ghNameOk (GH_NAME_OK
 // charset + the dot-segment rule); this module keeps only its own
 // module-prefixed fail-loud error message.
-import { appendFile, readFile } from 'node:fs/promises';
+import { appendFile, open, readFile } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { GH_NAME_OK, GhError, ghNameOk } from './gh.js';
 import type { GhFn, GhResult } from './gh.js';
 
@@ -125,7 +126,8 @@ export interface DispatchLog {
  * posts, so mid-file corruption stays loud, never tolerant. `record`
  * appends exactly one newline-terminated line — no read-modify-write, so
  * interleaved loads/records can never lose a record and a crash can never
- * damage PRIOR lines.
+ * damage PRIOR lines — and it first TRUNCATES a discarded partial tail, so
+ * the retry's append always lands on a newline boundary.
  */
 export function fileDispatchLog(path: string): DispatchLog {
   const load = async (): Promise<DispatchRecord[]> => {
@@ -164,10 +166,31 @@ export function fileDispatchLog(path: string): DispatchLog {
     return records;
   };
   const record = async (entry: DispatchRecord): Promise<void> => {
-    // Single-line append — each record lands as its own newline-terminated
-    // line. No read-modify-write: interleaved loads can never race a
-    // rewrite, and a crash mid-append can only truncate THIS line (which
-    // load tolerates as a never-recorded, retriable action).
+    // A discarded partial tail is truncated before the retry appends, so a
+    // crash mid-append can never poison the next record: load() tolerates a
+    // truncated FINAL line, but a later record() appending onto those
+    // unterminated bytes would CONCATENATE into one invalid line — the new
+    // record silently dropped by every later load, its action reposting
+    // forever. The repair cuts the file back to just after the last '\n'
+    // (byte-exact via Buffer — a decoded-string offset would lie for
+    // multi-byte content).
+    let handle: FileHandle | null = null;
+    try {
+      handle = await open(path, 'r+');
+      const bytes = await handle.readFile();
+      const keep = bytes.lastIndexOf(0x0a) + 1; // through the last COMPLETE line
+      if (keep < bytes.length) {
+        await handle.truncate(keep);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+        throw err;
+      }
+      // Missing file (the very first record): nothing to repair —
+      // appendFile creates it below.
+    } finally {
+      await handle?.close();
+    }
     await appendFile(path, `${JSON.stringify(entry)}\n`, 'utf8');
   };
   return { load, record };

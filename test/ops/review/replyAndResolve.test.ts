@@ -767,6 +767,28 @@ describe('fileDispatchLog', () => {
     }
   });
 
+  test('record() REPAIRS a partial tail before appending — the retry can never concatenate onto unterminated bytes', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      const second: DispatchRecord = { actionId: 'r2', kind: 'issue_comment', resultRef: '8002', at: NOW + 1 };
+      // The crash residue: a complete line followed by unterminated partial
+      // bytes ("line1\npartialtail").
+      await writeFile(path, `${JSON.stringify(first)}\n{"actionId":"r2","kind`, 'utf8');
+      const log = fileDispatchLog(path);
+      await log.record(second);
+      // The partial tail was TRUNCATED before the append, so the new record
+      // is whole and parseable — not concatenated into a dropped junk line.
+      expect(await log.load()).toEqual([first, second]);
+      const text = await readFile(path, 'utf8');
+      expect(text.endsWith('\n')).toBe(true);
+      expect(text.split('\n')).toEqual([JSON.stringify(first), JSON.stringify(second), '']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('record APPENDS one line: N interleaved load/record cycles always leave parseable content', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
