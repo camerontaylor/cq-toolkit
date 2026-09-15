@@ -729,10 +729,29 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
 describe('lossless parity pin: the CLI walk and the kernel walk reject the same corpus', () => {
   test('every lossy member: direct dispatch → exit 1 with empty stdout; run-plan → failed rows', async () => {
     const corpus = [
-      { name: 'lossmap', expr: 'new Map()', type: 'Map' },
-      { name: 'lossdate', expr: 'new Date(0)', type: 'Date' },
-      { name: 'lossset', expr: 'new Set([1])', type: 'Set' },
-      { name: 'lossnullproto', expr: 'Object.assign(Object.create(null), { m: new Map() })', type: 'Map' },
+      { name: 'lossmap', expr: 'new Map()', pattern: "non-plain object of type 'Map'" },
+      { name: 'lossdate', expr: 'new Date(0)', pattern: "non-plain object of type 'Date'" },
+      { name: 'lossset', expr: 'new Set([1])', pattern: "non-plain object of type 'Set'" },
+      { name: 'lossnullproto', expr: 'Object.assign(Object.create(null), { m: new Map() })', pattern: "non-plain object of type 'Map'" },
+      // The hidden-key family (PR #31 review, Codex P1 + review-debt #76):
+      // the member walk sees only enumerable string-keyed values, so these
+      // shapes passed while JSON.stringify disagreed with the walk — a
+      // symbol key is DROPPED by stringify; a non-enumerable 'toJSON' is
+      // INVOKED by it (the journal/artifact would reconstruct the hook's
+      // output); any non-enumerable member is invisible data.
+      { name: 'losssymbolkey', expr: "{ x: 1, [Symbol('hidden')]: 2 }", pattern: 'symbol-keyed own member' },
+      {
+        name: 'losshiddentojson',
+        expr:
+          "(() => { const o = { x: 1 }; Object.defineProperty(o, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return o; })()",
+        pattern: "non-enumerable own 'toJSON'",
+      },
+      {
+        name: 'losshiddenmember',
+        expr:
+          "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",
+        pattern: "non-enumerable own member 'hidden'",
+      },
     ];
     const tmp = await makeTmpOpsRoot('cq-i1-parity-');
     await mkdir(join(tmp, 'parityfam'), { recursive: true });
@@ -757,7 +776,7 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
       expect(code, member.name).toBe(1);
       expect(out, member.name).toBe('');
       expect(err, member.name).toMatch(new RegExp(`${member.name} returned an invalid result`));
-      expect(err, member.name).toMatch(new RegExp(`non-plain object of type '${member.type}'`));
+      expect(err, member.name).toMatch(new RegExp(member.pattern));
     }
 
     // (b) Plan path — the same ops through run-plan hit the kernel runner's
@@ -779,9 +798,9 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
       expect(row?.result.status, `job ${index}`).toBe('failed');
       const error = row?.result.status === 'failed' ? row.result.error : '';
       // The runner's non-serializable-result marker naming the same walk
-      // defect the direct path named above (/serializable|non-plain/i).
+      // defect the direct path named above.
       expect(error, `job ${index}`).toMatch(/returned a non-serializable result/);
-      expect(error, `job ${index}`).toMatch(/non-plain object of type/);
+      expect(error, `job ${index}`).toMatch(new RegExp(corpus[index]?.pattern ?? ''));
     }
   });
 });

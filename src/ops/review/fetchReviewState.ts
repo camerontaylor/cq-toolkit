@@ -43,7 +43,14 @@ export interface FetchReviewStateInput {
 /**
  * Conservative fetch caps. Defaults: 10 pages per GraphQL loop, 20 REST
  * pages. A cap hit never throws — it marks the result truncated (the
- * fail-closed flag) and returns the data fetched so far.
+ * fail-closed flag) and returns the data fetched so far. Every SUPPLIED
+ * cap must be a nonnegative safe integer (validated at entry, PR #63
+ * review, Codex P2) — NaN/Infinity/negative/fractional values would
+ * silently disable the conservative limit (`restPages: NaN` makes the
+ * retention comparison always false; `reviewThreadPages: Infinity`
+ * removes the request bound) instead of a malformed config failing loud.
+ * Zero stays legal and deliberate: GraphQL caps mean "first page only"
+ * (the PR-level fields need it), `restPages: 0` retains nothing.
  */
 export interface FetchReviewStateCaps {
   /** Max reviewThreads pages (100 threads each) before fail-closed truncation. */
@@ -58,6 +65,22 @@ export interface FetchReviewStateCaps {
    * the transfer itself.
    */
   restPages?: number;
+}
+
+/**
+ * Resolve one supplied cap against its default, validating it is a
+ * nonnegative safe integer (see {@link FetchReviewStateCaps}). Throws
+ * before any fetch when the configuration is malformed — a disabled cap
+ * must never read as "no truncation".
+ */
+function nonnegativeCapOrThrow(name: string, value: number | undefined, fallback: number): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      `fetchReviewState: caps.${name} must be a nonnegative safe integer — got ${String(value)}`,
+    );
+  }
+  return value;
 }
 
 /**
@@ -331,9 +354,9 @@ export async function fetchReviewState(
       `fetchReviewState: pr must be a positive safe integer — got ${JSON.stringify(input.pr)}`,
     );
   }
-  const threadPagesCap = caps?.reviewThreadPages ?? 10;
-  const reviewPagesCap = caps?.reviewPages ?? 10;
-  const restPagesCap = caps?.restPages ?? 20;
+  const threadPagesCap = nonnegativeCapOrThrow('reviewThreadPages', caps?.reviewThreadPages, 10);
+  const reviewPagesCap = nonnegativeCapOrThrow('reviewPages', caps?.reviewPages, 10);
+  const restPagesCap = nonnegativeCapOrThrow('restPages', caps?.restPages, 20);
 
   const threads: ReviewThread[] = [];
   const reviews: ReviewSummary[] = [];
