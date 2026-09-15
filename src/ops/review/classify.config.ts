@@ -22,18 +22,22 @@ export interface ClassifyConfig {
    * Bodies matching ANY of these patterns are bot skip/failure notices,
    * not reviews (the I2 rule: "CodeRabbit skipped this run", a tool
    * erroring out, …) — they carry no feedback to answer. EVERY pattern
-   * MUST anchor on a bot/tool identity or an explicit tooling self-skip
-   * (see the defaults): generic "review failed" phrasing is how HUMANS
-   * write real feedback ("the review failed to consider X"), so an
-   * unanchored pattern would eat human comments. R3 refines the pattern
-   * list AS DATA (structure frozen) — under the same anchoring rule.
+   * MUST anchor on a bot/tool identity — mid-line for failure notices,
+   * and at LINE START for self-skip phrasing ("skipping review", "not
+   * reviewing"): generic "review failed" or a human's "I'm not reviewing
+   * the migrations this pass, but …" is exactly how real feedback reads,
+   * so an unanchored pattern would eat human comments. R3 refines the
+   * pattern list AS DATA (structure frozen) — under the same anchoring
+   * rule.
    */
   skipPatterns: RegExp[];
   /**
-   * Who the responder is. Frozen to `'pr-author'`: in the merge-prs
-   * context the party answering review feedback is the PR author, so
-   * classifyThreads reads `state.authorLogin`. R3 may widen this union
-   * AS DATA (structure frozen) if a lane ever answers as someone else.
+   * Who the responder is. Today the only value is `'pr-author'`: in the
+   * merge-prs context the party answering review feedback is the PR
+   * author, so the table reads `state.authorLogin`. The knob is REAL —
+   * the table switches on it (exhaustively, compiler-checked) — so R3
+   * may widen this union AS DATA plus one arm, never a silent
+   * fallthrough.
    */
   responderIs: 'pr-author';
   /**
@@ -45,12 +49,13 @@ export interface ClassifyConfig {
    *     toward actionable).
    *   - `'epochMs'` — treated as ancient: the conservative "assume the
    *     worst about recency" reading.
-   * SEPARATELY — and regardless of this setting — a reply counts as
-   * ANSWERING a review only when its own createdAt parses for REAL: a
-   * null/unparseable reply never answers (under 'nowMs' it is not counted
-   * at all; under 'epochMs' the ordering fallback would be 0, which never
-   * postdates a past review). Both readings fail toward actionable. R3
-   * may flip this AS DATA (structure frozen).
+   * ORDERING ONLY — two verdicts additionally require a REAL parsed
+   * timestamp regardless of this setting: an ANSWERING reply (row 10) and
+   * a thread's LAST WORD (row 5). A null/unparseable timestamp never
+   * speaks ('nowMs' → not counted at all; 'epochMs' → the ordering
+   * fallback would be 0, which never postdates a past review) — both
+   * readings fail toward actionable. R3 may flip this AS DATA (structure
+   * frozen).
    */
   treatNullCreatedAtAs: 'nowMs' | 'epochMs';
   /**
@@ -77,6 +82,17 @@ export interface ClassifyConfig {
    * (structure frozen).
    */
   skipDismissedReviews: boolean;
+  /**
+   * An APPROVAL without text is not outstanding feedback — "approved"
+   * with no follow-up note means the reviewer is satisfied — and neither
+   * is a stateless (pending/unresolved-verdict) review with no body.
+   * Default true: both classify `skip` (`approval_no_body` /
+   * `empty_summary_no_state`). An approver WITH follow-ups writes them in
+   * the body, and a non-empty body stays on the content rows regardless
+   * of state (fails toward action). R3 may flip this AS DATA (structure
+   * frozen).
+   */
+  skipApprovalReviews: boolean;
 }
 
 /**
@@ -84,10 +100,11 @@ export interface ClassifyConfig {
  * literal mirrors them so the shipped values are greppable in one place).
  */
 export const defaultClassifyConfig: ClassifyConfig = {
-  // Bot skip/failure notices are not reviews (I2). Each pattern anchors on
-  // a bot/tool identity or an explicit tooling self-skip — NEVER on
-  // generic "review failed" phrasing (that is how humans write real
-  // feedback). R3 refines AS DATA, under the same anchoring rule.
+  // Bot skip/failure notices are not reviews (I2). Every pattern anchors
+  // on a bot/tool identity — mid-line for failure notices, line-start for
+  // self-skip phrasing — NEVER on generic "review failed"/"not reviewing"
+  // phrasing (that is how humans write real feedback). R3 refines AS DATA,
+  // under the same anchoring rule.
   skipPatterns: [
     // "CodeRabbit ... skipped ..." — the bot punted on this PR.
     /\bCodeRabbit\b.*\bskipped\b/i,
@@ -96,16 +113,17 @@ export const defaultClassifyConfig: ClassifyConfig = {
     /(?:CodeRabbit|Codex|coderabbitai|chatgpt-codex-connector)[^\n]{0,80}\b(?:failed|error)\b/i,
     // Tooling self-skip caused by a configuration/setup problem.
     /\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/i,
-    // "skipping review" — an explicit pass.
-    /\bskipping review\b/i,
-    // "not reviewing" — an explicit refusal.
-    /\bnot reviewing\b/i,
+    // A bot/tool identity LEADING the line delivering its self-skip
+    // verdict ("CodeRabbit is skipping this PR", "Codex: not reviewing
+    // until CI settles") — identity-anchored so a human's "I'm not
+    // reviewing the migrations this pass, but …" is never eaten.
+    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/i,
   ],
   responderIs: 'pr-author',
   // Unknown timestamp = brand-new for ordering purposes: an un-timestamped
   // review is not answerable by past replies — fails toward actionable.
-  // (Answering replies additionally need a REAL timestamp regardless of
-  // this value — see the interface doc.) R3 flips AS DATA.
+  // (Two verdicts still demand a REAL timestamp regardless of this value —
+  // an answer and a last word. See the interface doc.) R3 flips AS DATA.
   treatNullCreatedAtAs: 'nowMs',
   // An outdated unresolved thread needs a human, not a head-of-branch
   // commit. R3 flips AS DATA.
@@ -116,4 +134,7 @@ export const defaultClassifyConfig: ClassifyConfig = {
   // A dismissed verdict is void — do not plan batches for it.
   // R3 flips AS DATA.
   skipDismissedReviews: true,
+  // An approval without text — or a stateless review without any body —
+  // is not outstanding feedback. R3 flips AS DATA.
+  skipApprovalReviews: true,
 };

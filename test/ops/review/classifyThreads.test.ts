@@ -2,35 +2,43 @@
 // (src/ops/review/classifyThreads.ts + classify.config.ts), round 1.
 //
 // Pinned here:
-//   1. The FULL decision table, one test per row (rows 1–14 of the module
+//   1. The FULL decision table, one test per row (rows 1–15 of the module
 //      doc): threads (resolved / responder-authored / bot-skip / outdated /
 //      responder-last-word / fallback), reviews (responder-authored /
-//      bot-skip / dismissed / already-answered / fallback), top-level
-//      comments (responder-authored / bot-skip / fallback).
+//      bot-skip / dismissed / already-answered / approval-or-empty-summary
+//      / fallback), top-level comments (responder-authored / bot-skip /
+//      fallback).
 //   2. Row-order precedence: threads (resolved beats outdated 1 > 4;
 //      responder-authored beats bot-skip and outdated 2 > 3, 2 > 4) and
 //      reviews (responder-authored beats bot-skip and dismissed 7 > 8, 7 > 9;
-//      bot-skip beats dismissed 8 > 9; dismissed beats answered 9 > 10).
+//      bot-skip beats dismissed 8 > 9; dismissed beats answered 9 > 10;
+//      dismissed beats the approval/empty row 9 > 11).
 //   3. Truncation propagation: truncated/truncatedBecause are copied
-//      VERBATIM from the fetched state — consumers must consult the flag
-//      before dispatching batches (a reviewThreads.lag fetch means fresh
-//      threads are missing from the verdict set; fail closed downstream).
+//      VERBATIM (defensively cloned) from the fetched state — consumers
+//      must consult the flag before dispatching batches (a
+//      reviewThreads.lag fetch means fresh threads are missing from the
+//      verdict set; fail closed downstream).
 //   4. Null handling: null/unparseable timestamps fall back per
 //      config.treatNullCreatedAtAs (both values) where timestamps ORDER
 //      things; a null authorLogin is never the responder (fails toward
 //      actionable); a null responder matches nobody.
-//   5. Answering needs a REAL reply timestamp: a null/unparseable reply
-//      never answers a review (fails toward actionable), under either
+//   5. Two verdicts demand a REAL reply timestamp: ANSWERING a review
+//      (row 10) and a thread's LAST WORD (row 5) — a null/unparseable
+//      reply never speaks (fails toward actionable), under either
 //      treatNullCreatedAtAs value — and the answer may live in EITHER
 //      comment collection (restReviewComments or restIssueComments).
 //   6. nowMs is the ONLY clock: moving the injected nowMs moves the
 //      null-submittedAt fallback and thread last-word ordering.
 //   7. Both-values coverage for the flip-able config flags
 //      (blockOnOutdatedThreads, skipResponderAuthoredThreads,
-//      skipDismissedReviews), mirroring the timestamp pair style.
-//   8. Every default skipPattern fires on its bot-anchored phrasing class
-//      and none fires on a human sentence ("review failed to consider").
-//   9. A single state exercises all five frozen verdicts.
+//      skipDismissedReviews, skipApprovalReviews), mirroring the timestamp
+//      pair style.
+//   8. config.responderIs is REAL: the 'pr-author' value selects
+//      state.authorLogin via the exhaustive switch.
+//   9. Every default skipPattern fires on its bot-anchored phrasing class
+//      and none fires on human sentences ("review failed to consider",
+//      "I'm not reviewing the migrations this pass").
+//  10. A single state exercises all five frozen verdicts.
 //
 // Pure data tests: no gh, no I/O, no clocks — instant by construction.
 import { describe, expect, test } from 'vitest';
@@ -209,28 +217,42 @@ const ROW_CASES: RowCase[] = [
     ],
   },
   {
-    name: 'row 11 — a plain review summary → actionable (review_summary_needs_response)',
-    state: baseState({ reviews: [review({ id: 'R11', body: 'Please add a test' })] }),
+    name: 'row 11 (APPROVED) — an approval with an EMPTY body → skip (approval_no_body)',
+    state: baseState({ reviews: [review({ id: 'R11a', state: 'APPROVED', body: '' })] }),
     expected: [
-      { kind: 'review', id: 'R11', verdict: 'actionable', path: null, reason: 'review_summary_needs_response' },
+      { kind: 'review', id: 'R11a', verdict: 'skip', path: null, reason: 'approval_no_body' },
     ],
   },
   {
-    name: 'row 12 — a conversation comment the responder authored → skip (responder_authored)',
+    name: 'row 11 (null state) — a stateless review with an EMPTY body → skip (empty_summary_no_state)',
+    state: baseState({ reviews: [review({ id: 'R11b', state: null, body: '   ' })] }),
+    expected: [
+      { kind: 'review', id: 'R11b', verdict: 'skip', path: null, reason: 'empty_summary_no_state' },
+    ],
+  },
+  {
+    name: 'row 12 — a plain review summary → actionable (review_summary_needs_response)',
+    state: baseState({ reviews: [review({ id: 'R12', body: 'Please add a test' })] }),
+    expected: [
+      { kind: 'review', id: 'R12', verdict: 'actionable', path: null, reason: 'review_summary_needs_response' },
+    ],
+  },
+  {
+    name: 'row 13 — a conversation comment the responder authored → skip (responder_authored)',
     state: baseState({
       restIssueComments: [restComment({ id: 601, authorLogin: 'pr-author' })],
     }),
     expected: [{ kind: 'comment', id: '601', verdict: 'skip', path: null, reason: 'responder_authored' }],
   },
   {
-    name: 'row 13 — a conversation comment matching a skip pattern → skip (bot_skip_notice)',
+    name: 'row 14 — a conversation comment matching a skip pattern → skip (bot_skip_notice)',
     state: baseState({
-      restIssueComments: [restComment({ id: 602, body: 'Skipping review for this draft' })],
+      restIssueComments: [restComment({ id: 602, body: 'CodeRabbit is skipping this draft' })],
     }),
     expected: [{ kind: 'comment', id: '602', verdict: 'skip', path: null, reason: 'bot_skip_notice' }],
   },
   {
-    name: 'row 14 — a plain top-level comment → actionable (top_level_summary)',
+    name: 'row 15 — a plain top-level comment → actionable (top_level_summary)',
     state: baseState({
       restIssueComments: [restComment({ id: 603, body: 'Overall: please split this module' })],
     }),
@@ -251,11 +273,14 @@ describe('classifyThreads decision table', () => {
 // ---------------------------------------------------------------------------
 
 describe('truncation flag propagation', () => {
-  test('truncated/truncatedBecause are copied VERBATIM from the fetched state', () => {
+  test('truncated/truncatedBecause are copied VERBATIM (defensively cloned) from the fetched state', () => {
     const state = baseState({ truncated: true, truncatedBecause: ['reviewThreads.lag'] });
     const result = classifyThreads(state, NOW);
     expect(result.truncated).toBe(true);
     expect(result.truncatedBecause).toEqual(['reviewThreads.lag']);
+    // Verbatim content, but a defensive CLONE — mutating the copy cannot
+    // corrupt the fetched state's own flag.
+    expect(result.truncatedBecause).not.toBe(state.truncatedBecause);
     // The items themselves are unaffected — the flag is the consumer's
     // cue that they may be INCOMPLETE (fresh threads missing).
     expect(result.items).toEqual([]);
@@ -358,6 +383,34 @@ describe('row-order precedence — reviews (documented ordering)', () => {
       ),
     ).toEqual([{ kind: 'review', id: 'RP4', verdict: 'skip', path: null, reason: 'review_dismissed' }]);
   });
+
+  test('row 9 precedes row 11 — a dismissed EMPTY-body review → review_dismissed, not empty_summary_no_state', () => {
+    // Dismissal is the stronger void: it answers "should anyone act on
+    // this" before the emptiness check (row 11) is ever consulted.
+    expect(
+      itemsOf(
+        baseState({ reviews: [review({ id: 'RP5', state: 'DISMISSED', body: '' })] }),
+      ),
+    ).toEqual([{ kind: 'review', id: 'RP5', verdict: 'skip', path: null, reason: 'review_dismissed' }]);
+  });
+
+  test('row 11 sits before the fallback — a NON-empty APPROVED body → actionable, not skipped', () => {
+    // Fails toward action: an approver may have noted follow-ups in the
+    // body, so a text-carrying approval stays on the content rows.
+    expect(
+      itemsOf(
+        baseState({ reviews: [review({ id: 'RP6', state: 'APPROVED', body: 'Approved — but please tighten the retry cap next time.' })] }),
+      ),
+    ).toEqual([
+      {
+        kind: 'review',
+        id: 'RP6',
+        verdict: 'actionable',
+        path: null,
+        reason: 'review_summary_needs_response',
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -365,14 +418,16 @@ describe('row-order precedence — reviews (documented ordering)', () => {
 // ---------------------------------------------------------------------------
 
 describe('null timestamps fall back per treatNullCreatedAtAs', () => {
-  test("default 'nowMs': a null-createdAt reply counts as the newest — responder last word → responded", () => {
+  test("default 'nowMs': a null-createdAt responder reply is NO ONE'S word — actionable (flips the old responded pin)", () => {
+    // The null reply still ORDERS last (nowMs fallback), but a last word
+    // needs a REAL parsed timestamp (row 5) — so it falls through.
     const items = itemsOf(
       baseState({
         threads: [thread({ id: 'TN1', replies: [said('reviewer', T2), said('pr-author', null)] })],
       }),
     );
-    expect(items[0]?.verdict).toBe('responded');
-    expect(items[0]?.reason).toBe('responder_last_word');
+    expect(items[0]?.verdict).toBe('actionable');
+    expect(items[0]?.reason).toBe('thread_needs_response');
   });
 
   test("'epochMs': the same null-createdAt reply counts as ancient — reviewer last word → actionable", () => {
@@ -387,13 +442,14 @@ describe('null timestamps fall back per treatNullCreatedAtAs', () => {
     expect(items[0]?.reason).toBe('thread_needs_response');
   });
 
-  test("default 'nowMs': an unparseable createdAt behaves like null — responder last word → responded", () => {
+  test("default 'nowMs': an unparseable last reply is equally NO ONE'S word — actionable", () => {
     const items = itemsOf(
       baseState({
         threads: [thread({ id: 'TN3', replies: [said('reviewer', T2), said('pr-author', 'not-a-date')] })],
       }),
     );
-    expect(items[0]?.verdict).toBe('responded');
+    expect(items[0]?.verdict).toBe('actionable');
+    expect(items[0]?.reason).toBe('thread_needs_response');
   });
 
   test("'epochMs': an unparseable createdAt behaves like null — reviewer last word → actionable", () => {
@@ -502,6 +558,31 @@ describe('answering requires a real reply timestamp', () => {
     );
     expect(items[0]?.verdict).toBe('skip');
     expect(items[0]?.reason).toBe('review_already_answered');
+  });
+
+  test('row 5 mirror — a null-timestamp responder reply plus an earlier REAL reviewer reply → actionable', () => {
+    // The responder's null-createdAt reply even ORDERS last under 'nowMs'
+    // — but without a real parsed timestamp it is no one's word (row 5),
+    // so the thread fails through to actionable.
+    const items = itemsOf(
+      baseState({
+        threads: [
+          thread({ id: 'RW5', replies: [said('pr-author', null, 'fixed'), said('reviewer', T2, 'bumping')] }),
+        ],
+      }),
+    );
+    expect(items[0]?.verdict).toBe('actionable');
+    expect(items[0]?.reason).toBe('thread_needs_response');
+  });
+
+  test('row 5 control — a REAL responder last reply still → responded', () => {
+    const items = itemsOf(
+      baseState({
+        threads: [thread({ id: 'RW6', replies: [said('reviewer', T1), said('pr-author', T2)] })],
+      }),
+    );
+    expect(items[0]?.verdict).toBe('responded');
+    expect(items[0]?.reason).toBe('responder_last_word');
   });
 });
 
@@ -639,6 +720,72 @@ describe('both-values config coverage', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Approval / empty-summary reviews (row 11) — both config values
+// ---------------------------------------------------------------------------
+
+describe('approval and empty-summary reviews (row 11)', () => {
+  test('an APPROVED review with an EMPTY body → skip (approval_no_body)', () => {
+    const items = itemsOf(
+      baseState({ reviews: [review({ id: 'RA1', state: 'APPROVED', body: '' })] }),
+    );
+    expect(items[0]?.verdict).toBe('skip');
+    expect(items[0]?.reason).toBe('approval_no_body');
+  });
+
+  test('an APPROVED review with a NON-EMPTY body → actionable (the approver may have noted follow-ups)', () => {
+    const items = itemsOf(
+      baseState({ reviews: [review({ id: 'RA2', state: 'APPROVED' })] }),
+    );
+    expect(items[0]?.verdict).toBe('actionable');
+    expect(items[0]?.reason).toBe('review_summary_needs_response');
+  });
+
+  test('a null-state review with an EMPTY body → skip (empty_summary_no_state)', () => {
+    const items = itemsOf(
+      baseState({ reviews: [review({ id: 'RA3', state: null, body: '' })] }),
+    );
+    expect(items[0]?.verdict).toBe('skip');
+    expect(items[0]?.reason).toBe('empty_summary_no_state');
+  });
+
+  test('a null-state review WITH text → actionable', () => {
+    const items = itemsOf(
+      baseState({ reviews: [review({ id: 'RA4', state: null })] }),
+    );
+    expect(items[0]?.verdict).toBe('actionable');
+    expect(items[0]?.reason).toBe('review_summary_needs_response');
+  });
+
+  test.each([
+    { flag: true, verdict: 'skip', reason: 'approval_no_body' },
+    { flag: false, verdict: 'actionable', reason: 'review_summary_needs_response' },
+  ])(
+    'skipApprovalReviews=$flag — an empty-body APPROVED review → $verdict ($reason)',
+    ({ flag, verdict, reason }) => {
+      expect(
+        itemsOf(
+          baseState({ reviews: [review({ id: 'RA5', state: 'APPROVED', body: '' })] }),
+          NOW,
+          { ...defaultClassifyConfig, skipApprovalReviews: flag },
+        ),
+      ).toEqual([{ kind: 'review', id: 'RA5', verdict, path: null, reason }]);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// config.responderIs is real (exhaustive switch in the table)
+// ---------------------------------------------------------------------------
+
+describe('config.responderIs', () => {
+  test("'pr-author' (the only value) selects state.authorLogin as the responder", () => {
+    expect(itemsOf(baseState({ threads: [thread({ id: 'TRI1', authorLogin: 'pr-author' })] }))).toEqual([
+      { kind: 'thread', id: 'TRI1', verdict: 'skip', path: 'src/a.ts', reason: 'responder_authored' },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // skipPatterns — bot-anchored patterns fire; human phrasing never matches
 // ---------------------------------------------------------------------------
 
@@ -647,8 +794,8 @@ describe('default skipPatterns', () => {
     ['CodeRabbit skipped', 'CodeRabbit skipped this PR because the diff was empty'],
     ['bot-anchored failure', 'coderabbitai failed to post the review: error 500'],
     ['configuration problem skip', 'configuration problem detected — skipping this run'],
-    ['skipping review', 'Skipping review for this draft PR'],
-    ['not reviewing', 'Not reviewing until the CI settles'],
+    ['bot self-skip (skipping)', 'CodeRabbit is skipping this PR — no reviewable diff'],
+    ['bot self-skip (not reviewing)', 'chatgpt-codex-connector: not reviewing this run'],
   ])('bot-anchored pattern (%s) fires → bot_skip_notice', (_label, body) => {
     expect(itemsOf(baseState({ restIssueComments: [restComment({ id: 621, body })] }))).toEqual([
       { kind: 'comment', id: '621', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
@@ -664,6 +811,35 @@ describe('default skipPatterns', () => {
       ),
     ).toEqual([
       { kind: 'thread', id: 'TH1', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+    ]);
+  });
+
+  test("a HUMAN \"I'm not reviewing the migrations this pass, but …\" must NOT skip → actionable", () => {
+    expect(
+      itemsOf(
+        baseState({
+          threads: [
+            thread({
+              id: 'TH2',
+              body: "I'm not reviewing the migrations this pass, but the API layer needs a null guard.",
+            }),
+          ],
+        }),
+      ),
+    ).toEqual([
+      { kind: 'thread', id: 'TH2', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+    ]);
+  });
+
+  test('an UNANCHORED bare self-skip sentence (no bot identity) no longer skips → actionable', () => {
+    // Pinned round 2: "skipping review"/"not reviewing" phrasing only
+    // skips when a bot/tool identity LEADS the line.
+    expect(
+      itemsOf(
+        baseState({ restIssueComments: [restComment({ id: 623, body: 'Skipping review for this draft PR' })] }),
+      ),
+    ).toEqual([
+      { kind: 'comment', id: '623', verdict: 'actionable', path: null, reason: 'top_level_summary' },
     ]);
   });
 

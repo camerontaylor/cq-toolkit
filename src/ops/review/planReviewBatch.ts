@@ -30,7 +30,16 @@
 // come out in first-appearance order (isolated: item order; shared: path
 // first-appearance, chunk order within a path). Empty input → empty array;
 // no actionable items → empty array.
-import type { ClassifiedItem } from './classifyThreads.js';
+//
+// CONTRACT — takes the FULL Classification (not bare items) and REFUSES a
+// truncated one: if classification.truncated is true it THROWS, naming
+// every truncatedBecause cause. A truncated fetch means fresh threads/
+// reviews are MISSING from the verdict set, so dispatch must never plan
+// from incomplete data — the guard makes the fail-closed flag structurally
+// impossible to skip (a caller wanting softer handling must consult the
+// flag itself BEFORE calling here). Pure otherwise: same inputs →
+// deep-equal output.
+import type { ClassifiedItem, Classification } from './classifyThreads.js';
 
 /**
  * Batch-planning configuration. `worktreeMode: 'isolated'` is the asserted
@@ -93,18 +102,34 @@ const chunk = <T>(items: readonly T[], size: number): T[][] => {
 };
 
 /**
- * Plan fixer batches from classified review items. Filters to actionable
- * items, then — per config — emits one isolated batch per item (the I6
- * default) or groups+chunks shared batches. Pure and deterministic: same
- * inputs (and config) → deep-equal output, always. A shared-mode
- * maxItemsPerSharedBatch that is not an integer >= 1 would corrupt the
- * chunking into an unbounded or an empty plan — rejected loudly instead
- * (fail loud, never fail open), naming the field.
+ * Plan fixer batches from a Classification (the full classifyThreads
+ * result). TRUNCATION GUARD: a classification with truncated=true is
+ * REFUSED — the error names every truncatedBecause cause — because a
+ * partial fetch means fresh threads/reviews are missing from the verdict
+ * set and dispatch must never plan from incomplete data (fail closed).
+ * Otherwise: filters to actionable items, then — per config — emits one
+ * isolated batch per item (the I6 default) or groups+chunks shared
+ * batches. Pure and deterministic: same inputs (and config) → deep-equal
+ * output, always. A shared-mode maxItemsPerSharedBatch that is not an
+ * integer >= 1 would corrupt the chunking into an unbounded or an empty
+ * plan — rejected loudly instead (fail loud, never fail open), naming the
+ * field.
  */
 export function planReviewBatch(
-  items: readonly ClassifiedItem[],
+  classification: Classification,
   config: PlanBatchConfig = defaultPlanBatchConfig,
 ): PlannedBatch[] {
+  // The structural fail-closed guard: an unconsulted truncation flag can
+  // no longer plan batches — the refusal names every recorded cause so
+  // the operator sees exactly what the fetch was missing.
+  if (classification.truncated) {
+    throw new Error(
+      `planReviewBatch: refusing a TRUNCATED classification — dispatch must never plan from incomplete data; truncatedBecause: ${JSON.stringify(
+        classification.truncatedBecause,
+      )}`,
+    );
+  }
+  const items = classification.items;
   const actionable = items.filter((item) => item.verdict === 'actionable');
 
   if (config.worktreeMode === 'isolated') {
