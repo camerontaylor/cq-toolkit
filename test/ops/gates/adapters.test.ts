@@ -430,8 +430,12 @@ describe('subprocessRunCheck (real runner over process.execPath, no external bin
 });
 
 describe('gates registry entry', () => {
-  test('one entry, named gates.checkRunner, whose schema validates the full input and only it', () => {
-    expect(registry.map((entry) => entry.name)).toEqual(['gates.checkRunner']);
+  test('three entries (checkRunner, baselineProbe, regressionGate); the checkRunner schema validates the full input and only it', () => {
+    expect(registry.map((entry) => entry.name)).toEqual([
+      'gates.checkRunner',
+      'gates.baselineProbe',
+      'gates.regressionGate',
+    ]);
     const valid = { adapter: 'tsc-lines', command: { command: 'tsc', args: ['--noEmit'] } };
     expect(CheckRunnerInputSchema.parse(valid)).toEqual({
       adapter: 'tsc-lines',

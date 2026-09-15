@@ -1,0 +1,230 @@
+// Gates lane C2 — test evidence: the baseline probe's full decision table
+// over a SCRIPTED fake runner (no subprocesses): every ProbeVerdict value —
+// clean, failing, bail (pattern and exitCode-null flavors, retry budget
+// 0/1/2, storm, retry-then-clean) — and both indeterminate flavors (parse
+// verdict + runner crash). Plus the I7 no-cache property: the op input has
+// no baseline field by construction, and two identical calls re-run the
+// check twice.
+import { describe, expect, test } from 'vitest';
+import {
+  DEFAULT_BAIL_PATTERNS,
+  makeBaselineProbe,
+} from '../../../src/ops/gates/baselineProbe.js';
+import type { BaselineProbeInput } from '../../../src/ops/gates/index.js';
+import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/index.js';
+
+/** A vitest-json capture that parses clean behind exit 0. */
+const CLEAN_VITEST = (exitCode = 0): RawCheckOutput => ({
+  stdout: JSON.stringify({
+    success: true,
+    numTotalTests: 2,
+    numFailedTests: 0,
+    testResults: [
+      {
+        name: '/tmp/a.test.ts',
+        status: 'passed',
+        assertionResults: [
+          { title: 'ok', fullName: 'a > ok', status: 'passed', ancestorTitles: ['a'], failureMessages: [] },
+        ],
+      },
+    ],
+  }),
+  stderr: '',
+  exitCode,
+});
+
+/** An eslint-json capture with one failure behind exit 1. */
+const FAILING_ESLINT: RawCheckOutput = {
+  stdout: JSON.stringify([
+    {
+      filePath: '/tmp/bad.ts',
+      messages: [{ ruleId: 'prefer-const', severity: 2, message: "'g' is never reassigned.", line: 4, column: 7 }],
+    },
+  ]),
+  stderr: '',
+  exitCode: 1,
+};
+
+/** A scripted runner: pops one script entry per call; a spent script throws loudly. */
+function scriptedRunner(...script: Array<RawCheckOutput | Error>): { run: RunCheck; callCount(): number } {
+  let index = 0;
+  let calls = 0;
+  return {
+    run: async () => {
+      calls++;
+      const next = script[index];
+      index++;
+      if (next === undefined) {
+        throw new Error('script exhausted');
+      }
+      if (next instanceof Error) {
+        throw next;
+      }
+      return next;
+    },
+    callCount: () => calls,
+  };
+}
+
+const COMMAND = { command: 'npm', args: ['test', '--', '--reporter=json'] };
+
+function probeInput(overrides?: Partial<BaselineProbeInput>): BaselineProbeInput {
+  return { adapter: 'vitest-json', command: COMMAND, ...overrides };
+}
+
+describe('baselineProbe decision table (scripted fake runner)', () => {
+  test('clean: parsed zero failures behind exit 0 → clean on attempt 1, failure set attached', async () => {
+    const fake = scriptedRunner(CLEAN_VITEST());
+    const probe = makeBaselineProbe(fake.run);
+    const result = await probe(probeInput());
+    expect(result).toEqual({
+      status: 'ok',
+      value: {
+        verdict: 'clean',
+        attempts: 1,
+        failureSet: { tool: 'vitest', failures: [], exitCode: 0 },
+      },
+    });
+    expect(fake.callCount()).toBe(1);
+  });
+
+  test('failing: parsed non-empty failures → failing with the failure set', async () => {
+    const fake = scriptedRunner(FAILING_ESLINT);
+    const probe = makeBaselineProbe(fake.run);
+    const result = await probe(probeInput({ adapter: 'eslint-json' }));
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('failing');
+    expect(result.value.attempts).toBe(1);
+    expect(result.value.failureSet).toMatchObject({ tool: 'eslint', exitCode: 1 });
+    expect(result.value.failureSet?.failures).toHaveLength(1);
+  });
+
+  test('bail by pattern (case-insensitive) with maxBailRetries 0 → one attempt, no failure set', async () => {
+    const fake = scriptedRunner({
+      stdout: '',
+      stderr: 'FATAL ERROR: Reached heap limit — allocation failed',
+      exitCode: 1,
+    });
+    const probe = makeBaselineProbe(fake.run);
+    const result = await probe(probeInput({ bail: { maxBailRetries: 0 } }));
+    expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+    expect(fake.callCount()).toBe(1);
+  });
+
+  test('bail budget scales: maxBailRetries 1 → 2 attempts, 2 → 3 attempts', async () => {
+    const bailOutput: RawCheckOutput = { stdout: 'no tests found', stderr: '', exitCode: 1 };
+    const oneRetry = scriptedRunner(bailOutput, bailOutput);
+    await expect(
+      makeBaselineProbe(oneRetry.run)(probeInput({ bail: { maxBailRetries: 1 } })),
+    ).resolves.toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 2 } });
+    expect(oneRetry.callCount()).toBe(2);
+    const twoRetries = scriptedRunner(bailOutput, bailOutput, bailOutput);
+    await expect(
+      makeBaselineProbe(twoRetries.run)(probeInput({ bail: { maxBailRetries: 2 } })),
+    ).resolves.toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 3 } });
+    expect(twoRetries.callCount()).toBe(3);
+  });
+
+  test('bail storm: every attempt bails through the default budget → bail (default config)', async () => {
+    const storm = scriptedRunner(
+      { stdout: '', stderr: 'econnrefused 127.0.0.1:5432', exitCode: null },
+      { stdout: 'spawn enoent', stderr: '', exitCode: null },
+      { stdout: '', stderr: 'JavaScript heap out of memory', exitCode: 3 },
+    );
+    const result = await makeBaselineProbe(storm.run)(probeInput());
+    expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 3 } });
+    expect(storm.callCount()).toBe(3);
+  });
+
+  test('retry-then-clean: bail once, then a completed run → clean on attempt 2', async () => {
+    const fake = scriptedRunner(
+      { stdout: '', stderr: 'test run aborted', exitCode: 1 },
+      CLEAN_VITEST(),
+    );
+    const result = await makeBaselineProbe(fake.run)(probeInput());
+    expect(result).toEqual({
+      status: 'ok',
+      value: {
+        verdict: 'clean',
+        attempts: 2,
+        failureSet: { tool: 'vitest', failures: [], exitCode: 0 },
+      },
+    });
+  });
+
+  test('exitCode null with NO pattern match (signal kill) is a bail per the exitCode-null rule', async () => {
+    const fake = scriptedRunner({ stdout: 'partial output, no signature', stderr: '', exitCode: null });
+    const result = await makeBaselineProbe(fake.run)(probeInput({ bail: { maxBailRetries: 0 } }));
+    expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+  });
+
+  test('indeterminate (a): empty stdout on vitest-json (summary-bearing tool) → indeterminate, never clean', async () => {
+    const fake = scriptedRunner({ stdout: '', stderr: '', exitCode: 0 });
+    const result = await makeBaselineProbe(fake.run)(probeInput());
+    expect(result.status).toBe('indeterminate');
+    if (result.status !== 'indeterminate') {
+      return;
+    }
+    expect(result.detail).toContain('vitest-json:');
+  });
+
+  test('indeterminate (b): unparseable garbage → indeterminate', async () => {
+    const fake = scriptedRunner({ stdout: '⟨not json at all⟩', stderr: '', exitCode: 1 });
+    const result = await makeBaselineProbe(fake.run)(probeInput());
+    expect(result).toMatchObject({ status: 'indeterminate', detail: expect.any(String) });
+  });
+
+  test('indeterminate (c): a thrown runner crashes the probe → indeterminate with check-runner-crashed detail', async () => {
+    const fake = scriptedRunner(new Error('maxBuffer exceeded'));
+    const result = await makeBaselineProbe(fake.run)(probeInput());
+    expect(result).toEqual({
+      status: 'indeterminate',
+      detail: 'check runner crashed: maxBuffer exceeded',
+    });
+  });
+
+  test('indeterminate (c2): a non-Error throw still yields an honest detail', async () => {
+    const probe = makeBaselineProbe(async () => {
+      throw 'boom-string';
+    });
+    await expect(probe(probeInput())).resolves.toEqual({
+      status: 'indeterminate',
+      detail: 'check runner crashed: boom-string',
+    });
+  });
+
+  test('custom bailPatterns REPLACE the defaults (a fatal-error output with exit 0 then parses)', async () => {
+    const fake = scriptedRunner(CLEAN_VITEST());
+    const probe = makeBaselineProbe(fake.run);
+    const result = await probe(
+      probeInput({ bail: { bailPatterns: ['custom infrastructure doom'], maxBailRetries: 0 } }),
+    );
+    expect(result).toMatchObject({ status: 'ok', value: { verdict: 'clean', attempts: 1 } });
+    const dooming = scriptedRunner({ stdout: 'CUSTOM INFRASTRUCTURE DOOM', stderr: '', exitCode: 0 });
+    const bailResult = await makeBaselineProbe(dooming.run)(
+      probeInput({ bail: { bailPatterns: ['custom infrastructure doom'], maxBailRetries: 0 } }),
+    );
+    expect(bailResult).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+  });
+});
+
+describe('baselineProbe I7: no cache, no baseline input, no memoization', () => {
+  test('two calls with identical input run the check twice (zero memoization)', async () => {
+    const fake = scriptedRunner(CLEAN_VITEST(), CLEAN_VITEST());
+    const probe = makeBaselineProbe(fake.run);
+    const input = probeInput();
+    const first = await probe(input);
+    const second = await probe(input);
+    expect(first).toEqual(second);
+    expect(fake.callCount()).toBe(2);
+  });
+
+  test('DEFAULT_BAIL_PATTERNS is a frozen array carrying the shipped signatures', () => {
+    expect(Object.isFrozen(DEFAULT_BAIL_PATTERNS)).toBe(true);
+    expect(DEFAULT_BAIL_PATTERNS).toContain('no tests found');
+    expect(DEFAULT_BAIL_PATTERNS).toContain('spawn enoent');
+  });
+});

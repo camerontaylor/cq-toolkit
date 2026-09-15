@@ -1,6 +1,7 @@
-// Gates lane (C1) — public surface. Re-export only, no logic: the
-// CheckRunner contract + pure parse core + op factory, and the three named
-// wire-format adapters.
+// Gates lane (C1+C2) — public surface. Re-export only, no logic: the
+// CheckRunner contract + pure parse core + op factory, the three named
+// wire-format adapters, and the C2 baseline tooling — fingerprints, the
+// regression gate, and the baseline probe.
 export type {
   AdapterName,
   CheckAdapter,
@@ -21,3 +22,18 @@ export {
 export { vitestJsonAdapter } from './adapters/vitest.js';
 export { eslintJsonAdapter } from './adapters/eslint.js';
 export { tscLinesAdapter } from './adapters/tsc.js';
+export type {
+  BailConfig,
+  BaselineProbeInput,
+  ProbeReport,
+  ProbeVerdict,
+} from './baselineProbe.js';
+export { DEFAULT_BAIL_PATTERNS, makeBaselineProbe } from './baselineProbe.js';
+export type { FingerprintConfig } from './fingerprint.js';
+export { FingerprintConfigSchema, fingerprintFailure, fingerprintSet, fnv1a32Hex } from './fingerprint.js';
+export type {
+  RegressionGateInput,
+  RegressionReport,
+  RegressionVerdict,
+} from './regressionGate.js';
+export { CheckFailureSchema, FailureSetSchema, regressionGate } from './regressionGate.js';
