@@ -30,7 +30,7 @@ export type {
 export { fetchReviewState } from './fetchReviewState.js';
 export type { ClassifyConfig } from './classify.config.js';
 export { defaultClassifyConfig } from './classify.config.js';
-export type { ClassifiedItem, ThreadVerdict } from './classifyThreads.js';
+export type { ClassifiedItem, Classification, ThreadVerdict } from './classifyThreads.js';
 export { classifyThreads } from './classifyThreads.js';
 export type { PlanBatchConfig, PlannedBatch } from './planReviewBatch.js';
 export { defaultPlanBatchConfig, planReviewBatch } from './planReviewBatch.js';

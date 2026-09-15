@@ -8,7 +8,7 @@
 // THE DECISION TABLE — rows fire first-match-wins, top to bottom, within
 // each kind; the trailing row of each table is the total fallback. Each row
 // is a small named pure function below, and the tables are the arrays
-// THREAD_ROWS / REVIEW_ROWS / COMMENT_ROWS.
+// THREAD_ROWS / REVIEW_ROWS / COMMENT_ROWS (14 rows total).
 //
 //   THREADS (state.threads — replies already attached by fetchReviewState):
 //     1. resolved                                        → resolved   (thread_resolved)
@@ -21,38 +21,57 @@
 //     6. else                                            → actionable (thread_needs_response)
 //
 //   REVIEWS (state.reviews — summary comments):
-//     7. body matches a config.skipPatterns entry        → skip       (bot_skip_notice)
-//     8. a responder reply postdates review.submittedAt
-//        ("responder reply" = any state.restReviewComments
-//        comment authored by the responder whose createdAt,
-//        or its nowMs fallback, is STRICTLY GREATER than
-//        submittedAt, or its nowMs fallback)             → skip       (review_already_answered)
-//     9. else                                            → actionable (review_summary_needs_response)
+//     7. authored by the responder (config)              → skip       (responder_authored)
+//     8. body matches a config.skipPatterns entry        → skip       (bot_skip_notice)
+//     9. state === 'DISMISSED' && skipDismissedReviews   → skip       (review_dismissed)
+//    10. a responder comment with a REAL parsed createdAt
+//        strictly greater than submittedAt (or its nowMs
+//        fallback) exists in restReviewComments OR
+//        restIssueComments — the natural answer to a
+//        review summary is often a top-level comment     → skip       (review_already_answered)
+//    11. else                                            → actionable (review_summary_needs_response)
 //
 //   TOP-LEVEL conversation comments (state.restIssueComments):
-//    10. authored by the responder (config)              → skip       (responder_authored)
-//    11. body matches a config.skipPatterns entry        → skip       (bot_skip_notice)
-//    12. else                                            → actionable (top_level_summary)
+//    12. authored by the responder (config)              → skip       (responder_authored)
+//    13. body matches a config.skipPatterns entry        → skip       (bot_skip_notice)
+//    14. else                                            → actionable (top_level_summary)
 //        (top-level PR conversation comments ARE actionable
 //        review summaries — the workstream contract)
 //
-// Row order is load-bearing: resolution answers a thread outright (1 beats
-// 4); a responder-authored thread is not outstanding feedback no matter how
-// stale or bot-flavored its body (2 beats 3 and 4); only then does
-// staleness (4) or the conversation's last word (5) decide.
+// Row order is load-bearing. Threads: resolution answers a thread outright
+// (1 beats 4); a responder-authored thread is not outstanding feedback no
+// matter how stale or bot-flavored its body (2 beats 3 and 4); only then
+// does staleness (4) or the conversation's last word (5) decide. Reviews:
+// responder-authorship (7) PRECEDES the bot-notice (8) and dismissed (9)
+// rows — the responder's own review is never outstanding feedback no matter
+// what it carries, and when it is ALSO dismissed, `responder_authored` wins
+// on authorship alone (documented call: authorship settles it first); a bot
+// notice precedes dismissal (8 beats 9); a dismissed verdict precedes the
+// answered check (9 beats 10) — a voided review stays void regardless of
+// reply timing. Comments mirror the threads head: authorship (12) beats the
+// bot notice (13).
 //
 // "Responder" is `state.authorLogin` — the PR author in the merge-prs
 // context (ClassifyConfig.responderIs): the party answering review feedback
 // on their own PR. A null authorLogin (deleted/anonymized account) is NEVER
 // the responder — external, fail toward `actionable`.
 //
+// FAIL-CLOSED TRUNCATION PROPAGATION: the result carries the fetched
+// state's truncated/truncatedBecause flag VERBATIM (Classification), and
+// consumers MUST consult it before dispatching batches — a cap hit or a
+// `reviewThreads.lag` fetch means fresh threads are MISSING from the
+// verdict set, so an unconsulted dispatcher would plan against incomplete
+// evidence. planReviewBatch (E2 slice 2) intentionally does NOT consult it:
+// it takes plain items, so the flag check belongs to the dispatching layer.
+//
 // Purity: no I/O, no Date.now() anywhere — `nowMs` is the ONLY clock and is
 // an injected parameter (the auditor's acceptance check). ISO timestamps
 // convert with a local Date.parse helper; null or unparseable values fall
-// back per config.treatNullCreatedAtAs ('nowMs' → brand-new — it can never
-// be "already answered", so it fails toward actionable; 'epochMs' →
-// ancient). All heuristics and thresholds live in classify.config.ts AS
-// DATA — this module only reads them.
+// back per config.treatNullCreatedAtAs where timestamps order things
+// ('nowMs' → brand-new; 'epochMs' → ancient), EXCEPT that an answering
+// reply needs a REAL parsed timestamp (parseRealMs below — it never falls
+// back, so it fails toward actionable). All heuristics and thresholds live
+// in classify.config.ts AS DATA — this module only reads them.
 import { defaultClassifyConfig } from './classify.config.js';
 import type { ClassifyConfig } from './classify.config.js';
 import type { FetchedReviewState } from './fetchReviewState.js';
@@ -64,7 +83,8 @@ import type { RestComment, ReviewSummary, ReviewThread, ThreadComment } from './
  *   - `responded` — the responder has the last word; wait for the reviewer;
  *   - `resolved` — finished; nothing to do;
  *   - `blocked` — a human must settle it (e.g. outdated unresolved);
- *   - `skip` — not feedback at all (bot notices, responder's own words).
+ *   - `skip` — not feedback at all (bot notices, dismissed verdicts,
+ *     the responder's own words).
  */
 export type ThreadVerdict = 'actionable' | 'responded' | 'resolved' | 'blocked' | 'skip';
 
@@ -82,6 +102,24 @@ export interface ClassifiedItem {
   reason: string;
 }
 
+/**
+ * The classify result: per-item verdicts PLUS the fetched state's
+ * fail-closed truncation flag, copied verbatim (TruncationFlag contract:
+ * never silently dropped). Consumers MUST consult `truncated`/
+ * `truncatedBecause` before dispatching batches — a cap hit or a
+ * `reviewThreads.lag` fetch means fresh threads are MISSING from the
+ * verdict set, so an unconsulted dispatcher would plan against incomplete
+ * evidence; fail closed downstream, exactly like the fetch layer.
+ */
+export interface Classification {
+  /** One item per thread, review, and top-level comment (in that order). */
+  items: ClassifiedItem[];
+  /** Verbatim from state.truncated. */
+  truncated: boolean;
+  /** Verbatim from state.truncatedBecause. */
+  truncatedBecause: string[];
+}
+
 /** Everything a row needs besides the item itself. Plain data, no clocks. */
 interface RowContext {
   /** state.authorLogin — the responder (see module doc); null matches nobody. */
@@ -90,14 +128,17 @@ interface RowContext {
   nowMs: number;
   /** The R3-tunable heuristics (classify.config.ts). */
   config: ClassifyConfig;
-  /** The flat REST review comments — row 8's "responder reply" source. */
+  /** Flat REST review comments — row 10's answer scan (collection 1). */
   restReviewComments: readonly RestComment[];
+  /** Flat REST issue comments — row 10's answer scan (collection 2). */
+  restIssueComments: readonly RestComment[];
 }
 
 /**
- * ISO 8601 → epoch ms. Null or unparseable input falls back per
- * config.treatNullCreatedAtAs: 'nowMs' → `nowMs` (brand-new — fails toward
- * actionable), 'epochMs' → 0 (ancient).
+ * ISO 8601 → epoch ms for ORDERING uses (a thread's last-word comparison;
+ * a review's submittedAt side). Null or unparseable input falls back per
+ * config.treatNullCreatedAtAs: 'nowMs' → nowMs (brand-new), 'epochMs' → 0
+ * (ancient). NOT used for the answering-reply check — see parseRealMs.
  */
 const toMs = (iso: string | null, nowMs: number, config: ClassifyConfig): number => {
   if (iso !== null) {
@@ -107,6 +148,22 @@ const toMs = (iso: string | null, nowMs: number, config: ClassifyConfig): number
     }
   }
   return config.treatNullCreatedAtAs === 'nowMs' ? nowMs : 0;
+};
+
+/**
+ * Strict ISO 8601 → epoch ms, or null when absent/unparseable — NO config
+ * fallback. A reply counts as ANSWERING a review (row 10) only on a REAL
+ * parsed timestamp: a null/unparseable reply never answers (under 'nowMs'
+ * it is not counted at all; under 'epochMs' the ordering fallback would be
+ * 0, which never postdates a past review) — either way row 10 fails toward
+ * actionable.
+ */
+const parseRealMs = (iso: string | null): number | null => {
+  if (iso === null) {
+    return null;
+  }
+  const parsed = Date.parse(iso);
+  return Number.isNaN(parsed) ? null : parsed;
 };
 
 /** True when the author is the responder. Null authors are NEVER the responder. */
@@ -223,57 +280,84 @@ const THREAD_ROWS: readonly RowFn<ReviewThread>[] = [
 ];
 
 // ---------------------------------------------------------------------------
-// REVIEW rows (module doc rows 7–9)
+// REVIEW rows (module doc rows 7–11)
 // ---------------------------------------------------------------------------
 
-/** Row 7 — a bot skip/failure notice is not a review (I2). */
+/** Row 7 — the responder authored this review on their own PR: not
+ * outstanding feedback, whatever else it carries (bot-flavored body,
+ * DISMISSED verdict — authorship settles it first; see the module doc's
+ * ordering rationale). */
+const responderAuthoredReviewRow: RowFn<ReviewSummary> = (review, ctx) =>
+  ctx.config.skipResponderAuthoredThreads && isResponder(review.authorLogin, ctx.responder)
+    ? reviewItem(review, 'skip', 'responder_authored')
+    : null;
+
+/** Row 8 — a bot skip/failure notice is not a review (I2). */
 const botSkipReviewRow: RowFn<ReviewSummary> = (review, ctx) =>
   matchesSkipPattern(review.body, ctx.config)
     ? reviewItem(review, 'skip', 'bot_skip_notice')
     : null;
 
-/** Row 8 — a responder reply postdating the review means its summary is
+/** Row 9 — a DISMISSED verdict was voided downstream; re-surfacing it
+ * would plan batches for noise (config.skipDismissedReviews). */
+const reviewDismissedRow: RowFn<ReviewSummary> = (review, ctx) =>
+  ctx.config.skipDismissedReviews && review.state === 'DISMISSED'
+    ? reviewItem(review, 'skip', 'review_dismissed')
+    : null;
+
+/** Row 10 — a responder reply postdating the review means its summary is
  * already answered (workstream contract: review-body summaries skip when a
- * responder reply postdates them). Strictly greater: equal ms do not count. */
+ * responder reply postdates them). The answer may live in EITHER comment
+ * collection — restReviewComments or restIssueComments (the natural answer
+ * to a review summary is often a top-level comment). Strictly greater:
+ * equal ms do not count. The reply needs a REAL parsed timestamp — a
+ * null/unparseable reply never answers (fails toward actionable). */
 const reviewAlreadyAnsweredRow: RowFn<ReviewSummary> = (review, ctx) => {
   const submittedMs = toMs(review.submittedAt, ctx.nowMs, ctx.config);
-  const answered = ctx.restReviewComments.some(
-    (comment) =>
-      isResponder(comment.authorLogin, ctx.responder) &&
-      toMs(comment.createdAt, ctx.nowMs, ctx.config) > submittedMs,
-  );
+  const answered = [...ctx.restReviewComments, ...ctx.restIssueComments].some((comment) => {
+    if (!isResponder(comment.authorLogin, ctx.responder)) {
+      return false;
+    }
+    const answeredMs = parseRealMs(comment.createdAt);
+    return answeredMs !== null && answeredMs > submittedMs;
+  });
   return answered ? reviewItem(review, 'skip', 'review_already_answered') : null;
 };
 
-/** Row 9 — fallback: a review summary awaits a response. */
+/** Row 11 — fallback: a review summary awaits a response. */
 const reviewNeedsResponseRow: TotalRowFn<ReviewSummary> = (review) =>
   reviewItem(review, 'actionable', 'review_summary_needs_response');
 
-/** The REVIEW table (rows 7–8; row 9 is the fallback passed to decide). */
-const REVIEW_ROWS: readonly RowFn<ReviewSummary>[] = [botSkipReviewRow, reviewAlreadyAnsweredRow];
+/** The REVIEW table (rows 7–10; row 11 is the fallback passed to decide). */
+const REVIEW_ROWS: readonly RowFn<ReviewSummary>[] = [
+  responderAuthoredReviewRow,
+  botSkipReviewRow,
+  reviewDismissedRow,
+  reviewAlreadyAnsweredRow,
+];
 
 // ---------------------------------------------------------------------------
-// TOP-LEVEL COMMENT rows (module doc rows 10–12)
+// TOP-LEVEL COMMENT rows (module doc rows 12–14)
 // ---------------------------------------------------------------------------
 
-/** Row 10 — the responder's own conversation comment: not feedback. */
+/** Row 12 — the responder's own conversation comment: not feedback. */
 const responderAuthoredCommentRow: RowFn<RestComment> = (comment, ctx) =>
   ctx.config.skipResponderAuthoredThreads && isResponder(comment.authorLogin, ctx.responder)
     ? commentItem(comment, 'skip', 'responder_authored')
     : null;
 
-/** Row 11 — a bot skip/failure notice is not a review (I2). */
+/** Row 13 — a bot skip/failure notice is not a review (I2). */
 const botSkipCommentRow: RowFn<RestComment> = (comment, ctx) =>
   matchesSkipPattern(comment.body, ctx.config)
     ? commentItem(comment, 'skip', 'bot_skip_notice')
     : null;
 
-/** Row 12 — fallback: top-level PR conversation comments ARE actionable
+/** Row 14 — fallback: top-level PR conversation comments ARE actionable
  * review summaries (workstream contract). */
 const topLevelSummaryRow: TotalRowFn<RestComment> = (comment) =>
   commentItem(comment, 'actionable', 'top_level_summary');
 
-/** The COMMENT table (rows 10–11; row 12 is the fallback passed to decide). */
+/** The COMMENT table (rows 12–13; row 14 is the fallback passed to decide). */
 const COMMENT_ROWS: readonly RowFn<RestComment>[] = [
   responderAuthoredCommentRow,
   botSkipCommentRow,
@@ -303,25 +387,34 @@ const decide = <T>(
  * Classify the FULL fetched review state into per-item verdicts. Pure and
  * total: every thread, review, and top-level comment yields exactly one
  * ClassifiedItem (threads first, then reviews, then top-level comments —
- * input order within each collection). `nowMs` is the only clock. See the
- * module doc comment for the decision table.
+ * input order within each collection). `nowMs` is the only clock. The
+ * returned Classification carries the state's truncation flag VERBATIM —
+ * consumers MUST consult it before dispatching batches (see the module
+ * doc's truncation section). See the module doc comment for the table.
  */
 export function classifyThreads(
   state: FetchedReviewState,
   nowMs: number,
   config: ClassifyConfig = defaultClassifyConfig,
-): ClassifiedItem[] {
+): Classification {
   const ctx: RowContext = {
     responder: state.authorLogin,
     nowMs,
     config,
     restReviewComments: state.restReviewComments,
+    restIssueComments: state.restIssueComments,
   };
-  return [
-    ...state.threads.map((thread) => decide(THREAD_ROWS, threadNeedsResponseRow, thread, ctx)),
-    ...state.reviews.map((review) => decide(REVIEW_ROWS, reviewNeedsResponseRow, review, ctx)),
-    ...state.restIssueComments.map((comment) =>
-      decide(COMMENT_ROWS, topLevelSummaryRow, comment, ctx),
-    ),
-  ];
+  return {
+    items: [
+      ...state.threads.map((thread) => decide(THREAD_ROWS, threadNeedsResponseRow, thread, ctx)),
+      ...state.reviews.map((review) => decide(REVIEW_ROWS, reviewNeedsResponseRow, review, ctx)),
+      ...state.restIssueComments.map((comment) =>
+        decide(COMMENT_ROWS, topLevelSummaryRow, comment, ctx),
+      ),
+    ],
+    // Truncation propagation, verbatim: the fail-closed flag rides the
+    // result so no consumer can plan against a partial fetch unnoticed.
+    truncated: state.truncated,
+    truncatedBecause: state.truncatedBecause,
+  };
 }
