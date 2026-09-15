@@ -12,11 +12,13 @@
 //      must be non-negative INTEGERS (0.5 → null); cyclic source data
 //      terminates as null (or still extracts when a count is reachable)
 //      instead of recursing forever; raw compiler text is counted by
-//      ANCHORED tsc diagnostic-header lines (classic `path(line,col):` and
-//      pretty `path:line:col -` shapes) — quoted diagnostic text in
-//      displayed source lines never counts; text with no headers (empty or
-//      otherwise) and non-text non-object garbage are null — non-passing
-//      evidence (I5), never a fabricated pass.
+//      ANCHORED tsc diagnostic-header lines (classic `path(line,col):` with
+//      paths that may contain spaces, pretty `path:line:col -`, and
+//      location-free `error TSxxxx:` heads, with ANSI escapes stripped
+//      first) — quoted diagnostic text in displayed source lines never
+//      counts; text with no headers (empty or otherwise) and non-text
+//      non-object garbage are null — non-passing evidence (I5), never a
+//      fabricated pass.
 import { describe, expect, test } from 'vitest';
 import { typecheckCount } from '../../../src/ops/ratchet/adapters/typecheckCount.js';
 import { getAdapter, listAdapters, registerAdapter } from '../../../src/ops/ratchet/registry.js';
@@ -84,6 +86,19 @@ describe('typecheckCount', () => {
     'src/a.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.\n' +
     'src/p.ts:3:1 - error TS2304: Cannot find name \'missing\'.';
 
+  const TSC_SPACED_PATH =
+    'bad file.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.';
+
+  const TSC_PAREN_PATH = 'weird(1).ts(2,3): error TS2322: Property \'x\' is missing.';
+
+  const TSC_LOCATION_FREE =
+    'error TS18003: No inputs were found in configuration file \'tsconfig.json\'.';
+
+  const TSC_ANSI_PRETTY =
+    '\u001b[96msrc/p.ts\u001b[0m:\u001b[93m3\u001b[0m:\u001b[93m5\u001b[0m - \u001b[91merror TS2304\u001b[0m: Cannot find name \'missing\'.';
+
+  const TSC_ANSI_QUOTED = '\u001b[36mconst message = "error TS1234:";\u001b[0m';
+
   // Cyclic source data: the visited-set must bound the descent either way.
   const cyclicNoCount: Record<string, unknown> = { name: 'loop' };
   cyclicNoCount['self'] = cyclicNoCount;
@@ -98,6 +113,11 @@ describe('typecheckCount', () => {
     ['raw tsc output with several errors', TSC_OUTPUT, 3],
     ['pretty-format tsc headers count', TSC_PRETTY_OUTPUT, 2],
     ['classic and pretty headers count together', TSC_MIXED_OUTPUT, 2],
+    ['classic header with a spaced path counts', TSC_SPACED_PATH, 1],
+    ['path containing a parenthetic location counts once', TSC_PAREN_PATH, 1],
+    ['location-free diagnostic header counts', TSC_LOCATION_FREE, 1],
+    ['ANSI-colored pretty header counts', TSC_ANSI_PRETTY, 1],
+    ['ANSI-colored quoted source text still does not count', TSC_ANSI_QUOTED, null],
     ['quoted diagnostic text in a source line is not counted', TSC_OUTPUT_WITH_QUOTED_TEXT, 1],
     ['a file of only quoted diagnostic text yields null', 'const message = "error TS1234:";\nconst other = "error TS9999:";', null],
     ['negative count', { count: -1 }, null],
