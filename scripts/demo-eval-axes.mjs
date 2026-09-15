@@ -5,7 +5,7 @@
 // prints one markdown table row per cell (usage + token-derived costUSD +
 // stopReason):
 //
-//   axis 1 — model × ai-sdk lane:   { zai/glm-4.6, deepseek/deepseek-chat }
+//   axis 1 — model × ai-sdk lane:   { zai/glm-4.6, deepseek/deepseek-flash }
 //   axis 2 — glm-4.6 × lane:        { ai-sdk, claude-agent, subprocess }
 //   axis 3 — the acp lane:          { zai/glm-5.3-flash (the served id) }
 //
@@ -103,7 +103,11 @@ if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
 // --- The fixture (identical across every cell) --------------------------------
 const PROMPT = 'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
 const MODEL_GLM = 'glm-4.6';
-const MODEL_DEEPSEEK = 'deepseek-chat';
+// The deepseek wire SERVES `deepseek-flash` for a `deepseek-chat` request
+// (observed live, docs/eval-axes-demo.md history) — the conductor decision:
+// eval wires request the id the wire actually serves, so the identity check
+// compares like with like and the served id is the honest axis label.
+const MODEL_DEEPSEEK = 'deepseek-flash';
 // The acp cell's request — the SERVED model id per the conductor decision —
 // and the wire's own encoding of it, verbatim from the live probe
 // (materialized config_option_update; the lazy session/new default is
