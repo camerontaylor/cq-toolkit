@@ -89,9 +89,11 @@ function errorMessage(err: unknown): string {
  * itself, which would make prune scan the ws root — fails the prefix
  * check; neither capture nor prune may touch anything outside (or at) the
  * ws. `missing` (ENOENT) is reported separately: for capture it means a
- * vanishing dir mid-op, for prune the ordinary no-baselines-yet case.
+ * vanishing dir mid-op, for prune the ordinary no-baselines-yet case, and
+ * for checkRatchet (which shares this resolver — additive export, no
+ * behavior change) it means there is no baseline to check against.
  */
-async function resolveBaselinesDir(
+export async function resolveBaselinesDir(
   ws: string,
 ): Promise<{ ok: true; dir: string } | { ok: false; missing: boolean; error: string }> {
   const baselinesDir = join(ws, 'baselines');
