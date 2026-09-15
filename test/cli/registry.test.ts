@@ -5,18 +5,27 @@
 //   1. The src/ops family scan sees every planned family dir (the scan is
 //      exercised for real, not vacuously).
 //   2. The teeth (PER FAMILY): every op module a family dir contains (`*.ts`
-//      except registry.ts / index.ts / *.test.ts / *.d.ts) must have a matching entry
-//      name in THAT family's own registry module (source-layout import of
-//      registry.ts through vitest) — basename === entry.name. A global name
-//      set would mask an orphan in family alpha behind family beta's
-//      registered op of the same name. A family with no registry.ts is
-//      skipped only when it also has no op modules — op modules without a
-//      registry stay a violation. Vacuously true today (no op module has
-//      landed yet); the day one lands without a registry entry, this fails
-//      naming the family and the missing entry.
+//      except registry.ts / index.ts / *.test.ts / *.d.ts) must be COVERED by
+//      THAT family's own registry module (source-layout import of registry.ts
+//      through vitest). Coverage (the completeness heuristic, amended at the
+//      phase-2 integration, PR 64): an entry named exactly `<base>`, OR an
+//      entry name ENDING `.<base>` (family-prefixed entry names — lane C's
+//      'gates.checkRunner' covers 'checkRunner.ts'), OR the family registry
+//      module itself references `./<base>` (a helper the registry wires in —
+//      e.g. gates' fingerprint.ts — is family surface, not an orphan op). A
+//      global name set would mask an orphan in family alpha behind family
+//      beta's registered op of the same name. A family whose registry.ts does
+//      not yield a `registry` array — absent (lands in a later phase) or
+//      loads-clean-nonconforming (an interim internal registry, e.g. lane-H
+//      ratchet's metric adapters) — is NOT scanned for orphans: it must be
+//      surfaced in listWithDiagnostics().skippedFamilies instead, and is
+//      collected as a violation only if it appears in NEITHER place (entries
+//      nor skipped). Full closure is phase-4 T4.2.
 //   3. Every registry entry has a subcommand: subcommandNames(list()) covers
 //      all entry names plus 'run-plan'; the empty registry still yields
-//      ['run-plan'].
+//      ['run-plan']. Integration-time skips stay VISIBLE: listWithDiagnostics()
+//      on the default root must report 'ratchet' in skippedFamilies — the
+//      tolerance is surfaced, never silently swallowed.
 //   4. Fixture-root DI: the pure-op fixture family under
 //      test/fixtures/cli-ops/ resolves exactly its six names through the
 //      same list()/get() seam, and get('echo').importer() yields an async fn.
@@ -40,7 +49,7 @@
 // throwaway tmp roots for (5) are created under <repo>/node_modules, where
 // that bare specifier resolves; nothing else ever touches them and each test
 // cleans up with rm.
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -48,7 +57,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { subcommandNames } from '../../src/cli/main.js';
 import { getPlan, listPlans } from '../../src/plans/registry.js';
-import { get, list } from '../../src/registry/index.js';
+import { get, list, listWithDiagnostics } from '../../src/registry/index.js';
 
 const srcOps = fileURLToPath(new URL('../../src/ops/', import.meta.url));
 const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url));
@@ -113,12 +122,23 @@ describe('registry family scan (src/ops)', () => {
     // — family alpha's uncovered op module hides behind family beta's
     // registered op of the same name. Each family's candidates are matched
     // against THAT family's own registry module (imported at source layout —
-    // `registry.ts` — through the vitest module runner). A family with no
-    // registry.ts is skipped ONLY when it also has no candidate op modules;
-    // op modules without a registry.ts stay a violation.
+    // `registry.ts` — through the vitest module runner). Coverage is the
+    // amended completeness heuristic (PR 64 integration): an entry named
+    // exactly `<base>`, an entry name ending `.<base>` (family-prefixed —
+    // 'gates.checkRunner' covers 'checkRunner.ts'), or a `./<base>` reference
+    // in the registry module's own source (a helper the registry wires in —
+    // gates' fingerprint.ts — is family surface, not an orphan op). A family
+    // whose registry.ts does not yield a `registry` array — absent (lands in
+    // a later phase) or loads-clean-nonconforming (lane-H ratchet's interim
+    // metric-adapter registry) — is NOT scanned for orphans: it must be
+    // surfaced in listWithDiagnostics().skippedFamilies (asserted in the
+    // subcommand-surface test), and is collected as a violation only if it
+    // appears in NEITHER place. Full closure is phase-4 T4.2.
     const families = readdirSync(srcOps, { withFileTypes: true })
       .filter((dirent) => dirent.isDirectory())
       .map((dirent) => dirent.name);
+    const { skippedFamilies } = await listWithDiagnostics();
+    const skipped = new Set(skippedFamilies);
     const violations: string[] = [];
     for (const family of families) {
       const dirents = readdirSync(join(srcOps, family), { withFileTypes: true });
@@ -137,31 +157,68 @@ describe('registry family scan (src/ops)', () => {
         )
         .map((dirent) => dirent.name.replace(/\.ts$/, ''));
       const hasRegistry = dirents.some((dirent) => dirent.isFile() && dirent.name === 'registry.ts');
-      if (candidateNames.length === 0 && !hasRegistry) continue; // bare family — nothing to cover
       if (!hasRegistry) {
-        violations.push(
-          `src/ops/${family}: op module(s) ${candidateNames.join(', ')} but no registry.ts`,
-        );
+        // No registry module to scan against. A bare family (no candidates)
+        // has nothing to cover; a module-bearing family (e.g. review's
+        // helpers, landed ahead of any registry) contributes no entries and
+        // is tolerated/surfaced as absent — a violation only if it appears
+        // in NEITHER place (no entries and not in skippedFamilies).
+        if (candidateNames.length > 0 && !skipped.has(family)) {
+          violations.push(
+            `src/ops/${family}: op module(s) ${candidateNames.join(', ')} with no registry.ts, ` +
+              'and the family is surfaced neither by registry entries nor skippedFamilies',
+          );
+        }
         continue;
       }
       // Source-layout import of the family's own registry — the .ts specifier
       // resolves under vitest exactly like every other src import in this
       // suite; the convention's lazy `import('./<name>.js')` importers are
       // not invoked here (import only evaluates the module body).
-      let entryNames: Set<string>;
+      let entryNames: Set<string> | undefined;
       try {
         const mod = (await import(join(srcOps, family, 'registry.ts'))) as {
-          registry?: Array<{ name?: unknown }>;
+          registry?: unknown;
         };
-        entryNames = new Set((mod.registry ?? []).map((entry) => String(entry?.name)));
+        if (Array.isArray(mod.registry)) {
+          entryNames = new Set(
+            (mod.registry as Array<{ name?: unknown }>).map((entry) => String(entry?.name)),
+          );
+        }
       } catch (err) {
         violations.push(
           `src/ops/${family}/registry.ts failed to load: ${err instanceof Error ? err.message : String(err)}`,
         );
         continue;
       }
+      if (entryNames === undefined) {
+        // Loads clean but exports no `registry` array — a NONCONFORMING
+        // family (e.g. ratchet's interim metric-adapter registry): not
+        // scanned for orphans; the central registry must surface it
+        // (skippedFamilies), else it appears in neither place.
+        if (!skipped.has(family)) {
+          violations.push(
+            `src/ops/${family}: registry.ts exports no 'registry' array and the family is ` +
+              'surfaced neither by registry entries nor skippedFamilies',
+          );
+        }
+        continue;
+      }
+      // The registry module's own source, for the helper-reference excusal:
+      // a candidate whose module the registry itself imports (type-only
+      // helper imports count — the convention routes every REGISTERED op
+      // through an entry, so an unreferenced candidate is an orphan).
+      const registrySource = readFileSync(join(srcOps, family, 'registry.ts'), 'utf8');
+      const referencesModule = (base: string): boolean =>
+        [`'./${base}.js'`, `"./${base}.js"`, `'./${base}'`, `"./${base}"`].some((ref) =>
+          registrySource.includes(ref),
+        );
       for (const opName of candidateNames) {
-        if (!entryNames.has(opName)) {
+        const covered =
+          entryNames.has(opName) ||
+          [...entryNames].some((name) => name.endsWith(`.${opName}`)) ||
+          referencesModule(opName);
+        if (!covered) {
           violations.push(`src/ops/${family}: no registry entry named '${opName}'`);
         }
       }
@@ -180,6 +237,14 @@ describe('registry ⇄ CLI subcommand surface', () => {
     expect(names).toContain('run-plan');
     // The built-in run-plan subcommand exists even with zero op families.
     expect(subcommandNames([])).toEqual(['run-plan']);
+    // Integration visibility (PR 64): a family that loads clean but does not
+    // conform — lane-H ratchet's registry.ts is an interim metric-adapter
+    // registry with no `registry` array export — is SKIPPED, not thrown, and
+    // must stay visible in the diagnostics rather than silently swallowed.
+    const { entries: diagEntries, skippedFamilies } = await listWithDiagnostics();
+    expect(skippedFamilies).toContain('ratchet');
+    // list() is exactly the diagnostics' entry half (same cached scan).
+    expect(diagEntries).toEqual(entries);
   });
 });
 
@@ -288,6 +353,28 @@ describe('absent vs broken family registries (the narrow tolerance)', () => {
     await mkdir(join(tmp, 'empty-family'), { recursive: true });
     // Only a not-found for the requested registry.js itself counts as absent.
     await expect(list({ opsRoot: tmp })).resolves.toEqual([]);
+    // The tolerated absence is SURFACED, not silent (the diagnostics share
+    // the same cached scan as the list() call above).
+    const { entries, skippedFamilies } = await listWithDiagnostics({ opsRoot: tmp });
+    expect(entries).toEqual([]);
+    expect(skippedFamilies).toEqual(['empty-family']);
+  });
+
+  test('a NONCONFORMING registry (loads clean, no registry array) is skipped + surfaced', async () => {
+    // The PR 64 amendment: a module that loads cleanly but exports no
+    // `registry` array is not a broken family — it contributes no entries,
+    // is NOT thrown over, and is surfaced in skippedFamilies (the real-world
+    // case: lane-H ratchet's registry.ts is a metric-adapter registry until
+    // the family conforms — T4.2). The diagnostics carry no entries for it.
+    const tmp = await makeTmpOpsRoot('cq-registry-nonconforming-');
+    await mkdir(join(tmp, 'interim'), { recursive: true });
+    await writeFile(
+      join(tmp, 'interim', 'registry.js'),
+      "export const adapters = new Map();\nexport function listAdapters() {\n  return [];\n}\n",
+    );
+    const { entries, skippedFamilies } = await listWithDiagnostics({ opsRoot: tmp });
+    expect(entries).toEqual([]);
+    expect(skippedFamilies).toEqual(['interim']);
   });
 
   test('a PRESENT-but-broken registry (evaluation throw) rejects naming the family', async () => {

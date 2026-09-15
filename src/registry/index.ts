@@ -21,33 +21,53 @@
 // directory scan of the ops root (one level: family directories), then a lazy
 // dynamic import of each family's `registry.js`, then (only when an op is
 // actually dispatched) the entry's own `importer()` pulls the op module in.
-// ABSENT vs BROKEN (the tolerance is narrow): an ABSENT family registry is
-// expected (families land in later phases) and contributes no entries — but
-// only a not-found rejection whose resolution target IS the requested family
-// `registry.js` itself is treated as absent (classifier mirrors the SDK
-// presence idiom: code ERR_MODULE_NOT_FOUND + `Cannot find module '<path>'`,
-// or the module runner's `Could not resolve "<path>"`). A PRESENT-but-broken
-// registry — a syntax error, an evaluation throw, a not-found for a
-// TRANSITIVE dependency of the registry module, any other rejection — throws
-// loudly, naming the family, the requested path, and the original message
-// (attached as `cause`). Defects that also surface loudly: a registry export
-// that is not an array, a malformed entry, a duplicate op name across
-// families, or a shape-bearing object input schema that is not `.strict()`
-// (unknown-key rejection is load-bearing — see the scan loop below) — all
-// throw immediately — including a NAME that collides with the CLI
-// dispatcher: 'run-plan' (handled by main.ts before the registry is ever
+// ABSENT vs BROKEN vs NONCONFORMING (the tolerance is narrow, and has three
+// classes):
+//   - ABSENT — expected (families land in later phases): only a not-found
+//     rejection whose resolution target IS the requested family `registry.js`
+//     itself is treated as absent (classifier mirrors the SDK presence idiom:
+//     code ERR_MODULE_NOT_FOUND + `Cannot find module '<path>'`, or the
+//     module runner's `Could not resolve "<path>"`). The family contributes
+//     no entries and is surfaced in `skippedFamilies`.
+//   - BROKEN — a PRESENT-but-broken registry: a syntax error, an evaluation
+//     throw, a not-found for a TRANSITIVE dependency of the registry module,
+//     any other rejection — throws loudly, naming the family, the requested
+//     path, and the original message (attached as `cause`).
+//   - NONCONFORMING — a registry module that LOADS cleanly but exports no
+//     `registry` array (or a non-array) is NOT a broken family: it
+//     contributes no entries and is skipped + surfaced in `skippedFamilies`
+//     instead of throwing. Rationale: at integration a family's registry.ts
+//     may carry its own interim internal registries — e.g. lane-H ratchet's
+//     metric-adapter registry — until the family conforms; op-registry
+//     recognition is by EXPORT SHAPE, and a module without the shape is
+//     simply not an op registry yet. Full convention closure is phase-4 T4.2.
+// `listWithDiagnostics()` returns `{ entries, skippedFamilies }` — the family
+// dir names that contributed no entries without erroring (absent or
+// nonconforming) — so an integration-time skip stays visible to callers and
+// tests instead of being silently swallowed; `list()` delegates to it and
+// returns `.entries`, keeping the existing seam (and the `listOps` barrel
+// alias) unchanged.
+//
+// Defects that still surface loudly: a malformed entry, a duplicate op name
+// across families, or a shape-bearing object input schema that is not
+// `.strict()` (unknown-key rejection is load-bearing — see the scan loop
+// below) — all throw immediately — including a NAME that collides with the
+// CLI dispatcher: 'run-plan' (handled by main.ts before the registry is ever
 // consulted) and any name starting with '-' (reads as a flag spelling).
 // Such an entry validates but can never be invoked, and the deduped global
 // help would hide it — a dead op — so registration rejects it.
 //
 // Results are cached per resolved ops root (as a promise), so repeated
-// list()/get() calls do not rescan or re-import.
+// list()/listWithDiagnostics()/get() calls do not rescan or re-import.
 import { readdirSync, type Dirent } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { OpRegistryEntry } from '../kernel/types.js';
 
-const listCache = new Map<string, Promise<OpRegistryEntry[]>>();
+const listCache = new Map<
+  string,
+  Promise<{ entries: OpRegistryEntry[]; skippedFamilies: string[] }>
+>();
 
 /**
  * Default ops root: `src/ops` under vitest (source layout), `dist/ops` in the
@@ -58,11 +78,18 @@ export function defaultOpsRoot(): string {
 }
 
 /**
- * Aggregate every landed op family's registry entries. Scans `opsRoot`
- * (default {@link defaultOpsRoot}) for directories only; a root that does not
- * exist means no family has landed yet and yields `[]`.
+ * Aggregate every landed op family's registry entries together with the
+ * families that contributed none without erroring: `skippedFamilies` holds
+ * the family dir names whose `registry.js` is absent (lands in a later
+ * phase) or loads cleanly without exporting a `registry` array
+ * (nonconforming interim registry — see the header). Scans `opsRoot`
+ * (default {@link defaultOpsRoot}) for directories only; a root that does
+ * not exist means no family has landed yet and yields
+ * `{ entries: [], skippedFamilies: [] }`.
  */
-export function list(opts?: { opsRoot?: string }): Promise<OpRegistryEntry[]> {
+export function listWithDiagnostics(opts?: {
+  opsRoot?: string;
+}): Promise<{ entries: OpRegistryEntry[]; skippedFamilies: string[] }> {
   const root = path.resolve(opts?.opsRoot ?? defaultOpsRoot());
   let cached = listCache.get(root);
   if (cached === undefined) {
@@ -70,6 +97,15 @@ export function list(opts?: { opsRoot?: string }): Promise<OpRegistryEntry[]> {
     listCache.set(root, cached);
   }
   return cached;
+}
+
+/**
+ * Aggregate every landed op family's registry entries. Delegates to
+ * {@link listWithDiagnostics} and returns `.entries` — the pre-existing seam
+ * (and the `listOps` barrel alias) is unchanged by the diagnostics.
+ */
+export function list(opts?: { opsRoot?: string }): Promise<OpRegistryEntry[]> {
+  return listWithDiagnostics(opts).then((aggregated) => aggregated.entries);
 }
 
 /**
@@ -123,17 +159,20 @@ function isAbsentFamilyRegistry(err: unknown, target: string): boolean {
 }
 
 /** One directory scan + lazy family-registry imports, per resolved root. */
-async function scanOps(root: string): Promise<OpRegistryEntry[]> {
+async function scanOps(
+  root: string,
+): Promise<{ entries: OpRegistryEntry[]; skippedFamilies: string[] }> {
   let dirents: Dirent[];
   try {
     dirents = readdirSync(root, { withFileTypes: true });
   } catch (err) {
     if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') {
-      return []; // no family has landed yet
+      return { entries: [], skippedFamilies: [] }; // no family has landed yet
     }
     throw err;
   }
   const entries: OpRegistryEntry[] = [];
+  const skippedFamilies: string[] = [];
   const familyOf = new Map<string, string>(); // op name -> family (integrity)
   const families = dirents
     .filter((dirent) => dirent.isDirectory())
@@ -169,7 +208,11 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
       mod = await import(registrySpecifier);
     } catch (err) {
       if (isAbsentFamilyRegistry(err, registrySpecifier)) {
-        continue; // absent family registry — the family lands in a later phase
+        // Absent family registry — the family lands in a later phase. It
+        // contributes no entries and is surfaced in skippedFamilies rather
+        // than silently dropped.
+        skippedFamilies.push(family);
+        continue;
       }
       throw new Error(
         `op family '${family}': registry module ${registrySpecifier} failed to load ` +
@@ -179,10 +222,13 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
     }
     const registry = (mod as { registry?: unknown }).registry;
     if (!Array.isArray(registry)) {
-      throw new Error(
-        `op family '${family}': registry.js must export 'registry' as an array of OpRegistryEntry ` +
-          `(got ${registry === null ? 'null' : typeof registry})`,
-      );
+      // Loads cleanly but exports no `registry` array: NONCONFORMING, not
+      // broken — by export shape the module is not an op registry yet (an
+      // interim internal registry, e.g. lane-H ratchet's metric adapters).
+      // It contributes no entries and is skipped + surfaced, never thrown
+      // (full convention closure is phase-4 T4.2).
+      skippedFamilies.push(family);
+      continue;
     }
     for (const entry of registry) {
       const e = entry as Partial<OpRegistryEntry> | null | undefined;
@@ -269,5 +315,5 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
       entries.push(e as OpRegistryEntry);
     }
   }
-  return entries;
+  return { entries, skippedFamilies };
 }
