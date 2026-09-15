@@ -67,7 +67,12 @@
 //     payloads, a PR object without a usable head sha, comment entries
 //     without numeric ids, resolved threads without string ids) THROWS —
 //     a throw can never be mistaken for "NO PROGRESS".
-import { ghJson } from './gh.js';
+// Owner/repo spellings are validated by gh.ts's shared ghNameOk (GH_NAME_OK
+// charset + the dot-segment rule); this module keeps only its own
+// module-prefixed fail-loud error message. REST payload normalization
+// (slurp shape / flat tolerance / mixed-throw) is also gh.ts's shared
+// slurpedComments guard — both hoisted so the seams cannot drift apart.
+import { GH_NAME_OK, ghJson, ghNameOk, slurpedComments } from './gh.js';
 import type { GhFn } from './gh.js';
 
 /** The before/after evidence for one PR at one instant. */
@@ -124,13 +129,8 @@ export interface SnapshotPrStateOpts {
   nowMs: number;
 }
 
-/** The only owner/repo spellings allowed near a gh REST path (E1 convention). */
-const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
-
-/** GH_NAME_OK plus the DOT-SEGMENT rule (mirrors replyAndResolve): "." and
- * ".." pass the charset but ride into the request path as relative
- * segments — a repo spelled ".." is not a repo. */
-const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
+// Owner/repo spellings and REST payload normalization are validated at the
+// gh.ts transport layer (see the imports at the top of this file).
 
 /**
  * The resolved-threads query, PAGINATED (see the module doc for why verify
@@ -171,36 +171,6 @@ interface GraphqlPayload {
 }
 
 /**
- * Normalize a `--paginate --slurp` REST payload to one flat list of raw
- * comment objects. TWO shapes arrive in the wild and BOTH are accepted:
- *   - `[[page1…], [page2…]]` — the --slurp shape (gh >= 2.51): ONE outer
- *     array of page arrays;
- *   - `[c1, c2, …]` — the already-flat shape (an older gh variant, or pages
- *     merged flat WITHOUT slurp).
- * An empty array satisfies both readings (flat() of [] is []). A MIXED
- * payload — array pages alongside non-array entries (`[[c1], "junk"]`) —
- * satisfies NEITHER: flat() would silently DROP the array pages and read
- * only the junk, so it throws (a bad snapshot must never become a silent
- * "NO PROGRESS").
- */
-const slurpedComments = (payload: unknown, path: string): Array<{ id?: unknown; user?: unknown }> => {
-  if (!Array.isArray(payload)) {
-    throw new Error(`gh api ${path} returned a non-array payload — snapshot untrustworthy`);
-  }
-  const allPages = payload.every((entry) => Array.isArray(entry));
-  const anyPages = payload.some((entry) => Array.isArray(entry));
-  // length guard: an empty payload trivially has every!==some (both
-  // vacuous) and is the one case both clean readings agree on — [].
-  if (payload.length > 0 && allPages !== anyPages) {
-    throw new Error(
-      `gh api ${path} returned a MIXED page payload (array pages alongside non-array entries) — snapshot untrustworthy`,
-    );
-  }
-  const flat = allPages ? (payload as unknown[][]).flat() : (payload as Array<{ id?: unknown; user?: unknown }>);
-  return flat as Array<{ id?: unknown; user?: unknown }>;
-};
-
-/**
  * Extract one REST comment entry per raw comment: the numeric id (STRICT —
  * an entry without a safe-integer id is a payload this module cannot
  * trust; filtering it out would silently shrink the reply-novelty
@@ -222,17 +192,15 @@ const commentEntries = (
     return { id: raw.id, author: typeof login === 'string' && login !== '' ? login : null };
   });
 
-/** Fetch one REST comment collection paginated, tolerant of both slurp shapes. */
+/** Fetch one REST comment collection paginated (normalized by gh.ts's shared
+ * slurpedComments guard), mapped to id+author entries. */
 const fetchRestComments = async (
   run: GhFn,
   path: string,
-): Promise<Array<{ id: number; author: string | null }>> =>
-  commentEntries(
-    await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']).then((payload) =>
-      slurpedComments(payload, path),
-    ),
-    path,
-  );
+): Promise<Array<{ id: number; author: string | null }>> => {
+  const payload = await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']);
+  return commentEntries(slurpedComments<{ id?: unknown; user?: unknown }>(payload, path).flat(), path);
+};
 
 /**
  * Capture one instant of the PR's state: REST head sha, REST comment

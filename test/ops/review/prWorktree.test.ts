@@ -521,6 +521,37 @@ describe('existing-worktree scan reuse (BRANCH match AND SHA match, INSIDE the r
     });
   });
 
+  test('a tree at THIS PR key’s target path on an OLD branch name is RECLAIMED — non-forced remove, create succeeds in the freed slot', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-reclaim-'));
+    try {
+      const calls: string[][] = [];
+      // The branch was RENAMED after a previous round: the old tree still
+      // sits at the pr-keyed path, checked out on the OLD branch name. The
+      // path is the PR's slot, not the branch's — reclaim it.
+      const targetPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      await mkdir(targetPath, { recursive: true });
+      const registry = memRegistry({ '7': { path: targetPath, branch: 'old-pr-7-branch', createdAt: NOW - 1000 } });
+      const model = mkModel([
+        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: targetPath, branch: 'old-pr-7-branch', head: SHA_A },
+      ]);
+      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      expect(result).toEqual({ path: targetPath, reused: false, branch: BRANCH, foreign: [] });
+      expect(registry.calls).toEqual(['load', 'update:7']);
+      // The squatter was removed NON-FORCED and the create landed at the
+      // same pr-keyed slot, at the fetched sha.
+      expect(calls).toContainEqual(['-C', repoRoot, 'worktree', 'remove', targetPath]);
+      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, targetPath, SHA_B]);
+      expect(calls.some((args) => args.includes('--force'))).toBe(false);
+      expect(model.worktrees).toEqual([
+        { path: '/repo', branch: 'main', head: SHA_MAIN },
+        { path: targetPath, branch: BRANCH, head: SHA_B },
+      ]);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   test('a branch-matching stale tree OUTSIDE the root holds the branch — review ops never frees foreign trees: the create refuses and names the holder', async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-foreignstale-'));
     try {

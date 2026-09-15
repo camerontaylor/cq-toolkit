@@ -51,8 +51,11 @@
 //
 // Structure purity: no Date.now (nowMs is injected), no direct I/O —
 // everything goes through opts.run, opts.push.run, and the DispatchLog.
+// Owner/repo spellings are validated by gh.ts's shared ghNameOk (GH_NAME_OK
+// charset + the dot-segment rule); this module keeps only its own
+// module-prefixed fail-loud error message.
 import { appendFile, readFile } from 'node:fs/promises';
-import { GhError } from './gh.js';
+import { GH_NAME_OK, GhError, ghNameOk } from './gh.js';
 import type { GhFn, GhResult } from './gh.js';
 
 /** Reply to a review thread by posting to its ROOT comment's REST id. */
@@ -234,15 +237,6 @@ const pushFailureDetail = (code: number, stderr: string): string => {
   const detail = `push failed (exit ${code})${trimmed === '' ? '' : `: ${trimmed}`}`;
   return detail.length <= PUSH_ERROR_MAX ? detail : detail.slice(0, PUSH_ERROR_MAX);
 };
-
-/** The only owner/repo spellings allowed near a gh REST path (E1 convention). */
-const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
-
-/** GH_NAME_OK plus the DOT-SEGMENT rule: "." and ".." pass the charset but
- * ride into the request path as relative segments (`repos/../..`) — a repo
- * spelled ".." is not a repo. Values containing "/" already fail the
- * charset. */
-const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
 
 /**
  * The resolve mutation. COLLISION RULE: the document rides gh's

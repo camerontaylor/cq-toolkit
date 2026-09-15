@@ -405,6 +405,35 @@ describe('fetchReviewState', () => {
     expect(state.truncatedBecause).toEqual(['reviews.lag']);
   });
 
+  test('a CAPPED reviews loop does not misattribute reviews.lag — pageCap is the recorded cause, the lag check is skipped', async () => {
+    // The GraphQL reviews loop caps at page 1 while MORE GraphQL pages
+    // exist, so the loop provably under-saw. REST carries a review whose
+    // node_id lives on the UNSEEN page: the cap is the actual cause —
+    // flagging reviews.lag on top would misattribute the known failure
+    // mode.
+    const run = fakeGh({
+      graphql: (cursors: { threadsAfter: string; reviewsAfter: string }) =>
+        cursors.reviewsAfter === ''
+          ? graphqlPayload(
+              { hasNextPage: false, endCursor: null, nodes: [] },
+              { hasNextPage: true, endCursor: 'r2', nodes: [reviewNode('PRR_known')] },
+            )
+          : graphqlPayload(
+              { hasNextPage: false, endCursor: null, nodes: [] },
+              { hasNextPage: false, endCursor: null, nodes: [reviewNode('PRR_known'), reviewNode('PRR_unseen')] },
+            ),
+      restReviews: [
+        [
+          { id: 701, node_id: 'PRR_unseen', user: { login: 'late-reviewer' }, state: 'APPROVED', body: 'on the unseen page', submitted_at: '2026-01-01T09:00:00Z' },
+        ],
+      ],
+    });
+    const state = await fetchReviewState(INPUT, { reviewPages: 1 }, run);
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toContain('reviews.pageCap');
+    expect(state.truncatedBecause).not.toContain('reviews.lag');
+  });
+
   test('thread lag and review lag combine: both reasons, stable order', async () => {
     const run = fakeGh({
       graphql: () =>
@@ -556,17 +585,38 @@ describe('fetchReviewState', () => {
     expect(state.restReviewComments[1]?.inReplyToId).toBeNull();
   });
 
-  test('a --slurp payload that is not an array of page arrays fails closed (R2-9a)', async () => {
+  test('a --slurp payload that is ALREADY FLAT is tolerated as ONE retained page (R2-9a under the shared normalizer)', async () => {
+    const run = fakeGh({
+      graphql: () =>
+        graphqlPayload(
+          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          { hasNextPage: false, endCursor: null, nodes: [] },
+        ),
+      // A FLAT item array where the page-array shape is expected — an older
+      // gh variant (or pages merged WITHOUT --slurp): read as ONE retained
+      // page, never a throw. (The root comment's id anchors to T1's
+      // rootDatabaseId so the lag trap stays out of the picture — this test
+      // pins the SHAPE, not lag.)
+      pullsComments: [restPullComment(100, { nodeId: 'PRRC_100' }), restPullComment(101, { inReplyTo: 100, nodeId: null })],
+    });
+    const state = await fetchReviewState(INPUT, {}, run);
+    expect(state.restReviewComments).toHaveLength(2);
+    expect(state.truncated).toBe(false);
+  });
+
+  test.each([
+    ['a NON-ARRAY payload', { oops: true }, /non-array payload/],
+    ['a MIXED pages-and-junk payload', [[restPullComment(1)], 'junk'], /MIXED page payload/],
+  ])('%s satisfies neither slurp shape → fails closed', async (_label, pullsComments, pattern) => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
           { hasNextPage: false, endCursor: null, nodes: [] },
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
-      // A FLAT item array where the page-array shape is required.
-      pullsComments: [restPullComment(1), restPullComment(2)],
+      pullsComments,
     });
-    await expect(fetchReviewState(INPUT, {}, run)).rejects.toThrow(/non-page-array payload/);
+    await expect(fetchReviewState(INPUT, {}, run)).rejects.toThrow(pattern);
   });
 
   test('hasNextPage with a null endCursor cannot continue: pageCap reason, data kept (R2-9b)', async () => {

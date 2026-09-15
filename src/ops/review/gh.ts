@@ -8,8 +8,11 @@
 // substitute a fake gh script via the CQ_GH_BIN environment seam (or
 // `makeGhRunner({ bin })` directly).
 //
-// This module is transport only: no argument construction, no pagination, no
-// retries — and no parsing beyond ghJson's JSON.parse.
+// This module is transport only: no argument construction, no pagination,
+// no retries — and no parsing beyond ghJson's JSON.parse PLUS the two
+// shared payload/request guards every review consumer imports (the
+// owner/repo spelling validator and the `--paginate --slurp` payload
+// normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
@@ -139,4 +142,47 @@ export async function ghJson<T>(run: GhFn, args: string[]): Promise<T> {
   } catch {
     throw new GhError(result.code, result.stderr, args, 'printed non-JSON output');
   }
+}
+
+/** The only owner/repo spellings allowed near a gh REST path (the E1
+ * convention, shared by every review consumer so the seams cannot drift). */
+export const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
+
+/**
+ * The shared transport guard for owner/repo spellings: GH_NAME_OK plus the
+ * DOT-SEGMENT rule — "." and ".." pass the charset but ride into the
+ * request path as relative segments (`repos/../..`), so they are rejected
+ * outright (values containing "/" already fail the charset). Callers keep
+ * their own module-prefixed error messages (the fail-loud convention names
+ * the module that refused); this predicate is the single source of the
+ * accept/reject decision.
+ */
+export const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
+
+/**
+ * Normalize a `--paginate --slurp` REST payload to PAGES. THREE shapes
+ * arrive in the wild and are read defensively:
+ *   - `[[page1…], [page2…]]` — the --slurp shape (gh >= 2.51): ONE outer
+ *     array of page arrays — used as the page list;
+ *   - `[c1, c2, …]` — already-flat (an older gh variant, or pages merged
+ *     flat WITHOUT --slurp) — tolerated as ONE retained page;
+ *   - `[]` — empty under either reading.
+ * A MIXED payload (array pages alongside non-array entries) satisfies
+ * NEITHER shape and throws with the request path in the message — a
+ * silently partial read would corrupt every count built on top of it.
+ * Transport-level by design: no cap, retention, or truncation policy —
+ * callers decide what the pages mean.
+ */
+export function slurpedComments<T = unknown>(payload: unknown, path: string): T[][] {
+  if (!Array.isArray(payload)) {
+    throw new Error(`gh api ${path} returned a non-array payload — payload untrustworthy`);
+  }
+  const allPages = payload.every((entry) => Array.isArray(entry));
+  const anyPages = payload.some((entry) => Array.isArray(entry));
+  if (payload.length > 0 && allPages !== anyPages) {
+    throw new Error(
+      `gh api ${path} returned a MIXED page payload (array pages alongside non-array entries) — payload untrustworthy`,
+    );
+  }
+  return allPages ? (payload as T[][]) : [payload as T[]];
 }

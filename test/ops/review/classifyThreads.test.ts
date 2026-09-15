@@ -1006,6 +1006,25 @@ describe('default skipPatterns', () => {
     ).toEqual([{ kind: 'thread', id: 'TH7', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' }]);
   });
 
+  test('a HUMAN sentence MENTIONING CodeRabbit alongside "skipped" mid-sentence must NOT skip → actionable', () => {
+    // The skip pattern was rebuilt in the family form: the tool identity
+    // must LEAD the line (it used to be the one unanchored, unbounded
+    // pattern). "I asked CodeRabbit to re-run since it skipped the
+    // generated file" mentions the tool — a human's demand, not a verdict.
+    expect(
+      itemsOf(
+        baseState({
+          restIssueComments: [
+            restComment({
+              id: 627,
+              body: 'I asked CodeRabbit to re-run since it skipped the generated file — please fix inline.',
+            }),
+          ],
+        }),
+      ),
+    ).toEqual([{ kind: 'comment', id: '627', verdict: 'actionable', path: null, reason: 'top_level_summary' }]);
+  });
+
   test('a bot configuration-error notice ("CodeRabbit: configuration error, skipping review") → skip (bot_skip_notice)', () => {
     // The same pattern still fires on the tool's own notice — the identity
     // LEADS the line, so the skip is the tool's verdict, not a human's.

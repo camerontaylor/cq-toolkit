@@ -106,8 +106,13 @@ export const defaultClassifyConfig: ClassifyConfig = {
   // phrasing (that is how humans write real feedback). R3 refines AS DATA,
   // under the same anchoring rule.
   skipPatterns: [
-    // "CodeRabbit ... skipped ..." — the bot punted on this PR.
-    /\bCodeRabbit\b.*\bskipped\b/i,
+    // "CodeRabbit ... skipped ..." — the bot punted on this PR. Built in the
+    // SAME family form as its siblings (it used to be the one unanchored,
+    // unbounded pattern, and a human mentioning CodeRabbit mid-sentence
+    // alongside "skipped" was eaten): identity at LINE START (every line,
+    // `m`), the `(?!-)` hyphenated-mention guard, and a bounded [^\n]{0,80}
+    // window before the skip verb.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\bskipped\b/im,
     // A known bot/tool identity at LINE START followed within one line by
     // "failed"/"error" — the tool's own failure notice. The `m` flag makes
     // ^ match at EVERY line start, so a notice landing on line 2+ of a

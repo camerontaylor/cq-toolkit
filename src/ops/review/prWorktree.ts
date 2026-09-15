@@ -2,7 +2,9 @@
 // a PR — reuse the tree already checked out on the PR's branch, else create
 // one. The ORIGIN PR BRANCH IS TRUTH: the branch is fetched from origin
 // before any resolution decision, so every path below acts on what the
-// remote actually has, not on local memory.
+// remote actually has, not on local memory. One tree PER-PR, not per-batch
+// — E4 dispatches batches sequentially against this tree (I6 isolation is
+// invocation-level, not tree-level).
 //
 // DOMAIN BOUNDARY (asserted, not incidental): this is the REVIEW-OPS
 // worktree — keyed by PR, rooted at `<repoRoot>/.cq-review-worktrees`. It is
@@ -91,9 +93,11 @@ export interface WorktreeRegistry {
   save(map: RegistryMap): Promise<void>;
   /**
    * MERGE-ON-SAVE for ONE key: load → set the key (null clears it) → save.
-   * Resolves and removals scope their write to their OWN key, so concurrent
-   * runs for different PRs can no longer drop each other's entries the way
-   * a whole-map save would (last writer erasing everything it never saw).
+   * This NARROWS the whole-map-clobber window (a last writer erasing every
+   * entry it never saw) but does not ELIMINATE it under true concurrency —
+   * two interleaved load→mutate→save sequences can still race. Single-
+   * flight registry access is an E4 dispatch requirement; proper-lockfile
+   * is the named upgrade path if multi-process access ever lands.
    */
   update(key: string, entry: WorktreeRegistryEntry | null): Promise<void>;
 }
@@ -141,8 +145,9 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     await rename(tmpPath, path);
   };
   const update = async (key: string, entry: WorktreeRegistryEntry | null): Promise<void> => {
-    // Load-merge-save scoped to ONE key: a concurrent run's entries for
-    // other PRs are read fresh and written back untouched.
+    // Load-merge-save scoped to ONE key: entries for other PRs are read
+    // fresh at write time — narrowing (not eliminating) the whole-map
+    // clobber race; see the interface doc (single-flight is E4's bar).
     const map = await load();
     if (entry === null) {
       delete map[key];
@@ -395,27 +400,36 @@ export async function resolvePrWorktree(
   //   - OUTSIDE worktreeRoot + stale  → not ours, not fresh: skipped
   //     entirely (it still holds the branch and will refuse the create;
   //     freeing it is the human's call — see the module doc).
+  //   - AT THIS PR's target path (pr-<pr>-<sanitized>), ANY branch →
+  //     RECLAIMABLE: the path is the PR's slot, not the branch's — a tree
+  //     left there by a branch rename is removed non-forced exactly like
+  //     the stale-sha case, and the create lands in the freed slot.
   const listArgs = ['-C', opts.repoRoot, 'worktree', 'list', '--porcelain'];
   const list = await opts.run(listArgs);
   if (list.code !== 0) {
     throw gitFail('worktree list failed', list.code, list.stderr, listArgs);
   }
+  const targetPath = join(worktreeRoot, `pr-${opts.pr}-${opts.headRefName.replace(SANITIZE_OK, '-')}`);
   const foreign: Array<{ path: string; branch: string }> = [];
   let existing: PorcelainWorktree | null = null;
   for (const candidate of parseWorktreeList(list.stdout)) {
-    if (candidate.branch !== opts.headRefName) {
+    // RECLAIM RULE: a tree sitting at THIS PR key's target path is ours to
+    // reclaim regardless of its checked-out branch (the path is the PR's
+    // slot, not the branch's).
+    const atTargetPath = candidate.path === targetPath;
+    if (candidate.branch !== opts.headRefName && !atTargetPath) {
       continue;
     }
     const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
     const head = await opts.run(headArgs);
     const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
     if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
-      if (atSha) {
+      if (candidate.branch === opts.headRefName && atSha) {
         foreign.push({ path: candidate.path, branch: candidate.branch });
       }
       continue;
     }
-    if (atSha) {
+    if (candidate.branch === opts.headRefName && atSha) {
       existing = candidate;
       break;
     }
@@ -445,7 +459,7 @@ export async function resolvePrWorktree(
   // registered for a tree that does not exist, and any stale registry
   // entry was never pruned, so the pointer survives for the next run.
   await mkdir(worktreeRoot, { recursive: true });
-  const wtPath = join(worktreeRoot, `pr-${opts.pr}-${opts.headRefName.replace(SANITIZE_OK, '-')}`);
+  const wtPath = targetPath;
   const addArgs = ['-C', opts.repoRoot, 'worktree', 'add', '-B', opts.headRefName, wtPath, expectedSha];
   const add = await opts.run(addArgs);
   if (add.code !== 0) {
