@@ -916,19 +916,49 @@ describe('captureBaseline', () => {
     await expect(readdir(ws)).resolves.toEqual(['baselines']);
   });
 
-  test('a failed publish cleans up its temp file (no *.tmp debris)', async () => {
+  test('two CONCURRENT captures of one (target, metric) serialize (review-debt #68): created + unchanged, evidence consistent', async () => {
+    // The kernel runner executes a wave of dependency-free jobs
+    // concurrently: without the per-path lock both captures read "no
+    // existing file", both publish, and the last rename wins — both report
+    // 'created' while one reported result disagrees with the persisted
+    // evidence. With the lock, the second capture sees the first's file.
+    sourceRaw = { count: 3 };
+    const results = await Promise.all([
+      capture(captureInput({ capturedAt: CAPTURED_AT })),
+      capture(captureInput({ capturedAt: CAPTURED_AT })),
+    ]);
+    const lifecycles = results.map((r) => (r.status === 'ok' ? r.value.lifecycle : `not-ok:${r.status}`)).sort();
+    expect(lifecycles).toEqual(['created', 'unchanged']);
+    // The persisted evidence parses and matches BOTH reports' value; the
+    // 'unchanged' one carried the first's value as `previous`.
+    const persisted = parseBaseline(await readFile(join(ws, REL), 'utf8'));
+    expect(persisted.value).toBe(3);
+    const unchanged = results.find((r) => r.status === 'ok' && r.value.lifecycle === 'unchanged');
+    expect(unchanged?.status === 'ok' && unchanged.value.previous).toBe(3);
+    // No lock residue: the released lock dir left nothing behind.
+    expect(await readdir(join(ws, 'baselines'))).toEqual([basename(REL)]);
+  });
+
+  test('a read-only baselines dir fails fast at the capture lock (indeterminate, no debris — review-debt #68)', async () => {
     sourceRaw = { count: 3 };
     await capture(captureInput());
-    // Make the publish fail: a read-only baselines dir rejects the temp-file
-    // creation, so the write catch runs its best-effort cleanup.
+    // Make the dir read-only: the per-path capture lock (review-debt #68)
+    // is now the FIRST write attempted, so the failure surfaces at the
+    // lock acquire — a fast indeterminate (the short backoff never burns
+    // half a minute), never a mid-publish torn state. The temp-cleanup
+    // path itself is pinned by the seam-injected mid-write fault test
+    // (capture-temp-fault.test.ts).
     const baselinesDir = join(ws, 'baselines');
     await chmod(baselinesDir, 0o555);
     sourceRaw = { count: 5 };
     const result = await capture(captureInput({ capturedAt: CAPTURED_AT_2 }));
     await chmod(baselinesDir, 0o755); // restore before cleanup assertions
     expect(result.status).toBe('indeterminate');
+    if (result.status === 'indeterminate') {
+      expect(result.detail).toMatch(/could not acquire the capture lock/);
+    }
     const names = await readdir(baselinesDir);
-    expect(names).toEqual([basename(REL)]); // original baseline, no *.tmp debris
+    expect(names).toEqual([basename(REL)]); // original baseline, no *.tmp debris, no *.lock residue
   });
 });
 
