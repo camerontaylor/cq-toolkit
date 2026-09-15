@@ -465,6 +465,36 @@ describe('captureBaseline', () => {
     }
   });
 
+  test('even a byte-identical baseline outside a symlinked baselines dir fails (no ok/unchanged)', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+    try {
+      // The EXACT bytes this capture would write, planted in the outside
+      // dir: through the symlink the op would see its own output and take
+      // the unchanged fast path — containment must fire first.
+      const bytes = renderBaseline({
+        schemaVersion: 1,
+        target: TARGET,
+        metric: METRIC,
+        direction: 'lower-is-better',
+        value: 3,
+        unit: 'errors',
+        capturedAt: CAPTURED_AT,
+      });
+      await writeFile(join(outside, basename(REL)), bytes, 'utf8');
+      await symlink(outside, join(ws, 'baselines'), 'dir');
+      sourceRaw = { count: 3 };
+      const result = await capture(captureInput());
+      expect(result.status).toBe('failed');
+      await expect(capture(captureInput())).resolves.toEqual({
+        status: 'failed',
+        error: expect.stringMatching(/resolves outside the workspace/),
+      });
+      expect(await readFile(join(outside, basename(REL)), 'utf8')).toBe(bytes); // untouched
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   test('a symlinked baselines dir pointing outside ws: prune reports the fault, deletes nothing', async () => {
     const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
     try {

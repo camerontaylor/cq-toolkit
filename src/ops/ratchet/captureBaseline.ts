@@ -26,11 +26,13 @@
 // overwritten. Baselines land via temp-file + rename in the same
 // directory, so a crash mid-write can never leave a torn baseline at the
 // target path — and a failed publish cleans up its temp file (best-effort).
-// P1 containment: before any mutation the baselines dir is
+// P1 containment: before any read or mutation the baselines dir is
 // realpath-resolved and must stay INSIDE the resolved ws; a symlinked
 // baselines dir pointing outside fails the capture and makes prune return
 // the zero outcome with `error` — nothing outside the workspace is ever
-// touched. Capture does NOT judge tightening (that is the
+// touched — and containment runs BEFORE the existing-baseline read, so a
+// symlinked baselines dir can neither be read from nor serve an
+// ok/unchanged verdict. Capture does NOT judge tightening (that is the
 // checkRatchet/guard's job in H2) — it records facts and reports the
 // lifecycle trio created/updated/unchanged, rewriting an equal-value
 // baseline only when the rendered bytes differ.
@@ -199,7 +201,6 @@ export function createCaptureBaseline(
     }
 
     const relPath = baselineRelPath(input.target, input.metric);
-    const absPath = join(input.ws, relPath);
     const bytes = renderBaseline({
       schemaVersion: 1,
       target: input.target,
@@ -209,6 +210,34 @@ export function createCaptureBaseline(
       unit: reading.unit,
       capturedAt: input.capturedAt ?? new Date().toISOString(),
     });
+
+    // P1 containment BEFORE any read of the baselines dir: ensure it exists,
+    // then resolve both paths and require baselines to stay inside the ws.
+    // The existing-file read below uses the RESOLVED dir, so a symlinked
+    // baselines dir pointing outside can neither be read from nor written
+    // to, and the unchanged fast path is only reachable after containment
+    // passed.
+    try {
+      await mkdir(join(input.ws, 'baselines'), { recursive: true });
+    } catch (err) {
+      return {
+        status: 'indeterminate',
+        detail: `ratchet: could not ensure baselines dir for '${input.ws}' — ${errorMessage(err)}`,
+      };
+    }
+    const containment = await resolveBaselinesDir(input.ws);
+    if (containment.ok === false) {
+      if (containment.missing) {
+        return {
+          status: 'indeterminate',
+          detail: `ratchet: baselines dir vanished during capture — ${containment.error}`,
+        };
+      }
+      return { status: 'failed', error: containment.error };
+    }
+    // Read/write through the RESOLVED dir: relPath's 'baselines/' prefix is
+    // the virtual repo-relative form; containment guarantees it maps here.
+    const absPath = join(containment.dir, relPath.slice('baselines/'.length));
 
     let existingText: string | null = null;
     try {
@@ -274,19 +303,6 @@ export function createCaptureBaseline(
 
     let tempPath: string | undefined;
     try {
-      await mkdir(join(input.ws, 'baselines'), { recursive: true });
-      // P1 containment, after the dir is ensured to exist: both paths
-      // realpath-resolved, baselines required to stay inside the ws.
-      const containment = await resolveBaselinesDir(input.ws);
-      if (containment.ok === false) {
-        if (containment.missing) {
-          return {
-            status: 'indeterminate',
-            detail: `ratchet: baselines dir vanished during capture — ${containment.error}`,
-          };
-        }
-        return { status: 'failed', error: containment.error };
-      }
       // Atomic publish: bytes land in a unique temp file in the SAME
       // directory, then rename over the target — a crash mid-write can
       // never leave a torn baseline at the target path.
