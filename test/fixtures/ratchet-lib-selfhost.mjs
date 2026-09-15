@@ -91,6 +91,88 @@ check('typecheckEvidence: nonzero exit, no parsable diagnostics -> null (I5)', (
   });
   equal(evidence, null);
 });
+check('normalizeCoverageSummary rounds total.lines.pct to integer percent', () => {
+  const rounded = lib.normalizeCoverageSummary({ total: { lines: { pct: 93.46 } } });
+  equal(rounded.total.lines.pct, 93); // 93.46 and CI's 93.38 are the same ratchet reading
+  const half = lib.normalizeCoverageSummary({ total: { lines: { pct: 92.5 } } });
+  equal(half.total.lines.pct, 93); // Math.round: half-up
+  const hostile = lib.normalizeCoverageSummary({ total: {} });
+  equal(hostile.total.lines?.pct, undefined); // untouched shape -> adapter rules it unusable (I5)
+  equal(lib.normalizeCoverageSummary(null), null);
+});
+
+// The diff-guard's uniform comparison basis: fractional baseline values on
+// BOTH diff sides normalize to the readings' integer pct before the guard
+// judges — a re-basis no-op reads as equal, a true loosening still fails.
+const BASELINE_FILE = 'baselines/coverage--coverage--a8ceec8f7024.json';
+function baselineValueDiff(oldValue, newValue) {
+  return [
+    `diff --git a/${BASELINE_FILE} b/${BASELINE_FILE}`,
+    'index 1111111..2222222 100644',
+    `--- a/${BASELINE_FILE}`,
+    `+++ b/${BASELINE_FILE}`,
+    '@@ -2,6 +2,6 @@',
+    '   "target": "coverage",',
+    '   "metric": "coverage",',
+    '   "direction": "higher-is-better",',
+    `-  "value": ${oldValue},`,
+    `+  "value": ${newValue},`,
+    '   "unit": "pct",',
+    '   "capturedAt": "2026-09-15T19:20:25.084Z"',
+    ' }',
+  ].join('\n');
+}
+check('normalizeBaselineDiffValues rewrites fractional values on -, + AND context lines only in baselines sections', () => {
+  const diff = [
+    `diff --git a/${BASELINE_FILE} b/${BASELINE_FILE}`,
+    `--- a/${BASELINE_FILE}`,
+    `+++ b/${BASELINE_FILE}`,
+    '@@ -1,3 +1,3 @@',
+    '-  "value": 93.46,',
+    '+  "value": 93.4,',
+    '   "value": 91.6,',
+    ' }',
+  ].join('\n');
+  const normalized = lib.normalizeBaselineDiffValues(diff);
+  ok(normalized.includes('-  "value": 93,'));
+  ok(normalized.includes('+  "value": 93,'));
+  ok(normalized.includes('   "value": 92,'));
+  ok(normalized.includes('93.46') === false);
+});
+check('normalizeBaselineDiffValues leaves non-baseline files byte-identical', () => {
+  const diff = [
+    'diff --git a/src/x.ts b/src/x.ts',
+    '--- a/src/x.ts',
+    '+++ b/src/x.ts',
+    '@@ -1,1 +1,1 @@',
+    '-const v = { "value": 1.5 };',
+    '+const w = { "value": 2.5 };',
+  ].join('\n');
+  equal(lib.normalizeBaselineDiffValues(diff), diff);
+});
+check('guard verdict (a): re-basis 93.46 -> 93 is an equal no-op — pass', () => {
+  const verdict = engine.checkDiffMonotonicity(
+    lib.normalizeBaselineDiffValues(baselineValueDiff('93.46', '93')),
+  );
+  deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
+});
+check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
+  const verdict = engine.checkDiffMonotonicity(
+    lib.normalizeBaselineDiffValues(baselineValueDiff('93', '92')),
+  );
+  equal(verdict.ok, false);
+  equal(verdict.violations.length, 1);
+  equal(verdict.violations[0].why, 'loosened');
+  deepEqual(engine.formatViolations(verdict.violations), [
+    `${BASELINE_FILE}: metric coverage loosened 93 → 92 — only tightening diffs pass`,
+  ]);
+});
+check('guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)', () => {
+  const verdict = engine.checkDiffMonotonicity(
+    lib.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
+  );
+  deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
+});
 
 if (failures > 0) {
   process.stderr.write(`ratchet-lib-selfhost: ${failures} failure(s)\n`);

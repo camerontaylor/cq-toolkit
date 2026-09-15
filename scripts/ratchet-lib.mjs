@@ -141,13 +141,120 @@ export function typecheckEvidence(typecheckCountAdapter, run) {
 }
 
 /**
+ * Integer-percent normalization of a coverage summary — THE one shared
+ * rounding point (ratchet-check, ratchet-propose, and the baseline capture
+ * all read through runCoverageRaw, so all three apply it identically).
+ *
+ * Rationale: the ratcheted quantity is total.lines.pct, and v8's 2-decimal
+ * figure is NOT stable across environments — the same tree measured 93.46
+ * locally and 93.38 in CI (provider/instrumentation noise), which failed a
+ * 93.46 baseline as a spurious 0.08 "loosening". Granularity is the fix: the
+ * reading is rounded to INTEGER percent (Math.round), in place, before any
+ * adapter sees it. A ratchet step smaller than 1% is noise anyway — real
+ * coverage work moves whole percentages — so 93.46 and 93.38 are both simply
+ * 93, and cross-runner float noise can never turn into a ratchet verdict.
+ * A hostile/missing shape is left untouched: the adapter rules it unusable
+ * (I5), never a fabricated reading.
+ */
+export function normalizeCoverageSummary(summary) {
+  if (typeof summary !== 'object' || summary === null) return summary;
+  try {
+    const pct = summary?.total?.lines?.pct;
+    if (typeof pct === 'number' && Number.isFinite(pct)) {
+      summary.total.lines.pct = Math.round(pct);
+    }
+  } catch {
+    // Getter/hostile shape: leave as-is — the adapter's containment rules
+    // it unusable (I5), never a fabricated reading.
+  }
+  return summary;
+}
+
+// The diff-side twin of normalizeCoverageSummary's granularity law. The
+// value-token shape mirrors the engine guard's own VALUE_RE (monotonicGuard)
+// exactly — strict JSON number, terminator lookahead — so normalization can
+// only ever rewrite a token the guard would read.
+const DIFF_VALUE_TOKEN = /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
+const BASELINE_SECTION_PATH = /^baselines\/.+\.json$/;
+const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
+
+/** Path after a `+++ `/`--- ` header, prefix- and timestamp-stripped; null for /dev/null. */
+function diffHeaderPath(line) {
+  const raw = line.slice(4);
+  if (raw.startsWith('/dev/null')) return null;
+  const path = raw.split('\t')[0];
+  for (const prefix of DIFF_PATH_PREFIXES) {
+    if (path.startsWith(prefix)) return path.slice(prefix.length);
+  }
+  return path;
+}
+
+/**
+ * Uniform comparison basis for the diff-mode guard: rewrite every
+ * `"value": <non-integer>` token to the SAME integer normalization the live
+ * readings use (Math.round), on every `-`/`+`/context line inside
+ * baselines/*.json sections only.
+ *
+ * Rationale: a baseline and a reading must be compared in the SAME
+ * granularity. Readings are integer-pct (normalizeCoverageSummary), so a
+ * fractional committed baseline would be judged against a differently-scaled
+ * number — the re-basis hunk `93.46 → 93` must read as the no-op it is
+ * (both sides normalize to 93: equal passes), while a TRUE loosening
+ * (`93 → 92`) still fails and a genuine tighten in fractional clothing
+ * (`92.4 → 93`, old side normalizes to 92) still passes as a tighten.
+ *
+ * This is a symmetric COMPARISON-BASIS normalization applied to both diff
+ * sides alike — never a guard exception: it cannot flip a loosening into a
+ * pass, only remove sub-granularity float noise from both sides. The engine
+ * (monotonicGuard) is untouched; the rewritten text is what it judges.
+ * Sections are attributed by their `---`/`+++` file headers (before the
+ * first `@@` — after it, `---`-prefixed lines are removed CONTENT and are
+ * normalized like any other content line); every other file's diff passes
+ * through byte-identical, so a `"value": 1.5` in a source-file hunk is
+ * never touched.
+ */
+export function normalizeBaselineDiffValues(diff) {
+  const out = [];
+  let isBaselineSection = false;
+  let inHunk = false;
+  for (const line of String(diff).split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      isBaselineSection = false; // re-resolved by this section's own headers
+      inHunk = false;
+      out.push(line);
+      continue;
+    }
+    if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
+      const path = diffHeaderPath(line);
+      if (path !== null && BASELINE_SECTION_PATH.test(path)) isBaselineSection = true;
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHunk = true; // from here on, `---`-prefixed lines are removed content
+      out.push(line);
+      continue;
+    }
+    if (isBaselineSection && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
+      out.push(
+        line.replace(DIFF_VALUE_TOKEN, (_, head, num) => head + String(Math.round(Number(num)))),
+      );
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}
+
+/**
  * Run the suite under the v8 coverage provider, then read the emitted
  * coverage/coverage-summary.json. Returns {status, stdout, stderr, error,
- * summary} where summary is the PARSED summary object (the coverage
- * adapter reads total.lines.pct from it) or null when the file is absent or
- * unparsable — the engine rules a null reading non-passing evidence (I5).
- * A stale summary is removed BEFORE the run so a failed or crashed vitest
- * can never leave yesterday's numbers behind as today's evidence.
+ * summary} where summary is the PARSED summary object, normalized to
+ * INTEGER percent by normalizeCoverageSummary (the coverage adapter reads
+ * total.lines.pct from it), or null when the file is absent or unparsable —
+ * the engine rules a null reading non-passing evidence (I5). A stale summary
+ * is removed BEFORE the run so a failed or crashed vitest can never leave
+ * yesterday's numbers behind as today's evidence.
  */
 export function runCoverageRaw() {
   rmSync(COVERAGE_SUMMARY_PATH, { force: true });
@@ -163,6 +270,7 @@ export function runCoverageRaw() {
   } catch {
     summary = null; // absent or unparsable — never stale-passing evidence
   }
+  summary = normalizeCoverageSummary(summary);
   return {
     status: res.status,
     stdout: res.stdout ?? '',

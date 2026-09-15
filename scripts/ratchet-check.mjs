@@ -11,19 +11,26 @@
 //       for the I5 status/evidence rules);
 //   (b) coverage — a real `npx vitest run --coverage`, the parsed
 //       coverage/coverage-summary.json fed to the coverage adapter
-//       (total.lines.pct, higher-is-better).
+//       (total.lines.pct NORMALIZED TO INTEGER PERCENT by
+//       runCoverageRaw/normalizeCoverageSummary — 2-decimal float noise
+//       across runners is sub-granularity and must never be a verdict;
+//       higher-is-better).
 //
 // `--base <ref>` ADDITIONALLY runs the monotonic guard over the PR-shaped
-// diff: `git diff <ref>...HEAD` is fed to checkDiffMonotonicity, and any
-// baseline movement in the diff that loosens (or flips a direction/unit) is
-// named via formatViolations and fails the run — thresholds only tighten,
-// both live AND in the diff a branch wants to commit.
+// diff: `git diff <ref>...HEAD` is normalized to the readings' integer-pct
+// basis (both diff sides, baselines/*.json sections only — see
+// normalizeBaselineDiffValues in ratchet-lib.mjs) and fed to
+// checkDiffMonotonicity; any baseline movement in the diff that loosens (or
+// flips a direction/unit) is named via formatViolations and fails the run —
+// thresholds only tighten, both live AND in the diff a branch wants to
+// commit.
 import { spawnSync } from 'node:child_process';
 import {
   COVERAGE_SUMMARY_PATH,
   ROOT,
   fail,
   loadEngine,
+  normalizeBaselineDiffValues,
   runCoverageRaw,
   runTypecheckRaw,
   typecheckEvidence,
@@ -117,9 +124,15 @@ if (covRun.error || covRun.status !== 0) {
   }
 }
 
-// --base: the diff-mode guard. The diff text is the guard's ONLY input; the
-// engine judges baseline files alone (src/, workflows, everything else is
-// ignored by design).
+// --base: the diff-mode guard. The diff text is preprocessed by
+// normalizeBaselineDiffValues (uniform comparison basis: fractional baseline
+// values on BOTH diff sides are rewritten to the same integer-pct the live
+// readings use — the re-basis hunk `93.46 → 93` then reads as the equal
+// no-op it is, while a true loosening `93 → 92` still fails) and the
+// REWRITTEN text is what the engine judges; checkDiffMonotonicity itself is
+// untouched. The engine's input remains the guard's ONLY input — it still
+// judges baseline files alone (src/, workflows, everything else is ignored
+// by design, and passes through the normalization byte-identical).
 if (base !== null) {
   const diff = spawnSync('git', ['diff', `${base}...HEAD`], {
     cwd: ROOT,
@@ -133,7 +146,7 @@ if (base !== null) {
       }\n${diff.stderr ?? ''}`,
     );
   }
-  const verdict = engine.checkDiffMonotonicity(diff.stdout);
+  const verdict = engine.checkDiffMonotonicity(normalizeBaselineDiffValues(diff.stdout));
   if (verdict.ok === false) {
     for (const line of engine.formatViolations(verdict.violations)) {
       console.error(`ratchet-check: ${line}`);
