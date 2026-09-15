@@ -32,6 +32,7 @@ export { DEFAULT_BAIL_PATTERNS, makeBaselineProbe } from './baselineProbe.js';
 export type { FingerprintConfig } from './fingerprint.js';
 export {
   fingerprintFailure,
+  fingerprintKey,
   fingerprintPairs,
   fingerprintSet,
   fnv1a32Hex,

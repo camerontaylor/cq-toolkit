@@ -20,9 +20,17 @@
 //     default 500 — documented coarseness, asserted in tests).
 //   - Two matching regimes: positioned failures match by drift-tolerant
 //     position (message ignored); location-less failures match by content
-//     (normalized message). Residual limitation, documented: duplicate
-//     identical location-less messages collapse under Set semantics — one
-//     fixed copy of two identical failures is invisible to the gate.
+//     (normalized message). Residual limitations, documented (Set semantics
+//     cannot count): duplicate IDENTICAL failures — positioned keys
+//     included — collapse to one fingerprint, so one fixed copy of two
+//     identical failures is invisible to the gate; and on the positioned
+//     branch a null column folds to bucket 0 (a column-less failure shares
+//     its line bucket with its column-less siblings).
+//   - Exactness: gate decisions compare FULL canonical keys — JSON of the
+//     component tuple, so components containing `|` (or any delimiter)
+//     cannot collide across splits. The 32-bit FNV form is a compact
+//     display/ledger encoding of the key, NEVER the comparison unit, making
+//     novel/fixed detection deterministic rather than probabilistic.
 import type { CheckFailure, FailureSet } from './checkRunner.js';
 
 /**
@@ -77,54 +85,62 @@ export function fnv1a32Hex(text: string): string {
 }
 
 /**
- * The drift-surviving fingerprint of one failure: FNV-1a over
- * `tool|file|ruleId|severity|lineBucket:colBucket` for POSITIONED failures
- * (line is a number — message excluded, that is the drift survived), or
- * `tool|file|ruleId|severity|message|offN` for LOCATION-LESS failures (line
- * null — the normalized message is the identity: stable test names match,
- * a new failing test in the same file keys differently). Note the residual
- * limitation: two location-less failures with identical normalized content
- * share one fingerprint, and Set semantics cannot tell one surviving copy
- * from both surviving.
+ * The EXACT identity of one failure: JSON of its component tuple — in
+ * spirit `tool|file|ruleId|severity|position|lineBucket:colBucket` for
+ * POSITIONED failures and `tool|file|ruleId|severity|message|offN` for
+ * LOCATION-LESS ones, but array-encoded so no delimiter in any component
+ * can make two different failures key identically. This is what the
+ * regression gate compares.
  */
-export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): string {
-  return fnv1a32Hex(failureKey(f, resolveConfig(cfg)));
+export function fingerprintKey(f: CheckFailure, cfg?: FingerprintConfig): string {
+  return JSON.stringify(keyComponents(f, resolveConfig(cfg)));
 }
 
 /**
- * Every failure of a {@link FailureSet} paired with its fingerprint, the
- * FailureSet's `tool` folded into the key. The regression gate compares
+ * The drift-surviving COMPACT form of {@link fingerprintKey}: FNV-1a 32-bit
+ * over the key, as 8 lowercase hex digits — for display and ledgers. Gate
+ * decisions never use this form. The message is not a positioned-failure
+ * component (message rewording is exactly the drift survived); it IS the
+ * identity of a location-less failure (stable test names).
+ */
+export function fingerprintFailure(f: CheckFailure, cfg?: FingerprintConfig): string {
+  return fnv1a32Hex(fingerprintKey(f, resolveConfig(cfg)));
+}
+
+/**
+ * Every failure of a {@link FailureSet} paired with its EXACT canonical
+ * key, the FailureSet's `tool` folded in. The regression gate compares
  * these pair lists so novel/fixed failures can be REPORTED, not just
- * counted.
+ * counted — by key equality, deterministically.
  */
 export function fingerprintPairs(
   s: FailureSet,
   cfg?: FingerprintConfig,
-): Array<{ failure: CheckFailure; print: string }> {
+): Array<{ failure: CheckFailure; key: string }> {
   const effective = { ...cfg, tool: s.tool };
-  return s.failures.map((failure) => ({ failure, print: fingerprintFailure(failure, effective) }));
+  return s.failures.map((failure) => ({ failure, key: fingerprintKey(failure, effective) }));
 }
 
 /**
- * The fingerprint set of a whole {@link FailureSet} — the unit the
- * regression gate compares (Set membership makes the comparison
- * order-invariant).
+ * The canonical-key set of a whole {@link FailureSet} — the unit the
+ * regression gate compares. Exact keys, not hashes: Set membership makes
+ * the comparison order-invariant AND collision-free.
  */
 export function fingerprintSet(s: FailureSet, cfg?: FingerprintConfig): Set<string> {
-  return new Set(fingerprintPairs(s, cfg).map((pair) => pair.print));
+  return new Set(fingerprintPairs(s, cfg).map((pair) => pair.key));
 }
 
-/** The pre-hash key: tool, normalized file, ruleId, severity, and the position regime. */
-function failureKey(f: CheckFailure, cfg: Required<FingerprintConfig>): string {
+/** The component tuple of the pre-hash key: tool, normalized file, ruleId, severity, and the position regime. */
+function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): string[] {
   const file = f.file === null ? '' : normalizePath(f.file, cfg.rootDir);
   const ruleId = f.ruleId ?? '';
   if (typeof f.line === 'number') {
     const lineBucket = Math.floor(f.line / cfg.lineBucketSize);
     const colBucket = Math.floor((f.column ?? 0) / cfg.columnBucketSize);
-    return `${cfg.tool}|${file}|${ruleId}|${f.severity}|${lineBucket}:${colBucket}`;
+    return [cfg.tool, file, ruleId, f.severity, 'position', String(lineBucket), String(colBucket)];
   }
   const offsetBucket = Math.floor((f.column ?? 0) / cfg.offsetBucketSize);
-  return `${cfg.tool}|${file}|${ruleId}|${f.severity}|${normalizeMessage(f.message)}|off${offsetBucket}`;
+  return [cfg.tool, file, ruleId, f.severity, 'content', normalizeMessage(f.message), String(offsetBucket)];
 }
 
 /**

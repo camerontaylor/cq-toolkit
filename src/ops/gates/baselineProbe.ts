@@ -13,9 +13,12 @@
 //     re-run the check (asserted by call count in tests).
 //   - Honest no-verdict: a runner-level CRASH is `indeterminate`, never
 //     `failed` and never clean — the probe did not observe the check.
-//   - Bail detection is conservative: exitCode null OR a known crash-signature
-//     pattern (case-insensitive substring) means the check did not complete,
-//     so its failure set — whatever it parsed to — is not evidence.
+//   - Bail semantics are NARROW: a bail means "the check did not COMPLETE".
+//     An unobservable exit code (null) is a bail-candidate on its own; a
+//     crash-signature pattern may only classify an attempt that produced NO
+//     parseable evidence. A completed, parseable run is classified
+//     clean/failing from its evidence even when its TEXT quotes a signature
+//     — a test asserting on ECONNREFUSED FAILS, it does not bail.
 import type { Op } from '../../kernel/types.js';
 import type {
   AdapterName,
@@ -28,9 +31,9 @@ import { adapterByName, parseCheckOutput } from './checkRunner.js';
 
 /**
  * The shipped bail-signature patterns, matched case-insensitively as
- * substrings against stdout+stderr of every attempt. Frozen: consumers can
- * reference and extend (their own list REPLACES this one, per
- * {@link BailConfig}) but not mutate it.
+ * substrings against stdout+stderr of every attempt that produced NO
+ * parseable evidence. Frozen: consumers can reference and extend (their own
+ * list REPLACES this one, per {@link BailConfig}) but not mutate it.
  */
 export const DEFAULT_BAIL_PATTERNS: readonly string[] = Object.freeze([
   'no tests found',
@@ -49,7 +52,9 @@ const DEFAULT_MAX_BAIL_RETRIES = 2;
 /**
  * Bail tuning. `bailPatterns`, when supplied, REPLACES
  * {@link DEFAULT_BAIL_PATTERNS} (not extends); `maxBailRetries` is the
- * retry budget on top of the initial attempt.
+ * retry budget on top of the initial attempt. A non-finite, negative, or
+ * fractional `maxBailRetries` (reachable at the library level, past any
+ * schema) falls back to the default 2 — it never computes a NaN budget.
  */
 export interface BailConfig {
   /** Case-insensitive substrings that mark an attempt as a bail. */
@@ -85,14 +90,18 @@ export interface ProbeReport {
 }
 
 /**
- * Build the `gates.baselineProbe` op over an injected runner. Up to
- * `1 + maxBailRetries` attempts: an attempt whose exit code is unobservable
- * (signal, timeout, spawn failure) or whose output matches a bail pattern is
- * a BAIL — the check did not complete — and is retried until the budget is
- * spent, then reported as `bail`. A completed attempt parses through the
- * shared I5-guarded entry point: empty failures → `clean`, otherwise
- * `failing`, unparseable shape → op-level `indeterminate`. A thrown or
- * rejected runner is a probe crash, not a check failure:
+ * Build the `gates.baselineProbe` op over an injected runner, up to
+ * `1 + maxBailRetries` attempts. Per attempt, in order:
+ *  (a) exitCode null (signal, timeout, spawn failure) — the run did not
+ *      complete: bail-candidate, retry until the budget is spent, then
+ *      report `bail`;
+ *  (b) the output PARSES — classify clean/failing from the evidence
+ *      directly; bail patterns are irrelevant here, even when the failure
+ *      text quotes a signature;
+ *  (c) the run completed but produced no parseable evidence — a bail
+ *      pattern hit classifies it as a bail (retry), otherwise it is
+ *      op-level `indeterminate`.
+ * A thrown or rejected runner is a probe crash, not a check failure:
  * `indeterminate` with a `check runner crashed:` detail. No state is kept
  * between calls (I7): every invocation runs the check again.
  */
@@ -101,7 +110,11 @@ export function makeBaselineProbe(run: RunCheck): Op<BaselineProbeInput, ProbeRe
     const patterns = (input.bail?.bailPatterns ?? DEFAULT_BAIL_PATTERNS).map((pattern) =>
       pattern.toLowerCase(),
     );
-    const maxRetries = Math.max(0, input.bail?.maxBailRetries ?? DEFAULT_MAX_BAIL_RETRIES);
+    const requestedRetries = input.bail?.maxBailRetries ?? DEFAULT_MAX_BAIL_RETRIES;
+    const maxRetries =
+      Number.isInteger(requestedRetries) && requestedRetries >= 0
+        ? requestedRetries
+        : DEFAULT_MAX_BAIL_RETRIES;
     const attemptBudget = 1 + maxRetries;
     for (let attempt = 1; attempt <= attemptBudget; attempt++) {
       let raw: RawCheckOutput;
@@ -110,7 +123,7 @@ export function makeBaselineProbe(run: RunCheck): Op<BaselineProbeInput, ProbeRe
       } catch (err) {
         return { status: 'indeterminate', detail: `check runner crashed: ${messageOf(err)}` };
       }
-      if (isBail(raw, patterns)) {
+      if (raw.exitCode === null) {
         continue;
       }
       const result = parseCheckOutput(adapterByName(input.adapter), raw);
@@ -124,6 +137,9 @@ export function makeBaselineProbe(run: RunCheck): Op<BaselineProbeInput, ProbeRe
           },
         };
       }
+      if (matchesBailSignature(raw, patterns)) {
+        continue;
+      }
       return { status: 'indeterminate', detail: result.reason };
     }
     return { status: 'ok', value: { verdict: 'bail', attempts: attemptBudget } };
@@ -131,14 +147,11 @@ export function makeBaselineProbe(run: RunCheck): Op<BaselineProbeInput, ProbeRe
 }
 
 /**
- * Bail rule: the check did not complete. An unobservable exit code (null)
- * is a bail on its own; otherwise any bail pattern (case-insensitive
- * substring) in stdout+stderr is.
+ * Crash-signature match: case-insensitive substring over stdout+stderr.
+ * Consulted ONLY for attempts that produced no parseable evidence — never
+ * to re-classify a completed, parseable run (see {@link makeBaselineProbe}).
  */
-function isBail(raw: RawCheckOutput, lowercasePatterns: readonly string[]): boolean {
-  if (raw.exitCode === null) {
-    return true;
-  }
+function matchesBailSignature(raw: RawCheckOutput, lowercasePatterns: readonly string[]): boolean {
   const haystack = `${raw.stdout}\n${raw.stderr}`.toLowerCase();
   return lowercasePatterns.some((pattern) => haystack.includes(pattern));
 }

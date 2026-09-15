@@ -46,8 +46,9 @@ export interface RegressionGateInput {
  * The `gates.regressionGate` op: `ok` in BOTH verdict cases — the verdict is
  * the op's decision output, and what to do about a regression is the
  * caller's business. Ordering-invariant by construction: comparison is Set
- * membership over fingerprints, so any permutation of identical base/final
- * sets yields the identical verdict (property-tested). Inputs that fail
+ * membership over EXACT canonical keys (JSON component tuples — not
+ * hashes), so any permutation of identical base/final sets yields the
+ * identical verdict, deterministically (property-tested). Inputs that fail
  * schema validation never reach the op, and with no I/O there is no
  * crash-style failure path — the one non-`ok` status is the I5 guard on
  * untrustworthy sides (unobservable exit code, or empty behind non-zero).
@@ -60,13 +61,13 @@ export const regressionGate: Op<RegressionGateInput, RegressionReport> = async (
   }
   const basePairs = fingerprintPairs(input.base, input.config);
   const finalPairs = fingerprintPairs(input.final, input.config);
-  const basePrints = new Set(basePairs.map((pair) => pair.print));
-  const finalPrints = new Set(finalPairs.map((pair) => pair.print));
+  const baseKeys = new Set(basePairs.map((pair) => pair.key));
+  const finalKeys = new Set(finalPairs.map((pair) => pair.key));
   const novelFailures = finalPairs
-    .filter((pair) => !basePrints.has(pair.print))
+    .filter((pair) => !baseKeys.has(pair.key))
     .map((pair) => pair.failure);
   const fixedFailures = basePairs
-    .filter((pair) => !finalPrints.has(pair.print))
+    .filter((pair) => !finalKeys.has(pair.key))
     .map((pair) => pair.failure);
   const preExistingCount = basePairs.length - fixedFailures.length;
   return {

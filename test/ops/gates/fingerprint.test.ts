@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   fingerprintFailure,
+  fingerprintKey,
   fingerprintSet,
   fnv1a32Hex,
   type FingerprintConfig,
@@ -80,6 +81,12 @@ describe('fingerprintFailure bucket math', () => {
     const noPosition = fingerprintFailure(failureOf({ line: null, column: null }));
     expect(fingerprintFailure(failureOf({ line: null, column: 499 }))).toBe(noPosition);
     expect(fingerprintFailure(failureOf({ line: null, column: 500 }))).not.toBe(noPosition);
+  });
+
+  test('a positioned failure with a null column folds to column bucket 0 (documented residual)', () => {
+    const noColumn = fingerprintFailure(failureOf({ column: null }));
+    expect(fingerprintFailure(failureOf({ column: 1 }))).toBe(noColumn);
+    expect(fingerprintFailure(failureOf({ column: 20 }))).not.toBe(noColumn);
   });
 
   test('line-addressed and offset-addressed failures never collide on the same column', () => {
@@ -197,6 +204,29 @@ describe('fingerprintFailure location-less content matching (line null keys by m
   });
 });
 
+describe('canonical keys vs compact hash (exact matching)', () => {
+  test('components containing | cannot collide across different component splits (JSON tuple encoding)', () => {
+    // Under naive pipe composition these two tuples would pre-hash
+    // identically ('src/a.ts|r|s|error|...'): array encoding keeps every
+    // split distinct.
+    const pipeInFile = fingerprintKey(failureOf({ file: 'src/a.ts|r', ruleId: 's' }));
+    const pipeInRule = fingerprintKey(failureOf({ ruleId: 'r|s' }));
+    expect(pipeInFile).not.toBe(pipeInRule);
+    expect(pipeInFile).toContain('"src/a.ts|r"');
+    expect(pipeInRule).toContain('"r|s"');
+  });
+
+  test('the canonical key is the gate identity; fingerprintFailure is only its compact FNV form', () => {
+    const failure = failureOf({});
+    const key = fingerprintKey(failure);
+    expect(fingerprintFailure(failure)).not.toBe(key);
+    expect(fingerprintFailure(failure)).toMatch(/^[0-9a-f]{8}$/);
+    expect(fingerprintSet({ tool: 'vitest', failures: [failure], exitCode: 1 }).has(fingerprintKey(failure, { tool: 'vitest' }))).toBe(
+      true,
+    );
+  });
+});
+
 describe('fingerprintSet', () => {
   test('collects one fingerprint per failure, deduplicated', () => {
     const set = fingerprintSet({
@@ -209,9 +239,10 @@ describe('fingerprintSet', () => {
       ],
     });
     expect(set.size).toBe(2);
-    // fingerprintSet folds the FailureSet's tool into every print, so the
-    // expected member must be computed with the same tool in context.
-    expect(set.has(fingerprintFailure(failureOf({ line: 300 }), { tool: 'eslint' }))).toBe(true);
+    // fingerprintSet stores EXACT canonical keys with the FailureSet's tool
+    // folded in, so the expected member must be computed with the same tool
+    // in context (fingerprintKey, not the compact hash).
+    expect(set.has(fingerprintKey(failureOf({ line: 300 }), { tool: 'eslint' }))).toBe(true);
   });
 
   test('empty failure set yields an empty fingerprint set', () => {

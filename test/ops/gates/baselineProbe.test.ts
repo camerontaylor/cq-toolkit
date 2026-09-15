@@ -102,7 +102,7 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
     expect(result.value.failureSet?.failures).toHaveLength(1);
   });
 
-  test('bail by pattern (case-insensitive) with maxBailRetries 0 → one attempt, no failure set', async () => {
+  test('bail: pattern hit on an UNPARSEABLE attempt (case-insensitive), maxBailRetries 0 → one attempt, no failure set', async () => {
     const fake = scriptedRunner({
       stdout: '',
       stderr: 'FATAL ERROR: Reached heap limit — allocation failed',
@@ -159,6 +159,62 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
     const fake = scriptedRunner({ stdout: 'partial output, no signature', stderr: '', exitCode: null });
     const result = await makeBaselineProbe(fake.run)(probeInput({ bail: { maxBailRetries: 0 } }));
     expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+  });
+
+  test('exitCode null is a bail-candidate even when the partial output would parse', async () => {
+    const fake = scriptedRunner({ ...CLEAN_VITEST(), exitCode: null });
+    const result = await makeBaselineProbe(fake.run)(probeInput({ bail: { maxBailRetries: 0 } }));
+    expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+    expect(fake.callCount()).toBe(1);
+  });
+
+  test('a failing run whose failure TEXT quotes a signature is FAILING, never bail (parseable evidence wins)', async () => {
+    const stdout = JSON.stringify({
+      success: false,
+      numTotalTests: 1,
+      numFailedTests: 1,
+      testResults: [
+        {
+          name: '/tmp/conn.test.ts',
+          status: 'failed',
+          assertionResults: [
+            {
+              title: 'refuses bad connections',
+              fullName: 'conn > refuses bad connections',
+              status: 'failed',
+              ancestorTitles: ['conn'],
+              failureMessages: ['Error: connect ECONNREFUSED 127.0.0.1:5432'],
+            },
+          ],
+        },
+      ],
+    });
+    const fake = scriptedRunner({ stdout, stderr: '', exitCode: 1 });
+    const result = await makeBaselineProbe(fake.run)(probeInput());
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('failing');
+    expect(result.value.attempts).toBe(1);
+    expect(result.value.failureSet).toMatchObject({ tool: 'vitest', exitCode: 1 });
+    // The adapter derives the message from fullName (failureMessages feed
+    // only fallbacks), so the signature text lives in the raw capture —
+    // and the classification is STILL failing, not bail.
+    expect(result.value.failureSet?.failures).toHaveLength(1);
+    expect(fake.callCount()).toBe(1);
+  });
+
+  test('a NaN, Infinity, or negative maxBailRetries falls back to the default 2 (3 attempts), never a NaN budget', async () => {
+    const bailOutput: RawCheckOutput = { stdout: 'test run aborted', stderr: '', exitCode: 1 };
+    for (const bogus of [Number.NaN, Number.POSITIVE_INFINITY, -3]) {
+      const fake = scriptedRunner(bailOutput, bailOutput, bailOutput);
+      const result = await makeBaselineProbe(fake.run)(
+        probeInput({ bail: { bailPatterns: ['test run aborted'], maxBailRetries: bogus } }),
+      );
+      expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 3 } });
+      expect(fake.callCount()).toBe(3);
+    }
   });
 
   test('indeterminate (a): empty stdout on vitest-json (summary-bearing tool) → indeterminate, never clean', async () => {

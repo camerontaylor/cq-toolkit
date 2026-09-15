@@ -20,9 +20,11 @@ import type { RegressionGateInput } from './regressionGate.js';
  * only it. `timeoutMs` defaults to 600_000 here — a 10-minute default
  * applied at the OP boundary only, so a JSON-dispatched check is capped
  * even when the input omits a timeout (a zod `.default`, not a minimum;
- * the library-level {@link CheckCommand} stays timeout-optional).
+ * the library-level {@link CheckCommand} stays timeout-optional). The
+ * concrete object is kept so the baseline-probe schema can COMPOSE its
+ * adapter/command shapes from this single source.
  */
-export const CheckRunnerInputSchema: z.ZodType<CheckRunnerInput> = z
+const CheckRunnerInputObject = z
   .object({
     adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
     command: z.object({
@@ -34,23 +36,22 @@ export const CheckRunnerInputSchema: z.ZodType<CheckRunnerInput> = z
   })
   .strict();
 
+export const CheckRunnerInputSchema: z.ZodType<CheckRunnerInput> = CheckRunnerInputObject;
+
 /**
  * Registry-time mirror of {@link BaselineProbeInput}: the full input, and
  * only it — no baseline or cache field exists to hide memoization behind
- * (I7). The command mirrors the checkRunner schema including the 600_000ms
- * op-boundary `timeoutMs` DEFAULT (same rationale, same zod `.default`
- * — not a minimum). Bail fields validate only; the shipped defaults
+ * (I7). The adapter and command schemas are COMPOSED from
+ * {@link CheckRunnerInputSchema}'s object (one source, no drift), including
+ * its 600_000ms op-boundary `timeoutMs` DEFAULT (a zod `.default`, not a
+ * minimum). Bail fields validate only — patterns are non-empty strings and
+ * retries are bounded at this boundary — while the shipped defaults
  * (patterns, 2 retries) are applied by the op itself.
  */
 export const BaselineProbeInputSchema: z.ZodType<BaselineProbeInput> = z
   .object({
-    adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
-    command: z.object({
-      command: z.string(),
-      args: z.array(z.string()),
-      cwd: z.string().optional(),
-      timeoutMs: z.number().int().positive().default(600_000),
-    }),
+    adapter: CheckRunnerInputObject.shape.adapter,
+    command: CheckRunnerInputObject.shape.command,
     bail: z
       .object({
         // min(1): an empty pattern makes includes('') vacuously true —
