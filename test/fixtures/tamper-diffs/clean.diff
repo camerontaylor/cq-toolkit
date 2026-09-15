@@ -1,0 +1,14 @@
+diff --git a/src/ops/gates/fingerprint.ts b/src/ops/gates/fingerprint.ts
+index 1234567..89abcde 100644
+--- a/src/ops/gates/fingerprint.ts
++++ b/src/ops/gates/fingerprint.ts
+@@ -30,7 +30,8 @@
+ export function fingerprintKey(failure: CheckFailure): string {
+   const file = normalizePath(failure.file ?? 'unknown');
+   const line = bucket(failure.line);
+-  return [file, line, failure.ruleId].join('|');
++  const column = bucket(failure.column);
++  return [file, line, column, failure.ruleId].join('|');
+ }
+
+ export function fingerprintSet(set: FailureSet): string {

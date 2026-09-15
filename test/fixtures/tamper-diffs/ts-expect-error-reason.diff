@@ -1,0 +1,15 @@
+diff --git a/src/drivers/legacyBridge.ts b/src/drivers/legacyBridge.ts
+index 5a6b7c8..9d0e1f2 100644
+--- a/src/drivers/legacyBridge.ts
++++ b/src/drivers/legacyBridge.ts
+@@ -41,6 +41,10 @@
+ export function bridge(raw: unknown): Bridge {
+   if (!isBridgeable(raw)) {
+     throw new BridgeError('cannot bridge');
+   }
++  // @ts-expect-error: TODO(JIRA-123) remove after migration
++  const shaped = raw as ShapedBridge;
++  // @ts-expect-error
++  return wrap(shaped);
+   return internalBridge(raw);
+ }

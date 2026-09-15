@@ -430,11 +430,13 @@ describe('subprocessRunCheck (real runner over process.execPath, no external bin
 });
 
 describe('gates registry entry', () => {
-  test('three entries (checkRunner, baselineProbe, regressionGate); the checkRunner schema validates the full input and only it', () => {
+  test('registry entries in order (C3 appends the hack detector + commit gate); the checkRunner schema validates the full input and only it', () => {
     expect(registry.map((entry) => entry.name)).toEqual([
       'gates.checkRunner',
       'gates.baselineProbe',
       'gates.regressionGate',
+      'gates.hackDetector',
+      'gates.commitGate',
     ]);
     const valid = { adapter: 'tsc-lines', command: { command: 'tsc', args: ['--noEmit'] } };
     expect(CheckRunnerInputSchema.parse(valid)).toEqual({

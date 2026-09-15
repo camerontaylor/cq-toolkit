@@ -16,11 +16,13 @@ import {
 const EMPTY_FAILURE_SET = { tool: 'eslint', failures: [], exitCode: 0 };
 
 describe('gates registry: the two C2 entries', () => {
-  test('the registry names the three lane ops in order', () => {
+  test('the registry names the lane ops in order (C3 appends after the C1+C2 slice)', () => {
     expect(registry.map((entry) => entry.name)).toEqual([
       'gates.checkRunner',
       'gates.baselineProbe',
       'gates.regressionGate',
+      'gates.hackDetector',
+      'gates.commitGate',
     ]);
   });
 });
