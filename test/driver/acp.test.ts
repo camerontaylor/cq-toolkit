@@ -224,7 +224,7 @@ describe('win32 .cmd/.bat shim spawn translation (review-debt #54/#55)', () => {
     );
     expect(quoted.command).toBe('cmd.exe');
     expect(quoted.args[3]).toBe(
-      `"\"C:\\Program Files\\nodejs\\zcode-acp-server.cmd\" --prompt "two words\""`,
+      `""C:\\Program Files\\nodejs\\zcode-acp-server.cmd" --prompt "two words""`,
     );
   });
 
