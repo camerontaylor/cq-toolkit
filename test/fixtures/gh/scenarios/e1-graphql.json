@@ -1,0 +1,79 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "author": { "login": "pr-author" },
+        "headRefName": "feature/lantern",
+        "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "PRRT_kwDOCxyz111",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src/ops/review/threads.ts",
+              "line": 12,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 100,
+                    "author": { "login": "reviewer" },
+                    "body": "T1 root: this branch needs a guard",
+                    "createdAt": "2026-09-14T10:00:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOCxyz222",
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "src/a.ts",
+              "line": 5,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 104,
+                    "author": { "login": "reviewer" },
+                    "body": "T2 root (resolved)",
+                    "createdAt": "2026-09-14T10:05:00Z"
+                  }
+                ]
+              }
+            },
+            {
+              "id": "PRRT_kwDOCxyz333",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src/b.ts",
+              "line": 9,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 103,
+                    "author": { "login": "someone-else" },
+                    "body": "T3 root: external reviewer thread",
+                    "createdAt": "2026-09-14T10:10:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "reviews": {
+          "pageInfo": { "hasNextPage": true, "endCursor": "PRRCURSOR_R2" },
+          "nodes": [
+            {
+              "id": "PRR_1",
+              "author": { "login": "reviewer" },
+              "state": "CHANGES_REQUESTED",
+              "body": "please address the threads",
+              "submittedAt": "2026-09-14T11:00:00Z"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
