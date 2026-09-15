@@ -14,16 +14,17 @@
 import type { MetricAdapter, MetricReading } from '../registry.js';
 
 /**
- * Half-up rounding of a positive scaled ratio, guarded: the *100 scaling and
- * the sum accumulation carry a few-ulp binary representation error (exact
- * decimal 1.005 arrives as 100.49999999999999), so the half decision scales
- * y by (1 + 8*EPSILON) — far larger than that ulp-level noise, far smaller
- * than the 0.5 half-step it must not flip: it can only rescue a true half,
- * never flip a non-half (a true just-below like 1.00499 sits ~1000x the
- * guard away from the 1.005 half).
+ * Half-up rounding of a positive scaled ratio with a fixed ABSOLUTE
+ * tolerance: representation noise of the ×100 scale is ≤ 1e-9 for the
+ * magnitudes where a decimal half is expressible, so 1e-9 rescues every
+ * true half (1.005 arrives as 100.49999999999999) while
+ * genuinely-below-half values stay down. A RELATIVE guard would flip them
+ * at large magnitudes (1000000.004999999 rounded UP under the old
+ * y*(1+8·EPSILON) guard); beyond ~1e6 the rounding is best-effort and
+ * genuinely-below-half values round down.
  */
 function halfUp(y: number): number {
-  return Math.floor(y * (1 + Number.EPSILON * 8) + 0.5);
+  return Math.floor(y + 0.5 + 1e-9);
 }
 
 /** halfUp over an integer-domain ratio (numerator already *100-scaled), result back on the 2-decimal scale by /100. */

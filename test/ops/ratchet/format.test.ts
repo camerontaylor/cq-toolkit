@@ -9,8 +9,9 @@
 //   2. parseBaseline is loud on garbage: unparsable JSON, wrong
 //      schemaVersion, missing/typed-wrong keys, unknown direction, extra
 //      keys (strict schema), NON-FINITE values (JSON 1e999 parses to
-//      Infinity), and unparseable capturedAt timestamps all throw a plain
-//      Error with a clear message.
+//      Infinity), and capturedAt that is not a STRICT ISO-8601 instant
+//      (locale date strings, calendar rollovers) all throw a plain Error
+//      with a clear message.
 //   3. baselineRelPath: sanitization (lowercase, runs of non-[a-z0-9]
 //      collapse to a single '-', leading/trailing '-' stripped) PLUS a
 //      12-hex (48-bit) sha256 disambiguator over the RAW pair, so originals
@@ -121,6 +122,8 @@ describe('parseBaseline rejections', () => {
     ['a non-finite value (JSON 1e999 parses to Infinity)', JSON.stringify(RAW_BASE).replace('"value":3', '"value":1e999')],
     ['unknown direction', JSON.stringify({ ...RAW_BASE, direction: 'sideways' })],
     ['an unparseable capturedAt', JSON.stringify({ ...RAW_BASE, capturedAt: 'not a timestamp' })],
+    ['a non-ISO date-string capturedAt', JSON.stringify({ ...RAW_BASE, capturedAt: 'September 15, 2026' })],
+    ['a calendar-rollover capturedAt (Feb 30)', JSON.stringify({ ...RAW_BASE, capturedAt: '2026-02-30T00:00:00Z' })],
     ['an extra key (strict schema)', JSON.stringify({ ...RAW_BASE, extra: true })],
   ])('%s throws a clear Error', (_label, text) => {
     expect(() => parseBaseline(text)).toThrow(/^baseline: /);
@@ -136,6 +139,12 @@ describe('parseBaseline rejections', () => {
   test('a valid capturedAt with a timezone offset still parses', () => {
     expect(() =>
       parseBaseline(JSON.stringify({ ...RAW_BASE, capturedAt: '2026-09-15T02:00:00+02:00' })),
+    ).not.toThrow();
+  });
+
+  test('a nanosecond-precision capturedAt parses (truncated to milliseconds)', () => {
+    expect(() =>
+      parseBaseline(JSON.stringify({ ...RAW_BASE, capturedAt: '2026-09-15T10:00:00.123456789Z' })),
     ).not.toThrow();
   });
 });

@@ -37,7 +37,7 @@
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import type { Op } from '../../kernel/types.js';
-import { baselineRelPath, parseBaseline, renderBaseline } from './format.js';
+import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline } from './format.js';
 import type { BaselineFile } from './format.js';
 import { getAdapter } from './registry.js';
 import type { MetricReading, MetricSource } from './registry.js';
@@ -97,13 +97,10 @@ export function createCaptureBaseline(
   sources: SourceCatalog,
 ): Op<CaptureBaselineInput, CaptureBaselineOutcome> {
   return async (input) => {
-    if (
-      input.capturedAt !== undefined &&
-      Number.isNaN(Date.parse(input.capturedAt))
-    ) {
+    if (input.capturedAt !== undefined && isIso8601Instant(input.capturedAt) === false) {
       return {
         status: 'failed',
-        error: `ratchet: invalid capturedAt '${input.capturedAt}' — must be a parseable ISO-8601 timestamp`,
+        error: `ratchet: invalid capturedAt '${input.capturedAt}' — must be a strict ISO-8601 instant`,
       };
     }
     const adapter = getAdapter(input.metric);
@@ -196,6 +193,23 @@ export function createCaptureBaseline(
             `${errorMessage(err)}`,
         };
       }
+      // Identity check BEFORE the value is trusted: a file at the expected
+      // path that belongs to another (target, metric, direction) — mistaken
+      // move, adapter direction change — is never accepted as `previous` nor
+      // overwritten.
+      if (
+        existing.target !== input.target ||
+        existing.metric !== input.metric ||
+        existing.direction !== adapter.direction
+      ) {
+        return {
+          status: 'failed',
+          error:
+            `ratchet: existing baseline '${relPath}' holds ` +
+            `(${existing.target}, ${existing.metric}, ${existing.direction}) but this capture is ` +
+            `(${input.target}, ${input.metric}, ${adapter.direction}) — refusing to overwrite`,
+        };
+      }
       previous = existing.value;
       lifecycle = existing.value === reading.value ? 'unchanged' : 'updated';
       // Equal value AND identical bytes: the file is already exactly what this
@@ -205,18 +219,25 @@ export function createCaptureBaseline(
       }
     }
 
+    let tempPath: string | undefined;
     try {
       await mkdir(join(input.ws, 'baselines'), { recursive: true });
       // Atomic publish: bytes land in a unique temp file in the SAME
       // directory, then rename over the target — a crash mid-write can
       // never leave a torn baseline at the target path.
-      const tempPath = join(
+      tempPath = join(
         dirname(absPath),
         `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
       );
       await writeFile(tempPath, bytes, 'utf8');
       await rename(tempPath, absPath);
     } catch (err) {
+      // Best-effort temp cleanup: a failed publish must not litter
+      // baselines/ with .tmp debris (unlink errors are swallowed — the
+      // indeterminate verdict already names the primary fault).
+      if (tempPath !== undefined) {
+        await unlink(tempPath).catch(() => undefined);
+      }
       return {
         status: 'indeterminate',
         detail: `ratchet: writing baseline '${relPath}' failed — ${errorMessage(err)}`,

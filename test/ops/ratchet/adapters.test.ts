@@ -9,15 +9,16 @@
 //      are valid; out-of-range, missing, non-numeric and non-object raws
 //      are null.
 //   2. complexity: pre-averaged {averageComplexity} and {Complexity} record
-//      arrays share ONE half-up-to-2-decimals rounding core with a
-//      relative-epsilon guard (binary-unrepresentable halves like
+//      arrays share ONE half-up-to-2-decimals rounding core with a fixed
+//      ABSOLUTE tolerance (1e-9): binary-unrepresentable halves like
 //      1.005 → 1.01 and 2.675 → 2.68 round up on BOTH paths — through the
 //      direct multiply AND through the accumulated sum feeding the array
-//      ratio), while a true just-below like 1.00499 stays down; an input
-//      whose *100 scaling overflows to non-finite (1e307) is null; the
-//      array ratio runs in the INTEGER domain (sum*100 / count), so
-//      201/200 → 1.01 exactly; any negative record is rejected before
-//      aggregation; empty arrays and junk are null.
+//      ratio — while genuinely-below-half values stay down at ANY magnitude
+//      (1000000.004999999 → 1000000, 1.00499 → 1); an input whose *100
+//      scaling overflows to non-finite (1e307) is null; the array ratio
+//      runs in the INTEGER domain (sum*100 / count), so 201/200 → 1.01
+//      exactly; any negative record is rejected before aggregation; empty
+//      arrays and junk are null.
 import { describe, expect, test } from 'vitest';
 import { complexity } from '../../../src/ops/ratchet/adapters/complexity.js';
 import { coverage } from '../../../src/ops/ratchet/adapters/coverage.js';
@@ -77,6 +78,7 @@ describe('complexity', () => {
     ['direct: classic 2.675 rounds half-up', { averageComplexity: 2.675 }, { value: 2.68, unit: 'avg-cx' }],
     ['pre-averaged zero', { averageComplexity: 0 }, { value: 0, unit: 'avg-cx' }],
     ['pre-averaged negative', { averageComplexity: -1 }, null],
+    ['direct: genuinely-below-half at large magnitude stays down', { averageComplexity: 1000000.004999999 }, { value: 1000000, unit: 'avg-cx' }],
     ['pre-averaged Infinity', { averageComplexity: Number.POSITIVE_INFINITY }, null],
     ['pre-averaged NaN', { averageComplexity: Number.NaN }, null],
     ['direct: 1e307 overflows the *100 scaling to non-finite', { averageComplexity: 1e307 }, null],

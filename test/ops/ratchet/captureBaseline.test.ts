@@ -36,7 +36,7 @@
 // assertions); temp dirs under os.tmpdir(), removed in afterEach. The real
 // typecheck-count adapter is used so capture is exercised end-to-end with a
 // production adapter.
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
@@ -294,6 +294,28 @@ describe('captureBaseline', () => {
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
+  test('non-ISO and calendar-rollover capturedAt fail the strict instant check', async () => {
+    sourceRaw = { count: 1 };
+    for (const bad of ['September 15, 2026', '2026-02-30T00:00:00Z']) {
+      await expect(capture(captureInput({ capturedAt: bad }))).resolves.toEqual({
+        status: 'failed',
+        error: expect.stringMatching(/invalid capturedAt.*strict ISO-8601/s),
+      });
+    }
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('strict-but-legitimate capturedAt forms are accepted (numeric offset, nanoseconds)', async () => {
+    sourceRaw = { count: 1 };
+    await expect(
+      capture(captureInput({ capturedAt: '2026-09-15T12:00:00+02:00' })),
+    ).resolves.toMatchObject({ status: 'ok' });
+    sourceRaw = { count: 2 };
+    await expect(
+      capture(captureInput({ target: 'typecheck-nanos', capturedAt: '2026-09-15T10:00:00.123456789Z' })),
+    ).resolves.toMatchObject({ status: 'ok' });
+  });
+
   test('the publish is atomic: no temp files linger after captures', async () => {
     sourceRaw = { count: 3 };
     await capture(captureInput());
@@ -338,6 +360,45 @@ describe('captureBaseline', () => {
       status: 'indeterminate',
       detail: expect.stringMatching(/could not read existing baseline/s),
     });
+  });
+
+  test('a valid baseline for ANOTHER target at the expected path fails the identity check, untouched', async () => {
+    // Mistaken move: a fully valid baseline whose (target, metric, direction)
+    // identity disagrees with this capture sits at the expected path.
+    const foreign: BaselineFile = {
+      schemaVersion: 1,
+      target: 'elsewhere',
+      metric: METRIC,
+      direction: 'lower-is-better',
+      value: 9,
+      capturedAt: CAPTURED_AT,
+    };
+    await mkdir(join(ws, 'baselines'), { recursive: true });
+    const foreignBytes = renderBaseline(foreign);
+    await writeFile(join(ws, REL), foreignBytes, 'utf8');
+    sourceRaw = { count: 3 };
+    await expect(capture(captureInput())).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /holds \(elsewhere, typecheck-count, lower-is-better\).*\(typecheck, typecheck-count, lower-is-better\)/s,
+      ),
+    });
+    expect(await readFile(join(ws, REL), 'utf8')).toBe(foreignBytes);
+  });
+
+  test('a failed publish cleans up its temp file (no *.tmp debris)', async () => {
+    sourceRaw = { count: 3 };
+    await capture(captureInput());
+    // Make the publish fail: a read-only baselines dir rejects the temp-file
+    // creation, so the write catch runs its best-effort cleanup.
+    const baselinesDir = join(ws, 'baselines');
+    await chmod(baselinesDir, 0o555);
+    sourceRaw = { count: 5 };
+    const result = await capture(captureInput({ capturedAt: CAPTURED_AT_2 }));
+    await chmod(baselinesDir, 0o755); // restore before cleanup assertions
+    expect(result.status).toBe('indeterminate');
+    const names = await readdir(baselinesDir);
+    expect(names).toEqual([basename(REL)]); // original baseline, no *.tmp debris
   });
 });
 
