@@ -173,6 +173,11 @@
 //                         driver's stdout line buffer overflows — the
 //                         connection must FAIL and the run settle error;
 //                         the turn never settles protocol-side)
+//   FAKE_ACP_HUGE_FRAME_COMPLETE when '1', ONE newline-terminated frame
+//                         larger than the 1 MiB line bound is written
+//                         whole (Codex P2 on the RD-F PR: the bound must
+//                         hold for COMPLETE frames too — the connection
+//                         fails with evidence, the frame is never parsed)
 //   FAKE_ACP_HUGE_FRAME_AFTER_REPLY when '1', a VALID turn settles
 //                         end_turn FIRST and the oversized unterminated
 //                         frame is written AFTER the response (CodeRabbit
@@ -249,6 +254,7 @@ const LATE_FAIL = process.env.FAKE_ACP_LATE_FAIL === '1';
 const RAW_OUTPUT_JSON = process.env.FAKE_ACP_RAW_OUTPUT_JSON === '1';
 const HUGE_FRAME = process.env.FAKE_ACP_HUGE_FRAME === '1';
 const HUGE_FRAME_AFTER_REPLY = process.env.FAKE_ACP_HUGE_FRAME_AFTER_REPLY === '1';
+const HUGE_FRAME_COMPLETE = process.env.FAKE_ACP_HUGE_FRAME_COMPLETE === '1';
 
 // The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL=1), signal half: the
 // termination is IGNORED — only the unignorable SIGKILL rung reaches this
@@ -582,6 +588,16 @@ async function okFlow() {
   if (HUGE_FRAME) {
     process.stdout.write(HUGE_FRAME_PREFIX); // no newline, never completed — the overflow persona (#42)
     return; // hold the turn open; the driver fails the connection on the buffer overflow
+  }
+  if (HUGE_FRAME_COMPLETE) {
+    // The complete-oversized-frame persona (Codex P2): ONE whole frame
+    // over the line bound, newline and all — the bound must fail the
+    // connection, never parse it.
+    notifyUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `HUGECOMPLETE ${'x'.repeat(1_100_000)}` },
+    });
+    return; // never settle the turn — the connection is failed from the driver's side
   }
   if (BIG_FRAME) {
     await emitBigFrameChunk(); // the straddled frame fully flushes BEFORE end_turn

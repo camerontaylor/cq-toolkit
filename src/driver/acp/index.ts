@@ -460,7 +460,27 @@ class AcpWire {
       while (nl !== -1) {
         const line = this.lineBuffer.slice(0, nl).trim();
         this.lineBuffer = this.lineBuffer.slice(nl + 1);
-        if (line !== '') this.onLine(line);
+        if (line !== '') {
+          // THE BOUND IS A TRUE BOUND (Codex P2 on this PR): the ceiling
+          // applies to COMPLETE frames too — a newline-terminated frame
+          // over the limit is failed with evidence, never parsed, exactly
+          // like the unterminated accumulation below. #42's title names
+          // any frame larger than the line buffer.
+          if (line.length > STDOUT_LINE_BUFFER_LIMIT) {
+            this.handlers.onUnparseableLine(
+              `[cq: oversized frame — ${line.length} chars exceeds the ${STDOUT_LINE_BUFFER_LIMIT}-char line bound; failing the connection]`,
+            );
+            this.lineBuffer = '';
+            this.failConnection(
+              new Error(
+                `the harness emitted an oversized frame (${line.length} chars > ${STDOUT_LINE_BUFFER_LIMIT} char line bound) — ` +
+                  'the connection cannot carry protocol meaning past it, so the run fails with this evidence',
+              ),
+            );
+            return;
+          }
+          this.onLine(line);
+        }
         nl = this.lineBuffer.indexOf('\n');
       }
       // A frame straddling chunk boundaries WAITS here for its newline —

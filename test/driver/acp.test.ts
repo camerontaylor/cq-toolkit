@@ -693,6 +693,25 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('a COMPLETE newline-terminated frame over the line bound still fails the connection — the bound is a true bound (Codex P2)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_HUGE_FRAME_COMPLETE: a whole >1 MiB frame, newline and
+      // all. The extraction loop must enforce the bound on COMPLETE frames
+      // too — the old check ran only on the unterminated leftover, so a
+      // valid oversized frame folded as if nothing was wrong.
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME_COMPLETE: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'complete-oversized run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never settled protocol-side
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('oversized frame') && line.includes('exceeds the'))).toBe(true);
+      const failure = narration.find((line) => line.includes('"prompt-failure"'));
+      expect(failure !== undefined && failure.includes('oversized frame')).toBe(true);
+    });
+  });
+
   test('resume sidecar: the ACP session id persists to the workspace; session/load continues the SAME vendor session', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls1: SpawnCall[] = [];
