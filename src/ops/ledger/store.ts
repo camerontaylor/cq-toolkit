@@ -25,11 +25,15 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { lock } from 'proper-lockfile';
 import type { LockOptions } from 'proper-lockfile';
 import { z } from 'zod';
+// Runtime import of the canonical signature order — pulled from the pure
+// decision-ops module (order.ts was folded into ledger.js for lane i's
+// registry-completeness heuristic, PR 64); NO runtime cycle: ledger.js's
+// store.js import is type-only and erased.
+import { compareSignatures, sortEntries } from './ledger.js';
 import type { LedgerStore } from './ledger.js';
-import { compareSignatures, sortEntries } from './order.js';
 
-/** The canonical signature order lives in the tiny pure ./order.js (see its header). */
-export { sortEntries } from './order.js';
+/** The canonical signature order lives in the pure decision-ops module (see ledger.js). */
+export { sortEntries };
 
 /** One recurring error signature and its recurrence count (≥ 1). */
 export interface LedgerEntry {
