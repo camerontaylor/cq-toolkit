@@ -13,10 +13,11 @@
 //     ride a `status:'ok'` result (mirrors the regression gate). The one
 //     `failed` path is config whose regex sources do not compile.
 //   - Trailers are recognized by the git convention ONLY in the trailing
-//     paragraph (every line `Name: value`, set off by a blank line): prose
-//     after a trailer block makes the block NOT trailing, so those trailers
-//     are treated as missing — the gate never fishes trailers out of the
-//     middle of a message.
+//     paragraph (set off by a blank line, reading as a trailer block
+//     throughout: `Name: value` lines with indented continuation lines
+//     folding into the previous value): prose after a trailer block makes
+//     the block NOT trailing, so those trailers are treated as missing —
+//     the gate never fishes trailers out of the middle of a message.
 //   - Regex sources arrive as strings and are compiled with `new RegExp`;
 //     callers own their trustworthiness (same contract as the hack
 //     detector's pattern config).
@@ -105,7 +106,7 @@ export const DEFAULT_COMMIT_TRAILERS: readonly TrailerRule[] = Object.freeze([
 /** The shipped subject implications, frozen: what the Outcome says must be what the subject did. */
 export const DEFAULT_COMMIT_IMPLICATIONS: readonly SubjectImplication[] = Object.freeze([
   { outcomeValue: 'broken-test', subjectPattern: '^fix\\(test\\):' },
-  { outcomeValue: 'code-bug', subjectPattern: '^fix\\(' },
+  { outcomeValue: 'code-bug', subjectPattern: '^fix(\\(|:)' },
   { outcomeValue: 'todo', subjectPattern: '^chore\\(test\\): todo' },
 ]);
 
@@ -114,6 +115,13 @@ export const DEFAULT_OUTCOME_TRAILER = 'Outcome';
 
 /** Git trailer line: `Name: value` with a hyphen/alnum name and a non-empty value. */
 const TRAILER_LINE_RE = /^[A-Za-z][A-Za-z0-9-]*: .+$/;
+
+/**
+ * Git folded-trailer continuation: a trailer's value may continue on
+ * indented lines. Inside a trailer paragraph these neither void the block
+ * nor start a new trailer — they extend the previous trailer's value.
+ */
+const CONTINUATION_LINE_RE = /^[ \t]/;
 
 /**
  * The `gates.commitGate` op: `ok` whenever the message was evaluated —
@@ -239,9 +247,13 @@ function checkMessage(message: string, config: CheckedConfig): CommitViolation[]
  * Trailers of a message: the trailing paragraph's `Name: value` lines, or
  * none. The trailing paragraph is the LAST non-blank paragraph, and only
  * when the message has at least two paragraphs (a bare subject paragraph
- * is never its own trailer block) and EVERY line of it matches the git
- * trailer shape — one non-trailer line (prose) voids the whole block.
- * First occurrence wins for a repeated trailer name.
+ * is never its own trailer block) and it reads as a trailer block
+ * throughout: the first line must be a trailer line, and every later line
+ * must be either a trailer line or an indented continuation of the
+ * previous trailer's value (git folded trailers) — one other non-trailer
+ * line (prose) voids the whole block. Continuation content is folded into
+ * the value joined by newlines, verbatim trimmed. First occurrence wins
+ * for a repeated trailer name.
  */
 function trailersOf(lines: string[]): Map<string, string> {
   const paragraphs: string[][] = [];
@@ -264,13 +276,25 @@ function trailersOf(lines: string[]): Map<string, string> {
     return trailers;
   }
   const last = paragraphs[paragraphs.length - 1];
-  if (!last.every((line) => TRAILER_LINE_RE.test(line))) {
+  if (!TRAILER_LINE_RE.test(last[0])) {
     return trailers;
   }
+  for (const line of last.slice(1)) {
+    if (!TRAILER_LINE_RE.test(line) && !CONTINUATION_LINE_RE.test(line)) {
+      return trailers;
+    }
+  }
+  const entries: { name: string; value: string }[] = [];
   for (const line of last) {
+    if (CONTINUATION_LINE_RE.test(line)) {
+      const previous = entries[entries.length - 1];
+      previous.value = `${previous.value}\n${line.trim()}`;
+      continue;
+    }
     const separator = line.indexOf(': ');
-    const name = line.slice(0, separator);
-    const value = line.slice(separator + 2);
+    entries.push({ name: line.slice(0, separator), value: line.slice(separator + 2) });
+  }
+  for (const { name, value } of entries) {
     if (!trailers.has(name)) {
       trailers.set(name, value);
     }

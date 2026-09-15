@@ -18,7 +18,12 @@
 //   - The op is a SCANNER, not a validator: diff text that still parses
 //     line-by-line yields best-effort findings (often none) — a malformed
 //     diff is never a `failed` op. The one `failed` path is configuration
-//     whose regex sources do not compile.
+//     whose regex sources do not compile; the one `indeterminate` path is
+//     non-blank input with NO diff structure at all (no `diff --git`
+//     header, no `@@` hunk header, no +/- body lines) — "clean" must stay
+//     distinguishable from "could not see a diff" (I5). The parser
+//     understands standard two-party unified diffs only: combined `@@@`
+//     merge diffs are not understood and scan as best-effort nothing.
 //   - Regex sources arrive as strings and are compiled with `new RegExp`.
 //     Callers own their trustworthiness: a pattern source is arbitrary
 //     code-adjacent input, and only RE.source semantics are exercised
@@ -28,11 +33,18 @@ import type { Op } from '../../kernel/types.js';
 /**
  * One configurable suppression signature. `pattern` is a regex SOURCE
  * compiled with `new RegExp(source, flags ?? 'i')` — the caller owns its
- * trustworthiness. When `requiresReason` is true, an added line is flagged
- * ONLY when the pattern matches AND no non-empty explanatory text follows
- * the match on that line (the `@ts-expect-error`-without-reason shape);
- * any non-empty remainder counts as a reason — the mechanism does not
- * judge reason quality.
+ * trustworthiness. The `g` and `y` flags are STRIPPED at compile time: a
+ * shared stateful RegExp carries `lastIndex` across `exec` calls, which
+ * would silently skip findings on later lines and files. Matching is
+ * plain regex over the whole added line, deliberately NOT comment-syntax
+ * aware: a bare prose MENTION of a token in a comment flags like a real
+ * suppression (e.g. a comment sentence containing "eslint-disable" is
+ * reported — the noise direction is accepted, see the shipped defaults).
+ * When `requiresReason` is true, an added line is flagged ONLY when the
+ * pattern matches AND no non-empty explanatory text follows the match on
+ * that line (the `@ts-expect-error`-without-reason shape); any non-empty
+ * remainder counts as a reason — the mechanism does not judge reason
+ * quality.
  */
 export interface SuppressionPattern {
   /** Stable identifier reported in {@link TamperFinding.pattern}. */
@@ -53,7 +65,11 @@ export interface SuppressionPattern {
  * `@` can never fire in JS regexes (`@` is a non-word character, so no
  * word boundary precedes it) — `\b@ts-ignore\b` would silently never match
  * the canonical `// @ts-ignore` line, which is the exact tamper the
- * default exists to catch.
+ * default exists to catch. These are token-level patterns over the whole
+ * line, not comment-aware: prose that merely mentions a token (an
+ * explanatory comment naming "eslint-disable", say) is flagged like the
+ * real thing — the accepted noise direction, traded deliberately against
+ * missing real suppressions.
  */
 export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Object.freeze([
   { name: 'eslint-disable', pattern: '\\beslint-disable\\b' },
@@ -63,10 +79,12 @@ export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Objec
 ]);
 
 /**
- * Shipped test-file shapes (regex sources, matched case-insensitively
- * against both diff paths), frozen. Only consulted for DELETED-test-file
- * detection: a file section whose old path matches one of these and whose
- * new path is `/dev/null` is a test file this change deletes.
+ * Shipped test-file shapes (regex sources, matched case-insensitively),
+ * frozen. Consulted ONLY against the OLD path of a DELETED-file section —
+ * matching `oldPath` (not `newPath`) is what makes the detection correct:
+ * a deletion's new path is `/dev/null`, so the old path is the only path
+ * that says what KIND of file disappeared, and a deleted file section is
+ * reported when its old path matches one of these shapes.
  */
 export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
   '\\.test\\.[tj]sx?$',
@@ -85,7 +103,8 @@ export const DEFAULT_SKIP_ONLY_PATTERN = '\\b(describe|it|test)\\s*\\.\\s*(skip|
  * Tamper-heuristic tuning. Every field is optional with a shipped default;
  * `testFilePatterns` REPLACES {@link DEFAULT_TEST_FILE_PATTERNS} when
  * supplied (an empty array disables deleted-test-file detection without
- * touching the other heuristics).
+ * touching the other heuristics), and `skipOnlyPattern` REPLACES
+ * {@link DEFAULT_SKIP_ONLY_PATTERN} the same way.
  */
 export interface TamperConfig {
   /** Regex sources for what counts as a test file (see the shipped default). */
@@ -94,6 +113,8 @@ export interface TamperConfig {
   detectDeletedTests?: boolean;
   /** Flag added skip/only markers (default true). */
   detectNewSkipOnly?: boolean;
+  /** Regex source for the skip/only marker; default {@link DEFAULT_SKIP_ONLY_PATTERN}. */
+  skipOnlyPattern?: string;
   /** Flag tautological `expect(X).toBe(X)` assertions (default true). */
   detectTautologies?: boolean;
 }
@@ -143,6 +164,7 @@ interface CompiledConfig {
   testFilePatterns: { source: string; regex: RegExp }[];
   detectDeletedTests: boolean;
   skipOnly: RegExp | null;
+  skipOnlySource: string;
   detectTautologies: boolean;
 }
 
@@ -152,28 +174,49 @@ const HUNK_HEADER_RE = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 /**
  * Tautology heuristic: capture both sides of `expect(X).toBe(X)` and flag
  * when the trimmed texts are identical (which covers `expect(true).toBe(true)`
- * and every same-expression call shape). Deliberately greedy-free: the
- * right side runs to the final `)`, so `expect(f(a)).toBe(f(a))` captures
- * `f(a)` on both sides, and `.not.toBe(...)` never matches.
+ * and every same-expression call shape). The LEFT side is lazy so each
+ * match ends at the first `).toBe(` — which is also the correct boundary
+ * for nested calls (`expect(f(a)).toBe(f(a))` captures `f(a)`); the RIGHT
+ * side consumes balanced single-nesting units and stops at the first
+ * top-level `)`, so it neither truncates nested calls nor swallows past a
+ * closing paren into a sibling assertion. The `g` flag drives
+ * {@link String.prototype.matchAll}, which clones the regex — no
+ * `lastIndex` state leaks between lines — so EVERY tautology on a line is
+ * found, including two on one line.
  */
-const TAUTOLOGY_RE = /\bexpect\((.*)\)\.toBe\((.*)\)/;
+const TAUTOLOGY_RE = /\bexpect\((.*?)\)\.toBe\(((?:[^()]|\([^()]*\))*)\)/g;
 
 /**
  * The `gates.hackDetector` op: `ok` in every case where the diff text was
  * scanned line-by-line — an EMPTY findings array is a clean diff, and
- * malformed diff text is best-effort scanned (the op is a scanner, not a
- * validator: it never certifies diff well-formedness). `failed` is reserved
- * for config whose regex sources do not compile. Only ADDED lines are ever
- * scanned; removed and context lines are invisible to every heuristic.
+ * diff-shaped text that parses imperfectly is best-effort scanned (the op
+ * is a scanner, not a validator: it never certifies diff well-formedness).
+ * `indeterminate` is reserved for non-blank input carrying NO diff
+ * structure at all — "clean" must never be silently conflated with "nothing
+ * recognizable to scan" (I5). `failed` is reserved for config whose regex
+ * sources do not compile. Only ADDED lines are ever scanned; removed and
+ * context lines are invisible to every heuristic.
  */
 export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input) => {
+  // "Clean" must stay distinguishable from "could not see a diff" (I5):
+  // non-blank text with no diff structure at all is `indeterminate`, never
+  // a silent empty scan.
+  if (input.diff.trim() !== '' && !looksLikeDiff(input.diff)) {
+    return {
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    };
+  }
   const tamper = input.tamper ?? {};
+  const skipOnlySource = tamper.skipOnlyPattern ?? DEFAULT_SKIP_ONLY_PATTERN;
   let config: CompiledConfig;
   try {
     config = {
       suppressions: (input.suppressionPatterns ?? DEFAULT_SUPPRESSION_PATTERNS).map((p) => ({
         name: p.name,
-        regex: new RegExp(p.pattern, p.flags ?? 'i'),
+        // g/y stripped: a stateful RegExp carries lastIndex across exec
+        // calls and would silently skip findings on later lines/files.
+        regex: new RegExp(p.pattern, (p.flags ?? 'i').replace(/[gy]/g, '')),
         requiresReason: p.requiresReason === true,
       })),
       testFilePatterns: (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
@@ -181,7 +224,9 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
         regex: new RegExp(source, 'i'),
       })),
       detectDeletedTests: tamper.detectDeletedTests ?? true,
-      skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(DEFAULT_SKIP_ONLY_PATTERN, 'i'),
+      skipOnly:
+        tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
+      skipOnlySource,
       detectTautologies: tamper.detectTautologies ?? true,
     };
   } catch (err) {
@@ -312,28 +357,33 @@ function scanAddedLine(
       kind: 'new-skip-only',
       file,
       line,
-      pattern: DEFAULT_SKIP_ONLY_PATTERN,
+      pattern: config.skipOnlySource,
       snippet,
       message: 'added line marks a test as skipped or focused',
     });
   }
   if (config.detectTautologies) {
-    const tautology = TAUTOLOGY_RE.exec(content);
-    if (tautology && tautology[1].trim() === tautology[2].trim()) {
-      findings.push({
-        kind: 'tautological-assertion',
-        file,
-        line,
-        snippet,
-        message: 'added assertion compares an expression to itself',
-      });
+    for (const tautology of content.matchAll(TAUTOLOGY_RE)) {
+      if (tautology[1].trim() === tautology[2].trim()) {
+        findings.push({
+          kind: 'tautological-assertion',
+          file,
+          line,
+          snippet,
+          message: 'added assertion compares an expression to itself',
+        });
+      }
     }
   }
 }
 
 /** Path from a `---`/`+++` header body: `/dev/null`, or the path sans a/ b/ prefix. */
 function headerPathOf(rest: string): string {
-  const trimmed = rest.replace(/\t.*$/, '').trim();
+  let trimmed = rest.replace(/\t.*$/, '').trim();
+  // git double-quotes paths containing spaces or special characters.
+  if (trimmed.startsWith('"') && trimmed.endsWith('"') && trimmed.length >= 2) {
+    trimmed = trimmed.slice(1, -1);
+  }
   if (trimmed === '/dev/null') {
     return '/dev/null';
   }
@@ -341,6 +391,18 @@ function headerPathOf(rest: string): string {
     return trimmed.slice(2);
   }
   return trimmed;
+}
+
+/**
+ * Structural sniff for the I5 guard: does the text carry ANY unified-diff
+ * shape — a `diff --git` header, an `@@` hunk header, or +/- body lines?
+ * Without one of these the input is prose, not a scannable diff.
+ */
+function looksLikeDiff(diff: string): boolean {
+  return diff.split(/\r?\n/).some(
+    (line) =>
+      line.startsWith('diff --git ') || line.startsWith('@@') || line.startsWith('+') || line.startsWith('-'),
+  );
 }
 
 /** Error message of an unknown throwable, for `failed` results. */

@@ -97,6 +97,37 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
     ]);
   });
 
+  test('two tautologies on ONE added line yield two findings (matchAll, no cross-consumption)', async () => {
+    const diff = [
+      'diff --git a/src/pair.ts b/src/pair.ts',
+      'index 1111111..2222222 100644',
+      '--- a/src/pair.ts',
+      '+++ b/src/pair.ts',
+      '@@ -1,1 +1,2 @@',
+      ' const a = 1;',
+      '+it("both fake", () => { expect(1).toBe(1); expect(2).toBe(2); });',
+    ].join('\n');
+    const findings = await findingsOf(diff);
+    expect(findings.filter((f) => f.kind === 'tautological-assertion')).toHaveLength(2);
+  });
+
+  test('a tautology and a suppression sharing one line yield BOTH findings independently', async () => {
+    const diff = [
+      'diff --git a/src/mix.ts b/src/mix.ts',
+      'index 3333333..4444444 100644',
+      '--- a/src/mix.ts',
+      '+++ b/src/mix.ts',
+      '@@ -1,1 +1,2 @@',
+      ' const a = 1;',
+      '+expect(1).toBe(1); // @ts-ignore',
+    ].join('\n');
+    const findings = await findingsOf(diff);
+    expect(findings.map((f) => [f.kind, f.pattern])).toEqual([
+      ['suppression', '@ts-ignore'],
+      ['tautological-assertion', undefined],
+    ]);
+  });
+
   test('suppression-added.diff → eslint-disable + @ts-ignore findings on the + lines', async () => {
     expect(await findingsOf(fixture('suppression-added.diff'))).toEqual([
       {
@@ -194,6 +225,60 @@ describe('hackDetector: suppression config', () => {
     );
   });
 
+  test('a quoted deleted test path (spaces in the filename) still detects the deletion', async () => {
+    const diff = [
+      'diff --git "a/src/with space/printer.test.ts" "b/src/with space/printer.test.ts"',
+      'deleted file mode 100644',
+      'index 8a4b1c2..0000000',
+      '--- "a/src/with space/printer.test.ts"',
+      '+++ /dev/null',
+      '@@ -1,2 +0,0 @@',
+      '-const a = 1;',
+      '-const b = 2;',
+    ].join('\n');
+    expect(await findingsOf(diff)).toEqual([
+      {
+        kind: 'deleted-test-file',
+        file: 'src/with space/printer.test.ts',
+        line: null,
+        pattern: '\\.test\\.[tj]sx?$',
+        snippet: '--- "a/src/with space/printer.test.ts"',
+        message: 'test file deleted by this change: src/with space/printer.test.ts',
+      },
+    ]);
+  });
+
+  test('a custom skipOnlyPattern replaces the shipped skip/only marker', async () => {
+    const diff = [
+      'diff --git a/test/a.test.ts b/test/a.test.ts',
+      'index 1111111..2222222 100644',
+      '--- a/test/a.test.ts',
+      '+++ b/test/a.test.ts',
+      '@@ -1,2 +1,3 @@',
+      ' const a = 1;',
+      '+fixtureSlow("does the thing");',
+      '+test.skip("untouched by the custom marker", () => {});',
+    ].join('\n');
+    const result = await hackDetector({
+      diff,
+      tamper: { skipOnlyPattern: '\\bfixtureSlow\\b' },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      throw new Error('unreachable');
+    }
+    expect(result.value).toEqual([
+      {
+        kind: 'new-skip-only',
+        file: 'test/a.test.ts',
+        line: 2,
+        pattern: '\\bfixtureSlow\\b',
+        snippet: 'fixtureSlow("does the thing");',
+        message: 'added line marks a test as skipped or focused',
+      },
+    ]);
+  });
+
   test('a suppression on a "-" line is never flagged (removal is a fix)', async () => {
     const diff = [
       'diff --git a/src/c.ts b/src/c.ts',
@@ -221,6 +306,42 @@ describe('hackDetector: suppression config', () => {
   test('a custom pattern source that does not compile is a `failed` op, never a crash', async () => {
     const result = await hackDetector({ diff: '+anything', suppressionPatterns: [{ name: 'bad', pattern: '(' }] });
     expect(result.status).toBe('failed');
+  });
+
+  test('g/y flags are stripped at compile: every match found across files, hunks, and lines', async () => {
+    // With `g` preserved, the shared RegExp carries lastIndex across exec
+    // calls and later lines/files would be silently skipped — the exact
+    // regression this test pins.
+    const diff = [
+      'diff --git a/src/one.ts b/src/one.ts',
+      'index 1111111..2222222 100644',
+      '--- a/src/one.ts',
+      '+++ b/src/one.ts',
+      '@@ -1,1 +1,3 @@',
+      ' const a = 1;',
+      '+const b = TODO_HACK;',
+      '+const c = TODO_HACK;',
+      '@@ -10,1 +12,2 @@',
+      ' const d = 4;',
+      '+const e = TODO_HACK;',
+      'diff --git a/src/two.ts b/src/two.ts',
+      'index 3333333..4444444 100644',
+      '--- a/src/two.ts',
+      '+++ b/src/two.ts',
+      '@@ -5,1 +5,2 @@',
+      ' const f = 6;',
+      '+const g = TODO_HACK;',
+    ].join('\n');
+    const findings = await findingsOf(diff, [
+      { name: 'todo-hack', pattern: '\\bTODO_HACK\\b', flags: 'g' },
+    ]);
+    expect(findings).toHaveLength(4);
+    expect(findings.map((f) => [f.file, f.line])).toEqual([
+      ['src/one.ts', 2],
+      ['src/one.ts', 3],
+      ['src/one.ts', 13],
+      ['src/two.ts', 6],
+    ]);
   });
 });
 
@@ -284,8 +405,15 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
     expect(findings.map((f) => [f.kind, f.file, f.line])).toEqual([['new-skip-only', 'src/fresh.ts', 1]]);
   });
 
-  test('malformed diff text is best-effort scanned: ok with empty findings, never failed', async () => {
-    expect(await findingsOf('this is not a diff at all')).toEqual([]);
+  test('non-blank input with NO diff structure is indeterminate, never a silent clean scan (I5)', async () => {
+    const result = await hackDetector({ diff: 'this is not a diff at all' });
+    expect(result).toEqual({
+      status: 'indeterminate',
+      detail: 'input does not parse as a unified diff',
+    });
+  });
+
+  test('diff-shaped but broken text is best-effort scanned: ok with empty findings', async () => {
     expect(await findingsOf('diff --git a/x b/x\n@@ garbage @@\n+// @ts-ignore\n')).toEqual([]);
   });
 

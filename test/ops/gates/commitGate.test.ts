@@ -67,7 +67,7 @@ describe('commitGate decision table', () => {
       },
       {
         rule: 'code-bug',
-        message: '"Outcome: code-bug" requires a subject matching ^fix\\(',
+        message: '"Outcome: code-bug" requires a subject matching ^fix(\\(|:)',
         evidence: 'updated the cache logic',
       },
     ]);
@@ -205,6 +205,31 @@ describe('commitGate subject↔Outcome implications', () => {
     expect(result).toEqual({ status: 'ok', value: { ok: true, violations: [] } });
   });
 
+  test('Outcome: code-bug with an UNSCOPED fix: subject also passes (implication accepts both forms)', async () => {
+    const result = await commitGate({
+      message: messageOf('fix: handle an empty config object', [
+        'Confidence: 0.95',
+        'Tested: vitest',
+        'Outcome: code-bug',
+      ]),
+    });
+    expect(result).toEqual({ status: 'ok', value: { ok: true, violations: [] } });
+  });
+
+  test('a present Not-tested trailer violates nothing (optional rule, satisfied)', async () => {
+    const result = await commitGate({
+      message: messageOf('chore(test): todo: retire the flaky eviction case', [
+        'Confidence: 0.7',
+        'Not-tested: covered by the e2e suite',
+        'Outcome: todo',
+      ]),
+    });
+    if (result.status !== 'ok') {
+      throw new Error('unreachable');
+    }
+    expect(result.value.violations.map((v) => v.rule)).toEqual(['Tested']);
+  });
+
   test('a missing Outcome never triggers implications (the missing-trailer violation already fired)', async () => {
     const result = await commitGate({
       message: messageOf('fix(app): something', ['Confidence: 0.9', 'Tested: vitest']),
@@ -243,6 +268,43 @@ describe('commitGate trailer-block parsing', () => {
       throw new Error('unreachable');
     }
     expect(result.value.violations.map((v) => v.rule)).toEqual(['Confidence', 'Tested', 'Outcome']);
+  });
+
+  test('indented continuation lines fold into the previous trailer value (no false missing)', async () => {
+    const result = await commitGate({
+      message: [
+        'fix(test): re-baseline the eviction suite',
+        '',
+        'Notes: audited the new clock skew tolerance',
+        '  line-by-line against the TTL table',
+        'Confidence: 0.9',
+        '',
+      ].join('\n'),
+      config: {
+        trailers: [
+          { name: 'Notes', required: true, pattern: '^audited the new clock skew tolerance\\nline-by-line against the TTL table$' },
+          { name: 'Confidence', required: true, pattern: '^[0-9]+(\\.[0-9]+)?$' },
+        ],
+      },
+    });
+    expect(result).toEqual({ status: 'ok', value: { ok: true, violations: [] } });
+  });
+
+  test('a folded trailer against the default value patterns is a value violation, NOT a missing one', async () => {
+    const result = await commitGate({
+      message: messageOf('fix(test): re-baseline the eviction suite', [
+        'Confidence: 0.9',
+        '  audited by hand against the fixtures',
+        'Tested: vitest',
+        'Outcome: code-bug',
+      ]),
+    });
+    if (result.status !== 'ok') {
+      throw new Error('unreachable');
+    }
+    expect(result.value.violations.map((v) => [v.rule, v.message])).toEqual([
+      ['Confidence', '"Confidence" value does not match the required pattern'],
+    ]);
   });
 
   test('a subject-only message has no trailer block (the subject paragraph is never trailers)', async () => {

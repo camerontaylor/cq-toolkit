@@ -31,6 +31,7 @@ describe('HackDetectorInputSchema (full input, and only it)', () => {
       testFilePatterns: ['\\.spec\\.[tj]sx?$'],
       detectDeletedTests: true,
       detectNewSkipOnly: false,
+      skipOnlyPattern: '\\b(describe|it|test)\\s*\\.\\s*(skip|only)\\b',
       detectTautologies: true,
     },
   };
@@ -74,6 +75,15 @@ describe('HackDetectorInputSchema (full input, and only it)', () => {
     expect(
       HackDetectorInputSchema.safeParse({ diff: '', tamper: { detectDeletedTests: 'yes' } }).success,
     ).toBe(false);
+  });
+
+  test('rejects empty regex-source strings (an empty pattern matches everything vacuously)', () => {
+    expect(HackDetectorInputSchema.safeParse({ diff: '', tamper: { skipOnlyPattern: '' } }).success).toBe(
+      false,
+    );
+    expect(HackDetectorInputSchema.safeParse({ diff: '', tamper: { testFilePatterns: [''] } }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -129,6 +139,31 @@ describe('CommitGateInputSchema (full input, and only it)', () => {
       CommitGateInputSchema.safeParse({
         ...VALID,
         config: { ...VALID.config, trailers: [{ required: true }] },
+      }).success,
+    ).toBe(false);
+  });
+
+  test('rejects empty regex-source strings (an empty pattern matches everything vacuously)', () => {
+    expect(
+      CommitGateInputSchema.safeParse({ ...VALID, config: { ...VALID.config, subjectPattern: '' } })
+        .success,
+    ).toBe(false);
+    expect(
+      CommitGateInputSchema.safeParse({
+        ...VALID,
+        config: {
+          ...VALID.config,
+          trailers: [{ name: 'Confidence', required: true, pattern: '' }],
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      CommitGateInputSchema.safeParse({
+        ...VALID,
+        config: {
+          ...VALID.config,
+          implications: [{ outcomeValue: 'todo', subjectPattern: '' }],
+        },
       }).success,
     ).toBe(false);
   });

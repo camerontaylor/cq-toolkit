@@ -144,6 +144,7 @@ export const HackDetectorInputSchema: z.ZodType<HackDetectorInput> = z
         testFilePatterns: z.array(z.string().min(1)).optional(),
         detectDeletedTests: z.boolean().optional(),
         detectNewSkipOnly: z.boolean().optional(),
+        skipOnlyPattern: z.string().min(1).optional(),
         detectTautologies: z.boolean().optional(),
       })
       .strict()
@@ -153,16 +154,18 @@ export const HackDetectorInputSchema: z.ZodType<HackDetectorInput> = z
 
 /**
  * Registry-time mirror of {@link CommitGateInput}: the full input, and
- * only it. Like the tamper config, convention regex sources validate as
- * strings only; the shipped default taxonomy lives in the commitGate
- * module and is applied by the op, not duplicated here.
+ * only it. Regex-source fields are `.min(1)` — an empty pattern source
+ * compiles and matches EVERYTHING vacuously, so it is rejected here as
+ * config noise, not silently enforced as a rule that always fires. The
+ * shipped default taxonomy lives in the commitGate module and is applied
+ * by the op, not duplicated here.
  */
 export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
   .object({
     message: z.string(),
     config: z
       .object({
-        subjectPattern: z.string().optional(),
+        subjectPattern: z.string().min(1).optional(),
         requireSubject: z.boolean().optional(),
         trailers: z
           .array(
@@ -171,7 +174,7 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
                 name: z.string().min(1),
                 required: z.boolean().optional(),
                 oneOf: z.array(z.string()).optional(),
-                pattern: z.string().optional(),
+                pattern: z.string().min(1).optional(),
               })
               .strict(),
           )
@@ -180,7 +183,7 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
         implications: z
           .array(
             z
-              .object({ outcomeValue: z.string(), subjectPattern: z.string() })
+              .object({ outcomeValue: z.string(), subjectPattern: z.string().min(1) })
               .strict(),
           )
           .optional(),
