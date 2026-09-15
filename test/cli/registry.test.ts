@@ -323,6 +323,53 @@ describe('registry integrity defects reject loudly', () => {
     await expect(list({ opsRoot: tmp })).rejects.toThrow(/'--weird'/);
   });
 
+  test('a non-strict object behind a WRAPPER rejects at scan (review-debt #82)', async () => {
+    // The def-walk unwraps optional/nullable/default/catch/readonly (and a
+    // pipe's IN side) to the object they hide, so a strip-mode object can
+    // no longer bypass the strictness enforcement by hiding behind a
+    // wrapper — the exact silent-strip hole the convention exists to close.
+    const tmp = await makeTmpOpsRoot('cq-registry-wrapped-');
+    await mkdir(join(tmp, 'wrapfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'wrapfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'wrapped-strip', inputSchema: z.object({ a: z.string() }).optional(), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        "  { name: 'nullish-strip', inputSchema: z.object({ a: z.string() }).nullish(), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        "  { name: 'caught-strip', inputSchema: z.object({ a: z.string() }).strict().catch({ a: 'x' }), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/must be \.strict\(\)/);
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/wrapped-strip/);
+  });
+
+  test('a STRICT object behind wrappers scans clean — the unwrapping never over-rejects (review-debt #82)', async () => {
+    const tmp = await makeTmpOpsRoot('cq-registry-wrapped-ok-');
+    await mkdir(join(tmp, 'wrapok'), { recursive: true });
+    await writeFile(
+      join(tmp, 'wrapok', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'wrapped-strict', inputSchema: z.object({ a: z.string() }).strict().optional(), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        "  { name: 'nullish-strict', inputSchema: z.object({ a: z.string() }).strict().nullish(), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        "  { name: 'readonly-strict', inputSchema: z.object({ a: z.string() }).strict().readonly(), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        "  { name: 'caught-strict', inputSchema: z.object({ a: z.string() }).strict().catch({ a: 'x' }), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    await expect(list({ opsRoot: tmp })).resolves.toMatchObject([
+      { name: 'wrapped-strict' },
+      { name: 'nullish-strict' },
+      { name: 'readonly-strict' },
+      { name: 'caught-strict' },
+    ]);
+  });
+
   test('a non-strict object inputSchema (default z.object, no .strict()) rejects at scan', async () => {
     // The convention makes unknown-key rejection LOAD-BEARING (a typo'd flag
     // must exit 2, not be silently stripped), so a shape-bearing object

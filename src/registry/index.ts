@@ -158,6 +158,26 @@ function isAbsentFamilyRegistry(err: unknown, target: string): boolean {
   );
 }
 
+/**
+ * Walk wrapper schemas down to the object they hide (review-debt #82):
+ * optional/nullable/default/prefault/catch/readonly carry `innerType` on
+ * the def, pipes carry their IN side as `in`. Bounded (a pathological
+ * self-referential def cannot loop forever); stops at the first schema
+ * without an inner — an object, or a shape-less schema the gate leaves
+ * unjudged.
+ */
+function unwrapToObjectSchema(schema: unknown): unknown {
+  let current = schema;
+  for (let depth = 0; depth < 10; depth++) {
+    const def = (current as { def?: { innerType?: unknown; in?: unknown } } | undefined)?.def;
+    if (def === undefined) return current;
+    const inner = def.innerType ?? def.in;
+    if (inner === undefined) return current;
+    current = inner;
+  }
+  return current;
+}
+
 /** One directory scan + lazy family-registry imports, per resolved root. */
 async function scanOps(
   root: string,
@@ -282,8 +302,19 @@ async function scanOps(
       // could never receive it through its subcommand. Enforced at
       // registration time for schemas that expose a structural `.shape`
       // (same idiom as the CLI's help rendering); dynamic zod compositions
-      // without a usable shape are unaffected.
-      const shape = (e.inputSchema as { shape?: unknown }).shape;
+      // without a usable shape are unaffected. The schema is UNWRAPPED
+      // first (review-debt #82): the common wrappers — .optional()/
+      // .nullable()/nullish, .default()/.prefault(), .catch(), .readonly(),
+      // and a pipe's IN side — all carry their inner schema on the def
+      // (innerType, or `in` for pipes), so a bounded def-walk exposes the
+      // object a wrapper hides. Without it, `z.object({...}).optional()`
+      // bypassed the strictness enforcement entirely (unknown flags
+      // silently stripped for such entries) — exactly the loss the
+      // convention exists to prevent. A pipe THROUGH a transform (string
+      // in, object out) cannot be statically judged and stays unjudged,
+      // like every other shape-less schema.
+      const unwrapped = unwrapToObjectSchema(e.inputSchema);
+      const shape = (unwrapped as { shape?: unknown }).shape;
       if (typeof shape === 'object' && shape !== null && !Array.isArray(shape)) {
         for (const key of Object.keys(shape)) {
           if (key === 'json' || key === 'help' || key === 'h') {
@@ -303,13 +334,13 @@ async function scanOps(
         // schema, default (strip-mode) objects leave it undefined, and
         // `.loose()`/`.passthrough()` set `unknown` (unknown keys pass, so
         // non-strict too). Refinements (`.refine`/`.superRefine`) mutate the
-        // SAME ZodObject def, so the marker stays visible through them.
-        // Known limitation (left unjudged, not guessed at): wrapper schemas
-        // (`z.object({...}).strict().optional()`, `.default()`, `.pipe()`,
-        // `.catch()`, `.readonly()`) hide the object def entirely, and
+        // SAME ZodObject def, so the marker stays visible through them —
+        // and through WRAPPERS too, since the check runs on the unwrapped
+        // schema (review-debt #82). Still unjudged, deliberately: pipes
+        // through transforms (the object sits on a pipe's OUT side) and
         // non-object schemas (string, array, record, union) expose no
-        // `shape` — a non-strict object behind a wrapper passes this gate.
-        const def = (e.inputSchema as { def?: { type?: unknown; catchall?: { def?: { type?: unknown } } } })
+        // `shape` — there is nothing to judge.
+        const def = (unwrapped as { def?: { type?: unknown; catchall?: { def?: { type?: unknown } } } })
           .def;
         if (def?.type === 'object') {
           const catchallType = def.catchall?.def?.type;
