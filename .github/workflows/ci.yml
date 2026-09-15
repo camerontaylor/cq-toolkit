@@ -43,3 +43,34 @@ jobs:
       # deliberate, boring-safe choice.
       - name: Build
         run: npm run build
+
+  # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
+  # FROM SOURCE — the built artifact drives a real governed plan (two jobs
+  # through the subprocess driver and the fake agent CLI fixture) and the
+  # script asserts the report shape, the journal evidence, and the I1 output
+  # contract. A companion job, not a required check: REQUIRED_WORKFLOW_CHECKS
+  # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static},
+  # so this job's presence cannot dangle a branch-protection wait.
+  from-source:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # The smoke imports the BUILT barrel (dist/index.js) — emitting dist/
+      # is the from-source point, so build runs unconditionally here (the
+      # static job's build above is its own job's emit gate).
+      - name: Build
+        run: npm run build
+      - name: From-source smoke (real governed plan through dist/)
+        run: node scripts/smoke-run-plan.mjs

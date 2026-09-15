@@ -1,0 +1,82 @@
+# The LIVE drivers wiring — T1.7 slice 3 (the live-CI legs' only home).
+#
+# Runs the opt-in LIVE legs against real provider endpoints, MANUAL DISPATCH
+# ONLY (never on pull_request, never on push — a live run spends real money
+# and needs secrets, so nothing automatic may fire it):
+#
+#   1. The live ai-sdk vitest leg (test/driver/ai-sdk.test.ts's
+#      `describe.skipIf(!LIVE_DRIVERS)` block) — the deepseek leg ONLY (see
+#      the step's comment for why anthropic is not wired).
+#   2. The eval-axes demo's ai-sdk cells (scripts/demo-eval-axes.mjs
+#      --only ai-sdk — both providers' ai-sdk lane; the claude-agent /
+#      subprocess / acp cells need the vendor CLIs, which a hosted runner
+#      does not have, so they are not wired here either).
+#   3. The DD-1 abort spike's ai-sdk lane (scripts/dd1-abort-spike.mjs
+#      --lane ai-sdk — the measured abort-vs-spend evidence run).
+#
+# SECRETS: this file carries NAMES only. The values arrive as repo Actions
+# secrets (Z_AI_API_KEY, DEEPSEEK_API_KEY — the scripts map/rename in-process
+# and never print a value). As of 2026-09-15 the repo has none of these
+# configured yet; until they land, a dispatch fails at the scripts' own
+# credential gates (`… refusing to run`) — fail LOUDLY by design, never a
+# silent skip. Spend discipline: every leg caps itself (Budget.maxUsd 2 /
+# maxTokens, MAX_ATTEMPTS, the governed wall clock); the demo and spike are
+# the same bounded scripts the executor ran locally per the T1.6 keys rule.
+name: live-drivers
+
+on:
+  workflow_dispatch:
+
+# One live run at a time: a second dispatch queues behind the in-flight one
+# (cancel-in-progress: false — cancelling a live run still spends its
+# tokens; queueing avoids duplicated paid work). Fixed group, not per-ref:
+# this workflow never fires on PRs, so there is nothing per-ref to isolate.
+concurrency:
+  group: live-drivers
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-drivers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Names only — the values live in the repo's Actions secrets.
+      Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
+      DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # The demo and the spike import the BUILT barrel (dist/index.js).
+      - name: Build
+        run: npm run build
+      # The live describe's legs are (anthropic, deepseek). The ANTHROPIC leg
+      # needs a native ANTHROPIC_API_KEY — a key the operating regime
+      # deliberately does not hold (owner's keys rule, 2026-09-14: Claude
+      # lanes run against Z.AI's anthropic-compat endpoint through the
+      # claude-agent/subprocess/acp drivers, which READ a base-URL env; the
+      # in-process @ai-sdk/anthropic provider does not). Running it here
+      # would spend against api.anthropic.com with a wrong key, so the -t
+      # filter selects the deepseek leg only; the leg itself refuses loudly
+      # when DEEPSEEK_API_KEY is unset (never a silent skip).
+      - name: Live ai-sdk vitest leg (deepseek)
+        env:
+          LIVE_DRIVERS: '1'
+        run: npm test -- test/driver/ai-sdk.test.ts -t deepseek
+      - name: Eval-axes demo — the ai-sdk cells (zai + deepseek)
+        run: node scripts/demo-eval-axes.mjs --only ai-sdk
+      - name: DD-1 abort spike — the ai-sdk lane
+        run: node scripts/dd1-abort-spike.mjs --lane ai-sdk

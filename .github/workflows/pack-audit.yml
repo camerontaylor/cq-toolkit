@@ -1,0 +1,132 @@
+# The pack audit — T1.7 (ws-k stage 1 + the "Tarball audit" acceptance check;
+# the release-time run of the same mechanism is T5.1's publication checklist).
+#
+# `npm pack` the package, untar the tarball into a temp dir OUTSIDE the
+# checkout, and audit it two ways:
+#   1. PATH ALLOWLIST: every tarball path hangs off exactly the `files`
+#      allowlist roots of package.json (dist, policy, LICENSE, README.md —
+#      package.json itself always rides along). The shipped artifacts must
+#      include dist/index.js (the exports main) and policy/denylist/
+#      patterns.yml (the denylist config the scan consumes); test/, scripts/,
+#      and src/ must appear NOWHERE in the tarball.
+#   2. DENYLIST SCAN over the unpacked tree: the repo's scripts/denylist-scan
+#      resolves its root from its own location (<root>/scripts/denylist-scan),
+#      so the audit copies it into the unpacked tree at that relative path
+#      and runs it FROM the unpacked root — the scan then consumes the
+#      TARBALL'S OWN policy/denylist/patterns.yml (its absence or corruption
+#      fails the audit too) and gitleaks-scans the shipped bytes.
+#
+# Trigger note (I4 posture): this workflow is not a required check, but its
+# `on:` block is deliberately simple and UNFILTERED — pull_request +
+# workflow_dispatch, no path/branch filters — so the denylist sanity check
+# parses it and the audit runs on every PR regardless of touched files.
+name: pack-audit
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Superseded PR audits cancel: a newer commit on the same ref makes an
+# older run's verdict moot, and the audit is free to re-run. Per-ref group —
+# different PRs never cancel each other. Note this is run serialization, not
+# a trigger filter: the unfiltered `on:` block above (the I4 posture) is
+# untouched.
+concurrency:
+  group: pack-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pack-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build
+        run: npm run build
+      # The tarball + the unpacked tree live in RUNNER_TEMP, never inside
+      # the checkout, so the audit cannot mistake workspace state for
+      # tarball content.
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pack"
+          npm pack --pack-destination "${RUNNER_TEMP}/pack"
+          echo "TARBALL=$(ls "${RUNNER_TEMP}/pack"/*.tgz)" >> "${GITHUB_ENV}"
+      - name: Untar
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/unpacked"
+          tar -xzf "${TARBALL}" -C "${RUNNER_TEMP}/unpacked"
+      - name: Assert the tarball carries only the files-allowlisted paths
+        run: |
+          set -euo pipefail
+          # Every path (the npm `package/` root stripped) must hang off one
+          # of the package.json `files` roots (+ package.json itself, which
+          # npm always includes). Anything else — test/, scripts/, src/, a
+          # stray dotfile — is a violation.
+          allowlist='^(package\.json|README\.md|LICENSE|dist|policy)(/.*)?$'
+          # The listing is captured ONCE: a `tar | grep -qx` pipeline closes
+          # the pipe on grep's first match, SIGPIPEs tar (exit 141), and
+          # pipefail then fails the assertion even on a match.
+          listing="$(mktemp)"
+          tar -tzf "${TARBALL}" > "${listing}"
+          violations="$(sed 's|^package/||' "${listing}" | sed '/^$/d' | grep -vE "${allowlist}" || true)"
+          if [ -n "${violations}" ]; then
+            echo "tarball carries paths outside the package.json files allowlist:"
+            echo "${violations}"
+            exit 1
+          fi
+          # The two load-bearing artifacts must actually ship.
+          grep -qx 'package/dist/index.js' "${listing}" \
+            || { echo 'dist/index.js (the exports main) is missing from the tarball'; exit 1; }
+          grep -qx 'package/policy/denylist/patterns.yml' "${listing}" \
+            || { echo 'policy/denylist/patterns.yml is missing from the tarball'; exit 1; }
+          rm -f "${listing}"
+          echo 'tarball paths: only dist/, policy/, LICENSE, README.md, package.json'
+      - name: Install pinned gitleaks v8.30.1 (digest-pinned)
+        run: |
+          set -euo pipefail
+          cd "${RUNNER_TEMP:-/tmp}"
+          tarball="gitleaks_8.30.1_linux_x64.tar.gz"
+          # sha256 of the v8.30.1 linux_x64 release tarball, pinned here so a
+          # replaced release asset cannot substitute a different binary; the
+          # version is pinned the same way.
+          digest="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          curl -fsSL -o "${tarball}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/${tarball}"
+          echo "${digest}  ${tarball}" | sha256sum -c -
+          tar -xzf "${tarball}" gitleaks
+          sudo install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Denylist scan over the unpacked tree (the tarball's own patterns.yml)
+        env:
+          # The scanner's tree allowlist exempts dist/ as repo-tree build
+          # output; here the unpacked dist/ IS the payload, so this opt-in
+          # drops that entry from the generated config and gitleaks-scans
+          # the shipped bytes — the audit's whole point.
+          DENYLIST_SCAN_NO_DIST_ALLOWLIST: '1'
+        run: |
+          set -euo pipefail
+          # The scanner resolves its root from its own location; the tarball
+          # does not ship scripts/, so the copy lands it at the expected
+          # relative path and the scan runs FROM the unpacked root. The
+          # `type: commonjs` marker rides along: the scanner is require-based,
+          # and the tarball root's own package.json is `type: module`.
+          mkdir -p "${RUNNER_TEMP}/unpacked/package/scripts"
+          cp scripts/denylist-scan scripts/package.json "${RUNNER_TEMP}/unpacked/package/scripts/"
+          cd "${RUNNER_TEMP}/unpacked/package"
+          ./scripts/denylist-scan
