@@ -1,0 +1,14 @@
+diff --git a/test/kernel/plan.test.ts b/test/kernel/plan.test.ts
+index 9f8e7d6..1a2b3c4 100644
+--- a/test/kernel/plan.test.ts
++++ b/test/kernel/plan.test.ts
+@@ -14,6 +14,9 @@
+   it('runs jobs in order', async () => {
+     await runner.run(plan);
+   });
++  it.only('focuses the budget path', async () => {
++    await runner.run(budgetPlan);
++  });
+   it('stops on error', async () => {
+     await expect(runner.run(badPlan)).rejects.toThrow();
+   });

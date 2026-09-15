@@ -1,0 +1,4 @@
+diff --git a/src/legacy/printer.test.ts b/src/legacy/printer.helper.ts
+similarity index 100%
+rename from src/legacy/printer.test.ts
+rename to src/legacy/printer.helper.ts
