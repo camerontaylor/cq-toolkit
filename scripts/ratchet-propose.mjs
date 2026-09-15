@@ -35,6 +35,7 @@ import {
   runCoverageRaw,
   runTypecheckRaw,
   typecheckEvidence,
+  upsertProposalPr,
   withGitAskpass,
 } from './ratchet-lib.mjs';
 
@@ -234,7 +235,12 @@ const effects = {
     await withGitAskpass(token, async (gitEnv) => {
       const cred = ['-c', 'credential.helper='];
       runGit([...cred, 'fetch', 'origin', base], { env: gitEnv });
-      const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`], { env: gitEnv }).stdout.trim();
+      // Missing-ref probes are ALLOWED to fail: `rev-parse --verify --quiet`
+      // exits nonzero with empty stdout exactly when the ref does not exist —
+      // the fresh-checkout case for the local head, and the FIRST-push case
+      // for the remote-tracking ref. An absent ref is the create/plain-push
+      // path, never an error (PR-105 round-2 finding 3).
+      const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`], { allowFail: true, env: gitEnv }).stdout.trim();
       if (localHead !== '') {
         runGit(['checkout', head]); // reuse: idempotent re-run keeps its history
       } else {
@@ -259,9 +265,10 @@ const effects = {
         );
       }
       // Lease push: a TRUE lease against the remote head when it exists
-      // (idempotent re-push), a plain create when it does not.
+      // (idempotent re-push), a plain create when it does not (first push —
+      // the tracking ref probe below fails on exactly that).
       runGit([...cred, 'fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], { allowFail: true, env: gitEnv });
-      const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`], { env: gitEnv }).stdout.trim();
+      const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`], { allowFail: true, env: gitEnv }).stdout.trim();
       if (expected !== '') {
         runGit([...cred, 'push', `--force-with-lease=refs/heads/${head}:${expected}`, 'origin', `${head}:refs/heads/${head}`], { env: gitEnv });
       } else {
@@ -280,15 +287,33 @@ const effects = {
         );
       }
     });
-    if (existing.length > 0) {
-      const n = existing[0].number;
-      runGh(['pr', 'edit', String(n), '--title', title, '--body', body]);
-      return { created: false, number: n, url: existing[0].url };
+    // Edit-then-create with recovery (upsertProposalPr): a PR found open can
+    // be closed/merged between the list and the edit — a FAILED edit falls
+    // back to a FRESH proposal PR (created: true, failure narrated at the
+    // moment it happened), never an indeterminate surfacing.
+    let fresh = null;
+    const upsert = await upsertProposalPr({
+      existing: existing.length > 0 ? { number: existing[0].number, url: existing[0].url } : null,
+      edit: async () => {
+        runGh(['pr', 'edit', String(existing[0].number), '--title', title, '--body', body]);
+      },
+      create: async () => {
+        const out = runGh(['pr', 'create', '--base', base, '--head', head, '--title', title, '--body', body]);
+        const url = out.trim().split('\n').filter((l) => l.startsWith('http')).pop() ?? null;
+        const m = /\/pull\/(\d+)/.exec(url ?? '');
+        fresh = { number: m === null ? null : Number(m[1]), url };
+      },
+    });
+    if (upsert.recovered) {
+      console.error(
+        'ratchet-propose: note — outcome is a NEW proposal PR after the edit failure; ' +
+          'the reported number/url are the fresh PR',
+      );
     }
-    const out = runGh(['pr', 'create', '--base', base, '--head', head, '--title', title, '--body', body]);
-    const url = out.trim().split('\n').filter((l) => l.startsWith('http')).pop() ?? null;
-    const m = /\/pull\/(\d+)/.exec(url ?? '');
-    return { created: true, number: m === null ? null : Number(m[1]), url };
+    if (upsert.created === false) {
+      return { created: false, number: existing[0].number, url: existing[0].url };
+    }
+    return { created: true, number: fresh === null ? null : fresh.number, url: fresh === null ? null : fresh.url };
   },
 };
 

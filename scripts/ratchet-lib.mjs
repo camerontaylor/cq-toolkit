@@ -265,12 +265,19 @@ export function normalizeCoverageSummary(summary) {
   return summary;
 }
 
-// The diff-side twin of normalizeCoverageSummary's granularity law. The
-// value-token shape mirrors the engine guard's own VALUE_RE (monotonicGuard)
-// exactly — strict JSON number, terminator lookahead — so normalization can
-// only ever rewrite a token the guard would read.
+// The diff-side twin of normalizeCoverageSummary's granularity law — and it
+// applies to COVERAGE baselines ONLY: integer-pct is the coverage reading's
+// granularity (normalizeCoverageSummary rounds the live reading the same
+// way), so only a fractional COVERAGE baseline is normalized on the diff
+// side. A fractional NON-coverage metric (complexity avg-cx lives at 2
+// decimals) must pass through untouched — normalizing it would round
+// `2.40 → 2.49` into an equal no-op and MASK a real loosening; complexity's
+// meaningful step is far below 1. The value-token shape mirrors the engine
+// guard's own VALUE_RE (monotonicGuard) exactly — strict JSON number,
+// terminator lookahead — so normalization can only ever rewrite a token the
+// guard would read.
 const DIFF_VALUE_TOKEN = /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
-const BASELINE_SECTION_PATH = /^baselines\/.+\.json$/;
+const COVERAGE_BASELINE_SECTION = /^baselines\/coverage/;
 const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
 
 /** Path after a `+++ `/`--- ` header, prefix- and timestamp-stripped; null for /dev/null. */
@@ -285,18 +292,25 @@ function diffHeaderPath(line) {
 }
 
 /**
- * Uniform comparison basis for the diff-mode guard: rewrite every
- * `"value": <non-integer>` token to the SAME integer normalization the live
- * readings use (Math.round), on every `-`/`+`/context line inside
- * baselines/*.json sections only.
+ * Uniform comparison basis for the diff-mode guard — COVERAGE baselines
+ * only: rewrite every `"value": <non-integer>` token to the SAME integer
+ * normalization the live coverage readings use (Math.round), on every
+ * `-`/`+`/context line inside baselines/coverage* sections only.
  *
  * Rationale: a baseline and a reading must be compared in the SAME
- * granularity. Readings are integer-pct (normalizeCoverageSummary), so a
- * fractional committed baseline would be judged against a differently-scaled
- * number — the re-basis hunk `93.46 → 93` must read as the no-op it is
- * (both sides normalize to 93: equal passes), while a TRUE loosening
- * (`93 → 92`) still fails and a genuine tighten in fractional clothing
- * (`92.4 → 93`, old side normalizes to 92) still passes as a tighten.
+ * granularity, and integer-pct is the COVERAGE reading's granularity
+ * (normalizeCoverageSummary) — a fractional committed coverage baseline
+ * would be judged against a differently-scaled number. The re-basis hunk
+ * `93.46 → 93` must read as the no-op it is (both sides normalize to 93:
+ * equal passes), while a TRUE loosening (`93 → 92`) still fails and a
+ * genuine tighten in fractional clothing (`92.4 → 93`, old side normalizes
+ * to 92) still passes as a tighten.
+ *
+ * SCOPE IS DELIBERATELY NARROW (PR-105 round-2 finding 4): other metrics'
+ * granularity is their own — complexity avg-cx lives at 2 decimals, where
+ * `2.40 → 2.49` is a REAL change, not noise — so their sections pass through
+ * byte-identical and the guard judges them at full precision. Normalizing
+ * them would round the loosening into an equal no-op and mask it.
  *
  * This is a symmetric COMPARISON-BASIS normalization applied to both diff
  * sides alike — never a guard exception: it cannot flip a loosening into a
@@ -310,18 +324,18 @@ function diffHeaderPath(line) {
  */
 export function normalizeBaselineDiffValues(diff) {
   const out = [];
-  let isBaselineSection = false;
+  let isCoverageSection = false;
   let inHunk = false;
   for (const line of String(diff).split('\n')) {
     if (line.startsWith('diff --git ')) {
-      isBaselineSection = false; // re-resolved by this section's own headers
+      isCoverageSection = false; // re-resolved by this section's own headers
       inHunk = false;
       out.push(line);
       continue;
     }
     if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
       const path = diffHeaderPath(line);
-      if (path !== null && BASELINE_SECTION_PATH.test(path)) isBaselineSection = true;
+      if (path !== null && COVERAGE_BASELINE_SECTION.test(path)) isCoverageSection = true;
       out.push(line);
       continue;
     }
@@ -330,7 +344,7 @@ export function normalizeBaselineDiffValues(diff) {
       out.push(line);
       continue;
     }
-    if (isBaselineSection && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
+    if (isCoverageSection && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
       out.push(
         line.replace(DIFF_VALUE_TOKEN, (_, head, num) => head + String(Math.round(Number(num)))),
       );
@@ -339,6 +353,31 @@ export function normalizeBaselineDiffValues(diff) {
     out.push(line);
   }
   return out.join('\n');
+}
+
+/**
+ * Edit-then-create recovery for the proposal upsert (PR-105 round-2 finding
+ * 5): an open-PR hit is edited in place, but a PR found open can be
+ * closed/merged between the list and the edit — a FAILED edit falls back to
+ * a FRESH create instead of surfacing indeterminate. The outcome reports the
+ * recovery honestly: `{ created, recovered }` where `recovered` is true only
+ * when an edit was attempted and failed before the fresh create (the driver
+ * has already narrated the failure at the moment it happened).
+ */
+export async function upsertProposalPr({ existing, edit, create }) {
+  if (existing !== null) {
+    try {
+      await edit();
+      return { created: false, recovered: false };
+    } catch (err) {
+      process.stderr.write(
+        `ratchet-propose: note — gh pr edit failed for PR #${existing.number} ` +
+          `(${err?.message ?? err}); creating a fresh proposal PR\n`,
+      );
+    }
+  }
+  await create();
+  return { created: true, recovered: existing !== null };
 }
 
 /**
