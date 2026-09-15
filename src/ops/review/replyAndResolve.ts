@@ -4,14 +4,16 @@
 //
 // The dispatch contract (each clause is load-bearing and pinned in
 // test/ops/review/replyAndResolve.test.ts):
-//   a. PUSH-BEFORE-POST: when opts.push is configured it runs FIRST and must
-//      exit 0 before ANY post is attempted — replies reference the pushed
-//      head, so a failed push must post nothing at all (a reply about a fix
-//      nobody can see is worse than no reply). A failed push returns
-//      pushed:false with an empty posted/failed and skips nothing — every
-//      action remains retriable on the next run — and carries `pushError`
-//      (code + stderr, ≤500 chars) so the caller can say WHY without a
-//      second run.
+//   a. PUSH-BEFORE-POST ORDERING (with dispatch replay — not atomicity):
+//      when opts.push is configured it runs FIRST and must exit 0 before
+//      ANY post is attempted — replies reference the pushed head, so a
+//      failed push must post nothing at all (a reply about a fix nobody
+//      can see is worse than no reply). A failed push returns pushed:false
+//      with an empty posted/failed and skips nothing — every action
+//      remains retriable on the next run — and carries `pushError` (code +
+//      stderr, ≤500 chars) so the caller can say WHY without a second run.
+//      NO ROLLBACK: a landed push is not undone on later failures — the
+//      guarantee is ordering + replay, never a two-phase commit.
 //   b. DEDUPE: the dispatch log is the cross-run memory. An action whose
 //      actionId is already recorded is skipped entirely (no duplicate post)
 //      and counted in skippedAlreadyDispatched. actionId is the dedupe key —
@@ -180,7 +182,8 @@ export interface ReplyAndResolveOpts {
   run: GhFn;
   /**
    * The branch push that must succeed BEFORE anything posts (push-before-
-   * post atomicity): `run` is a GhFn (often the same runner), `args` the
+   * post ORDERING — there is NO rollback: a landed push is not undone on
+   * later failures): `run` is a GhFn (often the same runner), `args` the
    * full composed argv (e.g. ['push','origin','refs/heads/branch']) — this
    * module only runs them and checks the exit code. Null/absent = no push
    * needed; posting starts immediately.
@@ -234,6 +237,12 @@ const pushFailureDetail = (code: number, stderr: string): string => {
 
 /** The only owner/repo spellings allowed near a gh REST path (E1 convention). */
 const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
+
+/** GH_NAME_OK plus the DOT-SEGMENT rule: "." and ".." pass the charset but
+ * ride into the request path as relative segments (`repos/../..`) — a repo
+ * spelled ".." is not a repo. Values containing "/" already fail the
+ * charset. */
+const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
 
 /**
  * The resolve mutation. COLLISION RULE: the document rides gh's
@@ -293,9 +302,9 @@ export async function replyAndResolve(
 ): Promise<ReplyAndResolveResult> {
   // Pre-flight validation (fail loud before ANY I/O — nothing pushed, nothing
   // posted, nothing recorded).
-  if (!GH_NAME_OK.test(opts.owner) || !GH_NAME_OK.test(opts.repo)) {
+  if (!ghNameOk(opts.owner) || !ghNameOk(opts.repo)) {
     throw new Error(
-      `replyAndResolve: owner/repo must match ${String(GH_NAME_OK)} — got owner ${JSON.stringify(opts.owner)}, repo ${JSON.stringify(opts.repo)}`,
+      `replyAndResolve: owner/repo must match ${String(GH_NAME_OK)} (never "." or "..") — got owner ${JSON.stringify(opts.owner)}, repo ${JSON.stringify(opts.repo)}`,
     );
   }
   if (!Number.isSafeInteger(opts.pr) || opts.pr <= 0) {
@@ -324,13 +333,15 @@ export async function replyAndResolve(
     }
   }
 
-  // (a) PUSH-BEFORE-POST: the push runs FIRST and gates EVERYTHING. Nonzero
-  // exit — or a seam-level rejection (the GhFn contract resolves, but a
-  // non-conforming injected runner may throw; either counts as a failed
-  // push) — posts nothing and attempts nothing: posted/failed stay empty
-  // and nothing is skipped, so every action remains retriable. pushError
-  // surfaces WHY (code + stderr / the throw message, ≤500 chars) — a failed
-  // push posts nothing, so this detail is the caller's only diagnostic.
+  // (a) PUSH-BEFORE-POST ORDERING: the push runs FIRST and gates EVERYTHING.
+  // Nonzero exit — or a seam-level rejection (the GhFn contract resolves,
+  // but a non-conforming injected runner may throw; either counts as a
+  // failed push) — posts nothing and attempts nothing: posted/failed stay
+  // empty and nothing is skipped, so every action remains retriable. There
+  // is NO rollback: once the push lands it stays landed, whatever fails
+  // later. pushError surfaces WHY (code + stderr / the throw message,
+  // ≤500 chars) — a failed push posts nothing, so this detail is the
+  // caller's only diagnostic.
   if (opts.push != null) {
     try {
       const pushResult = await opts.push.run(opts.push.args);

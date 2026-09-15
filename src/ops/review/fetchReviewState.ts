@@ -215,6 +215,11 @@ const REVIEW_STATES: readonly string[] = ['APPROVED', 'CHANGES_REQUESTED', 'COMM
 /** The only owner/repo spellings allowed near a gh REST path. */
 const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
 
+/** GH_NAME_OK plus the DOT-SEGMENT rule (mirrors replyAndResolve): "." and
+ * ".." pass the charset but ride into the request path as relative
+ * segments — a repo spelled ".." is not a repo. */
+const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
+
 const isKnownReviewState = (state: string | null): state is Exclude<ReviewSummary['state'], null> =>
   state !== null && REVIEW_STATES.includes(state);
 
@@ -344,9 +349,9 @@ export async function fetchReviewState(
   // owner/repo land inside gh REST paths and pr into both REST paths and
   // GraphQL variables; anything injection-adjacent is rejected before a
   // single argv is built.
-  if (!GH_NAME_OK.test(input.owner) || !GH_NAME_OK.test(input.repo)) {
+  if (!ghNameOk(input.owner) || !ghNameOk(input.repo)) {
     throw new Error(
-      `fetchReviewState: owner/repo must match ${String(GH_NAME_OK)} — got owner ${JSON.stringify(input.owner)}, repo ${JSON.stringify(input.repo)}`,
+      `fetchReviewState: owner/repo must match ${String(GH_NAME_OK)} (never "." or "..") — got owner ${JSON.stringify(input.owner)}, repo ${JSON.stringify(input.repo)}`,
     );
   }
   if (!Number.isSafeInteger(input.pr) || input.pr <= 0) {

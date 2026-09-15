@@ -49,7 +49,7 @@
 // rev-parse answers, `worktree add -B` moving the branch to FETCH_HEAD).
 // No spawned process, no real clocks (nowMs injected).
 import { describe, expect, test } from 'vitest';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileWorktreeRegistry, removePrWorktree, resolvePrWorktree } from '../../../src/ops/review/prWorktree.js';
@@ -861,6 +861,32 @@ describe('fileWorktreeRegistry', () => {
       await expect(fileWorktreeRegistry(path).load()).rejects.toThrow(/corrupt/);
       await writeFile(path, '[]', 'utf8');
       await expect(fileWorktreeRegistry(path).load()).rejects.toThrow(/corrupt/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('save is ATOMIC (write tmp + rename): interleaved save/load cycles always leave parseable content', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    try {
+      const path = join(dir, 'worktrees.json');
+      const registry = fileWorktreeRegistry(path);
+      // Interleave loads (including ones racing the save) with saves; after
+      // EVERY cycle the on-disk registry must parse as a JSON object — an
+      // interrupted in-place rewrite would leave partial JSON here and the
+      // next load would throw corrupt.
+      for (let cycle = 0; cycle < 15; cycle++) {
+        const map: RegistryMap = {
+          '7': { path: `/repo/.cq-review-worktrees/pr-7-${cycle}`, branch: BRANCH, createdAt: NOW + cycle },
+        };
+        await Promise.all([registry.load(), registry.save(map), registry.load()]);
+        const onDisk: unknown = JSON.parse(await readFile(path, 'utf8'));
+        expect(onDisk).toHaveProperty('7');
+      }
+      // A FRESH registry instance sees the last save (the rename replaced
+      // the file, nothing was lost between cycles).
+      const final = await fileWorktreeRegistry(path).load();
+      expect(final['7']?.path).toBe('/repo/.cq-review-worktrees/pr-7-14');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -132,8 +132,11 @@ export const defaultClassifyConfig: ClassifyConfig = {
     // verdict ("CodeRabbit is skipping this PR", "Codex: not reviewing
     // until CI settles") — identity-anchored, on EVERY line (`m`), so a
     // human's "I'm not reviewing the migrations this pass, but …" is never
-    // eaten.
-    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
+    // eaten. The `(?!-)` guard after the identity mirrors its siblings — a
+    // hyphenated tool-name MENTION ("Codex-style tooling is not reviewing
+    // generated files correctly") is a human's sentence, not the tool
+    // speaking.
+    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b(?!-)[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
   ],
   responderIs: 'pr-author',
   // Unknown timestamp = brand-new for ordering purposes: an un-timestamped

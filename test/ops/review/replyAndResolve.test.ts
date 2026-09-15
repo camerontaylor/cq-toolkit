@@ -1,10 +1,11 @@
 // E3 slice 1 — tests for replyAndResolve (src/ops/review/replyAndResolve.ts).
 //
 // Pinned here (the module doc's contract clauses, each mapped to a test):
-//   a. PUSH-BEFORE-POST: a nonzero push exit posts NOTHING (no POST/graphql
-//      argv ever runs), returns pushed=false with empty posted/failed and
-//      zero skips — every action stays retriable; pushError carries the
-//      code + stderr (≤500 chars); a seam-level push throw fails closed
+//   a. PUSH-BEFORE-POST ORDERING (no rollback — a landed push stays
+//      landed): a nonzero push exit posts NOTHING (no POST/graphql argv
+//      ever runs), returns pushed=false with empty posted/failed and zero
+//      skips — every action stays retriable; pushError carries the code +
+//      stderr (≤500 chars); a seam-level push throw fails closed
 //      identically, with the throw message as pushError.
 //   b. DEDUPE: an actionId already in the dispatch log skips entirely — no
 //      invocation, counted in skippedAlreadyDispatched (cross-run AND
@@ -152,7 +153,7 @@ const pushRun = (calls: string[][], code = 0): GhFn => async (args: string[]) =>
 };
 
 // ---------------------------------------------------------------------------
-// a. PUSH-BEFORE-POST
+// a. PUSH-BEFORE-POST ORDERING (no rollback)
 // ---------------------------------------------------------------------------
 
 describe('push-before-post', () => {
@@ -651,6 +652,8 @@ describe('pre-flight validation', () => {
   test.each([
     ['bad owner', { ...REPO, owner: '../evil' }, [mkReply('r1', 1201)]],
     ['bad repo', { ...REPO, repo: 'bad repo' }, [mkReply('r1', 1201)]],
+    ['dot owner (dot segment into the request path)', { ...REPO, owner: '.' }, [mkReply('r1', 1201)]],
+    ['dotdot repo (dot segment into the request path)', { ...REPO, repo: '..' }, [mkReply('r1', 1201)]],
     ['bad pr', { ...REPO, pr: 0 }, [mkReply('r1', 1201)]],
     ['empty actionId', REPO, [mkReply('', 1201)]],
     ['bad threadRootRestId', REPO, [mkReply('r1', 0)]],

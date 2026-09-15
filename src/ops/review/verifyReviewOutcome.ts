@@ -46,13 +46,16 @@
 //     to non-array entries) is neither shape and THROWS — flat() would
 //     silently drop the pages.
 //   - Resolution state is the ONE field REST cannot give us, so it comes
-//     from a single GraphQL query — first page only (reviewThreads(first:
-//     100)). The 100-thread cap is acceptable for verify's purpose: commit
-//     and comment signals are REST and uncapped, progress needs ANY ONE
-//     signal, and the full-fidelity path remains E1's fetch lane. THE
-//     COLLISION RULE (I11 trap): the document rides `-f query=`, so no
-//     GraphQL variable may be named `query` (the variables are owner/name/
-//     pr, exactly as in fetchReviewState).
+//     from a PAGINATED GraphQL walk: reviewThreads(first: 100, after:
+//     $threadsCursor), advancing on pageInfo.endCursor until hasNextPage
+//     is false (like E1's fetch loops — the loop terminates on pageInfo,
+//     never on a counter). NO artificial cap: verify's evidence must not
+//     be page-limited, because a resolved thread hiding beyond page 1
+//     would read as "not resolved" — under-seeing is exactly the
+//     anti-hallucination direction that must not happen. Thread counts
+//     are bounded in practice. THE COLLISION RULE (I11 trap): the
+//     document rides `-f query=`, so no GraphQL variable may be named
+//     `query` (the variables are owner/name/pr/threadsCursor).
 //   - Any fetch that cannot produce a trustworthy snapshot (server-side
 //     GraphQL errors, missing payload pieces, non-array or MIXED REST
 //     payloads, a PR object without a usable head sha, comment entries
@@ -112,17 +115,25 @@ export interface SnapshotPrStateOpts {
 /** The only owner/repo spellings allowed near a gh REST path (E1 convention). */
 const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
 
+/** GH_NAME_OK plus the DOT-SEGMENT rule (mirrors replyAndResolve): "." and
+ * ".." pass the charset but ride into the request path as relative
+ * segments — a repo spelled ".." is not a repo. */
+const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
+
 /**
- * The resolved-threads query. Variable names are load-bearing (the I11
- * collision rule): the document rides `-f query=`, so no variable may be
- * named `query` — owner/name/pr, mirroring fetchReviewState (`-F pr=` for
- * the Int! coercion).
+ * The resolved-threads query, PAGINATED (see the module doc for why verify
+ * must walk every page). Variable names are load-bearing (the I11 collision
+ * rule): the document rides `-f query=`, so no variable may be named
+ * `query` — the variables are owner/name/pr (mirroring fetchReviewState)
+ * plus `threadsCursor`, the page cursor fed to `after` (page 1 omits it:
+ * a null/absent cursor variable reads as the first page).
  */
-const RESOLVED_THREADS_QUERY = `query ($owner: String!, $name: String!, $pr: Int!) {
+const RESOLVED_THREADS_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $threadsCursor: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
-      reviewThreads(first: 100) {
+      reviewThreads(first: 100, after: $threadsCursor) {
         nodes { id isResolved }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -137,6 +148,10 @@ interface GraphqlPayload {
       pullRequest?: {
         reviewThreads?: {
           nodes: Array<{ id?: unknown; isResolved?: unknown }>;
+          pageInfo?: {
+            hasNextPage?: unknown;
+            endCursor?: unknown;
+          } | null;
         } | null;
       } | null;
     } | null;
@@ -203,9 +218,9 @@ const fetchRestCommentIds = async (run: GhFn, path: string): Promise<number[]> =
  */
 export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnapshot> {
   // Validation before any argv is built (E1/E3-s1 convention).
-  if (!GH_NAME_OK.test(opts.owner) || !GH_NAME_OK.test(opts.repo)) {
+  if (!ghNameOk(opts.owner) || !ghNameOk(opts.repo)) {
     throw new Error(
-      `snapshotPrState: owner/repo must match ${String(GH_NAME_OK)} — got owner ${JSON.stringify(opts.owner)}, repo ${JSON.stringify(opts.repo)}`,
+      `snapshotPrState: owner/repo must match ${String(GH_NAME_OK)} (never "." or "..") — got owner ${JSON.stringify(opts.owner)}, repo ${JSON.stringify(opts.repo)}`,
     );
   }
   if (!Number.isSafeInteger(opts.pr) || opts.pr <= 0) {
@@ -236,44 +251,71 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     `repos/${opts.owner}/${opts.repo}/issues/${opts.pr}/comments?per_page=100`,
   );
 
-  // Resolution state — GraphQL only (REST cannot see it). First page only;
-  // see the module doc for why the cap is acceptable here.
-  const payload = await ghJson<GraphqlPayload>(opts.run, [
-    'api',
-    'graphql',
-    '-f',
-    `query=${RESOLVED_THREADS_QUERY}`,
-    '-f',
-    `owner=${opts.owner}`,
-    '-f',
-    `name=${opts.repo}`,
-    '-F',
-    `pr=${opts.pr}`,
-  ]);
-  if (payload.errors !== undefined && payload.errors.length > 0) {
-    const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
-    throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
-  }
-  const nodes = payload.data?.repository?.pullRequest?.reviewThreads?.nodes;
-  if (nodes === undefined || nodes === null) {
-    throw new Error(
-      `gh api graphql returned no reviewThreads payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
-    );
-  }
-  // Resolution state is STRICT too: a RESOLVED node without a string id
-  // would be silently dropped by a filter — shrinking the thread-resolved
-  // evidence — so it throws instead.
+  // Resolution state — GraphQL only (REST cannot see it), and PAGINATED to
+  // the end: a resolved thread hiding beyond page 1 must not read as "not
+  // resolved" (see the module doc). Each page rides the SAME mutation-
+  // shaped argv — exactly one `-f query=`; page 1 carries no cursor, later
+  // pages feed `threadsCursor=<endCursor>` as a raw `-f`.
   const resolvedThreadIds: string[] = [];
-  for (const node of nodes) {
-    if (node.isResolved !== true) {
-      continue;
+  let threadsCursor: string | null = null;
+  for (;;) {
+    const args: string[] = [
+      'api',
+      'graphql',
+      '-f',
+      `query=${RESOLVED_THREADS_QUERY}`,
+      '-f',
+      `owner=${opts.owner}`,
+      '-f',
+      `name=${opts.repo}`,
+      '-F',
+      `pr=${opts.pr}`,
+    ];
+    // Page 1 rides no cursor (an absent cursor variable reads as the first
+    // page); every later page feeds the previous endCursor as a raw `-f`.
+    if (threadsCursor !== null) {
+      args.push('-f', `threadsCursor=${threadsCursor}`);
     }
-    if (typeof node.id !== 'string' || node.id === '') {
+    // Explicit annotation: the loop-carried cursor must never leak into the
+    // payload's inferred type (the annotation severs the flow).
+    const payload: GraphqlPayload = await ghJson<GraphqlPayload>(opts.run, args);
+    if (payload.errors !== undefined && payload.errors.length > 0) {
+      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
+      throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
+    }
+    const threads = payload.data?.repository?.pullRequest?.reviewThreads;
+    if (threads === undefined || threads === null) {
       throw new Error(
-        `gh api graphql returned a RESOLVED reviewThread node without a string id — snapshot untrustworthy`,
+        `gh api graphql returned no reviewThreads payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
       );
     }
-    resolvedThreadIds.push(node.id);
+    // Resolution state is STRICT too: a RESOLVED node without a string id
+    // would be silently dropped by a filter — shrinking the thread-resolved
+    // evidence — so it throws instead.
+    for (const node of threads.nodes) {
+      if (node.isResolved !== true) {
+        continue;
+      }
+      if (typeof node.id !== 'string' || node.id === '') {
+        throw new Error(
+          `gh api graphql returned a RESOLVED reviewThread node without a string id — snapshot untrustworthy`,
+        );
+      }
+      resolvedThreadIds.push(node.id);
+    }
+    // The loop terminates on pageInfo, never on a counter (E1 fetch-loop
+    // shape); a hasNextPage without an endCursor is a broken pagination
+    // payload — untrustworthy, throw.
+    if (threads.pageInfo?.hasNextPage !== true) {
+      break;
+    }
+    const endCursor = threads.pageInfo.endCursor;
+    if (typeof endCursor !== 'string' || endCursor === '') {
+      throw new Error(
+        `gh api graphql reviewThreads pagination is broken (hasNextPage without an endCursor) — snapshot untrustworthy`,
+      );
+    }
+    threadsCursor = endCursor;
   }
 
   return {

@@ -63,7 +63,7 @@
 // through the injected WorktreeRegistry; the clock is injected (nowMs,
 // never Date.now); the only direct fs touch is the worktreeRoot mkdir and
 // the registry entry's directory-existence check.
-import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { join, sep } from 'node:path';
 import type { GhFn } from './gh.js';
 
@@ -96,7 +96,11 @@ export interface WorktreeRegistry {
  * number strings to entries. A MISSING file is an empty registry (first
  * run); a CORRUPT file (unparseable JSON, or not a plain object) throws a
  * clear error — resolving worktrees on top of an unreadable registry would
- * silently duplicate trees. `save` rewrites the whole file.
+ * silently duplicate trees. `save` replaces the whole file ATOMICALLY: the
+ * new content is written to `<path>.tmp` in the SAME directory and
+ * `fs.rename`d over the target — an interrupted in-place rewrite would
+ * leave PARTIAL JSON, and every later load would throw corrupt (the same
+ * write-tmp-then-rename pattern as fileDispatchLog's record).
  */
 export function fileWorktreeRegistry(path: string): WorktreeRegistry {
   const load = async (): Promise<RegistryMap> => {
@@ -122,7 +126,12 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     }
   };
   const save = async (map: RegistryMap): Promise<void> => {
-    await writeFile(path, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
+    // Write-tmp-then-rename, never a plain rewrite: rename(2) within one
+    // directory is atomic, so a crash mid-write can only ever truncate the
+    // throwaway tmp file — the registry on disk stays parseable JSON.
+    const tmpPath = `${path}.tmp`;
+    await writeFile(tmpPath, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
+    await rename(tmpPath, path);
   };
   return { load, save };
 }

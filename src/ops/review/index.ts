@@ -35,7 +35,7 @@ export { classifyThreads } from './classifyThreads.js';
 export type { PlanBatchConfig, PlannedBatch } from './planReviewBatch.js';
 export { defaultPlanBatchConfig, planReviewBatch } from './planReviewBatch.js';
 // E3 — the close-out half of the review loop: batch actions as data with
-// push-before-post atomicity + dispatch tracking (replyAndResolve), the
+// push-before-post ordering + dispatch replay (replyAndResolve), the
 // REST-counted anti-hallucination verify with its explicit NO PROGRESS
 // contract (verifyReviewOutcome), and per-PR worktree resolution with the
 // registry (prWorktree — origin branch is truth, never the sweep worktree).

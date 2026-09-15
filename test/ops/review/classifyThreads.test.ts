@@ -988,6 +988,24 @@ describe('default skipPatterns', () => {
     ]);
   });
 
+  test('a HYPHENATED tool-name mention in a SELF-SKIP sentence ("Codex-style tooling is not reviewing …") must NOT skip → actionable', () => {
+    // The self-skip pattern carries the same `(?!-)` hyphen guard as its
+    // siblings: without it, "Codex-style tooling is not reviewing generated
+    // files correctly" reads the hyphenated MENTION as the tool speaking.
+    expect(
+      itemsOf(
+        baseState({
+          threads: [
+            thread({
+              id: 'TH7',
+              body: 'Codex-style tooling is not reviewing generated files correctly — it misses half the diff.',
+            }),
+          ],
+        }),
+      ),
+    ).toEqual([{ kind: 'thread', id: 'TH7', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' }]);
+  });
+
   test('a bot configuration-error notice ("CodeRabbit: configuration error, skipping review") → skip (bot_skip_notice)', () => {
     // The same pattern still fires on the tool's own notice — the identity
     // LEADS the line, so the skip is the tool's verdict, not a human's.

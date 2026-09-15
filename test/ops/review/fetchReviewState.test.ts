@@ -360,6 +360,14 @@ describe('fetchReviewState', () => {
     await expect(fetchReviewState({ owner: 'octo', repo: '../escape', pr: 7 }, {}, run)).rejects.toThrow(
       /owner\/repo must match/,
     );
+    // DOT SEGMENTS: "." and ".." pass the charset but ride into the request
+    // path as relative segments — rejected like any other bad spelling.
+    await expect(fetchReviewState({ owner: '.', repo: 'widget', pr: 7 }, {}, run)).rejects.toThrow(
+      /owner\/repo must match/,
+    );
+    await expect(fetchReviewState({ owner: 'octo', repo: '..', pr: 7 }, {}, run)).rejects.toThrow(
+      /owner\/repo must match/,
+    );
   });
 
   test('rejects a pr that is not a positive safe integer (string-pr JS callers included)', async () => {
