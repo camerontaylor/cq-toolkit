@@ -35,10 +35,15 @@ never treat a sandboxed execution failure as proof the host is logged out —
 a sandbox callback failure is not a logout.
 
 Data handling: the CLI sends code diffs to the CodeRabbit API. Before any
-review, secret-scan the selected scope (tracked unstaged edits AND any
-untracked files being included). This repo's publish-forbidden classes live
-in `policy/denylist/patterns.yml` — none of them may appear in a reviewed
-diff. Do not print secret contents while scanning.
+review, pin the base (§3) and secret-scan every selected diff component:
+the base-to-HEAD patch (`git diff "$BASE" HEAD`), the staged patch
+(`git diff --cached`), the unstaged patch (`git diff`), and the full content
+of any included untracked files. Scan both added and removed lines; a
+credential deleted from the worktree can still occur in an uploaded patch.
+This repo's publish-forbidden classes live in
+`policy/denylist/patterns.yml` — none may appear in a reviewed diff. Inspect
+patches locally without printing secret contents; stop before upload if
+any selected component fails the scan.
 
 ## 2. Scope: what a review sees
 
@@ -141,7 +146,11 @@ changes. Both cycles include their addressing.
    never waives the second (it guards against a false-clean or skipped
    first pass). Adjudicate identically.
 3. **STOP at two completed cycles.** No third loop — remaining
-   minor/trivial findings are recorded, not chased.
+   minor/trivial findings are recorded, not chased. Record any fixes made
+   after cycle 2 as not yet CLI-reviewed; passing gates does not make those
+   fixes reviewed. The PR may be opened for independent review, but a
+   merge-ready claim requires non-author review covering the final head,
+   including those fixes, and the other I2 conditions (§9).
 
 A significant scope change after reviews means a separate task boundary —
 do not expand the diff and keep stale review evidence. No valid unresolved
@@ -241,4 +250,7 @@ coderabbit pullrequest <number-or-url> --show-prompts --agent
 Requires `reviews.enable_prompt_for_ai_agents` (on, deliberately) and
 existing auth. PR-level review evidence and I2 acceptance are judged on
 the opened PR at its final head — the CLI cycles do not substitute for
-either.
+either. This includes changes made while addressing cycle 2 or PR feedback:
+request fresh non-author review after the last code/configuration/documentation
+commit, address external threads, and require I2's settle or explicit
+all-clear before claiming ready to merge. Earlier-head reviews do not qualify.

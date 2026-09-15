@@ -46,7 +46,9 @@ full intended PR diff before creating a PR. Full protocol:
 - STOP after two completed cycles — no third loop. Significant scope change
   after reviews means a new task, not a bigger diff.
 - No valid unresolved critical/major finding may coexist with a
-  ready-to-merge claim.
+  ready-to-merge claim. Fixes after cycle 2 require independent non-author
+  review on the final PR head before that claim; passing gates alone is
+  insufficient. This does not add a third CLI cycle.
 
 The GitHub CodeRabbit App reviews the opened PR (already installed and
 active on this repo). CLI cycles are the author-side pre-PR pass and stay
