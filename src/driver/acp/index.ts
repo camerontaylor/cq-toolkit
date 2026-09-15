@@ -361,6 +361,10 @@ interface RunObservation {
   servedModel: string | undefined;
   /** The mode the harness last REPORTED (current_mode_update — the live vendor's pin-confirmation surface; replay-gated like every fold). */
   observedMode: string | undefined;
+  /** The fold-sequence of the reported mode — a report is POST-PIN iff its seq exceeds the pin response line's seq (CodeRabbit round: preserves same-chunk post-response reports the old reset wiped). */
+  observedModeSeq: number | undefined;
+  /** Monotonic fold counter for current_mode_update frames (relative order only). */
+  updateSeq: number;
   /** toolCallId → latest tool fold. */
   tools: Map<string, ToolObservation>;
   /** toolCallId → the channel it was FIRST seen on ('permission' = the gate fired for it). First-write-wins. */
@@ -382,6 +386,8 @@ function newObservation(): RunObservation {
     transcript: [],
     servedModel: undefined,
     observedMode: undefined,
+    observedModeSeq: undefined,
+    updateSeq: 0,
     tools: new Map(),
     toolFirstSeen: new Map(),
     permissionDecisions: new Map(),
@@ -557,6 +563,11 @@ class AcpWire {
   connectionFailure: Error | undefined;
 
   private onLine(line: string): void {
+    // A failed connection folds NOTHING further (CodeRabbit round: a later
+    // newline completing a valid session/update must not persist assistant
+    // text or tool results from a wire that already failed mid-frame). The
+    // failure itself is the recorded evidence.
+    if (this.connectionFailure !== undefined) return;
     let data: unknown;
     try {
       data = JSON.parse(line);
@@ -804,6 +815,13 @@ export class AcpDriver implements Driver {
     // the await's continuation (the round-1 shape) dropped it.
     let replaying = false;
     let replayedFrameCount = 0;
+    // The mode-pin response's fold-sequence: set at the RESPONSE LINE (the
+    // wire-level hook), it separates PRE-pin mode reports (the
+    // confirmation surface) from POST-pin ones (downgrade evidence) —
+    // including reports in the SAME chunk after the response line, which a
+    // continuation-level reset would wipe (CodeRabbit round on this PR).
+    let pinInFlight = false;
+    let pinSeqAtResponse: number | undefined;
     // True while the session-establishment request (load / resume / new)
     // is in flight. Its RESPONSE LINE carries the authoritative sessionId,
     // which the onResponseLine hook adopts AT LINE LEVEL — a same-chunk
@@ -956,6 +974,13 @@ export class AcpDriver implements Driver {
       },
       onServerRequest: handleServerRequest,
       onResponseLine: (result) => {
+        // The mode-pin response marks the PRE/POST-pin boundary AT LINE
+        // LEVEL (the hook fires synchronously, before any later frame of
+        // the same chunk is gated).
+        if (pinInFlight) {
+          pinSeqAtResponse = observation.updateSeq;
+          pinInFlight = false;
+        }
         // The replay window clears AT THE RESPONSE LINE — synchronously,
         // before any frame later in the same data chunk is gated (the
         // round-1 shape cleared only at the await's continuation, which
@@ -1206,6 +1231,7 @@ export class AcpDriver implements Driver {
     // never-asks tripwire remains the downstream backstop).
     if (handshakeFailure === undefined && !signalFired && acpSessionId !== undefined) {
       try {
+        pinInFlight = true;
         const pinRaw = await wire.request(ACP_METHODS.sessionSetConfigOption, {
           sessionId: acpSessionId,
           configId: MODE_CONFIG_ID,
@@ -1225,12 +1251,6 @@ export class AcpDriver implements Driver {
             `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, observed ` +
             `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}) — ` +
             'an unpinned session is a policy void, refusing to prompt';
-        }
-        if (handshakeFailure === undefined) {
-          // The settle-time downgrade marker (below) judges only POST-PIN
-          // reports: a pre-pin yolo report is the session's honest starting
-          // state, never a downgrade of the pin.
-          observation.observedMode = undefined;
         }
       } catch (err) {
         handshakeFailure =
@@ -1306,7 +1326,13 @@ export class AcpDriver implements Driver {
     // the ungated-execution half of a broken pin. Narrated, never
     // classified alone: the verdict's error paths own every enforcement
     // break this wire can show, and a clean reported mode is silence.
-    if (observation.observedMode !== undefined && observation.observedMode !== GATING_MODE) {
+    if (
+      observation.observedMode !== undefined &&
+      observation.observedMode !== GATING_MODE &&
+      observation.observedModeSeq !== undefined &&
+      pinSeqAtResponse !== undefined &&
+      observation.observedModeSeq > pinSeqAtResponse
+    ) {
       observation.narration.push(
         JSON.stringify({
           cq: 'mode-downgrade',
@@ -1684,7 +1710,14 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
       // switch is broadcast as this notification in the same flush as the
       // response (probe 2026-09-14, both tool legs). Arrives here only
       // past the replay + session-id gates, so history cannot poison it.
-      if (update.currentModeId !== undefined) observation.observedMode = update.currentModeId;
+      // The seq stamps the report's position: the pin response line's seq
+      // is what separates PRE-pin reports (confirmation surface) from
+      // POST-pin ones (downgrade evidence) — nothing is ever wiped.
+      observation.updateSeq += 1;
+      if (update.currentModeId !== undefined) {
+        observation.observedMode = update.currentModeId;
+        observation.observedModeSeq = observation.updateSeq;
+      }
       return;
     }
     case 'usage_update':
