@@ -10,10 +10,12 @@
 //      nobody.
 //   2. attachRestReplies — GraphQL reviewThreads.comments(first: 1) yields
 //      only the root comment, so reply chains are reconstructed from the
-//      flat REST collection: chains anchor at a root whose nodeId matches a
-//      thread id, append in createdAt order (nulls last, ties keep REST
-//      order), mutate the passed threads in place, and chains that cannot
-//      be anchored to a known thread are dropped silently.
+//      flat REST collection: chains anchor at a root REST comment whose
+//      numeric id equals a thread's rootDatabaseId (the real GitHub join —
+//      GraphQL root comment databaseId ↔ REST id), append in createdAt
+//      order (nulls last, ties keep REST order), mutate the passed threads
+//      in place, and chains that cannot be anchored to a known thread are
+//      dropped silently.
 //
 // Pure data tests: no gh, no I/O — instant by construction.
 import { describe, expect, test } from 'vitest';
@@ -26,7 +28,8 @@ import type { RestComment, ReviewThread } from '../../../src/ops/review/threads.
 
 /** An unresolved thread by an external reviewer, overridable field by field. */
 const thread = (extra?: Partial<ReviewThread>): ReviewThread => ({
-  id: 'T1',
+  id: 'PRRT_kwDOCr1',
+  rootDatabaseId: 100,
   path: 'src/a.ts',
   line: 1,
   isResolved: false,
@@ -41,7 +44,7 @@ const thread = (extra?: Partial<ReviewThread>): ReviewThread => ({
 /** A REST chain root (a thread's first comment), overridable field by field. */
 const rootComment = (extra?: Partial<RestComment>): RestComment => ({
   id: 100,
-  nodeId: 'T1',
+  nodeId: 'PRRC_100',
   authorLogin: 'alice',
   body: 'root',
   createdAt: '2026-01-01T00:00:00Z',
@@ -156,22 +159,23 @@ describe('attachRestReplies', () => {
 
   test.each([
     {
-      name: 'a chain rooted at an unknown thread id is dropped silently',
+      name: 'a chain whose REST root id matches no thread rootDatabaseId is dropped silently',
       comments: [
-        rootComment({ nodeId: 'OTHER-THREAD' }),
-        reply({ inReplyToId: 100 }),
+        rootComment({ id: 999, nodeId: 'PRRC_999' }),
+        reply({ inReplyToId: 999 }),
       ],
     },
     {
-      name: 'a chain root with no nodeId cannot anchor and is dropped silently',
-      comments: [rootComment({ nodeId: null }), reply({ inReplyToId: 100 })],
+      name: 'a thread with a null rootDatabaseId cannot anchor and is dropped silently',
+      comments: [rootComment(), reply({ inReplyToId: 100 })],
+      anchorless: true,
     },
     {
       name: 'a reply whose parent is missing from the REST collection is dropped silently',
       comments: [rootComment(), reply({ inReplyToId: 999 })],
     },
-  ])('$name', ({ comments }) => {
-    const t = thread();
+  ])('$name', ({ comments, anchorless }) => {
+    const t = thread(anchorless === true ? { rootDatabaseId: null } : undefined);
     attachRestReplies([t], comments);
     expect(t.replies).toEqual([]);
   });
@@ -214,13 +218,13 @@ describe('attachRestReplies', () => {
   });
 
   test('multiple threads each receive only their own chains', () => {
-    const t1 = thread({ id: 'T1' });
-    const t2 = thread({ id: 'T2' });
+    const t1 = thread({ id: 'PRRT_kwDOCa' });
+    const t2 = thread({ id: 'PRRT_kwDOCb', rootDatabaseId: 200 });
     attachRestReplies(
       [t1, t2],
       [
-        rootComment({ nodeId: 'T1' }),
-        rootComment({ id: 200, nodeId: 'T2', authorLogin: 'carol' }),
+        rootComment(),
+        rootComment({ id: 200, nodeId: 'PRRC_200', authorLogin: 'carol' }),
         reply({ id: 101, inReplyToId: 100, authorLogin: 'bob' }),
         reply({ id: 201, inReplyToId: 200, authorLogin: 'dave' }),
       ],

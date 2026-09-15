@@ -8,23 +8,24 @@
 //     (threadsAfter/reviewsAfter) advanced in a single request loop under
 //     per-collection page caps. THE COLLISION RULE (I11 trap): the document
 //     itself rides gh's `-f query=` slot, so no GraphQL variable may be
-//     named `query`.
-//   - REST: `gh api --paginate` (I11 trap: without it gh silently drops
-//     page 2+). gh merges all pages into ONE array, so the restPages cap is
-//     a client-side chunk cut at restPages × 100 (assuming gh's default
-//     100-per-page) — the documented simplification; per-page counts are
-//     not observable through the merged output.
+//     named `query`. Cursor flags are sent ONLY when a real cursor exists —
+//     never as empty strings (the first request omits them entirely).
+//   - REST: `gh api --paginate --slurp` (I11 trap: without --paginate gh
+//     silently returns page 1 only; and --paginate alone does NOT merge —
+//     --slurp, gh >= 2.51, is what yields ONE outer array of page arrays).
+//     Pages are fetched at the explicit `?per_page=100`, so the restPages
+//     cap is a true PAGE cap, applied client-side before flattening.
 // Any cap hit does NOT error: the result carries truncated=true plus a
 // truncatedBecause reason per cause, and the data fetched so far still
 // comes back — the caller decides (fail closed downstream).
 //
 // GraphQL thread comments are ROOT-ONLY (comments(first: 1)) AND stale —
 // reply chains are reconstructed from REST by attachRestReplies, never from
-// GraphQL.
+// GraphQL, anchored on the thread root comment's databaseId ↔ REST id.
 import { ghJson, makeGhRunner } from './gh.js';
 import type { GhFn } from './gh.js';
 import { attachRestReplies } from './threads.js';
-import type { RestComment, ReviewSummary, ReviewThread } from './threads.js';
+import type { RestComment, ReviewSummary, ReviewThread, TruncationFlag } from './threads.js';
 
 /** Which PR to fetch. */
 export interface FetchReviewStateInput {
@@ -39,23 +40,24 @@ export interface FetchReviewStateInput {
 /**
  * Conservative fetch caps. Defaults: 10 pages per GraphQL loop, 20 REST
  * pages. A cap hit never throws — it marks the result truncated (the
- * fail-closed flag) and returns the pages fetched so far.
+ * fail-closed flag) and returns the data fetched so far.
  */
 export interface FetchReviewStateCaps {
   /** Max reviewThreads pages (100 threads each) before fail-closed truncation. */
   reviewThreadPages?: number;
   /** Max reviews pages (100 reviews each) before fail-closed truncation. */
   reviewPages?: number;
-  /** Max REST pages (100 comments each, per collection) before truncation. */
+  /** Max REST pages (fetched at per_page=100, per collection) before truncation. */
   restPages?: number;
 }
 
 /**
- * The fetched review state: full data plus the fail-closed truncation flag.
- * Every consumer MUST consult `truncated`/`truncatedBecause` before trusting
+ * The fetched review state: full data plus the fail-closed truncation flag
+ * (extends TruncationFlag — the shared vocabulary's flag shape). Every
+ * consumer MUST consult `truncated`/`truncatedBecause` before trusting
  * counts — a cap hit means unknown data may be missing.
  */
-export interface RestReviewState {
+export interface RestReviewState extends TruncationFlag {
   /** Repo coordinates, echoed for downstream tools. */
   repo: { owner: string; name: string };
   /** PR number, echoed. */
@@ -74,17 +76,15 @@ export interface RestReviewState {
   restReviewComments: RestComment[];
   /** Flat REST issue comments (the PR's general conversation). */
   restIssueComments: RestComment[];
-  /** True when ANY cap was hit (fail closed: data may be incomplete). */
-  truncated: boolean;
-  /** Machine-readable cause per truncation, e.g. `reviewThreads.pageCap`. */
-  truncatedBecause: string[];
 }
 
 /**
  * The one GraphQL document per fetch. Variable names are load-bearing (the
  * I11 collision rule): the document rides gh's `-f query=` slot, so no
  * GraphQL variable may be named `query` — the cursors are threadsAfter and
- * reviewsAfter, sent as `-f` strings, empty on the first call.
+ * reviewsAfter, sent as `-f` strings ONLY when a real cursor exists (never
+ * empty). Thread root comments carry `databaseId` — the REST-side numeric
+ * id that anchors reply chains (see attachRestReplies).
  */
 const PR_STATE_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $threadsAfter: String, $reviewsAfter: String) {
   repository(owner: $owner, name: $name) {
@@ -101,7 +101,7 @@ const PR_STATE_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $thre
           path
           line
           comments(first: 1) {
-            nodes { author { login } body createdAt }
+            nodes { databaseId author { login } body createdAt }
           }
         }
       }
@@ -127,7 +127,12 @@ interface GraphqlPullRequest {
       path: string | null;
       line: number | null;
       comments: {
-        nodes: Array<{ author: { login: string } | null; body: string; createdAt: string | null }>;
+        nodes: Array<{
+          databaseId: number | null;
+          author: { login: string } | null;
+          body: string;
+          createdAt: string | null;
+        }>;
       };
     }[];
   };
@@ -175,11 +180,20 @@ const toReviewThread = (node: {
   isOutdated: boolean;
   path: string | null;
   line: number | null;
-  comments: { nodes: Array<{ author: { login: string } | null; body: string; createdAt: string | null }> };
+  comments: {
+    nodes: Array<{
+      databaseId: number | null;
+      author: { login: string } | null;
+      body: string;
+      createdAt: string | null;
+    }>;
+  };
 }): ReviewThread => {
   const root = node.comments.nodes[0];
   return {
     id: node.id,
+    // The REST-side anchor for reply chains (root comment's databaseId).
+    rootDatabaseId: root?.databaseId ?? null,
     path: node.path ?? null,
     line: node.line ?? null,
     isResolved: node.isResolved,
@@ -218,11 +232,11 @@ const toRestComment = (raw: RawRestComment): RestComment => ({
 });
 
 /**
- * Fetch one REST collection with `--paginate` and map it. SIMPLIFICATION:
- * gh merges all pages into a single JSON array, so the restPages cap is
- * enforced as a client-side chunk cut at restPages × 100 — an oversized
- * merged array is sliced (first cap items) and reported truncated with
- * `reason`, rather than counted per page.
+ * Fetch one REST collection with `--paginate --slurp` and map it. The path
+ * pins `?per_page=100`, so `restPages` is a true PAGE cap: it is applied
+ * client-side on the outer array of page arrays that `--slurp` (gh >= 2.51)
+ * produces, BEFORE flattening — an oversized fetch keeps its first
+ * `restPages` pages and is reported truncated with `reason`.
  */
 async function fetchRestComments(
   run: GhFn,
@@ -231,16 +245,16 @@ async function fetchRestComments(
   reason: string,
   truncatedBecause: string[],
 ): Promise<RestComment[]> {
-  const raw = await ghJson<RawRestComment[]>(run, ['api', path, '--paginate']);
-  if (!Array.isArray(raw)) {
-    throw new Error(`gh api ${path} --paginate returned a non-array payload`);
+  const raw = await ghJson<RawRestComment[][]>(run, ['api', path, '--paginate', '--slurp']);
+  if (!Array.isArray(raw) || raw.some((page) => !Array.isArray(page))) {
+    throw new Error(`gh api ${path} --paginate --slurp returned a non-page-array payload`);
   }
-  const cap = restPages * 100;
-  if (raw.length > cap) {
+  let pages = raw;
+  if (pages.length > restPages) {
     truncatedBecause.push(reason);
-    return raw.slice(0, cap).map(toRestComment);
+    pages = pages.slice(0, restPages);
   }
-  return raw.map(toRestComment);
+  return pages.flat().map(toRestComment);
 }
 
 /**
@@ -250,12 +264,15 @@ async function fetchRestComments(
  * GraphQL pagination is a single request loop advancing the two cursors
  * independently, each under its own page cap; a `hasNextPage` observed at
  * the cap (or a missing endCursor) records `reviewThreads.pageCap` /
- * `reviews.pageCap` and stops that loop — never an error. REST collections
- * ride `--paginate` under the client-side chunk cap, recording
- * `restComments.pageCap` / `issueComments.pageCap`. Thread replies are
- * reconstructed from the REST review comments (GraphQL thread comments are
- * root-only by design AND stale — the lag trap). Null-safety: deleted
- * accounts (`author: null`) and absent REST fields map to null, never throw.
+ * `reviews.pageCap` and stops that loop — never an error. Cursor flags are
+ * sent only when a real cursor exists (never as empty strings), and a
+ * finished collection stops advancing (and re-reporting) while its sibling
+ * keeps paginating. REST collections ride `--paginate --slurp` under a true
+ * page cap, recording `restComments.pageCap` / `issueComments.pageCap`.
+ * Thread replies are reconstructed from the REST review comments (GraphQL
+ * thread comments are root-only by design AND stale — the lag trap).
+ * Null-safety: deleted accounts (`author: null`) and absent REST fields map
+ * to null, never throw.
  */
 export async function fetchReviewState(
   input: FetchReviewStateInput,
@@ -272,18 +289,18 @@ export async function fetchReviewState(
   // PR-level fields are read off the FIRST page (they do not vary per page).
   let firstPage: GraphqlPullRequest | null = null;
 
-  // Per-collection cursor state: '' = first page (sent as the empty `-f`
-  // string), a cursor = next page, done = stop advancing (its page-1 nodes
-  // then come back on every further request and are IGNORED — both
-  // collections ride one document, so a still-paginating sibling re-fetches
-  // the finished one).
-  let threadsAfter: string = '';
-  let reviewsAfter: string = '';
+  // Per-collection cursor state: null = first page (the cursor flag is
+  // OMITTED entirely — never sent as an empty string), a cursor = next page,
+  // done = stop advancing (its page-1 nodes then come back on every further
+  // request and are IGNORED — both collections ride one document, so a
+  // still-paginating sibling re-fetches the finished one).
+  let threadsCursor: string | null = null;
+  let reviewsCursor: string | null = null;
   let threadsDone = false;
   let reviewsDone = false;
 
   for (let page = 1; ; page++) {
-    const payload = await ghJson<GraphqlPayload>(run, [
+    const args = [
       'api',
       'graphql',
       '-f',
@@ -294,11 +311,14 @@ export async function fetchReviewState(
       `name=${input.repo}`,
       '-F',
       `pr=${input.pr}`,
-      '-f',
-      `threadsAfter=${threadsAfter}`,
-      '-f',
-      `reviewsAfter=${reviewsAfter}`,
-    ]);
+    ];
+    if (threadsCursor !== null) {
+      args.push('-f', `threadsAfter=${threadsCursor}`);
+    }
+    if (reviewsCursor !== null) {
+      args.push('-f', `reviewsAfter=${reviewsCursor}`);
+    }
+    const payload = await ghJson<GraphqlPayload>(run, args);
     const pullRequest = payload.data?.repository?.pullRequest ?? null;
     if (pullRequest === null) {
       throw new Error(`gh api graphql returned no pullRequest payload for ${input.owner}/${input.repo}#${input.pr}`);
@@ -313,27 +333,32 @@ export async function fetchReviewState(
       reviews.push(...pullRequest.reviews.nodes.map(toReviewSummary));
     }
 
-    // Advance each cursor under its own cap: a hasNextPage past the cap is
-    // the fail-closed truncation (data kept, reason recorded, loop for this
-    // collection ends). A hasNextPage with no endCursor cannot continue and
-    // counts the same.
-    const threadPageInfo = pullRequest.reviewThreads.pageInfo;
-    if (threadPageInfo.hasNextPage && page < threadPagesCap && threadPageInfo.endCursor !== null) {
-      threadsAfter = threadPageInfo.endCursor;
-    } else {
-      if (threadPageInfo.hasNextPage) {
-        truncatedBecause.push('reviewThreads.pageCap');
+    // Advance each live cursor under its own cap: a hasNextPage past the cap
+    // is the fail-closed truncation (data kept, reason recorded ONCE, loop
+    // for this collection ends). A hasNextPage with no endCursor cannot
+    // continue and counts the same. Done collections skip advancing entirely
+    // — no re-fetch accounting, no duplicate reasons.
+    if (!threadsDone) {
+      const threadPageInfo = pullRequest.reviewThreads.pageInfo;
+      if (threadPageInfo.hasNextPage && page < threadPagesCap && threadPageInfo.endCursor !== null) {
+        threadsCursor = threadPageInfo.endCursor;
+      } else {
+        if (threadPageInfo.hasNextPage) {
+          truncatedBecause.push('reviewThreads.pageCap');
+        }
+        threadsDone = true;
       }
-      threadsDone = true;
     }
-    const reviewPageInfo = pullRequest.reviews.pageInfo;
-    if (reviewPageInfo.hasNextPage && page < reviewPagesCap && reviewPageInfo.endCursor !== null) {
-      reviewsAfter = reviewPageInfo.endCursor;
-    } else {
-      if (reviewPageInfo.hasNextPage) {
-        truncatedBecause.push('reviews.pageCap');
+    if (!reviewsDone) {
+      const reviewPageInfo = pullRequest.reviews.pageInfo;
+      if (reviewPageInfo.hasNextPage && page < reviewPagesCap && reviewPageInfo.endCursor !== null) {
+        reviewsCursor = reviewPageInfo.endCursor;
+      } else {
+        if (reviewPageInfo.hasNextPage) {
+          truncatedBecause.push('reviews.pageCap');
+        }
+        reviewsDone = true;
       }
-      reviewsDone = true;
     }
 
     if (threadsDone && reviewsDone) {
@@ -343,14 +368,14 @@ export async function fetchReviewState(
 
   const restReviewComments = await fetchRestComments(
     run,
-    `repos/${input.owner}/${input.repo}/pulls/${input.pr}/comments`,
+    `repos/${input.owner}/${input.repo}/pulls/${input.pr}/comments?per_page=100`,
     restPagesCap,
     'restComments.pageCap',
     truncatedBecause,
   );
   const restIssueComments = await fetchRestComments(
     run,
-    `repos/${input.owner}/${input.repo}/issues/${input.pr}/comments`,
+    `repos/${input.owner}/${input.repo}/issues/${input.pr}/comments?per_page=100`,
     restPagesCap,
     'issueComments.pageCap',
     truncatedBecause,

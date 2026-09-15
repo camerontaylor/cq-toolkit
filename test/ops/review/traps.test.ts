@@ -5,17 +5,20 @@
 // trap semantics (the scenario payloads pin the data side).
 //
 // One failing-without / passing-with pair per trap:
-//   1. REST silent pagination loss — without `--paginate` gh returns only
-//      page 1 of a paged collection (pages payload, pages[0]); the
-//      implementation always paginates (all 31 items, truncated: false) and
-//      a low restPages cap truncates fail-closed with a reason.
+//   1. REST silent pagination loss — without `--paginate` the fake returns
+//      only page 1 of a paged collection (pages payload, pages[0]); the
+//      implementation always sends `--paginate --slurp` at per_page=100
+//      (all 31 items, truncated: false) and a low restPages cap truncates
+//      fail-closed with a reason.
 //   2. GraphQL `query` variable collision — a duplicate `-f query=` flag or
 //      a document declaring `$query` exits nonzero; the implementation sends
-//      exactly one `-f query=` per graphql call and names its cursors
-//      threadsAfter/reviewsAfter (proven via CQ_GH_LOG).
-//   3. Replies-endpoint 404 — any `/replies` invocation exits 404; the
-//      implementation never makes one (proven via CQ_GH_LOG) and rebuilds
-//      reply chains from in_reply_to_id on the flat collection.
+//      exactly one `-f query=` per graphql call, names its cursors
+//      threadsAfter/reviewsAfter, and never sends an empty cursor (proven
+//      via CQ_GH_LOG).
+//   3. Replies-endpoint 404 — a GET `/replies` invocation exits 404 (POST is
+//      exempt: that is how replies are created); the implementation never
+//      makes one (proven via CQ_GH_LOG) and rebuilds reply chains from
+//      in_reply_to_id on the flat collection.
 //   4. reviewThreads lag — the recorded GraphQL snapshot carries NO thread
 //      replies; the fresh responder reply exists only in REST, and the
 //      fetched state surfaces it on the right thread via attachRestReplies.
@@ -65,15 +68,25 @@ const readLog = async (logPath: string): Promise<string[][]> => {
     .map((line) => (JSON.parse(line) as { args: string[] }).args);
 };
 
-/** -f/-F flag names of one logged invocation, in order. */
-const flagNames = (args: string[]): string[] => {
-  const names: string[] = [];
+/** One gh api flag as recorded in the log: `style` is `-f` or `-F`. */
+interface LoggedFlag {
+  style: string;
+  name: string;
+  value: string;
+}
+
+/** The -f/-F flags of one logged invocation, in order. */
+const flagsOf = (args: string[]): LoggedFlag[] => {
+  const flags: LoggedFlag[] = [];
   for (let i = 0; i < args.length - 1; i++) {
-    if ((args[i] === '-f' || args[i] === '-F') && (args[i + 1] ?? '').includes('=')) {
-      names.push((args[i + 1] as string).slice(0, (args[i + 1] as string).indexOf('=')));
+    const style = args[i];
+    if ((style === '-f' || style === '-F') && (args[i + 1] ?? '').includes('=')) {
+      const raw = args[i + 1] as string;
+      const eq = raw.indexOf('=');
+      flags.push({ style, name: raw.slice(0, eq), value: raw.slice(eq + 1) });
     }
   }
-  return names;
+  return flags;
 };
 
 // ---------------------------------------------------------------------------
@@ -89,12 +102,20 @@ describe('trap: REST silent pagination loss', () => {
     expect(items).toHaveLength(20); // the scenario's page 1 — 11 more exist, unreturned
   }, 20_000);
 
-  test('implementation survives: --paginate returns all 31; a low restPages cap truncates with a reason', async () => {
-    const { run } = await harness('pageloss-with');
+  test('implementation survives: --paginate --slurp returns all 31; a low restPages cap truncates with a reason', async () => {
+    const { run, logPath } = await harness('pageloss-with');
     const state = await fetchReviewState(INPUT, {}, run);
     expect(state.restReviewComments).toHaveLength(31);
     expect(state.truncated).toBe(false);
-    // Cap path end to end: restPages 0 allows nothing — everything must be
+    // The REST calls really paginated: --paginate --slurp at per_page=100.
+    const restCalls = (await readLog(logPath)).filter((args) => args.some((a) => a.startsWith('repos/')));
+    expect(restCalls).toHaveLength(2); // pulls comments + issue comments
+    for (const call of restCalls) {
+      expect(call).toContain('--paginate');
+      expect(call).toContain('--slurp');
+      expect(call.some((a) => a.includes('per_page=100'))).toBe(true);
+    }
+    // Cap path end to end: restPages 0 allows no pages — everything must be
     // reported truncated, never silently swallowed.
     const capped = await fetchReviewState(INPUT, { restPages: 0 }, run);
     expect(capped.truncated).toBe(true);
@@ -131,13 +152,31 @@ describe('trap: GraphQL query variable collision', () => {
     const { run, logPath } = await harness('collision-with');
     const state = await fetchReviewState(INPUT, {}, run);
     expect(state.truncated).toBe(false);
+    expect(state.reviews).toHaveLength(2); // the scenario's reviews walk two pages
     const log = await readLog(logPath);
     const graphqlCalls = log.filter((args) => args.includes('graphql'));
-    expect(graphqlCalls).toHaveLength(1); // single-page scenario: one call
-    const names = flagNames(graphqlCalls[0] ?? []);
-    expect(names.filter((name) => name === 'query')).toHaveLength(1);
-    expect(names).toContain('threadsAfter');
-    expect(names).toContain('reviewsAfter');
+    expect(graphqlCalls).toHaveLength(2);
+    // Exactly one -f query flag per call — never a duplicate `query` — and
+    // no -f flag anywhere carries an empty value (M1).
+    for (const call of graphqlCalls) {
+      const fFlags = flagsOf(call).filter((flag) => flag.style === '-f');
+      expect(fFlags.filter((flag) => flag.name === 'query')).toHaveLength(1);
+      for (const flag of fFlags) {
+        expect(flag.value).not.toBe('');
+      }
+    }
+    // M1: the first call sends NO cursor flags (never empty strings); the
+    // paginating call names its cursor reviewsAfter. Threads finished on
+    // page 1, so threadsAfter is (correctly) never sent.
+    const firstName = flagsOf(graphqlCalls[0] ?? [])
+      .filter((flag) => flag.style === '-f')
+      .map((flag) => flag.name);
+    expect(firstName).toEqual(['query']);
+    const secondNames = flagsOf(graphqlCalls[1] ?? [])
+      .filter((flag) => flag.style === '-f')
+      .map((flag) => flag.name);
+    expect(secondNames).toContain('reviewsAfter');
+    expect(secondNames).not.toContain('threadsAfter');
   }, 20_000);
 });
 
@@ -146,11 +185,19 @@ describe('trap: GraphQL query variable collision', () => {
 // ---------------------------------------------------------------------------
 
 describe('trap: replies endpoint 404', () => {
-  test('trap fires: any /replies invocation exits 404', async () => {
+  test('trap fires: a GET /replies invocation exits 404 (a POST routes normally)', async () => {
     const { run } = await harness('replies-without');
-    const res = await run(['api', 'repos/octo/toolkit/pulls/7/comments/101/replies']);
-    expect(res.code).not.toBe(0); // process.exit(404) truncates to 8 bits on POSIX
-    expect(res.stderr).toMatch(/404/);
+    const get = await run(['api', '--method', 'GET', 'repos/octo/toolkit/pulls/7/comments/101/replies']);
+    expect(get.code).not.toBe(0); // process.exit(404) truncates to 8 bits on POSIX
+    expect(get.stderr).toMatch(/404/);
+    expect(get.stderr).toContain('no GET/list replies endpoint for review comments');
+    // A POST is how replies are CREATED — it bypasses the 404 builtin and
+    // routes like any other call (the URL carries the pulls-comments route
+    // substring, so it gets that route's payload); the point is the 404
+    // never fires for a POST.
+    const post = await run(['api', '--method=POST', 'repos/octo/toolkit/pulls/7/comments/101/replies']);
+    expect(post.code).toBe(0);
+    expect(post.stderr).not.toMatch(/404/);
   }, 20_000);
 
   test('implementation survives: no /replies call, and the reply lands on the right thread', async () => {
@@ -158,9 +205,9 @@ describe('trap: replies endpoint 404', () => {
     const state = await fetchReviewState(INPUT, {}, run);
     const log = await readLog(logPath);
     expect(log.some((args) => args.some((arg) => arg.includes('/replies')))).toBe(false);
-    const t1 = state.threads.find((thread) => thread.id === 'PRRT_1');
+    const t1 = state.threads.find((thread) => thread.id === 'PRRT_kwDOCxyz111');
     expect(t1?.replies.map((reply) => reply.body)).toEqual([
-      'fresh responder reply: fixed in 0123456', // in_reply_to_id 100 → root node_id PRRT_1
+      'fresh responder reply: fixed in 0123456', // in_reply_to_id 100 → root REST id 100 ↔ rootDatabaseId 100
       'reviewer follow-up on T1',
     ]);
   }, 20_000);
@@ -181,14 +228,14 @@ describe('trap: reviewThreads lag', () => {
         };
       };
     };
-    const t1 = snapshot.data.repository.pullRequest.reviewThreads.nodes.find((n) => n.id === 'PRRT_1');
+    const t1 = snapshot.data.repository.pullRequest.reviewThreads.nodes.find((n) => n.id === 'PRRT_kwDOCxyz111');
     expect(t1?.comments.nodes).toHaveLength(1); // root only — no reply, fresh or otherwise
   }, 20_000);
 
   test('implementation survives: the fresh REST-only responder reply surfaces on the lagged thread', async () => {
     const { run } = await harness('lag-with');
     const state = await fetchReviewState(INPUT, {}, run);
-    const t1 = state.threads.find((thread) => thread.id === 'PRRT_1');
+    const t1 = state.threads.find((thread) => thread.id === 'PRRT_kwDOCxyz111');
     const freshReply = t1?.replies.find((reply) => reply.body.startsWith('fresh responder reply'));
     expect(freshReply).toEqual({
       authorLogin: 'pr-author',
@@ -197,7 +244,7 @@ describe('trap: reviewThreads lag', () => {
     });
     // The full vocabulary rides along: the resolved thread is not counted,
     // both external threads are.
-    expect(state.threads.find((thread) => thread.id === 'PRRT_2')?.isResolved).toBe(true);
+    expect(state.threads.find((thread) => thread.id === 'PRRT_kwDOCxyz222')?.isResolved).toBe(true);
     expect(countUnresolvedThreads(state.threads, { excludeAuthorLogin: 'pr-author' })).toBe(2);
     expect(state.truncated).toBe(false);
   }, 20_000);

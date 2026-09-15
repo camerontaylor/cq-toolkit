@@ -24,16 +24,19 @@
 //   calls without it). `code` exits nonzero AFTER printing the payload.
 //
 // BUILT-IN TRAP BEHAVIORS (mimic real gh; always on, not scenario-dependent):
-//   a. args containing `/replies` → exit 404 (the replies-endpoint-404 trap:
-//      pull review comments have no /replies endpoint; per-comment reply
-//      chains only exist via in_reply_to_id on the flat collection).
+//   a. args containing `/replies` on a non-POST invocation → exit 404 (the
+//      replies-endpoint-404 trap: there is no GET/list replies endpoint for
+//      review comments; reply chains only exist via in_reply_to_id on the
+//      flat collection). A POST (`--method POST`) routes normally — that is
+//      how replies are CREATED.
 //   b. `api graphql` collision guard (I11): a `-f`/`-F` flag named `query`
 //      appearing more than once, or a document declaring a `$query` variable,
 //      exits 1 with gh's collision error family. Never name a GraphQL
 //      variable `query` — the document rides the `-f query=` slot.
-//   c. `pages: [[...], [...]]` payloads: WITH `--paginate` the fake returns
-//      ONE merged JSON array of all pages' items (gh's documented merge);
-//      WITHOUT it, only `pages[0]` — silent page-2 loss, exactly the trap.
+//   c. `pages: [[...], [...]]` payloads: ONLY `--paginate --slurp` yields
+//      the outer array of page arrays (gh >= 2.51 semantics — --paginate
+//      alone does NOT merge); anything less returns `pages[0]` ONLY —
+//      silent page-2 loss, exactly the trap.
 //   d. `--paginate` on `api graphql` → exit 1 (`--paginate is not supported
 //      with graphql`) unless the matched route sets `paginateableGraphql`:
 //      true — GraphQL paginates via cursors, never double-pagination.
@@ -57,9 +60,20 @@ if (logPath) {
   appendFileSync(logPath, `${JSON.stringify({ args })}\n`);
 }
 
-// (a) The replies-endpoint-404 trap.
-if (flat.includes('/replies')) {
-  process.stderr.write('gh: Not Found (HTTP 404) — pull review comments have no /replies endpoint\n');
+// The effective HTTP method (--method POST form or --method=POST form).
+const methodFlag = args.find((a) => a === '--method' || a.startsWith('--method='));
+const method =
+  methodFlag === undefined
+    ? 'GET'
+    : methodFlag === '--method'
+      ? (args[args.indexOf('--method') + 1] ?? 'GET').toUpperCase()
+      : methodFlag.slice('--method='.length).toUpperCase();
+
+// (a) The replies-endpoint-404 trap — GET only; a POST routes normally.
+if (flat.includes('/replies') && method !== 'POST') {
+  process.stderr.write(
+    'gh: 404 Not Found — no GET/list replies endpoint for review comments (fetch the PR comments collection + in_reply_to_id instead)\n',
+  );
   process.exit(404);
 }
 
@@ -138,16 +152,17 @@ if (!route) {
   die(1, `no route for ${flat}`);
 }
 
-// Emit the payload. `pages` encodes the pagination trap: with --paginate all
-// pages merge into ONE array; without it only page 1 comes back.
+// Emit the payload. `pages` encodes the pagination trap: ONLY
+// --paginate --slurp yields the outer array of page arrays; anything less
+// silently returns page 1.
 const emit = (text) => {
   process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
   process.exit(route.code ?? 0);
 };
 
 if (route.pages !== undefined) {
-  const merged = hasFlag('--paginate') ? route.pages.flat() : (route.pages[0] ?? []);
-  emit(JSON.stringify(merged));
+  const slurped = hasFlag('--paginate') && hasFlag('--slurp');
+  emit(JSON.stringify(slurped ? route.pages : (route.pages[0] ?? [])));
 }
 if (route.file !== undefined) {
   emit(readFileSync(resolve(dirname(scenarioPath), route.file), 'utf8'));

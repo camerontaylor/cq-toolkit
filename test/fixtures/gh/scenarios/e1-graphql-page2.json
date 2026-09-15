@@ -62,14 +62,14 @@
           ]
         },
         "reviews": {
-          "pageInfo": { "hasNextPage": true, "endCursor": "PRRCURSOR_R2" },
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
           "nodes": [
             {
-              "id": "PRR_1",
+              "id": "PRR_2",
               "author": { "login": "reviewer" },
-              "state": "CHANGES_REQUESTED",
-              "body": "please address the threads",
-              "submittedAt": "2026-09-14T11:00:00Z"
+              "state": "APPROVED",
+              "body": "re-review: looks good",
+              "submittedAt": "2026-09-15T12:00:00Z"
             }
           ]
         }

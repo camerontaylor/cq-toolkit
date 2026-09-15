@@ -75,8 +75,11 @@ const fakeGh = (
 
 const INPUT: FetchReviewStateInput = { owner: 'octo', repo: 'widget', pr: 7 };
 
-/** One GraphQL reviewThread node with a root comment. */
-const threadNode = (id: string, overrides?: { isResolved?: boolean; authorLogin?: string | null }) => ({
+/** One GraphQL reviewThread node with a root comment (carrying databaseId). */
+const threadNode = (
+  id: string,
+  overrides?: { isResolved?: boolean; authorLogin?: string | null; rootDatabaseId?: number },
+) => ({
   id,
   isResolved: overrides?.isResolved ?? false,
   isOutdated: false,
@@ -85,6 +88,7 @@ const threadNode = (id: string, overrides?: { isResolved?: boolean; authorLogin?
   comments: {
     nodes: [
       {
+        databaseId: overrides?.rootDatabaseId ?? 100,
         author: overrides?.authorLogin === undefined ? { login: 'reviewer' } : overrides.authorLogin === null ? null : { login: overrides.authorLogin },
         body: `root ${id}`,
         createdAt: '2026-01-01T00:00:00Z',
@@ -140,15 +144,19 @@ describe('fetchReviewState', () => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
-          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1')] },
+          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
           { hasNextPage: false, endCursor: null, nodes: [reviewNode('R1')] },
         ),
       pullsComments: [
-        { id: 100, node_id: 'T1-root', user: { login: 'reviewer' }, body: 'root', created_at: '2026-01-01T00:00:00Z' },
-        restPullComment(101, { inReplyTo: 100 }),
+        [
+          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'root', created_at: '2026-01-01T00:00:00Z' },
+          restPullComment(101, { inReplyTo: 100 }),
+        ],
       ],
       issuesComments: [
-        { id: 500, node_id: 'IC1', user: { login: 'bystander' }, body: 'issue comment', created_at: '2026-01-01T02:00:00Z' },
+        [
+          { id: 500, node_id: 'IC_500', user: { login: 'bystander' }, body: 'issue comment', created_at: '2026-01-01T02:00:00Z' },
+        ],
       ],
     });
     const state = await fetchReviewState(INPUT, {}, run);
@@ -158,6 +166,7 @@ describe('fetchReviewState', () => {
     expect(state.headRefName).toBe('feature/lantern');
     expect(state.headRefOid).toBe('abc123');
     expect(state.threads).toHaveLength(1);
+    expect(state.threads[0]?.rootDatabaseId).toBe(100);
     expect(state.threads[0]?.body).toBe('root T1');
     expect(state.reviews).toHaveLength(1);
     expect(state.reviews[0]?.state).toBe('CHANGES_REQUESTED');
@@ -168,18 +177,24 @@ describe('fetchReviewState', () => {
     expect(state.truncatedBecause).toEqual([]);
   });
 
-  test('replies attach: REST in_reply_to_id chains anchor at the thread id via node_id', async () => {
+  test('replies attach: REST in_reply_to_id chains anchor via the root databaseId ↔ REST id join', async () => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
-          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1'), threadNode('T2')] },
+          {
+            hasNextPage: false,
+            endCursor: null,
+            nodes: [threadNode('T1', { rootDatabaseId: 100 }), threadNode('T2', { rootDatabaseId: 200 })],
+          },
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
       pullsComments: [
-        { id: 100, node_id: 'T1', user: { login: 'reviewer' }, body: 'root', created_at: '2026-01-01T00:00:00Z' },
-        restPullComment(101, { inReplyTo: 100 }),
-        restPullComment(102, { inReplyTo: 101, login: 'author' }),
-        { id: 200, node_id: 'T2', user: { login: 'other' }, body: 'root 2', created_at: '2026-01-01T00:00:00Z' },
+        [
+          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'root', created_at: '2026-01-01T00:00:00Z' },
+          restPullComment(101, { inReplyTo: 100 }),
+          restPullComment(102, { inReplyTo: 101, login: 'author' }),
+          { id: 200, node_id: 'PRRC_200', user: { login: 'other' }, body: 'root 2', created_at: '2026-01-01T00:00:00Z' },
+        ],
       ],
     });
     const state = await fetchReviewState(INPUT, {}, run);
@@ -247,29 +262,58 @@ describe('fetchReviewState', () => {
     expect(state.reviews).toHaveLength(1);
   });
 
-  test('restPages cap slices the merged --paginate array and truncates (both REST collections)', async () => {
-    const bigPulls = Array.from({ length: 250 }, (_, i) => restPullComment(1000 + i));
-    const bigIssues = Array.from({ length: 201 }, (_, i) => ({
-      id: 5000 + i,
-      node_id: `IC${i}`,
-      user: { login: 'bystander' },
-      body: 'issue',
-      created_at: '2026-01-01T02:00:00Z',
-    }));
+  test('restPages cap keeps the first pages of the --slurp output and truncates (both REST collections)', async () => {
+    // --slurp yields an outer array of PAGE arrays; the cap is on pages.
+    const pullPages = [
+      [restPullComment(1000), restPullComment(1001)],
+      [restPullComment(1002), restPullComment(1003)],
+      [restPullComment(1004)],
+    ];
+    const issuePages = [
+      [
+        { id: 5000, node_id: 'IC_5000', user: { login: 'bystander' }, body: 'issue', created_at: '2026-01-01T02:00:00Z' },
+      ],
+    ];
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
           { hasNextPage: false, endCursor: null, nodes: [] },
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
-      pullsComments: bigPulls,
-      issuesComments: bigIssues,
+      pullsComments: pullPages,
+      issuesComments: issuePages,
     });
-    const state = await fetchReviewState(INPUT, { restPages: 2 }, run); // cap = 200 items
+    const state = await fetchReviewState(INPUT, { restPages: 2 }, run); // cap = 2 pages
     expect(state.truncated).toBe(true);
-    expect(state.truncatedBecause).toEqual(['restComments.pageCap', 'issueComments.pageCap']);
-    expect(state.restReviewComments).toHaveLength(200);
-    expect(state.restIssueComments).toHaveLength(200);
+    expect(state.truncatedBecause).toEqual(['restComments.pageCap']); // issues: 1 page, under cap
+    expect(state.restReviewComments).toHaveLength(4); // first two pages kept, third dropped
+    expect(state.restIssueComments).toHaveLength(1);
+  });
+
+  test('asymmetric pagination: threads capped at page 1 while reviews walk 3 pages — no duplicate threads', async () => {
+    const run = fakeGh({
+      graphql: ({ reviewsAfter }) =>
+        reviewsAfter === ''
+          ? graphqlPayload(
+              { hasNextPage: true, endCursor: 't2', nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+              { hasNextPage: true, endCursor: 'r2', nodes: [reviewNode('R1')] },
+            )
+          : reviewsAfter === 'r2'
+            ? graphqlPayload(
+                // Threads are done (capped): this page comes back ignored.
+                { hasNextPage: true, endCursor: 't2', nodes: [] },
+                { hasNextPage: true, endCursor: 'r3', nodes: [reviewNode('R2')] },
+              )
+            : graphqlPayload(
+                { hasNextPage: false, endCursor: null, nodes: [] },
+                { hasNextPage: false, endCursor: null, nodes: [reviewNode('R3')] },
+              ),
+    });
+    const state = await fetchReviewState(INPUT, { reviewThreadPages: 1 }, run);
+    expect(state.threads.map((t) => t.id)).toEqual(['T1']); // capped once, never re-pushed
+    expect(state.reviews.map((r) => r.id)).toEqual(['R1', 'R2', 'R3']);
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toEqual(['reviewThreads.pageCap']); // exactly one entry
   });
 
   test('null authors tolerated end to end (deleted accounts never throw)', async () => {
@@ -284,8 +328,8 @@ describe('fetchReviewState', () => {
           { hasNextPage: false, endCursor: null, nodes: [reviewNode('R1', 'CHANGES_REQUESTED', null)] },
           null,
         ),
-      pullsComments: [{ id: 100, node_id: 'T1', user: null, body: 'anon root', created_at: null }],
-      issuesComments: [{ id: 500, user: undefined, body: 'anon', created_at: '2026-01-01T02:00:00Z' }],
+      pullsComments: [[{ id: 100, node_id: 'PRRC_100', user: null, body: 'anon root', created_at: null }]],
+      issuesComments: [[{ id: 500, user: undefined, body: 'anon', created_at: '2026-01-01T02:00:00Z' }]],
     });
     const state = await fetchReviewState(INPUT, {}, run);
     expect(state.authorLogin).toBeNull();
@@ -304,21 +348,23 @@ describe('fetchReviewState', () => {
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
       pullsComments: [
-        {
-          id: 42,
-          node_id: 'N42',
-          user: { login: 'carol' },
-          body: 'mapped',
-          created_at: '2026-01-01T03:00:00Z',
-          in_reply_to_id: 41,
-        },
-        { id: 43, node_id: null, user: { login: 'dave' }, body: 'bare', created_at: '2026-01-01T03:01:00Z' },
+        [
+          {
+            id: 42,
+            node_id: 'PRRC_42',
+            user: { login: 'carol' },
+            body: 'mapped',
+            created_at: '2026-01-01T03:00:00Z',
+            in_reply_to_id: 41,
+          },
+          { id: 43, node_id: null, user: { login: 'dave' }, body: 'bare', created_at: '2026-01-01T03:01:00Z' },
+        ],
       ],
     });
     const state = await fetchReviewState(INPUT, {}, run);
     expect(state.restReviewComments[0]).toEqual({
       id: 42,
-      nodeId: 'N42',
+      nodeId: 'PRRC_42',
       authorLogin: 'carol',
       body: 'mapped',
       createdAt: '2026-01-01T03:00:00Z',

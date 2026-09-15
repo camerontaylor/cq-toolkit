@@ -28,6 +28,13 @@ export interface ThreadComment {
 export interface ReviewThread {
   /** The GraphQL reviewThread node id. */
   id: string;
+  /**
+   * The thread's ROOT comment's REST-side numeric id (GraphQL `databaseId`)
+   * — the anchor attachRestReplies matches REST reply chains against (the
+   * real GitHub join). Null when unavailable: the thread cannot anchor
+   * replies, fail closed.
+   */
+  rootDatabaseId: number | null;
   /** File the thread anchors to, or null when it is a whole-review thread. */
   path: string | null;
   /** Line the thread anchors to, or null when unanchored/outdated. */
@@ -118,13 +125,14 @@ export function countUnresolvedThreads(
  * Reconstruct reply chains from the flat REST review-comment collection.
  * GraphQL reviewThreads.comments(first: 1) yields only each thread's ROOT
  * comment, so the conversation's tail comes from REST: each reply chain is
- * walked inReplyToId up to its root, the root's nodeId is matched against a
- * thread id (GraphQL thread root comments are matched by node id), and the
- * chain's non-root comments are appended to that thread's replies in
- * createdAt order (null timestamps last; ties keep REST order). Chains whose
- * root cannot be matched to a known thread are dropped silently — they
- * belong to other tools' conversations. Mutates the passed threads in place,
- * appending to each matched thread's replies.
+ * walked inReplyToId up to its root REST comment, whose numeric `id` is
+ * matched against a thread's `rootDatabaseId` (the real GitHub join: GraphQL
+ * thread root comment `databaseId` ↔ REST comment `id`), and the chain's
+ * non-root comments are appended to that thread's replies in createdAt order
+ * (null timestamps last; ties keep REST order). Chains whose root cannot be
+ * matched to a known thread are dropped silently — they belong to other
+ * tools' conversations. Mutates the passed threads in place, appending to
+ * each matched thread's replies.
  */
 export function attachRestReplies(
   threads: ReviewThread[],
@@ -134,17 +142,19 @@ export function attachRestReplies(
   for (const comment of restReviewComments) {
     byId.set(comment.id, comment);
   }
-  const threadByRootNodeId = new Map<string, ReviewThread>();
+  const threadByRootDatabaseId = new Map<number, ReviewThread>();
   for (const thread of threads) {
-    threadByRootNodeId.set(thread.id, thread);
+    if (thread.rootDatabaseId !== null) {
+      threadByRootDatabaseId.set(thread.rootDatabaseId, thread);
+    }
   }
 
-  /** Node id of a comment's chain root, or null when it cannot anchor. */
-  const rootNodeId = (comment: RestComment): string | null => {
+  /** A comment's chain root, or null when it cannot be resolved. */
+  const chainRoot = (comment: RestComment): RestComment | null => {
     const seen = new Set<number>([comment.id]);
     let current = comment;
     for (;;) {
-      if (current.inReplyToId === null) return current.nodeId;
+      if (current.inReplyToId === null) return current;
       if (seen.has(current.inReplyToId)) return null; // malformed cycle
       const parent = byId.get(current.inReplyToId);
       if (parent === undefined) return null; // dangling parent
@@ -156,9 +166,9 @@ export function attachRestReplies(
   const replies = new Map<ReviewThread, RestComment[]>();
   for (const comment of restReviewComments) {
     if (comment.inReplyToId === null) continue; // a chain root: it IS the thread body
-    const rootId = rootNodeId(comment);
-    if (rootId === null) continue;
-    const thread = threadByRootNodeId.get(rootId);
+    const root = chainRoot(comment);
+    if (root === null) continue;
+    const thread = threadByRootDatabaseId.get(root.id);
     if (thread === undefined) continue; // another tool's conversation
     const bucket = replies.get(thread);
     if (bucket === undefined) {
