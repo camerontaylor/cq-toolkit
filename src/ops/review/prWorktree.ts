@@ -1,10 +1,11 @@
 // prWorktree — E3 slice 3 (goal E3; UC §2 row 38): resolve THE worktree for
 // a PR — reuse the tree already checked out on the PR's branch, else create
-// one. The ORIGIN PR BRANCH IS TRUTH: the branch is fetched from origin
-// before any resolution decision, so every path below acts on what the
-// remote actually has, not on local memory. One tree PER-PR, not per-batch
-// — E4 dispatches batches sequentially against this tree (I6 isolation is
-// invocation-level, not tree-level).
+// one. The PR'S HEAD REF IS TRUTH: `refs/pull/<pr>/head` is fetched from
+// origin before any resolution decision — it exists for EVERY PR, fork or
+// same-repo alike — so every path below acts on what the remote actually
+// has, not on local memory, and the local branch label follows the fetched
+// sha. One tree PER-PR, not per-batch — E4 dispatches batches sequentially
+// against this tree (I6 isolation is invocation-level, not tree-level).
 //
 // DOMAIN BOUNDARY (asserted, not incidental): this is the REVIEW-OPS
 // worktree — keyed by PR, rooted at `<repoRoot>/.cq-review-worktrees`. It is
@@ -393,17 +394,21 @@ export async function resolvePrWorktree(
   const worktreeRoot = opts.worktreeRoot ?? join(opts.repoRoot, '.cq-review-worktrees');
   const key = String(opts.pr);
 
-  // (a) ORIGIN BRANCH IS TRUTH — fetched before any decision, and the
-  // fetched commit is NAMED: `rev-parse FETCH_HEAD` yields the expectedSha
-  // every reuse candidate must sit at. Gating on the fetch exit alone would
-  // trust a LOCAL tree that lags origin — the exact stale-tree reuse the
-  // fetch exists to prevent. A fetch failure means the branch's state is
-  // unknown: throw, touch nothing.
-  const fetchArgs = ['-C', opts.repoRoot, 'fetch', 'origin', opts.headRefName];
+  // (a) THE PR'S HEAD REF IS TRUTH — fetched from the BASE repo before any
+  // decision: `refs/pull/<pr>/head` exists for EVERY PR, fork or same-repo
+  // alike, so a forked PR's headRefName (which names a branch in the
+  // contributor's fork) never triggers a base-repo fetch that would fail —
+  // or silently grab an unrelated same-named base-repo branch. The fetched
+  // commit is NAMED: `rev-parse FETCH_HEAD` yields the expectedSha every
+  // reuse candidate must sit at, and the local branch label is (re)pointed
+  // at that sha downstream — the label follows the truth, never the other
+  // way round. A fetch failure means the PR head's state is unknown:
+  // throw, touch nothing.
+  const fetchArgs = ['-C', opts.repoRoot, 'fetch', 'origin', `refs/pull/${opts.pr}/head`];
   const fetch = await opts.run(fetchArgs);
   if (fetch.code !== 0) {
     throw gitFail(
-      `fetch origin ${opts.headRefName} failed — the origin PR branch is truth and cannot be resolved`,
+      `fetch origin refs/pull/${opts.pr}/head failed — the PR's head ref is truth and cannot be resolved`,
       fetch.code,
       fetch.stderr,
       fetchArgs,

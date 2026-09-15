@@ -18,7 +18,11 @@
 //      actionId is already recorded is skipped entirely (no duplicate post)
 //      and counted in skippedAlreadyDispatched. actionId is the dedupe key —
 //      callers must derive it from stable coordinates (thread root id, PR
-//      number), never from run-local state.
+//      number), never from run-local state. Each action's load-check-post-
+//      record runs under the file-backed log's withLogLock when available,
+//      so two JOBS processing the same PR cannot both post the same reply
+//      (cross-process dedupe); in-memory logs run unlocked (in-process
+//      callers are single-threaded), one action per critical section.
 //   c. REPLY-BEFORE-RESOLVE (I11 ordering): within one run ALL review_reply
 //      and issue_comment posts execute before ANY resolve_thread mutation.
 //      Resolving a thread hides it — a crash after an early resolve would
@@ -56,6 +60,7 @@
 // module-prefixed fail-loud error message.
 import { appendFile, open, readFile } from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
+import { lock } from 'proper-lockfile';
 import { GH_NAME_OK, GhError, ghNameOk } from './gh.js';
 import type { GhFn, GhResult } from './gh.js';
 
@@ -112,6 +117,17 @@ export interface DispatchRecord {
 export interface DispatchLog {
   load(): Promise<DispatchRecord[]>;
   record(entry: DispatchRecord): Promise<void>;
+  /**
+   * OPTIONAL cross-process serialization for ONE action's load →
+   * check → post → record sequence. The file-backed log provides it (a
+   * `<logPath>.lock` lockfile, proper-lockfile, bounded retries — failure
+   * to acquire within the bound throws loud naming the path); the
+   * in-memory log does not: in-process callers are single-threaded, and
+   * cross-process dedupe needs the file-backed log. Callers must hold the
+   * lock around exactly ONE action's sequence, never the whole batch (a
+   * whole-batch critical section is an avoidably long lock).
+   */
+  withLogLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 /**
@@ -126,8 +142,11 @@ export interface DispatchLog {
  * posts, so mid-file corruption stays loud, never tolerant. `record`
  * appends exactly one newline-terminated line — no read-modify-write, so
  * interleaved loads/records can never lose a record and a crash can never
- * damage PRIOR lines — and it first TRUNCATES a discarded partial tail, so
- * the retry's append always lands on a newline boundary.
+ * damage PRIOR lines — and it repairs the tail before appending: junk is
+ * truncated, while an unterminated tail that already parses as a complete
+ * record is KEPT (load() counts it dispatched) and only its newline
+ * boundary is added — the retry never discards a landed dispatch nor
+ * concatenates onto junk.
  */
 export function fileDispatchLog(path: string): DispatchLog {
   const load = async (): Promise<DispatchRecord[]> => {
@@ -167,20 +186,30 @@ export function fileDispatchLog(path: string): DispatchLog {
   };
   const record = async (entry: DispatchRecord): Promise<void> => {
     // A discarded partial tail is truncated before the retry appends, so a
-    // crash mid-append can never poison the next record: load() tolerates a
-    // truncated FINAL line, but a later record() appending onto those
-    // unterminated bytes would CONCATENATE into one invalid line — the new
-    // record silently dropped by every later load, its action reposting
-    // forever. The repair cuts the file back to just after the last '\n'
-    // (byte-exact via Buffer — a decoded-string offset would lie for
-    // multi-byte content).
+    // crash mid-append can never poison the next record — BUT not every
+    // unterminated tail is garbage: a crash AFTER the record's closing '}'
+    // but BEFORE its '\n' left a VALID record that load() already parses
+    // and counts dispatched. The repair therefore mirrors load() exactly:
+    // an unterminated tail that parses as JSON is KEPT (only its '\n'
+    // boundary is added — truncating it would discard a landed dispatch
+    // and cause a repost), while a tail that does not parse is truncated.
+    // Either way the new record lands on a clean newline boundary.
     let handle: FileHandle | null = null;
+    let boundaryNeeded = false;
     try {
       handle = await open(path, 'r+');
       const bytes = await handle.readFile();
       const keep = bytes.lastIndexOf(0x0a) + 1; // through the last COMPLETE line
       if (keep < bytes.length) {
-        await handle.truncate(keep);
+        const tail = bytes.subarray(keep).toString('utf8');
+        try {
+          JSON.parse(tail);
+          // The tail IS a complete record — keep it byte-for-byte; only
+          // the newline boundary is missing.
+          boundaryNeeded = true;
+        } catch {
+          await handle.truncate(keep); // junk tail: cut it
+        }
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
@@ -191,9 +220,51 @@ export function fileDispatchLog(path: string): DispatchLog {
     } finally {
       await handle?.close();
     }
+    if (boundaryNeeded) {
+      await appendFile(path, '\n', 'utf8');
+    }
     await appendFile(path, `${JSON.stringify(entry)}\n`, 'utf8');
   };
-  return { load, record };
+  /**
+   * The cross-process dedupe lock: serializes ONE action's load → check →
+   * post → record so two jobs processing the same PR cannot both see the
+   * actionId unseen and both POST (a duplicate user-visible reply). Same
+   * proper-lockfile pattern as the worktree registry: `<path>.lock`,
+   * bounded retries, loud throw naming the path on failure. The log file
+   * is materialized (empty) before locking — proper-lockfile lstats the
+   * target, and an empty file is a valid empty log.
+   */
+  const withLogLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    try {
+      await appendFile(path, '', 'utf8');
+    } catch {
+      // Materialization is best-effort: a failure here (e.g. missing
+      // directory) surfaces from the lock attempt below with the path.
+    }
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await lock(path, {
+        stale: 10_000,
+        retries: { retries: 5, minTimeout: 25, maxTimeout: 200 },
+      });
+    } catch (err) {
+      throw new Error(
+        `fileDispatchLog: could not acquire the dispatch log lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing an unserialized check-post-record; clear the stale lock and re-run`,
+        { cause: err },
+      );
+    }
+    if (release === undefined) {
+      throw new Error(
+        `fileDispatchLog: could not acquire the dispatch log lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing an unserialized check-post-record; clear the stale lock and re-run`,
+      );
+    }
+    try {
+      return await fn();
+    } finally {
+      await release();
+    }
+  };
+  return { load, record, withLogLock };
 }
 
 /** What to dispatch against, and everything the dispatch needs injected. */
@@ -409,131 +480,157 @@ export async function replyAndResolve(
     }
   };
 
+  // Per-action CROSS-PROCESS dedupe: when the log provides withLogLock
+  // (the file-backed one does), each action's load-check-post-record runs
+  // under the log lock — two jobs processing the same PR can no longer
+  // both see the actionId unseen and both POST. Under the lock the seen-
+  // set is RE-READ from the log (the startup snapshot predates the other
+  // job's just-written record). The lock is held for exactly ONE action's
+  // sequence, never the whole batch (an avoidably long critical section).
+  // In-memory logs run unlocked: in-process callers are single-threaded;
+  // cross-process safety needs the file-backed log.
+  const runExclusive = <T>(body: () => Promise<T>): Promise<T> =>
+    opts.dispatchLog.withLogLock === undefined ? body() : opts.dispatchLog.withLogLock(body);
+  const refreshSeenUnderLock = async (): Promise<void> => {
+    if (opts.dispatchLog.withLogLock === undefined) {
+      return; // unlocked mode: the startup snapshot is the whole truth
+    }
+    for (const record of await opts.dispatchLog.load()) {
+      seen.add(record.actionId);
+    }
+  };
+
   for (const action of posts) {
-    if (seen.has(action.actionId)) {
-      skippedAlreadyDispatched += 1;
-      continue;
-    }
-    const args =
-      action.kind === 'review_reply'
-        ? [
-            'api',
-            '-X',
-            'POST',
-            `repos/${opts.owner}/${opts.repo}/pulls/${opts.pr}/comments`,
-            // `-F` coerces (the REST id is an integer — same reasoning as
-            // `-F pr=` in fetchReviewState); `body` stays a raw `-f` string.
-            '-F',
-            `in_reply_to=${action.threadRootRestId}`,
-            '-f',
-            `body=${action.body}`,
-          ]
-        : [
-            'api',
-            '-X',
-            'POST',
-            `repos/${opts.owner}/${opts.repo}/issues/${opts.pr}/comments`,
-            '-f',
-            `body=${action.body}`,
-          ];
-    const result = await runGh(args);
-    if (result.code !== 0) {
-      // (e) isolated failure: message is GhError-shaped (exit code + argv +
-      // stderr); NOT recorded — the next run retries it.
-      failed.push({
-        action,
-        error: new GhError(result.code, result.stderr, args, 'failed').message,
-      });
-      continue;
-    }
-    const record: DispatchRecord = {
-      actionId: action.actionId,
-      kind: action.kind,
-      resultRef: minedCommentRef(result.stdout),
-      at: opts.nowMs,
-    };
-    // (f) record BEFORE the next action starts — (d)'s crash-window rule.
-    await opts.dispatchLog.record(record);
-    seen.add(action.actionId);
-    posted.push(record);
+    await runExclusive(async () => {
+      await refreshSeenUnderLock();
+      if (seen.has(action.actionId)) {
+        skippedAlreadyDispatched += 1;
+        return;
+      }
+      const args =
+        action.kind === 'review_reply'
+          ? [
+              'api',
+              '-X',
+              'POST',
+              `repos/${opts.owner}/${opts.repo}/pulls/${opts.pr}/comments`,
+              // `-F` coerces (the REST id is an integer — same reasoning as
+              // `-F pr=` in fetchReviewState); `body` stays a raw `-f` string.
+              '-F',
+              `in_reply_to=${action.threadRootRestId}`,
+              '-f',
+              `body=${action.body}`,
+            ]
+          : [
+              'api',
+              '-X',
+              'POST',
+              `repos/${opts.owner}/${opts.repo}/issues/${opts.pr}/comments`,
+              '-f',
+              `body=${action.body}`,
+            ];
+      const result = await runGh(args);
+      if (result.code !== 0) {
+        // (e) isolated failure: message is GhError-shaped (exit code + argv +
+        // stderr); NOT recorded — the next run retries it.
+        failed.push({
+          action,
+          error: new GhError(result.code, result.stderr, args, 'failed').message,
+        });
+        return;
+      }
+      const record: DispatchRecord = {
+        actionId: action.actionId,
+        kind: action.kind,
+        resultRef: minedCommentRef(result.stdout),
+        at: opts.nowMs,
+      };
+      // (f) record BEFORE the next action starts — (d)'s crash-window rule.
+      await opts.dispatchLog.record(record);
+      seen.add(action.actionId);
+      posted.push(record);
+    });
   }
 
   for (const action of resolves) {
-    if (seen.has(action.actionId)) {
-      skippedAlreadyDispatched += 1;
-      continue;
-    }
-    const args = ['api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-f', `threadId=${action.threadId}`];
-    const result = await runGh(args);
-    if (result.code !== 0) {
-      failed.push({
-        action,
-        error: new GhError(result.code, result.stderr, args, 'failed').message,
-      });
-      continue;
-    }
-    // A 200 can still carry the mutation's failure: a non-empty GraphQL
-    // errors array means the thread is NOT resolved — a safe retry.
-    let payload: GraphqlPayload;
-    try {
-      payload = JSON.parse(result.stdout) as GraphqlPayload;
-    } catch {
-      failed.push({
-        action,
-        error: `gh api graphql printed non-JSON output (exit ${result.code}) — mutation outcome unknown, left unrecorded for retry`,
-      });
-      continue;
-    }
-    if (payload.errors !== undefined && payload.errors.length > 0) {
-      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error));
-      // SUCCESS-EQUIVALENT replay: GitHub rejects a resolve of an
-      // already-resolved thread with this error — meaning a prior run's
-      // mutation LANDED but its record did not (the one crash window).
-      // Retrying would fail forever; the run must CONVERGE: record it
-      // (resultRef = threadId, exactly the landed success) and count it as
-      // an idempotent skip, NOT a failure. The reading is STRICT:
-      // already-resolved must be the SOLE error — EVERY message must
-      // match. A mixed payload (already-resolved next to a real failure
-      // like Bad credentials) does not prove the mutation landed, so it
-      // stays a plain failure: only a demonstrably-landed mutation may be
-      // recorded as converged.
-      if (messages.every((message) => /already resolved/i.test(message))) {
-        const record: DispatchRecord = {
-          actionId: action.actionId,
-          kind: action.kind,
-          resultRef: action.threadId,
-          at: opts.nowMs,
-        };
-        await opts.dispatchLog.record(record);
-        seen.add(action.actionId);
-        posted.push(record);
-        skippedAlreadyResolved += 1;
-        continue;
+    await runExclusive(async () => {
+      await refreshSeenUnderLock();
+      if (seen.has(action.actionId)) {
+        skippedAlreadyDispatched += 1;
+        return;
       }
-      failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages.join('; ')}` });
-      continue;
-    }
-    // Exit 0 + no errors is still not PROOF: the mutation's EFFECT must be
-    // visible in the response — resolveReviewThread.thread.isResolved ===
-    // true. Anything else (an empty object, data null, isResolved false)
-    // means the resolve mutation did not land: fail loud, leave unrecorded
-    // — the next run retries it.
-    if (payload.data?.resolveReviewThread?.thread?.isResolved !== true) {
-      failed.push({
-        action,
-        error: `gh api graphql response did not confirm the resolve (resolveReviewThread.thread.isResolved !== true) — resolve mutation did not land, left unrecorded for retry`,
-      });
-      continue;
-    }
-    const record: DispatchRecord = {
-      actionId: action.actionId,
-      kind: action.kind,
-      resultRef: action.threadId,
-      at: opts.nowMs,
-    };
-    await opts.dispatchLog.record(record);
-    seen.add(action.actionId);
-    posted.push(record);
+      const args = ['api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-f', `threadId=${action.threadId}`];
+      const result = await runGh(args);
+      if (result.code !== 0) {
+        failed.push({
+          action,
+          error: new GhError(result.code, result.stderr, args, 'failed').message,
+        });
+        return;
+      }
+      // A 200 can still carry the mutation's failure: a non-empty GraphQL
+      // errors array means the thread is NOT resolved — a safe retry.
+      let payload: GraphqlPayload;
+      try {
+        payload = JSON.parse(result.stdout) as GraphqlPayload;
+      } catch {
+        failed.push({
+          action,
+          error: `gh api graphql printed non-JSON output (exit ${result.code}) — mutation outcome unknown, left unrecorded for retry`,
+        });
+        return;
+      }
+      if (payload.errors !== undefined && payload.errors.length > 0) {
+        const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error));
+        // SUCCESS-EQUIVALENT replay: GitHub rejects a resolve of an
+        // already-resolved thread with this error — meaning a prior run's
+        // mutation LANDED but its record did not (the one crash window).
+        // Retrying would fail forever; the run must CONVERGE: record it
+        // (resultRef = threadId, exactly the landed success) and count it
+        // as an idempotent skip, NOT a failure. The reading is STRICT:
+        // already-resolved must be the SOLE error — EVERY message must
+        // match. A mixed payload (already-resolved next to a real failure
+        // like Bad credentials) does not prove the mutation landed, so it
+        // stays a plain failure: only a demonstrably-landed mutation may be
+        // recorded as converged.
+        if (messages.every((message) => /already resolved/i.test(message))) {
+          const record: DispatchRecord = {
+            actionId: action.actionId,
+            kind: action.kind,
+            resultRef: action.threadId,
+            at: opts.nowMs,
+          };
+          await opts.dispatchLog.record(record);
+          seen.add(action.actionId);
+          posted.push(record);
+          skippedAlreadyResolved += 1;
+          return;
+        }
+        failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages.join('; ')}` });
+        return;
+      }
+      // Exit 0 + no errors is still not PROOF: the mutation's EFFECT must be
+      // visible in the response — resolveReviewThread.thread.isResolved ===
+      // true. Anything else (an empty object, data null, isResolved false)
+      // means the resolve mutation did not land: fail loud, leave unrecorded
+      // — the next run retries it.
+      if (payload.data?.resolveReviewThread?.thread?.isResolved !== true) {
+        failed.push({
+          action,
+          error: `gh api graphql response did not confirm the resolve (resolveReviewThread.thread.isResolved !== true) — resolve mutation did not land, left unrecorded for retry`,
+        });
+        return;
+      }
+      const record: DispatchRecord = {
+        actionId: action.actionId,
+        kind: action.kind,
+        resultRef: action.threadId,
+        at: opts.nowMs,
+      };
+      await opts.dispatchLog.record(record);
+      seen.add(action.actionId);
+      posted.push(record);
+    });
   }
 
   return { pushed: true, posted, failed, skippedAlreadyDispatched, skippedAlreadyResolved };

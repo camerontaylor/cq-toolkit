@@ -789,6 +789,29 @@ describe('fileDispatchLog', () => {
     }
   });
 
+  test('record() PRESERVES a valid UNTERMINATED final record (crash after the closing brace, before the newline) — no repost', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      const second: DispatchRecord = { actionId: 'r2', kind: 'issue_comment', resultRef: '8002', at: NOW + 1 };
+      const third: DispatchRecord = { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW + 2 };
+      // The crash landed the SECOND record COMPLETE but without its newline:
+      // it is valid JSON that load() already counts dispatched.
+      await writeFile(path, `${JSON.stringify(first)}\n${JSON.stringify(second)}`, 'utf8');
+      expect(await fileDispatchLog(path).load()).toEqual([first, second]);
+      await fileDispatchLog(path).record(third);
+      // The landed record SURVIVED (only its '\n' boundary was added) —
+      // truncating it would have discarded a real dispatch and reposted r2.
+      expect(await fileDispatchLog(path).load()).toEqual([first, second, third]);
+      const text = await readFile(path, 'utf8');
+      expect(text.endsWith('\n')).toBe(true);
+      expect(text.split('\n')).toEqual([JSON.stringify(first), JSON.stringify(second), JSON.stringify(third), '']);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   test('record APPENDS one line: N interleaved load/record cycles always leave parseable content', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
@@ -815,6 +838,49 @@ describe('fileDispatchLog', () => {
       const history = await fileDispatchLog(path).load();
       expect(history).toHaveLength(20);
       expect(history.map((r) => r.actionId)).toEqual(Array.from({ length: 20 }, (_v, i) => `r${i}`));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('two CONCURRENT runs with the same action against a FILE log post exactly ONCE (cross-process dedupe)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const log = fileDispatchLog(path);
+      let postCount = 0;
+      const countingGh: GhFn = async (args) => {
+        if (args.some((a) => a.includes('/pulls/'))) {
+          postCount += 1;
+          // A little latency so both runs genuinely overlap inside the
+          // check-post-record window.
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return { code: 0, stdout: JSON.stringify({ id: 8001 }), stderr: '' };
+        }
+        return { code: 0, stdout: JSON.stringify({ id: 8002 }), stderr: '' };
+      };
+      const actions: ReviewAction[] = [mkReply('r1', 1201)];
+      const optsFor = (): ReplyAndResolveOpts => ({
+        ...REPO,
+        run: countingGh,
+        push: null,
+        dispatchLog: log,
+        nowMs: NOW,
+      });
+      // Two jobs, same PR, same action: without the `<logPath>.lock`, both
+      // would load an empty log, both see r1 unseen, and both POST.
+      const [runA, runB] = await Promise.all([
+        replyAndResolve(actions, optsFor()),
+        replyAndResolve(actions, optsFor()),
+      ]);
+      // Exactly ONE user-visible POST across both runs.
+      expect(postCount).toBe(1);
+      // The runs CONVERGED: one posted, the other counted the skip.
+      expect([runA, runB].filter((r) => r.posted.length > 0)).toHaveLength(1);
+      expect([runA, runB].filter((r) => r.skippedAlreadyDispatched === 1)).toHaveLength(1);
+      expect(runA.failed).toEqual([]);
+      expect(runB.failed).toEqual([]);
+      expect(await log.load()).toHaveLength(1);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

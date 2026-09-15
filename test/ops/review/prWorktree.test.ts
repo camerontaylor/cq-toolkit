@@ -128,6 +128,13 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
       if (model.fetchFails !== undefined) {
         return { code: model.fetchFails.code, stdout: '', stderr: model.fetchFails.stderr };
       }
+      // FORK WORLD: origin hosts the PR's pull ref (refs/pull/<n>/head),
+      // NOT the contributor's branch — a bare branch-name fetch must fail
+      // (it would miss, or grab an unrelated same-named base-repo branch).
+      const refspec = args[4] ?? '';
+      if (!refspec.startsWith('refs/pull/')) {
+        return { code: 128, stdout: '', stderr: `fatal: couldn't find remote ref refs/heads/${refspec}` };
+      }
       return { code: 0, stdout: '', stderr: '' };
     }
     if (sub === 'rev-parse') {
@@ -251,13 +258,13 @@ describe('fetch-first — origin branch is truth', () => {
   test('the fetch runs FIRST and a fetch failure THROWS before the registry is even consulted', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({ '7': { path: '/somewhere/pr-7', branch: BRANCH, createdAt: NOW - 1000 } });
-    const model = mkModel([], { fetchFails: { code: 128, stderr: "fatal: couldn't find remote ref refs/heads/pr-7-fix" } });
+    const model = mkModel([], { fetchFails: { code: 128, stderr: "fatal: couldn't find remote ref refs/pull/7/head" } });
     await expect(
       resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) })),
-    ).rejects.toThrow(/fetch origin pr-7-fix failed.*couldn't find remote ref/s);
+    ).rejects.toThrow(/fetch origin refs\/pull\/7\/head failed.*couldn't find remote ref/s);
     // The fetch was the only thing attempted — registry untouched.
     expect(calls).toHaveLength(1);
-    expect(calls[0]).toEqual(['-C', '/repo', 'fetch', 'origin', 'pr-7-fix']);
+    expect(calls[0]).toEqual(['-C', '/repo', 'fetch', 'origin', 'refs/pull/7/head']);
     expect(registry.calls).toEqual([]);
     // The pre-existing registry entry survives untouched (nothing decided).
     expect(registry.current()['7']).toBeDefined();
@@ -272,8 +279,32 @@ describe('fetch-first — origin branch is truth', () => {
     try {
       const model = mkModel();
       await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
-      expect(calls[0]).toEqual(['-C', repoRoot, 'fetch', 'origin', 'pr-7-fix']);
+      expect(calls[0]).toEqual(['-C', repoRoot, 'fetch', 'origin', 'refs/pull/7/head']);
       expect(calls[1]).toEqual(['-C', repoRoot, 'rev-parse', 'FETCH_HEAD']);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
+  test('a FORKED PR: headRefName names a branch that does NOT exist on origin — the pull-ref fetch still resolves the true head', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-fork-'));
+    try {
+      const calls: string[][] = [];
+      const registry = memRegistry();
+      // The contributor's branch name appears NOWHERE on origin or locally
+      // (the fake fetch refuses every bare branch name) — only
+      // refs/pull/7/head carries the PR's truth.
+      const forkBranch = 'contributor-patch';
+      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
+      const expectedPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${forkBranch}`);
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, headRefName: forkBranch, run: fakeGit(model, calls) }),
+      );
+      expect(result).toEqual({ path: expectedPath, reused: false, branch: forkBranch, foreign: [] });
+      // The truth came from the PULL REF, not the (nonexistent) branch name.
+      expect(calls[0]).toEqual(['-C', repoRoot, 'fetch', 'origin', `refs/pull/${PR}/head`]);
+      // The local branch label was created AT the fetched sha.
+      expect(model.headOf[expectedPath]).toEqual({ branch: forkBranch, head: SHA_B });
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
@@ -445,7 +476,7 @@ describe('registry consult', () => {
       // freed the branch hold, and `-B … <expectedSha>` landed the tree AT
       // the fetched truth.
       expect(calls).toEqual([
-        ['-C', repoRoot, 'fetch', 'origin', BRANCH],
+        ['-C', repoRoot, 'fetch', 'origin', `refs/pull/${PR}/head`],
         ['-C', repoRoot, 'rev-parse', 'FETCH_HEAD'],
         ['-C', stalePath, 'rev-parse', '--abbrev-ref', 'HEAD'],
         ['-C', stalePath, 'rev-parse', 'HEAD'],
@@ -916,7 +947,7 @@ describe('domain boundary vs the sweep ops worktree', () => {
       // fetched sha. No sweep path is ever probed (no branch-matching
       // candidate), returned, or registered.
       expect(calls).toEqual([
-        ['-C', repoRoot, 'fetch', 'origin', BRANCH],
+        ['-C', repoRoot, 'fetch', 'origin', `refs/pull/${PR}/head`],
         ['-C', repoRoot, 'rev-parse', 'FETCH_HEAD'],
         ['-C', repoRoot, 'worktree', 'list', '--porcelain'],
         ['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, expectedPath, SHA_B],
