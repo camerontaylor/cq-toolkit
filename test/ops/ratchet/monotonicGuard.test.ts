@@ -1108,6 +1108,62 @@ describe('formatViolations', () => {
     ]);
   });
 
+  test('a QUOTE-BEARING unit change is caught (review-debt #79/#80): the escaped bodies decode before comparing', () => {
+    // renderBaseline commits `scale"old` JSON-escaped as `scale\"old`; the
+    // old `[^"]*` capture stopped at the escape's quote, so old and new
+    // both captured `scale\\` — the identity check read a REAL SCALE
+    // CHANGE as unchanged and the same-value shortcut waved it through.
+    const changed = checkDiffMonotonicity(
+      fullRewrite(
+        REL,
+        body('lower-is-better', 3, { unit: 'scale"old' }),
+        body('lower-is-better', 3, { unit: 'scale"new' }),
+      ),
+    );
+    expect(changed).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 3,
+          why: 'unit changed',
+          oldUnit: 'scale"old',
+          newUnit: 'scale"new',
+        },
+      ],
+      filesChecked: 1,
+    });
+    // The honest counterpart: an IDENTICAL quote-bearing unit on both sides
+    // (a clock-only re-capture) still passes — no false violation.
+    const sameUnit = checkDiffMonotonicity(
+      fullRewrite(
+        REL,
+        body('lower-is-better', 3, { unit: 'scale"old' }),
+        body('lower-is-better', 3, { unit: 'scale"old' }),
+      ),
+    );
+    expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
+  test('a MALFORMED unit escape is fail-closed (the committed file could not parse back)', () => {
+    // The plus side's unit body carries an INVALID JSON escape (`\x` is
+    // not a JSON escape sequence): the field regex captures it as escape
+    // pairs, but decode fails — the section must fail closed rather than
+    // compare garbage or fall back to the other side's unit.
+    const base = fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3));
+    const plusAt = base.indexOf('+++ b/');
+    const diff =
+      base.slice(0, plusAt) + base.slice(plusAt).replace('"unit": "errors"', '"unit": "errors\\x"');
+    const verdict = checkDiffMonotonicity(diff);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) {
+      expect(verdict.violations[0]?.why).toBe('unparsable baseline diff');
+    }
+  });
+
   test('unit changed renders old → new — with undefined for an absent side — verbatim', () => {
     const flipped = checkDiffMonotonicity(
       fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3, { unit: 'failures' })),

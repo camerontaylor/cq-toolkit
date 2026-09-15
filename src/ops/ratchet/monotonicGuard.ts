@@ -111,10 +111,33 @@ const BASELINE_PATH = /^baselines\/.+\.json$/;
 // → the existing fail-closed paths handle it. `1e999` still matches and is
 // rejected by the non-finite gate in judgeModified.
 const VALUE_RE = /"value"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
-const DIRECTION_RE = /"direction"\s*:\s*"([^"]*)"/g;
-const METRIC_RE = /"metric"\s*:\s*"([^"]*)"/g;
-const TARGET_RE = /"target"\s*:\s*"([^"]*)"/g;
-const UNIT_RE = /"unit"\s*:\s*"([^"]*)"/g;
+// String-field bodies capture the COMPLETE JSON string INCLUDING escape
+// sequences (`[^"\\]|\\.` — a body may not contain a bare quote, but an
+// ESCAPED quote `\"` is part of the value). The capture is JSON-decoded at
+// consumption (decodeJsonString): the old `[^"]*` body stopped at the
+// first escape's quote, so `scale\"old` and `scale\"new` both captured
+// `scale\\` — the unit identity check read a REAL SCALE CHANGE as
+// unchanged and the same-value shortcut waved it through (review-debt
+// #79/#80).
+const DIRECTION_RE = /"direction"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+const METRIC_RE = /"metric"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+const TARGET_RE = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+
+/**
+ * Decode one captured JSON string body (the capture EXCLUDES the quotes):
+ * re-quote and JSON.parse. undefined when the escapes are malformed — a
+ * field the committed file could not parse back, which the strict callers
+ * treat as fail-closed evidence.
+ */
+function decodeJsonString(escaped: string): string | undefined {
+  try {
+    const decoded: unknown = JSON.parse(`"${escaped}"`);
+    return typeof decoded === 'string' ? decoded : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 function isDirection(d: string): d is Direction {
   return d === 'lower-is-better' || d === 'higher-is-better';
@@ -311,8 +334,16 @@ function judgeModified(
   // the guard's semantics would be undefined → terminal 'direction
   // changed'), or neither (a moved value is unjudgeable → fail-closed; an
   // unmoved value-only hunk passes via the shared context value).
-  const newDir = newSide.direction.last;
-  const oldDir = oldSide.direction.last;
+  // String fields decode BEFORE any comparison (review-debt #79/#80): the
+  // captures are JSON-escaped bodies, and only decoded values can be
+  // compared. A present-but-undecodable direction (malformed escapes) is
+  // fail-closed below via the undefined direction path; metric/target are
+  // labels on violations and decode leniently (raw fallback keeps the
+  // evidence named).
+  const newDir =
+    newSide.direction.last === undefined ? undefined : decodeJsonString(newSide.direction.last);
+  const oldDir =
+    oldSide.direction.last === undefined ? undefined : decodeJsonString(oldSide.direction.last);
   const direction = newDir ?? oldDir;
   const oldValue: number | undefined = valuesMoved ? Number(oldSide.value.last) : undefined;
   const newValue: number | undefined = valuesMoved ? Number(newSide.value.last) : undefined;
@@ -325,8 +356,10 @@ function judgeModified(
   if (valuesMoved && (Number.isFinite(oldValue) === false || Number.isFinite(newValue) === false)) {
     return [unparsable()];
   }
-  const metric = newSide.metric.last ?? oldSide.metric.last;
-  const target = newSide.target.last ?? oldSide.target.last;
+  const metricRaw = newSide.metric.last ?? oldSide.metric.last;
+  const targetRaw = newSide.target.last ?? oldSide.target.last;
+  const metric = metricRaw === undefined ? undefined : (decodeJsonString(metricRaw) ?? metricRaw);
+  const target = targetRaw === undefined ? undefined : (decodeJsonString(targetRaw) ?? targetRaw);
   const violations: BaselineViolation[] = [];
   // A flip redefines which way "tighten" points — incomparable evidence
   // (fail-closed), the diff-side twin of captureBaseline's identity check.
@@ -360,8 +393,21 @@ function judgeModified(
   // or dropping the unit line re-scales the evidence just as much. The
   // section is TERMINAL here — the loosens comparison never runs across
   // units, and a flip is moot once the scale itself moved.
-  const oldUnit = oldSide.unit.last;
-  const newUnit = newSide.unit.last;
+  // Units compare DECODED (review-debt #79/#80): `scale\"old` → `scale\"new`
+  // is a real scale change — the old raw capture truncated both to
+  // `scale\\` and the same-value shortcut waved the change through. A
+  // present-but-undecodable unit is malformed escapes — the committed file
+  // could not parse back — fail-closed, never a lucky pass.
+  const oldUnitRaw = oldSide.unit.last;
+  const newUnitRaw = newSide.unit.last;
+  const oldUnit = oldUnitRaw === undefined ? undefined : decodeJsonString(oldUnitRaw);
+  const newUnit = newUnitRaw === undefined ? undefined : decodeJsonString(newUnitRaw);
+  if (oldUnitRaw !== undefined && oldUnit === undefined) {
+    return [unparsable()];
+  }
+  if (newUnitRaw !== undefined && newUnit === undefined) {
+    return [unparsable()];
+  }
   if (oldUnit !== newUnit) {
     return [
       {
