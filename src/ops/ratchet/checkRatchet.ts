@@ -36,7 +36,7 @@
 // change), so the P1 strict-descendant containment applies to reads
 // exactly as it does to writes: a symlinked baselines dir pointing outside
 // the workspace is a fail, never a source of evidence.
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { resolveBaselinesDir } from './captureBaseline.js';
@@ -161,13 +161,16 @@ export function createCheckRatchet(
     // The reading is ADAPTER-OWNED: its fields may be getters or a hostile
     // Proxy that throws on access, so BOTH fields are materialized ONCE
     // inside this containment — a throwing getter (unit included) must fail
-    // the check here, mapped to a fail verdict, never escape the op seam —
-    // even though only `value` participates in the comparison. A non-finite
+    // the check here, mapped to a fail verdict, never escape the op seam.
+    // `unit` rides along for the identity check against the committed
+    // baseline; only `value` participates in the comparison. A non-finite
     // value is unusable comparison evidence, so it fails the same way.
     let value: number;
+    let unit: string | undefined;
     try {
       const materialized = { value: reading.value, unit: reading.unit };
       value = materialized.value;
+      unit = materialized.unit;
       if (!Number.isFinite(value)) {
         return fail(
           `ratchet: metric '${input.metric}' adapter produced an unusable reading ` +
@@ -193,6 +196,23 @@ export function createCheckRatchet(
     // Read through the RESOLVED dir: relPath's 'baselines/' prefix is the
     // virtual repo-relative form; containment guarantees it maps here.
     const absPath = join(containment.dir, relPath.slice('baselines/'.length));
+    // Leaf check BEFORE the read (the same guard captureBaseline's write
+    // path and prune's scan carry): lstat — not stat — so a symlink at the
+    // leaf is seen as itself. Anything that is not a regular file
+    // (symlink/fifo/dir) is refused as evidence, even when its bytes would
+    // have parsed; an ENOENT here falls through to the readFile containment
+    // below for the ordinary not-found wording.
+    try {
+      const leafStat = await lstat(absPath);
+      if (leafStat.isFile() === false) {
+        return fail(
+          `ratchet: baseline '${relPath}' is not a regular file — refusing to read as evidence`,
+        );
+      }
+    } catch {
+      // Inspectability faults (ENOENT, EACCES, ...) land on the readFile
+      // containment below — every path from here is a fail naming the path.
+    }
     let text: string;
     try {
       text = await readFile(absPath, 'utf8');
@@ -227,6 +247,19 @@ export function createCheckRatchet(
       return fail(
         `ratchet: baseline '${relPath}' for metric '${input.metric}' disagrees on ` +
           `${disagreements.join('; ')} — incomparable evidence`,
+      );
+    }
+    // Unit identity: values in different units — undefined counting as a
+    // value on BOTH sides — are never the same ratchet evidence
+    // ('incomparable scale'), the check-side twin of captureBaseline's
+    // write-time unit refusal. A number re-scaled from errors to failures,
+    // or a unit appearing/vanishing between capture and check, would
+    // otherwise compare incommensurables.
+    if (baseline.unit !== unit) {
+      const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
+      return fail(
+        `ratchet: baseline '${relPath}' for metric '${input.metric}' disagrees on ` +
+          `unit ${renderUnit(baseline.unit)} → ${renderUnit(unit)} — incomparable scale`,
       );
     }
 

@@ -21,9 +21,16 @@
 //      permissive baseline exists that would have passed.
 //   4. Identity: a planted baseline whose target, metric, or direction
 //      disagrees with the capture context is incomparable evidence — fail
-//      naming both sides; values are never compared across identities.
+//      naming both sides; values are never compared across identities. The
+//      unit joins the identity set: a planted unit differing from the
+//      reading's unit (undefined counting as a value) is incomparable
+//      SCALE — same-unit and unit-undefined≡undefined checks pass.
 //   5. Every fail carries a reason naming WHAT failed, and both values stay
 //      null unless the comparison actually ran.
+//   6. The baseline leaf is inspected with lstat BEFORE any read: a
+//      symlinked leaf (byte-valid content outside ws) and a directory
+//      squatting at the leaf path both fail with the non-ENOENT refusal
+//      wording, distinct from the missing-file 'not found'.
 //
 // Determinism: temp dirs under os.tmpdir(), removed in afterEach; no clock
 // in assertions. Production adapters are used so checks are exercised
@@ -38,7 +45,7 @@ import { createCheckRatchet } from '../../../src/ops/ratchet/checkRatchet.js';
 import type { CheckRatchetInput } from '../../../src/ops/ratchet/checkRatchet.js';
 import type { SourceCatalog } from '../../../src/ops/ratchet/captureBaseline.js';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
-import type { BaselineFile } from '../../../src/ops/ratchet/format.js';
+import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
 import { registerAdapter } from '../../../src/ops/ratchet/registry.js';
 import type { MetricReading, MetricSource } from '../../../src/ops/ratchet/registry.js';
 
@@ -51,6 +58,7 @@ const NULL_EXTRACT_METRIC = 'null-extract';
 const UNDEFINED_READING_METRIC = 'undefined-reading';
 const NONOBJECT_READING_METRIC = 'non-object-reading';
 const THROWING_VALUE_GETTER_METRIC = 'throwing-value-getter';
+const UNIT_SHIFTING_METRIC = 'unit-shifting';
 
 // One row per Direction, driven by the REAL production adapters so the
 // ratchet matrix (tighten/equal/loosen) is exercised end-to-end both ways.
@@ -117,6 +125,18 @@ beforeAll(() => {
       return reading as unknown as MetricReading;
     },
   });
+  registerAdapter({
+    id: UNIT_SHIFTING_METRIC,
+    direction: 'lower-is-better',
+    // The reading's unit follows the source data, so the same (target,
+    // metric) path can be checked against baselines in different units —
+    // exactly the incomparable-scale scenario.
+    extract: (raw) => {
+      const record = raw as { count?: unknown; unit?: string };
+      if (typeof record.count !== 'number') return null;
+      return { value: record.count, unit: record.unit };
+    },
+  });
 });
 
 // Sources are composition-time wiring: they live in this catalog, never in
@@ -124,6 +144,7 @@ beforeAll(() => {
 const sources: SourceCatalog = new Map<string, MetricSource>([
   [METRIC, () => Promise.resolve(raws[METRIC])],
   [COVERAGE_METRIC, () => Promise.resolve(raws[COVERAGE_METRIC])],
+  [UNIT_SHIFTING_METRIC, () => Promise.resolve(raws[UNIT_SHIFTING_METRIC])],
   [THROWING_METRIC, () => Promise.resolve({ count: 1 })],
   [NULL_EXTRACT_METRIC, () => Promise.resolve({ count: 1 })],
   [UNDEFINED_READING_METRIC, () => Promise.resolve({ count: 1 })],
@@ -139,6 +160,7 @@ beforeEach(async () => {
   ws = await mkdtemp(join(tmpdir(), 'cq-check-'));
   delete raws[METRIC];
   delete raws[COVERAGE_METRIC];
+  delete raws[UNIT_SHIFTING_METRIC];
 });
 
 afterEach(async () => {
@@ -156,7 +178,13 @@ function checkInput(overrides: Partial<CheckRatchetInput> = {}): CheckRatchetInp
 }
 
 /** Plant a committed baseline for one direction row at its real relPath. */
-async function plantBaseline(dir: Dir, value: number, overrides: Partial<BaselineFile> = {}): Promise<void> {
+interface DirSpec {
+  label: Direction;
+  metric: string;
+  unit?: string;
+}
+
+async function plantBaseline(dir: DirSpec, value: number, overrides: Partial<BaselineFile> = {}): Promise<void> {
   await mkdir(join(ws, 'baselines'), { recursive: true });
   const bytes = renderBaseline({
     schemaVersion: 1,
@@ -168,7 +196,7 @@ async function plantBaseline(dir: Dir, value: number, overrides: Partial<Baselin
     capturedAt: CAPTURED_AT,
     ...overrides,
   });
-  await writeFile(join(ws, relFor(dir)), bytes, 'utf8');
+  await writeFile(join(ws, baselineRelPath(TARGET, dir.metric)), bytes, 'utf8');
 }
 
 describe('checkRatchet', () => {
@@ -412,6 +440,117 @@ describe('checkRatchet', () => {
         reason: expect.stringMatching(
           /metric 'throwing-value-getter' adapter produced an unusable reading.*value getter exploded/s,
         ),
+      },
+    });
+  });
+
+  test('a symlinked baseline leaf (byte-valid content outside ws) fails the leaf check, never read as evidence', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'cq-check-outside-'));
+    try {
+      await mkdir(join(ws, 'baselines'), { recursive: true });
+      const outsideFile = join(outside, 'elsewhere.json');
+      await writeFile(
+        outsideFile,
+        renderBaseline({
+          schemaVersion: 1,
+          target: TARGET,
+          metric: METRIC,
+          direction: 'lower-is-better',
+          value: 3,
+          unit: 'errors',
+          capturedAt: CAPTURED_AT,
+        }),
+        'utf8',
+      );
+      await symlink(outsideFile, join(ws, REL));
+      raws[METRIC] = { count: 2 };
+      // lstat sees the link itself — even byte-VALID evidence behind a
+      // symlink is refused, mirroring captureBaseline's write-path leaf
+      // check and prune's scan guard.
+      await expect(check(checkInput())).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: REL,
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: expect.stringMatching(/is not a regular file — refusing to read as evidence/),
+        },
+      });
+      // The link was never followed — the outside bytes are untouched.
+      expect(await readFile(outsideFile, 'utf8')).toContain('"value": 3');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a directory squatting at the baseline path fails the leaf check — wording distinct from not-found', async () => {
+    raws[METRIC] = { count: 2 };
+    await mkdir(join(ws, REL), { recursive: true });
+    await expect(check(checkInput())).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: REL,
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        // The non-ENOENT refusal — negative lookahead pins that it is NOT
+        // the missing-baseline 'not found' wording.
+        reason: expect.stringMatching(
+          /^(?!.*not found).*is not a regular file — refusing to read as evidence/,
+        ),
+      },
+    });
+  });
+
+  test.each([
+    {
+      label: "plant 'errors', check 'failures'",
+      plantUnit: 'errors' as string | undefined,
+      raw: { count: 2, unit: 'failures' },
+      pattern: /disagrees on unit 'errors' → 'failures' — incomparable scale/,
+    },
+    {
+      label: "plant 'errors', check undefined",
+      plantUnit: 'errors' as string | undefined,
+      raw: { count: 2 },
+      pattern: /disagrees on unit 'errors' → undefined — incomparable scale/,
+    },
+    {
+      label: "plant undefined, check 'errors'",
+      plantUnit: undefined as string | undefined,
+      raw: { count: 2, unit: 'errors' },
+      pattern: /disagrees on unit undefined → 'errors' — incomparable scale/,
+    },
+  ])('a unit disagreement fails as incomparable scale ($label)', async ({ plantUnit, raw, pattern }) => {
+    raws[UNIT_SHIFTING_METRIC] = raw;
+    await plantBaseline({ label: 'lower-is-better', metric: UNIT_SHIFTING_METRIC, unit: plantUnit }, 3);
+    await expect(
+      check(checkInput({ metric: UNIT_SHIFTING_METRIC, sourceId: UNIT_SHIFTING_METRIC })),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: baselineRelPath(TARGET, UNIT_SHIFTING_METRIC),
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        reason: expect.stringMatching(pattern),
+      },
+    });
+  });
+
+  test('same-unit checks pass untouched — including unit-undefined ≡ unit-undefined', async () => {
+    raws[UNIT_SHIFTING_METRIC] = { count: 2 };
+    await plantBaseline({ label: 'lower-is-better', metric: UNIT_SHIFTING_METRIC }, 3);
+    await expect(
+      check(checkInput({ metric: UNIT_SHIFTING_METRIC, sourceId: UNIT_SHIFTING_METRIC })),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: baselineRelPath(TARGET, UNIT_SHIFTING_METRIC),
+        verdict: 'pass',
+        baselineValue: 3,
+        currentValue: 2,
       },
     });
   });

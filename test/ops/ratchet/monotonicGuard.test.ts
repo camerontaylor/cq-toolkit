@@ -9,7 +9,12 @@
 //      raising one fails with a 'loosened' violation carrying path + metric
 //      + old/new values.
 //   2. A direction flip with an equal value fails 'direction changed' (a
-//      flip redefines which way tighten points — fail-closed).
+//      flip redefines which way tighten points — fail-closed). A same-value
+//      re-capture with NO flip (captureBaseline legitimately rewriting an
+//      equal-value baseline when only the clock moves) is skipped silently
+//      — no loosening is possible without a value change.
+//   2b. A section can carry BOTH violations at once (loosened under the new
+//       direction AND the flip itself), loosened first.
 //   3. File lifecycle is not a loosening: an ADDED baseline file and a
 //      DELETED baseline file are skipped (counted in filesChecked via the
 //      `+++ b/` path, falling back to the `diff --git` b-side for /dev/null
@@ -185,6 +190,43 @@ describe('checkDiffMonotonicity', () => {
           metric: METRIC,
           oldValue: 3,
           newValue: 3,
+          why: 'direction changed',
+          oldDirection: 'lower-is-better',
+          newDirection: 'higher-is-better',
+        },
+      ],
+      filesChecked: 1,
+    });
+  });
+
+  test('a same-value re-capture (capturedAt-only rewrite) is skipped silently, filesChecked counted', () => {
+    // Real full-file rewrite from a clock-changed re-capture: every line is
+    // ±, the value lines are IDENTICAL on both sides, and the capturedAt
+    // lines differ (so this is not the whitespace-only skip). No loosening
+    // is possible at equal values — ok, and the section still counts.
+    const diff = fullRewrite(
+      REL,
+      body('lower-is-better', 2),
+      body('lower-is-better', 2, { capturedAt: '2026-09-15T01:00:00.000Z' }),
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
+  test('a section can carry BOTH violations: loosened AND direction changed, in that order', () => {
+    // lower(3) → higher(2): under the NEW higher-is-better direction the
+    // value DROPPED (2 < 3 → loosened), and the flip itself redefines the
+    // ratchet — both violations fire, loosened first.
+    const diff = fullRewrite(REL, body('lower-is-better', 3), body('higher-is-better', 2));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, target: TARGET, metric: METRIC, oldValue: 3, newValue: 2, why: 'loosened' },
+        {
+          path: REL,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 2,
           why: 'direction changed',
           oldDirection: 'lower-is-better',
           newDirection: 'higher-is-better',

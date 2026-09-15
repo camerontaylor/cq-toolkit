@@ -45,8 +45,13 @@
 // direction FLIP with values intact is condemned on its own terms
 // (why:'direction changed'): flipping `direction` redefines which way
 // "tighten" points, the same incomparable-evidence refusal captureBaseline's
-// identity check enforces at write time. Both a 'loosened' and a 'direction
-// changed' violation can fire on one section; 'unparsable' is terminal.
+// identity check enforces at write time. A same-value re-capture
+// (oldValue === newValue — captureBaseline legitimately rewrites an
+// equal-value baseline when only the clock moves) is skipped silently; only
+// a direction flip survives that skip, and only DIFFERING values with an
+// unreconstructable direction stay fail-closed. Both a 'loosened' and a
+// 'direction changed' violation can fire on one section; 'unparsable' is
+// terminal.
 import { loosens } from './format.js';
 import type { Direction } from './format.js';
 
@@ -211,29 +216,40 @@ function judgeModified(
     return [unparsable()];
   }
   // Direction: NEW side preferred, else OLD side (rule 3), with each side's
-  // ± lines preferred over shared context. If NO line in the section (± or
-  // context) declares a direction, the loosens comparison is skipped for
-  // the pair and the section fails closed (rule 4): a diff the guard cannot
-  // judge is non-passing evidence, never a pass. A present but
-  // non-Direction string (hand-edited or corrupted evidence) is equally
-  // unjudgeable.
+  // ± lines preferred over shared context. The unjudgeable-direction gate
+  // below binds ONLY when the values differ — see the same-value skip.
   const newDir = newSide.direction.last;
   const oldDir = oldSide.direction.last;
   const direction = newDir ?? oldDir;
-  if (direction === undefined || isDirection(direction) === false) {
-    return [unparsable()];
-  }
   const oldValue = Number(oldSide.value.last);
   const newValue = Number(newSide.value.last);
   const metric = newSide.metric.last ?? oldSide.metric.last;
   const target = newSide.target.last ?? oldSide.target.last;
   const violations: BaselineViolation[] = [];
-  if (loosens(oldValue, newValue, direction)) {
-    violations.push({ path, target, metric, oldValue, newValue, why: 'loosened' });
-  }
   // A flip redefines which way "tighten" points — incomparable evidence
   // (fail-closed), the diff-side twin of captureBaseline's identity check.
-  if (oldDir !== undefined && newDir !== undefined && oldDir !== newDir) {
+  const flip = oldDir !== undefined && newDir !== undefined && oldDir !== newDir;
+  // Same-value re-capture: with oldValue === newValue no loosening is
+  // possible, and captureBaseline legitimately rewrites an equal-value
+  // baseline when only the clock moves — skip the section silently
+  // (filesChecked has already counted it). Two exceptions keep the guard
+  // honest: a direction FLIP is condemned even at equal values (it
+  // redefines the ratchet itself), and only DIFFERING values with an
+  // unreconstructable direction stay fail-closed below.
+  if (oldValue === newValue && flip === false) return [];
+  if (oldValue !== newValue) {
+    // No line in the section (± or context) declares a direction — or the
+    // governing one is not a real Direction (hand-edited or corrupted
+    // evidence): the loosens comparison is unjudgeable, so the section
+    // fails closed (rule 4) — non-passing evidence, never a pass.
+    if (direction === undefined || isDirection(direction) === false) {
+      return [unparsable()];
+    }
+    if (loosens(oldValue, newValue, direction)) {
+      violations.push({ path, target, metric, oldValue, newValue, why: 'loosened' });
+    }
+  }
+  if (flip) {
     violations.push({
       path,
       target,
