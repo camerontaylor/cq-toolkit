@@ -62,6 +62,7 @@ const CRAFTED_INFINITE_METRIC = 'crafted-infinite';
 const UNIT_SHIFTING_METRIC = 'unit-shifting';
 const NULL_UNIT_METRIC = 'null-unit';
 const BAD_DIRECTION_METRIC = 'bad-direction';
+const BIGINT_UNIT_METRIC = 'bigint-unit';
 const REL = baselineRelPath(TARGET, METRIC);
 
 let ws: string;
@@ -119,6 +120,13 @@ beforeAll(() => {
     direction: 'sideways' as unknown as Direction,
     extract: () => ({ value: 1, unit: 'x' }),
   });
+  registerAdapter({
+    id: BIGINT_UNIT_METRIC,
+    direction: 'lower-is-better',
+    // A BigInt unit makes JSON.stringify THROW (before any guarded parse) —
+    // the render itself must be contained by the op seam.
+    extract: () => ({ value: 1, unit: 1n }) as unknown as MetricReading,
+  });
 });
 
 // Sources are composition-time wiring (round-1 fix): they live in this
@@ -131,6 +139,7 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [CRAFTED_INFINITE_METRIC, () => Promise.resolve({ count: 1 })],
   [NULL_UNIT_METRIC, () => Promise.resolve({ count: 1 })],
   [BAD_DIRECTION_METRIC, () => Promise.resolve({ count: 1 })],
+  [BIGINT_UNIT_METRIC, () => Promise.resolve({ count: 1 })],
   [UNIT_SHIFTING_METRIC, () => Promise.resolve(sourceRaw)],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
@@ -337,6 +346,18 @@ describe('captureBaseline', () => {
       status: 'failed',
       error: expect.stringMatching(
         /metric 'bad-direction' produced an unparsable baseline — refusing to publish.*direction/s,
+      ),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a probe adapter returning a BigInt unit fails the render containment (no throw, no file)', async () => {
+    await expect(
+      capture(captureInput({ metric: BIGINT_UNIT_METRIC, sourceId: BIGINT_UNIT_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'bigint-unit' produced an unparsable baseline — refusing to publish/s,
       ),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();

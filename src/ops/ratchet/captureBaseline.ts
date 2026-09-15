@@ -203,21 +203,23 @@ export function createCaptureBaseline(
     }
 
     const relPath = baselineRelPath(input.target, input.metric);
-    const bytes = renderBaseline({
-      schemaVersion: 1,
-      target: input.target,
-      metric: input.metric,
-      direction: adapter.direction,
-      value: reading.value,
-      unit: reading.unit,
-      capturedAt: input.capturedAt ?? new Date().toISOString(),
-    });
 
-    // Boundary self-check: capture never publishes bytes it cannot parse
-    // back — a third-party adapter shape (e.g. unit: null serialized as
-    // "unit": null, or a bogus direction) would otherwise land as a
-    // baseline file that fails its own parser.
+    // Boundary self-check: BOTH the render and a parse-back of its bytes
+    // run inside this containment — a third-party adapter shape that makes
+    // JSON.stringify throw (e.g. unit: 1n, a BigInt) or that renders to
+    // bytes failing their own parser (unit: null, a bogus direction) is a
+    // `failed` verdict, never a throw across the op seam.
+    let bytes: string;
     try {
+      bytes = renderBaseline({
+        schemaVersion: 1,
+        target: input.target,
+        metric: input.metric,
+        direction: adapter.direction,
+        value: reading.value,
+        unit: reading.unit,
+        capturedAt: input.capturedAt ?? new Date().toISOString(),
+      });
       parseBaseline(bytes);
     } catch (err) {
       return {
