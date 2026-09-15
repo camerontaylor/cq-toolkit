@@ -25,8 +25,10 @@
 //     silently raised), so a section with content lines on only one side
 //     and NO lifecycle marker FAILS CLOSED as 'unparsable baseline diff'.
 //     Index/mode-only sections (no content lines at all) and
-//     whitespace-only rewrites (the trimmed `-` set equals the trimmed
-//     `+` set) → skip: nothing moved.
+//     whitespace-only rewrites (the trimmed `-` lines equal the trimmed
+//     `+` lines IN ORDER — a sort would hide duplicate-key reorders, whose
+//     effective value is the LAST key JSON.parse honors) → skip: nothing
+//     moved.
 //   - Otherwise the section is MODIFIED: `"value"` — the ratcheted
 //     quantity — is reconstructed ONLY from the `-`/`+` content lines (the
 //     `---`/`+++` file headers are excluded so they are never mistaken for
@@ -54,9 +56,11 @@
 // "tighten" points, the same incomparable-evidence refusal captureBaseline's
 // identity check enforces at write time. A same-value re-capture
 // (oldValue === newValue — captureBaseline legitimately rewrites an
-// equal-value baseline when only the clock moves) is skipped silently; only
-// a direction flip survives that skip, and only DIFFERING values with an
-// unreconstructable direction stay fail-closed. A UNIT change between the
+// equal-value baseline when only the clock moves) is skipped silently — and
+// so is the REAL git shape of that rewrite, where the value line rides in
+// undiffed context and counts as UNMOVED; only a direction flip survives
+// that skip, and only genuinely DIFFERING values with an unreconstructable
+// direction stay fail-closed. A UNIT change between the
 // sides (Codex P1: `0.8 ratio` → `70 pct` must never read as an 87.5×
 // tightening) is why:'unit changed' — incomparable scale: the loosens
 // comparison NEVER runs across units, the section is terminal, and a unit
@@ -119,22 +123,61 @@ function splitSections(diff: string): string[][] {
   return sections;
 }
 
+/** Path prefixes git dialects put on diff paths (plus noprefix config, which has none). */
+const DIFF_PREFIXES: readonly string[] = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
+
+function stripDiffPrefix(p: string): string {
+  for (const prefix of DIFF_PREFIXES) {
+    if (p.startsWith(prefix)) return p.slice(prefix.length);
+  }
+  return p;
+}
+
 /**
- * The section's NEW path: the `+++ b/<path>` line wins (tab-stripped — some
- * diff tools append timestamps); `/dev/null` (added/deleted files) and any
- * missing `+++ b/` fall back to the b-side of the `diff --git a/X b/Y`
- * header (last ` b/` — baseline paths contain no spaces, so this split is
- * exact for every path the guard will judge).
+ * The section's NEW path, across dialects: the `+++ <path>` line wins
+ * (tab-stripped — some diff tools append timestamps), accepting every
+ * standard prefix (b/, a/, i/, w/, c/, o/) and noprefix config; a
+ * `/dev/null` new-side is not a path (it means added/deleted — decided from
+ * header metadata, item below) and falls back to the `diff --git a/X b/Y`
+ * header, whose b-side is the LAST known-prefix marker in the line, or —
+ * noprefix dialect — the second half of the printed-identical `X X` pair.
  */
 function sectionPath(lines: string[]): string | null {
   for (const line of lines) {
-    if (line.startsWith('+++ b/')) return line.slice('+++ b/'.length).split('\t')[0];
+    if (line.startsWith('+++ /dev/null')) continue; // lifecycle marker, not a path
+    if (line.startsWith('+++ ')) return stripDiffPrefix(line.slice('+++ '.length).split('\t')[0]);
   }
   const header = lines.find((l) => l.startsWith('diff --git '));
   if (header === undefined) return null;
   const rest = header.slice('diff --git '.length);
-  const bAt = rest.lastIndexOf(' b/');
-  return bAt === -1 ? null : rest.slice(bAt + ' b/'.length).split('\t')[0];
+  let bestAt = -1;
+  let bestPrefix = '';
+  for (const prefix of DIFF_PREFIXES) {
+    const at = rest.lastIndexOf(` ${prefix}`);
+    if (at > bestAt) {
+      bestAt = at;
+      bestPrefix = prefix;
+    }
+  }
+  if (bestAt !== -1) {
+    return stripDiffPrefix(rest.slice(bestAt + 1 + bestPrefix.length).split('\t')[0]);
+  }
+  // noprefix dialect prints the identical path twice: 'X X'.
+  if (rest.length % 2 === 0) {
+    const first = rest.slice(0, rest.length / 2);
+    if (first.length > 0 && rest.slice(rest.length / 2 + 1) === first) return first;
+  }
+  return null;
+}
+
+/** The section's METADATA region: every line before the first hunk header (`@@`). */
+function headerRegion(lines: string[]): string[] {
+  const header: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith('@@')) break;
+    header.push(line);
+  }
+  return header;
 }
 
 /**
@@ -158,12 +201,16 @@ function contentLines(lines: string[]): { minus: string[]; plus: string[]; conte
   return { minus, plus, context };
 }
 
-/** True when the two sides carry the same lines modulo whitespace — a reformat, not a movement. */
+/** True when the two sides carry the same lines modulo whitespace, IN ORDER — a reformat, not a movement. */
 function whitespaceOnly(minus: string[], plus: string[]): boolean {
-  const norm = (ls: string[]): string[] => ls.map((l) => l.trim()).sort();
-  const a = norm(minus);
-  const b = norm(plus);
-  return a.length === b.length && a.every((l, i) => l === b[i]);
+  // No sort: a reorder of duplicate `"value"` keys presents the same line
+  // multiset in a different order, and the effective value (the LAST key
+  // JSON.parse honors) moves with it — that is a movement, judged below,
+  // never a "reformat".
+  if (minus.length !== plus.length) return false;
+  const a = minus.map((l) => l.trim());
+  const b = plus.map((l) => l.trim());
+  return a.every((l, i) => l === b[i]);
 }
 
 /** Count + last capture of one quoted field across one diff side. */
@@ -198,9 +245,10 @@ function preferDiffLines(inline: SideScan, context: SideScan): SideScan {
 
 /**
  * Judge a MODIFIED baseline section (both sides have content lines). Every
- * return path is either [] (values equal / tightened under the governing
- * direction) or fail-closed violations; a section that cannot be judged is
- * NEVER silently passed (see the FAIL-CLOSED note in the header).
+ * return path is either [] (nothing moved — equal values, or the value
+ * untouched in context — or tightened under the governing direction) or
+ * fail-closed violations; a section that cannot be judged is NEVER silently
+ * passed (see the FAIL-CLOSED note in the header).
  */
 function judgeModified(
   path: string,
@@ -226,10 +274,19 @@ function judgeModified(
     unit: preferDiffLines(scanSide(plus, UNIT_RE), scanSide(context, UNIT_RE)),
   };
   const unparsable = (): BaselineViolation => ({ path, why: 'unparsable baseline diff' });
-  // The ratcheted quantity must pair up old→new: a count mismatch (two
-  // removed values, one added) or an absent value on either side leaves the
-  // movement unjudgeable — fail closed (rules 4 and 5).
-  if (oldSide.value.count !== newSide.value.count || oldSide.value.count === 0) {
+  // The ratcheted quantity must pair up old→new WHENEVER either side shows
+  // it: a count mismatch leaves the movement unjudgeable — fail closed
+  // (rules 4 and 5). When BOTH counts are 0, the value sat in undiffed
+  // context (the real -U3 clock-only re-capture shape): the value is
+  // UNMOVED — undefined on both sides, never Number(undefined) — and
+  // judgment falls through to the flip/unit checks. Both counts 0 with no
+  // value in context anywhere (renamed fields, garbage content) remains
+  // fail-closed: nothing identifies what moved.
+  if (oldSide.value.count !== newSide.value.count) {
+    return [unparsable()];
+  }
+  const valuesMoved = oldSide.value.count > 0;
+  if (valuesMoved === false && scanSide(context, VALUE_RE).count === 0) {
     return [unparsable()];
   }
   // Direction: NEW side preferred, else OLD side (rule 3), with each side's
@@ -238,8 +295,8 @@ function judgeModified(
   const newDir = newSide.direction.last;
   const oldDir = oldSide.direction.last;
   const direction = newDir ?? oldDir;
-  const oldValue = Number(oldSide.value.last);
-  const newValue = Number(newSide.value.last);
+  const oldValue: number | undefined = valuesMoved ? Number(oldSide.value.last) : undefined;
+  const newValue: number | undefined = valuesMoved ? Number(newSide.value.last) : undefined;
   const metric = newSide.metric.last ?? oldSide.metric.last;
   const target = newSide.target.last ?? oldSide.target.last;
   const violations: BaselineViolation[] = [];
@@ -268,15 +325,16 @@ function judgeModified(
       },
     ];
   }
-  // Same-value re-capture: with oldValue === newValue no loosening is
-  // possible, and captureBaseline legitimately rewrites an equal-value
+  // Same-value (or value-unmoved-in-context) re-capture: with the value
+  // identical on both sides — or never touched by any hunk — no loosening
+  // is possible, and captureBaseline legitimately rewrites an equal-value
   // baseline when only the clock moves — skip the section silently
   // (filesChecked has already counted it). Two exceptions keep the guard
   // honest: a direction FLIP is condemned even at equal values (it
   // redefines the ratchet itself), and only DIFFERING values with an
   // unreconstructable direction stay fail-closed below.
   if (oldValue === newValue && flip === false) return [];
-  if (oldValue !== newValue) {
+  if (oldValue !== undefined && newValue !== undefined && oldValue !== newValue) {
     // No line in the section (± or context) declares a direction — or the
     // governing one is not a real Direction (hand-edited or corrupted
     // evidence): the loosens comparison is unjudgeable, so the section
@@ -314,16 +372,32 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
   let filesChecked = 0;
   for (const section of splitSections(diff)) {
     const path = sectionPath(section);
-    if (path === null || BASELINE_PATH.test(path) === false) continue; // judged: baseline files only
+    if (path === null) {
+      // Unknown dialect (Codex P1 round 2): content we cannot attribute to
+      // a file is never silently unchecked — fail closed, naming the raw
+      // section header. Header-only noise (no content lines at all) stays
+      // ignored: there is nothing there to judge.
+      const { minus, plus } = contentLines(section);
+      if (minus.length > 0 || plus.length > 0) {
+        violations.push({ path: section[0], why: 'unparsable baseline diff' });
+      }
+      continue;
+    }
+    if (BASELINE_PATH.test(path) === false) continue; // judged: baseline files only
     filesChecked += 1;
     const { minus, plus, context } = contentLines(section);
     // Lifecycle from METADATA (Codex P1) — never from content-line counts:
     // an existing-file modification can produce one-sided content, and
-    // counting lines would let it ride the added/deleted skips.
-    if (hasMarker(section, 'new file mode') || hasMarker(section, '--- /dev/null')) {
+    // counting lines would let it ride the added/deleted skips. The
+    // /dev/null markers are honored only in the HEADER region (before the
+    // first `@@`): a ± content line that renders as `--- /dev/null` (a
+    // removed line whose own content was `-- /dev/null`) is evidence
+    // movement, not file lifecycle.
+    const header = headerRegion(section);
+    if (hasMarker(header, 'new file mode') || hasMarker(header, '--- /dev/null')) {
       continue; // added baseline: capture committing data, not a loosening
     }
-    if (hasMarker(section, 'deleted file mode') || hasMarker(section, '+++ /dev/null')) {
+    if (hasMarker(header, 'deleted file mode') || hasMarker(header, '+++ /dev/null')) {
       continue; // deleted baseline: prune lifecycle, not a loosening
     }
     if (minus.length === 0 && plus.length === 0) continue; // index/mode churn only

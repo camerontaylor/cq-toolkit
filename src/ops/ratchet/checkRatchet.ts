@@ -99,6 +99,31 @@ export function createCheckRatchet(
   sources: SourceCatalog,
 ): Op<CheckRatchetInput, CheckRatchetOutcome> {
   return async (input) => {
+    // Top input guard (round 2): the kernel's input schema should make
+    // malformed inputs unreachable, but the op seam owns its own
+    // defensiveness — baselineRelPath would throw on a non-string
+    // (toLowerCase), and a throw must never cross the op seam. A missing or
+    // non-typed field becomes a fail VERDICT with arg-error wording; no
+    // path is constructed, so the outcome's path is empty.
+    for (const [name, value] of [
+      ['ws', input.ws],
+      ['target', input.target],
+      ['metric', input.metric],
+      ['sourceId', input.sourceId],
+    ] as const) {
+      if (typeof value !== 'string') {
+        return {
+          status: 'ok',
+          value: {
+            path: '',
+            verdict: 'fail',
+            baselineValue: null,
+            currentValue: null,
+            reason: `ratchet: invalid input — '${name}' must be a string`,
+          },
+        };
+      }
+    }
     const relPath = baselineRelPath(input.target, input.metric);
     // Every failure mode funnels through here: a fail VERDICT delivered as
     // a ok-status OpResult — never a throw, never a fabricated pass.
@@ -202,6 +227,11 @@ export function createCheckRatchet(
     // (symlink/fifo/dir) is refused as evidence, even when its bytes would
     // have parsed; an ENOENT here falls through to the readFile containment
     // below for the ordinary not-found wording.
+    // RESIDUAL (recorded, round 2): the lstat→readFile pair is a TOCTOU
+    // window (a leaf swapped to a symlink between the two calls would be
+    // read); accepted for this read-only check path under the same merged
+    // pattern as captureBaseline — tracked with the H2 review findings
+    // (PR #74 review thread, round 2).
     try {
       const leafStat = await lstat(absPath);
       if (leafStat.isFile() === false) {

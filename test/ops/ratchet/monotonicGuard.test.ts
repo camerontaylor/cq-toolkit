@@ -46,6 +46,21 @@
 //      judged from the ± sides directly (rule 3's new-side preference).
 //   6. Whitespace-only rewrites and index/mode-only sections are skipped.
 //   7. formatViolations renders the three violation kinds verbatim.
+//
+// Round-2 additions: the whitespace check is IN-ORDER (a duplicate-`"value"`
+// reorder is a movement, judged — never a "reformat" skip); a value that
+// rides in undiffed context counts as UNMOVED (the real -U3 clock-only
+// re-capture shape skips silently); path extraction accepts every git
+// dialect prefix (b/, a/, i/, w/, c/, o/, noprefix) and a content-bearing
+// section with no extractable path fails closed naming the raw header;
+// lifecycle /dev/null markers are honored only in the header region (before
+// the first @@); and a describe block feeds LITERAL `git diff` output
+// (real temp repo) through the guard for tighten/loosen/lifecycle/clock
+// fixtures.
+import { spawnSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
 import { checkDiffMonotonicity, formatViolations } from '../../../src/ops/ratchet/monotonicGuard.js';
@@ -83,6 +98,53 @@ function covBody(value: number): string {
 
 function bodyLines(b: string): string[] {
   return b.split('\n').filter((l) => l !== '');
+}
+
+function gitAvailable(): boolean {
+  return spawnSync('git', ['--version']).status === 0;
+}
+
+/**
+ * Feed the guard LITERAL git output: a real temp repo, `before` committed
+ * (its absence = added-file lifecycle), `after` staged (its absence =
+ * deleted-file lifecycle), and `git diff --cached` returned verbatim.
+ * Identity configs ride on the commit as -c flags — one spawn per git
+ * verb keeps the sandboxed-spawn overhead well inside the test timeout.
+ */
+async function realGitDiff(before: string | null, after: string | null): Promise<string> {
+  const ws = await mkdtemp(join(tmpdir(), 'cq-gitdiff-'));
+  try {
+    const run = (args: string[]): void => {
+      const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8' });
+      if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${String(r.stderr)}`);
+    };
+    run(['init', '-q']);
+    await mkdir(join(ws, 'baselines'), { recursive: true });
+    await writeFile(join(ws, 'README.md'), 'seed commit\n', 'utf8');
+    const abs = join(ws, REL);
+    if (before !== null) await writeFile(abs, before, 'utf8');
+    run(['add', '-A']);
+    run([
+      '-c',
+      'user.email=guard@test',
+      '-c',
+      'user.name=guard',
+      '-c',
+      'commit.gpgsign=false',
+      'commit',
+      '-q',
+      '-m',
+      'base',
+    ]);
+    if (after === null) await rm(abs, { force: true });
+    else await writeFile(abs, after, 'utf8');
+    run(['add', '-A']);
+    const d = spawnSync('git', ['diff', '--cached'], { cwd: ws, encoding: 'utf8' });
+    if (d.status !== 0 || typeof d.stdout !== 'string') throw new Error('git diff failed');
+    return d.stdout;
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+  }
 }
 
 /** Full-file-rewrite form: every old line removed, every new line added. */
@@ -367,6 +429,61 @@ describe('checkDiffMonotonicity', () => {
     });
   });
 
+  test('a same-value re-capture in the real -U3 git shape (value only in context) is skipped silently', () => {
+    // hunkDiff with context 3: only the capturedAt line is ±; the value,
+    // direction, and unit lines ride in undiffed context. The value is
+    // UNMOVED (never Number(undefined)) — the same-value skip contract
+    // holds for the shape real git diffs actually produce.
+    const diff = hunkDiff(
+      REL,
+      body('lower-is-better', 2),
+      body('lower-is-better', 2, { capturedAt: '2026-09-15T01:00:00.000Z' }),
+      3,
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
+  test('a duplicate-"value" key REORDER is judged, not skipped as a reformat (sort-free whitespace check)', () => {
+    // Same line multiset, different order: the LAST key JSON.parse honors
+    // moves the effective threshold 5 → 100 (a loosening under
+    // lower-is-better). The in-order whitespace check refuses to call this
+    // a reformat; counts match (2/2, so the ±count gate is not the judge —
+    // the loosened verdict is, naming both values). A reorder whose counts
+    // DON'T match hits the ±count gate → unparsable (pinned separately).
+    const oldLines = [
+      '{',
+      '  "schemaVersion": 1,',
+      '  "target": "typecheck",',
+      '  "metric": "typecheck-count",',
+      '  "direction": "lower-is-better",',
+      '  "value": 100,',
+      '  "value": 5,',
+      '  "unit": "errors",',
+      '  "capturedAt": "2026-09-15T00:00:00.000Z",',
+      '}',
+    ];
+    const newLines = [
+      '{',
+      '  "schemaVersion": 1,',
+      '  "target": "typecheck",',
+      '  "metric": "typecheck-count",',
+      '  "direction": "lower-is-better",',
+      '  "value": 5,',
+      '  "value": 100,',
+      '  "unit": "errors",',
+      '  "capturedAt": "2026-09-15T00:00:00.000Z",',
+      '}',
+    ];
+    const diff = modifiedSection(REL, oldLines, newLines);
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, target: TARGET, metric: METRIC, oldValue: 5, newValue: 100, why: 'loosened' },
+      ],
+      filesChecked: 1,
+    });
+  });
+
   test('an added baseline file is skipped (capture committing data), counted in filesChecked', () => {
     const diff = [
       `diff --git a/${REL} b/${REL}`,
@@ -471,6 +588,108 @@ describe('checkDiffMonotonicity', () => {
     expect(checkDiffMonotonicity(diff)).toEqual({
       ok: false,
       violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test.each(['b/', 'a/', 'i/', 'w/', 'c/', 'o/', ''])(
+    'dialect prefix %s on the +++ line is attributed and judged',
+    (prefix) => {
+      const diff = [
+        `diff --git a/${REL} b/${REL}`,
+        'index 1111111..2222222 100644',
+        `--- a/${REL}`,
+        `+++ ${prefix}${REL}`,
+        '@@ -1,4 +1,4 @@',
+        '-  "direction": "lower-is-better",',
+        '-  "value": 3,',
+        '+  "direction": "lower-is-better",',
+        '+  "value": 2,',
+      ].join('\n');
+      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    },
+  );
+
+  test('a noprefix dialect (no a//b/ markers anywhere) is attributed via the printed-identical header pair', () => {
+    const diff = [
+      `diff --git ${REL} ${REL}`,
+      'index 1111111..2222222 100644',
+      `--- ${REL}`,
+      `+++ ${REL}`,
+      '@@ -1,4 +1,4 @@',
+      '-  "direction": "lower-is-better",',
+      '-  "value": 3,',
+      '+  "direction": "lower-is-better",',
+      '+  "value": 2,',
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
+  test('a section with no +++ line falls back to the diff --git b-side path and is judged', () => {
+    const diff = [
+      `diff --git a/${REL} b/${REL}`,
+      'index 1111111..2222222 100644',
+      `--- a/${REL}`,
+      '@@ -1,4 +1,4 @@',
+      '-  "direction": "lower-is-better",',
+      '-  "value": 3,',
+      '+  "direction": "lower-is-better",',
+      '+  "value": 2,',
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
+  test('a content section with no extractable path fails closed, naming the raw header (unknown dialect)', () => {
+    const diff = [
+      'diff --git mangled-nonstandard-output',
+      '@@ -1,4 +1,4 @@',
+      '-  "direction": "lower-is-better",',
+      '-  "value": 3,',
+      '+  "direction": "lower-is-better",',
+      '+  "value": 2,',
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: 'diff --git mangled-nonstandard-output', why: 'unparsable baseline diff' },
+      ],
+      filesChecked: 0,
+    });
+  });
+
+  test('a pathless section with NO content lines stays ignored (true non-file noise)', () => {
+    const diff = ['diff --git noise-entry', 'index abc..def 100644'].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 0 });
+  });
+
+  test('a removed `-- /dev/null` line rendering as `--- /dev/null` inside a hunk does NOT flip lifecycle to deleted', () => {
+    // The old body contained the literal line `-- /dev/null`; its removal
+    // renders exactly as the deleted-file marker — but INSIDE the hunk that
+    // is evidence movement, not file lifecycle. Before the header-region
+    // fix this section rode the deleted-file skip to ok.
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 2,', '-- /dev/null'],
+      ['  "direction": "lower-is-better",', '  "value": 3,'],
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      // The hand-built hunk carries no metric/target lines — both stay
+      // undefined while the loosened values are named.
+      violations: [{ path: REL, oldValue: 2, newValue: 3, why: 'loosened' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('an added `++ /dev/null` line rendering as `+++ /dev/null` inside a hunk does NOT flip lifecycle to added', () => {
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 2,'],
+      ['  "direction": "lower-is-better",', '  "value": 3,', '++ /dev/null'],
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, oldValue: 2, newValue: 3, why: 'loosened' }],
       filesChecked: 1,
     });
   });
@@ -637,6 +856,63 @@ describe('checkDiffMonotonicity', () => {
     ].join('\n');
     expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
+});
+
+const gitDescribe = gitAvailable() ? describe : describe.skip;
+gitDescribe('real git diff fixtures (literal git output from a temp repo)', () => {
+  test(
+    'a real tighten diff passes',
+    { timeout: 20_000 },
+    async () => {
+      const diff = await realGitDiff(body('lower-is-better', 3), body('lower-is-better', 2));
+      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    },
+  );
+
+  test(
+    'a real loosen diff fails naming path + metric + values',
+    { timeout: 20_000 },
+    async () => {
+      const diff = await realGitDiff(body('lower-is-better', 2), body('lower-is-better', 3));
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [
+          { path: REL, target: TARGET, metric: METRIC, oldValue: 2, newValue: 3, why: 'loosened' },
+        ],
+        filesChecked: 1,
+      });
+    },
+  );
+
+  test(
+    'a real added-baseline diff is skipped via its metadata markers',
+    { timeout: 20_000 },
+    async () => {
+      const diff = await realGitDiff(null, body('lower-is-better', 3));
+      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    },
+  );
+
+  test(
+    'a real deleted-baseline diff is skipped via its metadata markers',
+    { timeout: 20_000 },
+    async () => {
+      const diff = await realGitDiff(body('lower-is-better', 3), null);
+      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    },
+  );
+
+  test(
+    'a real clock-only re-capture diff is skipped silently (value unmoved in context)',
+    { timeout: 20_000 },
+    async () => {
+      const diff = await realGitDiff(
+        body('lower-is-better', 2),
+        body('lower-is-better', 2, { capturedAt: '2026-09-15T01:00:00.000Z' }),
+      );
+      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    },
+  );
 });
 
 describe('formatViolations', () => {

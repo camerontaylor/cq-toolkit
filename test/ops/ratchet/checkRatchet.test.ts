@@ -59,6 +59,7 @@ const UNDEFINED_READING_METRIC = 'undefined-reading';
 const NONOBJECT_READING_METRIC = 'non-object-reading';
 const THROWING_VALUE_GETTER_METRIC = 'throwing-value-getter';
 const UNIT_SHIFTING_METRIC = 'unit-shifting';
+const INFINITE_VALUE_METRIC = 'infinite-value';
 
 // One row per Direction, driven by the REAL production adapters so the
 // ratchet matrix (tighten/equal/loosen) is exercised end-to-end both ways.
@@ -137,6 +138,14 @@ beforeAll(() => {
       return { value: record.count, unit: record.unit };
     },
   });
+  registerAdapter({
+    id: INFINITE_VALUE_METRIC,
+    direction: 'lower-is-better',
+    // A crafted huge value that overflows the double range: 10**400 IS
+    // Infinity — a clean (non-throwing) non-finite reading must fail the
+    // check as an unusable reading, never reach the comparison.
+    extract: () => ({ value: 10 ** 400, unit: 'errors' }),
+  });
 });
 
 // Sources are composition-time wiring: they live in this catalog, never in
@@ -145,6 +154,7 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [METRIC, () => Promise.resolve(raws[METRIC])],
   [COVERAGE_METRIC, () => Promise.resolve(raws[COVERAGE_METRIC])],
   [UNIT_SHIFTING_METRIC, () => Promise.resolve(raws[UNIT_SHIFTING_METRIC])],
+  [INFINITE_VALUE_METRIC, () => Promise.resolve({ count: 1 })],
   [THROWING_METRIC, () => Promise.resolve({ count: 1 })],
   [NULL_EXTRACT_METRIC, () => Promise.resolve({ count: 1 })],
   [UNDEFINED_READING_METRIC, () => Promise.resolve({ count: 1 })],
@@ -202,6 +212,41 @@ async function plantBaseline(dir: DirSpec, value: number, overrides: Partial<Bas
 describe('checkRatchet', () => {
   test('the op input is plain data: structuredClone-safe (kernel makeManifest clones Job.input)', () => {
     expect(() => structuredClone(checkInput())).not.toThrow();
+  });
+
+  test.each([
+    ['ws: undefined', { ws: undefined }],
+    ['target: 42', { target: 42 }],
+    ['metric: {}', { metric: {} }],
+    ['sourceId: null', { sourceId: null }],
+  ])('a non-string input (%s) fails with arg-error wording before any path work — never a throw', async (_label, overrides) => {
+    await expect(
+      check(checkInput(overrides as Partial<CheckRatchetInput>)),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: '',
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        reason: expect.stringMatching(/invalid input — '(ws|target|metric|sourceId)' must be a string/),
+      },
+    });
+  });
+
+  test('a clean non-finite reading (Infinity) fails as an unusable reading — no throw, no comparison', async () => {
+    await expect(
+      check(checkInput({ metric: INFINITE_VALUE_METRIC, sourceId: INFINITE_VALUE_METRIC })),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: baselineRelPath(TARGET, INFINITE_VALUE_METRIC),
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        reason: expect.stringMatching(/adapter produced an unusable reading \(Infinity\)/),
+      },
+    });
   });
 
   test.each(DIRECTIONS)('tighten passes ($label): the value improves on the baseline', async (dir) => {
