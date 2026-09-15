@@ -117,6 +117,17 @@ export interface WorktreeRegistry {
    * remains an E4 dispatch requirement at the worker level.
    */
   update(key: string, entry: WorktreeRegistryEntry | null): Promise<void>;
+  /**
+   * Run `fn` under the registry's cross-process lock. MULTI-STEP critical
+   * sections (a resolution's registry-consult → scan → create) MUST hold
+   * this for the whole section — serialized mutations alone cannot stop
+   * two jobs from interleaving the steps BETWEEN their writes (both scan,
+   * both create, one wedges). save/update are themselves locked, and
+   * withLock is REENTRANT for the owning call flow (the held flag is
+   * instance-local), so a critical section calls the locked mutators
+   * freely.
+   */
+  withLock<T>(fn: () => Promise<T>): Promise<T>;
 }
 
 /**
@@ -182,40 +193,6 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     }
   };
 
-  /** Serialize every mutation behind the lockfile's bounded-retry acquire. */
-  const withLock = async <T>(mutate: () => Promise<T>): Promise<T> => {
-    let release: (() => Promise<void>) | undefined;
-    try {
-      // THE LOCK COMES FIRST: nothing touches the target before it is held.
-      // realpath:false lets proper-lockfile lock a NOT-YET-EXISTING target
-      // (the registry is materialized inside the critical section).
-      release = await lock(path, {
-        // A crashed holder's lock goes stale and may be broken after 10s.
-        stale: 10_000,
-        // Bounded acquire retries — a failure within the bound is LOUD
-        // (thrown, naming the path), never an unserialized write.
-        retries: { retries: 5, minTimeout: 25, maxTimeout: 200 },
-        realpath: false,
-      });
-    } catch (err) {
-      throw new Error(
-        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing to write unserialized; clear the stale lock and re-run`,
-        { cause: err },
-      );
-    }
-    if (release === undefined) {
-      throw new Error(
-        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing to write unserialized; clear the stale lock and re-run`,
-      );
-    }
-    try {
-      await ensureTarget();
-      return await mutate();
-    } finally {
-      await release();
-    }
-  };
-
   const saveUnlocked = async (map: RegistryMap): Promise<void> => {
     // Write-tmp-then-rename, never a plain rewrite: rename(2) within one
     // directory is atomic, so a crash mid-write can only ever truncate the
@@ -225,6 +202,36 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     const tmpPath = registryTmpPath(path, nextRegistryTmpNonce());
     await writeFile(tmpPath, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
     await rename(tmpPath, path);
+  };
+  // REENTRANCY: instance-local held flag — resolvePrWorktree holds the
+  // lock across its whole scan-then-create section and calls save/update
+  // (which re-enter withLock) inside it. Single logical flow per hold.
+  let lockHeld = false;
+  const withLock = async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (lockHeld) {
+      return fn();
+    }
+    let release: (() => Promise<void>) | undefined;
+    try {
+      release = await lock(path, {
+        stale: 10_000,
+        retries: { retries: 5, minTimeout: 25, maxTimeout: 200 },
+        realpath: false,
+      });
+    } catch (err) {
+      throw new Error(
+        `fileWorktreeRegistry: could not acquire the registry lock ${JSON.stringify(`${path}.lock`)} within the retry bound — refusing to write unserialized; clear the stale lock and re-run`,
+        { cause: err },
+      );
+    }
+    lockHeld = true;
+    try {
+      await ensureTarget();
+      return await fn();
+    } finally {
+      lockHeld = false;
+      await release();
+    }
   };
   const save = (map: RegistryMap): Promise<void> => withLock(() => saveUnlocked(map));
   const update = (key: string, entry: WorktreeRegistryEntry | null): Promise<void> =>
@@ -239,7 +246,7 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
       }
       await saveUnlocked(map);
     });
-  return { load, save, update };
+  return { load, save, update, withLock };
 }
 
 /** What resolvePrWorktree/removePrWorktree need — everything injected. */
@@ -413,7 +420,23 @@ export async function resolvePrWorktree(
   // worktreeRoot across two real locations (one per resolver). Absolute
   // everywhere means one location, whichever cwd the caller runs from.
   const repoRoot = pathResolve(opts.repoRoot);
-  const worktreeRoot = pathResolve(opts.worktreeRoot ?? join(repoRoot, '.git', 'cq-review-worktrees'));
+  // The default root lives under the GIT DIR, not under repoRoot: a linked
+  // worktree or submodule checkout has a .git FILE, and mkdir under a file
+  // is ENOTDIR — `rev-parse --absolute-git-dir` names the real git dir in
+  // every layout. Explicit worktreeRoot stays fully caller-controlled.
+  const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'];
+  const gitDir = await opts.run(gitDirArgs);
+  if (gitDir.code !== 0) {
+    throw gitFail(
+      'rev-parse --absolute-git-dir failed — repoRoot is not a git repository',
+      gitDir.code,
+      gitDir.stderr,
+      gitDirArgs,
+    );
+  }
+  const worktreeRoot = opts.worktreeRoot !== undefined
+    ? pathResolve(opts.worktreeRoot)
+    : join(gitDir.stdout.trim(), 'cq-review-worktrees');
   const key = String(opts.pr);
 
   // (a) THE PR'S HEAD REF IS TRUTH — fetched from the BASE repo before any
@@ -536,6 +559,28 @@ export async function resolvePrWorktree(
     if (candidate.branch === reviewBranch && atSha) {
       existing = candidate;
       break;
+    }
+    // UNPUSHED-WORK GUARD: commits on HEAD that the fetched PR head does
+    // not contain are fixer work a failed push left behind — removing the
+    // tree would orphan them (the branch label is reset by the next add).
+    // Refuse loudly with the count; a human resolves it by hand.
+    const unpushedArgs = ['-C', candidate.path, 'rev-list', '--count', `${expectedSha}..HEAD`];
+    const unpushed = await opts.run(unpushedArgs);
+    if (unpushed.code !== 0) {
+      throw gitFail(
+        `rev-list --count on ${candidate.path} failed — the tree's relation to the fetched head is unknown`,
+        unpushed.code,
+        unpushed.stderr,
+        unpushedArgs,
+      );
+    }
+    if (Number.parseInt(unpushed.stdout.trim(), 10) > 0) {
+      throw gitFail(
+        `worktree remove ${candidate.path} withheld: HEAD carries ${unpushed.stdout.trim()} commit(s) not in the fetched PR head (unpushed fixer work would be orphaned) — resolve by hand`,
+        1,
+        `HEAD is ${unpushed.stdout.trim()} commit(s) ahead of ${expectedSha}`,
+        unpushedArgs,
+      );
     }
     const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
     const remove = await opts.run(removeArgs);
