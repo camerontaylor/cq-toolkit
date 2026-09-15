@@ -219,6 +219,49 @@ describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdte
   });
 });
 
+describe('ledger.query is fs-READ-ONLY (the read-only pin)', () => {
+  /** The full directory tree as sorted, typed entries — the byte-identity snapshot. */
+  async function treeSnapshot(dir: string): Promise<string[]> {
+    const entries = await readdir(dir, { recursive: true, withFileTypes: true });
+    return entries
+      .map(
+        (entry) =>
+          `${entry.parentPath}/${entry.name}:${entry.isDirectory() ? 'd' : entry.isSymbolicLink() ? 'l' : 'f'}`,
+      )
+      .sort();
+  }
+
+  test('queries over a real path create NOTHING: the directory tree is identical before and after', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    const record = await entryNamed('ledger.record').importer();
+    await record({ root: scratchDir, storePath, signature: 'sig-a' });
+
+    const before = await treeSnapshot(scratchDir);
+    expect(before).toContain(`${scratchDir}/ledger.json:f`); // the snapshot sees the real tree
+
+    const query = await entryNamed('ledger.query').importer();
+    await expect(query({ root: scratchDir, storePath })).resolves.toEqual({
+      status: 'ok',
+      value: {
+        entries: [{ signature: 'sig-a', count: 1 }],
+        knownNoise: [],
+        needsHuman: [],
+      },
+    });
+    // A query over a MISSING path (parent included) must not mkdir either.
+    await expect(query({ root: scratchDir, storePath: join(scratchDir, 'missing', 'ledger.json') })).resolves.toEqual(
+      {
+        status: 'ok',
+        value: { entries: [], knownNoise: [], needsHuman: [] },
+      },
+    );
+
+    // No files, dirs, or lock dirs appeared: the tree is byte-identical.
+    expect(await treeSnapshot(scratchDir)).toEqual(before);
+  });
+});
+
 describe('pathLedgerStore containment (the trust surface is checked at the seam)', () => {
   test('a storePath inside an existing root is accepted (the happy containment row)', async () => {
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));

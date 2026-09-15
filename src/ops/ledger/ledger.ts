@@ -147,9 +147,11 @@ const NOTE_MAX_CHARS = 500;
 /**
  * Build the `ledger.record` op over an input-driven store selector. The
  * selector receives the op input and returns the store to use — the
- * registry binds `(input) => pathLedgerStore(input.storePath)` (the path
- * crosses the plain-JSON boundary; no store object ever does), while a
- * library consumer can pass a constant store: `() => myStore`.
+ * registry binds `(input) => pathLedgerStore(input.root, input.storePath)`
+ * (root + path cross the plain-JSON boundary; no store object ever does;
+ * containment to strict descendants of the resolved root is enforced at
+ * that seam), while a library consumer can pass a constant store:
+ * `() => myStore`.
  *
  * Per call: load (a missing ledger starts empty), find the signature —
  * new → count 1, inserted in canonical order; existing → count + 1, with
