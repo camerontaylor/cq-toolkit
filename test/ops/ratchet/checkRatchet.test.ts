@@ -234,6 +234,22 @@ describe('checkRatchet', () => {
     });
   });
 
+  test.each([
+    ['null', null],
+    ['undefined', undefined],
+  ])('calling the op with %s input fails with arg-error wording — no throw', async (_label, badInput) => {
+    await expect(check(badInput as unknown as CheckRatchetInput)).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: '',
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        reason: expect.stringMatching(/invalid input — expected a non-null object/),
+      },
+    });
+  });
+
   test('a clean non-finite reading (Infinity) fails as an unusable reading — no throw, no comparison', async () => {
     await expect(
       check(checkInput({ metric: INFINITE_VALUE_METRIC, sourceId: INFINITE_VALUE_METRIC })),

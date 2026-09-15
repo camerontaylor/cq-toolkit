@@ -99,6 +99,20 @@ export function createCheckRatchet(
   sources: SourceCatalog,
 ): Op<CheckRatchetInput, CheckRatchetOutcome> {
   return async (input) => {
+    // Round 3: the input ITSELF is guarded first — reading input.ws on a
+    // null/undefined input would throw before the field loop ever ran.
+    if (typeof input !== 'object' || input === null) {
+      return {
+        status: 'ok',
+        value: {
+          path: '',
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: 'ratchet: invalid input — expected a non-null object',
+        },
+      };
+    }
     // Top input guard (round 2): the kernel's input schema should make
     // malformed inputs unreachable, but the op seam owns its own
     // defensiveness — baselineRelPath would throw on a non-string

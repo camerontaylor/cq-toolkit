@@ -110,11 +110,12 @@ function isDirection(d: string): d is Direction {
   return d === 'lower-is-better' || d === 'higher-is-better';
 }
 
-/** Split a unified diff into per-file sections on `diff --git ` boundaries; text before the first header is ignored. */
+/** Split a unified diff into per-file sections on `diff --git ` boundaries; text before the first header is ignored. Lines are CRLF-normalized (a trailing `\r` would otherwise survive into extracted paths and fail the `$`-anchored baseline regex, silently skipping every section). */
 function splitSections(diff: string): string[][] {
   const sections: string[][] = [];
   let current: string[] | null = null;
-  for (const line of diff.split('\n')) {
+  for (const raw of diff.split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw;
     if (line.startsWith('diff --git ')) {
       current = [line];
       sections.push(current);
@@ -164,11 +165,12 @@ function sectionPath(lines: string[]): string | null {
   if (bestAt !== -1) {
     return stripDiffPrefix(rest.slice(bestAt + 1 + bestPrefix.length).split('\t')[0]);
   }
-  // noprefix dialect prints the identical path twice: 'X X'.
-  if (rest.length % 2 === 0) {
-    const first = rest.slice(0, rest.length / 2);
-    if (first.length > 0 && rest.slice(rest.length / 2 + 1) === first) return first;
-  }
+  // noprefix dialect prints the identical path twice: 'X X'. The pair is
+  // always ODD-length (2·|X| + 1 for the separator space), so floor-halve:
+  // first = rest[0..half), second = rest(half..] and the two must match.
+  const half = Math.floor(rest.length / 2);
+  const first = rest.slice(0, half);
+  if (first.length > 0 && rest.slice(half + 1) === first) return first;
   return null;
 }
 

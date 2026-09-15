@@ -702,7 +702,41 @@ describe('checkDiffMonotonicity', () => {
     });
   });
 
-  test('a ±count mismatch (two removed values, one added) fails closed — the pair cannot be lined up', () => {    const diff = modifiedSection(
+  test('a non-finite reconstructed value (1e999 → Infinity) fails closed — parseBaseline would reject the committed file', () => {
+    // `1e999` is valid JSON parsing to Infinity, and higher-is-better is the
+    // wave-through shape: loosens(80, Infinity, 'higher-is-better') is
+    // false, so before the fix the guard returned ok for evidence
+    // parseBaseline would go on to reject as corrupt.
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "higher-is-better",', '  "value": 80,'],
+      ['  "direction": "higher-is-better",', '  "value": 1e999,'],
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('a CRLF-normalized loosening diff still fires (extracted paths survive \\r\\n)', () => {
+    // Literal git output on CRLF checkouts: every line carries a trailing
+    // \r, which would survive into the extracted path and fail the
+    // $-anchored baseline regex — silently skipping EVERY section.
+    const diff = fullRewrite(REL, body('lower-is-better', 2), body('lower-is-better', 3))
+      .split('\n')
+      .join('\r\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, target: TARGET, metric: METRIC, oldValue: 2, newValue: 3, why: 'loosened' },
+      ],
+      filesChecked: 1,
+    });
+  });
+
+  test('a ±count mismatch (two removed values, one added) fails closed — the pair cannot be lined up', () => {
+    const diff = modifiedSection(
       REL,
       ['  "value": 2,', '  "value": 3,'],
       ['  "value": 4,'],
@@ -891,6 +925,24 @@ gitDescribe('real git diff fixtures (literal git output from a temp repo)', () =
       });
     },
   );
+
+  test('a noprefix DELETED baseline is attributed via the header fallback (floor-halved pair) and skipped', () => {
+    // RED before the round-3 fix: the identical `X X` header pair is always
+    // ODD-length, so the old %2===0 gate was dead code and the b-side path
+    // was never recovered — the section fail-closed on its minus lines.
+    // Now the path is recovered and the header-only `deleted file mode`
+    // lifecycle metadata skips the section.
+    const diff = [
+      `diff --git ${REL} ${REL}`,
+      'deleted file mode 100644',
+      'index 1111111..0000000',
+      `--- ${REL}`,
+      '+++ /dev/null',
+      '@@ -1,7 +0,0 @@',
+      ...bodyLines(body('lower-is-better', 3)).map((l) => `-${l}`),
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
 
   test(
     'a real added-baseline diff is skipped via its metadata markers',
