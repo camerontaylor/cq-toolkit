@@ -335,7 +335,10 @@ export function normalizeBaselineDiffValues(diff) {
     }
     if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
       const path = diffHeaderPath(line);
-      if (path !== null && COVERAGE_BASELINE_SECTION.test(path)) isCoverageSection = true;
+      // Assigned PER HEADER, never only-if-matches: a sibling file's header
+      // must RESET the flag, so a non-coverage section following a coverage
+      // one can never inherit its normalization.
+      isCoverageSection = path !== null && COVERAGE_BASELINE_SECTION.test(path);
       out.push(line);
       continue;
     }

@@ -59,9 +59,15 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Ratchet check
+        env:
+          PR_BASE: ${{ github.base_ref }}
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            node scripts/ratchet-check.mjs check --base "origin/${{ github.base_ref }}"
+          # Env-indirection doctrine: no textual ${{ }} interpolation inside
+          # the run script (expression values reach the shell as env vars,
+          # never as interpolated text). GITHUB_EVENT_NAME is an Actions
+          # default environment variable.
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            node scripts/ratchet-check.mjs check --base "origin/${PR_BASE}"
           else
             node scripts/ratchet-check.mjs check
           fi

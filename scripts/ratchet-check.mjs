@@ -18,12 +18,20 @@
 //
 // `--base <ref>` ADDITIONALLY runs the monotonic guard over the PR-shaped
 // diff: `git diff <ref>...HEAD` is normalized to the readings' integer-pct
-// basis (both diff sides, baselines/*.json sections only — see
+// basis (both diff sides, coverage-baseline sections only — see
 // normalizeBaselineDiffValues in ratchet-lib.mjs) and fed to
 // checkDiffMonotonicity; any baseline movement in the diff that loosens (or
 // flips a direction/unit) is named via formatViolations and fails the run —
 // thresholds only tighten, both live AND in the diff a branch wants to
 // commit.
+//
+// FUTURE WORK (recorded round-2, no harness this round): a workflow-PR-mode
+// e2e — `check --base` driven against a SCRATCH repo (temp clone plus a
+// crafted loosening-baseline diff) — would pin the guard's CI shape
+// end-to-end; the propose side likewise wants a forge-seam e2e (local bare
+// repo as the push target, a fake `gh` shim serving canned pr list/create
+// JSON). Neither harness exists yet; the ratchet-lib fixture checks and the
+// engine's own guard tests carry the logic in the meantime.
 import { spawnSync } from 'node:child_process';
 import {
   COVERAGE_SUMMARY_PATH,
@@ -42,13 +50,28 @@ const argv = process.argv.slice(2);
 if (argv[0] !== 'check') {
   fail(`unknown command '${argv[0] ?? ''}' — ${USAGE}`);
 }
+// STRICT argv walk: everything that is not `check`, `--base`, or its value
+// is unrecognized and fails the run BEFORE any leg runs — the guard leg must
+// never be silently skipped (or silently downgraded to no-diff mode) by a
+// typo like `--bases`.
 let base = null;
-const baseFlag = argv.indexOf('--base');
-if (baseFlag !== -1) {
-  base = argv[baseFlag + 1];
-  if (typeof base !== 'string' || base === '') {
-    fail('--base requires a ref (e.g. --base origin/main)');
+const unrecognized = [];
+for (let i = 1; i < argv.length; i++) {
+  if (argv[i] === '--base') {
+    base = argv[i + 1];
+    if (typeof base !== 'string' || base === '') {
+      fail('--base requires a ref (e.g. --base origin/main)');
+    }
+    i++; // the ref value is consumed by --base
+  } else {
+    unrecognized.push(argv[i]);
   }
+}
+if (unrecognized.length > 0) {
+  fail(
+    `unrecognized argument(s): ${unrecognized.join(' ')} — refusing to guess ` +
+      `(a typo like '--bases' must fail loudly, never run a weaker check) — ${USAGE}`,
+  );
 }
 
 // Build dist fresh, import the engine, register BOTH metrics the check reads.

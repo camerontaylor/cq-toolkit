@@ -47,8 +47,8 @@ if (process.argv.length > 2) {
   fail(`unknown arguments: ${process.argv.slice(2).join(' ')} — this script takes none`);
 }
 
-// ---- TOKEN DOCTRINE gate (belt-and-braces: the workflow's job-level if ----
-// guards the same condition; a manual workflow_dispatch run may not have it).
+// ---- TOKEN DOCTRINE gate (the workflow carries no job-level if; THIS ----
+// script is the gate — a tokenless run is a green no-op).
 const token = process.env.CQ_AUTOMATION_TOKEN;
 if (!token || token === '') {
   console.error('ratchet-propose: CQ_AUTOMATION_TOKEN not set; skipping proposal');
@@ -61,6 +61,11 @@ if (process.env.GITHUB_TOKEN) {
       'Proceeding with CQ_AUTOMATION_TOKEN only.',
   );
 }
+// The token's only legitimate consumers below are the git askpass env (set
+// explicitly from the local const) and the gh subprocess env (GH_TOKEN) —
+// so scrub it from the process env NOW: the build and coverage-suite
+// children this driver spawns (npm, vitest, tsc) must never inherit it.
+delete process.env.CQ_AUTOMATION_TOKEN;
 
 // ---- worktree guard: the effects checkout/commit/push THIS checkout ----
 // A dirty tree would ride the branch switch into the proposal commit. CI
@@ -172,9 +177,9 @@ if (improvements.length === 0) {
 }
 
 // ---- BaselinePrEffects over gh CLI + git ----
-// The token rides ONLY in the gh subprocess env (GH_TOKEN wins over
-// GITHUB_TOKEN inside gh) and in the push URL inside .git/config — never in
-// an echoed line (redact() scrubs any captured output), never in a log.
+// The token rides ONLY in subprocess envs: GH_TOKEN (winning over
+// GITHUB_TOKEN) for gh, and the askpass file's environment for git — never
+// in an echoed line (redact() scrubs any captured output), never in a log.
 const redact = (text) => (token ? String(text).split(token).join('[redacted]') : String(text));
 const ghEnv = () => {
   const e = { ...process.env, GH_TOKEN: token };
