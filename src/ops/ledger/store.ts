@@ -9,8 +9,10 @@
 //     same ledger state always renders to the same bytes, so git diffs of
 //     the committed file are reviewable.
 //   - parseLedger is STRICT: invalid JSON, a wrong version, a non-object
-//     entry, a count < 1, a duplicate signature, or UNSORTED entries all
-//     throw LedgerFormatError. The deterministic format is load-bearing, so
+//     entry, a count < 1, a duplicate signature, UNSORTED entries, or an
+//     entry outside the record boundary's field bounds (signature > 500
+//     chars, empty/overlong component or note) all throw
+//     LedgerFormatError. The deterministic format is load-bearing, so
 //     a hand-edited unsorted file is a format error — never silently
 //     normalized. Normalization happens in the ledger ops, not here: the
 //     store never collapses duplicates nor reorders anything on read.
@@ -20,7 +22,7 @@
 // is the sync node:fs adapter the registry importer binds — the only
 // node:fs touch in the lane's storage (sync for v1: ledger entries are one
 // small JSON file, and the ops are async at the Op boundary regardless).
-import { mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { lock } from 'proper-lockfile';
 import type { LockOptions } from 'proper-lockfile';
@@ -28,8 +30,16 @@ import { z } from 'zod';
 // Runtime import of the canonical signature order — pulled from the pure
 // decision-ops module (order.ts was folded into ledger.js for lane i's
 // registry-completeness heuristic, PR 64); NO runtime cycle: ledger.js's
-// store.js import is type-only and erased.
-import { compareSignatures, sortEntries } from './ledger.js';
+// store.js import is type-only and erased. The field-length bounds ride
+// the same edge so the parse boundary and the record boundary reject the
+// same states from ONE definition.
+import {
+  COMPONENT_MAX_CHARS,
+  compareSignatures,
+  NOTE_MAX_CHARS,
+  SIGNATURE_MAX_CHARS,
+  sortEntries,
+} from './ledger.js';
 import type { LedgerStore } from './ledger.js';
 
 /** The canonical signature order lives in the pure decision-ops module (see ledger.js). */
@@ -64,12 +74,17 @@ export class LedgerFormatError extends Error {
   }
 }
 
+// Persisted bounds MIRROR the record boundary exactly (PR #78 review,
+// Codex P2): a hand-edited or externally produced ledger must not hold a
+// state no valid record input could produce — an overlong signature no
+// record can increment, or an EMPTY component/note that reads as present
+// to the backfill logic and so can never be replaced with real metadata.
 const LedgerEntrySchema: z.ZodType<LedgerEntry> = z
   .object({
-    signature: z.string().min(1),
+    signature: z.string().min(1).max(SIGNATURE_MAX_CHARS),
     count: z.number().int().min(1),
-    component: z.string().optional(),
-    note: z.string().optional(),
+    component: z.string().min(1).max(COMPONENT_MAX_CHARS).optional(),
+    note: z.string().min(1).max(NOTE_MAX_CHARS).optional(),
   })
   .strict();
 
@@ -182,11 +197,15 @@ export function parseLedger(text: string): LedgerFile {
  * the read-only query likewise. Save is an ATOMIC publish
  * ({@link publishAtomic}): unique temp file, exclusive create, rename over
  * the target — a crash mid-write can never leave a torn ledger at the path,
- * and a pre-planted symlink there is replaced, never followed. `lock` (see
- * {@link LedgerStore.lock}) wraps the ledger path with proper-lockfile,
- * THENABLE and with bounded acquire backoff, so concurrent recorders of one
- * storePath — across processes — serialize instead of being dropped; a
- * rejected release is a fault, never a swallowed success.
+ * and a pre-planted symlink there is replaced, never followed. The publish
+ * also PRESERVES permissions: an existing regular ledger's mode is copied
+ * onto the temp file before the rename, and a NEW ledger (or a replaced
+ * symlink) is created 0600 — the inode swap can never widen operator-chosen
+ * permissions. `lock` (see {@link LedgerStore.lock}) wraps the ledger path
+ * with proper-lockfile, THENABLE and with bounded acquire backoff, so
+ * concurrent recorders of one storePath — across processes — serialize
+ * instead of being dropped; a rejected release is a fault, never a
+ * swallowed success.
  */
 export function pathLedgerStore(root: string, target: string): LedgerStore {
   const { rootReal, targetAbs } = containLedgerTarget(root, target);
@@ -222,8 +241,38 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
       try {
         realFile = realpathSync(targetAbs);
       } catch (err) {
-        if (isEnoent(err)) return { version: 1, entries: [] };
-        throw err;
+        if (!isEnoent(err)) throw err;
+        // ENOENT from realpath is NOT always "the ledger file is missing"
+        // (PR #78 review, Codex P2): a DANGLING or ESCAPING intermediate
+        // symlink also leaves the target unresolvable, and reading that as
+        // an empty in-root ledger would hand dispatch an ok view with all
+        // suppression silently dropped. The file is genuinely absent only
+        // under a parent that is itself absent (no dirs ⇒ no file ⇒ the
+        // empty ledger) or that RESOLVES to a strict in-root descendant —
+        // a parent that exists but will not resolve is a containment
+        // fault, never an empty ledger.
+        const parentDir = dirname(targetAbs);
+        try {
+          lstatSync(parentDir);
+        } catch (parentErr) {
+          if (isEnoent(parentErr)) return { version: 1, entries: [] };
+          throw parentErr;
+        }
+        let realParent: string;
+        try {
+          realParent = realpathSync(parentDir);
+        } catch (parentErr) {
+          throw new Error(`ledger parent for '${target}' does not resolve — ${messageOf(parentErr)}`, {
+            cause: parentErr,
+          });
+        }
+        const fault = strictDescendantFault(rootReal, join(realParent, base));
+        if (fault !== null) {
+          throw new Error(`${fault} — an intermediate symlink escapes the root; refusing to read it`, {
+            cause: err,
+          });
+        }
+        return { version: 1, entries: [] };
       }
       const fault = strictDescendantFault(rootReal, realFile);
       if (fault !== null) {
@@ -274,15 +323,33 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
 
 /**
  * proper-lockfile tuning: no realpath (the ledger may not exist yet on a
- * first record), bounded staleness (a crashed holder's lock is stealable
- * after 5s), and bounded acquire BACKOFF — {retries: 8, factor: 2,
- * minTimeout: 25} — so a contended recorder waits its turn instead of
- * dropping its increment.
+ * first record), bounded staleness, and bounded acquire BACKOFF so a
+ * contended recorder waits its turn instead of dropping its increment.
+ *
+ * The stale window must comfortably exceed the worst-case ALL-SYNC
+ * critical section (load → parse/sort → serialize → save, PR #78 review,
+ * Codex P2): sync node:fs work blocks the event loop, so proper-lockfile's
+ * periodic mtime refresh CANNOT run during the section — a stale window
+ * smaller than the section lets another process classify our live lock as
+ * stale, steal it, and record concurrently with us (the lost-increment
+ * case the lock exists to prevent). 30s is 6× the old 5s window, an order
+ * of magnitude above the section's realistic duration (one small JSON
+ * file, even on a slow/network filesystem); the residual bound — a sync
+ * section somehow exceeding 30s — is accepted rather than redesigned, per
+ * this review's disposition.
+ *
+ * The backoff must OUTLIVE the stale window for one-call crash recovery:
+ * a JUST-crashed holder's lock is not yet stale, so acquire must still be
+ * retrying when staleness passes. {retries: 11, factor: 2, minTimeout: 25}
+ * accumulates 25·(2¹¹−1) ≈ 51s of backoff > the 30s window — the lock is
+ * detected stale and stolen within the same op call. Live contention
+ * (another recorder's ms-scale section) still lands within the first few
+ * retries.
  */
 const LOCK_OPTIONS: LockOptions = {
   realpath: false,
-  stale: 5000,
-  retries: { retries: 8, factor: 2, minTimeout: 25 },
+  stale: 30_000,
+  retries: { retries: 11, factor: 2, minTimeout: 25 },
 };
 
 /**
@@ -370,6 +437,22 @@ let tempFileCounter = 0;
  */
 function publishAtomic(targetPath: string, bytes: string): void {
   mkdirSync(dirname(targetPath), { recursive: true });
+  // Permission preservation across the inode swap (PR #78 review, Codex
+  // P2): the temp file is born 0666&~umask (typically 0644) and rename
+  // REPLACES the directory entry, so without an explicit mode every update
+  // of an operator-chmod'ed 0600 ledger would silently widen it back to
+  // the default. An existing REGULAR target lends its own mode; a NEW
+  // ledger — or a symlink about to be replaced, whose target's mode is
+  // not ours to inherit — gets 0600, restrictive by default for committed
+  // evidence. The mode lands via chmodSync, not the write's mode option:
+  // creation modes are umask-masked, chmod is exact.
+  let mode = 0o600;
+  try {
+    const existing = lstatSync(targetPath);
+    if (existing.isFile()) mode = existing.mode & 0o777;
+  } catch {
+    // Absent target: the restrictive default stands.
+  }
   let tempPath: string | undefined;
   let tempCreated = false;
   try {
@@ -389,6 +472,7 @@ function publishAtomic(targetPath: string, bytes: string): void {
     if (tempCreated === false || tempPath === undefined) {
       throw new Error('all temp candidates already existed');
     }
+    chmodSync(tempPath, mode);
     renameSync(tempPath, targetPath);
   } catch (err) {
     if (tempPath !== undefined && tempCreated) {

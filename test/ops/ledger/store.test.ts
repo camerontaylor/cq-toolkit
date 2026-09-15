@@ -176,6 +176,25 @@ describe('parseLedger rejections (the deterministic format is load-bearing)', ()
     }
   });
 
+  test('entries outside the record boundary field bounds are rejected (sig ≤ 500; component ≤ 200; note ≤ 500; never empty)', () => {
+    // At the bounds exactly: valid (the boundary accepts, so the parse
+    // must too — the two boundaries reject the same states).
+    const atBounds = `{"signature": "${'s'.repeat(500)}", "count": 1, "component": "${'c'.repeat(200)}", "note": "${'n'.repeat(500)}"}`;
+    expect(() => parseLedger(`{"version": 1, "entries": [${atBounds}]}`)).not.toThrow();
+    // One step past each bound, and each empty-optional state: all format
+    // errors — a hand-edited file cannot hold what no valid record could
+    // produce (an overlong signature no record can increment; an EMPTY
+    // component/note that reads as present and can never be backfilled).
+    const overlongSignature = `{"signature": "${'s'.repeat(501)}", "count": 1}`;
+    const emptyComponent = `{"signature": "sig-a", "count": 1, "component": ""}`;
+    const overlongComponent = `{"signature": "sig-a", "count": 1, "component": "${'c'.repeat(201)}"}`;
+    const emptyNote = `{"signature": "sig-a", "count": 1, "note": ""}`;
+    const overlongNote = `{"signature": "sig-a", "count": 1, "note": "${'n'.repeat(501)}"}`;
+    for (const bad of [overlongSignature, emptyComponent, overlongComponent, emptyNote, overlongNote]) {
+      expect(() => parseLedger(`{"version": 1, "entries": [${bad}]}`)).toThrow(LedgerFormatError);
+    }
+  });
+
   test('a non-object entry (string, null, array, number) is rejected', () => {
     for (const bad of ['"sig-a"', 'null', '[]', '7']) {
       expect(() => parseLedger(`{"version": 1, "entries": [${bad}]}`)).toThrow(LedgerFormatError);

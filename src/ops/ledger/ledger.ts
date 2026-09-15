@@ -164,14 +164,20 @@ export interface LedgerView {
   needsHuman: string[];
 }
 
-/** Library-level signature bound, mirroring the registry schema's bound. */
-const SIGNATURE_MAX_CHARS = 500;
+/**
+ * Library-level signature bound, mirroring the registry schema's bound.
+ * EXPORTED for the store's persisted-entry schema, which must enforce the
+ * same bounds when parsing a committed file (the record boundary and the
+ * parse boundary reject the same states — a hand-edited file cannot hold
+ * what no valid record could produce).
+ */
+export const SIGNATURE_MAX_CHARS = 500;
 
-/** Library-level component bound, mirroring the registry schema's bound. */
-const COMPONENT_MAX_CHARS = 200;
+/** Library-level component bound, mirroring the registry schema's bound (see {@link SIGNATURE_MAX_CHARS}). */
+export const COMPONENT_MAX_CHARS = 200;
 
-/** Library-level note bound, mirroring the registry schema's bound. */
-const NOTE_MAX_CHARS = 500;
+/** Library-level note bound, mirroring the registry schema's bound (see {@link SIGNATURE_MAX_CHARS}). */
+export const NOTE_MAX_CHARS = 500;
 
 /**
  * Build the `ledger.record` op over an input-driven store selector. The
@@ -249,10 +255,13 @@ export function makeLedgerRecord(
       }
       return updated;
     };
-    const { lock } = store;
+    // The lock is invoked THROUGH the store, never destructured: a
+    // class-shaped LedgerStore whose lock uses `this` must keep its
+    // receiver — a destructured call would throw and map a usable lock to
+    // `failed` (PR #78 review, CodeRabbit).
     let updated: LedgerEntry;
     try {
-      updated = lock !== undefined ? await lock(applyRecord) : applyRecord();
+      updated = store.lock !== undefined ? await store.lock(applyRecord) : applyRecord();
     } catch (err) {
       if (err instanceof StoreFault) return { status: 'failed', error: err.message };
       return { status: 'failed', error: `ledger: could not update the error ledger — ${messageOf(err)}` };
