@@ -464,9 +464,21 @@ export function createCaptureBaseline(
       return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
 
     };
+    // Lock-compromise containment (PR #109 review, Codex P1): proper-
+    // lockfile's DEFAULT onCompromised throws asynchronously from its
+    // mtime-refresh timer — outside this try, outside the op seam,
+    // process-killing. The handler records the compromise instead, and the
+    // outcome folds to indeterminate naming it: the write may or may not
+    // have raced a thief, which is exactly what indeterminate means.
+    let lockCompromised: Error | undefined;
     try {
-      const release = await lock(absPath, CAPTURE_LOCK_OPTIONS);
-      return await Promise.resolve()
+      const release = await lock(absPath, {
+        ...CAPTURE_LOCK_OPTIONS,
+        onCompromised: (err) => {
+          lockCompromised = err;
+        },
+      });
+      const outcome = await Promise.resolve()
         .then(readModifyPublish)
         .then(
           (outcome) =>
@@ -485,6 +497,13 @@ export function createCaptureBaseline(
               .catch(() => undefined)
               .then(() => { throw sectionErr; }),
         );
+      if (lockCompromised !== undefined) {
+        return {
+          status: 'indeterminate',
+          detail: `ratchet: the capture lock for baseline '${relPath}' was compromised — ${errorMessage(lockCompromised)}`,
+        };
+      }
+      return outcome;
     } catch (err) {
       return {
         status: 'indeterminate',

@@ -16,6 +16,8 @@ declare module 'proper-lockfile' {
     };
     /** Resolve symlinks via realpath before locking; must be false when the target may not exist yet. */
     realpath?: boolean;
+    /** Called (instead of the default ASYNC THROW) when the held lock is found compromised — stolen after staleness, removed, or its refresh faulted. */
+    onCompromised?: (err: Error) => void;
     /** Custom lockfile path (defaults to `<file>.lock`). */
     lockfilePath?: string;
   }

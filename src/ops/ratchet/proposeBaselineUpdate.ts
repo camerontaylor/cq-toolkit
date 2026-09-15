@@ -174,32 +174,44 @@ const COMMIT_MESSAGE = 'chore(ratchet): tighten baselines (proposeBaselineUpdate
 /** Default head-branch prefix. */
 const DEFAULT_HEAD_PREFIX = 'ratchet/propose';
 
-/** Branch ref-name characters (the remaining check-ref-format rules live in violatesRefRules). */
+/** Branch ref-name characters (the remaining check-ref-format rules live in violatesRefShapeRules/violatesWholeRefRules). */
 const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
 
 /**
- * The check-ref-format rules that matter for a branch name (the proposal's
- * head prefix AND its base): non-empty, ref-name characters only (underscore
- * INCLUDED — review-debt #87 round-3: git allows '_' in ref segments; the
- * old class was stricter than git), no leading or trailing slash, no '//'
- * doubled slash, no '..' walk-up, no dot-leading path segment ('.hidden'
- * cannot be a branch component), no TRAILING-dot segment ('main.' is
- * rejected by check-ref-format), and no segment ending '.lock'
- * ('release.lock', 'ratchet.lock/nightly' — git reserves *.lock for reflock
- * files; a branch named after one cannot exist). Anything violating this
- * could not exist as a git ref at all — and could not ride clean markdown
- * into the PR body either.
+ * The check-ref-format rules that matter for a branch name — applied with
+ * git's own SCOPING (PR #110 review, Codex P2): the trailing-dot and
+ * *.lock restrictions bind the END OF THE COMPLETE REF, not every
+ * component ('release./main' is a legal ref; 'release.lock-<digest>' does
+ * not end in .lock), while the dot-LEADING restriction binds EVERY
+ * component ('.hidden' cannot be a branch component anywhere). Also per
+ * check-ref-format: no leading/trailing slash, no '//', no '..' walk-up,
+ * no '@{' sequence, not the lone '@'. Anything violating this could not
+ * exist as a git ref at all — and could not ride clean markdown into the
+ * PR body either.
  */
-function violatesRefRules(value: string): boolean {
+function violatesRefShapeRules(value: string): boolean {
   return (
     REF_PATTERN.test(value) === false ||
+    value.startsWith('/') ||
     value.endsWith('/') ||
     value.includes('//') ||
     value.includes('..') ||
-    value.split('/').some(
-      (segment) => segment.startsWith('.') || segment.endsWith('.') || segment.endsWith('.lock'),
-    )
+    value.includes('@{') ||
+    value === '@' ||
+    value.split('/').some((segment) => segment.startsWith('.'))
   );
+}
+
+/**
+ * Whole-ref END rules (PR #110 review): the trailing-dot and *.lock
+ * restrictions bind the END OF THE COMPLETE REF — a BASE is a complete ref
+ * and is validated with them; the head PREFIX is validated with the shape
+ * rules only, because the head is judged as the branch it actually
+ * becomes (`<prefix>-<digest>`, below) — a prefix like 'release.lock' or
+ * 'main.' is legal when its composition does not end in '.lock' or '.'.
+ */
+function violatesWholeRefRules(value: string): boolean {
+  return violatesRefShapeRules(value) || value.endsWith('.') || value.endsWith('.lock');
 }
 
 /** One tighten going into the proposal (superset of the outcome's applied row). */
@@ -268,9 +280,9 @@ export function createProposeBaselineUpdate(
       if (typeof input.headPrefix !== 'string') {
         return { status: 'failed', error: "ratchet: invalid input — 'headPrefix' must be a string" };
       }
-      // A git ref, not free text (see violatesRefRules) — else the head
+      // A git ref, not free text (see violatesRefShapeRules) — else the head
       // could not exist at all.
-      if (violatesRefRules(input.headPrefix)) {
+      if (violatesRefShapeRules(input.headPrefix)) {
         return {
           status: 'failed',
           error: "ratchet: invalid input — 'headPrefix' would form an invalid git ref",
@@ -280,7 +292,7 @@ export function createProposeBaselineUpdate(
     // The base branch gets the same ref discipline: the proposal PR must
     // target a ref that can exist, and a free-text base could smuggle
     // markdown into the body's target line.
-    if (violatesRefRules(input.base)) {
+    if (violatesWholeRefRules(input.base)) {
       return {
         status: 'failed',
         error: "ratchet: invalid input — 'base' would form an invalid git ref",
@@ -501,6 +513,12 @@ export function createProposeBaselineUpdate(
       .digest('hex')
       .slice(0, 12);
     const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${digest}`;
+    if (violatesWholeRefRules(head)) {
+      return {
+        status: 'failed',
+        error: `ratchet: invalid input — the composed head '${head}' would form an invalid git ref`,
+      };
+    }
     const title =
       `chore(ratchet): tighten baselines (${applied.length} metric` +
       `${applied.length === 1 ? '' : 's'})`;
