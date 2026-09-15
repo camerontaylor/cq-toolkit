@@ -74,6 +74,25 @@ describe('vitest-json adapter (real captured fixture)', () => {
     expect(result.verdict).toBe('indeterminate');
   });
 
+  test('a parsed empty failure set with success:false is indeterminate even behind exit 0 (adapter-domain I5)', () => {
+    const stdout = JSON.stringify({ success: false, numTotalTests: 0, testResults: [] });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 0 });
+    expect(result).toEqual({
+      verdict: 'indeterminate',
+      reason: 'summary reports a failing run but no failure details were extracted',
+    });
+  });
+
+  test('a testResult without an assertionResults array is indeterminate, not coerced empty', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      numTotalTests: 1,
+      testResults: [{ name: '/tmp/a.test.ts', status: 'passed' }],
+    });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 0 });
+    expect(result.verdict).toBe('indeterminate');
+  });
+
   test('a failed suite without failing assertions surfaces one suite-level failure', () => {
     const stdout = JSON.stringify({
       success: false,
@@ -347,7 +366,10 @@ describe('gates registry entry', () => {
   test('one entry, named gates.checkRunner, whose schema validates the full input and only it', () => {
     expect(registry.map((entry) => entry.name)).toEqual(['gates.checkRunner']);
     const valid = { adapter: 'tsc-lines', command: { command: 'tsc', args: ['--noEmit'] } };
-    expect(CheckRunnerInputSchema.parse(valid)).toEqual(valid);
+    expect(CheckRunnerInputSchema.parse(valid)).toEqual({
+      adapter: 'tsc-lines',
+      command: { command: 'tsc', args: ['--noEmit'], timeoutMs: 600_000 },
+    });
     expect(
       CheckRunnerInputSchema.safeParse({ adapter: 'grep-json', command: valid.command }).success,
     ).toBe(false);
@@ -372,6 +394,14 @@ describe('gates registry entry', () => {
         command: { command: 'tsc', args: ['--noEmit'], timeoutMs: 0 },
       }).success,
     ).toBe(false);
+  });
+
+  test('an input without timeoutMs parses to the 600_000ms op-boundary floor', () => {
+    const parsed = CheckRunnerInputSchema.parse({
+      adapter: 'eslint-json',
+      command: { command: 'eslint', args: ['--format', 'json', '.'] },
+    });
+    expect(parsed.command.timeoutMs).toBe(600_000);
   });
 
   test('the importer resolves to the subprocess-bound op', async () => {

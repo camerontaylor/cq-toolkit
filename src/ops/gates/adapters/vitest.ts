@@ -46,9 +46,13 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
       return { verdict: 'indeterminate', reason: 'vitest-json: testResults entry is not an object' };
     }
     const file = typeof suiteRecord.name === 'string' ? suiteRecord.name : null;
-    const assertions = Array.isArray(suiteRecord.assertionResults)
-      ? suiteRecord.assertionResults
-      : [];
+    if (!Array.isArray(suiteRecord.assertionResults)) {
+      return {
+        verdict: 'indeterminate',
+        reason: 'vitest-json: testResults entry without an assertionResults array',
+      };
+    }
+    const assertions = suiteRecord.assertionResults;
     let failingAssertions = 0;
     for (const assertion of assertions) {
       const record = asRecord(assertion);
@@ -100,6 +104,15 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
         severity: 'error',
       });
     }
+  }
+  if (failures.length === 0 && report.success === false) {
+    // Adapter-domain I5 knowledge: `success` exists only in the vitest
+    // shape, and success:false with zero extracted failures is
+    // contradictory evidence — never certified clean.
+    return {
+      verdict: 'indeterminate',
+      reason: 'summary reports a failing run but no failure details were extracted',
+    };
   }
   return { verdict: 'parsed', set: { tool: 'vitest', failures, exitCode: raw.exitCode } };
 }

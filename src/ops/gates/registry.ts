@@ -6,7 +6,13 @@ import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { CheckRunnerInput } from './checkRunner.js';
 
-/** Registry-time mirror of {@link CheckRunnerInput}: the full input, and only it. */
+/**
+ * Registry-time mirror of {@link CheckRunnerInput}: the full input, and only
+ * it. `timeoutMs` defaults to 600_000 here — a 10-minute floor applied at
+ * the OP boundary only, so a JSON-dispatched check can never run uncapped
+ * (a watch-mode command hangs at most one timeout, not the job). The
+ * library-level {@link CheckCommand} stays timeout-optional.
+ */
 export const CheckRunnerInputSchema: z.ZodType<CheckRunnerInput> = z
   .object({
     adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
@@ -14,7 +20,7 @@ export const CheckRunnerInputSchema: z.ZodType<CheckRunnerInput> = z
       command: z.string(),
       args: z.array(z.string()),
       cwd: z.string().optional(),
-      timeoutMs: z.number().int().positive().optional(),
+      timeoutMs: z.number().int().positive().default(600_000),
     }),
   })
   .strict();

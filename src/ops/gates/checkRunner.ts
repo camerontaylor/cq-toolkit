@@ -29,7 +29,9 @@ export interface CheckCommand {
   /**
    * Wall-clock cap for the runner, in milliseconds. When exceeded the child
    * is killed (SIGKILL) and the observed exitCode is null — a timed-out
-   * check is non-passing evidence, never a hang.
+   * check is non-passing evidence, never a hang. Optional at the
+   * library level; the gates.checkRunner op boundary defaults it to
+   * 600_000ms (registry schema).
    */
   timeoutMs?: number;
 }
@@ -149,7 +151,10 @@ function emptyFailureSetReason(exitCode: number | null): string {
  * `indeterminate` → `indeterminate` (the reason as detail), a thrown or
  * rejected runner → `failed` (the runner never produced evidence). A
  * timed-out check (`CheckCommand.timeoutMs`) surfaces as exitCode null →
- * `indeterminate` — never a hang, never clean.
+ * `indeterminate` — never a hang, never clean. At the op boundary
+ * (registry schema) `timeoutMs` defaults to 600_000ms — the 10-minute
+ * floor for JSON-dispatched checks; the library-level CheckCommand stays
+ * timeout-optional.
  */
 export function makeCheckRunner(run: RunCheck): Op<CheckRunnerInput, FailureSet> {
   return async (input) => {
