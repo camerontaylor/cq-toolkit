@@ -43,6 +43,15 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
     },
     {
+      // Inline import type — the source goes through the same
+      // resolve-and-contain check: '../kernel/types.js' resolves to
+      // src/kernel/types.js, an allowed root for a file under src/cli/**.
+      code: "type T = import('../kernel/types.js').T;",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
+    },
+    {
       code: "import { readFile } from 'node:fs/promises';",
       filename: 'src/cli/run-plan.ts',
       options: OPTIONS,
@@ -172,6 +181,24 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       code: "const target = '../ops/x.js';\nconst mod = require(target);",
       filename: 'src/cli/main.ts',
       options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // Inline import type reaching OUTSIDE the boundary: resolves to
+      // src/driver/types.js — reported like the equivalent static import.
+      code: "type D = import('../driver/types.js').Driver;",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // Computed inline import type — FAIL CLOSED: no literal source text, so
+      // resolve-then-contain cannot see the real target; reported outright.
+      code: 'type E = import(target).E;',
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
       errors: [{ messageId: 'beyondRegistryKernel' }],
     },
   ],

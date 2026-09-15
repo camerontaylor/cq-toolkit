@@ -56,12 +56,18 @@ function isAllowedZodFile(filename, zodFiles) {
 // repo-relative form starts at the LAST '/src/' segment (the config only ever
 // applies this rule to 'src/cli/**' and 'src/cli.ts'). Windows separators are
 // normalized to forward slashes first.
+// The '/src/' slice is deliberately NOT gated on path.posix.isAbsolute: on
+// Windows an absolute path is 'C:/repo/src/cli/main.ts', which is NOT
+// posix-absolute ('C:/' is a drive prefix, not a leading '/') — gating on
+// absoluteness left the drive-letter path whole, so every relative source
+// resolved against 'C:/repo/src/cli' and containment failed on the entire
+// tree (the rule would misfire on everything). Slice whenever a '/src/'
+// segment exists, whatever the absoluteness; only the no-segment case keeps
+// the input as-is (RuleTester's already-repo-relative filenames).
 function repoRelative(filename) {
   const normalized = filename.split('\\').join('/');
-  if (path.posix.isAbsolute(normalized)) {
-    const srcIndex = normalized.lastIndexOf('/src/');
-    if (srcIndex !== -1) return normalized.slice(srcIndex + 1);
-  }
+  const srcIndex = normalized.lastIndexOf('/src/');
+  if (srcIndex !== -1) return normalized.slice(srcIndex + 1);
   return normalized;
 }
 
@@ -195,6 +201,16 @@ export default {
         if (node.moduleReference.type === 'TSExternalModuleReference') {
           checkSource(context, node.moduleReference.expression, node);
         }
+      },
+      // Inline import types — `type X = import('../driver/types.js').X` — are
+      // import sources like any other and go through the same
+      // resolve-and-contain check. `source` is the Literal/TemplateLiteral
+      // module source (the deprecated `argument` alias wraps the same node in
+      // a TSLiteralType); a COMPUTED source (`import(target)`) exposes none —
+      // its absence is the non-literal shape funneled into the fail-closed
+      // computed branch, exactly like `await import(t)`.
+      TSImportType(node) {
+        checkSource(context, node.source ?? { type: 'Identifier' }, node);
       },
       CallExpression(node) {
         const isRequire =
