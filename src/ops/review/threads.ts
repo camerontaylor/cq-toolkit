@@ -122,6 +122,21 @@ export function countUnresolvedThreads(
 }
 
 /**
+ * The attachRestReplies report. `attached` counts comments appended to
+ * threads' replies. `unmatchedRoots` holds the chain-root REST comment of
+ * every conversation that anchors to NO known thread — in fetchReviewState
+ * terms that is reviewThreads lag (a fresh thread the GraphQL snapshot has
+ * not caught up to), and the fetch layer turns a non-empty list into the
+ * fail-closed `reviewThreads.lag` truncation reason.
+ */
+export interface AttachReport {
+  /** Number of comments appended to threads' replies. */
+  attached: number;
+  /** Chain roots of conversations no known thread claims (deduped by id). */
+  unmatchedRoots: RestComment[];
+}
+
+/**
  * Reconstruct reply chains from the flat REST review-comment collection.
  * GraphQL reviewThreads.comments(first: 1) yields only each thread's ROOT
  * comment, so the conversation's tail comes from REST: each reply chain is
@@ -129,15 +144,17 @@ export function countUnresolvedThreads(
  * matched against a thread's `rootDatabaseId` (the real GitHub join: GraphQL
  * thread root comment `databaseId` ↔ REST comment `id`), and the chain's
  * non-root comments are appended to that thread's replies in createdAt order
- * (null timestamps last; ties keep REST order). Chains whose root cannot be
- * matched to a known thread are dropped silently — they belong to other
- * tools' conversations. Mutates the passed threads in place, appending to
- * each matched thread's replies.
+ * (null timestamps last; ties keep REST order). A conversation whose chain
+ * root matches no known thread is not attached — its root comment is
+ * REPORTED in the return value (reviewThreads lag at thread granularity;
+ * unresolvable chains — dangling parent or cycle — stay silently dropped,
+ * they are attributable to nothing). Mutates the passed threads in place,
+ * appending to each matched thread's replies.
  */
 export function attachRestReplies(
   threads: ReviewThread[],
   restReviewComments: readonly RestComment[],
-): void {
+): AttachReport {
   const byId = new Map<number, RestComment>();
   for (const comment of restReviewComments) {
     byId.set(comment.id, comment);
@@ -164,18 +181,37 @@ export function attachRestReplies(
   };
 
   const replies = new Map<ReviewThread, RestComment[]>();
+  const unmatchedRoots: RestComment[] = [];
+  const reportedRootIds = new Set<number>();
+  let attached = 0;
   for (const comment of restReviewComments) {
-    if (comment.inReplyToId === null) continue; // a chain root: it IS the thread body
+    if (comment.inReplyToId === null) {
+      // A chain root: it IS the thread body. Known → nothing to attach;
+      // unknown → reviewThreads lag (the snapshot predates this thread).
+      if (!threadByRootDatabaseId.has(comment.id) && !reportedRootIds.has(comment.id)) {
+        reportedRootIds.add(comment.id);
+        unmatchedRoots.push(comment);
+      }
+      continue;
+    }
     const root = chainRoot(comment);
     if (root === null) continue;
     const thread = threadByRootDatabaseId.get(root.id);
-    if (thread === undefined) continue; // another tool's conversation
+    if (thread === undefined) {
+      // The conversation anchors to no known thread: report its ROOT once.
+      if (!reportedRootIds.has(root.id)) {
+        reportedRootIds.add(root.id);
+        unmatchedRoots.push(root);
+      }
+      continue;
+    }
     const bucket = replies.get(thread);
     if (bucket === undefined) {
       replies.set(thread, [comment]);
     } else {
       bucket.push(comment);
     }
+    attached += 1;
   }
 
   for (const [thread, chain] of replies) {
@@ -193,4 +229,5 @@ export function attachRestReplies(
       })),
     );
   }
+  return { attached, unmatchedRoots };
 }

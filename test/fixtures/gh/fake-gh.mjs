@@ -29,17 +29,24 @@
 //      review comments; reply chains only exist via in_reply_to_id on the
 //      flat collection). A POST (`--method POST`) routes normally — that is
 //      how replies are CREATED.
-//   b. `api graphql` collision guard (I11): a `-f`/`-F` flag named `query`
-//      appearing more than once, or a document declaring a `$query` variable,
-//      exits 1 with gh's collision error family. Never name a GraphQL
-//      variable `query` — the document rides the `-f query=` slot.
-//   c. `pages: [[...], [...]]` payloads: ONLY `--paginate --slurp` yields
-//      the outer array of page arrays (gh >= 2.51 semantics — --paginate
-//      alone does NOT merge); anything less returns `pages[0]` ONLY —
-//      silent page-2 loss, exactly the trap.
+//   b. `api graphql` models the SERVER — real gh runs NO client-side
+//      collision check: a duplicate `-f query=` key is LAST-WINS, silently,
+//      and the request proceeds. A document declaring a `$query` variable
+//      yields GitHub's GraphQL validation-errors shape: exit 0 with
+//      `{"data":null,"errors":[{"message":"Variable \"$query\" ..."}]}` on
+//      stdout — callers must check payload.errors, not the exit code.
+//      (Doctrine is unchanged: never name a GraphQL variable `query` — the
+//      document rides the `-f query=` slot.)
+//   c. `pages: [[...], [...]]` payloads model real gh (v2.100.0
+//      paginatedArrayReader): `--paginate` WITHOUT `--slurp` merges all
+//      pages into ONE flat array; `--paginate --slurp` keeps the outer
+//      array of page arrays (gh >= 2.51); NO `--paginate` at all returns
+//      `pages[0]` ONLY — that is the silent page-2 loss trap.
 //   d. `--paginate` on `api graphql` → exit 1 (`--paginate is not supported
 //      with graphql`) unless the matched route sets `paginateableGraphql`:
-//      true — GraphQL paginates via cursors, never double-pagination.
+//      true — gh >= 2.51 supports it only for documents accepting
+//      `$endCursor`; this module paginates GraphQL manually, so the two
+//      must never combine. The guard stays.
 import { appendFileSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import process from 'node:process';
@@ -135,16 +142,25 @@ if (isGraphql && hasFlag('--paginate') && route?.paginateableGraphql !== true) {
   die(1, 'incorrect usage: --paginate is not supported with graphql');
 }
 
-// (b) The query-collision guard (I11): a duplicated `query` flag, or a
-// document declaring a `$query` variable, is the collision.
+// (b) Server-side modeling: a duplicate `query` flag is silent last-wins
+// (real gh behavior — no client check); a `$query`-declaring document gets
+// GitHub's GraphQL validation-errors payload (exit 0, errors on stdout).
 if (isGraphql) {
   const queryFlags = flags.filter((flag) => flag.name === 'query');
-  if (queryFlags.length > 1) {
-    die(1, 'incorrect usage: the value of a -f flag named "query" collides with the GraphQL query parameter');
-  }
-  const doc = queryFlags[0]?.value ?? '';
+  const doc = queryFlags[queryFlags.length - 1]?.value ?? ''; // last wins
   if (/(\$query\b|\bquery\s*:)/.test(doc)) {
-    die(1, 'Variable "$query" collides with the GraphQL query parameter');
+    process.stdout.write(
+      `${JSON.stringify({
+        data: null,
+        errors: [
+          {
+            message: 'Variable "$query" is never used in operation.',
+            extensions: { code: 'variableNotUsed' },
+          },
+        ],
+      })}\n`,
+    );
+    process.exit(route?.code ?? 0);
   }
 }
 
@@ -152,17 +168,19 @@ if (!route) {
   die(1, `no route for ${flat}`);
 }
 
-// Emit the payload. `pages` encodes the pagination trap: ONLY
-// --paginate --slurp yields the outer array of page arrays; anything less
-// silently returns page 1.
+// Emit the payload. `pages` models real gh (v2.100.0 paginatedArrayReader):
+// --paginate WITHOUT --slurp merges every page into ONE flat array;
+// --paginate --slurp keeps the outer array of page arrays; no --paginate
+// returns page 1 only — the silent-loss trap.
 const emit = (text) => {
   process.stdout.write(text.endsWith('\n') ? text : `${text}\n`);
   process.exit(route.code ?? 0);
 };
 
 if (route.pages !== undefined) {
-  const slurped = hasFlag('--paginate') && hasFlag('--slurp');
-  emit(JSON.stringify(slurped ? route.pages : (route.pages[0] ?? [])));
+  const paginate = hasFlag('--paginate');
+  const slurp = hasFlag('--slurp');
+  emit(JSON.stringify(!paginate ? (route.pages[0] ?? []) : slurp ? route.pages : route.pages.flat()));
 }
 if (route.file !== undefined) {
   emit(readFileSync(resolve(dirname(scenarioPath), route.file), 'utf8'));

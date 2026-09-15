@@ -67,20 +67,32 @@ export function makeGhRunner(opts?: { bin?: string; env?: Record<string, string>
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
       const bin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
-      let stdout = '';
-      let stderr = '';
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
       const child = spawn(bin, args, { env: { ...process.env, ...opts?.env } });
       child.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString();
+        stdoutChunks.push(chunk);
       });
       child.stderr.on('data', (chunk: Buffer) => {
-        stderr += chunk.toString();
+        stderrChunks.push(chunk);
       });
       child.on('error', (err: Error) => {
-        resolve({ code: 127, stdout, stderr: stderr === '' ? String(err) : stderr });
+        const stderr = Buffer.concat(stderrChunks).toString('utf8');
+        resolve({
+          code: 127,
+          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+          stderr: stderr === '' ? String(err) : stderr,
+        });
       });
       child.on('close', (code) => {
-        resolve({ code: code ?? -1, stdout, stderr });
+        // UTF-8 decoded ONCE over the whole stream: a multi-byte character
+        // split across pipe chunks must survive (chunk-wise decoding would
+        // replace it with U+FFFD).
+        resolve({
+          code: code ?? -1,
+          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+          stderr: Buffer.concat(stderrChunks).toString('utf8'),
+        });
       });
     });
 }

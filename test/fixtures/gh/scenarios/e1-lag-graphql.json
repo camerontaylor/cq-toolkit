@@ -1,0 +1,45 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "author": { "login": "pr-author" },
+        "headRefName": "feature/lantern",
+        "headRefOid": "0123456789abcdef0123456789abcdef01234567",
+        "reviewThreads": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "PRRT_kwDOClag1",
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "src/ops/review/threads.ts",
+              "line": 20,
+              "comments": {
+                "nodes": [
+                  {
+                    "databaseId": 300,
+                    "author": { "login": "reviewer" },
+                    "body": "known thread root",
+                    "createdAt": "2026-09-14T10:00:00Z"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "reviews": {
+          "pageInfo": { "hasNextPage": false, "endCursor": null },
+          "nodes": [
+            {
+              "id": "PRR_lag1",
+              "author": { "login": "reviewer" },
+              "state": "CHANGES_REQUESTED",
+              "body": "please address",
+              "submittedAt": "2026-09-14T11:00:00Z"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

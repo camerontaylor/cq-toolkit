@@ -16,6 +16,10 @@
 //      fields (`user`, `in_reply_to_id`, `node_id`, `created_at`) map to
 //      null; snake_case maps explicitly to the shared camelCase vocabulary.
 //   5. GhError propagation: a nonzero gh exit rejects with GhError.
+//   6. Fail-closed hardening: a REST-only fresh thread (reviewThreads lag)
+//      truncates with `reviewThreads.lag` and is never fabricated into a
+//      thread; malformed --slurp shapes, missing collections, server-side
+//      GraphQL errors, and unsafe owner/repo spellings all reject.
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv) — no spawned
 // process here; the CLI/fake-gh-script path is slice 3.
@@ -264,10 +268,12 @@ describe('fetchReviewState', () => {
 
   test('restPages cap keeps the first pages of the --slurp output and truncates (both REST collections)', async () => {
     // --slurp yields an outer array of PAGE arrays; the cap is on pages.
+    // The fillers reply to a dangling parent (999): unattributable chains
+    // are dropped silently, so the ONLY reason here is the page cap.
     const pullPages = [
-      [restPullComment(1000), restPullComment(1001)],
-      [restPullComment(1002), restPullComment(1003)],
-      [restPullComment(1004)],
+      [restPullComment(1000, { inReplyTo: 999 }), restPullComment(1001, { inReplyTo: 999 })],
+      [restPullComment(1002, { inReplyTo: 999 }), restPullComment(1003, { inReplyTo: 999 })],
+      [restPullComment(1004, { inReplyTo: 999 })],
     ];
     const issuePages = [
       [
@@ -288,6 +294,79 @@ describe('fetchReviewState', () => {
     expect(state.truncatedBecause).toEqual(['restComments.pageCap']); // issues: 1 page, under cap
     expect(state.restReviewComments).toHaveLength(4); // first two pages kept, third dropped
     expect(state.restIssueComments).toHaveLength(1);
+  });
+
+  test('a REST-only fresh thread (reviewThreads lag) truncates with reviewThreads.lag and is not fabricated', async () => {
+    const run = fakeGh({
+      graphql: () =>
+        graphqlPayload(
+          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          { hasNextPage: false, endCursor: null, nodes: [] },
+        ),
+      pullsComments: [
+        [
+          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'known root', created_at: '2026-01-01T00:00:00Z' },
+          { id: 400, node_id: 'PRRC_400', user: { login: 'late-reviewer' }, body: 'fresh thread root', created_at: '2026-01-01T05:00:00Z' },
+        ],
+      ],
+    });
+    const state = await fetchReviewState(INPUT, {}, run);
+    expect(state.threads.map((t) => t.rootDatabaseId)).toEqual([100]); // the fresh thread is NOT fabricated
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toEqual(['reviewThreads.lag']);
+  });
+
+  test('rejects an owner/repo that does not match ^[A-Za-z0-9_.-]+$', async () => {
+    const run: GhFn = async () => ({ code: 0, stdout: '[]', stderr: '' });
+    await expect(fetchReviewState({ owner: 'octo/x', repo: 'widget', pr: 7 }, {}, run)).rejects.toThrow(
+      /owner\/repo must match/,
+    );
+    await expect(fetchReviewState({ owner: 'octo', repo: '../escape', pr: 7 }, {}, run)).rejects.toThrow(
+      /owner\/repo must match/,
+    );
+  });
+
+  test('a GraphQL errors payload fails closed carrying the server messages', async () => {
+    const run = fakeGh({
+      graphql: () => ({
+        data: null,
+        errors: [
+          { message: 'Variable "$threadsAfter" of required type "String!" was not provided.' },
+          { message: 'second problem' },
+        ],
+      }),
+    });
+    await expect(fetchReviewState(INPUT, {}, run)).rejects.toThrow(
+      /GraphQL errors: Variable "\$threadsAfter".*; second problem/,
+    );
+  });
+
+  test.each([
+    {
+      name: 'a null reviewThreads collection fails closed naming it',
+      omit: 'reviewThreads' as const,
+      message: /no reviewThreads collection/,
+    },
+    {
+      name: 'a null reviews collection fails closed naming it',
+      omit: 'reviews' as const,
+      message: /no reviews collection/,
+    },
+  ])('$name', async ({ omit, message }) => {
+    const run = fakeGh({
+      graphql: () => {
+        const pullRequest: Record<string, unknown> = {
+          author: { login: 'pr-author' },
+          headRefName: 'x',
+          headRefOid: 'abc',
+          reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+          reviews: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] },
+        };
+        delete pullRequest[omit];
+        return { data: { repository: { pullRequest } } };
+      },
+    });
+    await expect(fetchReviewState(INPUT, {}, run)).rejects.toThrow(message);
   });
 
   test('asymmetric pagination: threads capped at page 1 while reviews walk 3 pages — no duplicate threads', async () => {
@@ -372,6 +451,33 @@ describe('fetchReviewState', () => {
     });
     expect(state.restReviewComments[1]?.nodeId).toBeNull();
     expect(state.restReviewComments[1]?.inReplyToId).toBeNull();
+  });
+
+  test('a --slurp payload that is not an array of page arrays fails closed (R2-9a)', async () => {
+    const run = fakeGh({
+      graphql: () =>
+        graphqlPayload(
+          { hasNextPage: false, endCursor: null, nodes: [] },
+          { hasNextPage: false, endCursor: null, nodes: [] },
+        ),
+      // A FLAT item array where the page-array shape is required.
+      pullsComments: [restPullComment(1), restPullComment(2)],
+    });
+    await expect(fetchReviewState(INPUT, {}, run)).rejects.toThrow(/non-page-array payload/);
+  });
+
+  test('hasNextPage with a null endCursor cannot continue: pageCap reason, data kept (R2-9b)', async () => {
+    const run = fakeGh({
+      graphql: () =>
+        graphqlPayload(
+          { hasNextPage: true, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          { hasNextPage: false, endCursor: null, nodes: [] },
+        ),
+    });
+    const state = await fetchReviewState(INPUT, {}, run);
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toEqual(['reviewThreads.pageCap']);
+    expect(state.threads).toHaveLength(1); // page data still returned
   });
 
   test('a nonzero gh exit rejects with GhError (fail closed, stderr carried)', async () => {

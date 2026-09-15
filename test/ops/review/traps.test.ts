@@ -5,23 +5,27 @@
 // trap semantics (the scenario payloads pin the data side).
 //
 // One failing-without / passing-with pair per trap:
-//   1. REST silent pagination loss — without `--paginate` the fake returns
-//      only page 1 of a paged collection (pages payload, pages[0]); the
-//      implementation always sends `--paginate --slurp` at per_page=100
-//      (all 31 items, truncated: false) and a low restPages cap truncates
-//      fail-closed with a reason.
-//   2. GraphQL `query` variable collision — a duplicate `-f query=` flag or
-//      a document declaring `$query` exits nonzero; the implementation sends
-//      exactly one `-f query=` per graphql call, names its cursors
-//      threadsAfter/reviewsAfter, and never sends an empty cursor (proven
-//      via CQ_GH_LOG).
+//   1. REST silent pagination loss — with NO `--paginate` the fake returns
+//      only page 1 of a paged collection; `--paginate` alone merges all
+//      pages (real gh fact), `--paginate --slurp` keeps the outer page
+//      array. The implementation always sends `--paginate --slurp` at
+//      per_page=100 (all 31 items, truncated: false) and a low restPages
+//      cap truncates fail-closed with a reason.
+//   2. GraphQL `query` collision — a `$query`-declaring document gets the
+//      server's GraphQL validation-errors payload (exit 0); a duplicate
+//      `-f query=` is silent last-wins (real gh runs no client check). The
+//      implementation sends exactly one `-f query=` per graphql call, names
+//      its cursors threadsAfter/reviewsAfter, and never sends an empty
+//      cursor (proven via CQ_GH_LOG).
 //   3. Replies-endpoint 404 — a GET `/replies` invocation exits 404 (POST is
 //      exempt: that is how replies are created); the implementation never
 //      makes one (proven via CQ_GH_LOG) and rebuilds reply chains from
 //      in_reply_to_id on the flat collection.
-//   4. reviewThreads lag — the recorded GraphQL snapshot carries NO thread
-//      replies; the fresh responder reply exists only in REST, and the
-//      fetched state surfaces it on the right thread via attachRestReplies.
+//   4. reviewThreads lag — the GraphQL snapshot knows ONE thread and
+//      carries NO replies; REST knows both a fresh reply on that known
+//      thread AND a fresh root thread the snapshot has never seen. The
+//      known-thread reply attaches; the fresh thread is NOT fabricated;
+//      the lag truncates fail-closed with reason `reviewThreads.lag`.
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,12 +34,12 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { fetchReviewState } from '../../../src/ops/review/fetchReviewState.js';
 import type { FetchReviewStateInput } from '../../../src/ops/review/fetchReviewState.js';
 import { makeGhRunner } from '../../../src/ops/review/gh.js';
-import { countUnresolvedThreads } from '../../../src/ops/review/threads.js';
 import type { GhFn } from '../../../src/ops/review/gh.js';
 
 const FAKE_GH = fileURLToPath(new URL('../../fixtures/gh/fake-gh.mjs', import.meta.url));
 const SCENARIO = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-traps.json', import.meta.url));
-const GRAPHQL_SNAPSHOT = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-graphql.json', import.meta.url));
+const LAG_SCENARIO = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-lag.json', import.meta.url));
+const LAG_GRAPHQL_SNAPSHOT = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-lag-graphql.json', import.meta.url));
 const INPUT: FetchReviewStateInput = { owner: 'octo', repo: 'toolkit', pr: 7 };
 
 // ---------------------------------------------------------------------------
@@ -47,14 +51,14 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-/** A runner wired to the fake gh + e1 scenario, logging every call. */
-const harness = async (label: string): Promise<{ run: GhFn; logPath: string }> => {
+/** A runner wired to the fake gh + a scenario, logging every call. */
+const harness = async (label: string, scenario: string = SCENARIO): Promise<{ run: GhFn; logPath: string }> => {
   const dir = await mkdtemp(join(tmpdir(), `cq-e1-${label}-`));
   tempDirs.push(dir);
   const logPath = join(dir, 'calls.jsonl');
   const run = makeGhRunner({
     bin: FAKE_GH,
-    env: { CQ_GH_SCENARIO: SCENARIO, CQ_GH_LOG: logPath },
+    env: { CQ_GH_SCENARIO: scenario, CQ_GH_LOG: logPath },
   });
   return { run, logPath };
 };
@@ -96,10 +100,19 @@ const flagsOf = (args: string[]): LoggedFlag[] => {
 describe('trap: REST silent pagination loss', () => {
   test('trap fires: without --paginate only page 1 comes back (page 2 silently lost)', async () => {
     const { run } = await harness('pageloss-without');
-    const res = await run(['api', 'repos/octo/toolkit/pulls/7/comments']);
-    expect(res.code).toBe(0);
-    const items = JSON.parse(res.stdout) as unknown[];
+    const path = 'repos/octo/toolkit/pulls/7/comments';
+    const naked = await run(['api', path]);
+    expect(naked.code).toBe(0);
+    const items = JSON.parse(naked.stdout) as unknown[];
     expect(items).toHaveLength(20); // the scenario's page 1 — 11 more exist, unreturned
+    // Real gh facts the fake models: --paginate alone MERGES all pages into
+    // one flat array (v2.100.0 paginatedArrayReader); --slurp keeps pages.
+    const merged = await run(['api', path, '--paginate']);
+    expect(JSON.parse(merged.stdout)).toHaveLength(31);
+    const slurped = JSON.parse((await run(['api', path, '--paginate', '--slurp'])).stdout) as unknown[][];
+    expect(slurped).toHaveLength(2);
+    expect(slurped[0]).toHaveLength(20);
+    expect(slurped[1]).toHaveLength(11);
   }, 20_000);
 
   test('implementation survives: --paginate --slurp returns all 31; a low restPages cap truncates with a reason', async () => {
@@ -129,11 +142,18 @@ describe('trap: REST silent pagination loss', () => {
 // ---------------------------------------------------------------------------
 
 describe('trap: GraphQL query variable collision', () => {
-  test('trap fires: a $query variable or a duplicate -f query flag exits nonzero', async () => {
+  test('trap fires: a $query doc gets the server errors payload (exit 0); duplicate -f query is silent last-wins', async () => {
     const { run } = await harness('collision-without');
+    // Server-side modeling: a doc declaring `$query` yields GitHub's GraphQL
+    // validation-errors body in a 200 response — the caller must check
+    // payload.errors, never rely on a nonzero exit.
     const declared = await run(['api', 'graphql', '-f', 'query=query ($query: String) { viewer { login } }']);
-    expect(declared.code).not.toBe(0);
-    expect(declared.stderr).toMatch(/Variable "\$query"|collides/);
+    expect(declared.code).toBe(0);
+    const payload = JSON.parse(declared.stdout) as { errors?: Array<{ message?: string }> };
+    expect(payload.errors?.[0]?.message).toMatch(/\$query/);
+    // Real gh runs NO client-side check: duplicate `-f query=` keys are
+    // last-wins and the request proceeds with the normal route payload —
+    // nothing may rely on gh erroring here.
     const duplicated = await run([
       'api',
       'graphql',
@@ -142,10 +162,9 @@ describe('trap: GraphQL query variable collision', () => {
       '-f',
       'query=query { repository { id } }',
     ]);
-    expect(duplicated.code).not.toBe(0);
-    expect(duplicated.stderr).toContain(
-      'incorrect usage: the value of a -f flag named "query" collides with the GraphQL query parameter',
-    );
+    expect(duplicated.code).toBe(0);
+    expect(duplicated.stderr).not.toMatch(/collides|incorrect usage/);
+    expect(JSON.parse(duplicated.stdout)).toHaveProperty('data.repository.pullRequest');
   }, 20_000);
 
   test('implementation survives: exactly one -f query per graphql call; cursors named threadsAfter/reviewsAfter', async () => {
@@ -218,8 +237,8 @@ describe('trap: replies endpoint 404', () => {
 // ---------------------------------------------------------------------------
 
 describe('trap: reviewThreads lag', () => {
-  test('trap exists: the recorded GraphQL snapshot carries no thread replies', async () => {
-    const snapshot = JSON.parse(await readFile(GRAPHQL_SNAPSHOT, 'utf8')) as {
+  test('trap exists: the snapshot knows one thread (root-only) while REST carries a fresh root it does not know', async () => {
+    const snapshot = JSON.parse(await readFile(LAG_GRAPHQL_SNAPSHOT, 'utf8')) as {
       data: {
         repository: {
           pullRequest: {
@@ -228,24 +247,23 @@ describe('trap: reviewThreads lag', () => {
         };
       };
     };
-    const t1 = snapshot.data.repository.pullRequest.reviewThreads.nodes.find((n) => n.id === 'PRRT_kwDOCxyz111');
-    expect(t1?.comments.nodes).toHaveLength(1); // root only — no reply, fresh or otherwise
+    const snapThreads = snapshot.data.repository.pullRequest.reviewThreads.nodes;
+    expect(snapThreads).toHaveLength(1);
+    expect(snapThreads[0]?.id).toBe('PRRT_kwDOClag1');
+    expect(snapThreads[0]?.comments.nodes).toHaveLength(1); // root only — replies never ride GraphQL
   }, 20_000);
 
-  test('implementation survives: the fresh REST-only responder reply surfaces on the lagged thread', async () => {
-    const { run } = await harness('lag-with');
+  test('implementation survives: the known-thread reply attaches, the fresh thread is NOT fabricated, lag truncates', async () => {
+    const { run } = await harness('lag-with', LAG_SCENARIO);
     const state = await fetchReviewState(INPUT, {}, run);
-    const t1 = state.threads.find((thread) => thread.id === 'PRRT_kwDOCxyz111');
-    const freshReply = t1?.replies.find((reply) => reply.body.startsWith('fresh responder reply'));
-    expect(freshReply).toEqual({
-      authorLogin: 'pr-author',
-      body: 'fresh responder reply: fixed in 0123456',
-      createdAt: '2026-09-15T09:00:00Z',
-    });
-    // The full vocabulary rides along: the resolved thread is not counted,
-    // both external threads are.
-    expect(state.threads.find((thread) => thread.id === 'PRRT_kwDOCxyz222')?.isResolved).toBe(true);
-    expect(countUnresolvedThreads(state.threads, { excludeAuthorLogin: 'pr-author' })).toBe(2);
-    expect(state.truncated).toBe(false);
+    // The fresh REST-only thread (root 400) must NOT appear as a thread —
+    // the fetch layer never fabricates threads from REST.
+    expect(state.threads.map((thread) => thread.rootDatabaseId)).toEqual([300]);
+    // The plain lag case — a fresh reply on a KNOWN thread — attaches fine.
+    const known = state.threads.find((thread) => thread.id === 'PRRT_kwDOClag1');
+    expect(known?.replies.map((reply) => reply.body)).toEqual(['fresh responder reply on the KNOWN thread']);
+    // And the fresh thread truncates the result fail-closed.
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toEqual(['reviewThreads.lag']);
   }, 20_000);
 });

@@ -13,9 +13,11 @@
 //      flat REST collection: chains anchor at a root REST comment whose
 //      numeric id equals a thread's rootDatabaseId (the real GitHub join —
 //      GraphQL root comment databaseId ↔ REST id), append in createdAt
-//      order (nulls last, ties keep REST order), mutate the passed threads
-//      in place, and chains that cannot be anchored to a known thread are
-//      dropped silently.
+//      order (nulls last, ties keep REST order), and mutate the passed
+//      threads in place. The returned report counts attached comments and
+//      carries the chain ROOT of every conversation no known thread claims
+//      (reviewThreads lag at thread granularity); unresolvable chains
+//      (dangling parent, cycle) stay silently dropped.
 //
 // Pure data tests: no gh, no I/O — instant by construction.
 import { describe, expect, test } from 'vitest';
@@ -121,7 +123,7 @@ describe('countUnresolvedThreads', () => {
 describe('attachRestReplies', () => {
   test('a linear chain appends in createdAt order and maps to ThreadComment shape', () => {
     const t = thread();
-    attachRestReplies(
+    const report = attachRestReplies(
       [t],
       [
         rootComment(),
@@ -129,6 +131,7 @@ describe('attachRestReplies', () => {
         reply({ id: 102, createdAt: '2026-01-01T02:00:00Z', authorLogin: 'carol', inReplyToId: 101 }),
       ],
     );
+    expect(report).toEqual({ attached: 2, unmatchedRoots: [] });
     expect(repliesOf(t)).toEqual([
       ['bob', '2026-01-01T01:00:00Z'],
       ['carol', '2026-01-01T02:00:00Z'],
@@ -143,7 +146,7 @@ describe('attachRestReplies', () => {
 
   test('a branched chain (two replies on one root) sorts by createdAt regardless of REST order', () => {
     const t = thread();
-    attachRestReplies(
+    const report = attachRestReplies(
       [t],
       [
         rootComment(),
@@ -151,38 +154,59 @@ describe('attachRestReplies', () => {
         reply({ id: 101, createdAt: '2026-01-01T01:00:00Z' }),
       ],
     );
+    expect(report.attached).toBe(2);
     expect(repliesOf(t)).toEqual([
       ['bob', '2026-01-01T01:00:00Z'],
       ['carol', '2026-01-01T02:00:00Z'],
     ]);
   });
 
+  test('a REST-only fresh thread (root unknown to any thread) is reported as an unmatched root', () => {
+    const t = thread();
+    const freshRoot = rootComment({ id: 400, nodeId: 'PRRC_400' });
+    const report = attachRestReplies(
+      [t],
+      [freshRoot, reply({ id: 401, inReplyToId: 400 })],
+    );
+    expect(report.attached).toBe(0); // nothing anchors
+    expect(report.unmatchedRoots).toEqual([freshRoot]); // reviewThreads lag signal
+    expect(t.replies).toEqual([]);
+  });
+
   test.each([
     {
-      name: 'a chain whose REST root id matches no thread rootDatabaseId is dropped silently',
+      name: 'a chain whose REST root id matches no thread rootDatabaseId is not attached; its root is reported',
       comments: [
         rootComment({ id: 999, nodeId: 'PRRC_999' }),
         reply({ inReplyToId: 999 }),
       ],
+      anchorless: false,
+      unmatched: [999],
     },
     {
-      name: 'a thread with a null rootDatabaseId cannot anchor and is dropped silently',
+      name: 'a thread with a null rootDatabaseId cannot anchor; the root is reported',
       comments: [rootComment(), reply({ inReplyToId: 100 })],
       anchorless: true,
+      unmatched: [100],
     },
     {
-      name: 'a reply whose parent is missing from the REST collection is dropped silently',
+      name: 'a reply whose parent is missing from the REST collection is dropped silently (unattributable)',
       comments: [rootComment(), reply({ inReplyToId: 999 })],
+      anchorless: false,
+      unmatched: [],
     },
-  ])('$name', ({ comments, anchorless }) => {
+  ])('$name', ({ comments, anchorless, unmatched }) => {
     const t = thread(anchorless === true ? { rootDatabaseId: null } : undefined);
-    attachRestReplies([t], comments);
+    const report = attachRestReplies([t], comments);
     expect(t.replies).toEqual([]);
+    expect(report.attached).toBe(0);
+    expect(report.unmatchedRoots.map((root) => root.id)).toEqual(unmatched);
   });
 
   test('chain roots themselves are never appended (the thread body already carries the root)', () => {
     const t = thread();
-    attachRestReplies([t], [rootComment()]);
+    const report = attachRestReplies([t], [rootComment()]);
+    expect(report).toEqual({ attached: 0, unmatchedRoots: [] });
     expect(t.replies).toEqual([]);
   });
 
@@ -206,10 +230,11 @@ describe('attachRestReplies', () => {
       replies: [{ authorLogin: 'dave', body: 'pre-existing', createdAt: null }],
     });
     const threads = [alreadyThere];
-    attachRestReplies(
+    const report = attachRestReplies(
       threads,
       [rootComment(), reply({ createdAt: '2026-01-01T01:00:00Z' })],
     );
+    expect(report.attached).toBe(1);
     expect(threads[0]).toBe(alreadyThere);
     expect(repliesOf(alreadyThere)).toEqual([
       ['dave', null],
@@ -220,7 +245,7 @@ describe('attachRestReplies', () => {
   test('multiple threads each receive only their own chains', () => {
     const t1 = thread({ id: 'PRRT_kwDOCa' });
     const t2 = thread({ id: 'PRRT_kwDOCb', rootDatabaseId: 200 });
-    attachRestReplies(
+    const report = attachRestReplies(
       [t1, t2],
       [
         rootComment(),
@@ -229,6 +254,7 @@ describe('attachRestReplies', () => {
         reply({ id: 201, inReplyToId: 200, authorLogin: 'dave' }),
       ],
     );
+    expect(report).toEqual({ attached: 2, unmatchedRoots: [] });
     expect(t1.replies.map((r) => r.authorLogin)).toEqual(['bob']);
     expect(t2.replies.map((r) => r.authorLogin)).toEqual(['dave']);
   });

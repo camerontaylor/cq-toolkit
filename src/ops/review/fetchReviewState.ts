@@ -17,7 +17,10 @@
 //     cap is a true PAGE cap, applied client-side before flattening.
 // Any cap hit does NOT error: the result carries truncated=true plus a
 // truncatedBecause reason per cause, and the data fetched so far still
-// comes back — the caller decides (fail closed downstream).
+// comes back — the caller decides (fail closed downstream). So does the
+// reviewThreads lag trap at THREAD granularity: a REST conversation whose
+// root anchors to no known thread is a fresh thread the GraphQL snapshot
+// has not caught up to, recorded as reason `reviewThreads.lag`.
 //
 // GraphQL thread comments are ROOT-ONLY (comments(first: 1)) AND stale —
 // reply chains are reconstructed from REST by attachRestReplies, never from
@@ -118,7 +121,7 @@ interface GraphqlPullRequest {
   author: { login: string } | null;
   headRefName: string | null;
   headRefOid: string | null;
-  reviewThreads: {
+  reviewThreads?: {
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
     nodes: {
       id: string;
@@ -135,8 +138,8 @@ interface GraphqlPullRequest {
         }>;
       };
     }[];
-  };
-  reviews: {
+  } | null;
+  reviews?: {
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
     nodes: {
       id: string;
@@ -145,11 +148,13 @@ interface GraphqlPullRequest {
       body: string;
       submittedAt: string | null;
     }[];
-  };
+  } | null;
 }
 
 /** Minimal shape of the `gh api graphql` payload this function reads. */
 interface GraphqlPayload {
+  /** Server-side GraphQL validation errors — non-empty means the call failed. */
+  errors?: Array<{ message?: string }>;
   data?: {
     repository?: {
       pullRequest?: GraphqlPullRequest | null;
@@ -169,6 +174,9 @@ interface RawRestComment {
 
 /** Review verdicts the shared vocabulary carries; anything else → null. */
 const REVIEW_STATES: readonly string[] = ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'];
+
+/** The only owner/repo spellings allowed near a gh REST path. */
+const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
 
 const isKnownReviewState = (state: string | null): state is Exclude<ReviewSummary['state'], null> =>
   state !== null && REVIEW_STATES.includes(state);
@@ -270,15 +278,24 @@ async function fetchRestComments(
  * keeps paginating. REST collections ride `--paginate --slurp` under a true
  * page cap, recording `restComments.pageCap` / `issueComments.pageCap`.
  * Thread replies are reconstructed from the REST review comments (GraphQL
- * thread comments are root-only by design AND stale — the lag trap).
+ * thread comments are root-only by design AND stale — the lag trap); a REST
+ * conversation anchored to no known thread records `reviewThreads.lag`.
  * Null-safety: deleted accounts (`author: null`) and absent REST fields map
- * to null, never throw.
+ * to null, never throw. `owner`/`repo` are validated against
+ * `^[A-Za-z0-9_.-]+$` before any gh path is built.
  */
 export async function fetchReviewState(
   input: FetchReviewStateInput,
   caps?: FetchReviewStateCaps,
   run: GhFn = makeGhRunner(),
 ): Promise<RestReviewState> {
+  // owner/repo land inside gh REST paths; anything path-injection-adjacent
+  // is rejected before a single argv is built.
+  if (!GH_NAME_OK.test(input.owner) || !GH_NAME_OK.test(input.repo)) {
+    throw new Error(
+      `fetchReviewState: owner/repo must match ${String(GH_NAME_OK)} — got owner ${JSON.stringify(input.owner)}, repo ${JSON.stringify(input.repo)}`,
+    );
+  }
   const threadPagesCap = caps?.reviewThreadPages ?? 10;
   const reviewPagesCap = caps?.reviewPages ?? 10;
   const restPagesCap = caps?.restPages ?? 20;
@@ -291,9 +308,9 @@ export async function fetchReviewState(
 
   // Per-collection cursor state: null = first page (the cursor flag is
   // OMITTED entirely — never sent as an empty string), a cursor = next page,
-  // done = stop advancing (its page-1 nodes then come back on every further
-  // request and are IGNORED — both collections ride one document, so a
-  // still-paginating sibling re-fetches the finished one).
+  // done = stop advancing (once done, the collection's most-recent page —
+  // page 1 if no cursor ever advanced — comes back on its sibling's further
+  // requests and is IGNORED).
   let threadsCursor: string | null = null;
   let reviewsCursor: string | null = null;
   let threadsDone = false;
@@ -319,18 +336,32 @@ export async function fetchReviewState(
       args.push('-f', `reviewsAfter=${reviewsCursor}`);
     }
     const payload = await ghJson<GraphqlPayload>(run, args);
+    // Server-side GraphQL errors arrive as a 200 body with a non-empty
+    // errors array — fail closed carrying the server's messages.
+    if (payload.errors !== undefined && payload.errors.length > 0) {
+      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
+      throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
+    }
     const pullRequest = payload.data?.repository?.pullRequest ?? null;
     if (pullRequest === null) {
       throw new Error(`gh api graphql returned no pullRequest payload for ${input.owner}/${input.repo}#${input.pr}`);
     }
+    if (pullRequest.reviewThreads == null) {
+      throw new Error(`gh api graphql returned no reviewThreads collection for ${input.owner}/${input.repo}#${input.pr}`);
+    }
+    if (pullRequest.reviews == null) {
+      throw new Error(`gh api graphql returned no reviews collection for ${input.owner}/${input.repo}#${input.pr}`);
+    }
+    const threadCollection = pullRequest.reviewThreads;
+    const reviewCollection = pullRequest.reviews;
     if (firstPage === null) {
       firstPage = pullRequest;
     }
     if (!threadsDone) {
-      threads.push(...pullRequest.reviewThreads.nodes.map(toReviewThread));
+      threads.push(...threadCollection.nodes.map(toReviewThread));
     }
     if (!reviewsDone) {
-      reviews.push(...pullRequest.reviews.nodes.map(toReviewSummary));
+      reviews.push(...reviewCollection.nodes.map(toReviewSummary));
     }
 
     // Advance each live cursor under its own cap: a hasNextPage past the cap
@@ -339,7 +370,7 @@ export async function fetchReviewState(
     // continue and counts the same. Done collections skip advancing entirely
     // — no re-fetch accounting, no duplicate reasons.
     if (!threadsDone) {
-      const threadPageInfo = pullRequest.reviewThreads.pageInfo;
+      const threadPageInfo = threadCollection.pageInfo;
       if (threadPageInfo.hasNextPage && page < threadPagesCap && threadPageInfo.endCursor !== null) {
         threadsCursor = threadPageInfo.endCursor;
       } else {
@@ -350,7 +381,7 @@ export async function fetchReviewState(
       }
     }
     if (!reviewsDone) {
-      const reviewPageInfo = pullRequest.reviews.pageInfo;
+      const reviewPageInfo = reviewCollection.pageInfo;
       if (reviewPageInfo.hasNextPage && page < reviewPagesCap && reviewPageInfo.endCursor !== null) {
         reviewsCursor = reviewPageInfo.endCursor;
       } else {
@@ -382,8 +413,13 @@ export async function fetchReviewState(
   );
 
   // GraphQL thread comments are root-only and stale; the reply chains come
-  // from the flat REST collection (mutates threads in place).
-  attachRestReplies(threads, restReviewComments);
+  // from the flat REST collection (mutates threads in place). A REST
+  // conversation anchored to no known thread is a fresh thread the GraphQL
+  // snapshot has not caught up to — reviewThreads lag, fail closed.
+  const { unmatchedRoots } = attachRestReplies(threads, restReviewComments);
+  if (unmatchedRoots.length > 0) {
+    truncatedBecause.push('reviewThreads.lag');
+  }
 
   // The loop body ran at least once (it exits only via its own break, after
   // the first-page snapshot), so firstPage is set here.

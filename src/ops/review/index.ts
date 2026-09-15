@@ -5,6 +5,7 @@
 // injectable gh CLI runner; ./fetchReviewState.js pulls one PR's full
 // review state over the gh seam.
 export type {
+  AttachReport,
   RestComment,
   ReviewSummary,
   ReviewThread,
