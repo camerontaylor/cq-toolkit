@@ -324,7 +324,12 @@ export {
 // exports either name (star-export ambiguity), so they are re-exported
 // aliased as `listOps`/`getOp`; `defaultOpsRoot` is distinctive enough to
 // stay bare.
-export { defaultOpsRoot, list as listOps, get as getOp } from './registry/index.js';
+export {
+  defaultOpsRoot,
+  list as listOps,
+  get as getOp,
+  listWithDiagnostics as listOpsWithDiagnostics,
+} from './registry/index.js';
 export * from './ops/gates/index.js';
 export * from './ops/ledger/index.js';
 export * from './ops/review/index.js';
