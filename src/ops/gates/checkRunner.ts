@@ -26,6 +26,12 @@ export interface CheckCommand {
   command: string;
   args: string[];
   cwd?: string;
+  /**
+   * Wall-clock cap for the runner, in milliseconds. When exceeded the child
+   * is killed (SIGKILL) and the observed exitCode is null — a timed-out
+   * check is non-passing evidence, never a hang.
+   */
+  timeoutMs?: number;
 }
 
 /** Raw captured output of one check run — plain captured bytes, serializable. */
@@ -57,7 +63,11 @@ export interface CheckFailure {
   severity: 'error' | 'warning';
 }
 
-/** The typed failure set for one tool run — the op's entire output. */
+/**
+ * The typed failure set for one tool run — the op's entire output. An EMPTY
+ * `failures` array certifies clean only behind `exitCode: 0`; any other
+ * exit code downgrades the parse verdict (see {@link CheckParseResult}).
+ */
 export interface FailureSet {
   tool: string;
   failures: CheckFailure[];
@@ -66,8 +76,12 @@ export interface FailureSet {
 
 /**
  * Parse verdict that never conflates "unparsable" with "clean" (I5):
- * `indeterminate` means the adapter did not RECOGNIZE the output shape —
- * callers must treat it as non-passing evidence, never as a pass.
+ * `indeterminate` covers both an output shape the adapter did not RECOGNIZE
+ * and — centrally in {@link parseCheckOutput} — a shape that parsed to an
+ * EMPTY failure set while the tool's exit code was not 0 (eslint's
+ * unmatched-glob `[]`-behind-exit-2 class of traps; a null exit code —
+ * signal, timeout, lost worker — counts as not-0). Callers must treat
+ * `indeterminate` as non-passing evidence, never as a pass.
  */
 export type CheckParseResult =
   | { verdict: 'parsed'; set: FailureSet }
@@ -108,16 +122,34 @@ export function adapterByName(name: AdapterName): CheckAdapter {
   }
 }
 
-/** Run one adapter over one raw capture — the single call site the op uses. */
+/**
+ * Run one adapter over one raw capture — the single call site the op uses.
+ * CENTRAL I5 guard, uniform for every adapter: a parsed EMPTY failure set
+ * certifies clean ONLY behind exit code 0; behind a non-zero (or
+ * unobservable) exit code it is downgraded to `indeterminate`.
+ */
 export function parseCheckOutput(adapter: CheckAdapter, raw: RawCheckOutput): CheckParseResult {
-  return adapter.parse(raw);
+  const result = adapter.parse(raw);
+  if (result.verdict === 'parsed' && result.set.failures.length === 0 && raw.exitCode !== 0) {
+    return { verdict: 'indeterminate', reason: emptyFailureSetReason(raw.exitCode) };
+  }
+  return result;
+}
+
+/** Why an empty parsed failure set is not a pass for this exit code. */
+function emptyFailureSetReason(exitCode: number | null): string {
+  return exitCode === null
+    ? 'parsed empty failure set behind an unobservable exit code (signal, timeout, lost worker)'
+    : `parsed empty failure set behind exit code ${exitCode}`;
 }
 
 /**
  * Build the `gates.checkRunner` op over an injected runner. Verdict mapping
  * is the op's ENTIRE decision surface: `parsed` → `ok` (the FailureSet),
  * `indeterminate` → `indeterminate` (the reason as detail), a thrown or
- * rejected runner → `failed` (the runner never produced evidence).
+ * rejected runner → `failed` (the runner never produced evidence). A
+ * timed-out check (`CheckCommand.timeoutMs`) surfaces as exitCode null →
+ * `indeterminate` — never a hang, never clean.
  */
 export function makeCheckRunner(run: RunCheck): Op<CheckRunnerInput, FailureSet> {
   return async (input) => {
@@ -137,16 +169,22 @@ export function makeCheckRunner(run: RunCheck): Op<CheckRunnerInput, FailureSet>
 /**
  * The default injected runner: execFile-based, capturing stdout/stderr as
  * strings and reporting exitCode null whenever no code was observed (killed
- * by signal, timed out, buffer overflow, spawn failure). Never rejects — a
- * check that RAN and misbehaved still produced a RawCheckOutput; only the
- * op-level contract turns a runner-level throw into `failed`.
+ * by signal, timed out past {@link CheckCommand.timeoutMs} and SIGKILLed,
+ * buffer overflow, spawn failure). Never rejects — a check that RAN and
+ * misbehaved still produced a RawCheckOutput; only the op-level contract
+ * turns a runner-level throw into `failed`.
  */
 export const subprocessRunCheck: RunCheck = (cmd) =>
   new Promise((resolve) => {
     execFile(
       cmd.command,
       cmd.args,
-      { cwd: cmd.cwd, maxBuffer: CHECK_OUTPUT_MAX_BUFFER_BYTES },
+      {
+        cwd: cmd.cwd,
+        timeout: cmd.timeoutMs,
+        killSignal: 'SIGKILL',
+        maxBuffer: CHECK_OUTPUT_MAX_BUFFER_BYTES,
+      },
       (error, stdout, stderr) => {
         const exitCode = error === null ? 0 : typeof error.code === 'number' ? error.code : null;
         resolve({ stdout, stderr, exitCode });

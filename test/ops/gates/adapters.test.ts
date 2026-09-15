@@ -9,6 +9,8 @@ import { describe, expect, test } from 'vitest';
 import {
   adapterByName,
   makeCheckRunner,
+  parseCheckOutput,
+  subprocessRunCheck,
   type CheckParseResult,
   type FailureSet,
   type RawCheckOutput,
@@ -21,8 +23,9 @@ function fixture(name: string): string {
   return readFileSync(new URL(`../../fixtures/check-outputs/${name}`, import.meta.url), 'utf8');
 }
 
+/** Parse through the real guarded entry point (parseCheckOutput, not the raw adapter). */
 function parseWith(adapter: 'vitest-json' | 'eslint-json' | 'tsc-lines', raw: RawCheckOutput): CheckParseResult {
-  return adapterByName(adapter).parse(raw);
+  return parseCheckOutput(adapterByName(adapter), raw);
 }
 
 describe('vitest-json adapter (real captured fixture)', () => {
@@ -63,6 +66,12 @@ describe('vitest-json adapter (real captured fixture)', () => {
   test('empty output is indeterminate even behind exit 0 (summary-bearing tool, I5)', () => {
     const result = parseWith('vitest-json', { stdout: '', stderr: '', exitCode: 0 });
     expect(result).toMatchObject({ verdict: 'indeterminate' });
+  });
+
+  test('a parsed empty failure set behind a non-zero exit is indeterminate (central I5 guard)', () => {
+    const stdout = JSON.stringify({ success: true, numTotalTests: 0, testResults: [] });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 1 });
+    expect(result.verdict).toBe('indeterminate');
   });
 
   test('a failed suite without failing assertions surfaces one suite-level failure', () => {
@@ -153,6 +162,11 @@ describe('eslint-json adapter (real captured fixture)', () => {
       verdict: 'parsed',
       set: { tool: 'eslint', failures: [], exitCode: 0 },
     });
+  });
+
+  test('the confirmed trap: an empty array behind exit 2 (unmatched glob) is indeterminate', () => {
+    const result = parseWith('eslint-json', { stdout: '[]\n', stderr: '', exitCode: 2 });
+    expect(result.verdict).toBe('indeterminate');
   });
 });
 
@@ -300,6 +314,35 @@ describe('makeCheckRunner over a fake injected runner (no subprocesses)', () => 
   });
 });
 
+describe('subprocessRunCheck (real runner over process.execPath, no external binaries)', () => {
+  test('captures stdout and a zero exit', async () => {
+    await expect(
+      subprocessRunCheck({ command: process.execPath, args: ['-e', "console.log('hello')"] }),
+    ).resolves.toEqual({ stdout: 'hello\n', stderr: '', exitCode: 0 });
+  });
+
+  test('maps a real exit code through', async () => {
+    await expect(
+      subprocessRunCheck({ command: process.execPath, args: ['-e', 'process.exit(3)'] }),
+    ).resolves.toEqual({ stdout: '', stderr: '', exitCode: 3 });
+  });
+
+  test('a check past timeoutMs resolves quickly with exitCode null (SIGKILL, never clean)', async () => {
+    const result = await subprocessRunCheck({
+      command: process.execPath,
+      args: ['-e', 'setTimeout(() => {}, 10_000)'],
+      timeoutMs: 300,
+    });
+    expect(result.exitCode).toBeNull();
+  });
+
+  test('a spawn failure yields exitCode null, not a rejection', async () => {
+    await expect(
+      subprocessRunCheck({ command: 'definitely-not-a-real-check-binary', args: [] }),
+    ).resolves.toMatchObject({ exitCode: null });
+  });
+});
+
 describe('gates registry entry', () => {
   test('one entry, named gates.checkRunner, whose schema validates the full input and only it', () => {
     expect(registry.map((entry) => entry.name)).toEqual(['gates.checkRunner']);
@@ -316,6 +359,18 @@ describe('gates registry entry', () => {
     ).toBe(false);
     expect(
       CheckRunnerInputSchema.safeParse({ adapter: 'tsc-lines', command: { command: 9 } }).success,
+    ).toBe(false);
+    expect(
+      CheckRunnerInputSchema.safeParse({
+        adapter: 'tsc-lines',
+        command: { command: 'tsc', args: ['--noEmit'], timeoutMs: 30_000 },
+      }).success,
+    ).toBe(true);
+    expect(
+      CheckRunnerInputSchema.safeParse({
+        adapter: 'tsc-lines',
+        command: { command: 'tsc', args: ['--noEmit'], timeoutMs: 0 },
+      }).success,
     ).toBe(false);
   });
 

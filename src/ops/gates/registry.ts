@@ -14,6 +14,7 @@ export const CheckRunnerInputSchema: z.ZodType<CheckRunnerInput> = z
       command: z.string(),
       args: z.array(z.string()),
       cwd: z.string().optional(),
+      timeoutMs: z.number().int().positive().optional(),
     }),
   })
   .strict();
