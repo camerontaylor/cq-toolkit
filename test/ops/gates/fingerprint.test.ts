@@ -132,7 +132,20 @@ describe('fingerprintFailure divergence (what counts as a different failure)', (
     );
   });
 
-  test('message-independence: different messages, same fingerprint (the drift-survival contract)', () => {
+  test('severity divergence produces a different fingerprint (warning baseline ≠ error escalation)', () => {
+    expect(fingerprintFailure(failureOf({ severity: 'warning' }))).not.toBe(
+      fingerprintFailure(failureOf({ severity: 'error' })),
+    );
+  });
+
+  test('tool divergence produces a different fingerprint (fingerprintSet folds the FailureSet tool in)', () => {
+    const failure = failureOf({});
+    const vitestPrints = [...fingerprintSet({ tool: 'vitest', failures: [failure], exitCode: 1 })];
+    const eslintPrints = [...fingerprintSet({ tool: 'eslint', failures: [failure], exitCode: 1 })];
+    expect(vitestPrints[0]).not.toBe(eslintPrints[0]);
+  });
+
+  test('message-independence for POSITIONED failures: different messages, same fingerprint (the drift-survival contract)', () => {
     expect(fingerprintFailure(failureOf({ message: "'x' is assigned a value but never used." }))).toBe(
       fingerprintFailure(failureOf({ message: "'x' is read here but the rule text changed." })),
     );
@@ -142,6 +155,44 @@ describe('fingerprintFailure divergence (what counts as a different failure)', (
     const nullFields = fingerprintFailure(failureOf({ file: null, ruleId: null }));
     expect(nullFields).toBe(fingerprintFailure(failureOf({ file: null, ruleId: null })));
     expect(nullFields).not.toBe(fingerprintFailure(failureOf({ file: null, ruleId: 'rule' })));
+  });
+});
+
+describe('fingerprintFailure location-less content matching (line null keys by message)', () => {
+  const locationLess = { line: null, column: null } as const;
+
+  test('two location-less failures in the same file differing only in message are DIFFERENT failures', () => {
+    const existing = fingerprintFailure(
+      failureOf({ ...locationLess, message: 'suite > handles iso dates' }),
+    );
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles leap years' }))).not.toBe(
+      existing,
+    );
+  });
+
+  test('the same message keys identically: whitespace runs collapse and trailing lines are ignored', () => {
+    const canonical = fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles iso dates' }));
+    expect(
+      fingerprintFailure(failureOf({ ...locationLess, message: 'suite >  handles\tiso  dates\nextra line' })),
+    ).toBe(canonical);
+  });
+
+  test('messages are capped at 200 chars: the 200-char prefix is the identity', () => {
+    const atCap = fingerprintFailure(failureOf({ ...locationLess, message: 'a'.repeat(200) }));
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: 'a'.repeat(250) }))).toBe(atCap);
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${'a'.repeat(199)}b` }))).not.toBe(atCap);
+  });
+
+  test('case is preserved: distinct test names that differ only in case stay distinct', () => {
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles Edge Case' }))).not.toBe(
+      fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles edge case' })),
+    );
+  });
+
+  test('a positioned failure never collides with a location-less one sharing the message text', () => {
+    expect(fingerprintFailure(failureOf({ line: 3, message: 'same text' }))).not.toBe(
+      fingerprintFailure(failureOf({ ...locationLess, message: 'same text' })),
+    );
   });
 });
 
@@ -157,7 +208,9 @@ describe('fingerprintSet', () => {
       ],
     });
     expect(set.size).toBe(2);
-    expect(set.has(fingerprintFailure(failureOf({ line: 300 })))).toBe(true);
+    // fingerprintSet folds the FailureSet's tool into every print, so the
+    // expected member must be computed with the same tool in context.
+    expect(set.has(fingerprintFailure(failureOf({ line: 300 }), { tool: 'eslint' }))).toBe(true);
   });
 
   test('empty failure set yields an empty fingerprint set', () => {

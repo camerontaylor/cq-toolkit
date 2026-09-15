@@ -196,18 +196,44 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
     });
   });
 
-  test('custom bailPatterns REPLACE the defaults (a fatal-error output with exit 0 then parses)', async () => {
-    const fake = scriptedRunner(CLEAN_VITEST());
-    const probe = makeBaselineProbe(fake.run);
-    const result = await probe(
-      probeInput({ bail: { bailPatterns: ['custom infrastructure doom'], maxBailRetries: 0 } }),
-    );
-    expect(result).toMatchObject({ status: 'ok', value: { verdict: 'clean', attempts: 1 } });
+  test('custom bailPatterns REPLACE the defaults: a default-signature output does NOT bail', async () => {
+    const patterns = { bailPatterns: ['custom infrastructure doom'], maxBailRetries: 0 };
+    // 'no tests found' is a SHIPPED signature. Under custom patterns it is not a bail:
+    // a passing vitest report whose test NAME contains the phrase completes and parses clean.
+    const passesMentioningNoTestsFound: RawCheckOutput = {
+      stdout: JSON.stringify({
+        success: true,
+        numTotalTests: 1,
+        numFailedTests: 0,
+        testResults: [
+          {
+            name: '/tmp/x.test.ts',
+            status: 'passed',
+            assertionResults: [
+              { title: 'no tests found', fullName: 'x > no tests found', status: 'passed', ancestorTitles: ['x'], failureMessages: [] },
+            ],
+          },
+        ],
+      }),
+      stderr: '',
+      exitCode: 0,
+    };
+    const parsePath = scriptedRunner(passesMentioningNoTestsFound);
+    await expect(
+      makeBaselineProbe(parsePath.run)(probeInput({ bail: patterns })),
+    ).resolves.toMatchObject({ status: 'ok', value: { verdict: 'clean', attempts: 1 } });
+    expect(parsePath.callCount()).toBe(1);
+    // Same signature as unparseable output: the attempt still reaches the PARSER
+    // (indeterminate), proving it was never bailed on.
+    const indeterminatePath = scriptedRunner({ stdout: 'no tests found', stderr: '', exitCode: 1 });
+    await expect(
+      makeBaselineProbe(indeterminatePath.run)(probeInput({ bail: patterns })),
+    ).resolves.toMatchObject({ status: 'indeterminate' });
+    // Positive control: the CUSTOM signature does bail.
     const dooming = scriptedRunner({ stdout: 'CUSTOM INFRASTRUCTURE DOOM', stderr: '', exitCode: 0 });
-    const bailResult = await makeBaselineProbe(dooming.run)(
-      probeInput({ bail: { bailPatterns: ['custom infrastructure doom'], maxBailRetries: 0 } }),
-    );
-    expect(bailResult).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+    await expect(
+      makeBaselineProbe(dooming.run)(probeInput({ bail: patterns })),
+    ).resolves.toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
   });
 });
 

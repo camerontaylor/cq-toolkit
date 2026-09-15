@@ -30,7 +30,7 @@ describe('BaselineProbeInputSchema (full input, and only it)', () => {
     command: { command: 'tsc', args: ['--noEmit'] },
   };
 
-  test('parses the full input, applying the 600_000ms op-boundary timeout floor', () => {
+  test('parses the full input, applying the 600_000ms op-boundary timeout default', () => {
     expect(BaselineProbeInputSchema.parse(VALID)).toEqual({
       adapter: 'tsc-lines',
       command: { command: 'tsc', args: ['--noEmit'], timeoutMs: 600_000 },

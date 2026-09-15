@@ -111,6 +111,129 @@ describe('regressionGate decision table', () => {
     });
   });
 
+  test('a NEW location-less vitest failure in an already-failing file IS novel (content matching)', async () => {
+    const existing: CheckFailure = {
+      file: '/repo/src/dates.test.ts',
+      line: null,
+      column: null,
+      ruleId: null,
+      message: 'parses dates > handles iso input',
+      severity: 'error',
+    };
+    const novel: CheckFailure = {
+      file: '/repo/src/dates.test.ts',
+      line: null,
+      column: null,
+      ruleId: null,
+      message: 'parses dates > handles leap years',
+      severity: 'error',
+    };
+    const result = await regressionGate({
+      base: { tool: 'vitest', failures: [existing], exitCode: 1 },
+      final: { tool: 'vitest', failures: [existing, novel], exitCode: 1 },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('regression');
+    expect(result.value.novelFailures).toEqual([novel]);
+    expect(result.value.preExistingCount).toBe(1);
+  });
+
+  test('identical location-less failures (same normalized messages) → no-regression', async () => {
+    const failures: CheckFailure[] = [
+      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite > is  ok', severity: 'error' },
+      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite > handles edge cases', severity: 'error' },
+    ];
+    const driftedMessages: CheckFailure[] = [
+      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite >   is   ok', severity: 'error' },
+      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite > handles edge cases', severity: 'error' },
+    ];
+    const result = await regressionGate({
+      base: { tool: 'vitest', failures, exitCode: 1 },
+      final: { tool: 'vitest', failures: driftedMessages, exitCode: 1 },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('no-regression');
+    expect(result.value.preExistingCount).toBe(2);
+  });
+
+  test('a warning baseline escalating to error at the same spot is a regression', async () => {
+    const result = await regressionGate({
+      base: setOf([failureOf({ line: 30, severity: 'warning' })]),
+      final: setOf([failureOf({ line: 30, severity: 'error' })]),
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('regression');
+    expect(result.value.novelFailures).toEqual([failureOf({ line: 30, severity: 'error' })]);
+  });
+
+  test('an error downgraded to warning at the same spot: symmetric severity identity → the base error is FIXED, the warning NOVEL', async () => {
+    // Severity is identity in BOTH branches (finding 3's fix is symmetric):
+    // a downgrade therefore appears as the old error in fixedFailures AND a
+    // novel warning — the gate has no asymmetric "downgrade is free" rule.
+    const result = await regressionGate({
+      base: setOf([failureOf({ line: 30, severity: 'error' })]),
+      final: setOf([failureOf({ line: 30, severity: 'warning' })]),
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.fixedFailures).toEqual([failureOf({ line: 30, severity: 'error' })]);
+    expect(result.value.novelFailures).toEqual([failureOf({ line: 30, severity: 'warning' })]);
+    expect(result.value.preExistingCount).toBe(0);
+  });
+
+  test('identical failures attributed to a DIFFERENT tool never match (tool is in the key)', async () => {
+    const failure = failureOf({ line: 10 });
+    const result = await regressionGate({
+      base: { tool: 'vitest', failures: [failure], exitCode: 1 },
+      final: { tool: 'eslint', failures: [failure], exitCode: 1 },
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') {
+      return;
+    }
+    expect(result.value.verdict).toBe('regression');
+    expect(result.value.novelFailures).toEqual([failure]);
+    expect(result.value.fixedFailures).toEqual([failure]);
+    expect(result.value.preExistingCount).toBe(0);
+  });
+
+  test('I5 guard: empty FINAL behind a non-zero exit is indeterminate, never no-regression', async () => {
+    const result = await regressionGate({
+      base: setOf([]),
+      final: { tool: 'eslint', failures: [], exitCode: 1 },
+    });
+    expect(result.status).toBe('indeterminate');
+    if (result.status !== 'indeterminate') {
+      return;
+    }
+    expect(result.detail).toContain('final');
+    expect(result.detail).toContain('exit code 1');
+  });
+
+  test('I5 guard: empty BASE behind an unobservable exit code (null) is indeterminate', async () => {
+    const result = await regressionGate({
+      base: { tool: 'eslint', failures: [], exitCode: null },
+      final: setOf([]),
+    });
+    expect(result.status).toBe('indeterminate');
+    if (result.status !== 'indeterminate') {
+      return;
+    }
+    expect(result.detail).toContain('base');
+    expect(result.detail).toContain('unobservable exit code');
+  });
+
   test('a custom config tightens buckets: lineBucketSize 1 makes line 5 → 6 a regression', async () => {
     const config = { lineBucketSize: 1 };
     const loose = await regressionGate({
@@ -157,15 +280,22 @@ describe('regressionGate ordering-invariance property (seeded, deterministic)', 
     return copy;
   }
 
-  /** 12 failures with pairwise-distinct fingerprints (distinct line buckets). */
-  const seedFailures: CheckFailure[] = Array.from({ length: 12 }, (_, i) => ({
-    file: `src/mod${i % 4}.ts`,
-    line: i * 20 + 3,
-    column: i + 1,
-    ruleId: `rule-${i % 3}`,
-    message: `failure ${i}`,
-    severity: i % 2 === 0 ? ('error' as const) : ('warning' as const),
-  }));
+  /**
+   * 12 failures with pairwise-distinct fingerprints: positioned entries
+   * have distinct line buckets; every third is LOCATION-LESS (vitest's
+   * shape) and matches by content, so those carry distinct messages.
+   */
+  const seedFailures: CheckFailure[] = Array.from({ length: 12 }, (_, i) => {
+    const locationLess = i % 3 === 2;
+    return {
+      file: `src/mod${i % 4}.ts`,
+      line: locationLess ? null : i * 20 + 3,
+      column: locationLess ? null : i + 1,
+      ruleId: `rule-${i % 3}`,
+      message: locationLess ? `suite ${i} > handles case ${i}` : `failure ${i}`,
+      severity: i % 2 === 0 ? ('error' as const) : ('warning' as const),
+    };
+  });
 
   const ITERATIONS = 40;
   const novelFailure: CheckFailure = {

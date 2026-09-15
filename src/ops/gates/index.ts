@@ -30,10 +30,16 @@ export type {
 } from './baselineProbe.js';
 export { DEFAULT_BAIL_PATTERNS, makeBaselineProbe } from './baselineProbe.js';
 export type { FingerprintConfig } from './fingerprint.js';
-export { FingerprintConfigSchema, fingerprintFailure, fingerprintSet, fnv1a32Hex } from './fingerprint.js';
+export {
+  fingerprintFailure,
+  fingerprintPairs,
+  fingerprintSet,
+  fnv1a32Hex,
+} from './fingerprint.js';
 export type {
   RegressionGateInput,
   RegressionReport,
   RegressionVerdict,
 } from './regressionGate.js';
-export { CheckFailureSchema, FailureSetSchema, regressionGate } from './regressionGate.js';
+export { regressionGate } from './regressionGate.js';
+export { CheckFailureSchema, FailureSetSchema, FingerprintConfigSchema } from './registry.js';

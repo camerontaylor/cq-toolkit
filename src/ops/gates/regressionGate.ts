@@ -1,36 +1,18 @@
 // Gates lane C2 — the baseline regression gate (R2 D5, the "crown jewel"):
 // tolerate pre-existing failures, block regressions. Compares two
-// {@link FailureSet}s through {@link fingerprintSet} membership — pre-existing
-// failures (fingerprints present on both sides) never block; a NOVEL
-// fingerprint in `final` is a regression and is reported as the gate's
-// DECISION, not as an op failure. Pure decision op: zero I/O, no clocks, no
-// environment — the same inputs always yield the same report, in any order
-// the failures happen to arrive in.
-import { z } from 'zod';
+// {@link FailureSet}s through {@link fingerprintPairs} membership —
+// pre-existing failures (fingerprints present on both sides) never block; a
+// NOVEL fingerprint in `final` is a regression and is reported as the gate's
+// DECISION, not as an op failure. Before comparing, the gate applies the
+// SAME I5 discipline C1 closed at the parser: a failure set that parsed
+// EMPTY behind a non-zero (or unobservable) exit code is not certifiable
+// evidence, and neither side's emptiness may be trusted — such input yields
+// `indeterminate`, never `no-regression`. Pure decision op: zero I/O, no
+// clocks, no environment — the same inputs always yield the same report, in
+// any order the failures happen to arrive in.
 import type { Op } from '../../kernel/types.js';
 import type { CheckFailure, FailureSet } from './checkRunner.js';
-import { fingerprintFailure, fingerprintSet, type FingerprintConfig } from './fingerprint.js';
-
-/** Registry-time mirror of {@link CheckFailure}: the full failure, and only it. */
-export const CheckFailureSchema = z
-  .object({
-    file: z.string().nullable(),
-    line: z.number().nullable(),
-    column: z.number().nullable(),
-    ruleId: z.string().nullable(),
-    message: z.string(),
-    severity: z.enum(['error', 'warning']),
-  })
-  .strict();
-
-/** Registry-time mirror of {@link FailureSet}: the full set, and only it. */
-export const FailureSetSchema: z.ZodType<FailureSet> = z
-  .object({
-    tool: z.string(),
-    failures: z.array(CheckFailureSchema),
-    exitCode: z.number().nullable(),
-  })
-  .strict();
+import { fingerprintPairs, type FingerprintConfig } from './fingerprint.js';
 
 /** The gate's decision: a regression exists in `final`, or it does not. */
 export type RegressionVerdict = 'no-regression' | 'regression';
@@ -60,21 +42,25 @@ export interface RegressionGateInput {
  * The `gates.regressionGate` op: `ok` in BOTH verdict cases — the verdict is
  * the op's decision output, and what to do about a regression is the
  * caller's business. Ordering-invariant by construction: comparison is Set
- * membership, so any permutation of identical base/final sets yields the
- * identical verdict (property-tested). Inputs that fail schema validation
- * never reach the op, and with no I/O there is no crash-style failure path.
+ * membership over fingerprints, so any permutation of identical base/final
+ * sets yields the identical verdict (property-tested). Inputs that fail
+ * schema validation never reach the op, and with no I/O there is no
+ * crash-style failure path — the one non-`ok` status is the I5 guard on
+ * untrustworthy empty sets.
  */
 export const regressionGate: Op<RegressionGateInput, RegressionReport> = async (input) => {
-  const cfg = input.config;
-  const basePrints = fingerprintSet(input.base, cfg);
-  const finalPrints = fingerprintSet(input.final, cfg);
-  const basePairs = input.base.failures.map((failure) => ({
-    failure,
-    print: fingerprintFailure(failure, cfg),
-  }));
-  const novelFailures = input.final.failures.filter(
-    (failure) => !basePrints.has(fingerprintFailure(failure, cfg)),
-  );
+  const untrusted =
+    emptySetBehindNonZeroExit(input.base, 'base') ?? emptySetBehindNonZeroExit(input.final, 'final');
+  if (untrusted !== null) {
+    return { status: 'indeterminate', detail: untrusted };
+  }
+  const basePairs = fingerprintPairs(input.base, input.config);
+  const finalPairs = fingerprintPairs(input.final, input.config);
+  const basePrints = new Set(basePairs.map((pair) => pair.print));
+  const finalPrints = new Set(finalPairs.map((pair) => pair.print));
+  const novelFailures = finalPairs
+    .filter((pair) => !basePrints.has(pair.print))
+    .map((pair) => pair.failure);
   const fixedFailures = basePairs
     .filter((pair) => !finalPrints.has(pair.print))
     .map((pair) => pair.failure);
@@ -89,3 +75,23 @@ export const regressionGate: Op<RegressionGateInput, RegressionReport> = async (
     },
   };
 };
+
+/**
+ * Central I5 guard at the GATE level (mirrors parseCheckOutput's guard): an
+ * empty failure set only certifies clean behind exit code 0. A base or
+ * final side that parsed empty behind anything else — including a null exit
+ * code (signal, timeout, lost worker) — cannot be trusted as the "nothing
+ * failed" half of a comparison, and trusting it would be exactly the
+ * unparsable-conflates-with-clean trap. Returns the `indeterminate` detail,
+ * or null when the side is trustworthy.
+ */
+function emptySetBehindNonZeroExit(set: FailureSet, side: 'base' | 'final'): string | null {
+  if (set.failures.length === 0 && set.exitCode !== 0) {
+    const exit =
+      set.exitCode === null
+        ? 'an unobservable exit code (signal, timeout, lost worker)'
+        : `exit code ${set.exitCode}`;
+    return `${side} parsed an empty failure set behind ${exit} — an empty set certifies clean only behind exit code 0 (I5)`;
+  }
+  return null;
+}
