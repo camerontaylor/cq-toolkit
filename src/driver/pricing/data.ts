@@ -81,6 +81,10 @@ export const PRICE_TABLE: PriceTable = {
     'glm-4.6': { input: 0.6, output: 2.2, cacheRead: 0.11 },
   },
   // https://models.dev/deepseek — chat/reasoner unified pricing; no cache-write fee.
+  // NOT listed (no published rates as of 2026-09-15): `deepseek-flash` — the
+  // id the DeepSeek wire SERVES for `deepseek-chat` requests (observed live,
+  // docs/eval-axes-demo.md). Unpriced = costUSD stays absent for it
+  // (never fabricate); the DD-8 refresh owns adding it when published.
   deepseek: {
     'deepseek-chat': { input: 0.28, output: 0.42, cacheRead: 0.028 },
     'deepseek-reasoner': { input: 0.28, output: 0.42, cacheRead: 0.028 },
