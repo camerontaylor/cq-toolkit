@@ -24,16 +24,24 @@
 // itself never carries tokens; DEFAULT_PR_TOKEN is exported as the doctrine
 // marker and the H4 runner resolves the env var.
 //
-// ONE PR PER IMPROVEMENT SET: every improvement that is a genuine TIGHTEN is
-// grouped into a single proposal. The head branch is deterministic —
-// `<headPrefix ?? 'ratchet/propose'>-<hash8>` where hash8 is the first 8 hex
-// of sha256 over JSON.stringify(sorted [target, metric] pairs of the applied
-// set), the canonical-JSON convention format.ts uses for baseline paths —
-// so identical inputs collide onto one head and one PR, while a different
-// set necessarily gets a different head. Idempotency is find-then-upsert:
-// effects.findOpenPrByHead(head) hit → effects.commitAndUpsertPr on the SAME
-// head (created:false expected from the impl) → proposal 'updated' with the
-// FOUND PR's number; miss → proposal 'created'.
+// ONE PR PER IMPROVEMENT SET: every judged improvement that is a genuine
+// TIGHTEN is grouped into a single proposal. The head branch is
+// deterministic — `<headPrefix ?? 'ratchet/propose'>-<digest>` where digest
+// is the first 12 hex (48 bits — the same width as format.ts's baseline-path
+// digest) of sha256 over JSON.stringify(sorted [target, metric] pairs of the
+// applied set), the canonical-JSON convention format.ts uses for baseline
+// paths — so identical inputs collide onto one head and one PR, while a
+// different set cannot practically share a head branch. Idempotency is
+// find-then-upsert: effects.findOpenPrByHead(head) hit →
+// effects.commitAndUpsertPr on the SAME head (created:false expected from
+// the impl) → proposal 'updated'; miss → proposal 'created'. The UPSERT
+// result carries the AUTHORITATIVE PR identity (a PR found open can be
+// closed/merged between find and upsert, making the impl's fresh creation
+// the truth); the find result is only a fallback. Duplicate (target, metric)
+// improvements collapse LAST-WINS before the tighten gate: the newest
+// reading is the truth, so a later non-tightening supersedes an earlier
+// tightening and drops the metric from the proposal entirely. headPrefix is
+// arg-validated to form a valid git ref.
 //
 // I5 — never fabricate (the propose-side corollary): a proposal can only be
 // built from a USABLE committed baseline. A missing baseline, an unparsable
@@ -133,7 +141,7 @@ export interface ProposeOutcome {
   proposal: 'created' | 'updated' | 'none';
   prNumber: number | null;
   prUrl: string | null;
-  /** The deterministic head branch, e.g. 'ratchet/propose-1a2b3c4d'; null when 'none'. */
+  /** The deterministic head branch, e.g. 'ratchet/propose-1a2b3c4d5e6f'; null when 'none'. */
   head: string | null;
   /** The tightenings that went into the proposal (deterministic sorted order). */
   applied: Array<{ path: string; target: string; metric: string; oldValue: number; newValue: number }>;
@@ -149,6 +157,9 @@ const COMMIT_MESSAGE = 'chore(ratchet): tighten baselines (proposeBaselineUpdate
 
 /** Default head-branch prefix. */
 const DEFAULT_HEAD_PREFIX = 'ratchet/propose';
+
+/** Head-prefix ref-name characters (plus the trailing-slash and '..' rules checked alongside). */
+const HEAD_PREFIX_PATTERN = /^[A-Za-z0-9][A-Za-z0-9./-]*$/;
 
 /** One tighten going into the proposal (superset of the outcome's applied row). */
 interface AppliedEntry {
@@ -172,6 +183,18 @@ function byPair(
   if (a.metric < b.metric) return -1;
   if (a.metric > b.metric) return 1;
   return 0;
+}
+
+/**
+ * Markdown safety for the PR body: identity fields render inside backticks,
+ * so a raw target/metric carrying backticks or newlines could break out of
+ * them and inject body content — those characters are STRIPPED for the body
+ * rendering only. The committed FILE keeps the raw identity (parseBaseline's
+ * business, not markdown's), and the baselines/ path is inert by
+ * construction (sanitizeSegment admits [a-z0-9-] only).
+ */
+function mdSafe(identity: string): string {
+  return identity.replace(/[`\r\n]/g, '');
 }
 
 /** I5 wording shared by the missing-file and missing-dir skip paths. */
@@ -200,8 +223,23 @@ export function createProposeBaselineUpdate(
         return { status: 'failed', error: `ratchet: invalid input — '${name}' must be a string` };
       }
     }
-    if (input.headPrefix !== undefined && typeof input.headPrefix !== 'string') {
-      return { status: 'failed', error: "ratchet: invalid input — 'headPrefix' must be a string" };
+    if (input.headPrefix !== undefined) {
+      if (typeof input.headPrefix !== 'string') {
+        return { status: 'failed', error: "ratchet: invalid input — 'headPrefix' must be a string" };
+      }
+      // A git ref, not free text: ref-name characters only, no leading or
+      // trailing slash, no '..' walk-up (the check-ref-format rules that
+      // matter for a branch prefix) — else the head could not exist at all.
+      if (
+        HEAD_PREFIX_PATTERN.test(input.headPrefix) === false ||
+        input.headPrefix.endsWith('/') ||
+        input.headPrefix.includes('..')
+      ) {
+        return {
+          status: 'failed',
+          error: "ratchet: invalid input — 'headPrefix' would form an invalid git ref",
+        };
+      }
     }
     if (Array.isArray(input.improvements) === false) {
       return { status: 'failed', error: "ratchet: invalid input — 'improvements' must be an array" };
@@ -251,19 +289,32 @@ export function createProposeBaselineUpdate(
     }
 
     const skipped: ProposeOutcome['skipped'] = [];
-    // Keyed by the baseline relPath: duplicate (target, metric) improvements
-    // collapse last-wins (a later reading supersedes an earlier one for the
-    // same pair) so the proposal never carries the same file twice.
-    const appliedByKey = new Map<string, AppliedEntry>();
+    // Duplicate (target, metric) improvements collapse LAST-WINS among the
+    // entries that get judged: improvements are grouped by pair in input
+    // order and only the LAST entry per pair survives to the gate. The
+    // newest evidence is the truth — a later non-tightening reading
+    // SUPERSEDES an earlier tightening (the metric is dropped from the
+    // proposal entirely, never kept at the older tightened value), and a
+    // later tightening after a looser entry still proposes. The tighten gate
+    // then runs ONCE per metric, on the surviving entry only; superseded
+    // entries produce no records at all. The group key is the canonical JSON
+    // of the raw pair (injective — format.ts's own digest argument), so even
+    // exotic strings cannot alias another pair's group.
+    const lastByKey = new Map<string, ProposeInput['improvements'][number]>();
+    for (const imp of input.improvements) {
+      lastByKey.set(JSON.stringify([imp.target, imp.metric]), imp);
+    }
+    const judged = [...lastByKey.values()];
+    const applied: AppliedEntry[] = [];
 
     // P1 containment BEFORE any read (shared resolver): a baselines dir that
-    // escapes the ws skips EVERY improvement with the resolver's message —
-    // an escape never serves evidence, and nothing outside is ever touched.
-    // A MISSING baselines dir is the ordinary no-baseline-yet case: every
-    // improvement skips with the I5 no-usable-baseline wording.
+    // escapes the ws skips EVERY judged improvement with the resolver's
+    // message — an escape never serves evidence, and nothing outside is ever
+    // touched. A MISSING baselines dir is the ordinary no-baseline-yet case:
+    // every judged improvement skips with the I5 no-usable-baseline wording.
     const containment = await resolveBaselinesDir(input.ws);
     if (containment.ok === false) {
-      for (const imp of input.improvements) {
+      for (const imp of judged) {
         const relPath = baselineRelPath(imp.target, imp.metric);
         skipped.push({
           target: imp.target,
@@ -274,7 +325,7 @@ export function createProposeBaselineUpdate(
         });
       }
     } else {
-      for (const imp of input.improvements) {
+      for (const imp of judged) {
         const relPath = baselineRelPath(imp.target, imp.metric);
         // Read through the RESOLVED dir: relPath's 'baselines/' prefix is the
         // virtual repo-relative form; containment guarantees it maps here.
@@ -372,7 +423,7 @@ export function createProposeBaselineUpdate(
           unit: baseline.unit,
           capturedAt: imp.capturedAt ?? new Date().toISOString(),
         });
-        appliedByKey.set(relPath, {
+        applied.push({
           path: relPath,
           target: imp.target,
           metric: imp.metric,
@@ -386,7 +437,7 @@ export function createProposeBaselineUpdate(
 
     // Deterministic sorted order: the PR body, the files list, and the head
     // hash are all stable regardless of the caller's improvement order.
-    const applied = [...appliedByKey.values()].sort(byPair);
+    applied.sort(byPair);
     if (applied.length === 0) {
       return {
         status: 'ok',
@@ -394,16 +445,17 @@ export function createProposeBaselineUpdate(
       };
     }
 
-    // hash8 over the canonical JSON of the SORTED (target, metric) pairs —
-    // the same convention format.ts uses for baseline path digests (injective
-    // JSON encoding, deterministic). Same set ⇒ same head ⇒ idempotent
-    // upsert; different set ⇒ different head ⇒ its own proposal.
+    // 12-hex (48-bit) digest over the canonical JSON of the SORTED (target,
+    // metric) pairs — the same convention AND width as format.ts's baseline
+    // path digest (injective JSON encoding, deterministic). Same set ⇒ same
+    // head ⇒ idempotent upsert; a different set cannot practically collide
+    // onto the same head branch.
     const pairs = applied.map((a): [string, string] => [a.target, a.metric]);
-    const hash8 = createHash('sha256')
+    const digest = createHash('sha256')
       .update(JSON.stringify(pairs), 'utf8')
       .digest('hex')
-      .slice(0, 8);
-    const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${hash8}`;
+      .slice(0, 12);
+    const head = `${input.headPrefix ?? DEFAULT_HEAD_PREFIX}-${digest}`;
     const title =
       `chore(ratchet): tighten baselines (${applied.length} metric` +
       `${applied.length === 1 ? '' : 's'})`;
@@ -414,15 +466,16 @@ export function createProposeBaselineUpdate(
       '',
       ...applied.map(
         (a) =>
-          `- \`${a.path}\` (${a.target} / ${a.metric}): ${a.oldValue} → ${a.newValue} (${a.direction})`,
+          `- \`${a.path}\` (${mdSafe(a.target)} / ${mdSafe(a.metric)}): ${a.oldValue} → ${a.newValue} (${a.direction})`,
       ),
       '',
       `Target branch: \`${input.base}\`. The required I4 check (checkDiffMonotonicity) must pass before merge.`,
     ].join('\n');
 
     // Idempotency: find-then-upsert. A found PR is UPDATED on its own head —
-    // the outcome reports the FOUND PR's number (same PR, always), never a
-    // second creation.
+    // one PR per improvement set, never a second creation. The verdict uses
+    // the find result; the REPORTED PR identity is the upsert result's
+    // (authoritative — see below).
     let open: { number: number; url: string } | null;
     try {
       open = await effects.findOpenPrByHead(head);
@@ -451,25 +504,20 @@ export function createProposeBaselineUpdate(
         oldValue,
         newValue,
       }));
-      if (open !== null) {
-        return {
-          status: 'ok',
-          value: {
-            proposal: 'updated',
-            prNumber: open.number,
-            prUrl: open.url,
-            head,
-            applied: appliedOut,
-            skipped,
-          },
-        };
-      }
+      // The UPSERT result carries the AUTHORITATIVE PR identity: a PR found
+      // open can be closed/merged between find and upsert, and the impl then
+      // legitimately creates a DIFFERENT PR — its number/url is the truth.
+      // The find result is a FALLBACK only, for an impl that reports no
+      // identity from the upsert (the seam is wide; runtime is verified).
+      const prNumber = typeof upsert.number === 'number' ? upsert.number : (open?.number ?? null);
+      const prUrl =
+        typeof upsert.url === 'string' && upsert.url !== '' ? upsert.url : (open?.url ?? null);
       return {
         status: 'ok',
         value: {
-          proposal: 'created',
-          prNumber: upsert.number,
-          prUrl: upsert.url,
+          proposal: open !== null ? 'updated' : 'created',
+          prNumber,
+          prUrl,
           head,
           applied: appliedOut,
           skipped,

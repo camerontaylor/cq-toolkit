@@ -7,11 +7,18 @@
 //      each rebuilt baseline (direction/unit from the committed baseline,
 //      capturedAt from the improvement or the clock), and the op NEVER
 //      writes to the workspace — the effects seam commits.
-//   2. Idempotency: the head branch is a hash8 over the sorted (target,
-//      metric) pairs — the same improvement set in any order computes the
-//      same head and hits findOpenPrByHead on re-run → proposal 'updated'
-//      with the SAME PR number, still exactly one PR, no second create; a
-//      different set gets a different head.
+//   2. Idempotency: the head branch is a 12-hex (48-bit) digest over the
+//      sorted (target, metric) pairs — the same improvement set in any order
+//      computes the same head and hits findOpenPrByHead on re-run → proposal
+//      'updated' with the UPSERT result's authoritative PR identity (a found
+//      PR closed between find and upsert makes the impl's fresh creation the
+//      truth; a no-identity upsert falls back to the find result) — still
+//      exactly one PR, no second create; a different set gets a different
+//      head.
+//   2b. Duplicate (target, metric) improvements collapse LAST-WINS before
+//       the tighten gate: a later looser reading supersedes an earlier
+//       tightening (metric dropped), a later tightening after a looser
+//       entry still proposes, and the last tightened value wins.
 //   3. The skip paths (I5 — never fabricate): looser/equal ('not a
 //      tightening', with the direction read from the committed baseline),
 //      missing/corrupt baseline ('no usable baseline — refusing to propose
@@ -20,8 +27,12 @@
 //      skipped with a reason while remaining usable improvements still
 //      propose.
 //   4. Input validation: null input, non-string ws/base, non-finite
-//      improvement value → failed verdicts with arg-error wording; the op
-//      input is plain data (structuredClone-safe).
+//      improvement value, non-array/malformed improvements, non-string
+//      target/metric, non-ISO capturedAt, and a headPrefix that would not
+//      form a valid git ref → failed verdicts with arg-error wording; the
+//      op input is plain data (structuredClone-safe); an empty improvements
+//      list is the zero fast path with zero effects calls. The PR body
+//      renders identity fields markdown-inert (backticks/newlines stripped).
 //   5. Effect-fault containment: a findOpenPrByHead rejection → failed
 //      (nothing happened); a commitAndUpsertPr rejection → indeterminate
 //      (the commit may or may not have landed); no throw crosses the op
@@ -34,7 +45,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
+import { baselineRelPath, parseBaseline, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
 import {
   createProposeBaselineUpdate,
@@ -177,7 +188,7 @@ describe('proposeBaselineUpdate', () => {
         proposal: 'created',
         prNumber: 1,
         prUrl: 'https://github.com/acme/repo/pull/1',
-        head: expect.stringMatching(/^ratchet\/propose-[0-9a-f]{8}$/),
+        head: expect.stringMatching(/^ratchet\/propose-[0-9a-f]{12}$/),
         applied: [{ path: REL, target: TARGET, metric: METRIC, oldValue: 10, newValue: 7 }],
         skipped: [],
       },
@@ -253,14 +264,49 @@ describe('proposeBaselineUpdate', () => {
 
   test('looser or equal improvements propose NOTHING and never call the effects seam', async () => {
     await seedBaseline(TARGET, METRIC, 10);
+    for (const value of [12, 10]) {
+      // looser (12) and equal (10) are each judged on their own run.
+      const effects = makeFakeEffects();
+      await expect(
+        createProposeBaselineUpdate(effects)(
+          proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value }] }),
+        ),
+      ).resolves.toEqual({
+        status: 'ok',
+        value: {
+          proposal: 'none',
+          prNumber: null,
+          prUrl: null,
+          head: null,
+          applied: [],
+          skipped: [
+            {
+              target: TARGET,
+              metric: METRIC,
+              reason: expect.stringMatching(
+                new RegExp(`10 → ${value} is not a tightening \\(lower-is-better\\)`),
+              ),
+            },
+          ],
+        },
+      });
+      expect(effects.findCalls()).toBe(0);
+      expect(effects.upsertCalls()).toBe(0);
+    }
+  });
+
+  test('duplicate (target, metric): a later looser reading SUPERSEDES the earlier tightening — metric dropped', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
     const effects = makeFakeEffects();
-    const propose = createProposeBaselineUpdate(effects);
+    // The newest evidence is the truth: the looser LAST reading drops the
+    // metric from the proposal entirely — never kept at the older tightened
+    // value 7 — and the superseded tightening leaves no record either.
     await expect(
-      propose(
+      createProposeBaselineUpdate(effects)(
         proposeInput({
           improvements: [
-            { target: TARGET, metric: METRIC, value: 12 }, // looser
-            { target: TARGET, metric: METRIC, value: 10 }, // equal
+            { target: TARGET, metric: METRIC, value: 7 },
+            { target: TARGET, metric: METRIC, value: 12 },
           ],
         }),
       ),
@@ -276,18 +322,136 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(/is not a tightening \(lower-is-better\)/),
-          },
-          {
-            target: TARGET,
-            metric: METRIC,
-            reason: expect.stringMatching(/is not a tightening \(lower-is-better\)/),
+            reason: expect.stringMatching(/10 → 12 is not a tightening/),
           },
         ],
       },
     });
     expect(effects.findCalls()).toBe(0);
     expect(effects.upsertCalls()).toBe(0);
+  });
+
+  test('duplicate (target, metric): a later tightening after a looser entry still proposes', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({
+          improvements: [
+            { target: TARGET, metric: METRIC, value: 12 },
+            { target: TARGET, metric: METRIC, value: 7 },
+          ],
+        }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 10, newValue: 7 }], skipped: [] },
+    });
+    expect(effects.prs.size).toBe(1);
+  });
+
+  test('duplicate (target, metric): the LAST tightened value wins (v3, not v2)', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [
+          { target: TARGET, metric: METRIC, value: 7 },
+          { target: TARGET, metric: METRIC, value: 5 },
+        ],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { proposal: 'created', applied: [{ oldValue: 10, newValue: 5 }] },
+    });
+    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    expect(pr?.files[0]?.content).toContain('"value": 5');
+  });
+
+  test('the UPSERT result carries the authoritative PR identity (a found PR can close between find and upsert)', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects: BaselinePrEffects = {
+      async findOpenPrByHead() {
+        // Stale view: PR 7 was open at find time…
+        return { number: 7, url: 'https://github.com/acme/repo/pull/7' };
+      },
+      async commitAndUpsertPr(input) {
+        // …but it was closed/merged before the upsert, so the impl created
+        // PR 9 — ITS number/url is the truth the outcome must report.
+        const pr: FakePr = {
+          number: 9,
+          url: 'https://github.com/acme/repo/pull/9',
+          head: input.head,
+          base: input.base,
+          title: input.title,
+          body: input.body,
+          commitMessage: input.commitMessage,
+          files: input.files,
+        };
+        return { created: true, number: pr.number, url: pr.url };
+      },
+    };
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: {
+        proposal: 'updated',
+        prNumber: 9,
+        prUrl: 'https://github.com/acme/repo/pull/9',
+      },
+    });
+  });
+
+  test('an upsert result lacking an identity falls back to the found PR', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects: BaselinePrEffects = {
+      async findOpenPrByHead() {
+        return { number: 7, url: 'https://github.com/acme/repo/pull/7' };
+      },
+      async commitAndUpsertPr() {
+        // A loosely typed impl that reports no number/url at all.
+        return { created: false } as { created: boolean; number: number; url: string };
+      },
+    };
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      ),
+    ).resolves.toMatchObject({
+      status: 'ok',
+      value: {
+        proposal: 'updated',
+        prNumber: 7,
+        prUrl: 'https://github.com/acme/repo/pull/7',
+      },
+    });
+  });
+
+  test('the PR body renders hostile identity fields inert (backticks/newlines stripped for markdown only)', async () => {
+    const hostile = 'we`ird\ninject';
+    await seedBaseline(hostile, METRIC, 10);
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        improvements: [{ target: hostile, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
+      }),
+    );
+    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    // The body line carries the STRIPPED identity — the backtick and newline
+    // cannot break out of the markdown backticks — while the applied outcome
+    // and the committed FILE keep the raw identity.
+    expect(pr?.body).not.toContain('we`ird');
+    expect(pr?.body).toContain('(weirdinject / typecheck-count): 10 → 7 (lower-is-better)');
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { applied: [{ target: hostile, metric: METRIC }] },
+    });
+    const content = pr?.files[0]?.content ?? '';
+    expect((parseBaseline(content) as { target?: string }).target).toBe(hostile);
   });
 
   test('the tighten direction comes from the COMMITTED baseline, not the caller', async () => {
@@ -544,8 +708,9 @@ describe('proposeBaselineUpdate', () => {
         }),
       ),
     ]);
-    // The exact convention, pinned: first 8 hex of sha256 over the canonical
-    // JSON of the SORTED [target, metric] pairs of the applied set.
+    // The exact convention, pinned: first 12 hex (48 bits — format.ts's
+    // baseline-path digest width) of sha256 over the canonical JSON of the
+    // SORTED [target, metric] pairs of the applied set.
     const expectedHash = createHash('sha256')
       .update(
         JSON.stringify([
@@ -555,7 +720,7 @@ describe('proposeBaselineUpdate', () => {
         'utf8',
       )
       .digest('hex')
-      .slice(0, 8);
+      .slice(0, 12);
     const headA = runA.status === 'ok' && runA.value.head;
     const headB = runB.status === 'ok' && runB.value.head;
     expect(headA).toBe(`ratchet/propose-${expectedHash}`);
@@ -580,7 +745,43 @@ describe('proposeBaselineUpdate', () => {
     );
     expect(result).toMatchObject({
       status: 'ok',
-      value: { head: expect.stringMatching(/^ratchet\/nightly-[0-9a-f]{8}$/) },
+      value: { head: expect.stringMatching(/^ratchet\/nightly-[0-9a-f]{12}$/) },
+    });
+  });
+
+  test('headPrefix must form a valid git ref (arg-error table)', async () => {
+    const effects = makeFakeEffects();
+    const propose = createProposeBaselineUpdate(effects);
+    for (const bad of ['', '/leading', 'trailing/', 'has..dots', 'has space', 'under_score']) {
+      await expect(propose(proposeInput({ headPrefix: bad }))).resolves.toEqual({
+        status: 'failed',
+        error: "ratchet: invalid input — 'headPrefix' would form an invalid git ref",
+      });
+    }
+    // Non-strings keep the plain must-be-a-string wording.
+    await expect(
+      propose(proposeInput({ headPrefix: 7 as unknown as string })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: "ratchet: invalid input — 'headPrefix' must be a string",
+    });
+    // Ref validation fires at the boundary: no effects call ever happened.
+    expect(effects.findCalls()).toBe(0);
+    expect(effects.upsertCalls()).toBe(0);
+  });
+
+  test('a valid headPrefix with dots, dashes and slashes is accepted', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        headPrefix: 'ratchet/nightly.v1-beta',
+        improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { head: expect.stringMatching(/^ratchet\/nightly\.v1-beta-[0-9a-f]{12}$/) },
     });
   });
 
@@ -613,6 +814,71 @@ describe('proposeBaselineUpdate', () => {
       status: 'failed',
       error: "ratchet: invalid input — improvements[0].value must be a finite number",
     });
+    // The remaining boundary guards, each pinned with its arg-error wording.
+    await expect(
+      propose(proposeInput({ improvements: 'nope' as unknown as ProposeInput['improvements'] })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: "ratchet: invalid input — 'improvements' must be an array",
+    });
+    await expect(
+      propose(
+        proposeInput({ improvements: [42 as unknown as ProposeInput['improvements'][number]] }),
+      ),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: 'ratchet: invalid input — improvements[0] must be an object',
+    });
+    await expect(
+      propose(
+        proposeInput({
+          improvements: [{ target: 42 as unknown as string, metric: METRIC, value: 1 }],
+        }),
+      ),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: 'ratchet: invalid input — improvements[0].target must be a string',
+    });
+    await expect(
+      propose(
+        proposeInput({
+          improvements: [{ target: TARGET, metric: 42 as unknown as string, value: 1 }],
+        }),
+      ),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: 'ratchet: invalid input — improvements[0].metric must be a string',
+    });
+    await expect(
+      propose(
+        proposeInput({
+          improvements: [{ target: TARGET, metric: METRIC, value: 1, capturedAt: 'not-a-date' }],
+        }),
+      ),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /improvements\[0\]\.capturedAt must be a strict ISO-8601 instant/,
+      ),
+    });
+  });
+
+  test('an empty improvements list is the zero fast path: none, zero effects calls', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects = makeFakeEffects();
+    await expect(createProposeBaselineUpdate(effects)(proposeInput())).resolves.toEqual({
+      status: 'ok',
+      value: {
+        proposal: 'none',
+        prNumber: null,
+        prUrl: null,
+        head: null,
+        applied: [],
+        skipped: [],
+      },
+    });
+    expect(effects.findCalls()).toBe(0);
+    expect(effects.upsertCalls()).toBe(0);
   });
 
   test('a findOpenPrByHead rejection is a failed verdict — no throw crosses the op seam', async () => {
