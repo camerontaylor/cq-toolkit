@@ -1,0 +1,207 @@
+# CodeRabbit configuration — schema: https://www.coderabbit.ai/integrations/schema.v2.json
+# Reference: https://docs.coderabbit.ai/reference/configuration
+# Validation: `coderabbit config validate` (authoritative; fetches the current schema).
+# Advisory review configuration only — the repo's own gates (eslint boundary
+# rules, typecheck ratchet, denylist scan, workflow tests) remain the
+# enforcement; see policy/DOCTRINE.md. The GitHub App reviews opened PRs;
+# these settings also govern that once merged to the default branch.
+language: en-US
+tone_instructions: >-
+  Concise and technical; cite file:line. Prefer few high-confidence findings
+  over volume; skip style commentary the repo's own lint, typecheck ratchet,
+  or denylist gates already enforce.
+reviews:
+  profile: chill
+  poem: false
+  in_progress_fortune: false
+  # Generated/noisy outputs carry no review signal; tracked sources, tests,
+  # policy, baselines, workflows, and dependency manifests (package.json)
+  # stay visible. path_filters also drive sparse-checkout on clone — exclude
+  # only true non-review outputs. The .gjc/.zcode/.paseo/.claude-worktrees
+  # entries mirror .gitignore's local-agent runtime scratch; authored agent
+  # guidance (.claude skills/settings, AGENTS.md) stays visible.
+  path_filters:
+    - "!dist/**"
+    - "!coverage/**"
+    - "!node_modules/**"
+    - "!.gjc/**"
+    - "!.zcode/**"
+    - "!.paseo/**"
+    - "!.claude/worktrees/**"
+    - "!package-lock.json"
+  path_instructions:
+    - path: src/kernel/**
+      instructions: >-
+        Frozen contracts (types-freeze-v1): hand-written types in types.ts are
+        the single source of truth; zod mirrors in schema.ts stay in exact
+        sync and parse strict (unknown keys fail). No vendor/SDK vocabulary
+        in types or persisted data (I10). Governor: admission caps (attempts,
+        dispatch quota, USD/token rollups) reject before dispatch; the
+        escalation ladder (signal/timeout/kill) always records its rung
+        markers, and kills settle budget-exhausted; no retries inside the
+        governed wrapper (attempts must stay journal-visible); USD is
+        observed via reportUsage/reportCost, never derived by the kernel,
+        and unpriced usage under a configured maxUsd trips loud; every timer
+        flows through the injected Clock. The in-flight ceiling queues FIFO
+        and itself never fails or times out a waiter; a waiter dequeued
+        after a budget trip short-circuits budget-exhausted
+        (budget-while-queued). The NDJSON journal never fabricates or
+        truncates budget-exhausted results (I9).
+    - path: src/driver/**
+      instructions: >-
+        Rescue/escalation vocabulary belongs to the kernel, never driver
+        types (I8); the kernel types and the src/driver/types.ts seam stay
+        vendor-neutral. Drivers report token usage and never trust
+        vendor-reported USD; each driver attaches an optional derived
+        costUSD via the src/driver/pricing price-map lookup (costBasis
+        'modeled'; unknown model → no cost fields). The kernel only
+        observes costUSD (reportCost / WorkerResult fold), never derives
+        it. Cancellation must actually stop client-side spend: honor the
+        AbortSignal/cancel port, tear down workers and release resources on
+        abort so no spend or process survives the run.
+    - path: src/harness/**
+      instructions: >-
+        The tool surface and its budgets are per-op CONFIG data (config.ts),
+        never hardcoded policy in executors. Executors never throw: every
+        refusal (sandbox, bad input, path escape, allowlist miss, missing
+        file, failed command) is a structured denial with the stable reason
+        prefixes. Enforcement order per call: sandbox gate, input schema,
+        workspace containment (lexical, then symlink realpath re-check),
+        config allowlist. Run-tool commands execute with host privileges —
+        the command allowlist is a gate, not a confinement.
+    - path: src/ops/**
+      instructions: >-
+        Family registry convention (src/ops/README.md): each family exports
+        registry.ts with { name, inputSchema, importer } — globally unique
+        names, .strict() zod schemas that never declare json/help/h, lazy
+        importers, op modules default-export the op function. Central
+        aggregation tolerates absent/nonconforming family registries
+        (surfaced) but throws on malformed entries or duplicate names.
+        Failures express at operation boundaries: internal throws are
+        legitimate inside a module, but a public op maps failure onto the
+        frozen taxonomy (status 'failed' with error), never a fabricated ok.
+    - path: src/ops/ledger/**
+      instructions: >-
+        The store layer may throw (parseLedger is strict: unsorted,
+        duplicate, or out-of-bounds entries are LedgerFormatError;
+        serializeLedger is byte-deterministic); the public ledger ops map
+        store I/O failure to status 'failed' across the op seam. Recurrence
+        is count-only (no timestamps, no hidden state); escalation is the
+        needs-human emission; needsHuman is a subset of knownNoise.
+    - path: src/ops/review/**
+      instructions: >-
+        Pagination is fail-closed: cap hits set truncated flags and
+        truncatedBecause reasons, never silent truncation; gh REST needs
+        --paginate --slurp; no GraphQL variable may be named query (I11
+        traps carried as named fixture tests).
+    - path: src/ops/ratchet/**
+      instructions: >-
+        Baselines only tighten (I5). Failed paths are narrow and per-op:
+        captureBaseline and proposeBaselineUpdate fail on input-validation,
+        containment, and store faults; checkRatchet is a pure verdict op
+        with no failed path. monotonicGuard judges baselines/*.json
+        lifecycle from diff metadata, never content-line counts.
+    - path: src/ops/gates/**
+      instructions: >-
+        Verdict decisions ride status 'ok' (regressionGate has no failed
+        path). Failed paths are narrow and per-op: commitGate and
+        hackDetector fail only on pattern-config sources that do not
+        compile; checkRunner fails only when the runner itself throws or
+        rejects (no evidence).
+    - path: src/cli/**
+      instructions: >-
+        I1 CLI contract (src/cli/README.md; the src/cli.ts shim shares it):
+        stdout carries exactly one JSON artifact per invocation (--help is
+        the sanctioned exception); stderr is cq:-prefixed narration; exit
+        codes 0/1/2/3 derive mechanically from the frozen taxonomy — 2 is
+        never derived from a taxonomy value. json/help/h are CLI-reserved
+        keys; valued reserved flags exit 2. The CLI is a thin dispatcher:
+        imports only the registry, kernel, intra-CLI modules, node:
+        builtins, and zod in run-plan.ts (cq/no-cli-beyond-registry-kernel).
+    - path: src/cli.ts
+      instructions: >-
+        The executable shim shares the I1 CLI contract (src/cli/README.md):
+        stdout carries exactly one JSON artifact per invocation (--help is
+        the sanctioned exception); stderr is cq:-prefixed narration; exit
+        codes 0/1/2/3 derive mechanically from the frozen taxonomy — 2 is
+        never derived from a taxonomy value. Keep the shim a thin dispatcher
+        importing only CLI modules, the registry, kernel, or node: builtins
+        (cq/no-cli-beyond-registry-kernel).
+    - path: src/registry/**
+      instructions: >-
+        Lazy aggregation: importing the module does no fs work and no
+        dynamic imports — discovery happens on first list()/get(), then
+        results cache per resolved root. Absent (registry.js not-found) and
+        nonconforming (loads clean, no registry array) families are
+        tolerated and surfaced; malformed entries or duplicate op names
+        throw.
+    - path: src/plans/**
+      instructions: >-
+        Plans are contributed by sibling files exporting
+        `plan: PlanRegistryEntry` — never by editing registry.ts. Discovery
+        is lazy (no fs/imports at construction); reserved stems registry and
+        index are skipped; a malformed plan export or duplicate name throws.
+    - path: test/**
+      instructions: >-
+        Tests are vitest, mirroring the src/ layout. Prefer assertions that
+        exercise intended behavior and its failure modes — error paths,
+        budget/cap trips, concurrency (in-flight ceiling, resume/seed
+        continuity), containment denials — over shape-only checks.
+        GitHub-API behavioral facts land as named fixture tests beside the
+        consuming op (I11). A skipped test needs a structural reason (e.g.
+        optional peer SDK absent); do not add skips to quiet failures.
+    - path: .github/workflows/*
+      instructions: >-
+        Required checks (ci.yml, denylist.yml) carry unfiltered on: push /
+        pull_request triggers — never paths/branch/tag filters (I4); job ids
+        static and denylist are policed by the denylist-scan self-test and
+        must not be renamed; actions are pinned to immutable commit SHAs;
+        code-running jobs set persist-credentials: false. Workflow edits
+        route through policy/templates/ re-instantiation, never direct edits
+        (provenance headers).
+    - path: scripts/**
+      instructions: >-
+        Scripts are Node ESM (.mjs); denylist-scan is a Node script
+        (#!/usr/bin/env node) despite its extensionless name, with a known
+        I1 deviation (exits 2 for thrown config errors, 127 for a missing
+        binary). The typecheck ratchet invokes tsc6, never tsc (the bare
+        name is alias-owned); baselines only tighten (I5).
+        policy/denylist/patterns.yml is the single source of
+        publish-forbidden content classes — lowercase word-bounded regexes,
+        fail-closed hand parser; keep example strings out of other files.
+    - path: policy/**
+      instructions: >-
+        Doctrine text: each invariant carries Rule, Why, and Enforcement;
+        enforcement claims must name what actually enforces today.
+        policy/templates/ is the source workflows are instantiated from
+        (provenance headers) — template changes require re-instantiation,
+        not hand edits. policy/denylist/patterns.yml: lowercase
+        word-bounded regexes, fail-closed parser, self-test proves
+        non-vacuity.
+    - path: baselines/**
+      instructions: >-
+        Baselines are committed JSON evidence for the ratchet (I5): counts
+        may only tighten; a missing or unparsable baseline is non-passing
+        evidence, never a pass; raising a baseline to go green is refused.
+  auto_review:
+    enabled: true
+    # Automatic PR review on the real targets: merge-queue (the documented
+    # queue flow, policy/templates) and main (recent merges' actual target).
+    base_branches:
+      - ^merge-queue$
+      - ^main$
+    drafts: false
+    ignore_title_keywords:
+      - WIP
+      - do-not-review
+  # Keeps the "Prompt for all review comments with AI agents" block on PR
+  # reviews — required for `coderabbit pullrequest <n> --show-prompts --agent`.
+  enable_prompt_for_ai_agents: true
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    # Additive on top of auto-detected guideline files (**/AGENTS.md,
+    # **/CLAUDE.md, ...): carry the doctrine as a repo-wide guideline too.
+    filePatterns:
+      - files: policy/DOCTRINE.md
+        applyTo: "**/*"
