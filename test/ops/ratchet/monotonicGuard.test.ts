@@ -1148,17 +1148,31 @@ describe('formatViolations', () => {
     expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
-  test('an identity STRING containing the unit-key TEXT does not false-fire the key check (PR #118 review, Codex P2)', () => {
-    // A target value like `contains "unit": nope` embeds the key text
-    // INSIDE a JSON string; the unanchored key regex treated it as a unit
-    // property and rejected a perfectly valid tightening. The anchor
-    // (^\s*) matches only real property positions.
-    const diff = fullRewrite(
+  test('key-like text never fires the key check — escaped in rendered values, raw mid-line in hand-crafted diffs (PR #118/#123 reviews)', () => {
+    // Two layers, both pinned (PR #123 review caught the earlier version
+    // of this test being vacuous — the fixture passed against the
+    // UNANCHORED matcher too):
+    // (a) RENDERED baselines: a target like `contains "unit": nope` is
+    //     committed JSON-ESCAPED (\"unit\") — neither matcher can read
+    //     the escaped form, so this row documents the escaping invariant.
+    const rendered = fullRewrite(
       REL,
       body('lower-is-better', 5, { target: 'contains "unit": nope' }),
       body('lower-is-better', 3, { target: 'contains "unit": nope' }),
     );
-    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    expect(checkDiffMonotonicity(rendered)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+    // (b) HAND-CRAFTED diffs: a hostile line carrying the RAW sequence
+    //     mid-value (`"target": "prefix "unit": nope"`) is not valid JSON,
+    //     but the guard judges diff TEXT — the UNANCHORED matcher read it
+    //     as a unit key at a non-property position and failed the section
+    //     closed; the ^\s* anchor matches only property positions, so the
+    //     section judges normally (a tightening of 5 → 3 passes).
+    const crafted = fullRewrite(
+      REL,
+      body('lower-is-better', 5, { unit: undefined }),
+      body('lower-is-better', 3, { unit: undefined }),
+    ).replace('"target": "typecheck"', '"target": "prefix "unit": nope"');
+    expect(checkDiffMonotonicity(crafted)).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
   test('malformed direction escapes on BOTH sides at equal values fail closed (PR #108 review, CodeRabbit Major)', () => {

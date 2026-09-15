@@ -125,11 +125,18 @@ const VALUE_RE = /"value"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=
 // nothing, so the field read as absent. Key presence is tracked
 // separately: a key the side carries whose value cannot be captured is
 // malformed committed evidence — fail closed, never a lucky pass.
-const DIRECTION_KEY_RE = /"direction"\s*:/g;
+// ANCHORED to the property position (PR #123 review, Codex P2 — the
+// PR #118 finding's hardening, landed for real this time): keys match
+// only at a line's leading-whitespace property position. In RENDERED
+// baselines quotes inside values are always JSON-escaped (\"), so an
+// unanchored regex could not match them either — but a HAND-CRAFTED or
+// hostile diff line can carry the raw sequence mid-line, and the anchor
+// makes the property-position intent structural instead of incidental.
+const DIRECTION_KEY_RE = /^\s*"direction"\s*:/g;
 const DIRECTION_RE = /"direction"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const METRIC_RE = /"metric"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const TARGET_RE = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-const UNIT_KEY_RE = /"unit"\s*:/g;
+const UNIT_KEY_RE = /^\s*"unit"\s*:/g;
 const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 
 /**
