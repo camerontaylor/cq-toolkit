@@ -191,12 +191,21 @@ describe('trap: GraphQL query variable collision', () => {
     const firstName = flagsOf(graphqlCalls[0] ?? [])
       .filter((flag) => flag.style === '-f')
       .map((flag) => flag.name);
-    expect(firstName).toEqual(['query']);
+    expect(firstName).toEqual(['query', 'owner', 'name']);
     const secondNames = flagsOf(graphqlCalls[1] ?? [])
       .filter((flag) => flag.style === '-f')
       .map((flag) => flag.name);
     expect(secondNames).toContain('reviewsAfter');
     expect(secondNames).not.toContain('threadsAfter');
+    // Codex thread: owner/name ride raw `-f` (gh `-F` would coerce
+    // integer-looking or boolean-literal names and break String!); only pr
+    // rides `-F` (Int! needs the number).
+    const stylesOf = (call: string[]): Map<string, string> =>
+      new Map(flagsOf(call).map((flag) => [flag.name, flag.style]));
+    const firstStyles = stylesOf(graphqlCalls[0] ?? []);
+    expect(firstStyles.get('owner')).toBe('-f');
+    expect(firstStyles.get('name')).toBe('-f');
+    expect(firstStyles.get('pr')).toBe('-F');
   }, 20_000);
 });
 

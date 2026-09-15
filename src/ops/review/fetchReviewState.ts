@@ -357,9 +357,14 @@ export async function fetchReviewState(
       'graphql',
       '-f',
       `query=${PR_STATE_QUERY}`,
-      '-F',
+      // gh flag semantics (Codex thread on this file): `-f` is a RAW string,
+      // `-F` coerces — an integer-looking or boolean-literal owner/repo name
+      // (123, true, null) would arrive as a non-String and fail
+      // `$owner: String!`/`$name: String!`. So owner/name ride `-f`; `pr`
+      // needs the coercion (`Int!`).
+      '-f',
       `owner=${input.owner}`,
-      '-F',
+      '-f',
       `name=${input.repo}`,
       '-F',
       `pr=${input.pr}`,
