@@ -1,5 +1,5 @@
-// Lane H slice 2 (+ round-1 fix) — tests for captureBaseline and
-// pruneBaselines (src/ops/ratchet/captureBaseline.ts).
+// Lane H slice 2 (+ round-1 and round-2 fixes) — tests for captureBaseline
+// and pruneBaselines (src/ops/ratchet/captureBaseline.ts).
 //
 // Pinned here:
 //   1. Op-input serializability (Codex P1): the input is plain data
@@ -15,24 +15,30 @@
 //      never fabricated: unknown metric and unknown sourceId → failures
 //      naming them; a null source or an unreadable raw → failure naming the
 //      metric and "no metrics summary", with NOTHING written (no baselines
-//      dir) and a pre-existing baseline surviving byte-for-byte; a throwing
-//      source AND a throwing adapter → failures; a corrupt existing
-//      baseline → failure, file untouched; an unreadable existing path →
+//      dir) and a pre-existing baseline surviving byte-for-byte; NON-ERROR
+//      rejections (null, string, plain object) and throwing sources/adapters
+//      → failures with mapped messages; a non-finite reading and an
+//      unparseable capturedAt → failures; a corrupt existing baseline →
+//      failure, file untouched; an unreadable existing path →
 //      indeterminate, never a verdict.
-//   4. pruneBaselines: stale baselines deleted (relPath recorded), live
-//      kept, unparseable content skipped, I/O-fault files unreadable, a
-//      scan that cannot start returns the zero outcome with `error` (never
-//      a throw), the rename drill (capture a → capture b → prune live=[b]
-//      removes a) and the delete drill (empty live removes every
-//      classifiable baseline).
+//   4. Atomic publish: bytes land via temp-file + rename in the same dir —
+//      no temp files linger, and the unchanged no-rewrite case still skips
+//      the write entirely.
+//   5. pruneBaselines: stale baselines deleted (relPath recorded), live
+//      kept, unparseable content skipped, name/content disagreement
+//      skipped (never deleted), I/O-fault files unreadable, a scan that
+//      cannot start returns the zero outcome with `error` (never a throw),
+//      the rename drill (capture a → capture b → prune live=[b] removes a)
+//      and the delete drill (empty live removes every classifiable
+//      baseline).
 //
 // Determinism: capturedAt is pinned on every capture (no clock in
 // assertions); temp dirs under os.tmpdir(), removed in afterEach. The real
 // typecheck-count adapter is used so capture is exercised end-to-end with a
 // production adapter.
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
 import { typecheckCount } from '../../../src/ops/ratchet/adapters/typecheckCount.js';
 import { createCaptureBaseline, pruneBaselines } from '../../../src/ops/ratchet/captureBaseline.js';
@@ -50,6 +56,8 @@ const CAPTURED_AT_2 = '2026-09-15T01:00:00.000Z';
 const TARGET = 'typecheck';
 const METRIC = 'typecheck-count';
 const THROWING_METRIC = 'throwing-adapter';
+const OBJECT_THROWING_METRIC = 'object-throwing-adapter';
+const CRAFTED_INFINITE_METRIC = 'crafted-infinite';
 const REL = baselineRelPath(TARGET, METRIC);
 
 let ws: string;
@@ -65,6 +73,22 @@ beforeAll(() => {
       throw new Error('exploded');
     },
   });
+  registerAdapter({
+    id: OBJECT_THROWING_METRIC,
+    direction: 'lower-is-better',
+    // A NON-Error throw: containment must map the object, not crash on it.
+    extract: () => {
+      throw { message: 'plain boom' };
+    },
+  });
+  registerAdapter({
+    id: CRAFTED_INFINITE_METRIC,
+    direction: 'lower-is-better',
+    // A crafted huge value that overflows the double range: 10**400 IS
+    // Infinity, and JSON.stringify(Infinity) would write a `null` value the
+    // baseline file could never parse back — the op must refuse it.
+    extract: () => ({ value: 10 ** 400, unit: 'errors' }),
+  });
 });
 
 // Sources are composition-time wiring (round-1 fix): they live in this
@@ -73,7 +97,11 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [METRIC, () => Promise.resolve(sourceRaw)],
   ['offline', () => Promise.resolve(null)],
   [THROWING_METRIC, () => Promise.resolve({ count: 1 })],
+  [OBJECT_THROWING_METRIC, () => Promise.resolve({ count: 1 })],
+  [CRAFTED_INFINITE_METRIC, () => Promise.resolve({ count: 1 })],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
+  ['rejecting-null', () => Promise.reject(null)],
+  ['rejecting-string', () => Promise.reject('boom-string')],
 ]);
 const capture = createCaptureBaseline(sources);
 
@@ -224,6 +252,57 @@ describe('captureBaseline', () => {
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
+  test('a null rejection fails with the fallback message, never a TypeError', async () => {
+    await expect(capture(captureInput({ sourceId: 'rejecting-null' }))).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/source failed.*unknown error/s),
+    });
+  });
+
+  test('a string rejection carries that string', async () => {
+    await expect(capture(captureInput({ sourceId: 'rejecting-string' }))).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/source failed.*boom-string/s),
+    });
+  });
+
+  test('an adapter throwing a plain object fails with its message, not a TypeError', async () => {
+    await expect(
+      capture(captureInput({ metric: OBJECT_THROWING_METRIC, sourceId: OBJECT_THROWING_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/adapter failed.*plain boom/s),
+    });
+  });
+
+  test('a non-finite reading fails at the write path and writes nothing', async () => {
+    await expect(
+      capture(captureInput({ metric: CRAFTED_INFINITE_METRIC, sourceId: CRAFTED_INFINITE_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/metric 'crafted-infinite'.*unusable reading/s),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('an unparseable capturedAt fails with arg-error semantics', async () => {
+    sourceRaw = { count: 1 };
+    await expect(capture(captureInput({ capturedAt: 'not-a-date' }))).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/invalid capturedAt 'not-a-date'/),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('the publish is atomic: no temp files linger after captures', async () => {
+    sourceRaw = { count: 3 };
+    await capture(captureInput());
+    sourceRaw = { count: 5 };
+    await capture(captureInput({ capturedAt: CAPTURED_AT_2 }));
+    const names = await readdir(join(ws, 'baselines'));
+    expect(names).toEqual([basename(REL)]);
+  });
+
   test('corrupt existing baseline fails and is left untouched', async () => {
     sourceRaw = { count: 3 };
     await mkdir(join(ws, 'baselines'), { recursive: true });
@@ -284,6 +363,35 @@ describe('pruneBaselines', () => {
     });
     expect(await readFile(join(ws, 'baselines', 'garbage.json'), 'utf8')).toBe('not json');
     expect(await readFile(join(ws, 'baselines', 'notes.txt'), 'utf8')).toBe('keep me');
+  });
+
+  test('a file whose name disagrees with its content is skipped, never deleted', async () => {
+    await captureBaselineFor(TARGET, 2);
+    // Valid baseline content for TARGET, stored under a foreign filename:
+    // the content classifies to another file's path, so THIS file cannot
+    // be classified — skipped, left untouched.
+    const misnamed = join(ws, 'baselines', 'misnamed.json');
+    await writeFile(
+      misnamed,
+      renderBaseline({
+        schemaVersion: 1,
+        target: TARGET,
+        metric: METRIC,
+        direction: 'lower-is-better',
+        value: 9,
+        capturedAt: CAPTURED_AT,
+      }),
+      'utf8',
+    );
+    await expect(
+      pruneBaselines({ ws, live: [{ target: TARGET, metric: METRIC }] }),
+    ).resolves.toEqual({
+      deleted: [],
+      kept: 1,
+      skipped: ['baselines/misnamed.json'],
+      unreadable: [],
+    });
+    expect(await readFile(misnamed, 'utf8')).toContain('"value": 9');
   });
 
   test('an unreadable file (I/O fault) is reported unreadable, distinct from skipped', async () => {

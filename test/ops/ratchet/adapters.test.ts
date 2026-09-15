@@ -10,11 +10,12 @@
 //      are null.
 //   2. complexity: pre-averaged {averageComplexity} is rounded half-up to
 //      2 decimals with a relative-epsilon guard (binary-unrepresentable
-//      halves like 1.005 → 1.01 and 2.675 → 2.68); {Complexity} record
-//      arrays become the arithmetic mean rounded half-up in the INTEGER
-//      domain (sum*100 / count), so 201/200 → 1.01 exactly; any negative
-//      record is rejected before aggregation; empty arrays and junk are
-//      null.
+//      halves like 1.005 → 1.01 and 2.675 → 2.68), and an input whose
+//      *100 scaling overflows to non-finite (1e307) is null; {Complexity}
+//      record arrays become the arithmetic mean rounded half-up in the
+//      INTEGER domain (sum*100 / count), so 201/200 → 1.01 exactly; any
+//      negative record is rejected before aggregation; empty arrays and
+//      junk are null.
 import { describe, expect, test } from 'vitest';
 import { complexity } from '../../../src/ops/ratchet/adapters/complexity.js';
 import { coverage } from '../../../src/ops/ratchet/adapters/coverage.js';
@@ -76,6 +77,7 @@ describe('complexity', () => {
     ['pre-averaged negative', { averageComplexity: -1 }, null],
     ['pre-averaged Infinity', { averageComplexity: Number.POSITIVE_INFINITY }, null],
     ['pre-averaged NaN', { averageComplexity: Number.NaN }, null],
+    ['direct: 1e307 overflows the *100 scaling to non-finite', { averageComplexity: 1e307 }, null],
     ['records: clean mean', [{ Complexity: 1 }, { Complexity: 2 }], { value: 1.5, unit: 'avg-cx' }],
     ['records: repeating decimal rounds down', [{ Complexity: 1 }, { Complexity: 1 }, { Complexity: 2 }], { value: 1.33, unit: 'avg-cx' }],
     ['records: repeating decimal rounds up', [{ Complexity: 1 }, { Complexity: 2 }, { Complexity: 2 }], { value: 1.67, unit: 'avg-cx' }],

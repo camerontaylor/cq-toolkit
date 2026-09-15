@@ -16,20 +16,26 @@
 // Failure direction, named (I5): a null from the source or the adapter is
 // NON-PASSING EVIDENCE — the op returns `failed` naming the metric, never a
 // fabricated pass and never a fabricated baseline; the same holds when the
-// source or adapter THROWS (a throw never crosses the op seam). A corrupt
-// EXISTING baseline is likewise a failure: capture never silently overwrites
-// evidence it cannot classify. Capture does NOT judge tightening (that is
-// the checkRatchet/guard's job in H2) — it records facts and reports the
+// source or adapter THROWS (a throw never crosses the op seam — and
+// rejections are not assumed to be Errors: any thrown value is mapped to a
+// message). The write path does not trust its own output either: a
+// non-finite reading and an unparseable capturedAt both fail the capture.
+// A corrupt EXISTING baseline is likewise a failure: capture never silently
+// overwrites evidence it cannot classify. Baselines land via temp-file +
+// rename in the same directory, so a crash mid-write can never leave a torn
+// baseline. Capture does NOT judge tightening (that is the
+// checkRatchet/guard's job in H2) — it records facts and reports the
 // lifecycle trio created/updated/unchanged, rewriting an equal-value
 // baseline only when the rendered bytes differ.
 //
 // pruneBaselines deletes baseline files whose (target, metric) is no longer
 // live, and NEVER THROWS: I/O faults are reported per-file in `unreadable`
-// (distinct from `skipped`, which means readable-but-unparseable content —
+// (distinct from `skipped`, which means readable-but-unclassifiable content
+// — including a file whose name disagrees with its parsed (target, metric) —
 // nothing is deleted that cannot be classified), and a scan that cannot
 // start at all returns the zero outcome with `error` describing the fault.
-import { mkdir, readFile, readdir, unlink, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { baselineRelPath, parseBaseline, renderBaseline } from './format.js';
 import type { BaselineFile } from './format.js';
@@ -43,6 +49,24 @@ function isEnoent(err: unknown): boolean {
     'code' in err &&
     (err as { code?: unknown }).code === 'ENOENT'
   );
+}
+
+/**
+ * Any thrown value → a message string. Rejections are not assumed to be
+ * Errors (a `Promise.reject(null)` must not turn into a TypeError inside the
+ * handler): Error → .message; object with a non-empty string message → it;
+ * string → itself; anything else (null/undefined/plain object) → 'unknown
+ * error'.
+ */
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object' && err !== null) {
+    const message = (err as { message?: unknown }).message;
+    if (typeof message === 'string' && message !== '') return message;
+    return 'unknown error';
+  }
+  if (typeof err === 'string') return err;
+  return 'unknown error';
 }
 
 /** Capture one (target, metric) baseline in a workspace. Fully serializable: survives structuredClone. */
@@ -60,7 +84,7 @@ export interface CaptureBaselineInput {
 export type SourceCatalog = ReadonlyMap<string, MetricSource>;
 
 export interface CaptureBaselineOutcome {
-  /** Repo-relative baseline path, e.g. 'baselines/typecheck--typecheck-count--f818e46f.json'. */
+  /** Repo-relative baseline path, e.g. 'baselines/typecheck--typecheck-count--f818e46f24dc.json'. */
   path: string;
   value: number;
   /** The previously recorded value; null when none existed. */
@@ -73,6 +97,15 @@ export function createCaptureBaseline(
   sources: SourceCatalog,
 ): Op<CaptureBaselineInput, CaptureBaselineOutcome> {
   return async (input) => {
+    if (
+      input.capturedAt !== undefined &&
+      Number.isNaN(Date.parse(input.capturedAt))
+    ) {
+      return {
+        status: 'failed',
+        error: `ratchet: invalid capturedAt '${input.capturedAt}' — must be a parseable ISO-8601 timestamp`,
+      };
+    }
     const adapter = getAdapter(input.metric);
     if (adapter === undefined) {
       return {
@@ -94,7 +127,7 @@ export function createCaptureBaseline(
     } catch (err) {
       return {
         status: 'failed',
-        error: `ratchet: metric '${input.metric}' source failed — ${(err as Error).message}`,
+        error: `ratchet: metric '${input.metric}' source failed — ${errorMessage(err)}`,
       };
     }
     let reading: MetricReading | null;
@@ -103,7 +136,7 @@ export function createCaptureBaseline(
     } catch (err) {
       return {
         status: 'failed',
-        error: `ratchet: metric '${input.metric}' adapter failed — ${(err as Error).message}`,
+        error: `ratchet: metric '${input.metric}' adapter failed — ${errorMessage(err)}`,
       };
     }
     if (reading === null) {
@@ -112,6 +145,16 @@ export function createCaptureBaseline(
         error:
           `ratchet: metric '${input.metric}' has no metrics summary in '${input.ws}' ` +
           '(I5: non-passing evidence, never a pass) — baseline not captured',
+      };
+    }
+    if (!Number.isFinite(reading.value)) {
+      // A non-finite value would JSON.stringify to null and the written file
+      // would fail its own parser — refuse it here, at the write path.
+      return {
+        status: 'failed',
+        error:
+          `ratchet: metric '${input.metric}' adapter produced an unusable reading ` +
+          `(${reading.value}) — baseline not captured`,
       };
     }
 
@@ -134,7 +177,7 @@ export function createCaptureBaseline(
       if (!isEnoent(err)) {
         return {
           status: 'indeterminate',
-          detail: `ratchet: could not read existing baseline '${relPath}' — ${(err as Error).message}`,
+          detail: `ratchet: could not read existing baseline '${relPath}' — ${errorMessage(err)}`,
         };
       }
     }
@@ -150,7 +193,7 @@ export function createCaptureBaseline(
           status: 'failed',
           error:
             `ratchet: existing baseline '${relPath}' is corrupt and was not overwritten — ` +
-            `${(err as Error).message}`,
+            `${errorMessage(err)}`,
         };
       }
       previous = existing.value;
@@ -164,16 +207,27 @@ export function createCaptureBaseline(
 
     try {
       await mkdir(join(input.ws, 'baselines'), { recursive: true });
-      await writeFile(absPath, bytes, 'utf8');
+      // Atomic publish: bytes land in a unique temp file in the SAME
+      // directory, then rename over the target — a crash mid-write can
+      // never leave a torn baseline at the target path.
+      const tempPath = join(
+        dirname(absPath),
+        `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
+      );
+      await writeFile(tempPath, bytes, 'utf8');
+      await rename(tempPath, absPath);
     } catch (err) {
       return {
         status: 'indeterminate',
-        detail: `ratchet: writing baseline '${relPath}' failed — ${(err as Error).message}`,
+        detail: `ratchet: writing baseline '${relPath}' failed — ${errorMessage(err)}`,
       };
     }
     return { status: 'ok', value: { path: relPath, value: reading.value, previous, lifecycle } };
   };
 }
+
+/** Temp-name salt: uniqueness within a process, not determinism, is the requirement. */
+let tempFileCounter = 0;
 
 /** Prune baselines that are no longer live. */
 export interface PruneBaselinesInput {
@@ -186,7 +240,7 @@ export interface PruneBaselinesOutcome {
   deleted: string[];
   /** Files kept because their (target, metric) is live. */
   kept: number;
-  /** Readable but unparseable content — never deleted, never conflated with I/O faults. */
+  /** Readable but unclassifiable content (unparseable, or name/content disagreement) — never deleted. */
   skipped: string[];
   /** File exists but readFile/unlink failed (I/O fault) — left untouched. */
   unreadable: string[];
@@ -210,7 +264,7 @@ export async function pruneBaselines(input: PruneBaselinesInput): Promise<PruneB
       kept: 0,
       skipped: [],
       unreadable: [],
-      error: `could not scan '${baselinesDir}' — ${(err as Error).message}`,
+      error: `could not scan '${baselinesDir}' — ${errorMessage(err)}`,
     };
   }
 
@@ -237,7 +291,14 @@ export async function pruneBaselines(input: PruneBaselinesInput): Promise<PruneB
       skipped.push(relPath); // cannot classify the content → never delete
       continue;
     }
-    if (liveKeys.has(baselineRelPath(parsed.target, parsed.metric))) {
+    // Name/content disagreement: the content classifies to another file's
+    // path, so THIS file cannot be classified at all — skip, never delete.
+    const ownPath = baselineRelPath(parsed.target, parsed.metric);
+    if (ownPath !== relPath) {
+      skipped.push(relPath);
+      continue;
+    }
+    if (liveKeys.has(ownPath)) {
       kept++;
       continue;
     }

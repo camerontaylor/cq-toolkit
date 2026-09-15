@@ -12,10 +12,10 @@
 //      Infinity), and unparseable capturedAt timestamps all throw a plain
 //      Error with a clear message.
 //   3. baselineRelPath: sanitization (lowercase, runs of non-[a-z0-9]
-//      collapse to a single '-', leading/trailing '-' stripped) PLUS an
-//      8-hex sha256 disambiguator over the RAW pair, so originals that
-//      sanitize identically ('src/kernel' vs 'src-kernel') still get
-//      distinct, deterministic paths.
+//      collapse to a single '-', leading/trailing '-' stripped) PLUS a
+//      12-hex (48-bit) sha256 disambiguator over the RAW pair, so originals
+//      that sanitize identically ('src/kernel' vs 'src-kernel') stay
+//      collision-RESISTANT with distinct, deterministic paths.
 //   4. tightens/loosens are pure comparators for both directions; equal
 //      values are neither.
 //
@@ -142,12 +142,12 @@ describe('parseBaseline rejections', () => {
 
 describe('baselineRelPath', () => {
   test.each([
-    ['typecheck', 'typecheck-count', 'baselines/typecheck--typecheck-count--f818e46f.json'],
-    ['Src/Kernel', 'Typecheck Count', 'baselines/src-kernel--typecheck-count--ca5599f1.json'],
-    ['  spaced  target  ', 'metric!!', 'baselines/spaced-target--metric--e720baed.json'],
-    ['A//B', 'C--D', 'baselines/a-b--c-d--63e50bf9.json'],
-    ['---lead---', '___trail___', 'baselines/lead--trail--ce9c228b.json'],
-    ['Ünicode Târget', 'métric', 'baselines/nicode-t-rget--m-tric--d5aaf618.json'],
+    ['typecheck', 'typecheck-count', 'baselines/typecheck--typecheck-count--f818e46f24dc.json'],
+    ['Src/Kernel', 'Typecheck Count', 'baselines/src-kernel--typecheck-count--ca5599f16a99.json'],
+    ['  spaced  target  ', 'metric!!', 'baselines/spaced-target--metric--e720baedc948.json'],
+    ['A//B', 'C--D', 'baselines/a-b--c-d--63e50bf9095e.json'],
+    ['---lead---', '___trail___', 'baselines/lead--trail--ce9c228bc566.json'],
+    ['Ünicode Târget', 'métric', 'baselines/nicode-t-rget--m-tric--d5aaf618a6b2.json'],
   ])('target %j + metric %j → %j', (target, metric, expected) => {
     expect(baselineRelPath(target, metric)).toBe(expected);
   });
@@ -158,11 +158,11 @@ describe('baselineRelPath', () => {
 
   test('sanitization collisions stay distinct: the disambiguator hashes the RAW pair', () => {
     // Both sanitize to src-kernel / m, but the raw pairs differ.
-    expect(baselineRelPath('src/kernel', 'm')).toBe('baselines/src-kernel--m--1f3222c9.json');
-    expect(baselineRelPath('src-kernel', 'm')).toBe('baselines/src-kernel--m--8007c124.json');
+    expect(baselineRelPath('src/kernel', 'm')).toBe('baselines/src-kernel--m--1f3222c9fccf.json');
+    expect(baselineRelPath('src-kernel', 'm')).toBe('baselines/src-kernel--m--8007c124e9e7.json');
     expect(baselineRelPath('src/kernel', 'm')).not.toBe(baselineRelPath('src-kernel', 'm'));
-    expect(baselineRelPath('src/a.ts', 'm')).toBe('baselines/src-a-ts--m--1876373a.json');
-    expect(baselineRelPath('src-a.ts', 'm')).toBe('baselines/src-a-ts--m--2194db1d.json');
+    expect(baselineRelPath('src/a.ts', 'm')).toBe('baselines/src-a-ts--m--1876373ace6e.json');
+    expect(baselineRelPath('src-a.ts', 'm')).toBe('baselines/src-a-ts--m--2194db1df002.json');
     expect(baselineRelPath('src/a.ts', 'm')).not.toBe(baselineRelPath('src-a.ts', 'm'));
   });
 });

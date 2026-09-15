@@ -49,7 +49,12 @@ export const complexity: MetricAdapter = {
     if (typeof raw === 'object' && raw !== null) {
       const avg = (raw as Record<string, unknown>)['averageComplexity'];
       if (typeof avg !== 'number' || !Number.isFinite(avg) || avg < 0) return null;
-      return { value: roundHalfUp2(avg), unit: 'avg-cx' };
+      const value = roundHalfUp2(avg);
+      // Finite input can still overflow the *100 scaling (1e307*100 =
+      // Infinity); an infinite value would JSON.stringify to null and the
+      // written file would fail its own parser, so it is no reading at all.
+      if (!Number.isFinite(value)) return null;
+      return { value, unit: 'avg-cx' };
     }
     return null;
   },

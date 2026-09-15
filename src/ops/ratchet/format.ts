@@ -92,18 +92,24 @@ function sanitizeSegment(raw: string): string {
 }
 
 /**
- * 8-hex disambiguator over the RAW (unsanitized) pair: distinct originals keep
- * distinct baseline paths even when sanitization collapses them
- * ('src/kernel' and 'src-kernel' both sanitize to 'src-kernel'). NUL-separated
- * so ('ab', 'c') and ('a', 'bc') hash differently.
+ * 12-hex (48-bit) disambiguator over the RAW (unsanitized) pair: distinct
+ * originals stay collision-resistant in their baseline paths even when
+ * sanitization collapses them ('src/kernel' and 'src-kernel' both sanitize
+ * to 'src-kernel'). NUL-separated so ('ab', 'c') and ('a', 'bc') hash
+ * differently. Deterministic: same pair, same digest.
  */
-function hash8(target: string, metric: string): string {
-  return createHash('sha256').update(`${target}\u0000${metric}`, 'utf8').digest('hex').slice(0, 8);
+function pathDigest(target: string, metric: string): string {
+  return createHash('sha256').update(`${target}\u0000${metric}`, 'utf8').digest('hex').slice(0, 12);
 }
 
-/** Deterministic, collision-proof repo-relative path for one (target, metric) baseline. */
+/**
+ * Deterministic repo-relative path for one (target, metric) baseline —
+ * collision-RESISTANT, not collision-proof: the 48-bit raw-pair digest makes
+ * a sanitization collision practically impossible without pretending a
+ * 48-bit space cannot ever clash.
+ */
 export function baselineRelPath(target: string, metric: string): string {
-  return `baselines/${sanitizeSegment(target)}--${sanitizeSegment(metric)}--${hash8(target, metric)}.json`;
+  return `baselines/${sanitizeSegment(target)}--${sanitizeSegment(metric)}--${pathDigest(target, metric)}.json`;
 }
 
 /** True when `next` improves on `prev` for direction `d`; equal values are never a tighten. */
