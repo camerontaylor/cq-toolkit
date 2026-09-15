@@ -118,6 +118,15 @@ reviews:
         keys; valued reserved flags exit 2. The CLI is a thin dispatcher:
         imports only the registry, kernel, intra-CLI modules, node:
         builtins, and zod in run-plan.ts (cq/no-cli-beyond-registry-kernel).
+    - path: src/cli.ts
+      instructions: >-
+        The executable shim shares the I1 CLI contract (src/cli/README.md):
+        stdout carries exactly one JSON artifact per invocation (--help is
+        the sanctioned exception); stderr is cq:-prefixed narration; exit
+        codes 0/1/2/3 derive mechanically from the frozen taxonomy — 2 is
+        never derived from a taxonomy value. Keep the shim a thin dispatcher
+        importing only CLI modules, the registry, kernel, or node: builtins
+        (cq/no-cli-beyond-registry-kernel).
     - path: src/registry/**
       instructions: >-
         Lazy aggregation: importing the module does no fs work and no

@@ -16,6 +16,7 @@ prevents opening the PR.
 
 ### Cycle 1
 
+- Gates before review (ratchet / lint / test / git diff --check exits):
 - Command (verbatim):
 - Reviewed HEAD: <!-- sha at review time -->
 - Dirty-diff identity: <!-- sha256 of `git diff --binary --full-index HEAD` after staging own new files; "clean tree" if committed -->
