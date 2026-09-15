@@ -639,7 +639,12 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
     ]);
   });
 
-  test('an unreadable target metadata PROPAGATES from the mode probe — never a silent 0600 replacement (non-ENOENT lstat faults)', async () => {
+  // Root bypasses directory permission bits, so the chmod-0000 precondition
+  // cannot be produced under UID 0 — skip there (PR #95 review, Codex P2;
+  // same posture as the EACCES test in test/cli/i1.test.ts).
+  test.skipIf(process.getuid?.() === 0)(
+    'an unreadable target metadata PROPAGATES from the mode probe — never a silent 0600 replacement (non-ENOENT lstat faults)',
+    async () => {
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
     const root = join(scratchDir, 'ws');
     const stateDir = join(root, 'state');
@@ -664,5 +669,6 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
     // The refused publish changed nothing: same bytes, same mode.
     expect(await readFile(storePath, 'utf8')).toBe(before);
     expect((await stat(storePath)).mode & 0o777).toBe(0o640);
-  });
+    });
 });
+

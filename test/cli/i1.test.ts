@@ -794,6 +794,12 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
           "(() => { const o = { x: 1 }; Object.defineProperty(o, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return o; })()",
         pattern: "non-enumerable own 'toJSON'",
       },
+      // The array-side family (PR #103 review, Codex P1): arrays carrying
+      // anything but indices and length diverge from stringify the same
+      // ways objects do.
+      { name: 'lossarrtojson', expr: "(() => { const a = [1]; Object.defineProperty(a, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return a; })()", pattern: "own 'toJSON' on an array" },
+      { name: 'lossarrextra', expr: "(() => { const a = [1]; a.extra = 'gone'; return a; })()", pattern: "non-index own member 'extra' on an array" },
+      { name: 'lossarrsymbol', expr: "(() => { const a = [1]; a[Symbol('leak')] = 2; return a; })()", pattern: 'symbol-keyed own member' },
       {
         name: 'losshiddenmember',
         expr:

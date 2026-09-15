@@ -642,6 +642,16 @@ describe('runPlan — execution semantics', () => {
         Object.defineProperty(withHidden, 'secret', { value: 3, enumerable: false });
         return { status: 'ok', value: withHidden } as { status: 'ok'; value: unknown };
       }),
+      entry('arr-tojson-op', jobInputSchema, async () => {
+        const hooked = [1];
+        Object.defineProperty(hooked, 'toJSON', { value: () => ({ x: 2 }), enumerable: false });
+        return { status: 'ok', value: hooked } as { status: 'ok'; value: unknown };
+      }),
+      entry('arr-extra-op', jobInputSchema, async () => {
+        const withExtra = [1];
+        (withExtra as unknown as { extra: string }).extra = 'gone';
+        return { status: 'ok', value: withExtra } as { status: 'ok'; value: unknown };
+      }),
       entry('fake', jobInputSchema, op),
     );
     const plan: Plan = {
@@ -654,6 +664,8 @@ describe('runPlan — execution semantics', () => {
         { id: 's', op: 'symbol-op', input: { jobId: 's' } },
         { id: 't', op: 'tojson-op', input: { jobId: 't' } },
         { id: 'n', op: 'hidden-op', input: { jobId: 'n' } },
+        { id: 'at', op: 'arr-tojson-op', input: { jobId: 'at' } },
+        { id: 'ax', op: 'arr-extra-op', input: { jobId: 'ax' } },
         { id: 'ok1', op: 'fake', input: { jobId: 'ok1' } },
       ],
     };
@@ -675,7 +687,9 @@ describe('runPlan — execution semantics', () => {
     expect(failureOf('s')).toMatch(/non-serializable.*symbol-keyed own member/s);
     expect(failureOf('t')).toMatch(/non-serializable.*non-enumerable own 'toJSON'/s);
     expect(failureOf('n')).toMatch(/non-serializable.*non-enumerable own member 'secret'/s);
-    expect(report.counts.failed).toBe(7);
+    expect(failureOf('at')).toMatch(/non-serializable.*own 'toJSON' on an array/s);
+    expect(failureOf('ax')).toMatch(/non-serializable.*non-index own member 'extra' on an array/s);
+    expect(report.counts.failed).toBe(9);
     expect(report.counts.done).toBe(1); // the run continues
   });
 
