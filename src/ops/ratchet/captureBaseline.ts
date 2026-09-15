@@ -197,14 +197,30 @@ export function createCaptureBaseline(
           '(I5: non-passing evidence, never a pass) — baseline not captured',
       };
     }
-    if (!Number.isFinite(reading.value)) {
-      // A non-finite value would JSON.stringify to null and the written file
-      // would fail its own parser — refuse it here, at the write path.
+    // The reading is ADAPTER-OWNED: its fields may be getters or a hostile
+    // Proxy that throws on access, so value and unit are snapshotted ONCE
+    // inside this containment; only the snapshots are used downstream.
+    let value: number;
+    let unit: string | undefined;
+    try {
+      value = reading.value;
+      unit = reading.unit;
+      if (!Number.isFinite(value)) {
+        // A non-finite value would JSON.stringify to null and the written
+        // file would fail its own parser — refuse it here, at the boundary.
+        return {
+          status: 'failed',
+          error:
+            `ratchet: metric '${input.metric}' adapter produced an unusable reading ` +
+            `(${value}) — baseline not captured`,
+        };
+      }
+    } catch (err) {
       return {
         status: 'failed',
         error:
-          `ratchet: metric '${input.metric}' adapter produced an unusable reading ` +
-          `(${reading.value}) — baseline not captured`,
+          `ratchet: metric '${input.metric}' adapter produced an unusable reading — ` +
+          `${errorMessage(err)}`,
       };
     }
 
@@ -222,8 +238,8 @@ export function createCaptureBaseline(
         target: input.target,
         metric: input.metric,
         direction: adapter.direction,
-        value: reading.value,
-        unit: reading.unit,
+        value: value,
+        unit: unit,
         capturedAt: input.capturedAt ?? new Date().toISOString(),
       });
       parseBaseline(bytes);
@@ -326,9 +342,9 @@ export function createCaptureBaseline(
       if (existing.direction !== adapter.direction) {
         disagreements.push(`direction '${existing.direction}' → '${adapter.direction}'`);
       }
-      if (existing.unit !== reading.unit) {
+      if (existing.unit !== unit) {
         const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
-        disagreements.push(`unit ${renderUnit(existing.unit)} → ${renderUnit(reading.unit)}`);
+        disagreements.push(`unit ${renderUnit(existing.unit)} → ${renderUnit(unit)}`);
       }
       if (disagreements.length > 0) {
         return {
@@ -339,11 +355,11 @@ export function createCaptureBaseline(
         };
       }
       previous = existing.value;
-      lifecycle = existing.value === reading.value ? 'unchanged' : 'updated';
+      lifecycle = existing.value === value ? 'unchanged' : 'updated';
       // Equal value AND identical bytes: the file is already exactly what this
       // capture would write — leave it untouched (no spurious mtime churn).
       if (lifecycle === 'unchanged' && bytes === existingText) {
-        return { status: 'ok', value: { path: relPath, value: reading.value, previous, lifecycle } };
+        return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
       }
     }
 
@@ -390,7 +406,7 @@ export function createCaptureBaseline(
         detail: `ratchet: writing baseline '${relPath}' failed — ${errorMessage(err)}`,
       };
     }
-    return { status: 'ok', value: { path: relPath, value: reading.value, previous, lifecycle } };
+    return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
   };
 }
 

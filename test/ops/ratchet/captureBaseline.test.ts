@@ -64,6 +64,8 @@ const NULL_UNIT_METRIC = 'null-unit';
 const BAD_DIRECTION_METRIC = 'bad-direction';
 const BIGINT_UNIT_METRIC = 'bigint-unit';
 const UNDEFINED_READING_METRIC = 'undefined-reading';
+const THROWING_VALUE_GETTER_METRIC = 'throwing-value-getter';
+const THROWING_UNIT_GETTER_METRIC = 'throwing-unit-getter';
 const REL = baselineRelPath(TARGET, METRIC);
 
 let ws: string;
@@ -136,6 +138,36 @@ beforeAll(() => {
     // evidence, never dereference it.
     extract: () => undefined as unknown as MetricReading,
   });
+  registerAdapter({
+    id: THROWING_VALUE_GETTER_METRIC,
+    direction: 'lower-is-better',
+    // Adapter-owned FIELD ACCESS can also throw: the value getter explodes
+    // on access, after the reading passed the typeof guard.
+    extract: () =>
+      {
+        const reading = { unit: 'errors' };
+        Object.defineProperty(reading, 'value', {
+          get() {
+            throw new Error('value getter exploded');
+          },
+        });
+        return reading as unknown as MetricReading;
+      },
+  });
+  registerAdapter({
+    id: THROWING_UNIT_GETTER_METRIC,
+    direction: 'lower-is-better',
+    extract: () =>
+      {
+        const reading = { value: 2 };
+        Object.defineProperty(reading, 'unit', {
+          get() {
+            throw new Error('unit getter exploded');
+          },
+        });
+        return reading as unknown as MetricReading;
+      },
+  });
 });
 
 // Sources are composition-time wiring (round-1 fix): they live in this
@@ -150,6 +182,8 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [BAD_DIRECTION_METRIC, () => Promise.resolve({ count: 1 })],
   [BIGINT_UNIT_METRIC, () => Promise.resolve({ count: 1 })],
   [UNDEFINED_READING_METRIC, () => Promise.resolve({ count: 1 })],
+  [THROWING_VALUE_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
+  [THROWING_UNIT_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
   [UNIT_SHIFTING_METRIC, () => Promise.resolve(sourceRaw)],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
@@ -314,6 +348,34 @@ describe('captureBaseline', () => {
       ),
     });
     // The failure fabricated no evidence — nothing was written.
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a throwing value getter fails as an unusable reading (no rejection, no file)', async () => {
+    await expect(
+      capture(
+        captureInput({ metric: THROWING_VALUE_GETTER_METRIC, sourceId: THROWING_VALUE_GETTER_METRIC }),
+      ),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'throwing-value-getter' adapter produced an unusable reading.*value getter exploded/s,
+      ),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a throwing unit getter fails as an unusable reading (no rejection, no file)', async () => {
+    await expect(
+      capture(
+        captureInput({ metric: THROWING_UNIT_GETTER_METRIC, sourceId: THROWING_UNIT_GETTER_METRIC }),
+      ),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'throwing-unit-getter' adapter produced an unusable reading.*unit getter exploded/s,
+      ),
+    });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
