@@ -399,3 +399,21 @@ if (lane !== 'ai-sdk' && lane !== 'claude-agent') {
 }
 const verdictJson = await measure(lane);
 console.log(JSON.stringify(verdictJson, null, 2));
+// THE VERDICT GATES THE EXIT STATUS (PR #52 review, Codex P2): a green
+// workflow step past a failed abort verdict hid exactly the failure this
+// spike exists to catch — spend that did not verifiably stop. The
+// evidence prints above either way; the nonzero exit makes the
+// live-drivers step fail on: no verdict (the `error` field), a
+// `spendStopped` of false/'inconclusive' (an unverified stop is no
+// stop), or an inconclusive reason. A thrown measure() already exits 1
+// via the unhandled top-level rejection.
+if (verdictJson.error !== undefined || verdictJson.spendStopped !== true) {
+  const why =
+    verdictJson.error !== undefined
+      ? verdictJson.error
+      : `spendStopped=${String(verdictJson.spendStopped)}` +
+        (verdictJson.inconclusiveReason !== undefined ? ` — ${verdictJson.inconclusiveReason}` : '');
+  console.error(`dd1-abort-spike: ABORT VERDICT FAILED for lane '${lane}': ${why}`);
+  process.exit(1);
+}
+console.error(`dd1-abort-spike: abort verdict passed for lane '${lane}' (spend verifiably stopped)`);

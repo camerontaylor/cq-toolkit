@@ -102,12 +102,19 @@ if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
 
 // --- The fixture (identical across every cell) --------------------------------
 const PROMPT = 'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
-// The zai coding wire SERVES `glm-5.3-flash` for a `glm-4.6` request
-// (observed live — see the eval history) — the conductor decision: eval
-// wires request the id the wire actually serves. The anthropic-compat
-// lanes (claude-agent/subprocess) serve glm-4.6 truthfully, so their
-// cells keep glm-4.6.
-const MODEL_GLM = 'glm-5.3-flash';
+// The anthropic-compat lanes (claude-agent/subprocess) serve glm-4.6
+// truthfully, so their cells request glm-4.6 — MODEL_GLM stays the
+// truthfully-served id (PR #60 review, Codex P1 + CodeRabbit Major: a
+// shared constant at the served id put the subprocess cell on
+// glm-5.3-flash, which routeFor rejects off the Z.AI allowlist before
+// dispatch, and broke the intended glm-4.6 comparison lane).
+const MODEL_GLM = 'glm-4.6';
+// The zai CODING wire (the ai-sdk cell) SERVES `glm-5.3-flash` for a
+// `glm-4.6` request (observed live — see the eval history) — the
+// conductor decision: eval wires request the id the wire actually
+// serves. A SEPARATE constant: sharing it with the anthropic-compat
+// lanes is exactly the PR #60 regression.
+const MODEL_GLM_AI_SDK = 'glm-5.3-flash';
 // The deepseek wire SERVES `deepseek-flash` for a `deepseek-chat` request
 // (observed live, docs/eval-axes-demo.md history) — the conductor decision:
 // eval wires request the id the wire actually serves, so the identity check
@@ -325,7 +332,7 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
 }
 
 const cells = [
-  { lane: 'ai-sdk', provider: 'zai', model: MODEL_GLM },
+  { lane: 'ai-sdk', provider: 'zai', model: MODEL_GLM_AI_SDK },
   { lane: 'ai-sdk', provider: 'deepseek', model: MODEL_DEEPSEEK },
   { lane: 'claude-agent', provider: 'zai', model: MODEL_GLM },
   { lane: 'subprocess', provider: 'zai', model: MODEL_GLM },
