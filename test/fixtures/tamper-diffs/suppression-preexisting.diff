@@ -1,0 +1,17 @@
+diff --git a/src/parsers/config.ts b/src/parsers/config.ts
+index 0c1d2e3..9b8c7d6 100644
+--- a/src/parsers/config.ts
++++ b/src/parsers/config.ts
+@@ -20,11 +20,10 @@
+ export function parseConfig(raw: unknown): Config {
+   if (typeof raw !== 'object') {
+     throw new ParseError('config must be an object');
+   }
+   // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   const legacy = raw as any;
+-  // @ts-ignore
+   return migrate(legacy);
+-  const clean = normalize(raw);
++  const clean = normalize(legacy);
+   return { ...clean, source: 'legacy' };
+ }

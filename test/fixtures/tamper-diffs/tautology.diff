@@ -1,0 +1,15 @@
+diff --git a/src/math/abs.test.ts b/src/math/abs.test.ts
+index 3d4c5e6..7f8a9b0 100644
+--- a/src/math/abs.test.ts
++++ b/src/math/abs.test.ts
+@@ -6,6 +6,10 @@
+   it('is positive for negatives', () => {
+     expect(abs(-3)).toBe(3);
+   });
++  it('always passes', () => {
++    expect(makeValue()).toBe(makeValue());
++    expect(1).toBe(1);
++  });
+   it('rejects NaN', () => {
+     expect(abs(Number.NaN)).toBe(Number.NaN);
+   });
