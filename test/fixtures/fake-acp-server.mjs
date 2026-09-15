@@ -263,6 +263,12 @@ const NO_SERVED_MODEL = process.env.FAKE_ACP_NO_SERVED_MODEL === '1';
 // session/request_permission names a session that is NOT this run's —
 // the driver must reject it before any answer/evidence effects.
 const FOREIGN_PERMISSION_SESSION = process.env.FAKE_ACP_FOREIGN_PERMISSION_SESSION === '1';
+// The stale-mode persona (PR #53 review, Codex P1): the agent announces
+// its initial mode 'build' right after session/new — BEFORE the pin —
+// and the set_config_option answer carries neither a modes echo nor a
+// fresh current_mode_update. A driver that accepts the stale
+// observedMode prompts on an unproven pin.
+const PRE_PIN_MODE_BUILD = process.env.FAKE_ACP_PRE_PIN_MODE_BUILD === '1';
 
 // The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL=1), signal half: the
 // termination is IGNORED — only the unignorable SIGKILL rung reaches this
@@ -837,15 +843,33 @@ function onFrame(frame) {
       // Never expected (no gate) — the error keeps the record honest if a driver ever calls it.
       send({ jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'fake-acp-server: no auth gate; authenticate is never needed (OQ-1)' } });
       return;
-    case 'session/new':
+    case 'session/new': {
       acpSessionId = `fake-acp-${process.pid}-${++sessionCounter}`;
       sessionMode = 'yolo';
-      send({
+      const established = {
         jsonrpc: '2.0',
         id: frame.id,
         result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
-      });
+      };
+      if (PRE_PIN_MODE_BUILD) {
+        // The initial-mode announcement, written BEFORE the establishment
+        // response line and with NO sessionId member — the shape that
+        // folds BEFORE establishment resolves (the driver's session-id
+        // gate passes an unidentified update pre-establishment:
+        // undefined === undefined). observedMode folds 'build' with a seq
+        // that predates the pin request by construction.
+        process.stdout.write(
+          `${JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'session/update',
+            params: { update: { sessionUpdate: 'current_mode_update', currentModeId: 'build' } },
+          })}\n${JSON.stringify(established)}\n`,
+        );
+        return;
+      }
+      send(established);
       return;
+    }
     case 'session/load': {
       const sid = frame.params?.sessionId;
       if (typeof sid !== 'string' || sid === '') {
@@ -911,6 +935,13 @@ function onFrame(frame) {
         // The unshapeable-answer persona: the driver's not-confirmed
         // evidence must distinguish this from a merely-absent modes echo.
         send({ jsonrpc: '2.0', id: frame.id, result: { modes: 'garbage' } });
+        return;
+      }
+      if (PRE_PIN_MODE_BUILD) {
+        // The stale-mode persona's pin answer: NO modes echo and NO fresh
+        // current_mode_update — the only 'build' observation on the wire
+        // is the pre-pin announcement above.
+        send({ jsonrpc: '2.0', id: frame.id, result: { configOptions: configOptionsLazy() } });
         return;
       }
       if (MODE_PIN_NOTIFICATION) {

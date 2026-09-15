@@ -1234,6 +1234,31 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('a PRE-pin mode report naming build is STALE — it cannot confirm the pin (PR #53 review, Codex P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_PRE_PIN_MODE_BUILD: the agent announces its initial mode
+      // 'build' right after session/new (the loading-an-already-build-
+      // session shape), and the pin answer carries NO modes echo and NO
+      // fresh notification. The only 'build' observation predates the pin
+      // request, so a driver that checks observedMode alone would accept
+      // the STALE value and prompt without proving THIS pin landed — the
+      // fixed driver snapshots the update seq before sending the pin and
+      // requires the naming to be newer.
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_PRE_PIN_MODE_BUILD: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'stale-mode run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never prompted — unmeasured
+      const narration = await narrationOf(store, result.sessionId as string);
+      const marker = narration.find((line) => line.includes('"handshake-failure"'));
+      expect(marker !== undefined && marker.includes('mode pin was not confirmed')).toBe(true);
+      expect(marker !== undefined && marker.includes('STALE')).toBe(true); // the evidence names the staleness
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'assistant')).toBe(false); // the prompt never fired
+    });
+  });
+
   test('a POST-PIN mode downgrade is narrated (cq: mode-downgrade) — evidence, never classified alone (round-3, the round-2 fix pinned)', async () => {
     await withScratch(async (scratchDir, store) => {
       // FAKE_ACP_MODE_DOWNGRADE: after the confirmed pin (materialization

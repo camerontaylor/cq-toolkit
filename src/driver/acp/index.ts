@@ -1271,6 +1271,15 @@ export class AcpDriver implements Driver {
     // never-asks tripwire remains the downstream backstop).
     if (handshakeFailure === undefined && !signalFired && acpSessionId !== undefined) {
       try {
+        // Snapshot the update seq BEFORE the pin goes out (PR #53 review,
+        // Codex P1): the notification surface confirms ONLY when its
+        // naming of the pinned mode is NEWER than this snapshot. A
+        // current_mode_update folded during establishment — loading an
+        // already-build session, or an agent announcing its initial mode
+        // right after session/new — leaves observedMode naming the pinned
+        // mode with a seq from BEFORE the pin; accepting it would prompt
+        // on a stale observation without proving THIS pin landed.
+        const seqBeforePin = observation.updateSeq;
         pinInFlight = true;
         const pinRaw = await wire.request(ACP_METHODS.sessionSetConfigOption, {
           sessionId: acpSessionId,
@@ -1281,15 +1290,24 @@ export class AcpDriver implements Driver {
         const echoedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
         // TWO confirmation surfaces (review round 1 / the live record): the
         // response's modes echo, OR a current_mode_update naming the pinned
-        // mode — the live vendor does the latter, in the same flush BEFORE
-        // the response line, so it is already folded when this continuation
-        // runs (wire lines process in order). Neither surface naming build =
-        // an unpinned session: a policy void, refusing to prompt.
-        if (echoedMode !== GATING_MODE && observation.observedMode !== GATING_MODE) {
+        // mode that arrived AFTER the pin was sent — the live vendor does
+        // the latter, in the same flush BEFORE the response line, so it is
+        // already folded (with a newer seq) when this continuation runs
+        // (wire lines process in order). Neither surface confirming = an
+        // unpinned session: a policy void, refusing to prompt.
+        const notificationConfirms =
+          observation.observedMode === GATING_MODE &&
+          observation.observedModeSeq !== undefined &&
+          observation.observedModeSeq > seqBeforePin;
+        if (echoedMode !== GATING_MODE && !notificationConfirms) {
+          const stale =
+            observation.observedMode === GATING_MODE
+              ? ' (STALE — folded before the pin was sent; not a confirmation of THIS pin)'
+              : '';
           handshakeFailure =
             `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
             `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, observed ` +
-            `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}) — ` +
+            `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}${stale}) — ` +
             'an unpinned session is a policy void, refusing to prompt';
         }
       } catch (err) {
