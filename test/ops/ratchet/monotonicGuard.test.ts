@@ -735,6 +735,120 @@ describe('checkDiffMonotonicity', () => {
     });
   });
 
+  test('a binary baseline modification (Binary files differ / GIT binary patch) fails closed', () => {
+    // Binary sections have no ± lines to reconstruct — and binary content
+    // is exactly what parseBaseline would reject as corrupt. They must not
+    // ride the index/mode-only skip to ok.
+    const differ = [
+      `diff --git a/${REL} b/${REL}`,
+      'index 1111111..2222222 100644',
+      'Binary files a/baselines/x and b/baselines/x differ',
+    ].join('\n');
+    expect(checkDiffMonotonicity(differ)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+    const patch = [
+      `diff --git a/${REL} b/${REL}`,
+      'index 1111111..2222222 100644',
+      'GIT binary patch',
+      'literal 0',
+    ].join('\n');
+    expect(checkDiffMonotonicity(patch)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('normal JSON numbers — ints, floats, exponents — are still judged (tighten passes)', () => {
+    // The strict tokenizer must not over-reject: valid ints, floats, and
+    // scientific notation reconstruct exactly as before (last-minus 2e1 =
+    // 20 tightens to last-plus 1e1 = 10 under lower-is-better).
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 3.5,', '  "value": 2e1,'],
+      ['  "direction": "lower-is-better",', '  "value": 2.5,', '  "value": 1e1,'],
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
+  test.each([
+    ['a leading-dot number (.70 — invalid JSON)', '  "value": .70,'],
+    ['a trailing-dot number (1. — invalid JSON)', '  "value": 1.,'],
+    ['a leading-zero token followed by junk (01x — invalid JSON)', '  "value": 01x,'],
+  ])('an invalid-JSON numeric token on the + side (%s) fails closed — the committed file would not parse', (_label, plusLine) => {
+    // The strict tokenizer captures NO number from these tokens, so the ±
+    // value counts mismatch (old 1, new 0) and the section fails closed:
+    // a threshold the committed file could never contain is never judged
+    // as a tighten.
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 3,'],
+      ['  "direction": "lower-is-better",', plusLine],
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [{ path: REL, why: 'unparsable baseline diff' }],
+      filesChecked: 1,
+    });
+  });
+
+  test('removing the direction while tightening 3 → 2 fails as direction changed (schema-invalid file)', () => {
+    // The minus side declares the direction, the plus side has dropped it:
+    // the committed file would be schema-invalid (parseBaseline rejects it)
+    // and the ratchet's semantics would be undefined — terminal violation,
+    // never a compare-under-the-surviving-direction pass.
+    const diff = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 3,'],
+      ['  "value": 2,'],
+    );
+    const verdict = checkDiffMonotonicity(diff);
+    expect(verdict).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          oldValue: 3,
+          newValue: 2,
+          why: 'direction changed',
+          oldDirection: 'lower-is-better',
+          newDirection: undefined,
+        },
+      ],
+      filesChecked: 1,
+    });
+    // The absent side renders as 'undefined'.
+    if (verdict.ok) throw new Error('unreachable');
+    expect(formatViolations(verdict.violations)).toEqual([
+      `${REL}: direction changed lower-is-better → undefined`,
+    ]);
+  });
+
+  test('adding the direction while tightening 3 → 2 fails as direction changed the same way', () => {
+    const diff = modifiedSection(
+      REL,
+      ['  "value": 3,'],
+      ['  "direction": "lower-is-better",', '  "value": 2,'],
+    );
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          oldValue: 3,
+          newValue: 2,
+          why: 'direction changed',
+          oldDirection: undefined,
+          newDirection: 'lower-is-better',
+        },
+      ],
+      filesChecked: 1,
+    });
+  });
+
   test('a ±count mismatch (two removed values, one added) fails closed — the pair cannot be lined up', () => {
     const diff = modifiedSection(
       REL,

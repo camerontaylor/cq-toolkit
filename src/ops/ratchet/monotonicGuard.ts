@@ -56,7 +56,9 @@
 // direction FLIP with values intact is condemned on its own terms
 // (why:'direction changed'): flipping `direction` redefines which way
 // "tighten" points, the same incomparable-evidence refusal captureBaseline's
-// identity check enforces at write time. A same-value re-capture
+// identity check enforces at write time — and so is a direction PRESENCE
+// change (the field removed or added on exactly one side): the committed
+// file would be schema-invalid. A same-value re-capture
 // (oldValue === newValue — captureBaseline legitimately rewrites an
 // equal-value baseline when only the clock moves) is skipped silently — and
 // so is the REAL git shape of that rewrite, where the value line rides in
@@ -100,7 +102,15 @@ const BASELINE_PATH = /^baselines\/.+\.json$/;
 // Quote-anchored keys: `"value"` cannot match `"oldValue"` (capital V) nor
 // `"myvalue"` (no quote before the v), so the extraction sees exactly the
 // baseline schema's own fields.
-const VALUE_RE = /"value"\s*:\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)/g;
+// VALUE_RE is a STRICT JSON-number token with a terminator lookahead
+// (post-cap Codex wave): without it, numeric PREFIXES of invalid JSON were
+// judged as thresholds the committed file never contained — `1.` captured
+// as 1, `01x` as 0, `.70` matched via the old leading-dot alternative. Now
+// `.70` cannot start a match at all, and `1.` / `01x` fail the lookahead
+// (the next char continues a number) → no capture → value unreconstructable
+// → the existing fail-closed paths handle it. `1e999` still matches and is
+// rejected by the non-finite gate in judgeModified.
+const VALUE_RE = /"value"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
 const DIRECTION_RE = /"direction"\s*:\s*"([^"]*)"/g;
 const METRIC_RE = /"metric"\s*:\s*"([^"]*)"/g;
 const TARGET_RE = /"target"\s*:\s*"([^"]*)"/g;
@@ -293,9 +303,14 @@ function judgeModified(
   if (valuesMoved === false && scanSide(context, VALUE_RE).count === 0) {
     return [unparsable()];
   }
-  // Direction: NEW side preferred, else OLD side (rule 3), with each side's
-  // ± lines preferred over shared context. The unjudgeable-direction gate
-  // below binds ONLY when the values differ — see the same-value skip.
+  // Direction: reconstructed per side — ± lines preferred over shared
+  // context. Three mutually exclusive outcomes drive the verdicts below:
+  // both sides present (flip/loosens under the NEW side's direction),
+  // exactly ONE side present (the field was removed or added — the
+  // committed file would be schema-invalid: parseBaseline rejects it, and
+  // the guard's semantics would be undefined → terminal 'direction
+  // changed'), or neither (a moved value is unjudgeable → fail-closed; an
+  // unmoved value-only hunk passes via the shared context value).
   const newDir = newSide.direction.last;
   const oldDir = oldSide.direction.last;
   const direction = newDir ?? oldDir;
@@ -315,7 +330,30 @@ function judgeModified(
   const violations: BaselineViolation[] = [];
   // A flip redefines which way "tighten" points — incomparable evidence
   // (fail-closed), the diff-side twin of captureBaseline's identity check.
-  const flip = oldDir !== undefined && newDir !== undefined && oldDir !== newDir;
+  const oldHasDir = oldDir !== undefined;
+  const newHasDir = newDir !== undefined;
+  const flip = oldHasDir && newHasDir && oldDir !== newDir;
+  const directionPresenceChange = oldHasDir !== newHasDir;
+  // Direction PRESENCE change (final post-cap Codex wave): removing (or
+  // adding) the direction field on exactly one side makes the committed
+  // baseline schema-invalid — parseBaseline would reject it — and leaves
+  // the ratchet's semantics undefined. Terminal, like the unit gate, and
+  // fired regardless of value movement; never for value-only-in-context
+  // sections (both sides resolve to the same shared context value).
+  if (directionPresenceChange) {
+    return [
+      {
+        path,
+        target,
+        metric,
+        oldValue,
+        newValue,
+        why: 'direction changed',
+        oldDirection: oldDir,
+        newDirection: newDir,
+      },
+    ];
+  }
   // Unit identity (Codex P1): a scale change is incomparable however the
   // numbers line up — `0.8 ratio` → `70 pct` would otherwise read as an
   // 87.5× "tightening". Undefined counts as a value on BOTH sides: adding
@@ -344,8 +382,9 @@ function judgeModified(
   // baseline when only the clock moves — skip the section silently
   // (filesChecked has already counted it). Two exceptions keep the guard
   // honest: a direction FLIP is condemned even at equal values (it
-  // redefines the ratchet itself), and only DIFFERING values with an
-  // unreconstructable direction stay fail-closed below.
+  // redefines the ratchet itself — a PRESENCE change was already handled
+  // above, terminal), and only DIFFERING values with an unreconstructable
+  // direction stay fail-closed below.
   if (oldValue === newValue && flip === false) return [];
   if (oldValue !== undefined && newValue !== undefined && oldValue !== newValue) {
     // No line in the section (± or context) declares a direction — or the
@@ -398,6 +437,14 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
     }
     if (BASELINE_PATH.test(path) === false) continue; // judged: baseline files only
     filesChecked += 1;
+    // Binary baselines (post-cap Codex wave): a `Binary files ... differ`
+    // line or a `GIT binary patch` payload has no ± lines to reconstruct —
+    // and binary content is exactly what parseBaseline would reject as
+    // corrupt. Fail closed; never ride the index/mode-only skip.
+    if (hasMarker(section, 'Binary files') || hasMarker(section, 'GIT binary patch')) {
+      violations.push({ path, why: 'unparsable baseline diff' });
+      continue;
+    }
     const { minus, plus, context } = contentLines(section);
     // Lifecycle from METADATA (Codex P1) — never from content-line counts:
     // an existing-file modification can produce one-sided content, and
