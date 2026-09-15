@@ -134,8 +134,14 @@ function summaryContradiction(
   if (report.success === false && failureCount === 0) {
     return 'summary reports a failing run but no failure details were extracted';
   }
-  if ((numTotalTests > 0 || numFailedTests > 0) && testResults.length === 0) {
-    return 'summary counts tests but testResults carries no suite entries';
+  if (numTotalTests > 0 || numFailedTests > 0) {
+    const totalAssertions = testResults.reduce<number>((sum, suite) => {
+      const record = asRecord(suite);
+      return sum + (Array.isArray(record?.assertionResults) ? record.assertionResults.length : 0);
+    }, 0);
+    if (totalAssertions === 0) {
+      return 'summary counts tests but testResults carries no suite entries';
+    }
   }
   if (report.success === true && numFailedTests > 0) {
     return 'summary claims success but also counts failed tests';

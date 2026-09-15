@@ -111,6 +111,23 @@ describe('vitest-json adapter (real captured fixture)', () => {
     });
   });
 
+  test('suites present but every one assertionless is indeterminate when the summary counts tests', () => {
+    const stdout = JSON.stringify({
+      success: true,
+      numTotalTests: 1,
+      numFailedTests: 0,
+      testResults: [
+        { name: '/tmp/a.test.ts', status: 'passed', assertionResults: [] },
+        { name: '/tmp/b.test.ts', status: 'passed', assertionResults: [] },
+      ],
+    });
+    const result = parseWith('vitest-json', { stdout, stderr: '', exitCode: 0 });
+    expect(result).toEqual({
+      verdict: 'indeterminate',
+      reason: 'summary counts tests but testResults carries no suite entries',
+    });
+  });
+
   test('success:true alongside a numFailedTests count is indeterminate (self-contradiction)', () => {
     const stdout = JSON.stringify({
       success: true,
