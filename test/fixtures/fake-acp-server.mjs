@@ -129,6 +129,61 @@
 //                         the driver's stdout line buffer must hold the
 //                         partial frame until the newline (the old
 //                         8000-char cap destroyed it mid-JSON)
+//   FAKE_ACP_IGNORE_MODE_PIN when '1', session/set_config_option does NOT
+//                         apply the pin — the response echoes the mode
+//                         STILL 'yolo' (the unconfirmed-pin persona,
+//                         review-debt #39: the driver must verify the
+//                         echoed mode and fail the run pre-prompt)
+//   FAKE_ACP_MODE_PIN_NOTIFICATION when '1', the set_config_option answer
+//                         carries NO modes echo — the switch is broadcast
+//                         as a current_mode_update notification naming
+//                         'build' written BEFORE the response line (the
+//                         LIVE vendor's shape, probe 2026-09-14: the
+//                         driver must confirm the pin from the
+//   FAKE_ACP_MODE_DOWNGRADE when '1', a current_mode_update naming 'yolo'
+//                         is broadcast MID-TURN after the confirmed pin
+//                         (the round-2 fix's downgrade-marker persona —
+//                         the marker must narrate it, never classify alone)
+//   FAKE_ACP_PIN_UNSHAPEABLE when '1', the set_config_option answer is an
+//                         UNSHAPEABLE result (modes as a bare string) —
+//                         the not-confirmed evidence must say so
+//                         ('unshapeable pin response'), distinct from an
+//                         absent modes echo
+//   FAKE_ACP_DENY_BUT_COMPLETE when '1' (tool flows), a DENIED tool is
+//                         EXECUTED anyway and reported status 'completed'
+//                         on the same toolCallId (the
+//                         ungated-through-the-answer persona,
+//                         review-debt #45 — the driver's
+//                         denied-execution tripwire must fail the run)
+//   FAKE_ACP_LATE_FAIL    when '1' (with DENY_BUT_COMPLETE), AFTER the
+//                         completed report a further update for the same
+//                         toolCallId reports status 'failed' (CodeRabbit
+//                         P1: the completed evidence must be LATCHED at
+//                         the fold — the mutable final status must not
+//                         erase the bypass evidence)
+//   FAKE_ACP_RAW_OUTPUT_JSON when '1' (a FAILED tool execution), the
+//                         tool_call_update rawOutput is an OBJECT
+//                         { error: <text> } instead of a string
+//                         (review-debt #49: the string-only schema
+//                         rejected the whole frame; the fold must
+//                         stringify and keep the status + output)
+//   FAKE_ACP_HUGE_FRAME   when '1', after materialization the fixture
+//                         writes ONE >1 MiB frame PREFIX with NO newline
+//                         and never completes it (review-debt #42: the
+//                         driver's stdout line buffer overflows — the
+//                         connection must FAIL and the run settle error;
+//                         the turn never settles protocol-side)
+//   FAKE_ACP_HUGE_FRAME_COMPLETE when '1', ONE newline-terminated frame
+//                         larger than the 1 MiB line bound is written
+//                         whole (Codex P2 on the RD-F PR: the bound must
+//                         hold for COMPLETE frames too — the connection
+//                         fails with evidence, the frame is never parsed)
+//   FAKE_ACP_HUGE_FRAME_AFTER_REPLY when '1', a VALID turn settles
+//                         end_turn FIRST and the oversized unterminated
+//                         frame is written AFTER the response (CodeRabbit
+//                         P2: the pending table is empty at failConnection
+//                         — the verdict must still pin error via the
+//                         connection-failure evidence, measurement folded)
 //   ok               materialization updates + reply (FAKE_ACP_REPLY ??
 //                    'ok') + end_turn with usage
 //   tool-then-reply  ONE gated tool call: request_permission round-trip
@@ -190,6 +245,16 @@ const STOP_READ_BEFORE_PROMPT = process.env.FAKE_ACP_STOP_READ_BEFORE_PROMPT ===
 const OMIT_RAW_OUTPUT = process.env.FAKE_ACP_OMIT_RAW_OUTPUT === '1';
 const PLACEHOLDER_CARD = process.env.FAKE_ACP_PLACEHOLDER_CARD === '1';
 const BIG_FRAME = process.env.FAKE_ACP_BIG_FRAME === '1';
+const IGNORE_MODE_PIN = process.env.FAKE_ACP_IGNORE_MODE_PIN === '1';
+const MODE_PIN_NOTIFICATION = process.env.FAKE_ACP_MODE_PIN_NOTIFICATION === '1';
+const MODE_DOWNGRADE = process.env.FAKE_ACP_MODE_DOWNGRADE === '1';
+const PIN_UNSHAPEABLE = process.env.FAKE_ACP_PIN_UNSHAPEABLE === '1';
+const DENY_BUT_COMPLETE = process.env.FAKE_ACP_DENY_BUT_COMPLETE === '1';
+const LATE_FAIL = process.env.FAKE_ACP_LATE_FAIL === '1';
+const RAW_OUTPUT_JSON = process.env.FAKE_ACP_RAW_OUTPUT_JSON === '1';
+const HUGE_FRAME = process.env.FAKE_ACP_HUGE_FRAME === '1';
+const HUGE_FRAME_AFTER_REPLY = process.env.FAKE_ACP_HUGE_FRAME_AFTER_REPLY === '1';
+const HUGE_FRAME_COMPLETE = process.env.FAKE_ACP_HUGE_FRAME_COMPLETE === '1';
 
 // The tolerant-vendor persona (FAKE_ACP_IGNORE_CANCEL=1), signal half: the
 // termination is IGNORED — only the unignorable SIGKILL rung reaches this
@@ -220,6 +285,12 @@ const POST_LOAD_TAIL_TEXT =
 // line is still partial. The driver must hold the partial frame until the
 // newline; BOTH markers must then appear in the folded transcript.
 const BIG_FRAME_TEXT = `BIGFRAME-START ${'x'.repeat(20000)} BIGFRAME-END`;
+
+// The oversized-frame prefix (FAKE_ACP_HUGE_FRAME=1): a valid-frame PREFIX
+// larger than the driver's 1 MiB stdout line buffer, written with NO
+// newline and never completed — the wire can carry no protocol meaning
+// past it (review-debt #42: the connection must fail, not truncate).
+const HUGE_FRAME_PREFIX = `{"jsonrpc":"2.0","method":"session/update","params":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"${'x'.repeat(1_100_000)}"`;
 
 /**
  * Emit ONE agent_message_chunk update as a ~20k-char JSON line split across
@@ -511,12 +582,37 @@ function endTurn() {
 
 async function okFlow() {
   materializationUpdates();
+  if (MODE_DOWNGRADE) {
+    notifyUpdate({ sessionUpdate: 'current_mode_update', currentModeId: 'yolo' }); // mid-turn downgrade after the confirmed pin
+  }
+  if (HUGE_FRAME) {
+    process.stdout.write(HUGE_FRAME_PREFIX); // no newline, never completed — the overflow persona (#42)
+    return; // hold the turn open; the driver fails the connection on the buffer overflow
+  }
+  if (HUGE_FRAME_COMPLETE) {
+    // The complete-oversized-frame persona (Codex P2): ONE whole frame
+    // over the line bound, newline and all — the bound must fail the
+    // connection, never parse it.
+    notifyUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: `HUGECOMPLETE ${'x'.repeat(1_100_000)}` },
+    });
+    return; // never settle the turn — the connection is failed from the driver's side
+  }
   if (BIG_FRAME) {
     await emitBigFrameChunk(); // the straddled frame fully flushes BEFORE end_turn
   } else {
     emitChunk(REPLY ?? 'ok');
   }
   endTurn();
+  if (HUGE_FRAME_AFTER_REPLY) {
+    // The post-response overflow persona (CodeRabbit P2): a VALID turn
+    // settles end_turn FIRST, then the harness emits an oversized
+    // unterminated frame. The pending table is empty when the connection
+    // fails — the verdict must still pin error (connection-failed), with
+    // the real measurement folded.
+    process.stdout.write(HUGE_FRAME_PREFIX);
+  }
 }
 
 async function resumeEchoFlow() {
@@ -592,7 +688,13 @@ async function toolFlow({ alwaysFail }) {
 
     let ok;
     let text;
-    if (!allowed) {
+    if (!allowed && DENY_BUT_COMPLETE) {
+      // The ungated-through-the-answer persona (#45): the vendor EXECUTES
+      // past the rejection and reports the denied toolCallId completed.
+      const executed = await executeTool(TOOL, input);
+      ok = executed.ok;
+      text = executed.text;
+    } else if (!allowed) {
       ok = false;
       text = `rejected (${optionId})`; // the probed deny shape: rawOutput 'rejected (deny)'
     } else if (alwaysFail) {
@@ -609,9 +711,22 @@ async function toolFlow({ alwaysFail }) {
       status: ok ? 'completed' : 'failed',
       content: [{ type: 'text', text }],
       // OMIT_RAW_OUTPUT: the content-only persona (Codex P2) — the result
-      // rides the blocks alone, failures included.
-      ...(ok || OMIT_RAW_OUTPUT ? {} : { rawOutput: text }),
+      // rides the blocks alone, failures included. RAW_OUTPUT_JSON: the
+      // structured-value persona (#49) — a failed tool's rawOutput is an
+      // OBJECT; the fold must stringify it, not reject the frame.
+      ...(ok || OMIT_RAW_OUTPUT ? {} : { rawOutput: RAW_OUTPUT_JSON ? { error: text } : text }),
     });
+    if (LATE_FAIL && !allowed) {
+      // A further update for the SAME toolCallId reporting failed — the
+      // mutable-final-status shape the latch must survive (CodeRabbit P1).
+      notifyUpdate({
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        status: 'failed',
+        content: [{ type: 'text', text: 'late failure after the completed report' }],
+        rawOutput: 'late failure after the completed report',
+      });
+    }
     emitChunk(`${REPLY ?? 'noted the tool result'} [permission:${optionId}] [mode:${sessionMode}]`);
     endTurn();
   });
@@ -781,8 +896,27 @@ function onFrame(frame) {
       return;
     }
     case 'session/set_config_option':
-      if (frame.params?.configId === 'mode') {
+      if (frame.params?.configId === 'mode' && !IGNORE_MODE_PIN) {
         sessionMode = String(frame.params?.value ?? sessionMode);
+      }
+      if (PIN_UNSHAPEABLE) {
+        // The unshapeable-answer persona: the driver's not-confirmed
+        // evidence must distinguish this from a merely-absent modes echo.
+        send({ jsonrpc: '2.0', id: frame.id, result: { modes: 'garbage' } });
+        return;
+      }
+      if (MODE_PIN_NOTIFICATION) {
+        // The LIVE shape (probe 2026-09-14): no modes echo in the response;
+        // the switch rides a current_mode_update written BEFORE the
+        // response line — the driver's wire folds it before the pin await
+        // resolves (lines process in order).
+        notifyUpdate({ sessionUpdate: 'current_mode_update', currentModeId: sessionMode });
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          result: { configOptions: configOptionsLazy() },
+        });
+        return;
       }
       send({
         jsonrpc: '2.0',

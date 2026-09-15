@@ -741,6 +741,16 @@ mode (one `session/set_config_option` added to the §1.2 subset) — a driver
 that leaves the `yolo` default would sail through its own never-asks tripwire
 on every tool run.
 
+Live-recorded amendment (probe 2026-09-14, tool legs; review round 1 on
+the RD-F PR): the set_config_option ANSWER carries no `modes` member —
+`configOptions` only. The switch is broadcast as a `current_mode_update`
+notification naming `build`, written in the same stdout flush BEFORE the
+response line. A driver that verifies the pin from the response echo alone
+would fail every live run pre-prompt; the driver therefore confirms from
+either surface (echo, or a folded current_mode_update naming `build` —
+the wire's line ordering guarantees the notification is already folded
+when the pin await resolves).
+
 **OQ-6 (cancel-spend) — ANSWERED (client-observable scope per §2.3).**
 Mid-turn `session/cancel` on a generation prompt: `session/prompt` resolves
 `stopReason: "cancelled"` **327 ms** after the cancel notification; the

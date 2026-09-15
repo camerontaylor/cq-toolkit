@@ -185,9 +185,11 @@
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired, or the prompt settled stopReason
 //      'cancelled'                                        → 'aborted'
-//   2. never-asks evidence at settle, a permission ask with NO answerable
-//      option of the required side, or a failed permission-ANSWER write
-//      (the enforcement channel is broken — Codex P1)       → 'error'
+//   2. never-asks evidence at settle, a DENIED tool reporting a completed
+//      execution (ungated through the answer channel), a permission ask
+//      with NO answerable option of the required side, a failed
+//      permission-ANSWER write (the enforcement channel is broken —
+//      Codex P1), or a failed connection (oversized frame) → 'error'
 //   3. folded usage ≥ Budget.maxTokens                   → 'budget'
 //   4. no wellshaped prompt response (handshake failure, child death) → 'error'
 //   5. stopReason 'end_turn'                             → 'complete'
@@ -232,6 +234,7 @@ import {
   RequestPermissionParamsSchema,
   SessionNewResultSchema,
   SessionUpdateParamsSchema,
+  SetConfigOptionResultSchema,
   AcpRpcError,
   isAuthRequiredError,
   mapWireUsage,
@@ -356,6 +359,12 @@ interface RunObservation {
   transcript: string[];
   /** The POST-MATERIALIZATION model value (config_option_update ONLY — never the session/new lazy default). */
   servedModel: string | undefined;
+  /** The mode the harness last REPORTED (current_mode_update — the live vendor's pin-confirmation surface; replay-gated like every fold). */
+  observedMode: string | undefined;
+  /** The fold-sequence of the reported mode — a report is POST-PIN iff its seq exceeds the pin response line's seq (CodeRabbit round: preserves same-chunk post-response reports the old reset wiped). */
+  observedModeSeq: number | undefined;
+  /** Monotonic fold counter for current_mode_update frames (relative order only). */
+  updateSeq: number;
   /** toolCallId → latest tool fold. */
   tools: Map<string, ToolObservation>;
   /** toolCallId → the channel it was FIRST seen on ('permission' = the gate fired for it). First-write-wins. */
@@ -364,6 +373,8 @@ interface RunObservation {
   permissionDecisions: Map<string, 'allow' | 'deny'>;
   /** toolCallIds already carrying a denial (dedupe across the two channels). */
   deniedToolCallIds: Set<string>;
+  /** DENIED toolCallIds that reported a COMPLETED execution — latched AT THE FOLD (a later status update must not erase the bypass evidence). */
+  deniedCompletedIds: Set<string>;
   /** The frozen denials, in denial order (answer-side + execution-failure side). */
   denials: ToolDenial[];
 }
@@ -374,10 +385,14 @@ function newObservation(): RunObservation {
     stderr: [],
     transcript: [],
     servedModel: undefined,
+    observedMode: undefined,
+    observedModeSeq: undefined,
+    updateSeq: 0,
     tools: new Map(),
     toolFirstSeen: new Map(),
     permissionDecisions: new Map(),
     deniedToolCallIds: new Set(),
+    deniedCompletedIds: new Set(),
     denials: [],
   };
 }
@@ -392,8 +407,13 @@ function newObservation(): RunObservation {
  * can be large) routinely straddles `data`-chunk boundaries and must sit
  * in the buffer intact until its newline arrives. The old 8000-char mirror
  * of the stderr cap destroyed exactly those frames mid-JSON, before onLine
- * could parse them. 1 MiB is a pathological-run bound, not a protocol
- * limit; stderr (human diagnostics, not frames) keeps its 8000-char cap.
+ * could parse them. 1 MiB is a pathological-run bound, not a protocol limit; stderr (human
+ * diagnostics, not frames) keeps its 8000-char cap. ON OVERFLOW the
+ * connection FAILS (failConnection — review-debt #42): a valid frame larger
+ * than the buffer (a permission request whose rawInput embeds file contents
+ * is plausible) must error the run naming the oversized frame, never
+ * truncate — once bytes are dropped the stream can never resynchronize
+ * mid-JSON.
  */
 const STDOUT_LINE_BUFFER_LIMIT = 1_048_576;
 
@@ -440,20 +460,48 @@ class AcpWire {
       while (nl !== -1) {
         const line = this.lineBuffer.slice(0, nl).trim();
         this.lineBuffer = this.lineBuffer.slice(nl + 1);
-        if (line !== '') this.onLine(line);
+        if (line !== '') {
+          // THE BOUND IS A TRUE BOUND (Codex P2 on this PR): the ceiling
+          // applies to COMPLETE frames too — a newline-terminated frame
+          // over the limit is failed with evidence, never parsed, exactly
+          // like the unterminated accumulation below. #42's title names
+          // any frame larger than the line buffer.
+          if (line.length > STDOUT_LINE_BUFFER_LIMIT) {
+            this.handlers.onUnparseableLine(
+              `[cq: oversized frame — ${line.length} chars exceeds the ${STDOUT_LINE_BUFFER_LIMIT}-char line bound; failing the connection]`,
+            );
+            this.lineBuffer = '';
+            this.failConnection(
+              new Error(
+                `the harness emitted an oversized frame (${line.length} chars > ${STDOUT_LINE_BUFFER_LIMIT} char line bound) — ` +
+                  'the connection cannot carry protocol meaning past it, so the run fails with this evidence',
+              ),
+            );
+            return;
+          }
+          this.onLine(line);
+        }
         nl = this.lineBuffer.indexOf('\n');
       }
       // A frame straddling chunk boundaries WAITS here for its newline —
       // the normal case on this wire, not an error (frames are the data;
       // see STDOUT_LINE_BUFFER_LIMIT). The 1 MiB ceiling only bounds a
-      // pathological run: on overflow the accumulated bytes are emitted as
-      // a narration truncation marker (never silent loss) before the
-      // buffer clears.
+      // pathological run: on overflow the connection FAILS (review-debt
+      // #42) — the evidence lands in narration, then every pending request
+      // rejects naming the oversized frame and the child is killed. The
+      // old shape (clear the buffer, keep reading) truncated a possibly
+      // valid frame and kept a connection that can never resynchronize.
       if (this.lineBuffer.length > STDOUT_LINE_BUFFER_LIMIT) {
         this.handlers.onUnparseableLine(
-          `[cq: stdout line buffer overflow — ${this.lineBuffer.length} chars with no newline; truncated, never silently dropped]`,
+          `[cq: stdout line buffer overflow — ${this.lineBuffer.length} chars with no newline; failing the connection rather than truncating a possibly-valid frame]`,
         );
         this.lineBuffer = '';
+        this.failConnection(
+          new Error(
+            `the harness emitted an oversized frame (> ${STDOUT_LINE_BUFFER_LIMIT} chars with no newline) — ` +
+              'the connection cannot resynchronize mid-frame, so the run fails with this evidence',
+          ),
+        );
       }
     });
     child.stderr?.on('data', (chunk: string) => {
@@ -514,7 +562,32 @@ class AcpWire {
     return this.send({ jsonrpc: '2.0', id, error: { code: -32603, message } });
   }
 
+  /**
+   * Fail the WHOLE connection (review-debt #42): every pending request
+   * rejects with `reason` and the child is killed. Once frame bytes have
+   * been dropped, the newline-delimited stream can never resynchronize
+   * (the next newline would be read as a frame boundary mid-JSON), so the
+   * honest settle is an error verdict carrying `reason` — never silent
+   * truncation, never a run left reading a misframed wire. Idempotent with
+   * the exit path: whatever rejects first wins, and the exit handler finds
+   * the pending table already empty.
+   */
+  private failConnection(reason: Error): void {
+    this.connectionFailure = reason;
+    for (const p of this.pending.values()) p.reject(reason);
+    this.pending.clear();
+    this.child.kill();
+  }
+
+  /** The reason failConnection fired, when it did — verdict evidence even when no request was pending at the time. */
+  connectionFailure: Error | undefined;
+
   private onLine(line: string): void {
+    // A failed connection folds NOTHING further (CodeRabbit round: a later
+    // newline completing a valid session/update must not persist assistant
+    // text or tool results from a wire that already failed mid-frame). The
+    // failure itself is the recorded evidence.
+    if (this.connectionFailure !== undefined) return;
     let data: unknown;
     try {
       data = JSON.parse(line);
@@ -761,6 +834,13 @@ export class AcpDriver implements Driver {
     // the await's continuation (the round-1 shape) dropped it.
     let replaying = false;
     let replayedFrameCount = 0;
+    // The mode-pin response's fold-sequence: set at the RESPONSE LINE (the
+    // wire-level hook), it separates PRE-pin mode reports (the
+    // confirmation surface) from POST-pin ones (downgrade evidence) —
+    // including reports in the SAME chunk after the response line, which a
+    // continuation-level reset would wipe (CodeRabbit round on this PR).
+    let pinInFlight = false;
+    let pinSeqAtResponse: number | undefined;
     // True while the session-establishment request (load / resume / new)
     // is in flight. Its RESPONSE LINE carries the authoritative sessionId,
     // which the onResponseLine hook adopts AT LINE LEVEL — a same-chunk
@@ -913,6 +993,13 @@ export class AcpDriver implements Driver {
       },
       onServerRequest: handleServerRequest,
       onResponseLine: (result) => {
+        // The mode-pin response marks the PRE/POST-pin boundary AT LINE
+        // LEVEL (the hook fires synchronously, before any later frame of
+        // the same chunk is gated).
+        if (pinInFlight) {
+          pinSeqAtResponse = observation.updateSeq;
+          pinInFlight = false;
+        }
         // The replay window clears AT THE RESPONSE LINE — synchronously,
         // before any frame later in the same data chunk is gated (the
         // round-1 shape cleared only at the await's continuation, which
@@ -1154,13 +1241,36 @@ export class AcpDriver implements Driver {
     // --- Handshake step 3: THE MODE PIN, before ANY prompt (§1.2
     // amendment). Sessions open in yolo — which never asks — so an
     // unpinned session is a policy void: a failed pin refuses to prompt.
+    // The pin is VERIFIED, not just sent (review-debt #39): a 2xx response
+    // alone proves nothing — the same response can echo the current mode
+    // STILL 'yolo' (or carry no mode echo at all), leaving the policy
+    // silently unenforced while the run proceeds. The echoed
+    // modes.currentModeId must NAME the pinned mode; a non-confirming
+    // response fails the run pre-prompt exactly like a thrown pin (the
+    // never-asks tripwire remains the downstream backstop).
     if (handshakeFailure === undefined && !signalFired && acpSessionId !== undefined) {
       try {
-        await wire.request(ACP_METHODS.sessionSetConfigOption, {
+        pinInFlight = true;
+        const pinRaw = await wire.request(ACP_METHODS.sessionSetConfigOption, {
           sessionId: acpSessionId,
           configId: MODE_CONFIG_ID,
           value: GATING_MODE,
         });
+        const pin = SetConfigOptionResultSchema.safeParse(pinRaw);
+        const echoedMode = pin.success ? pin.data.modes?.currentModeId : undefined;
+        // TWO confirmation surfaces (review round 1 / the live record): the
+        // response's modes echo, OR a current_mode_update naming the pinned
+        // mode — the live vendor does the latter, in the same flush BEFORE
+        // the response line, so it is already folded when this continuation
+        // runs (wire lines process in order). Neither surface naming build =
+        // an unpinned session: a policy void, refusing to prompt.
+        if (echoedMode !== GATING_MODE && observation.observedMode !== GATING_MODE) {
+          handshakeFailure =
+            `the mode pin was not confirmed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE} ` +
+            `echoed ${echoedMode === undefined ? (pin.success ? 'no mode echo' : 'unshapeable pin response') : `mode '${echoedMode}'`}, observed ` +
+            `${observation.observedMode === undefined ? 'no mode update' : `mode '${observation.observedMode}'`}) — ` +
+            'an unpinned session is a policy void, refusing to prompt';
+        }
       } catch (err) {
         handshakeFailure =
           `the mode pin failed (session/set_config_option ${MODE_CONFIG_ID}=${GATING_MODE}): ${messageOf(err)} — ` +
@@ -1211,6 +1321,46 @@ export class AcpDriver implements Driver {
       );
     }
 
+    // --- THE DENIED-EXECUTION TRIPWIRE (review-debt #45): a toolCallId our
+    // answer DENIED that nevertheless reported a COMPLETED execution is
+    // ungated execution through the answer channel — the harness asked,
+    // was told no, and ran the tool anyway. Same posture as never-asks:
+    // the verdict fails loud (a policy that cannot be enforced is not
+    // silently soft); the bypass is narration evidence — a denied id is
+    // never persisted as a governed tool message.
+    const deniedButCompletedIds = [...observation.deniedCompletedIds];
+    if (deniedButCompletedIds.length > 0) {
+      observation.narration.push(
+        JSON.stringify({
+          cq: 'denied-tool-completed',
+          toolCallIds: deniedButCompletedIds,
+          note: 'a tool_call our answer DENIED reported status completed — the harness executed past the rejection; UNGATED EXECUTION through the answer channel (strategy §2.1)',
+        }),
+      );
+    }
+
+    // --- THE MODE-DOWNGRADE MARKER (round-2 review, low): a harness that
+    // REPORTED a mode other than the pinned one AFTER the pin landed is
+    // enforcement-relevant evidence — the never-asks tripwire only catches
+    // the ungated-execution half of a broken pin. Narrated, never
+    // classified alone: the verdict's error paths own every enforcement
+    // break this wire can show, and a clean reported mode is silence.
+    if (
+      observation.observedMode !== undefined &&
+      observation.observedMode !== GATING_MODE &&
+      observation.observedModeSeq !== undefined &&
+      pinSeqAtResponse !== undefined &&
+      observation.observedModeSeq > pinSeqAtResponse
+    ) {
+      observation.narration.push(
+        JSON.stringify({
+          cq: 'mode-downgrade',
+          mode: observation.observedMode,
+          note: `the harness reported mode '${observation.observedMode}' after the pin — the never-asks tripwire remains the verdict-level backstop`,
+        }),
+      );
+    }
+
     // --- Prompt-directed JSON (§4): parse + validate the assembled text;
     // a failing payload is dropped to narration, never trusted.
     let structured: unknown;
@@ -1243,6 +1393,15 @@ export class AcpDriver implements Driver {
       }
     }
 
+    // A failed connection (the oversized-frame path) pins the verdict
+    // 'error' even when a prompt response had already arrived — the wire's
+    // integrity broke mid-run, and 'complete' would hide that (the
+    // answerWriteFailed mirror). The measured usage still folds.
+    const connectionFailure = wire.connectionFailure;
+    if (connectionFailure !== undefined) {
+      observation.narration.push(JSON.stringify({ cq: 'connection-failed', message: connectionFailure.message }));
+    }
+
     // --- Failure records land in narration BEFORE persistence (evidence,
     // not silence) — the verdict itself has no error-message field.
     if (handshakeFailure !== undefined) {
@@ -1268,6 +1427,8 @@ export class AcpDriver implements Driver {
       signalFired,
       answerWriteFailed,
       permissionAnswerFailed,
+      connectionFailed: connectionFailure !== undefined,
+      deniedRan: deniedButCompletedIds.length > 0,
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
       measuredUsage,
@@ -1295,6 +1456,8 @@ export class AcpDriver implements Driver {
       signalFired: boolean;
       answerWriteFailed: boolean;
       permissionAnswerFailed: boolean;
+      connectionFailed: boolean;
+      deniedRan: boolean;
       promptStopReason: string | undefined;
       responded: boolean;
       measuredUsage: Usage | undefined;
@@ -1306,6 +1469,8 @@ export class AcpDriver implements Driver {
       aborted: inputs.signalFired || inputs.promptStopReason === 'cancelled',
       answerWriteFailed: inputs.answerWriteFailed,
       permissionAnswerFailed: inputs.permissionAnswerFailed,
+      connectionFailed: inputs.connectionFailed,
+      deniedRan: inputs.deniedRan,
       ungated: inputs.ungated,
       maxTokens: budget.maxTokens,
       usage,
@@ -1525,6 +1690,15 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
       existing.status = update.status ?? existing.status;
       existing.identity = permissionToolIdentity(existing.title, existing.kind);
       observation.tools.set(id, existing);
+      // THE LATCH (CodeRabbit P1 on this PR): the completed report IS the
+      // bypass evidence — a later update for the same id (failed, pending)
+      // overwrites the mutable status and would erase it at settle. Latch
+      // at fold time, when the answer's decision is already known; a
+      // tool_call that completed BEFORE its gate is never-asks evidence
+      // instead (first-write-wins).
+      if (existing.status === 'completed' && observation.permissionDecisions.get(id) === 'deny') {
+        observation.deniedCompletedIds.add(id);
+      }
       // The SECOND denial channel: an execution that RAN and failed — not
       // one we denied at the answer (deduped per toolCallId).
       if (
@@ -1549,10 +1723,25 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
       if (value !== undefined) observation.servedModel = value;
       return;
     }
-    case 'current_mode_update':
+    case 'current_mode_update': {
+      // The mode the harness REPORTS — the live vendor's pin-confirmation
+      // surface: its set_config_option response carries no modes echo; the
+      // switch is broadcast as this notification in the same flush as the
+      // response (probe 2026-09-14, both tool legs). Arrives here only
+      // past the replay + session-id gates, so history cannot poison it.
+      // The seq stamps the report's position: the pin response line's seq
+      // is what separates PRE-pin reports (confirmation surface) from
+      // POST-pin ones (downgrade evidence) — nothing is ever wiped.
+      observation.updateSeq += 1;
+      if (update.currentModeId !== undefined) {
+        observation.observedMode = update.currentModeId;
+        observation.observedModeSeq = observation.updateSeq;
+      }
+      return;
+    }
     case 'usage_update':
     case 'known-unconsumed':
-      return; // evidence lives in the mode-pin flow / context telemetry is dropped / no seam field
+      return; // context telemetry is dropped / no seam field
   }
 }
 
@@ -1655,6 +1844,10 @@ export interface StopReasonInputs {
   answerWriteFailed?: boolean;
   /** True when a permission answer could not be SELECTED (the required side was never offered) — failed enforcement; the run fails even if the vendor ignores the termination and settles the unanswered ask (round-3). */
   permissionAnswerFailed?: boolean;
+  /** A DENIED toolCallId reported a completed execution — ungated through the answer channel (review-debt #45); fails like never-asks. */
+  deniedRan?: boolean;
+  /** The wire failed (the oversized-frame connection failure) — integrity broke mid-run; fails even when a response had arrived. */
+  connectionFailed?: boolean;
   /** Never-asks evidence at settle (ungated execution — a policy void is an error, never green). */
   ungated: boolean;
   maxTokens: number | undefined;
@@ -1665,11 +1858,13 @@ export interface StopReasonInputs {
   responded: boolean;
 }
 
-/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → ungated-error → budget → no-response-error → the wire stopReason. */
+/** THE mapping (checked in order): aborted → permission-selection-failure → answer-write-failure → connection-failure → denied-execution-error → ungated-error → budget → no-response-error → the wire stopReason. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
   if (inputs.permissionAnswerFailed === true) return 'error'; // the unanswerable ask — failed enforcement even if the vendor settles end_turn anyway
   if (inputs.answerWriteFailed === true) return 'error'; // the broken enforcement channel — fail loud even if a response arrived
+  if (inputs.connectionFailed === true) return 'error'; // the wire failed mid-run (oversized frame) — fail loud even if a response arrived
+  if (inputs.deniedRan === true) return 'error'; // a denied tool ran anyway — ungated through the answer channel (review-debt #45)
   if (inputs.ungated) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
   if (!inputs.responded) return 'error';

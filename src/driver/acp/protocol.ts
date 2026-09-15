@@ -197,7 +197,12 @@ const ToolCallProgressSchema = z.looseObject({
   sessionUpdate: z.literal('tool_call_update'),
   toolCallId: z.string(),
   status: z.string().optional(),
-  rawOutput: z.string().optional(),
+  // rawOutput accepts ANY JSON value (review-debt #49): a conforming agent
+  // may report an object, array, number, or boolean here — the old
+  // string-only schema rejected the ENTIRE tool_call_update, losing the
+  // terminal status AND the output. Non-strings are serialized at this
+  // boundary (rawOutputToText below); the driver sees a string, as before.
+  rawOutput: z.unknown().optional(),
   // The tool's result CONTENT blocks (the spec's ContentBlock[]; the
   // reference vendor reports a SUCCESSFUL tool result here, rawOutput
   // riding only on some failure shapes — Codex P2). The text of the text
@@ -238,6 +243,7 @@ export type AcpUpdate =
       kind: 'tool_call_update';
       toolCallId: string;
       status?: string;
+      /** Wire rawOutput as TEXT — a non-string JSON value (object/array/number/boolean) serialized at this boundary (review-debt #49). */
       rawOutput?: string;
       /** The content blocks' text (text-typed blocks joined in order), when non-empty — the fallback output the fold reads when rawOutput is absent. */
       contentText?: string;
@@ -284,7 +290,7 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
         kind: 'tool_call_update',
         toolCallId: parsed.data.toolCallId,
         ...(parsed.data.status !== undefined ? { status: parsed.data.status } : {}),
-        ...(parsed.data.rawOutput !== undefined ? { rawOutput: parsed.data.rawOutput } : {}),
+        ...(parsed.data.rawOutput !== undefined ? { rawOutput: rawOutputToText(parsed.data.rawOutput) } : {}),
         ...(contentText !== '' ? { contentText } : {}),
       };
     }
@@ -588,6 +594,23 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
+}
+
+/**
+ * The rawOutput fold at the protocol boundary (review-debt #49): a string
+ * rides verbatim; any other JSON value (object, array, number, boolean,
+ * null) is serialized — the same extraction posture as textOfContentBlocks
+ * below, the vendor's value vocabulary dying here so the driver folds a
+ * string. A value JSON.stringify cannot represent (parse output never
+ * cycles; only a hostile hand-built frame could) falls back to String().
+ */
+export function rawOutputToText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
 }
 
 /**
