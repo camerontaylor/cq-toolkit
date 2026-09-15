@@ -802,12 +802,12 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
       const manifest = makeManifest(plan);
       // Prior run: c1 reached a terminal budget-exhausted record, usage
       // journaled (the same shape as the seeded-USD test).
-      await log.append('plan-dd9-seed--prior--aa', { type: 'run-started', runId: 'plan-dd9-seed--prior--aa', at: 't', planId: 'plan-dd9-seed' });
-      await log.append('plan-dd9-seed--prior--aa', { type: 'job-started', runId: 'plan-dd9-seed--prior--aa', at: 't', jobId: 'c1', op: 'usagey', attempt: 1 });
+      await log.append('plan-dd9-seed--prior--aa', { type: 'run-started', runId: 'plan-dd9-seed--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dd9-seed' });
+      await log.append('plan-dd9-seed--prior--aa', { type: 'job-started', runId: 'plan-dd9-seed--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'usagey', attempt: 1 });
       await log.append('plan-dd9-seed--prior--aa', {
         type: 'job-finished',
         runId: 'plan-dd9-seed--prior--aa',
-        at: 't',
+        at: '2026-09-16T00:00:00.000Z',
         jobId: 'c1',
         opId: 'usagey',
         inputsHash: manifest.jobs[0]?.inputsHash ?? '',
@@ -927,12 +927,12 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
   test('(c) a seeded journal event with negative usage throws at seed time', () => {
     const governor = new BudgetGovernor({ maxTokens: 100 });
     const events: JournalEvent[] = [
-      { type: 'run-started', runId: 'r1', at: 't', planId: 'plan-seed-lying' },
-      { type: 'job-started', runId: 'r1', at: 't', jobId: 'c1', op: 'fake', attempt: 1 },
+      { type: 'run-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-lying' },
+      { type: 'job-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 },
       {
         type: 'job-finished',
         runId: 'r1',
-        at: 't',
+        at: '2026-09-16T00:00:00.000Z',
         jobId: 'c1',
         opId: 'fake',
         inputsHash: 'h1',
@@ -1041,12 +1041,12 @@ describe('governOp folds a returned WorkerResult through observeResult (#14-1/#1
 describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)', () => {
   const SEED_USAGE = { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 };
   const seededEvents = (): JournalEvent[] => [
-    { type: 'run-started', runId: 'r1', at: 't', planId: 'plan-seed-usd' },
-    { type: 'job-started', runId: 'r1', at: 't', jobId: 'c1', op: 'fake', attempt: 1 },
+    { type: 'run-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-usd' },
+    { type: 'job-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 },
     {
       type: 'job-finished',
       runId: 'r1',
-      at: 't',
+      at: '2026-09-16T00:00:00.000Z',
       jobId: 'c1',
       opId: 'fake',
       inputsHash: 'h1',
@@ -1438,13 +1438,13 @@ describe('attempt caps (ws-a item 2)', () => {
       const manifest = makeManifest(plan);
       // A prior run whose journal carries TRUE ordinals (what the T1.4
       // runner will emit): attempts 1 and 2, definitively failed.
-      await log.append('plan-field--prior--aa', { type: 'run-started', runId: 'plan-field--prior--aa', at: 't', planId: 'plan-field' });
-      await log.append('plan-field--prior--aa', { type: 'job-started', runId: 'plan-field--prior--aa', at: 't', jobId: 'j1', op: 'fake', attempt: 1 });
-      await log.append('plan-field--prior--aa', { type: 'job-started', runId: 'plan-field--prior--aa', at: 't', jobId: 'j1', op: 'fake', attempt: 2 });
+      await log.append('plan-field--prior--aa', { type: 'run-started', runId: 'plan-field--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-field' });
+      await log.append('plan-field--prior--aa', { type: 'job-started', runId: 'plan-field--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'j1', op: 'fake', attempt: 1 });
+      await log.append('plan-field--prior--aa', { type: 'job-started', runId: 'plan-field--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'j1', op: 'fake', attempt: 2 });
       await log.append('plan-field--prior--aa', {
         type: 'job-finished',
         runId: 'plan-field--prior--aa',
-        at: 't',
+        at: '2026-09-16T00:00:00.000Z',
         jobId: 'j1',
         opId: 'fake',
         inputsHash: manifest.jobs[0]?.inputsHash ?? '',
@@ -1517,12 +1517,12 @@ describe('default job key — the cap exists without config (review F3)', () => 
       // Prior run: job 'x' ran op 'solo' once (attempt 1) and failed.
       const plan: Plan = { id: 'plan-seed-align', jobs: [{ id: 'x', op: 'solo', input: { n: 0 } }] };
       const manifest = makeManifest(plan);
-      await log.append('plan-seed-align--prior--aa', { type: 'run-started', runId: 'plan-seed-align--prior--aa', at: 't', planId: 'plan-seed-align' });
-      await log.append('plan-seed-align--prior--aa', { type: 'job-started', runId: 'plan-seed-align--prior--aa', at: 't', jobId: 'x', op: 'solo', attempt: 1 });
+      await log.append('plan-seed-align--prior--aa', { type: 'run-started', runId: 'plan-seed-align--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-align' });
+      await log.append('plan-seed-align--prior--aa', { type: 'job-started', runId: 'plan-seed-align--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'x', op: 'solo', attempt: 1 });
       await log.append('plan-seed-align--prior--aa', {
         type: 'job-finished',
         runId: 'plan-seed-align--prior--aa',
-        at: 't',
+        at: '2026-09-16T00:00:00.000Z',
         jobId: 'x',
         opId: 'solo',
         inputsHash: manifest.jobs[0]?.inputsHash ?? '',
@@ -1571,14 +1571,14 @@ describe('default job key — the cap exists without config (review F3)', () => 
     try {
       const log = openRunLog(dir);
       // Two journal jobs sharing op 'solo', two attempts EACH = 4 dispatches.
-      await log.append('p-sum--r1--aa', { type: 'run-started', runId: 'p-sum--r1--aa', at: 't', planId: 'plan-sum' });
+      await log.append('p-sum--r1--aa', { type: 'run-started', runId: 'p-sum--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-sum' });
       for (const jobId of ['x1', 'x2']) {
-        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 1 });
-        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 2 });
+        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 1 });
+        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 2 });
         await log.append('p-sum--r1--aa', {
           type: 'job-finished',
           runId: 'p-sum--r1--aa',
-          at: 't',
+          at: '2026-09-16T00:00:00.000Z',
           jobId: jobId,
           opId: 'solo',
           inputsHash: `hash-${jobId}`,
@@ -1624,14 +1624,14 @@ describe('default job key — the cap exists without config (review F3)', () => 
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-seed-sum2-'));
     try {
       const log = openRunLog(dir);
-      await log.append('p-sum2--r1--aa', { type: 'run-started', runId: 'p-sum2--r1--aa', at: 't', planId: 'plan-sum2' });
+      await log.append('p-sum2--r1--aa', { type: 'run-started', runId: 'p-sum2--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-sum2' });
       for (const jobId of ['x1', 'x2']) {
-        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 1 });
-        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: 't', jobId: jobId, op: 'solo', attempt: 2 });
+        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 1 });
+        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 2 });
         await log.append('p-sum2--r1--aa', {
           type: 'job-finished',
           runId: 'p-sum2--r1--aa',
-          at: 't',
+          at: '2026-09-16T00:00:00.000Z',
           jobId: jobId,
           opId: 'solo',
           inputsHash: `hash-${jobId}`,
@@ -1680,7 +1680,7 @@ describe('seedFromJournal usage dedupe across multi-run journals (review F4)', (
   const finishedWithUsage = (runId: string, jobId: string, inputsHash: string): JournalEvent => ({
     type: 'job-finished',
     runId: runId,
-    at: 't',
+    at: '2026-09-16T00:00:00.000Z',
     jobId: jobId,
     opId: 'fake',
     inputsHash: inputsHash,
@@ -1697,10 +1697,10 @@ describe('seedFromJournal usage dedupe across multi-run journals (review F4)', (
       const inputsHash = manifest.jobs[0]?.inputsHash ?? '';
       // Run 1: dispatched + finished with usage. Run 2 (chained resume): the
       // SAME dispatch's outcome re-attested — a finish with NO start.
-      await log.append('plan-dedupe--r1--aa', { type: 'run-started', runId: 'plan-dedupe--r1--aa', at: 't', planId: 'plan-dedupe' });
-      await log.append('plan-dedupe--r1--aa', { type: 'job-started', runId: 'plan-dedupe--r1--aa', at: 't', jobId: 'c1', op: 'fake', attempt: 1 });
+      await log.append('plan-dedupe--r1--aa', { type: 'run-started', runId: 'plan-dedupe--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe' });
+      await log.append('plan-dedupe--r1--aa', { type: 'job-started', runId: 'plan-dedupe--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
       await log.append('plan-dedupe--r1--aa', finishedWithUsage('plan-dedupe--r1--aa', 'c1', inputsHash));
-      await log.append('plan-dedupe--r2--bb', { type: 'run-started', runId: 'plan-dedupe--r2--bb', at: 't', planId: 'plan-dedupe' });
+      await log.append('plan-dedupe--r2--bb', { type: 'run-started', runId: 'plan-dedupe--r2--bb', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe' });
       await log.append('plan-dedupe--r2--bb', finishedWithUsage('plan-dedupe--r2--bb', 'c1', inputsHash));
       const events: JournalEvent[] = [
         ...(await log.read('plan-dedupe--r1--aa')),
@@ -1725,11 +1725,11 @@ describe('seedFromJournal usage dedupe across multi-run journals (review F4)', (
       const manifest = makeManifest(plan);
       const inputsHash = manifest.jobs[0]?.inputsHash ?? '';
       // Two runs, each a genuine dispatch of c1 (start + finish).
-      await log.append('plan-dedupe2--r1--aa', { type: 'run-started', runId: 'plan-dedupe2--r1--aa', at: 't', planId: 'plan-dedupe2' });
-      await log.append('plan-dedupe2--r1--aa', { type: 'job-started', runId: 'plan-dedupe2--r1--aa', at: 't', jobId: 'c1', op: 'fake', attempt: 1 });
+      await log.append('plan-dedupe2--r1--aa', { type: 'run-started', runId: 'plan-dedupe2--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe2' });
+      await log.append('plan-dedupe2--r1--aa', { type: 'job-started', runId: 'plan-dedupe2--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
       await log.append('plan-dedupe2--r1--aa', finishedWithUsage('plan-dedupe2--r1--aa', 'c1', inputsHash));
-      await log.append('plan-dedupe2--r2--bb', { type: 'run-started', runId: 'plan-dedupe2--r2--bb', at: 't', planId: 'plan-dedupe2' });
-      await log.append('plan-dedupe2--r2--bb', { type: 'job-started', runId: 'plan-dedupe2--r2--bb', at: 't', jobId: 'c1', op: 'fake', attempt: 2 });
+      await log.append('plan-dedupe2--r2--bb', { type: 'run-started', runId: 'plan-dedupe2--r2--bb', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe2' });
+      await log.append('plan-dedupe2--r2--bb', { type: 'job-started', runId: 'plan-dedupe2--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 2 });
       await log.append('plan-dedupe2--r2--bb', finishedWithUsage('plan-dedupe2--r2--bb', 'c1', inputsHash));
       const events: JournalEvent[] = [
         ...(await log.read('plan-dedupe2--r1--aa')),
@@ -1773,18 +1773,18 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     };
     const manifest = makeManifest(plan);
     // Prior run: c1 done ok; c2 hard-killed mid-flight (started, NO finish).
-    await log.append('plan-resume-kill--prior--aa', { type: 'run-started', runId: 'plan-resume-kill--prior--aa', at: 't', planId: 'plan-resume-kill' });
-    await log.append('plan-resume-kill--prior--aa', { type: 'job-started', runId: 'plan-resume-kill--prior--aa', at: 't', jobId: 'c1', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-kill--prior--aa', { type: 'run-started', runId: 'plan-resume-kill--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-resume-kill' });
+    await log.append('plan-resume-kill--prior--aa', { type: 'job-started', runId: 'plan-resume-kill--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
     await log.append('plan-resume-kill--prior--aa', {
       type: 'job-finished',
       runId: 'plan-resume-kill--prior--aa',
-      at: 't',
+      at: '2026-09-16T00:00:00.000Z',
       jobId: 'c1',
       opId: 'fake',
       inputsHash: manifest.jobs[0]?.inputsHash ?? '',
       result: { status: 'ok', value: 'c1' },
     });
-    await log.append('plan-resume-kill--prior--aa', { type: 'job-started', runId: 'plan-resume-kill--prior--aa', at: 't', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-kill--prior--aa', { type: 'job-started', runId: 'plan-resume-kill--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
 
     const calls: string[] = [];
     const countingOk = async (raw: unknown): Promise<OpResult<unknown>> => {
@@ -1824,22 +1824,22 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     const manifest = makeManifest(plan);
     // Prior run: c1 done ok; c2 killed by the governor (terminal
     // budget-exhausted record, usage journaled).
-    await log.append('plan-resume-budget--prior--aa', { type: 'run-started', runId: 'plan-resume-budget--prior--aa', at: 't', planId: 'plan-resume-budget' });
-    await log.append('plan-resume-budget--prior--aa', { type: 'job-started', runId: 'plan-resume-budget--prior--aa', at: 't', jobId: 'c1', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-budget--prior--aa', { type: 'run-started', runId: 'plan-resume-budget--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-resume-budget' });
+    await log.append('plan-resume-budget--prior--aa', { type: 'job-started', runId: 'plan-resume-budget--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
     await log.append('plan-resume-budget--prior--aa', {
       type: 'job-finished',
       runId: 'plan-resume-budget--prior--aa',
-      at: 't',
+      at: '2026-09-16T00:00:00.000Z',
       jobId: 'c1',
       opId: 'fake',
       inputsHash: manifest.jobs[0]?.inputsHash ?? '',
       result: { status: 'ok', value: 'c1' },
     });
-    await log.append('plan-resume-budget--prior--aa', { type: 'job-started', runId: 'plan-resume-budget--prior--aa', at: 't', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-budget--prior--aa', { type: 'job-started', runId: 'plan-resume-budget--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
     await log.append('plan-resume-budget--prior--aa', {
       type: 'job-finished',
       runId: 'plan-resume-budget--prior--aa',
-      at: 't',
+      at: '2026-09-16T00:00:00.000Z',
       jobId: 'c2',
       opId: 'fake',
       inputsHash: manifest.jobs[1]?.inputsHash ?? '',
@@ -1884,13 +1884,13 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     const plan: Plan = { id: 'plan-resume-quota', jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }] };
     const manifest = makeManifest(plan);
     // Prior run: THREE journaled dispatches of j1 (attempts 1-3, all failed).
-    await log.append('plan-resume-quota--prior--aa', { type: 'run-started', runId: 'plan-resume-quota--prior--aa', at: 't', planId: 'plan-resume-quota' });
+    await log.append('plan-resume-quota--prior--aa', { type: 'run-started', runId: 'plan-resume-quota--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-resume-quota' });
     for (const attempt of [1, 2, 3]) {
-      await log.append('plan-resume-quota--prior--aa', { type: 'job-started', runId: 'plan-resume-quota--prior--aa', at: 't', jobId: 'j1', op: 'fake', attempt: attempt });
+      await log.append('plan-resume-quota--prior--aa', { type: 'job-started', runId: 'plan-resume-quota--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'j1', op: 'fake', attempt: attempt });
       await log.append('plan-resume-quota--prior--aa', {
         type: 'job-finished',
         runId: 'plan-resume-quota--prior--aa',
-        at: 't',
+        at: '2026-09-16T00:00:00.000Z',
         jobId: 'j1',
         opId: 'fake',
         inputsHash: manifest.jobs[0]?.inputsHash ?? '',
@@ -1934,23 +1934,23 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     const U2 = { input: 20, output: 10, cacheRead: 0, cacheWrite: 0 };
 
     // Run 1: real dispatches with usage — c1 ok, c2 killed (budget-exhausted).
-    await log.append('plan-chained--r1--aa', { type: 'run-started', runId: 'plan-chained--r1--aa', at: 't', planId: 'plan-chained' });
-    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c1', op: 'fake', attempt: 1 });
-    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
-    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c2', op: 'fake', attempt: 1 });
-    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: 't', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
+    await log.append('plan-chained--r1--aa', { type: 'run-started', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-chained' });
+    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
+    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
+    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
 
     // Run 2 (resume): c1 re-ATTESTED (finish-only — usage must NOT double-
     // count), c2 really re-dispatched and killed again (usage counts again).
-    await log.append('plan-chained--r2--bb', { type: 'run-started', runId: 'plan-chained--r2--bb', at: 't', planId: 'plan-chained' });
-    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: 't', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
-    await log.append('plan-chained--r2--bb', { type: 'job-started', runId: 'plan-chained--r2--bb', at: 't', jobId: 'c2', op: 'fake', attempt: 1 });
-    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: 't', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
+    await log.append('plan-chained--r2--bb', { type: 'run-started', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', planId: 'plan-chained' });
+    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
+    await log.append('plan-chained--r2--bb', { type: 'job-started', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
 
     // Run 3 (resume): c2 re-dispatched once more (fails, no usage).
-    await log.append('plan-chained--r3--cc', { type: 'run-started', runId: 'plan-chained--r3--cc', at: 't', planId: 'plan-chained' });
-    await log.append('plan-chained--r3--cc', { type: 'job-started', runId: 'plan-chained--r3--cc', at: 't', jobId: 'c2', op: 'fake', attempt: 2 });
-    await log.append('plan-chained--r3--cc', { type: 'job-finished', runId: 'plan-chained--r3--cc', at: 't', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'failed', error: 'flake' } });
+    await log.append('plan-chained--r3--cc', { type: 'run-started', runId: 'plan-chained--r3--cc', at: '2026-09-16T00:00:00.000Z', planId: 'plan-chained' });
+    await log.append('plan-chained--r3--cc', { type: 'job-started', runId: 'plan-chained--r3--cc', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 2 });
+    await log.append('plan-chained--r3--cc', { type: 'job-finished', runId: 'plan-chained--r3--cc', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'failed', error: 'flake' } });
 
     // The helper folds ALL THREE runs, oldest-first — not just the latest.
     const governor = await seedFromRunLog(log, 'plan-chained', { config: { runDispatchQuota: 3 } });
@@ -1987,11 +1987,11 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     // corrupt journal of plan 'a--b' threw /corrupt line/ into plan 'a''s
     // governed resume. It now shares the runner's candidateRunsForPlan.
     const log = openRunLog(dir);
-    await log.append('a--r1--aa', { type: 'run-started', runId: 'a--r1--aa', at: 't', planId: 'a' });
+    await log.append('a--r1--aa', { type: 'run-started', runId: 'a--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'a' });
     await log.append('a--r1--aa', {
       type: 'job-started',
       runId: 'a--r1--aa',
-      at: 't',
+      at: '2026-09-16T00:00:00.000Z',
       jobId: 'j1',
       op: 'fake',
       attempt: 1,
@@ -1999,7 +1999,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     // A corrupt MIDDLE line in the sibling plan's file (prefix 'a--' matches).
     await appendFile(
       join(dir, 'a--b--k3y--c0ffee.ndjson'),
-      `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: 't', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
+      `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: '2026-09-16T00:00:00.000Z', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
       'utf8',
     );
     const governor = await seedFromRunLog(log, 'a', { config: { runDispatchQuota: 3 } });

@@ -56,11 +56,15 @@ import type {
 // ---------------------------------------------------------------------------
 
 export const UsageSchema: z.ZodType<Usage> = z.object({
-  input: z.number(),
-  output: z.number(),
-  cacheRead: z.number(),
-  cacheWrite: z.number(),
-  reasoning: z.number().optional(),
+  // Mirror-only tightening (review-debt #17, PR #7 Major/P2): token counts
+  // are cardinalities — non-negative integers. The frozen Usage type is
+  // untouched; a negative or fractional count is malformed at the mirror
+  // exactly like the CLI lanes' own wire gates.
+  input: z.number().int().nonnegative(),
+  output: z.number().int().nonnegative(),
+  cacheRead: z.number().int().nonnegative(),
+  cacheWrite: z.number().int().nonnegative(),
+  reasoning: z.number().int().nonnegative().optional(),
 }).strict();
 
 export const DriverStopReasonSchema: z.ZodType<DriverStopReason> = z.enum([
@@ -97,7 +101,9 @@ export const SandboxPolicySchema: z.ZodType<SandboxPolicy> = z.object({
 }).strict();
 
 export const BudgetSchema: z.ZodType<Budget> = z.object({
-  maxUsd: z.number().optional(),
+  // Mirror-only tightening (review-debt #17): a negative USD cap is
+  // malformed — the frozen RunOptions type is untouched.
+  maxUsd: z.number().nonnegative().optional(),
   maxTokens: z.number().optional(),
   wallClockMs: z.number().optional(),
   maxAttempts: z.number().optional(),
@@ -210,7 +216,9 @@ export const RunOptionsSchema: z.ZodType<RunOptions> = z.object({
   concurrency: z.number().int().min(1),
   stopOnError: z.boolean(),
   journalDir: z.string().optional(),
-  maxUsd: z.number().optional(),
+  // Mirror-only tightening (review-debt #17): a negative USD cap is
+  // malformed — the frozen RunOptions type is untouched.
+  maxUsd: z.number().nonnegative().optional(),
   // maxTokens (DD-9's token rollup cap) mirrors the frozen RunOptions field
   // with the same mirror-tightening precedent as `concurrency` above
   // (recorded pattern: mirror-only tightening, the frozen RunOptions type is
@@ -222,10 +230,16 @@ export const RunOptionsSchema: z.ZodType<RunOptions> = z.object({
 }).strict();
 
 export const LimitsSchema: z.ZodType<Limits> = z.object({
-  maxUsd: z.number().optional(),
-  perJobWallClockMs: z.number().optional(),
-  maxAttemptsPerJob: z.number().optional(),
-  inFlightCeiling: z.number().optional(),
+  // Mirror-only tightenings (review-debt #17, PR #7 Major/P2): USD caps and
+  // wall-clock durations are non-negative quantities; attempts are positive
+  // integers — the frozen Limits type is untouched.
+  maxUsd: z.number().nonnegative().optional(),
+  perJobWallClockMs: z.number().nonnegative().optional(),
+  maxAttemptsPerJob: z.number().int().positive().optional(),
+  // Mirror-only tightening (review-debt #17, PR #7 P2): a pool ceiling
+  // below 1 is meaningless, exactly like `concurrency` above — the frozen
+  // type is untouched; the runner enforces the same bound at runtime.
+  inFlightCeiling: z.number().int().min(1).optional(),
   runDispatchQuota: z.number().optional(),
 }).strict();
 
@@ -233,12 +247,15 @@ export const RunEarlyStopReasonSchema: z.ZodType<RunEarlyStopReason> = z.literal
 
 /** Mirrors `RunCounts`: all six states required, so a missing key fails the ZodType annotation. */
 export const RunCountsSchema: z.ZodType<RunCounts> = z.object({
-  queued: z.number(),
-  running: z.number(),
-  blocked: z.number(),
-  done: z.number(),
-  failed: z.number(),
-  'budget-exhausted': z.number(),
+  // Mirror-only tightening (review-debt #17, PR #7 Major/P2): counts are
+  // cardinalities — non-negative integers; the frozen RunCounts type is
+  // untouched.
+  queued: z.number().int().nonnegative(),
+  running: z.number().int().nonnegative(),
+  blocked: z.number().int().nonnegative(),
+  done: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative(),
+  'budget-exhausted': z.number().int().nonnegative(),
 }).strict();
 
 export const JobOutcomeSchema: z.ZodType<JobOutcome> = z.object({
@@ -288,14 +305,17 @@ export const RunReportSchema: z.ZodType<RunReport> = z.object({
 export const RunStartedJournalEventSchema = z.object({
   type: z.literal('run-started'),
   runId: z.string(),
-  at: z.string(),
+  // ISO-8601 UTC timestamps (review-debt #17, PR #7 Minor): the journal
+  // contract already emits z.iso datetime strings (now() in runner.ts);
+  // the mirror now rejects anything else.
+  at: z.iso.datetime(),
   planId: z.string(),
 }).strict();
 
 export const JobStartedJournalEventSchema = z.object({
   type: z.literal('job-started'),
   runId: z.string(),
-  at: z.string(),
+  at: z.iso.datetime(),
   jobId: z.string(),
   op: z.string(),
   // 1-based (frozen): the first dispatch of a job is attempt 1.
@@ -305,7 +325,7 @@ export const JobStartedJournalEventSchema = z.object({
 export const JobFinishedJournalEventSchema = z.object({
   type: z.literal('job-finished'),
   runId: z.string(),
-  at: z.string(),
+  at: z.iso.datetime(),
   jobId: z.string(),
   // Replay record (frozen verbatim): opId + inputsHash + result.
   opId: z.string(),
@@ -318,7 +338,7 @@ export const JobFinishedJournalEventSchema = z.object({
 export const RunFinishedJournalEventSchema = z.object({
   type: z.literal('run-finished'),
   runId: z.string(),
-  at: z.string(),
+  at: z.iso.datetime(),
   stoppedEarly: z.boolean(),
   earlyStopReason: RunEarlyStopReasonSchema.optional(),
 }).strict()

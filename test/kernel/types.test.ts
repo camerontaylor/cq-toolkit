@@ -635,6 +635,69 @@ function failsParse(schema: z.ZodType<unknown>, instance: unknown, why: string):
   }
 }
 
+describe('mirror-only domain tightenings (review-debt #17, PR #7 non-frozen items)', () => {
+  test('UsageSchema rejects negative and fractional token counts (cardinalities)', () => {
+    const base = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 };
+    for (const bad of [
+      { ...base, input: -1 },
+      { ...base, output: -5 },
+      { ...base, cacheRead: 0.5 },
+      { ...base, cacheWrite: 1.5 },
+      { ...base, reasoning: -1 },
+    ]) {
+      failsParse(kernelSchema.UsageSchema, bad, `usage ${JSON.stringify(bad)}`);
+    }
+    expect(kernelSchema.UsageSchema.safeParse({ ...base, reasoning: 3 }).success).toBe(true);
+  });
+
+  test('RunCountsSchema rejects negative and fractional counts', () => {
+    const base = { queued: 0, running: 0, blocked: 0, done: 1, failed: 0, 'budget-exhausted': 0 };
+    failsParse(kernelSchema.RunCountsSchema, { ...base, done: -1 }, 'negative count');
+    failsParse(kernelSchema.RunCountsSchema, { ...base, failed: 1.5 }, 'fractional count');
+    expect(kernelSchema.RunCountsSchema.safeParse(base).success).toBe(true);
+  });
+
+  test('RunOptionsSchema rejects a negative maxUsd; LimitsSchema rejects a sub-1 inFlightCeiling', () => {
+    failsParse(
+      kernelSchema.RunOptionsSchema,
+      { concurrency: 2, stopOnError: false, maxUsd: -0.01 },
+      'negative maxUsd',
+    );
+    expect(
+      kernelSchema.RunOptionsSchema.safeParse({ concurrency: 2, stopOnError: false, maxUsd: 0 }).success,
+    ).toBe(true);
+    // inFlightCeiling is a LIMITS field (the issue's schema.ts:200 drifted
+    // into the Limits block): the ceiling bound lives on LimitsSchema.
+    failsParse(kernelSchema.LimitsSchema, { inFlightCeiling: 0 }, 'zero inFlightCeiling');
+    failsParse(kernelSchema.LimitsSchema, { inFlightCeiling: 1.5 }, 'fractional inFlightCeiling');
+    expect(kernelSchema.LimitsSchema.safeParse({ inFlightCeiling: 1 }).success).toBe(true);
+    failsParse(kernelSchema.LimitsSchema, { maxUsd: -1 }, 'negative limits maxUsd');
+    failsParse(kernelSchema.LimitsSchema, { perJobWallClockMs: -1 }, 'negative duration');
+    failsParse(kernelSchema.LimitsSchema, { maxAttemptsPerJob: 0 }, 'zero attempts');
+  });
+
+  test('journal at timestamps must be ISO-8601 UTC', () => {
+    const base = { runId: 'r', planId: 'p' } as const;
+    failsParse(
+      kernelSchema.RunStartedJournalEventSchema,
+      { type: 'run-started', ...base, at: 't' },
+      'bare-word timestamp',
+    );
+    failsParse(
+      kernelSchema.RunStartedJournalEventSchema,
+      { type: 'run-started', ...base, at: '2026-09-16T00:00:00+02:00' },
+      'offset timestamp (UTC-only)',
+    );
+    expect(
+      kernelSchema.RunStartedJournalEventSchema.safeParse({
+        type: 'run-started',
+        ...base,
+        at: '2026-09-16T00:00:00.000Z',
+      }).success,
+    ).toBe(true);
+  });
+});
+
 describe('encoded couplings (honest-stop pairing, 1-based attempts)', () => {
   test('RunReportSchema: stoppedEarly=true WITH earlyStopReason parses and round-trips', () => {
     const instance: RunReport = {
