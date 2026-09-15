@@ -49,12 +49,16 @@ export const DEFAULT_BAIL_PATTERNS: readonly string[] = Object.freeze([
 /** Default retry budget for bail attempts — 1 initial + 2 retries. */
 const DEFAULT_MAX_BAIL_RETRIES = 2;
 
+/** Library-level ceiling for bail retries, mirroring the JSON-boundary bound. */
+const BAIL_RETRIES_CEILING = 10;
+
 /**
  * Bail tuning. `bailPatterns`, when supplied, REPLACES
  * {@link DEFAULT_BAIL_PATTERNS} (not extends); `maxBailRetries` is the
  * retry budget on top of the initial attempt. A non-finite, negative, or
  * fractional `maxBailRetries` (reachable at the library level, past any
- * schema) falls back to the default 2 — it never computes a NaN budget.
+ * schema) falls back to the default 2 — it never computes a NaN budget;
+ * values above 10 clamp to 10, mirroring the JSON-boundary bound.
  */
 export interface BailConfig {
   /** Case-insensitive substrings that mark an attempt as a bail. */
@@ -91,7 +95,9 @@ export interface ProbeReport {
 
 /**
  * Build the `gates.baselineProbe` op over an injected runner, up to
- * `1 + maxBailRetries` attempts. Per attempt, in order:
+ * `1 + maxBailRetries` attempts (the retry count is sanitized at entry:
+ * non-finite, negative, or fractional values fall back to the default 2,
+ * values above 10 clamp to the ceiling). Per attempt, in order:
  *  (a) exitCode null (signal, timeout, spawn failure) — the run did not
  *      complete: bail-candidate, retry until the budget is spent, then
  *      report `bail`;
@@ -113,7 +119,7 @@ export function makeBaselineProbe(run: RunCheck): Op<BaselineProbeInput, ProbeRe
     const requestedRetries = input.bail?.maxBailRetries ?? DEFAULT_MAX_BAIL_RETRIES;
     const maxRetries =
       Number.isInteger(requestedRetries) && requestedRetries >= 0
-        ? requestedRetries
+        ? Math.min(requestedRetries, BAIL_RETRIES_CEILING)
         : DEFAULT_MAX_BAIL_RETRIES;
     const attemptBudget = 1 + maxRetries;
     for (let attempt = 1; attempt <= attemptBudget; attempt++) {

@@ -217,6 +217,18 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
     }
   });
 
+  test('a library-level maxBailRetries of 1000 clamps to the 10 ceiling (at most 11 attempts)', async () => {
+    const bailOutput: RawCheckOutput = { stdout: 'test run aborted', stderr: '', exitCode: 1 };
+    // One extra scripted output: an un-clamped budget would over-draw and
+    // trip the runner's loud 'script exhausted' throw.
+    const fake = scriptedRunner(...Array.from({ length: 12 }, () => bailOutput));
+    const result = await makeBaselineProbe(fake.run)(
+      probeInput({ bail: { bailPatterns: ['test run aborted'], maxBailRetries: 1000 } }),
+    );
+    expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 11 } });
+    expect(fake.callCount()).toBe(11);
+  });
+
   test('indeterminate (a): empty stdout on vitest-json (summary-bearing tool) → indeterminate, never clean', async () => {
     const fake = scriptedRunner({ stdout: '', stderr: '', exitCode: 0 });
     const result = await makeBaselineProbe(fake.run)(probeInput());

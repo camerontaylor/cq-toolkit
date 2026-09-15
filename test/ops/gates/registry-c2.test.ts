@@ -7,6 +7,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   BaselineProbeInputSchema,
+  CheckRunnerInputSchema,
   RegressionGateInputSchema,
   registry,
 } from '../../../src/ops/gates/registry.js';
@@ -50,6 +51,21 @@ describe('BaselineProbeInputSchema (full input, and only it)', () => {
     expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 10 } }).success).toBe(true);
     expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 11 } }).success).toBe(false);
     expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { bailPatterns: [''] } }).success).toBe(false);
+  });
+
+  test('a typo inside command (timeoutMS, wrong case) is REJECTED, not silently stripped', () => {
+    expect(
+      BaselineProbeInputSchema.safeParse({
+        ...VALID,
+        command: { command: 'tsc', args: ['--noEmit'], timeoutMS: 5 },
+      }).success,
+    ).toBe(false);
+    expect(
+      CheckRunnerInputSchema.safeParse({
+        adapter: 'tsc-lines',
+        command: { command: 'tsc', args: ['--noEmit'], timeoutMS: 5 },
+      }).success,
+    ).toBe(false);
   });
 
   test('REJECTS a smuggled baseline or cache field (strict unknown keys, I7)', () => {

@@ -27,12 +27,16 @@ import type { RegressionGateInput } from './regressionGate.js';
 const CheckRunnerInputObject = z
   .object({
     adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
-    command: z.object({
-      command: z.string(),
-      args: z.array(z.string()),
-      cwd: z.string().optional(),
-      timeoutMs: z.number().int().positive().default(600_000),
-    }),
+    // Strict: an unknown key inside command (a typo'd timeoutMS) must fail
+    // loudly, not be silently stripped into an uncapped-looking input.
+    command: z
+      .object({
+        command: z.string(),
+        args: z.array(z.string()),
+        cwd: z.string().optional(),
+        timeoutMs: z.number().int().positive().default(600_000),
+      })
+      .strict(),
   })
   .strict();
 
