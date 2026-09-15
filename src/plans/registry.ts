@@ -23,7 +23,7 @@
 // listPlans()/getPlan() calls do not rescan or re-import.
 import { readdirSync, type Dirent } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { PlanRegistryEntry } from '../kernel/types.js';
 
 const listCache = new Map<string, Promise<PlanRegistryEntry[]>>();
@@ -98,10 +98,19 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     if (stem === 'registry' || stem === 'index' || stem.endsWith('.test')) {
       continue;
     }
-    // Plain string concatenation into import(): TypeScript must NOT
-    // statically resolve this specifier — plan modules are discovered at
-    // runtime.
-    const mod: unknown = await import(root + '/' + file);
+    // Discovered-path import, win32-safe (same rationale as the family scan
+    // in src/registry/index.ts): a constructed plain fs path cannot be
+    // imported on win32 (`import('C:\\...')` parses `c:` as a URL scheme —
+    // ERR_UNSUPPORTED_ESM_URL_SCHEME), so there the path is converted to a
+    // FILE URL first (pathToFileURL). POSIX keeps the plain path: it is
+    // already a valid specifier, and the vitest module runner resolves
+    // sibling-relative imports inside plan modules against the file-URL
+    // module id AS AN FS PATH, breaking plan discovery under test.
+    // TypeScript must NOT statically resolve this specifier — plan modules
+    // are discovered at runtime.
+    const modulePath = path.join(root, file);
+    const specifier = process.platform === 'win32' ? pathToFileURL(modulePath).href : modulePath;
+    const mod: unknown = await import(specifier);
     const plan = (mod as { plan?: unknown }).plan;
     if (plan === undefined || plan === null) {
       continue; // not a plan module

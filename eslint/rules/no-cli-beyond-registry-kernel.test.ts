@@ -158,5 +158,21 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       options: OPTIONS,
       errors: [{ messageId: 'beyondRegistryKernel' }],
     },
+    {
+      // Computed dynamic import — FAIL CLOSED: sourceText() is null, so
+      // resolve-then-contain cannot see the real target ('../ops/x.js' never
+      // appears as a literal); a silent accept would be the boundary bypass.
+      code: "const target = '../ops/x.js';\nawait import(target);",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // Computed require() — the same fail-closed treatment.
+      code: "const target = '../ops/x.js';\nconst mod = require(target);",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
   ],
 });

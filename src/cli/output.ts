@@ -47,6 +47,55 @@ export function writeResultJson(io: CliIo, value: unknown): void {
 }
 
 /**
+ * JSON-LOSSLESSNESS check for op results — the CLI's exact mirror of the
+ * kernel runner's walk (src/kernel/runner.ts, `assertJsonLossless`). The
+ * stdout artifact is a JSON.stringify of the result; stringify-throwing
+ * values (BigInt, circular) are caught by the caller's stringify probe,
+ * while this walk catches the SILENTLY lossy ones — Map/Set/Date/RegExp/
+ * class instances stringify as `{}` or strings, function/symbol members
+ * vanish, undefined array elements become null — where the emitted artifact
+ * would disagree with the value the run produced. One normalization is
+ * accepted, matching JSON semantics: an undefined-valued member of a nested
+ * object IS absent data ({a: undefined} and {} are the same JSON record) —
+ * required-field positions (the ok variant's `value`) are guarded by the
+ * caller. Plain objects: prototype null or Object.prototype only.
+ * Requires cycle-freedom — call only after the stringify probe passed.
+ */
+export function assertJsonLossless(value: unknown): void {
+  switch (typeof value) {
+    case 'string':
+    case 'boolean':
+      return;
+    case 'number':
+      if (!Number.isFinite(value)) throw new Error(`non-finite number ${String(value)}`);
+      return;
+    case 'object': {
+      if (value === null) return;
+      if (Array.isArray(value)) {
+        for (let i = 0; i < value.length; i++) {
+          const element = value[i];
+          if (element === undefined) throw new Error(`undefined array element at [${i}]`);
+          assertJsonLossless(element);
+        }
+        return;
+      }
+      const proto = Object.getPrototypeOf(value) as object | null;
+      if (proto !== Object.prototype && proto !== null) {
+        const name = (value as object).constructor?.name ?? 'unknown';
+        throw new Error(`non-plain object of type '${name}'`);
+      }
+      for (const memberValue of Object.values(value)) {
+        if (memberValue === undefined) continue; // absent-key semantics
+        assertJsonLossless(memberValue);
+      }
+      return;
+    }
+    default:
+      throw new Error(`non-JSON value of type '${typeof value}'`);
+  }
+}
+
+/**
  * One narration line to stderr with the `cq:` prefix. Never stdout (I1).
  *
  * One narrate() call is EXACTLY ONE `cq: `-prefixed stderr line: the OpResult

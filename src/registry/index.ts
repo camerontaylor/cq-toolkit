@@ -38,7 +38,7 @@
 // list()/get() calls do not rescan or re-import.
 import { readdirSync, type Dirent } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { OpRegistryEntry } from '../kernel/types.js';
 
 const listCache = new Map<string, Promise<OpRegistryEntry[]>>();
@@ -82,19 +82,37 @@ export async function get(
  * resolution-error shapes naming the REQUESTED registry path itself as the
  * quoted resolution target — node's `ERR_MODULE_NOT_FOUND` +
  * `Cannot find module '<path>'` (or the module runner's
- * `Could not resolve "<path>"`). Everything else — a not-found for a
- * TRANSITIVE dependency of the registry module (the requested path appears
- * only as the IMPORTING module, never as the quoted target), a syntax error,
- * an evaluation throw, junk — is 'broken'.
+ * `Could not resolve "<path>"`). `target` is the specifier the registry was
+ * imported through — a plain fs path on POSIX, a FILE URL on win32 (see the
+ * import site below); when it is a file URL the two runtimes quote different
+ * spellings of that ONE requested module (node's native loader prints the
+ * decoded path, the vitest module runner prints the URL as given), so both
+ * spellings are matched — they name the REQUESTED registry itself, never a
+ * transitive dependency, and the tolerance stays exactly this narrow.
+ * Everything else — a not-found for a TRANSITIVE dependency of the registry
+ * module (the requested path appears only as the IMPORTING module, never as
+ * the quoted target), a syntax error, an evaluation throw, junk — is
+ * 'broken'.
  */
 function isAbsentFamilyRegistry(err: unknown, target: string): boolean {
   if (typeof err !== 'object' || err === null) return false;
   const code = (err as { code?: unknown }).code;
   const message = (err as { message?: unknown }).message;
   if (typeof message !== 'string') return false;
-  return (
-    (code === 'ERR_MODULE_NOT_FOUND' && message.includes(`Cannot find module '${target}'`)) ||
-    message.includes(`Could not resolve "${target}"`)
+  // The file-URL spelling's other face: its decoded path. For a plain-path
+  // target fileURLToPath throws (not a URL) and the list stays single-entry.
+  let decodedPath: string | undefined;
+  try {
+    decodedPath = fileURLToPath(target);
+  } catch {
+    decodedPath = undefined;
+  }
+  const targets = decodedPath === undefined ? [target] : [target, decodedPath];
+  return targets.some(
+    (candidate) =>
+      (code === 'ERR_MODULE_NOT_FOUND' &&
+        message.includes(`Cannot find module '${candidate}'`)) ||
+      message.includes(`Could not resolve "${candidate}"`),
   );
 }
 
@@ -116,18 +134,28 @@ async function scanOps(root: string): Promise<OpRegistryEntry[]> {
     .map((dirent) => dirent.name)
     .sort();
   for (const family of families) {
-    // Plain string concatenation into import(): TypeScript must NOT
+    // Discovered-path import, win32-safe: a constructed plain fs path cannot
+    // be imported on win32 (`import('C:\\...')` parses `c:` as a URL scheme
+    // — ERR_UNSUPPORTED_ESM_URL_SCHEME), so there the path is converted to a
+    // FILE URL first (pathToFileURL). POSIX keeps the plain path: it is
+    // already a valid specifier, and the vitest module runner resolves the
+    // NESTED relative dynamic imports inside a family registry (the
+    // convention's canonical `import('./<name>.js')` importer) against the
+    // file-URL module id AS AN FS PATH — importing registries via file URLs
+    // breaks every family's lazy importers under vitest. TypeScript must NOT
     // statically resolve this specifier — families are discovered at runtime.
-    const registryPath = root + '/' + family + '/registry.js';
+    const registryPath = path.join(root, family, 'registry.js');
+    const registrySpecifier =
+      process.platform === 'win32' ? pathToFileURL(registryPath).href : registryPath;
     let mod: unknown;
     try {
-      mod = await import(registryPath);
+      mod = await import(registrySpecifier);
     } catch (err) {
-      if (isAbsentFamilyRegistry(err, registryPath)) {
+      if (isAbsentFamilyRegistry(err, registrySpecifier)) {
         continue; // absent family registry — the family lands in a later phase
       }
       throw new Error(
-        `op family '${family}': registry module ${registryPath} failed to load ` +
+        `op family '${family}': registry module ${registrySpecifier} failed to load ` +
           `(broken registry): ${err instanceof Error ? err.message : String(err)}`,
         { cause: err },
       );

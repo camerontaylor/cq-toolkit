@@ -24,6 +24,11 @@
 // Anything else (bare vendor packages, absolute paths, ../ops, ../driver,
 // ../harness, ../plans, or a relative source resolving outside the allowed
 // roots) drags logic or machinery into the CLI layer and is reported.
+// COMPUTED sources fail closed: an import/require whose source is NOT a
+// plain string literal or a substitution-free template hides its real target
+// from resolve-then-contain (`const t = '../ops/x.js'; await import(t);`),
+// so it is reported outright — computed import sources must be literal
+// inside the CLI layer.
 // The rule CORE checks every import source it sees; file scoping and the
 // zodFiles option come from the config, keeping this file testable with
 // RuleTester alone.
@@ -112,17 +117,36 @@ function sourceText(sourceNode) {
 
 function checkSource(context, sourceNode, reportNode) {
   if (!sourceNode) return;
-  const source = sourceText(sourceNode);
-  if (source === null) return; // dynamic, computed sources are not statically checkable
   const [options] = context.options;
   const zodFiles = options?.zodFiles ?? [];
   const importerPath = repoRelative(context.filename);
+  const source = sourceText(sourceNode);
+  if (source === null) {
+    // FAIL CLOSED: a COMPUTED source — a variable (`import(t)`), a template
+    // with substitutions, a non-string literal — makes the import's real
+    // target invisible to resolve-then-contain, which is exactly the bypass
+    // (`const t = '../ops/x.js'; await import(t);`). Such an import is
+    // reported outright; inside the CLI layer the source must be literal.
+    // (Static import/export declarations can only carry string literals — a
+    // computed one is a SyntaxError — so in practice this fires for dynamic
+    // imports and require() calls.)
+    context.report({
+      node: reportNode,
+      messageId: 'beyondRegistryKernel',
+      data: {
+        source: '(computed)',
+        arrow: '',
+        computedNote: ' Computed import sources must be literal inside the CLI layer.',
+      },
+    });
+    return;
+  }
   if (!isAllowedSource(source, zodFiles, importerPath)) {
     const arrow = isRelativeSpecifier(source) ? ` (resolves to '${resolveRelative(source, importerPath)}')` : '';
     context.report({
       node: reportNode,
       messageId: 'beyondRegistryKernel',
-      data: { source, arrow },
+      data: { source, arrow, computedNote: '' },
     });
   }
 }
@@ -150,7 +174,7 @@ export default {
     ],
     messages: {
       beyondRegistryKernel:
-        "Import source '{{source}}'{{arrow}} is beyond the registry/kernel boundary (no-logic-in-CLI: relative imports must resolve inside src/cli/, or — from src/cli/** — into src/registry/ or src/kernel/; node: builtins everywhere, and 'zod' solely in schema-defining subcommand modules).",
+        "Import source '{{source}}'{{arrow}} is beyond the registry/kernel boundary (no-logic-in-CLI: relative imports must resolve inside src/cli/, or — from src/cli/** — into src/registry/ or src/kernel/; node: builtins everywhere, and 'zod' solely in schema-defining subcommand modules).{{computedNote}}",
     },
   },
   create(context) {

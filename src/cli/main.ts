@@ -40,6 +40,7 @@ import { OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
 import {
+  assertJsonLossless,
   narrate,
   narrateOpResult,
   processIo,
@@ -129,6 +130,33 @@ export function subcommandNames(entries: OpRegistryEntry[]): string[] {
   const names = entries.map((entry) => entry.name).sort();
   if (!names.includes('run-plan')) names.push('run-plan');
   return names;
+}
+
+/**
+ * The reserved mode-flag keys: `--json` (narration mode) and `--help`/`-h`
+ * (the help surface) are recognized for EVERY subcommand and never reach any
+ * op input as data.
+ */
+const RESERVED_FLAG_KEYS: readonly string[] = ['json', 'help', 'h'];
+
+/**
+ * The first reserved key that arrived WITH an explicit `=value`, or
+ * `undefined` when none did. A raw-token scan is required because bare
+ * `--json` and `--json=true` are indistinguishable in the parsed flags
+ * record (both parse to `true`): the bare spellings keep their mode/help
+ * behavior, while an explicit `=value` on an OP subcommand would otherwise
+ * be silently stripped below — for an op whose schema declares the key that
+ * is silent input loss (exit 0 with the value dropped without a trace).
+ */
+function reservedFlagWithValue(tokens: readonly string[]): string | undefined {
+  for (const token of tokens) {
+    if (!token.startsWith('-')) continue;
+    const eq = token.indexOf('=');
+    if (eq === -1) continue;
+    const key = token.slice(token.startsWith('--') ? 2 : 1, eq);
+    if (RESERVED_FLAG_KEYS.includes(key)) return key;
+  }
+  return undefined;
 }
 
 // --- Help rendering (plain text — the sanctioned non-JSON stdout surface) --
@@ -338,6 +366,20 @@ async function dispatchCli(
     narrate(io, '--ops-root is a run-plan flag (op inputs own their schema keys)');
     return EXIT_CODES.usage;
   }
+  // A reserved key that arrived WITH an explicit `=value` never runs: the
+  // strip below would otherwise silently drop it (exit 0, key gone) — for an
+  // op whose schema declares the key that is silent input loss. Bare
+  // --json/--help/-h already took their mode/help branch above and never get
+  // here.
+  const reservedKey = reservedFlagWithValue(argv.slice(1));
+  if (reservedKey !== undefined) {
+    narrate(
+      io,
+      `--${reservedKey} is a reserved CLI flag ` +
+        '(op input schemas must not declare reserved keys: json, help, h)',
+    );
+    return EXIT_CODES.usage;
+  }
   // Strip the reserved mode flags — the op's schema sees only its own keys
   // (ops map flags by EXACT schema key; see the header for the run-plan
   // kebab-case exception).
@@ -346,8 +388,15 @@ async function dispatchCli(
   delete input['help'];
   delete input['h'];
   // Validate FIRST: schema-invalid input is a usage error (exit 2, nothing
-  // on stdout — no op ever ran).
-  const check = entry.inputSchema.safeParse(input);
+  // on stdout — no op ever ran). safeParseAsync, not safeParse: registry
+  // schemas may carry ASYNC refinements/transforms (the runner dispatches
+  // through parseAsync, and the direct path must accept exactly what the
+  // runner accepts) — a sync parse throws on those
+  // (`Encountered Promise during synchronous parse`), surfacing as a
+  // spurious exit-1 'thrown' instead of a usage error. Failures of async
+  // schemas stay usage errors (2). The run-plan schema path stays on plain
+  // safeParse (static, sync — see run-plan.ts).
+  const check = await entry.inputSchema.safeParseAsync(input);
   if (!check.success) {
     narrate(io, `invalid input for '${sub}': ${issueMessage(check.error)}`);
     return EXIT_CODES.usage;
@@ -365,10 +414,16 @@ async function dispatchCli(
       narrate(io, `${sub} returned an invalid result: ${issueMessage(checked.error)}`);
       return EXIT_CODES.thrown;
     }
-    // JSON-losslessness probe (the one the runner applies before
-    // journalling): stringify with a replacer that throws on non-finite
-    // numbers — an artifact that cannot survive serialization must not be
-    // emitted.
+    // JSON-losslessness probes — the runner's full pre-journal gate applied
+    // to the direct path, BEFORE any stdout artifact: (1) stringify with a
+    // replacer that throws on non-finite numbers (an artifact that cannot
+    // survive serialization must not be emitted); (2) the required-value
+    // check — the frozen ok variant REQUIRES its value (the journal's
+    // ok-without-value record is rejected on read), so `{status:'ok'}` with
+    // an undefined value is lossy, not absent data; (3) the losslessness
+    // walk (assertJsonLossless, the runner's mirror) rejecting the
+    // silently-lossy values the schema probe passes — Maps, Dates, class
+    // instances, function/symbol members, undefined array elements.
     try {
       JSON.stringify(checked.data, (_key, value: unknown) => {
         if (typeof value === 'number' && !Number.isFinite(value)) {
@@ -376,6 +431,10 @@ async function dispatchCli(
         }
         return value;
       });
+      if (checked.data.status === 'ok' && checked.data.value === undefined) {
+        throw new Error("ok result without a 'value'");
+      }
+      assertJsonLossless(checked.data);
     } catch (probeErr) {
       narrate(io, `${sub} returned an invalid result: ${messageOf(probeErr)}`);
       return EXIT_CODES.thrown;
