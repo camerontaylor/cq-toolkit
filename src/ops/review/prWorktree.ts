@@ -16,22 +16,33 @@
 //      the branch's truth is unavailable and nothing must be guessed.
 //   b. Registry consult: an entry for the pr that still POINTS AT TRUTH
 //      (directory exists AND `git -C <entryPath> rev-parse --abbrev-ref
-//      HEAD` prints headRefName) → reuse it. Any check failing means the
+//      HEAD` prints headRefName AND `git -C <entryPath> rev-parse HEAD`
+//      prints the fetched sha) → reuse it. Any check failing means the
 //      entry is STALE — it is pruned from the registry and resolution
 //      continues (the registry is a cache, never the evidence).
 //   c. Existing-worktree scan (`git worktree list --porcelain`, parsed
-//      blocks): a worktree already checked out on headRefName is REGISTERED
-//      and reused — `git worktree add` refuses an already-checked-out
-//      branch, so when the branch is checked out anywhere, reuse is the
-//      only move (UC row 38).
-//   d. Create: `git -C <repoRoot> worktree add <worktreeRoot>/<sanitized-
-//      branch> <headRefName>`; register and return it as NOT reused.
+//      blocks): a worktree already checked out on headRefName AT THE
+//      FETCHED SHA is registered and reused. Branch match ALONE is not
+//      reuse: a tree parked on the branch name at a stale sha is exactly
+//      the local memory the fetch exists to override — it is skipped, and
+//      a tree matching the branch but not the sha is never reachable from
+//      here (that includes foreign/sweep-family trees that happen to hold
+//      the branch at an old commit).
+//   d. Create: `git -C <repoRoot> worktree add -B <headRefName>
+//      <worktreeRoot>/pr-<pr>-<sanitized-branch> FETCH_HEAD` — the `-B`
+//      (re)points the branch at the fetched truth and the new tree sits AT
+//      the fetched sha, not at whatever the local ref remembered; register
+//      and return it as NOT reused.
 //
 // The `[A-Za-z0-9._-]` sanitization: branch names are user data ("release/
 // 1.0 +fix me") and the worktree directory name must stay one path segment —
 // every character outside [A-Za-z0-9._-] becomes '-', so `/` cannot smuggle
 // a directory hop and spaces/metacharacters cannot reach a shell (argv-only
-// spawns anyway — this keeps the name boring, not the process safe).
+// spawns anyway — this keeps the name boring, not the process safe). The
+// directory is `pr-<pr>-<sanitized>` (not the bare sanitized branch): two
+// DIFFERENT branches can sanitize to the same segment ("feat/x" vs
+// "feat-x"), and the PR number prefix disambiguates the collision while
+// keeping one review tree per PR in the name.
 //
 // I/O discipline: ALL git I/O goes through the injected `run` (the same
 // GhFn shape as gh.ts — a generic command runner; the bin is the caller's
@@ -219,8 +230,12 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{ path: s
   const worktreeRoot = opts.worktreeRoot ?? join(opts.repoRoot, '.cq-review-worktrees');
   const key = String(opts.pr);
 
-  // (a) ORIGIN BRANCH IS TRUTH — fetched before any decision. A fetch
-  // failure means the branch's state is unknown: throw, touch nothing.
+  // (a) ORIGIN BRANCH IS TRUTH — fetched before any decision, and the
+  // fetched commit is NAMED: `rev-parse FETCH_HEAD` yields the expectedSha
+  // every reuse candidate must sit at. Gating on the fetch exit alone would
+  // trust a LOCAL tree that lags origin — the exact stale-tree reuse the
+  // fetch exists to prevent. A fetch failure means the branch's state is
+  // unknown: throw, touch nothing.
   const fetchArgs = ['-C', opts.repoRoot, 'fetch', 'origin', opts.headRefName];
   const fetch = await opts.run(fetchArgs);
   if (fetch.code !== 0) {
@@ -231,19 +246,37 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{ path: s
       fetchArgs,
     );
   }
+  const fetchHeadArgs = ['-C', opts.repoRoot, 'rev-parse', 'FETCH_HEAD'];
+  const fetchHead = await opts.run(fetchHeadArgs);
+  if (fetchHead.code !== 0) {
+    throw gitFail(
+      'rev-parse FETCH_HEAD failed — the fetched truth is unnameable',
+      fetchHead.code,
+      fetchHead.stderr,
+      fetchHeadArgs,
+    );
+  }
+  const expectedSha = fetchHead.stdout.trim();
 
   const map = await opts.registry.load();
 
   // (b) Registry consult — the entry must still POINT AT TRUTH: the
-  // directory exists AND git says headRefName is checked out there.
+  // directory exists AND git says headRefName is checked out there AND that
+  // checkout sits AT the fetched sha (a round-1 tree at a stale commit is
+  // exactly what this check exists to catch).
   const entry = map[key];
   if (entry !== undefined) {
     const valid =
       (await directoryExists(entry.path)) &&
       (await (async () => {
-        const revParseArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
-        const result = await opts.run(revParseArgs);
-        return result.code === 0 && result.stdout.trim() === opts.headRefName;
+        const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
+        const branch = await opts.run(branchArgs);
+        if (branch.code !== 0 || branch.stdout.trim() !== opts.headRefName) {
+          return false;
+        }
+        const headArgs = ['-C', entry.path, 'rev-parse', 'HEAD'];
+        const head = await opts.run(headArgs);
+        return head.code === 0 && head.stdout.trim() === expectedSha;
       })());
     if (valid) {
       return { path: entry.path, reused: true, branch: opts.headRefName };
@@ -256,28 +289,47 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{ path: s
 
   // (c) Existing-worktree scan: someone may already have the branch checked
   // out (the main tree, another worktree) — `git worktree add` REFUSES an
-  // already-checked-out branch, so reuse is the only move (UC row 38).
+  // already-checked-out branch, so reuse is the only move (UC row 38). But
+  // the branch NAME matching is not enough: the candidate must sit AT the
+  // fetched sha too. A tree parked on the branch at an older commit is the
+  // stale local memory this module exists to override — reusing it would
+  // review the wrong diff. `find` with an async sha probe, first match wins.
   const listArgs = ['-C', opts.repoRoot, 'worktree', 'list', '--porcelain'];
   const list = await opts.run(listArgs);
   if (list.code !== 0) {
     throw gitFail('worktree list failed', list.code, list.stderr, listArgs);
   }
-  const existing = parseWorktreeList(list.stdout).find((wt) => wt.branch === opts.headRefName);
-  if (existing !== undefined) {
+  let existing: PorcelainWorktree | null = null;
+  for (const candidate of parseWorktreeList(list.stdout)) {
+    if (candidate.branch !== opts.headRefName) {
+      continue;
+    }
+    const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
+    const head = await opts.run(headArgs);
+    if (head.code === 0 && head.stdout.trim() === expectedSha) {
+      existing = candidate;
+      break;
+    }
+  }
+  if (existing !== null) {
     map[key] = { path: existing.path, branch: opts.headRefName, createdAt: opts.nowMs };
     await opts.registry.save(map);
     return { path: existing.path, reused: true, branch: opts.headRefName };
   }
 
-  // (d) Create: one directory per branch, sanitized to a single boring path
-  // segment (see module doc); the root is created on demand. Nonzero add →
-  // throw with stderr — nothing is registered for a tree that does not exist.
+  // (d) Create: one directory per PR, `pr-<pr>-<sanitized-branch>` (the PR
+  // prefix disambiguates sanitize collisions like feat/x vs feat-x — see
+  // the module doc), sanitized to a single boring path segment; the root is
+  // created on demand. `-B <headRefName> … FETCH_HEAD` (re)points the branch
+  // at the fetched commit, so the new tree sits AT TRUTH rather than at
+  // whatever the local ref last remembered. Nonzero add → throw with
+  // stderr — nothing is registered for a tree that does not exist.
   await mkdir(worktreeRoot, { recursive: true });
-  const wtPath = join(worktreeRoot, opts.headRefName.replace(SANITIZE_OK, '-'));
-  const addArgs = ['-C', opts.repoRoot, 'worktree', 'add', wtPath, opts.headRefName];
+  const wtPath = join(worktreeRoot, `pr-${opts.pr}-${opts.headRefName.replace(SANITIZE_OK, '-')}`);
+  const addArgs = ['-C', opts.repoRoot, 'worktree', 'add', '-B', opts.headRefName, wtPath, 'FETCH_HEAD'];
   const add = await opts.run(addArgs);
   if (add.code !== 0) {
-    throw gitFail(`worktree add ${wtPath} ${opts.headRefName} failed`, add.code, add.stderr, addArgs);
+    throw gitFail(`worktree add -B ${opts.headRefName} ${wtPath} FETCH_HEAD failed`, add.code, add.stderr, addArgs);
   }
   map[key] = { path: wtPath, branch: opts.headRefName, createdAt: opts.nowMs };
   await opts.registry.save(map);
@@ -291,7 +343,10 @@ export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{ path: s
  * policy). NO --force by default: review ops never silently destroys trees
  * — when git refuses (dirty, locked, …) the error is RETHROWN with git's
  * stderr and the caller decides (retry, force deliberately, or leave it).
- * The registry entry is pruned ONLY after git actually removed the tree.
+ * The registry entry is pruned ONLY after git actually removed the tree,
+ * and ONLY when it points at THE removed path — an entry pointing elsewhere
+ * (a re-created tree at a new location, or another PR's path under a shared
+ * opts mistake) describes a different tree and must survive.
  */
 export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }): Promise<void> {
   validateOpts(opts);
@@ -305,7 +360,10 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
       removeArgs,
     );
   }
+  const key = String(opts.pr);
   const map = await opts.registry.load();
-  delete map[String(opts.pr)];
-  await opts.registry.save(map);
+  if (map[key]?.path === opts.path) {
+    delete map[key];
+    await opts.registry.save(map);
+  }
 }

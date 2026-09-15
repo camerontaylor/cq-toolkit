@@ -3,8 +3,9 @@
 // Pinned here (the module doc's contract clauses, each mapped to a test):
 //   a. PUSH-BEFORE-POST: a nonzero push exit posts NOTHING (no POST/graphql
 //      argv ever runs), returns pushed=false with empty posted/failed and
-//      zero skips — every action stays retriable; a seam-level push throw
-//      fails closed identically.
+//      zero skips — every action stays retriable; pushError carries the
+//      code + stderr (≤500 chars); a seam-level push throw fails closed
+//      identically, with the throw message as pushError.
 //   b. DEDUPE: an actionId already in the dispatch log skips entirely — no
 //      invocation, counted in skippedAlreadyDispatched (cross-run AND
 //      within-run duplicates).
@@ -16,15 +17,22 @@
 //      and retries only the resolves.
 //   e. PER-ACTION FAILURE ISOLATION: a failing reply or resolve lands in
 //      `failed` (GhError-shaped message / GraphQL-errors message), is NOT
-//      recorded (retriable), and never stops its siblings.
+//      recorded (retriable), and never stops its siblings. THE IDEMPOTENT
+//      EXCEPTION: a resolve whose GraphQL errors say "already resolved" is
+//      a SUCCESS-EQUIVALENT replay — recorded, counted in
+//      skippedAlreadyResolved, never failed — so a mutation that landed
+//      but whose record didn't converges on the re-run.
 //   f. RECORD-BEFORE-NEXT: every success is logged immediately after its own
 //      mutation, before the next action starts (asserted via an interleaved
 //      event stream of gh invocations and log records).
 //   Plus: argv shapes (REST posts with -F in_reply_to / -f body; the resolve
 //   mutation riding `-f query=` with NO variable named `query` — the I11
 //   collision rule), the no-push configuration, result record shapes
-//   (created comment ids / thread ids / injected nowMs), and the
-//   fileDispatchLog behaviors (missing = empty, corrupt = loud throw).
+//   (created comment ids / thread ids / injected nowMs; 'unknown' when the
+//   response body is unmineable), seam-level throw isolation for the main
+//   run, and the fileDispatchLog behaviors (missing = empty, corrupt = loud
+//   throw, record = ATOMIC write-tmp-then-rename — interleaved load/record
+//   cycles never leave a truncated log).
 //
 // The gh seam is INJECTED (fakes routing on argv, recording invocation
 // order); no spawned process, no network, no real clocks (nowMs injected).
@@ -145,21 +153,28 @@ const pushRun = (calls: string[][], code = 0): GhFn => async (args: string[]) =>
 // ---------------------------------------------------------------------------
 
 describe('push-before-post', () => {
-  test('a FAILED push posts NOTHING — zero gh POST/graphql invocations, pushed=false, nothing failed or skipped (all retriable)', async () => {
+  test('a FAILED push posts NOTHING — zero gh POST/graphql invocations, pushed=false, nothing failed or skipped (all retriable), and pushError names the failure', async () => {
     const calls: GhCall[] = [];
     const pushCalls: string[][] = [];
     const result = await replyAndResolve(
       [mkReply('r1', 1201), mkIssue('i1'), mkResolve('s1', 'PRRT_1')],
       baseOpts(recordingGh(calls), memLog(), { run: pushRun(pushCalls, 1), args: ['push', 'origin', 'refs/heads/branch'] }),
     );
-    expect(result).toEqual({ pushed: false, posted: [], failed: [], skippedAlreadyDispatched: 0 });
+    expect(result.pushed).toBe(false);
+    expect(result.posted).toEqual([]);
+    expect(result.failed).toEqual([]);
+    expect(result.skippedAlreadyDispatched).toBe(0);
+    expect(result.skippedAlreadyResolved).toBe(0);
+    // pushError: code + stderr — the caller's only diagnostic (nothing posted).
+    expect(result.pushError).toContain('exit 1');
+    expect(result.pushError).toContain('fatal: unable to access');
     // NO POST argv ever ran — not one reply, comment, or mutation.
     expect(calls).toEqual([]);
     // The push itself ran exactly once, with the caller-composed argv.
     expect(pushCalls).toEqual([['push', 'origin', 'refs/heads/branch']]);
   });
 
-  test('a THROWN push (spawn-level failure) fails closed identically — nothing posted, nothing attempted', async () => {
+  test('a THROWN push (spawn-level failure) fails closed identically — nothing posted, nothing attempted, pushError carries the throw message', async () => {
     const calls: GhCall[] = [];
     const pushCalls: string[][] = [];
     const throwingPush: GhFn = async (args) => {
@@ -170,9 +185,26 @@ describe('push-before-post', () => {
       [mkReply('r1', 1201)],
       baseOpts(recordingGh(calls), memLog(), { run: throwingPush, args: ['push', 'origin', 'main'] }),
     );
-    expect(result).toEqual({ pushed: false, posted: [], failed: [], skippedAlreadyDispatched: 0 });
+    expect(result.pushed).toBe(false);
+    expect(result.posted).toEqual([]);
+    expect(result.failed).toEqual([]);
+    expect(result.skippedAlreadyDispatched).toBe(0);
+    expect(result.skippedAlreadyResolved).toBe(0);
+    expect(result.pushError).toContain('spawn gh ENOENT');
     expect(calls).toEqual([]);
     expect(pushCalls).toEqual([['push', 'origin', 'main']]);
+  });
+
+  test('pushError is capped at 500 characters even when the push spews pages of stderr', async () => {
+    const longStderr = 'x'.repeat(2000);
+    const failingPush: GhFn = async () => ({ code: 1, stdout: '', stderr: longStderr });
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201)],
+      baseOpts(recordingGh([]), memLog(), { run: failingPush, args: ['push', 'origin', 'main'] }),
+    );
+    expect(result.pushed).toBe(false);
+    expect(result.pushError).toHaveLength(500);
+    expect(result.pushError).toContain('exit 1');
   });
 
   test('no push configured → posting proceeds immediately (pushed=true)', async () => {
@@ -331,7 +363,7 @@ describe('per-action failure isolation', () => {
     expect(calls.map((c) => c.label)).toEqual(['reply:1201', 'reply:1202', 'issue-comment']);
   });
 
-  test('failing resolves are isolated the same way — nonzero exit AND GraphQL-errors-on-200 both land in failed, unrecorded', async () => {
+  test('failing resolves are isolated the same way — nonzero exit AND other GraphQL-errors-on-200 both land in failed, unrecorded', async () => {
     const calls: GhCall[] = [];
     const log = memLog();
     const result = await replyAndResolve(
@@ -340,9 +372,10 @@ describe('per-action failure isolation', () => {
         recordingGh(calls, undefined, (label) => {
           if (label === 'resolve:PRRT_1') return { code: 4, stdout: '', stderr: 'gh: mutation conflicted' };
           if (label === 'resolve:PRRT_2') {
-            // A 200 whose body carries server-side GraphQL errors — the
-            // mutation did NOT land; a safe retry.
-            return { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved' }] }), stderr: '' };
+            // A 200 whose body carries server-side GraphQL errors OTHER
+            // than the idempotent already-resolved case — the mutation did
+            // NOT land; a safe retry.
+            return { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Bad credentials' }] }), stderr: '' };
           }
           return undefined;
         }),
@@ -351,10 +384,157 @@ describe('per-action failure isolation', () => {
     );
     expect(result.posted.map((r) => r.actionId)).toEqual(['r1']);
     expect(result.failed.map((f) => f.action.actionId)).toEqual(['s1', 's2']);
+    expect(result.skippedAlreadyResolved).toBe(0);
     expect(result.failed[0]?.error).toContain('exit 4');
-    expect(result.failed[1]?.error).toContain('GraphQL errors: Thread is already resolved');
+    expect(result.failed[1]?.error).toContain('GraphQL errors: Bad credentials');
     // Neither resolve was recorded; the reply was.
     expect((await log.load()).map((r) => r.actionId)).toEqual(['r1']);
+  });
+
+  test('a resolve the server calls ALREADY RESOLVED is a SUCCESS-EQUIVALENT replay — recorded, skippedAlreadyResolved, never failed', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) => {
+          if (label === 'resolve:PRRT_1') {
+            // The mutation's effects are already in place (a prior run's
+            // mutation landed, its record did not — the crash window);
+            // GitHub answers with this GraphQL error.
+            return { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved.' }] }), stderr: '' };
+          }
+          return undefined;
+        }),
+        log,
+      ),
+    );
+    // NOT a failure: the run converged instead of retrying forever.
+    expect(result.failed).toEqual([]);
+    expect(result.skippedAlreadyResolved).toBe(1);
+    // Recorded exactly like a landed success — resultRef is the thread id.
+    expect(result.posted.map((r) => r.actionId)).toEqual(['r1', 's1']);
+    expect(result.posted[1]).toEqual({ actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW });
+    expect((await log.load())).toEqual([
+      { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+    ]);
+    // The reply sibling ran normally.
+    expect(calls.map((c) => c.label)).toEqual(['reply:1201', 'resolve:PRRT_1']);
+  });
+
+  test('IDEMPOTENT REPLAY across runs: mutation landed, record did not → the re-run converges (skippedAlreadyResolved 1, failed 0, no duplicate anything)', async () => {
+    const actions: ReviewAction[] = [mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')];
+
+    // Run 1: BOTH mutations land, but gh answers s1 with the
+    // already-resolved error (the prior run's record never made it).
+    const calls1: GhCall[] = [];
+    const log = memLog();
+    const run1 = await replyAndResolve(
+      actions,
+      baseOpts(
+        recordingGh(calls1, undefined, (label) =>
+          label === 'resolve:PRRT_1'
+            ? { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved' }] }), stderr: '' }
+            : undefined,
+        ),
+        log,
+      ),
+    );
+    expect(run1.failed).toEqual([]);
+    expect(run1.skippedAlreadyResolved).toBe(1);
+    expect(run1.posted.map((r) => r.actionId)).toEqual(['s1', 's2']);
+    // The replay was RECORDED — the log now carries it once.
+    expect((await log.load()).map((r) => r.actionId)).toEqual(['s1', 's2']);
+
+    // Run 2: clean gh, SAME action list, SAME log — s1 is now deduped like
+    // any dispatched action: no second mutation, no duplicate record.
+    const calls2: GhCall[] = [];
+    const run2 = await replyAndResolve(actions, baseOpts(recordingGh(calls2), log));
+    expect(run2.failed).toEqual([]);
+    expect(run2.skippedAlreadyResolved).toBe(0);
+    expect(run2.skippedAlreadyDispatched).toBe(2);
+    expect(run2.posted).toEqual([]);
+    // The mutation for s1 ran exactly ONCE across both runs.
+    expect(calls1.filter((c) => c.label === 'resolve:PRRT_1')).toHaveLength(1);
+    expect(calls2.filter((c) => c.label === 'resolve:PRRT_1')).toHaveLength(0);
+    // No duplicate anything: one record per action, period.
+    expect((await log.load())).toHaveLength(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// outcome-parsing gaps — every non-conforming gh outcome is isolated+unrecorded
+// ---------------------------------------------------------------------------
+
+describe('non-conforming gh outcomes', () => {
+  test('a resolve printing NON-JSON stdout lands in failed and is NOT recorded (outcome unknown → retry)', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) =>
+          label === 'resolve:PRRT_1' ? { code: 0, stdout: 'gh: rendered an error page, not JSON', stderr: '' } : undefined,
+        ),
+        log,
+      ),
+    );
+    // The reply sibling was unaffected.
+    expect(result.posted.map((r) => r.actionId)).toEqual(['r1']);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.action.actionId).toBe('s1');
+    expect(result.failed[0]?.error).toContain('non-JSON');
+    // NOT recorded — the next run retries it (recording an unknown outcome
+    // could swallow a mutation that never landed).
+    expect(await log.load()).toEqual([{ actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW }]);
+  });
+
+  test('a THROWN main-run gh seam failure fails just that action with the throw message — siblings proceed', async () => {
+    const calls: GhCall[] = [];
+    const base = recordingGh(calls);
+    const log = memLog();
+    const throwingRun: GhFn = async (args) => {
+      if (args.some((a) => a.includes('in_reply_to=1202'))) {
+        throw new Error('spawn gh ENOMEM');
+      }
+      return base(args);
+    };
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkReply('rmid', 1202), mkIssue('i1')],
+      baseOpts(throwingRun, log),
+    );
+    expect(result.pushed).toBe(true);
+    // The thrown seam failure became that ONE action's failure, message
+    // carrying the throw string; siblings ran and were recorded.
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.action.actionId).toBe('rmid');
+    expect(result.failed[0]?.error).toContain('spawn gh ENOMEM');
+    expect(result.posted.map((r) => r.actionId)).toEqual(['r1', 'i1']);
+    // The throwing invocation never even reached the recorder — the seam
+    // threw before delegating — but the SIBLINGS all ran, in order.
+    expect(calls.map((c) => c.label)).toEqual(['reply:1201', 'issue-comment']);
+    expect((await log.load()).map((r) => r.actionId)).toEqual(['r1', 'i1']);
+  });
+
+  test("a success whose body cannot be mined records resultRef 'unknown' — recording is never blocked by an unparseable body", async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkIssue('i1')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) => {
+          if (label === 'reply:1201') return { code: 0, stdout: '<html>gateway garbage</html>', stderr: '' };
+          if (label === 'issue-comment') return { code: 0, stdout: JSON.stringify({ id: 'not-a-number' }), stderr: '' };
+          return undefined;
+        }),
+        log,
+      ),
+    );
+    // Both posts SUCCEEDED (exit 0): recorded with the best-effort ref.
+    expect(result.failed).toEqual([]);
+    expect(result.posted.map((r) => r.resultRef)).toEqual(['unknown', 'unknown']);
+    expect((await log.load()).map((r) => r.resultRef)).toEqual(['unknown', 'unknown']);
   });
 });
 
@@ -480,6 +660,38 @@ describe('fileDispatchLog', () => {
       await expect(
         log.record({ actionId: 'r2', kind: 'issue_comment', resultRef: '8002', at: NOW }),
       ).rejects.toThrow(/corrupt/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('record is ATOMIC (tmp + rename): N interleaved load/record cycles always leave parseable content', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
+    try {
+      const path = join(dir, 'dispatch.jsonl');
+      const log = fileDispatchLog(path);
+      // Interleave loads (including ones racing the record) with records;
+      // after EVERY cycle the on-disk log must parse line-by-line — a
+      // non-atomic rewrite could leave a truncated (unparseable) file here.
+      for (let cycle = 0; cycle < 20; cycle++) {
+        await Promise.all([
+          log.load(),
+          log.record({ actionId: `r${cycle}`, kind: 'issue_comment', resultRef: String(cycle), at: NOW + cycle }),
+          log.load(),
+          log.load(),
+        ]);
+        const text = await readFile(path, 'utf8');
+        for (const line of text.split('\n')) {
+          if (line.trim() === '') continue;
+          expect(() => JSON.parse(line)).not.toThrow();
+        }
+      }
+      // Every record survived (records are per-cycle sequential, so the
+      // read-modify-write chain never loses one), and a FRESH log instance
+      // sees the whole history.
+      const history = await fileDispatchLog(path).load();
+      expect(history).toHaveLength(20);
+      expect(history.map((r) => r.actionId)).toEqual(Array.from({ length: 20 }, (_v, i) => `r${i}`));
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

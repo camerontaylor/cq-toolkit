@@ -9,7 +9,9 @@
 //      head, so a failed push must post nothing at all (a reply about a fix
 //      nobody can see is worse than no reply). A failed push returns
 //      pushed:false with an empty posted/failed and skips nothing — every
-//      action remains retriable on the next run.
+//      action remains retriable on the next run — and carries `pushError`
+//      (code + stderr, ≤500 chars) so the caller can say WHY without a
+//      second run.
 //   b. DEDUPE: the dispatch log is the cross-run memory. An action whose
 //      actionId is already recorded is skipped entirely (no duplicate post)
 //      and counted in skippedAlreadyDispatched. actionId is the dedupe key —
@@ -27,6 +29,11 @@
 //   e. PER-ACTION FAILURE ISOLATION: one nonzero gh response does not stop
 //      the run; the failure lands in `failed` with the GhError-shaped
 //      message and is NOT recorded — failed actions retry on the next run.
+//      THE IDEMPOTENT EXCEPTION: a resolve whose GraphQL errors say the
+//      thread is "already resolved" is a SUCCESS-EQUIVALENT replay (the
+//      previous run's mutation landed but its record did not — the crash
+//      window) — it is recorded and counted in skippedAlreadyResolved, so
+//      the re-run converges instead of failing forever.
 //   f. Every success is recorded via dispatchLog.record before the next
 //      action starts (no interleaving, no batching of records).
 //
@@ -40,7 +47,7 @@
 //
 // Structure purity: no Date.now (nowMs is injected), no direct I/O —
 // everything goes through opts.run, opts.push.run, and the DispatchLog.
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { GhError } from './gh.js';
 import type { GhFn, GhResult } from './gh.js';
 
@@ -105,7 +112,11 @@ export interface DispatchLog {
  * a corrupt file THROWS with a clear message (dispatching on top of an
  * unreadable log would silently duplicate every prior post, so the failure
  * is loud, never tolerant). `record` re-reads, appends, and rewrites the
- * whole file — a fresh process on the next run sees every record.
+ * whole file ATOMICALLY: the new content is written to `<path>.tmp` in the
+ * SAME directory and `fs.rename`d over the target — rename(2) within one
+ * directory is atomic, so a crash mid-write can only ever truncate the
+ * throwaway tmp file, never the log itself. A fresh process on the next run
+ * sees every record.
  */
 export function fileDispatchLog(path: string): DispatchLog {
   const load = async (): Promise<DispatchRecord[]> => {
@@ -136,7 +147,14 @@ export function fileDispatchLog(path: string): DispatchLog {
   const record = async (entry: DispatchRecord): Promise<void> => {
     const prior = await load();
     const lines = [...prior.map((r) => JSON.stringify(r)), JSON.stringify(entry)];
-    await writeFile(path, `${lines.join('\n')}\n`, 'utf8');
+    // Write-then-rename, never a plain rewrite: an in-place writeFile that
+    // dies halfway leaves a TRUNCATED log — every prior record gone, the
+    // next run a duplicate-post machine. The tmp file lives in the target's
+    // directory so the rename stays within one filesystem (cross-device
+    // rename fails).
+    const tmpPath = `${path}.tmp`;
+    await writeFile(tmpPath, `${lines.join('\n')}\n`, 'utf8');
+    await rename(tmpPath, path);
   };
   return { load, record };
 }
@@ -169,13 +187,41 @@ export interface ReplyAndResolveOpts {
 export interface ReplyAndResolveResult {
   /** Whether the configured push succeeded — or none was configured. */
   pushed: boolean;
+  /**
+   * Why the push failed, when it did: the exit code plus the captured
+   * stderr, capped at 500 characters (a push can spew pages of output; the
+   * result must stay log-line sized). Absent when pushed is true. A failed
+   * push posts nothing, so this is the ONLY diagnostic the caller gets.
+   */
+  pushError?: string;
   /** Records of every successful post/mutation, in execution order. */
   posted: DispatchRecord[];
   /** Per-action failures — NOT recorded; they retry on the next run. */
   failed: Array<{ action: ReviewAction; error: string }>;
   /** Actions skipped because their actionId was already dispatched. */
   skippedAlreadyDispatched: number;
+  /**
+   * Resolves whose mutation had ALREADY landed in a previous run (GitHub
+   * answers a resolve of an already-resolved thread with an "already
+   * resolved" GraphQL error): SUCCESS-EQUIVALENT replays — recorded with
+   * the thread id as resultRef and counted here, never in `failed`. The
+   * run converges instead of retrying a finished mutation forever.
+   */
+  skippedAlreadyResolved: number;
 }
+
+/** Cap for the composed pushError detail — a push can spew pages of output;
+ * the result must stay log-line sized. */
+const PUSH_ERROR_MAX = 500;
+
+/** Compose the pushError detail from the exit code and stderr, capped at
+ * PUSH_ERROR_MAX characters (head kept — the first lines of a git push
+ * failure carry the `! [rejected]` / `fatal:` payload). */
+const pushFailureDetail = (code: number, stderr: string): string => {
+  const trimmed = stderr.trim();
+  const detail = `push failed (exit ${code})${trimmed === '' ? '' : `: ${trimmed}`}`;
+  return detail.length <= PUSH_ERROR_MAX ? detail : detail.slice(0, PUSH_ERROR_MAX);
+};
 
 /** The only owner/repo spellings allowed near a gh REST path (E1 convention). */
 const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
@@ -259,15 +305,31 @@ export async function replyAndResolve(
   // exit — or a seam-level rejection (the GhFn contract resolves, but a
   // non-conforming injected runner may throw; either counts as a failed
   // push) — posts nothing and attempts nothing: posted/failed stay empty
-  // and nothing is skipped, so every action remains retriable.
+  // and nothing is skipped, so every action remains retriable. pushError
+  // surfaces WHY (code + stderr / the throw message, ≤500 chars) — a failed
+  // push posts nothing, so this detail is the caller's only diagnostic.
   if (opts.push != null) {
     try {
       const pushResult = await opts.push.run(opts.push.args);
       if (pushResult.code !== 0) {
-        return { pushed: false, posted: [], failed: [], skippedAlreadyDispatched: 0 };
+        return {
+          pushed: false,
+          pushError: pushFailureDetail(pushResult.code, pushResult.stderr),
+          posted: [],
+          failed: [],
+          skippedAlreadyDispatched: 0,
+          skippedAlreadyResolved: 0,
+        };
       }
-    } catch {
-      return { pushed: false, posted: [], failed: [], skippedAlreadyDispatched: 0 };
+    } catch (err) {
+      return {
+        pushed: false,
+        pushError: pushFailureDetail(1, String(err)),
+        posted: [],
+        failed: [],
+        skippedAlreadyDispatched: 0,
+        skippedAlreadyResolved: 0,
+      };
     }
   }
 
@@ -278,6 +340,7 @@ export async function replyAndResolve(
   const posted: DispatchRecord[] = [];
   const failed: Array<{ action: ReviewAction; error: string }> = [];
   let skippedAlreadyDispatched = 0;
+  let skippedAlreadyResolved = 0;
 
   // (c) REPLY-BEFORE-RESOLVE: the input order is preserved within each
   // phase; every post precedes every resolve.
@@ -372,6 +435,25 @@ export async function replyAndResolve(
     }
     if (payload.errors !== undefined && payload.errors.length > 0) {
       const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
+      // SUCCESS-EQUIVALENT replay: GitHub rejects a resolve of an
+      // already-resolved thread with exactly this error — meaning a prior
+      // run's mutation LANDED but its record did not (the one crash
+      // window). Retrying would fail forever; the run must CONVERGE:
+      // record it (resultRef = threadId, exactly the landed success) and
+      // count it as an idempotent skip, NOT a failure.
+      if (/already resolved/i.test(messages)) {
+        const record: DispatchRecord = {
+          actionId: action.actionId,
+          kind: action.kind,
+          resultRef: action.threadId,
+          at: opts.nowMs,
+        };
+        await opts.dispatchLog.record(record);
+        seen.add(action.actionId);
+        posted.push(record);
+        skippedAlreadyResolved += 1;
+        continue;
+      }
       failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages}` });
       continue;
     }
@@ -386,5 +468,5 @@ export async function replyAndResolve(
     posted.push(record);
   }
 
-  return { pushed: true, posted, failed, skippedAlreadyDispatched };
+  return { pushed: true, posted, failed, skippedAlreadyDispatched, skippedAlreadyResolved };
 }

@@ -22,8 +22,9 @@
 //      already-flat `[...]` payload yield the SAME id sets (real gh
 //      variants differ — neither shape may fail).
 //   7. Untrustworthy fetches throw loudly (server-side GraphQL errors;
-//      missing reviewThreads payload; non-array REST payload) — a throw
-//      can never be misread as NO PROGRESS.
+//      missing reviewThreads payload; non-array REST payload; MIXED page
+//      payload `[[c1],"junk"]` — flat() would silently DROP the array
+//      pages) — a throw can never be misread as NO PROGRESS.
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv) — no spawned
 // process, no network, no real clocks.
@@ -373,6 +374,22 @@ describe('untrustworthy fetches throw loudly', () => {
           nowMs: NOW,
         }),
       /non-array payload/,
+    ],
+    [
+      'MIXED page payload (array pages alongside junk — flat() would silently drop the pages)',
+      async (run: GhFn) =>
+        snapshotPrState({
+          ...COORDS,
+          run: async (args) => {
+            const path = args.find((a) => a.startsWith('repos/')) ?? '';
+            if (path.includes('/comments')) {
+              return { code: 0, stdout: JSON.stringify([[{ id: 9001 }], 'junk']), stderr: '' };
+            }
+            return run(args);
+          },
+          nowMs: NOW,
+        }),
+      /MIXED page payload/,
     ],
   ])('%s → snapshotPrState rejects', async (_label, runWith, pattern) => {
     const base = fakeGh({ headSha: 'abc123' });

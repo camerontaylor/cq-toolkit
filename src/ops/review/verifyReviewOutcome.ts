@@ -37,7 +37,9 @@
 //     back as a FLAT array, while with it (gh >= 2.51) they arrive as ONE
 //     outer array of page arrays. Real gh variants differ — BOTH shapes are
 //     accepted defensively (array of pages → flattened; already-flat array
-//     → used as-is); neither is failed.
+//     → used as-is); neither is failed. A MIXED payload (array pages next
+//     to non-array entries) is neither shape and THROWS — flat() would
+//     silently drop the pages.
 //   - Resolution state is the ONE field REST cannot give us, so it comes
 //     from a single GraphQL query — first page only (reviewThreads(first:
 //     100)). The 100-thread cap is acceptable for verify's purpose: commit
@@ -137,18 +139,26 @@ interface GraphqlPayload {
  *     array of page arrays;
  *   - `[c1, c2, …]` — the already-flat shape (an older gh variant, or pages
  *     merged flat WITHOUT slurp).
- * An empty array satisfies both readings (flat() of [] is []). Anything
- * else — or a page list containing a non-array page — is a payload this
- * module cannot trust and throws (a bad snapshot must never become a
- * silent "NO PROGRESS").
+ * An empty array satisfies both readings (flat() of [] is []). A MIXED
+ * payload — array pages alongside non-array entries (`[[c1], "junk"]`) —
+ * satisfies NEITHER: flat() would silently DROP the array pages and read
+ * only the junk, so it throws (a bad snapshot must never become a silent
+ * "NO PROGRESS").
  */
 const slurpedComments = (payload: unknown, path: string): Array<{ id?: unknown }> => {
   if (!Array.isArray(payload)) {
     throw new Error(`gh api ${path} returned a non-array payload — snapshot untrustworthy`);
   }
-  const flat = payload.every((entry) => Array.isArray(entry))
-    ? (payload as unknown[][]).flat()
-    : (payload as Array<{ id?: unknown }>);
+  const allPages = payload.every((entry) => Array.isArray(entry));
+  const anyPages = payload.some((entry) => Array.isArray(entry));
+  // length guard: an empty payload trivially has every!==some (both
+  // vacuous) and is the one case both clean readings agree on — [].
+  if (payload.length > 0 && allPages !== anyPages) {
+    throw new Error(
+      `gh api ${path} returned a MIXED page payload (array pages alongside non-array entries) — snapshot untrustworthy`,
+    );
+  }
+  const flat = allPages ? (payload as unknown[][]).flat() : (payload as Array<{ id?: unknown }>);
   return flat as Array<{ id?: unknown }>;
 };
 

@@ -1014,6 +1014,48 @@ describe('default skipPatterns', () => {
     ]);
   });
 
+  test('a bot notice on LINE 2 of a multi-line comment skips (the `m` flag: ^ matches every line start)', () => {
+    // Bots append their verdict below a preamble; the line-anchored default
+    // patterns carry the `m` flag, so "line start" means EVERY line start,
+    // not just the body's first character.
+    expect(
+      itemsOf(
+        baseState({
+          restIssueComments: [
+            restComment({ id: 625, body: 'Review queued; results will appear below.\nCodeRabbit is skipping this PR — no reviewable diff' }),
+          ],
+        }),
+      ),
+    ).toEqual([{ kind: 'comment', id: '625', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+    expect(
+      itemsOf(
+        baseState({
+          restIssueComments: [
+            restComment({ id: 626, body: 'Preamble line.\ncoderabbitai failed to post the review: error 500' }),
+          ],
+        }),
+      ),
+    ).toEqual([{ kind: 'comment', id: '626', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+  });
+
+  test('a HUMAN mid-body sentence (line 2, no bot identity) stays actionable even with the `m` flag', () => {
+    // The `m` flag widens WHERE the anchors can match, never WHAT counts as
+    // a bot: line 2 opening with generic human "failed to consider…"
+    // phrasing still finds no bot identity at the line start.
+    expect(
+      itemsOf(
+        baseState({
+          threads: [
+            thread({
+              id: 'TH5',
+              body: 'Two nits below.\nThe migration helper failed to consider the null case — please handle it.',
+            }),
+          ],
+        }),
+      ),
+    ).toEqual([{ kind: 'thread', id: 'TH5', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' }]);
+  });
+
   test('a normal review body matches no default pattern → stays actionable', () => {
     const items = itemsOf(
       baseState({
