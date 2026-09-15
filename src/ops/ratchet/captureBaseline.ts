@@ -44,7 +44,7 @@
 // nothing is deleted that cannot be classified), and a scan that cannot
 // start at all returns the zero outcome with `error` describing the fault
 // (including a baselines dir that resolves outside the ws — P1).
-import { mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline } from './format.js';
@@ -239,6 +239,27 @@ export function createCaptureBaseline(
     // the virtual repo-relative form; containment guarantees it maps here.
     const absPath = join(containment.dir, relPath.slice('baselines/'.length));
 
+    // Leaf check BEFORE the read: the expected baseline file itself may be
+    // a symlink — the read would follow it, and byte-identical external
+    // content would hit the unchanged fast path. Anything that is not a
+    // regular file is refused outright.
+    try {
+      const leafStat = await lstat(absPath);
+      if (leafStat.isFile() === false) {
+        return {
+          status: 'failed',
+          error: `ratchet: existing baseline '${relPath}' is not a regular file — refusing to overwrite`,
+        };
+      }
+    } catch (err) {
+      if (!isEnoent(err)) {
+        return {
+          status: 'indeterminate',
+          detail: `ratchet: could not inspect existing baseline '${relPath}' — ${errorMessage(err)}`,
+        };
+      }
+    }
+
     let existingText: string | null = null;
     try {
       existingText = await readFile(absPath, 'utf8');
@@ -305,12 +326,27 @@ export function createCaptureBaseline(
     try {
       // Atomic publish: bytes land in a unique temp file in the SAME
       // directory, then rename over the target — a crash mid-write can
-      // never leave a torn baseline at the target path.
-      tempPath = join(
-        dirname(absPath),
-        `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
-      );
-      await writeFile(tempPath, bytes, 'utf8');
+      // never leave a torn baseline at the target path. The temp is created
+      // EXCLUSIVELY ('wx'): the PID/counter name is predictable, and a
+      // pre-planted symlink there would make a plain 'w' write follow it
+      // and truncate the outside target. EEXIST advances the counter —
+      // bounded retries, then indeterminate.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        tempPath = join(
+          dirname(absPath),
+          `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
+        );
+        try {
+          await writeFile(tempPath, bytes, { flag: 'wx' });
+          break;
+        } catch (err) {
+          if ((err as { code?: unknown }).code !== 'EEXIST' || attempt === 4) throw err;
+        }
+      }
+      if (tempPath === undefined) {
+        // Unreachable (the loop always runs), but rename needs the path.
+        throw new Error('temp file could not be created');
+      }
       await rename(tempPath, absPath);
     } catch (err) {
       // Best-effort temp cleanup: a failed publish must not litter
@@ -328,7 +364,7 @@ export function createCaptureBaseline(
   };
 }
 
-/** Temp-name salt: uniqueness within a process, not determinism, is the requirement. */
+/** Temp-name salt: uniqueness within a process; EEXIST collisions (planted or raced) advance the counter, bounded. */
 let tempFileCounter = 0;
 
 /** Prune baselines that are no longer live. */

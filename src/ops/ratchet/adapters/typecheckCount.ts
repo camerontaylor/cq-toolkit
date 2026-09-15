@@ -15,6 +15,10 @@
 // compiler log at all, so text with zero diagnostic headers yields null —
 // non-passing evidence (I5), never a fabricated 0 pass. Callers that KNOW
 // the count supply the object form, where a structured 0 is a real zero.
+// Counts must be non-negative SAFE integers: an error count is a
+// cardinality, so a fraction, or anything beyond 2^53-1 (not a
+// representable cardinality — it would permanently distort the ratchet),
+// is unusable evidence.
 // Cyclic source data is bounded by a visited-set: a cycle yields
 // "no count here", never unbounded recursion.
 import type { MetricAdapter, MetricReading } from '../registry.js';
@@ -53,7 +57,7 @@ export const typecheckCount: MetricAdapter = {
   extract(raw: unknown): MetricReading | null {
     if (typeof raw === 'object' && raw !== null) {
       const count = findNumericCount(raw, new WeakSet());
-      if (count === undefined || !Number.isInteger(count) || count < 0) return null;
+      if (count === undefined || !Number.isSafeInteger(count) || count < 0) return null;
       return { value: count, unit: 'errors' };
     }
     if (typeof raw === 'string') {

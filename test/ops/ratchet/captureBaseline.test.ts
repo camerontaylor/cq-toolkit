@@ -39,7 +39,7 @@
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
-import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
 import { typecheckCount } from '../../../src/ops/ratchet/adapters/typecheckCount.js';
 import { createCaptureBaseline, pruneBaselines } from '../../../src/ops/ratchet/captureBaseline.js';
 import type {
@@ -365,15 +365,92 @@ describe('captureBaseline', () => {
     expect(await readFile(join(ws, REL), 'utf8')).toBe(corrupt);
   });
 
-  test('unreadable existing baseline path → indeterminate, never a verdict', async () => {
+  test('a directory squatting at the baseline path fails the leaf check (not a regular file)', async () => {
     sourceRaw = { count: 3 };
-    // A DIRECTORY squatting where the file belongs: unreadable as a baseline,
-    // and not ENOENT, so capture must refuse to claim any verdict.
+    // A DIRECTORY where the file belongs: lstat sees it before any read —
+    // not a regular file, so capture refuses outright.
     await mkdir(join(ws, REL), { recursive: true });
     await expect(capture(captureInput())).resolves.toEqual({
-      status: 'indeterminate',
-      detail: expect.stringMatching(/could not read existing baseline/s),
+      status: 'failed',
+      error: expect.stringMatching(/not a regular file — refusing/),
     });
+  });
+
+  test('a symlinked baseline leaf with byte-identical outside content fails the leaf check', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+    try {
+      await mkdir(join(ws, 'baselines'), { recursive: true });
+      const bytes = renderBaseline({
+        schemaVersion: 1,
+        target: TARGET,
+        metric: METRIC,
+        direction: 'lower-is-better',
+        value: 3,
+        unit: 'errors',
+        capturedAt: CAPTURED_AT,
+      });
+      const outsideFile = join(outside, 'elsewhere-baseline.json');
+      await writeFile(outsideFile, bytes, 'utf8');
+      await symlink(outsideFile, join(ws, REL));
+      sourceRaw = { count: 3 };
+      // The leaf is a symlink to a byte-identical file: without the lstat
+      // check the read would follow it and return ok/unchanged.
+      await expect(capture(captureInput())).resolves.toEqual({
+        status: 'failed',
+        error: expect.stringMatching(/not a regular file — refusing/),
+      });
+      expect(await readFile(outsideFile, 'utf8')).toBe(bytes); // outside untouched
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a pre-planted temp-name symlink does not truncate the outside target', async () => {
+    // A fresh module instance starts its temp counter at 0, making the
+    // EXACT next temp name predictable (...1.tmp).
+    vi.resetModules();
+    try {
+      const captureMod = await import('../../../src/ops/ratchet/captureBaseline.js');
+      const registryMod = await import('../../../src/ops/ratchet/registry.js');
+      registryMod.registerAdapter(typecheckCount);
+      const captureFresh = captureMod.createCaptureBaseline(
+        new Map([[METRIC, () => Promise.resolve(sourceRaw)]]),
+      );
+
+      const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+      try {
+        await mkdir(join(ws, 'baselines'), { recursive: true });
+        const outsideFile = join(outside, 'precious.txt');
+        await writeFile(outsideFile, 'precious — must not be truncated', 'utf8');
+        const planted = join(ws, 'baselines', `.${basename(REL)}.${process.pid}.1.tmp`);
+        await symlink(outsideFile, planted);
+
+        sourceRaw = { count: 3 };
+        await expect(captureFresh(captureInput())).resolves.toEqual({
+          status: 'ok',
+          value: { path: REL, value: 3, previous: null, lifecycle: 'created' },
+        });
+        expect(await readFile(join(ws, REL), 'utf8')).toContain('"value": 3');
+        expect(await readFile(outsideFile, 'utf8')).toBe('precious — must not be truncated');
+
+        // Exhaustion: plant EVERY remaining temp name — the bounded retries
+        // give up as indeterminate. The last planted symlink is removed by
+        // the best-effort cleanup (the link only; its target stays intact).
+        for (let c = 3; c <= 7; c++) {
+          await symlink(outsideFile, join(ws, 'baselines', `.${basename(REL)}.${process.pid}.${c}.tmp`));
+        }
+        sourceRaw = { count: 9 };
+        await expect(captureFresh(captureInput({ capturedAt: CAPTURED_AT_2 }))).resolves.toEqual({
+          status: 'indeterminate',
+          detail: expect.stringMatching(/writing baseline.*failed/s),
+        });
+        expect(await readFile(outsideFile, 'utf8')).toBe('precious — must not be truncated');
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    } finally {
+      vi.resetModules(); // later tests keep using the static module bindings
+    }
   });
 
   test('a valid baseline for ANOTHER target at the expected path fails the identity check, untouched', async () => {

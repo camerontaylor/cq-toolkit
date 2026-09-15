@@ -9,7 +9,8 @@
 //      state per test file, so these cannot leak.
 //   2. typecheckCount extract: structured {count} objects (top-level or
 //      nested) are read verbatim (a structured 0 is a real zero); counts
-//      must be non-negative INTEGERS (0.5 → null); cyclic source data
+//      must be non-negative SAFE integers (0.5 → null, and anything beyond
+//      2^53-1 — not a representable cardinality — → null); cyclic source data
 //      terminates as null (or still extracts when a count is reachable)
 //      instead of recursing forever; raw compiler text is counted by
 //      ANCHORED tsc diagnostic-header lines (classic `path(line,col):` with
@@ -122,6 +123,9 @@ describe('typecheckCount', () => {
     ['a file of only quoted diagnostic text yields null', 'const message = "error TS1234:";\nconst other = "error TS9999:";', null],
     ['negative count', { count: -1 }, null],
     ['non-integer count (a fraction of an error is unusable)', { count: 0.5 }, null],
+    ['huge integer count is not a representable cardinality', { count: 1e100 }, null],
+    ['2**53 is beyond safe-integer cardinality', { count: 2 ** 53 }, null],
+    ['large but safe count is fine', { count: 2 ** 53 - 1 }, 9007199254740991],
     ['non-finite count', { count: Number.POSITIVE_INFINITY }, null],
     ['NaN count', { count: Number.NaN }, null],
     ['count key present but not numeric', { count: 'many' }, null],
