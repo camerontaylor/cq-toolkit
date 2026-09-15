@@ -89,13 +89,20 @@ function isEnoent(err: unknown): boolean {
  * out this slice): rejections are not assumed to be Errors.
  */
 function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'object' && err !== null) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message !== '') return message;
-    return 'unknown error';
+  // The whole body is guarded (review-debt #72): a hostile thrown object's
+  // `message` getter can itself throw, and a containment helper that
+  // throws inside a catch handler would REPLACE the original fault.
+  try {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'object' && err !== null) {
+      const message = (err as { message?: unknown }).message;
+      if (typeof message === 'string' && message !== '') return message;
+      return 'unknown error';
+    }
+    if (typeof err === 'string') return err;
+  } catch {
+    // the thrown value's message accessor threw — fall through
   }
-  if (typeof err === 'string') return err;
   return 'unknown error';
 }
 

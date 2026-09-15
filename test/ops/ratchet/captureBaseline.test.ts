@@ -65,6 +65,8 @@ const BAD_DIRECTION_METRIC = 'bad-direction';
 const BIGINT_UNIT_METRIC = 'bigint-unit';
 const UNDEFINED_READING_METRIC = 'undefined-reading';
 const THROWING_VALUE_GETTER_METRIC = 'throwing-value-getter';
+const THROWING_DIRECTION_GETTER_METRIC = 'throwing-direction-getter';
+const THROWING_MESSAGE_GETTER_METRIC = 'throwing-message-getter';
 const THROWING_UNIT_GETTER_METRIC = 'throwing-unit-getter';
 const REL = baselineRelPath(TARGET, METRIC);
 
@@ -96,6 +98,28 @@ beforeAll(() => {
     // Infinity, and JSON.stringify(Infinity) would write a `null` value the
     // baseline file could never parse back — the op must refuse it.
     extract: () => ({ value: 10 ** 400, unit: 'errors' }),
+  });
+  registerAdapter({
+    id: THROWING_DIRECTION_GETTER_METRIC,
+    // review-debt #72: `direction` is adapter-owned property read after the
+    // guarded value/unit snapshot — a throwing getter must fail the op,
+    // never escape the seam.
+    get direction(): 'lower-is-better' {
+      throw new Error('direction getter exploded');
+    },
+    extract: () => ({ value: 1, unit: 'errors' }),
+  } as unknown as Parameters<typeof registerAdapter>[0]);
+  registerAdapter({
+    id: THROWING_MESSAGE_GETTER_METRIC,
+    direction: 'lower-is-better',
+    // review-debt #72: the THROWN value's own message accessor throws.
+    extract: () => {
+      throw {
+        get message(): string {
+          throw new Error('meta-explosion');
+        },
+      };
+    },
   });
   registerAdapter({
     id: UNIT_SHIFTING_METRIC,
@@ -184,6 +208,8 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [UNDEFINED_READING_METRIC, () => Promise.resolve({ count: 1 })],
   [THROWING_VALUE_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
   [THROWING_UNIT_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
+  [THROWING_DIRECTION_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
+  [THROWING_MESSAGE_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
   [UNIT_SHIFTING_METRIC, () => Promise.resolve(sourceRaw)],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
@@ -328,6 +354,30 @@ describe('captureBaseline', () => {
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
+  test('a THROWING direction getter fails the capture inside the snapshot containment (review-debt #72)', async () => {
+    await expect(
+      capture(captureInput({ metric: THROWING_DIRECTION_GETTER_METRIC, sourceId: THROWING_DIRECTION_GETTER_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'throwing-direction-getter' adapter produced an unusable reading.*direction getter exploded/s,
+      ),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
+  test('a thrown value whose MESSAGE getter throws maps to unknown error (review-debt #72)', async () => {
+    await expect(
+      capture(captureInput({ metric: THROWING_MESSAGE_GETTER_METRIC, sourceId: THROWING_MESSAGE_GETTER_METRIC })),
+    ).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /metric 'throwing-message-getter' adapter failed.*unknown error/s,
+      ),
+    });
+    await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
+  });
+
   test('a throwing adapter fails the capture; no throw crosses the op seam', async () => {
     await expect(
       capture(captureInput({ metric: THROWING_METRIC, sourceId: THROWING_METRIC })),
@@ -424,13 +474,17 @@ describe('captureBaseline', () => {
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
-  test('a probe adapter with a bogus direction fails the publish self-check (no file)', async () => {
+  test('a probe adapter with a bogus direction fails at the snapshot boundary (no file)', async () => {
+    // review-debt #72: the direction is materialized with the reading
+    // snapshot and validated against the two literals THERE — earlier and
+    // clearer than the old render/parse-back self-check, and a throwing
+    // direction getter can no longer escape the op seam either.
     await expect(
       capture(captureInput({ metric: BAD_DIRECTION_METRIC, sourceId: BAD_DIRECTION_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
       error: expect.stringMatching(
-        /metric 'bad-direction' produced an unparsable baseline — refusing to publish.*direction/s,
+        /metric 'bad-direction' adapter produced an unusable direction \(sideways\) — baseline not captured/s,
       ),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();

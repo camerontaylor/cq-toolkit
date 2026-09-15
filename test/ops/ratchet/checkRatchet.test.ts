@@ -58,6 +58,8 @@ const NULL_EXTRACT_METRIC = 'null-extract';
 const UNDEFINED_READING_METRIC = 'undefined-reading';
 const NONOBJECT_READING_METRIC = 'non-object-reading';
 const THROWING_VALUE_GETTER_METRIC = 'throwing-value-getter';
+const THROWING_DIRECTION_GETTER_METRIC = 'throwing-direction-getter';
+const THROWING_MESSAGE_GETTER_METRIC = 'throwing-message-getter';
 const UNIT_SHIFTING_METRIC = 'unit-shifting';
 const INFINITE_VALUE_METRIC = 'infinite-value';
 
@@ -127,6 +129,29 @@ beforeAll(() => {
     },
   });
   registerAdapter({
+    id: THROWING_DIRECTION_GETTER_METRIC,
+    // review-debt #72: `direction` is adapter-owned property read AFTER the
+    // guarded value/unit snapshot — a throwing getter here must land on a
+    // fail verdict, never escape the op seam.
+    get direction(): 'lower-is-better' {
+      throw new Error('direction getter exploded');
+    },
+    extract: () => ({ value: 1, unit: 'errors' }),
+  } as unknown as Parameters<typeof registerAdapter>[0]);
+  registerAdapter({
+    id: THROWING_MESSAGE_GETTER_METRIC,
+    direction: 'lower-is-better',
+    // review-debt #72: the THROWN value's own message accessor throws — the
+    // containment helper must never throw inside the catch handler.
+    extract: () => {
+      throw {
+        get message(): string {
+          throw new Error('meta-explosion');
+        },
+      };
+    },
+  });
+  registerAdapter({
     id: UNIT_SHIFTING_METRIC,
     direction: 'lower-is-better',
     // The reading's unit follows the source data, so the same (target,
@@ -160,6 +185,8 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [UNDEFINED_READING_METRIC, () => Promise.resolve({ count: 1 })],
   [NONOBJECT_READING_METRIC, () => Promise.resolve({ count: 1 })],
   [THROWING_VALUE_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
+  [THROWING_DIRECTION_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
+  [THROWING_MESSAGE_GETTER_METRIC, () => Promise.resolve({ count: 1 })],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
   ['rejecting-string', () => Promise.reject('boom-string')],
@@ -469,6 +496,44 @@ describe('checkRatchet', () => {
         baselineValue: null,
         currentValue: null,
         reason: expect.stringMatching(pattern),
+      },
+    });
+  });
+
+  test('a THROWING direction getter is contained by the snapshot (review-debt #72): fail, never a throw', async () => {
+    // `direction` was read AFTER the guarded value/unit snapshot — at the
+    // identity check, the comparison, and the fail reason — so a hostile
+    // getter escaped the op seam. The snapshot now materializes it inside
+    // the same containment.
+    await expect(
+      check(checkInput({ metric: THROWING_DIRECTION_GETTER_METRIC, sourceId: THROWING_DIRECTION_GETTER_METRIC })),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: baselineRelPath(TARGET, THROWING_DIRECTION_GETTER_METRIC),
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        reason: expect.stringMatching(
+          /metric 'throwing-direction-getter' adapter produced an unusable reading.*direction getter exploded/s,
+        ),
+      },
+    });
+  });
+
+  test('a thrown value whose MESSAGE getter throws is contained (review-debt #72): unknown error, never a second throw', async () => {
+    await expect(
+      check(checkInput({ metric: THROWING_MESSAGE_GETTER_METRIC, sourceId: THROWING_MESSAGE_GETTER_METRIC })),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        path: baselineRelPath(TARGET, THROWING_MESSAGE_GETTER_METRIC),
+        verdict: 'fail',
+        baselineValue: null,
+        currentValue: null,
+        reason: expect.stringMatching(
+          /metric 'throwing-message-getter' adapter failed.*unknown error/s,
+        ),
       },
     });
   });

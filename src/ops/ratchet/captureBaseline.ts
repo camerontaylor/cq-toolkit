@@ -47,7 +47,8 @@
 // nothing is deleted that cannot be classified), and a scan that cannot
 // start at all returns the zero outcome with `error` describing the fault
 // (including a baselines dir that resolves outside the ws — P1).
-import { lstat, mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, open, readFile, readdir, realpath, rename, unlink } from 'node:fs/promises';
+import type { FileHandle } from 'node:fs/promises';
 import { basename, dirname, join, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline } from './format.js';
@@ -72,13 +73,20 @@ function isEnoent(err: unknown): boolean {
  * error'.
  */
 function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === 'object' && err !== null) {
-    const message = (err as { message?: unknown }).message;
-    if (typeof message === 'string' && message !== '') return message;
-    return 'unknown error';
+  // The whole body is guarded (review-debt #72): a hostile thrown object's
+  // `message` getter can itself throw, and a containment helper that
+  // throws inside a catch handler would REPLACE the original fault.
+  try {
+    if (err instanceof Error) return err.message;
+    if (typeof err === 'object' && err !== null) {
+      const message = (err as { message?: unknown }).message;
+      if (typeof message === 'string' && message !== '') return message;
+      return 'unknown error';
+    }
+    if (typeof err === 'string') return err;
+  } catch {
+    // the thrown value's message accessor threw — fall through
   }
-  if (typeof err === 'string') return err;
   return 'unknown error';
 }
 
@@ -201,12 +209,28 @@ export function createCaptureBaseline(
     }
     // The reading is ADAPTER-OWNED: its fields may be getters or a hostile
     // Proxy that throws on access, so value and unit are snapshotted ONCE
-    // inside this containment; only the snapshots are used downstream.
+    // inside this containment; only the snapshots are used downstream. The
+    // adapter's `direction` joins the snapshot (review-debt #72): it is
+    // adapter-owned property too, read later at the render and the identity
+    // check, where a throwing/mutating getter would previously have escaped
+    // the op seam — and a direction outside the two literals is refused
+    // here rather than silently rendered into an unparsable baseline.
     let value: number;
     let unit: string | undefined;
+    let direction: 'lower-is-better' | 'higher-is-better';
     try {
       value = reading.value;
       unit = reading.unit;
+      const adapterDirection = adapter.direction;
+      if (adapterDirection !== 'lower-is-better' && adapterDirection !== 'higher-is-better') {
+        return {
+          status: 'failed',
+          error:
+            `ratchet: metric '${input.metric}' adapter produced an unusable direction ` +
+            `(${String(adapterDirection)}) — baseline not captured`,
+        };
+      }
+      direction = adapterDirection;
       if (!Number.isFinite(value)) {
         // A non-finite value would JSON.stringify to null and the written
         // file would fail its own parser — refuse it here, at the boundary.
@@ -239,7 +263,7 @@ export function createCaptureBaseline(
         schemaVersion: 1,
         target: input.target,
         metric: input.metric,
-        direction: adapter.direction,
+        direction: direction,
         value: value,
         unit: unit,
         capturedAt: input.capturedAt ?? new Date().toISOString(),
@@ -341,8 +365,8 @@ export function createCaptureBaseline(
       if (existing.metric !== input.metric) {
         disagreements.push(`metric '${existing.metric}' → '${input.metric}'`);
       }
-      if (existing.direction !== adapter.direction) {
-        disagreements.push(`direction '${existing.direction}' → '${adapter.direction}'`);
+      if (existing.direction !== direction) {
+        disagreements.push(`direction '${existing.direction}' → '${direction}'`);
       }
       if (existing.unit !== unit) {
         const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
@@ -378,17 +402,31 @@ export function createCaptureBaseline(
       // removes a temp THIS invocation actually created: exhausted retries
       // collide on pre-existing entries that must stay untouched.
       for (let attempt = 0; attempt < 5; attempt++) {
-        tempPath = join(
+        const candidate = join(
           dirname(absPath),
           `.${basename(absPath)}.${process.pid}.${++tempFileCounter}.tmp`,
         );
+        let handle: FileHandle;
         try {
-          await writeFile(tempPath, bytes, { flag: 'wx' });
-          tempCreated = true;
-          break;
+          handle = await open(candidate, 'wx');
         } catch (err) {
           if ((err as { code?: unknown }).code !== 'EEXIST' || attempt === 4) throw err;
+          continue;
         }
+        // OWNED FROM THE OPEN, not from a completed write (review-debt
+        // #69): writeFile(flag 'wx') marks ownership only AFTER the bytes
+        // land, so a fault mid-write (ENOSPC, I/O error) left the
+        // just-created zero-length temp behind as debris. The handle
+        // sequence owns the file the moment the exclusive open succeeds —
+        // a faulting write still reaches the cleanup unlink below.
+        tempPath = candidate;
+        tempCreated = true;
+        try {
+          await handle.writeFile(bytes);
+        } finally {
+          await handle.close();
+        }
+        break;
       }
       if (tempCreated === false || tempPath === undefined) {
         throw new Error('all temp candidates already existed');
