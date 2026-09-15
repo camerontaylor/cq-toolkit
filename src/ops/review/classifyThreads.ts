@@ -170,9 +170,16 @@ const parseRealMs = (iso: string | null): number | null => {
 const isResponder = (authorLogin: string | null, responder: string | null): boolean =>
   authorLogin !== null && authorLogin === responder;
 
-/** True when the body matches any configured bot skip/failure pattern (I2). */
+/** True when the body matches any configured bot skip/failure pattern (I2).
+ * Each pattern is evaluated via a FRESH expression with any `g`/`y` flag
+ * stripped: config patterns are data, and a stateful pattern's `lastIndex`
+ * survives across `.test()` calls, so repeated classification of identical
+ * bodies would alternate between match and no-match — a nondeterministic
+ * table. Rebuilding per call keeps the decision pure. */
 const matchesSkipPattern = (body: string, config: ClassifyConfig): boolean =>
-  config.skipPatterns.some((pattern) => pattern.test(body));
+  config.skipPatterns.some((pattern) =>
+    new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, '')).test(body),
+  );
 
 /** The thread's LAST reply by timestamp order as given (attachRestReplies
  * already sorts createdAt-ascending, nulls last); equal ms keep the LATER
