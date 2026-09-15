@@ -59,17 +59,36 @@ export class GhError extends Error {
  * both streams, and resolves with code + streams. The environment passes
  * through unchanged, layered with `opts.env` overrides (the test seam for
  * scenario/log plumbing like CQ_GH_SCENARIO and CQ_GH_LOG); args go to execve
- * directly (no shell, no quoting). A spawn failure (e.g. binary missing — no
- * `close` may follow) resolves, not rejects, with the shell's
- * command-not-found code 127 and the OS error as stderr: the seam is total.
+ * directly (no shell, no quoting). `timeoutMs` — default UNDEFINED, wait
+ * forever — SIGKILLs the child when it elapses and resolves (never rejects,
+ * the seam stays total) with the timeout convention code 124 and a
+ * `gh timed out after <ms>ms` marker appended to stderr. A spawn failure
+ * (e.g. binary missing — no `close` may follow) resolves with the shell's
+ * command-not-found code 127 and the OS error as stderr.
  */
-export function makeGhRunner(opts?: { bin?: string; env?: Record<string, string> }): GhFn {
+export function makeGhRunner(opts?: {
+  bin?: string;
+  env?: Record<string, string>;
+  timeoutMs?: number;
+}): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
       const bin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
+      let timedOut = false;
       const child = spawn(bin, args, { env: { ...process.env, ...opts?.env } });
+      // The runner — not the child — owns this one wall clock: it bounds a
+      // single spawned gh invocation and OBEYS by killing, never by deciding
+      // policy (the governor owns WHEN a run aborts; this only bounds one
+      // subprocess so a hung gh cannot wedge the caller forever).
+      const timer =
+        opts?.timeoutMs !== undefined
+          ? setTimeout(() => {
+              timedOut = true;
+              child.kill('SIGKILL');
+            }, opts.timeoutMs)
+          : undefined;
       child.stdout.on('data', (chunk: Buffer) => {
         stdoutChunks.push(chunk);
       });
@@ -77,6 +96,9 @@ export function makeGhRunner(opts?: { bin?: string; env?: Record<string, string>
         stderrChunks.push(chunk);
       });
       child.on('error', (err: Error) => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
         const stderr = Buffer.concat(stderrChunks).toString('utf8');
         resolve({
           code: 127,
@@ -85,14 +107,18 @@ export function makeGhRunner(opts?: { bin?: string; env?: Record<string, string>
         });
       });
       child.on('close', (code) => {
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
         // UTF-8 decoded ONCE over the whole stream: a multi-byte character
         // split across pipe chunks must survive (chunk-wise decoding would
         // replace it with U+FFFD).
-        resolve({
-          code: code ?? -1,
-          stdout: Buffer.concat(stdoutChunks).toString('utf8'),
-          stderr: Buffer.concat(stderrChunks).toString('utf8'),
-        });
+        const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+        let stderr = Buffer.concat(stderrChunks).toString('utf8');
+        if (timedOut) {
+          stderr = `${stderr}\ngh timed out after ${String(opts?.timeoutMs)}ms`;
+        }
+        resolve({ code: timedOut ? 124 : (code ?? -1), stdout, stderr });
       });
     });
 }

@@ -50,7 +50,13 @@ export interface FetchReviewStateCaps {
   reviewThreadPages?: number;
   /** Max reviews pages (100 reviews each) before fail-closed truncation. */
   reviewPages?: number;
-  /** Max REST pages (fetched at per_page=100, per collection) before truncation. */
+  /**
+   * Max REST pages (per collection) whose content is RETAINED. Plainly: the
+   * cap bounds retention ONLY — gh `--paginate` walks every Link header (the
+   * full transfer happens) before the cap is applied client-side, so an
+   * adversarial PR can force the complete download; the cap never bounds
+   * the transfer itself.
+   */
   restPages?: number;
 }
 
@@ -58,9 +64,9 @@ export interface FetchReviewStateCaps {
  * The fetched review state: full data plus the fail-closed truncation flag
  * (extends TruncationFlag — the shared vocabulary's flag shape). Every
  * consumer MUST consult `truncated`/`truncatedBecause` before trusting
- * counts — a cap hit means unknown data may be missing.
+ * counts — a cap hit or a lag detection means unknown data may be missing.
  */
-export interface RestReviewState extends TruncationFlag {
+export interface FetchedReviewState extends TruncationFlag {
   /** Repo coordinates, echoed for downstream tools. */
   repo: { owner: string; name: string };
   /** PR number, echoed. */
@@ -172,6 +178,14 @@ interface RawRestComment {
   in_reply_to_id?: number | null;
 }
 
+/**
+ * Minimal shape of one REST PR review (`.../pulls/{pr}/reviews`) — only the
+ * GraphQL-side join key is read: `node_id` ↔ the GraphQL review node `id`.
+ */
+interface RawRestReview {
+  node_id?: string | null;
+}
+
 /** Review verdicts the shared vocabulary carries; anything else → null. */
 const REVIEW_STATES: readonly string[] = ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'];
 
@@ -240,20 +254,20 @@ const toRestComment = (raw: RawRestComment): RestComment => ({
 });
 
 /**
- * Fetch one REST collection with `--paginate --slurp` and map it. The path
- * pins `?per_page=100`, so `restPages` is a true PAGE cap: it is applied
- * client-side on the outer array of page arrays that `--slurp` (gh >= 2.51)
- * produces, BEFORE flattening — an oversized fetch keeps its first
- * `restPages` pages and is reported truncated with `reason`.
+ * Fetch one REST collection with `--paginate --slurp` and apply the page
+ * cap. The path pins `?per_page=100`, so `restPages` is a true PAGE cap: it
+ * is applied client-side on the outer array of page arrays that `--slurp`
+ * (gh >= 2.51) produces, BEFORE flattening — an oversized fetch keeps its
+ * first `restPages` pages and is reported truncated with `reason`.
  */
-async function fetchRestComments(
+async function fetchRestPages<T>(
   run: GhFn,
   path: string,
   restPages: number,
   reason: string,
   truncatedBecause: string[],
-): Promise<RestComment[]> {
-  const raw = await ghJson<RawRestComment[][]>(run, ['api', path, '--paginate', '--slurp']);
+): Promise<T[][]> {
+  const raw = await ghJson<T[][]>(run, ['api', path, '--paginate', '--slurp']);
   if (!Array.isArray(raw) || raw.some((page) => !Array.isArray(page))) {
     throw new Error(`gh api ${path} --paginate --slurp returned a non-page-array payload`);
   }
@@ -262,6 +276,18 @@ async function fetchRestComments(
     truncatedBecause.push(reason);
     pages = pages.slice(0, restPages);
   }
+  return pages;
+}
+
+/** Fetch the flat REST review-comment collection and map it to the vocabulary. */
+async function fetchRestComments(
+  run: GhFn,
+  path: string,
+  restPages: number,
+  reason: string,
+  truncatedBecause: string[],
+): Promise<RestComment[]> {
+  const pages = await fetchRestPages<RawRestComment>(run, path, restPages, reason, truncatedBecause);
   return pages.flat().map(toRestComment);
 }
 
@@ -276,24 +302,33 @@ async function fetchRestComments(
  * sent only when a real cursor exists (never as empty strings), and a
  * finished collection stops advancing (and re-reporting) while its sibling
  * keeps paginating. REST collections ride `--paginate --slurp` under a true
- * page cap, recording `restComments.pageCap` / `issueComments.pageCap`.
- * Thread replies are reconstructed from the REST review comments (GraphQL
- * thread comments are root-only by design AND stale — the lag trap); a REST
- * conversation anchored to no known thread records `reviewThreads.lag`.
- * Null-safety: deleted accounts (`author: null`) and absent REST fields map
- * to null, never throw. `owner`/`repo` are validated against
- * `^[A-Za-z0-9_.-]+$` before any gh path is built.
+ * page cap, recording `restComments.pageCap` / `issueComments.pageCap` /
+ * `restReviews.pageCap`. Thread replies are reconstructed from the REST
+ * review comments (GraphQL thread comments are root-only by design AND
+ * stale — the lag trap); a REST conversation anchored to no known thread
+ * records `reviewThreads.lag`, and a REST review whose node_id is absent
+ * from the GraphQL review set records `reviews.lag` — both lag flavors are
+ * fail closed. Null-safety: deleted accounts (`author: null`) and absent
+ * REST fields map to null, never throw. `owner`/`repo` are validated against
+ * `^[A-Za-z0-9_.-]+$` and `pr` must be a positive safe integer, before any
+ * gh path is built.
  */
 export async function fetchReviewState(
   input: FetchReviewStateInput,
   caps?: FetchReviewStateCaps,
   run: GhFn = makeGhRunner(),
-): Promise<RestReviewState> {
-  // owner/repo land inside gh REST paths; anything path-injection-adjacent
-  // is rejected before a single argv is built.
+): Promise<FetchedReviewState> {
+  // owner/repo land inside gh REST paths and pr into both REST paths and
+  // GraphQL variables; anything injection-adjacent is rejected before a
+  // single argv is built.
   if (!GH_NAME_OK.test(input.owner) || !GH_NAME_OK.test(input.repo)) {
     throw new Error(
       `fetchReviewState: owner/repo must match ${String(GH_NAME_OK)} — got owner ${JSON.stringify(input.owner)}, repo ${JSON.stringify(input.repo)}`,
+    );
+  }
+  if (!Number.isSafeInteger(input.pr) || input.pr <= 0) {
+    throw new Error(
+      `fetchReviewState: pr must be a positive safe integer — got ${JSON.stringify(input.pr)}`,
     );
   }
   const threadPagesCap = caps?.reviewThreadPages ?? 10;
@@ -411,6 +446,15 @@ export async function fetchReviewState(
     'issueComments.pageCap',
     truncatedBecause,
   );
+  // The REST reviews collection is fetched for the LAG CROSS-CHECK below —
+  // it is deliberately not part of the returned state.
+  const restReviewPages = await fetchRestPages<RawRestReview>(
+    run,
+    `repos/${input.owner}/${input.repo}/pulls/${input.pr}/reviews?per_page=100`,
+    restPagesCap,
+    'restReviews.pageCap',
+    truncatedBecause,
+  );
 
   // GraphQL thread comments are root-only and stale; the reply chains come
   // from the flat REST collection (mutates threads in place). A REST
@@ -419,6 +463,18 @@ export async function fetchReviewState(
   const { unmatchedRoots } = attachRestReplies(threads, restReviewComments);
   if (unmatchedRoots.length > 0) {
     truncatedBecause.push('reviewThreads.lag');
+  }
+
+  // Reviews lag, mirroring the thread-lag pattern: any REST review whose
+  // node_id is absent from the GraphQL review id set means the snapshot
+  // predates that review — fail closed. (A REST review with no node_id
+  // cannot be cross-checked and is not evidence of lag.)
+  const graphqlReviewIds = new Set(reviews.map((review) => review.id));
+  const reviewsLag = restReviewPages
+    .flat()
+    .some((rest) => typeof rest.node_id === 'string' && !graphqlReviewIds.has(rest.node_id));
+  if (reviewsLag) {
+    truncatedBecause.push('reviews.lag');
   }
 
   // The loop body ran at least once (it exits only via its own break, after

@@ -24,11 +24,11 @@
 //   calls without it). `code` exits nonzero AFTER printing the payload.
 //
 // BUILT-IN TRAP BEHAVIORS (mimic real gh; always on, not scenario-dependent):
-//   a. args containing `/replies` on a non-POST invocation → exit 404 (the
-//      replies-endpoint-404 trap: there is no GET/list replies endpoint for
-//      review comments; reply chains only exist via in_reply_to_id on the
-//      flat collection). A POST (`--method POST`) routes normally — that is
-//      how replies are CREATED.
+//   a. args containing `/replies` on a non-POST invocation → exit 1 with
+//      gh's 404 stderr (the replies-endpoint-404 trap: there is no GET/list
+//      replies endpoint for review comments; reply chains only exist via
+//      in_reply_to_id on the flat collection). A POST (`--method POST`)
+//      routes normally — that is how replies are CREATED.
 //   b. `api graphql` models the SERVER — real gh runs NO client-side
 //      collision check: a duplicate `-f query=` key is LAST-WINS, silently,
 //      and the request proceeds. A document declaring a `$query` variable
@@ -79,9 +79,9 @@ const method =
 // (a) The replies-endpoint-404 trap — GET only; a POST routes normally.
 if (flat.includes('/replies') && method !== 'POST') {
   process.stderr.write(
-    'gh: 404 Not Found — no GET/list replies endpoint for review comments (fetch the PR comments collection + in_reply_to_id instead)\n',
+    'gh: Not Found (HTTP 404) - no GET/list replies endpoint for review comments (fetch the PR comments collection + in_reply_to_id instead)\n',
   );
-  process.exit(404);
+  process.exit(1);
 }
 
 // Scenario load — loud on missing/unparseable (exit 2).

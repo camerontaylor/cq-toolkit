@@ -1,31 +1,38 @@
-// E1 round-2 — the gh runner's UTF-8 contract (R2-10): stdout/stderr are
-// accumulated as Buffers and decoded ONCE on close, so a multi-byte UTF-8
-// character split across two pipe chunks survives intact (chunk-wise
-// decoding would replace it with U+FFFD).
+// E1 round-2/round-3 — the gh runner's process contract: UTF-8 decoded ONCE
+// over the whole stream (a multi-byte character split across two pipe chunks
+// survives; chunk-wise decoding would replace it with U+FFFD), a missing
+// binary resolves fail-closed with code 127 (the seam never rejects), ghJson
+// rejects non-JSON stdout, and timeoutMs bounds a hung child with the
+// timeout convention code 124 + stderr marker — resolving, not throwing.
 //
-// The split writer is generated at runtime into a temp dir (not a repo
-// fixture) and spawned through the real makeGhRunner seam.
+// The spawned helpers are generated at runtime into a temp dir (not repo
+// fixtures) and run through the real makeGhRunner seam.
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
-import { makeGhRunner } from '../../../src/ops/review/gh.js';
+import { makeGhRunner, ghJson } from '../../../src/ops/review/gh.js';
+import type { GhFn } from '../../../src/ops/review/gh.js';
 
 const tempDirs: string[] = [];
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe('makeGhRunner UTF-8 handling', () => {
+/** Write an executable helper .mjs into a fresh temp dir and return its path. */
+const tempBin = async (name: string, source: string): Promise<string> => {
+  const dir = await mkdtemp(join(tmpdir(), 'cq-gh-'));
+  tempDirs.push(dir);
+  const bin = join(dir, name);
+  await writeFile(bin, source);
+  await chmod(bin, 0o755);
+  return bin;
+};
+
+describe('makeGhRunner', () => {
   test('a multi-byte UTF-8 character split across two pipe chunks survives', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-gh-utf8-'));
-    tempDirs.push(dir);
-    const bin = join(dir, 'split-writer.mjs');
-    // '日' is U+65E5 = 0xe6 0x97 0xa5. The two writes are separated by a
-    // timer so they arrive as two distinct 'data' chunks with the
-    // character's bytes straddling the boundary.
-    await writeFile(
-      bin,
+    const bin = await tempBin(
+      'split-writer.mjs',
       [
         '#!/usr/bin/env node',
         'import process from "node:process";',
@@ -37,10 +44,45 @@ describe('makeGhRunner UTF-8 handling', () => {
         '',
       ].join('\n'),
     );
-    await chmod(bin, 0o755);
     const run = makeGhRunner({ bin });
     const res = await run([]);
     expect(res.code).toBe(0);
     expect(res.stdout).toBe('a\u65e5b');
   }, 10_000);
+
+  test('a nonexistent binary resolves (never rejects) with the 127 convention', async () => {
+    const run = makeGhRunner({ bin: '/nonexistent-cq-gh-probe' });
+    const res = await run(['whatever']);
+    expect(res.code).toBe(127);
+    expect(res.stderr).not.toBe('');
+  }, 10_000);
+
+  test('timeoutMs SIGKILLs a hung child: resolves code 124 with the stderr marker, timer cleared', async () => {
+    const bin = await tempBin(
+      'sleeper.mjs',
+      [
+        '#!/usr/bin/env node',
+        'import process from "node:process";',
+        'setTimeout(() => process.exit(0), 5000);',
+        '',
+      ].join('\n'),
+    );
+    const run = makeGhRunner({ bin, timeoutMs: 100 });
+    const startedAt = Date.now();
+    const res = await run([]); // resolves — the seam stays total
+    const elapsed = Date.now() - startedAt;
+    expect(res.code).toBe(124);
+    expect(res.stderr).toContain('gh timed out after 100ms');
+    // The child was killed and the timer cleared: we are back long before
+    // the child's own 5s exit, and the process is not kept alive by the
+    // pending timer.
+    expect(elapsed).toBeLessThan(4000);
+  }, 10_000);
+});
+
+describe('ghJson', () => {
+  test('non-JSON stdout rejects with a non-JSON message (never echoes the stdout)', async () => {
+    const run: GhFn = async () => ({ code: 0, stdout: 'not json', stderr: '' });
+    await expect(ghJson(run, ['api', 'x'])).rejects.toThrow(/non-JSON/);
+  });
 });

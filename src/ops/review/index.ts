@@ -21,6 +21,6 @@ export { GhError, ghJson, makeGhRunner } from './gh.js';
 export type {
   FetchReviewStateCaps,
   FetchReviewStateInput,
-  RestReviewState,
+  FetchedReviewState,
 } from './fetchReviewState.js';
 export { fetchReviewState } from './fetchReviewState.js';

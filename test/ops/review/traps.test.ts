@@ -17,15 +17,16 @@
 //      implementation sends exactly one `-f query=` per graphql call, names
 //      its cursors threadsAfter/reviewsAfter, and never sends an empty
 //      cursor (proven via CQ_GH_LOG).
-//   3. Replies-endpoint 404 — a GET `/replies` invocation exits 404 (POST is
-//      exempt: that is how replies are created); the implementation never
-//      makes one (proven via CQ_GH_LOG) and rebuilds reply chains from
-//      in_reply_to_id on the flat collection.
+//   3. Replies-endpoint 404 — a GET `/replies` invocation exits 1 with gh's
+//      404 stderr (POST is exempt: that is how replies are created); the
+//      implementation never makes one (proven via CQ_GH_LOG) and rebuilds
+//      reply chains from in_reply_to_id on the flat collection.
 //   4. reviewThreads lag — the GraphQL snapshot knows ONE thread and
 //      carries NO replies; REST knows both a fresh reply on that known
-//      thread AND a fresh root thread the snapshot has never seen. The
-//      known-thread reply attaches; the fresh thread is NOT fabricated;
-//      the lag truncates fail-closed with reason `reviewThreads.lag`.
+//      thread AND a fresh root thread the snapshot has never seen, plus a
+//      fresh REST-only review. The known-thread reply attaches; the fresh
+//      thread is NOT fabricated; both lag flavors truncate fail-closed in
+//      stable order (`reviewThreads.lag`, then `reviews.lag`).
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -122,7 +123,7 @@ describe('trap: REST silent pagination loss', () => {
     expect(state.truncated).toBe(false);
     // The REST calls really paginated: --paginate --slurp at per_page=100.
     const restCalls = (await readLog(logPath)).filter((args) => args.some((a) => a.startsWith('repos/')));
-    expect(restCalls).toHaveLength(2); // pulls comments + issue comments
+    expect(restCalls).toHaveLength(3); // pulls comments + issue comments + reviews
     for (const call of restCalls) {
       expect(call).toContain('--paginate');
       expect(call).toContain('--slurp');
@@ -204,12 +205,12 @@ describe('trap: GraphQL query variable collision', () => {
 // ---------------------------------------------------------------------------
 
 describe('trap: replies endpoint 404', () => {
-  test('trap fires: a GET /replies invocation exits 404 (a POST routes normally)', async () => {
+  test('trap fires: a GET /replies invocation exits 1 with gh 404 stderr (a POST routes normally)', async () => {
     const { run } = await harness('replies-without');
     const get = await run(['api', '--method', 'GET', 'repos/octo/toolkit/pulls/7/comments/101/replies']);
-    expect(get.code).not.toBe(0); // process.exit(404) truncates to 8 bits on POSIX
-    expect(get.stderr).toMatch(/404/);
-    expect(get.stderr).toContain('no GET/list replies endpoint for review comments');
+    expect(get.code).toBe(1);
+    expect(get.stderr).toContain('gh: Not Found (HTTP 404) - no GET/list replies endpoint for review comments');
+    expect(get.stderr).toContain('in_reply_to_id');
     // A POST is how replies are CREATED — it bypasses the 404 builtin and
     // routes like any other call (the URL carries the pulls-comments route
     // substring, so it gets that route's payload); the point is the 404
@@ -262,8 +263,10 @@ describe('trap: reviewThreads lag', () => {
     // The plain lag case — a fresh reply on a KNOWN thread — attaches fine.
     const known = state.threads.find((thread) => thread.id === 'PRRT_kwDOClag1');
     expect(known?.replies.map((reply) => reply.body)).toEqual(['fresh responder reply on the KNOWN thread']);
-    // And the fresh thread truncates the result fail-closed.
+    // And BOTH lag flavors truncate the result fail-closed, in stable order:
+    // the scenario also carries a fresh REST-only review (node_id absent
+    // from the GraphQL snapshot).
     expect(state.truncated).toBe(true);
-    expect(state.truncatedBecause).toEqual(['reviewThreads.lag']);
+    expect(state.truncatedBecause).toEqual(['reviewThreads.lag', 'reviews.lag']);
   }, 20_000);
 });

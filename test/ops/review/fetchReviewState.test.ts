@@ -40,11 +40,13 @@ const flagValue = (args: string[], name: string): string => {
   return entry === undefined ? '' : entry.slice(name.length + 1);
 };
 
-/** The fake's fixtures: a GraphQL page builder plus the two REST arrays. */
+/** The fake's fixtures: a GraphQL page builder plus the three REST arrays. */
 interface FakeGhFixture {
   graphql: (cursors: { threadsAfter: string; reviewsAfter: string }) => unknown;
   pullsComments?: unknown;
   issuesComments?: unknown;
+  /** REST PR reviews (page arrays) — used for the reviews-lag cross-check. */
+  restReviews?: unknown;
 }
 
 /** Build an injected GhFn that records graphql (threadsAfter|reviewsAfter) calls. */
@@ -55,7 +57,12 @@ const fakeGh = (
   async (args: string[]): Promise<GhResult> => {
     const restPath = args.find((a) => a.startsWith('repos/'));
     if (restPath !== undefined) {
-      const body = restPath.includes('/pulls/') ? fixture.pullsComments : fixture.issuesComments;
+      // '/reviews' first: the reviews path also contains '/pulls/'.
+      const body = restPath.includes('/reviews')
+        ? fixture.restReviews
+        : restPath.includes('/pulls/')
+          ? fixture.pullsComments
+          : fixture.issuesComments;
       return { code: 0, stdout: JSON.stringify(body ?? []), stderr: '' };
     }
     if (calls !== undefined) {
@@ -324,6 +331,65 @@ describe('fetchReviewState', () => {
     await expect(fetchReviewState({ owner: 'octo', repo: '../escape', pr: 7 }, {}, run)).rejects.toThrow(
       /owner\/repo must match/,
     );
+  });
+
+  test('rejects a pr that is not a positive safe integer (string-pr JS callers included)', async () => {
+    const run: GhFn = async () => ({ code: 0, stdout: '[]', stderr: '' });
+    // A JS caller (or JSON.parse'd data) can smuggle a string past the type.
+    const stringPr = '7?per_page=1#' as unknown as number;
+    await expect(fetchReviewState({ owner: 'octo', repo: 'widget', pr: stringPr }, {}, run)).rejects.toThrow(
+      /pr must be a positive safe integer/,
+    );
+    await expect(fetchReviewState({ owner: 'octo', repo: 'widget', pr: 0 }, {}, run)).rejects.toThrow(
+      /pr must be a positive safe integer/,
+    );
+    await expect(fetchReviewState({ owner: 'octo', repo: 'widget', pr: -3 }, {}, run)).rejects.toThrow(
+      /pr must be a positive safe integer/,
+    );
+  });
+
+  test('a fresh REST-only review (reviews lag) truncates with exactly reviews.lag and is not fabricated', async () => {
+    const run = fakeGh({
+      graphql: () =>
+        graphqlPayload(
+          { hasNextPage: false, endCursor: null, nodes: [] },
+          { hasNextPage: false, endCursor: null, nodes: [reviewNode('PRR_known')] },
+        ),
+      restReviews: [
+        [
+          { id: 700, node_id: 'PRR_known', user: { login: 'reviewer' }, state: 'CHANGES_REQUESTED', body: 'known', submitted_at: '2026-01-01T00:00:00Z' },
+          { id: 701, node_id: 'PRR_fresh', user: { login: 'late-reviewer' }, state: 'APPROVED', body: 'fresh review', submitted_at: '2026-01-01T09:00:00Z' },
+        ],
+      ],
+    });
+    const state = await fetchReviewState(INPUT, {}, run);
+    expect(state.reviews.map((r) => r.id)).toEqual(['PRR_known']); // the fresh review is NOT fabricated
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toEqual(['reviews.lag']);
+  });
+
+  test('thread lag and review lag combine: both reasons, stable order', async () => {
+    const run = fakeGh({
+      graphql: () =>
+        graphqlPayload(
+          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          { hasNextPage: false, endCursor: null, nodes: [reviewNode('PRR_known')] },
+        ),
+      pullsComments: [
+        [
+          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'known root', created_at: '2026-01-01T00:00:00Z' },
+          { id: 400, node_id: 'PRRC_400', user: { login: 'late-reviewer' }, body: 'fresh thread root', created_at: '2026-01-01T05:00:00Z' },
+        ],
+      ],
+      restReviews: [
+        [
+          { id: 700, node_id: 'PRR_fresh', user: { login: 'late-reviewer' }, state: 'APPROVED', body: 'fresh review', submitted_at: '2026-01-01T09:00:00Z' },
+        ],
+      ],
+    });
+    const state = await fetchReviewState(INPUT, {}, run);
+    expect(state.truncated).toBe(true);
+    expect(state.truncatedBecause).toEqual(['reviewThreads.lag', 'reviews.lag']);
   });
 
   test('a GraphQL errors payload fails closed carrying the server messages', async () => {

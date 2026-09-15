@@ -9,6 +9,15 @@
       "file": "e1-graphql.json"
     },
     {
+      "when": { "containsAll": ["pulls/7/reviews"] },
+      "pages": [
+        [
+          { "id": 700, "node_id": "PRR_1", "user": { "login": "reviewer" }, "state": "CHANGES_REQUESTED", "body": "please address the threads", "submitted_at": "2026-09-14T11:00:00Z" },
+          { "id": 701, "node_id": "PRR_2", "user": { "login": "reviewer" }, "state": "APPROVED", "body": "re-review: looks good", "submitted_at": "2026-09-15T12:00:00Z" }
+        ]
+      ]
+    },
+    {
       "when": { "containsAll": ["pulls/7/comments"] },
       "pages": [
         [
