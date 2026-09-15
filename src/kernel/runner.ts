@@ -140,7 +140,7 @@ function messageOf(err: unknown): string {
  * of the result; replay reconstructs from that line). stringify-throwing
  * values (BigInt, circular) are caught by the stringify probe; this walk
  * catches the SILENTLY lossy ones — Map/Set/Date/RegExp/class instances
- * stringify as `{}` or strings, function/symbol members vanish, undefined
+ * stringify as `{}` or strings, function members, symbol-keyed or non-enumerable (hidden) members vanish, undefined
  * array elements become null — where the journal would otherwise disagree
  * with the value the run produced. One normalization is accepted, matching
  * JSON semantics: an undefined-valued member of a nested object IS absent
@@ -171,6 +171,29 @@ function assertJsonLossless(value: unknown): void {
       if (proto !== Object.prototype && proto !== null) {
         const name = (value as object).constructor?.name ?? 'unknown';
         throw new Error(`non-plain object of type '${name}'`);
+      }
+      // ALL own keys, not just the enumerable string-keyed ones (PR #31
+      // review, Codex P1 + review-debt #76): a SYMBOL-keyed member is
+      // dropped by JSON.stringify, so the journal would reconstruct less
+      // than the walk accepted; a NON-ENUMERABLE own member is the worse
+      // divergence when it is a hidden `toJSON` hook — Object.values
+      // skips it while stringify INVOKES it, so the journal would
+      // reconstruct the hook's output instead of the walked shape (and
+      // any non-enumerable member is data invisible to the serialization
+      // either way). An ENUMERABLE own toJSON needs no special case: the
+      // member walk below reaches it as a function value and throws.
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key === 'symbol') {
+          throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, key);
+        if (descriptor !== undefined && !descriptor.enumerable) {
+          throw new Error(
+            key === 'toJSON'
+              ? "non-enumerable own 'toJSON' — JSON.stringify invokes the hidden hook, so the journal would reconstruct its output instead of the walked shape"
+              : `non-enumerable own member '${key}' — invisible to JSON.stringify`,
+          );
+        }
       }
       for (const memberValue of Object.values(value)) {
         if (memberValue === undefined) continue; // absent-key semantics
@@ -274,7 +297,7 @@ async function executeOp(
     // per-job failure instead: stringify rejects throwing values (BigInt,
     // cycles, and — via the replacer — non-finite numbers); the losslessness
     // walk rejects silently-lossy values (Maps, Dates, class instances,
-    // function/symbol members, undefined array elements). See
+    // function members, symbol-keyed or non-enumerable (hidden) members, undefined array elements). See
     // assertJsonLossless for the one accepted normalization.
     try {
       JSON.stringify(checked.data, (_key, value: unknown) => {

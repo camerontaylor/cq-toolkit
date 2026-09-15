@@ -476,7 +476,7 @@ async function dispatchCli(
     // an undefined value is lossy, not absent data; (3) the losslessness
     // walk (assertJsonLossless, the runner's mirror) rejecting the
     // silently-lossy values the schema probe passes — Maps, Dates, class
-    // instances, function/symbol members, undefined array elements.
+    // instances, function members, symbol-keyed or non-enumerable (hidden) members, undefined array elements.
     try {
       JSON.stringify(checked.data, (_key, value: unknown) => {
         if (typeof value === 'number' && !Number.isFinite(value)) {

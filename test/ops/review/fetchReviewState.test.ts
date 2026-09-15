@@ -273,6 +273,35 @@ describe('fetchReviewState', () => {
     expect(state.reviews).toHaveLength(1);
   });
 
+  test('malformed caps are rejected before any fetch — NaN/Infinity/negative/fractional never disable the limits', async () => {
+    // PR #63 review (Codex P2): restPages: NaN makes the retention
+    // comparison always false (every page kept, truncated: false) and
+    // reviewThreadPages: Infinity removes the request bound — a malformed
+    // cap must fail loud at entry, not silently disable the conservative
+    // limit. Validation fires before the run seam is ever consulted.
+    const neverRuns = () => {
+      throw new Error('the run seam must not be consulted for malformed caps');
+    };
+    for (const caps of [
+      { restPages: Number.NaN },
+      { restPages: Number.POSITIVE_INFINITY },
+      { restPages: -1 },
+      { restPages: 1.5 },
+      { reviewThreadPages: Number.NaN },
+      { reviewThreadPages: Number.NEGATIVE_INFINITY },
+      { reviewThreadPages: -2 },
+      { reviewThreadPages: 0.5 },
+      { reviewPages: Number.NaN },
+      { reviewPages: Number.POSITIVE_INFINITY },
+      { reviewPages: -1 },
+      { reviewPages: 2.25 },
+    ]) {
+      await expect(fetchReviewState(INPUT, caps, neverRuns as never)).rejects.toThrow(
+        /caps\.(restPages|reviewThreadPages|reviewPages) must be a nonnegative safe integer/,
+      );
+    }
+  });
+
   test('restPages cap keeps the first pages of the --slurp output and truncates (both REST collections)', async () => {
     // --slurp yields an outer array of PAGE arrays; the cap is on pages.
     // The fillers reply to a dangling parent (999): unattributable chains

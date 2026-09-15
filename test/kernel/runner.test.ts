@@ -608,7 +608,7 @@ describe('runPlan — execution semantics', () => {
     });
   });
 
-  test('silently-lossy op results are rejected: Map, Date, function member, undefined array hole', async () => {
+  test('silently-lossy op results are rejected: Map, Date, function member, undefined array hole, symbol key, hidden toJSON, hidden member', async () => {
     // Each of these stringifies WITHOUT throwing but the journal line would
     // disagree with the value the op returned (Map → {}, Date → ISO string,
     // function members vanish, undefined array elements → null).
@@ -625,6 +625,23 @@ describe('runPlan — execution semantics', () => {
         holey[2] = 3; // index 1 left undefined — stringify would null it
         return { status: 'ok', value: holey } as { status: 'ok'; value: unknown };
       }),
+      entry('symbol-op', jobInputSchema, async () => ({
+        status: 'ok',
+        value: { x: 1, [Symbol('hidden')]: 2 } as unknown,
+      })),
+      entry('tojson-op', jobInputSchema, async () => {
+        const hooked = { x: 1 };
+        Object.defineProperty(hooked, 'toJSON', {
+          value: () => ({ x: 2 }),
+          enumerable: false,
+        });
+        return { status: 'ok', value: hooked } as { status: 'ok'; value: unknown };
+      }),
+      entry('hidden-op', jobInputSchema, async () => {
+        const withHidden = { x: 1 };
+        Object.defineProperty(withHidden, 'secret', { value: 3, enumerable: false });
+        return { status: 'ok', value: withHidden } as { status: 'ok'; value: unknown };
+      }),
       entry('fake', jobInputSchema, op),
     );
     const plan: Plan = {
@@ -634,6 +651,9 @@ describe('runPlan — execution semantics', () => {
         { id: 'd', op: 'date-op', input: { jobId: 'd' } },
         { id: 'f', op: 'fn-op', input: { jobId: 'f' } },
         { id: 'h', op: 'hole-op', input: { jobId: 'h' } },
+        { id: 's', op: 'symbol-op', input: { jobId: 's' } },
+        { id: 't', op: 'tojson-op', input: { jobId: 't' } },
+        { id: 'n', op: 'hidden-op', input: { jobId: 'n' } },
         { id: 'ok1', op: 'fake', input: { jobId: 'ok1' } },
       ],
     };
@@ -648,7 +668,14 @@ describe('runPlan — execution semantics', () => {
     expect(failureOf('d')).toMatch(/non-serializable.*non-plain object of type 'Date'/);
     expect(failureOf('f')).toMatch(/non-serializable.*non-JSON value of type 'function'/);
     expect(failureOf('h')).toMatch(/non-serializable.*undefined array element/);
-    expect(report.counts.failed).toBe(4);
+    // The hidden-key family (PR #31 review, Codex P1 + review-debt #76):
+    // stringify DROPS the symbol key, INVOKES the hidden toJSON (the
+    // journal would reconstruct x:2 while the walk accepted x:1), and
+    // never sees the non-enumerable member.
+    expect(failureOf('s')).toMatch(/non-serializable.*symbol-keyed own member/s);
+    expect(failureOf('t')).toMatch(/non-serializable.*non-enumerable own 'toJSON'/s);
+    expect(failureOf('n')).toMatch(/non-serializable.*non-enumerable own member 'secret'/s);
+    expect(report.counts.failed).toBe(7);
     expect(report.counts.done).toBe(1); // the run continues
   });
 
