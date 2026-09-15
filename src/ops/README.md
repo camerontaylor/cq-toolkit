@@ -12,6 +12,11 @@ follows this; the central registry and the CLI discover families through it):
   `async () => (await import('./<name>.js')).default` (the seam is
   `() => Promise<Op>` — the dispatcher awaits the importer and CALLS its
   result). Construction must never import an op module eagerly.
+- Input schemas must NOT declare fields named `json`, `help`, or `h` — the
+  CLI reserves those keys on EVERY subcommand (narration mode / help
+  surface). Bare `--json`/`--help`/`-h` never reach op input; a VALUED
+  reserved flag on an op subcommand (`--json=…`) is a usage error
+  (exit 2), never data.
 - The op module `src/ops/<family>/<name>.ts` DEFAULT-exports the op
   function (`async (input) => OpResult`).
 - `OpRegistryEntry` is the FROZEN kernel type: import it from the kernel
@@ -19,7 +24,11 @@ follows this; the central registry and the CLI discover families through it):
   the registry layer defines no new types.
 - The family's `index.ts` is its public barrel (stubbed `export {}` by lane
   I until the owning lane populates it — the root barrel already carries one
-  `export *` line per family).
+  `export *` line per family). Star exports are COLLISION-SILENT: ESM
+  silently EXCLUDES a star-exported name that collides with an explicit
+  export on the root barrel or with the same name star-exported by another
+  family — no error, the name just vanishes from the root barrel. Avoid
+  generic names (e.g. `list`, `get`) in family barrels.
 - The central aggregation (src/registry) scans the ops root at runtime —
   one level of family directories — and TOLERATES families whose
   registry.ts has not landed yet (only a not-found naming the requested

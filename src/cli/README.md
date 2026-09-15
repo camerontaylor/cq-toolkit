@@ -16,6 +16,11 @@ THE I1 CLI CONTRACT (landed):
   JSON-parsed when they parse): ops take EXACT schema keys; run-plan takes
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
   --stop-on-error).
+- `json`, `help`, and `h` are CLI-reserved keys on every subcommand (narration
+  mode / help surface): op input schemas must not declare them. Bare
+  `--json`/`--help`/`-h` keep their mode/help behavior and never reach op
+  input; a VALUED reserved flag on an op subcommand (`--json=…`) is a usage
+  error (exit 2).
 - `--help` renders the subcommand's input schema; an unknown subcommand
   exits 2.
 - Unknown-flag enforcement is two-tier: unknown flag SYNTAX (positional

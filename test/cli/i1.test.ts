@@ -261,6 +261,122 @@ describe('result-validation gate (CX1) — no artifact for an invalid op result'
   });
 });
 
+// 4530779 behavior pins: the safeParseAsync input gate (registry schemas may
+// carry ASYNC refinements), the full lossless-result probe set on the direct
+// path, and the reserved-key valued-flag rejection. Tmp fixture families are
+// generated .js under <repo>/node_modules (ESM via "type":"module", zod
+// bare-importable) with INLINE importers — the same shape as the inf probe
+// above; no nested './op.js' importers are needed here (the fixture family
+// test/fixtures/cli-ops pins that convention).
+describe('4530779 pins: async-schema gate, lossless-result probes, reserved valued flags', () => {
+  test('async-refinement schema ACCEPTED: exit 0 with the artifact (safeParseAsync gate)', async () => {
+    // zod 4: a schema carrying an ASYNC refinement throws on a PLAIN
+    // safeParse ($ZodAsyncError — 'Encountered Promise during synchronous
+    // parse'), so before the gate this dispatch surfaced as a spurious
+    // exit-1 'threw:'; the safeParseAsync gate accepts exactly what the
+    // runner's parseAsync accepts.
+    const tmp = await makeTmpOpsRoot('cq-i1-asyncok-');
+    await mkdir(join(tmp, 'asyncfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'asyncfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'asyncok', inputSchema: z.object({}).refine(async () => true), importer: async () => async () => ({ status: 'ok', value: 'async-ran' }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    const { code, out, err } = await capture(['asyncok'], { opsRoot: tmp });
+    expect(code).toBe(0);
+    expect(JSON.parse(out)).toEqual({ status: 'ok', value: 'async-ran' });
+    expect(err).toBe('');
+  });
+
+  test('async-refinement schema REJECTING: usage error (2) with the flattened message, not a throw', async () => {
+    // Same spelling, rejecting refinement: safeParseAsync resolves with a
+    // failed check — the narration is the ordinary usage line (issueMessage
+    // flattening), stdout stays empty, and the old $ZodAsyncError shape
+    // (exit 1 'threw:') stays gone.
+    const tmp = await makeTmpOpsRoot('cq-i1-asyncbad-');
+    await mkdir(join(tmp, 'asyncfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'asyncfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'asyncbad', inputSchema: z.object({}).refine(async () => false), importer: async () => async () => ({ status: 'ok', value: 'never-runs' }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    const { code, out, err } = await capture(['asyncbad'], { opsRoot: tmp });
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid input for 'asyncbad': Invalid input/);
+    expect(err).not.toMatch(/threw/);
+  });
+
+  test('lossless-result probes: a Map-valued ok result → exit 1, stdout empty, invalid result', async () => {
+    // The SILENTLY-lossy class the stringify probe passes (Map stringifies
+    // as {}): assertJsonLossless — the runner's mirror walk — must reject it
+    // before any artifact is emitted.
+    const tmp = await makeTmpOpsRoot('cq-i1-map-');
+    await mkdir(join(tmp, 'mapfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'mapfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'mapresult', inputSchema: z.object({}).strict(), importer: async () => async () => ({ status: 'ok', value: { m: new Map() } }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    const { code, out, err } = await capture(['mapresult'], { opsRoot: tmp });
+    expect(code).toBe(1);
+    expect(out).toBe('');
+    expect(err).toMatch(/mapresult returned an invalid result/);
+    expect(err).toMatch(/non-plain object of type 'Map'/);
+  });
+
+  test('lossless-result probes: ok WITHOUT a value → exit 1, stdout empty', async () => {
+    // {status:'ok'} is lossy, not absent data: the frozen ok variant
+    // REQUIRES its value (the journal's ok-without-value record is rejected
+    // on read), so it can never become an artifact either.
+    const tmp = await makeTmpOpsRoot('cq-i1-novalue-');
+    await mkdir(join(tmp, 'novaluefam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'novaluefam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'novalue', inputSchema: z.object({}).strict(), importer: async () => async () => ({ status: 'ok' }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    const { code, out, err } = await capture(['novalue'], { opsRoot: tmp });
+    expect(code).toBe(1);
+    expect(out).toBe('');
+    expect(err).toMatch(/novalue returned an invalid result/);
+  });
+
+  test('reserved key WITH a value (--json=yes) on an op: usage error 2, stdout empty', async () => {
+    // A VALUED reserved spelling on an op subcommand would otherwise be
+    // silently stripped before the schema sees it (silent input loss for an
+    // op declaring the key) — it is rejected outright instead. The BARE
+    // spellings keep their mode/help behavior: the '--json mode' pin above
+    // (['boom','--json'] → machine mode, stderr empty) already exercises
+    // bare --json through this same gate.
+    const { code, out, err } = await capture(['echo', '--msg=hi', '--json=yes'], { opsRoot });
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/reserved/);
+    expect(err).toMatch(/--json is a reserved CLI flag/);
+  });
+});
+
 describe('line-based narration (embedded newlines flatten to the literal escape)', () => {
   test('narrate: one call is exactly ONE `cq:` line, newlines flattened to literal \\n', () => {
     const errChunks: string[] = [];

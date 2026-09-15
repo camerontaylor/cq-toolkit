@@ -89,6 +89,7 @@
 //
 //   node scripts/smoke-run-plan.mjs            # spawn the built CLI + assert
 import { spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -132,6 +133,19 @@ async function runPlanParent() {
   const journalDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-journal-'));
   const cappedJournalDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-capped-journal-'));
   const planDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-plan-'));
+  // fail() calls process.exit(1), which unwinds WITHOUT running the `finally`
+  // below — a failing smoke would leak its temp journal/plan dirs. This
+  // synchronous exit hook cleans up through ANY exit path (the existing
+  // finally stays as-is: a double rm is force:true-safe).
+  process.on('exit', () => {
+    try {
+      rmSync(journalDir, { recursive: true, force: true });
+      rmSync(cappedJournalDir, { recursive: true, force: true });
+      rmSync(planDir, { recursive: true, force: true });
+    } catch {
+      // best effort — the process is exiting anyway
+    }
+  });
   try {
     const planPath = join(planDir, 'plan.json');
     const plan = {
