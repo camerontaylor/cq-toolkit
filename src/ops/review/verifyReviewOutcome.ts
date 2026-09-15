@@ -274,7 +274,7 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     // Runtime shape guards: a non-array errors or nodes payload is not a
     // GraphQL document this module can trust (the types promise arrays;
     // the wire does not have to).
-    if (payload.errors !== undefined && payload.errors !== null && !Array.isArray(payload.errors)) {
+    if (payload.errors === null || (payload.errors !== undefined && !Array.isArray(payload.errors))) {
       throw new Error(
         `gh api graphql returned a non-array errors payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
       );

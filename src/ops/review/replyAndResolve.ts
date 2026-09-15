@@ -567,6 +567,13 @@ export async function replyAndResolve(
   // are unrecorded failures: they retry once the reply lands.
   const replyFailed = failed.some((f) => f.action.kind === 'review_reply');
   for (const action of resolves) {
+    // An already-dispatched resolve is DONE regardless of any failed reply
+    // — the dedupe check must run first, or a converged action counts as
+    // withheld forever.
+    if (seen.has(action.actionId)) {
+      skippedAlreadyDispatched += 1;
+      continue;
+    }
     if (replyFailed) {
       failed.push({
         action,
@@ -602,7 +609,7 @@ export async function replyAndResolve(
         });
         return;
       }
-      if (payload.errors !== undefined && payload.errors.length > 0) {
+      if (payload.errors !== null && payload.errors !== undefined && payload.errors.length > 0) {
         const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error));
         // SUCCESS-EQUIVALENT replay: GitHub rejects a resolve of an
         // already-resolved thread with this error — meaning a prior run's

@@ -109,12 +109,10 @@ export interface WorktreeRegistry {
   /**
    * MERGE-ON-SAVE for ONE key: load → set the key (null clears it) → save.
    * This NARROWS the whole-map-clobber window (a last writer erasing every
-   * entry it never saw) — and the FILE-BACKED registry now ELIMINATES the
-   * race for save/update by SERIALIZING them behind a lockfile beside the
-   * target (`<path>.lock`, proper-lockfile, bounded retries: failure to
-   * acquire within the bound throws loud). The in-memory registry is
-   * unsynchronized (single-threaded tests). Single-flight registry access
-   * remains an E4 dispatch requirement at the worker level.
+   * entry it never saw). UNLOCKED PRIMITIVE: callers MUST hold `withLock`
+   * (the file-backed registry serializes via a lockfile beside the target —
+   * bounded retries; failure to acquire within the bound throws loud). The
+   * in-memory registry is unsynchronized (single-threaded tests).
    */
   update(key: string, entry: WorktreeRegistryEntry | null): Promise<void>;
   /**
@@ -203,14 +201,7 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     await writeFile(tmpPath, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
     await rename(tmpPath, path);
   };
-  // REENTRANCY: instance-local held flag — resolvePrWorktree holds the
-  // lock across its whole scan-then-create section and calls save/update
-  // (which re-enter withLock) inside it. Single logical flow per hold.
-  let lockHeld = false;
   const withLock = async <T>(fn: () => Promise<T>): Promise<T> => {
-    if (lockHeld) {
-      return fn();
-    }
     let release: (() => Promise<void>) | undefined;
     try {
       release = await lock(path, {
@@ -224,20 +215,21 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
         { cause: err },
       );
     }
-    lockHeld = true;
     try {
       await ensureTarget();
       return await fn();
     } finally {
-      lockHeld = false;
       await release();
     }
   };
-  const save = (map: RegistryMap): Promise<void> => withLock(() => saveUnlocked(map));
+  /** UNLOCKED mutation primitive — callers MUST hold `withLock`. */
+  const save = (map: RegistryMap): Promise<void> => saveUnlocked(map);
+  /** UNLOCKED mutation primitive — callers MUST hold `withLock`. */
   const update = (key: string, entry: WorktreeRegistryEntry | null): Promise<void> =>
-    withLock(async () => {
-      // Load-merge-save scoped to ONE key, SERIALIZED by the lockfile:
-      // entries for other PRs are read fresh and written back intact.
+    (async () => {
+      // Load-merge-save scoped to ONE key: entries for other PRs are read
+      // fresh and written back intact (the CALLER holds withLock, which
+      // serializes the whole read-modify-write across processes).
       const map = await load();
       if (entry === null) {
         delete map[key];
@@ -245,7 +237,7 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
         map[key] = entry;
       }
       await saveUnlocked(map);
-    });
+    })();
   return { load, save, update, withLock };
 }
 
@@ -476,6 +468,14 @@ export async function resolvePrWorktree(
       fetchHeadArgs,
     );
   }
+
+  // CRITICAL SECTION — the consult → scan → create walk runs under the
+  // registry's lock: two jobs resolving the SAME PR concurrently would
+  // otherwise both finish the scan before either creates the target (one
+  // add succeeds, the other wedges on the occupied slot). The save/update
+  // calls inside are the registry's UNLOCKED primitives. The fetch above
+  // is per-PR and stays outside.
+  return opts.registry.withLock(async () => {
   const expectedSha = fetchHead.stdout.trim();
   // The LOCAL branch label we own (keyed by PR) — see reviewBranchFor.
   const reviewBranch = reviewBranchFor(opts.pr);
@@ -619,8 +619,9 @@ export async function resolvePrWorktree(
   // entry — only now, with the new truth on disk, is the old pointer retired
   // (the update is a per-key load-merge-save: concurrent resolves for other
   // PRs never lose their entries to this write).
-  await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
-  return { path: wtPath, reused: false, branch: reviewBranch, foreign };
+    await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
+    return { path: wtPath, reused: false, branch: reviewBranch, foreign };
+  });
 }
 
 /**
@@ -643,7 +644,25 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
   // Absolute everywhere (see resolvePrWorktree): mkdir/`-C`/paths must not
   // straddle two resolvers.
   const repoRoot = pathResolve(opts.repoRoot);
-  const worktreeRoot = pathResolve(opts.worktreeRoot ?? join(repoRoot, '.git', 'cq-review-worktrees'));
+  // Same derivation as resolvePrWorktree (git dir, not <repoRoot>/.git — a
+  // linked worktree's .git is a file): the boundary check must agree with
+  // where resolution actually creates trees.
+  let worktreeRoot: string;
+  if (opts.worktreeRoot !== undefined) {
+    worktreeRoot = pathResolve(opts.worktreeRoot);
+  } else {
+    const gitDirArgs = ['-C', repoRoot, 'rev-parse', '--absolute-git-dir'];
+    const gitDir = await opts.run(gitDirArgs);
+    if (gitDir.code !== 0) {
+      throw gitFail(
+        'rev-parse --absolute-git-dir failed — repoRoot is not a git repository',
+        gitDir.code,
+        gitDir.stderr,
+        gitDirArgs,
+      );
+    }
+    worktreeRoot = join(gitDir.stdout.trim(), 'cq-review-worktrees');
+  }
   if (!(await isInsideRoot(opts.path, worktreeRoot))) {
     throw new Error(
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,

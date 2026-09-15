@@ -962,7 +962,7 @@ describe('removePrWorktree', () => {
     expect(registry.calls).toEqual(['load']);
   });
 
-  test('a path OUTSIDE the worktreeRoot is refused before git runs — the registry and the foreign tree are untouched', async () => {
+  test('a path OUTSIDE the worktreeRoot is refused before any destructive git runs — the registry and the foreign tree are untouched', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
       '7': { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, createdAt: NOW - 1000 },
@@ -974,8 +974,9 @@ describe('removePrWorktree', () => {
         path: '/elsewhere/foreign-pr-7-fix',
       }),
     ).rejects.toThrow(/removePrWorktree: refusing to remove.*outside the review worktreeRoot/s);
-    // No git call at all; the foreign tree and the registry both intact.
-    expect(calls).toEqual([]);
+    // The ONLY git call is the git-dir derivation the boundary check needs;
+    // the foreign tree and the registry both intact.
+    expect(calls).toEqual([['-C', '/repo', 'rev-parse', '--absolute-git-dir']]);
     expect(model.worktrees).toHaveLength(1);
     expect(registry.current()['7']).toBeDefined();
     expect(registry.calls).toEqual([]);
@@ -1151,17 +1152,22 @@ describe('fileWorktreeRegistry', () => {
     }
   });
 
-  test('update() is SERIALIZED on the file-backed registry: two concurrent updates for different keys BOTH persist', async () => {
+  test('update() rides withLock on the file-backed registry: two concurrent updates for different keys BOTH persist', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
     try {
       const path = join(dir, 'worktrees.json');
       const registry = fileWorktreeRegistry(path);
       const entry7: WorktreeRegistryEntry = { path: '/t/pr-7', branch: 'b7', createdAt: NOW };
       const entry9: WorktreeRegistryEntry = { path: '/t/pr-9', branch: 'b9', createdAt: NOW + 1 };
-      // Fired CONCURRENTLY: the `<path>.lock` serializes the load-merge-save
-      // chains, so the second update re-reads the first's entry instead of
-      // clobbering it (an unsynchronized whole-map save would drop one).
-      await Promise.all([registry.update('7', entry7), registry.update('9', entry9)]);
+      // Fired CONCURRENTLY under `withLock` (the documented contract:
+      // update is an UNLOCKED primitive): the `<path>.lock` serializes the
+      // load-merge-save chains, so the second update re-reads the first's
+      // entry instead of clobbering it (an unsynchronized whole-map save
+      // would drop one).
+      await Promise.all([
+        registry.withLock(() => registry.update('7', entry7)),
+        registry.withLock(() => registry.update('9', entry9)),
+      ]);
       const map = await registry.load();
       expect(map['7']).toEqual(entry7);
       expect(map['9']).toEqual(entry9);
