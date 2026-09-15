@@ -264,6 +264,17 @@ gh api repos/OWNER/REPO/pulls/NUMBER/reviews --paginate --slurp
 gh api repos/OWNER/REPO/issues/NUMBER/comments --paginate --slurp
 ```
 
+These REST lists retrieve feedback, not thread resolution state. Before
+claiming final-head acceptance, use this repository's
+[`fetchReviewState({ owner, repo, pr })`](../src/ops/review/fetchReviewState.ts)
+to collect paginated GraphQL `reviewThreads.isResolved` alongside REST
+comments and summaries. Inspect its `threads`, and fail closed if
+`truncated` is true (consult `truncatedBecause`, including API-lag reasons)
+or `headRefOid` differs from the final PR head. Unresolved external threads
+block acceptance; replies alone do not prove resolution. Re-fetch after
+resolving threads or after new commits. This check is required whether
+feedback came from the CLI prompt or the REST fallback.
+
 This fallback retrieves PR feedback only; it does not replace either
 mandatory CLI review cycle. Do not substitute local `review --show-prompts`
 for the App-review command: these are different review scopes.
