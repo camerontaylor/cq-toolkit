@@ -1,93 +1,151 @@
 #!/usr/bin/env node
-// From-source smoke — T1.7 (ws-k stage 1 item 6): the SHIPPED ARTIFACT drives
-// a real governed plan. This script imports the BUILT barrel (dist/index.js —
-// never src/), wires the documented composition, and asserts the contracts
-// the plan runner + governor + subprocess driver are supposed to honor
-// end-to-end:
+// From-source smoke — T1.7 (ws-k stage 1 item 6), I1 slice D: the BUILT CLI
+// (dist/cli.js) drives a real governed plan. This script spawns
 //
-//   runPlan(plan, opts, governRegistry(registry, governor))
+//   node dist/cli.js run-plan --plan=<file> --journal-dir=<dir> \
+//        --concurrency=2 --max-usd=2 --ops-root=test/fixtures/cli-smoke-ops
+//
+// as a child, consumer-style (stdio piped, streams inspected), and asserts
+// the contracts the CLI + kernel + governor + subprocess driver are supposed
+// to honor end-to-end. The plan's `agent-run` op resolves through the BUILT
+// CLI's registry from the fixture op family (test/fixtures/cli-smoke-ops —
+// the documented family convention as plain ESM .js), whose op delegates to
+// the REAL SubprocessDriver spawning the fake agent CLI fixture
+// (test/fixtures/fake-agent-cli.mjs — the same stream-json fixture the
+// subprocess conformance suite drives) through the driver's `binary` config
+// with its REAL spawn — no test overrides: the fixture is a real child
+// process in a real workspace, only the model is fake (the fixture's
+// default 'ok' completion, fixed usage). The governed composition itself is
+// the CLI's (src/cli/run-plan.ts):
+//
+//   runPlan(plan, opts, governRegistry(view, governor))
 //     → withBudgetStop(report, plan, governor)
 //
-// exactly as src/kernel/README.md's "Budget governor" section documents (the
-// strategy the kernel and governor tests use). The registry holds ONE op,
-// `agent-run`, which delegates to the REAL SubprocessDriver spawning the
-// fake agent CLI fixture (test/fixtures/fake-agent-cli.mjs — the same
-// stream-json fixture the subprocess conformance suite drives) through the
-// driver's `binary` config with its REAL spawn — no test overrides: the
-// fixture is a real child process in a real workspace, only the model is
-// fake (the fixture's default 'ok' completion, fixed usage).
+// exactly as src/kernel/README.md's "Budget governor" section documents —
+// the old smoke wired this composition BY HAND in a self re-invoked child;
+// a generic CLI child cannot carry that hand wiring, so the usage-fold
+// evidence moved into the fixture op's guards (leg 4 below).
 //
-// ASSERTED HERE (the goal's three legs):
-//   1. Run report shape — two jobs, both done (result 'ok'), stoppedEarly
-//      false, counts honest, report valid against the shipped RunReportSchema.
+// ASSERTED HERE (the legs):
+//   0. Child exit code 0 — the CLI's own verdict over the whole run.
+//   1. Run report shape — stdout is EXACTLY ONE machine-readable artifact,
+//      valid against the shipped RunReportSchema (parseable whole, nothing
+//      else); two jobs, both done (value 'smoke-1'), stoppedEarly false,
+//      counts honest.
+//   1b. Frozen-contract pin — on a FRESH run, report.usage and every
+//      row.usage are undefined: RunReport usage is replay-only (the frozen
+//      JobOutcome contract — runner.ts sources per-job usage from replayed
+//      journal events alone), and the derived-only costUSD stays undefined
+//      too (cost is priced by the price-map layer from usage; runPlan never
+//      fabricates it).
 //   2. Journal evidence — the temp journal dir carries exactly one run whose
 //      NDJSON events are run-started, job-started ×2 (attempt 1 each),
 //      job-finished ×2, run-finished (first/last in order).
 //   3. THE I1 OUTPUT CONTRACT — stdout carries exactly ONE machine-readable
-//      artifact, the RunReport as JSON (parseable whole, nothing else);
-//      narration, when any, rides stderr under the `cq: ` prefix and never
-//      stdout (`cq <plan> | jq .` stays safe). The plan run executes in a
-//      CHILD process (this script re-invokes itself with --plan-run) so the
-//      parent can inspect its streams as a consumer would.
+//      artifact (the whole-document JSON parse above); narration rides
+//      stderr under the `cq: ` prefix and never stdout (`cq <plan> | jq .`
+//      stays safe). Failures-only narration: with both rows ok the stderr
+//      view is the counts summary alone — NO per-row lines. (`--json`
+//      suppressing narration entirely is pinned by the vitest conformance
+//      suite, test/cli/i1.test.ts — not here.)
 //   4. USAGE/MODEL OBSERVABILITY — each ok row's observable IS the served
 //      model id: the fixture reports the requested --model as served, so
-//      the row pins 'smoke-1' (never the 'unreported' fallback), and the
-//      governed reportUsage fold lands in the governor's rollup as the
-//      fixture's fixed usage ×2 jobs. A driver result WITHOUT usage fails
-//      the op outright (the fixture contract guarantees fixed usage).
-//      RunReport.usage itself is replay-only on a fresh run (the frozen
-//      JobOutcome contract — runner.ts sources per-job usage from replayed
-//      journal events alone), so the fold is asserted at the governor in
-//      the producing child, not on the report.
+//      the row must pin 'smoke-1' (never the 'unreported' fallback). The
+//      USAGE FOLD's evidence moved: the old smoke asserted the governor's
+//      rollup ({10,5,2,3} ×2 jobs) INSIDE its hand-wired child, right after
+//      runPlan; a generic CLI child has no governor handle to inspect. At
+//      the CLI boundary the fold is proven by the fixture op's guards
+//      (test/fixtures/cli-smoke-ops/smoke/agent-run.js):
+//        (a) the op REFUSES an ungoverned job context — a dropped
+//            governRegistry wiring fails both jobs and the child exits 1,
+//            failing leg 0;
+//        (b) the op REFUSES a driver result without usage (the old
+//            regression guard, message unchanged);
+//        (c) leg 0's exit 0 + leg 1's two ok rows prove both guards passed
+//            — i.e. ctx.reportUsage WAS called with the fixture's fixed
+//            usage, once per job, twice here.
 //
 // SECRETS: the fixture route's key env var (SMOKE_API_KEY) is set here to a
 // FAKE value — the subprocess driver reads key VALUES from the environment
 // at dispatch time and the fixture never contacts anything (the URL is a
 // black hole); no real credential exists in this lane.
 //
-// Standalone by design — never runs in `npm test` (the suite's smoke test
-// only loads the src barrel). Requires `npm run build` first: importing dist
-// IS the point. Usage:
+// Standalone by design — never imported by `npm test` (the suite's smoke
+// test only loads the src barrel). Requires `npm run build` first: spawning
+// dist/cli.js IS the point. Usage:
 //
-//   node scripts/smoke-run-plan.mjs            # parent: run + assert
-//   node scripts/smoke-run-plan.mjs --plan-run <journalDir>
-//                                              # child: execute the plan, I1 output
+//   node scripts/smoke-run-plan.mjs            # spawn the built CLI + assert
 import { spawn } from 'node:child_process';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const REPO_ROOT = dirname(dirname(SCRIPT_PATH));
-const FAKE_CLI = join(REPO_ROOT, 'test', 'fixtures', 'fake-agent-cli.mjs');
 
 const usage = () => {
-  console.error('usage: smoke-run-plan.mjs [--plan-run <journalDir>]');
+  console.error('usage: smoke-run-plan.mjs');
   process.exit(2);
 };
 
-if (process.argv[2] === '--plan-run') {
-  const journalDir = process.argv[3];
-  if (journalDir === undefined || process.argv[4] !== undefined) usage();
-  await runPlanChild(journalDir);
-} else if (process.argv[2] === undefined) {
-  await runPlanParent();
-} else {
-  usage();
-}
+if (process.argv.length > 2) usage();
+await runPlanParent();
 
 // ---------------------------------------------------------------------------
-// Parent mode: spawn the plan run as a child, then assert the three legs.
+// Parent mode: spawn the BUILT CLI's run-plan as a child, then assert the
+// legs against its streams, the shipped schema, and the journal.
 // ---------------------------------------------------------------------------
 
 async function runPlanParent() {
-  const { openRunLog, RunReportSchema } = await importDist();
-  const journalDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-journal-'));
+  // Require dist up front: a missing dist is the smoke's most likely failure
+  // mode (the from-source point is that dist exists and works) — name the
+  // fix instead of leaking an ERR_MODULE_NOT_FOUND from the child.
   try {
-    const child = spawn(process.execPath, [SCRIPT_PATH, '--plan-run', journalDir], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
+    await access(join(REPO_ROOT, 'dist', 'cli.js'));
+  } catch {
+    fail('dist/cli.js is missing — run `npm run build` first — from-source IS the point (the smoke spawns the BUILT CLI)');
+  }
+  const { openRunLog, RunReportSchema } = await importDist();
+
+  const journalDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-journal-'));
+  const planDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-plan-'));
+  try {
+    const planPath = join(planDir, 'plan.json');
+    const plan = {
+      id: 'smoke-from-source',
+      label: 'T1.7 from-source smoke',
+      jobs: [
+        { id: 'j1', op: 'agent-run', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'agent-run', input: { jobId: 'j2' } },
+      ],
+    };
+    await writeFile(planPath, JSON.stringify(plan, null, 2), 'utf8');
+
+    // The child's environment: the fixture route's key VALUE (fake — see the
+    // header; the driver reads it from the environment at dispatch time and
+    // a missing one throws pre-spawn). FAKE_AGENT_MODE deleted: a stray host
+    // value would re-script the fixture (up to a SIGTERM-ignoring hang) —
+    // the smoke always wants the default 'ok' run. FAKE_AGENT_SERVED_MODEL
+    // deleted for the same reason: leg 1 pins the served model as 'smoke-1',
+    // so a stray override would masquerade as a driver regression.
+    const childEnv = { ...process.env, SMOKE_API_KEY: 'smoke-fake-key' };
+    delete childEnv.FAKE_AGENT_MODE;
+    delete childEnv.FAKE_AGENT_SERVED_MODEL;
+
+    const child = spawn(
+      process.execPath,
+      [
+        join(REPO_ROOT, 'dist', 'cli.js'),
+        'run-plan',
+        `--plan=${planPath}`,
+        `--journal-dir=${journalDir}`,
+        '--concurrency=2',
+        '--max-usd=2',
+        `--ops-root=${join(REPO_ROOT, 'test', 'fixtures', 'cli-smoke-ops')}`,
+      ],
+      { env: childEnv, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
     let stdout = '';
     let stderr = '';
     child.stdout.setEncoding('utf8');
@@ -98,8 +156,10 @@ async function runPlanParent() {
       child.on('error', reject);
       child.on('close', resolve);
     });
+
+    // Leg 0 — the CLI's own verdict.
     if (code !== 0) {
-      fail(`the plan-run child exited ${code}\n--- child stdout ---\n${stdout}--- child stderr ---\n${stderr}`);
+      fail(`the dist/cli.js run-plan child exited ${code}\n--- child stdout ---\n${stdout}--- child stderr ---\n${stderr}`);
     }
 
     // Leg 1 — the run report shape, validated against the SHIPPED schema.
@@ -143,6 +203,24 @@ async function runPlanParent() {
       }
     }
 
+    // Leg 1b — the frozen-contract pin on a FRESH run: RunReport usage is
+    // replay-only (runner.ts sources per-job usage from replayed journal
+    // events alone — executed rows never carry it), so the report and every
+    // row leave usage undefined here; the derived-only costUSD stays
+    // undefined too (the price-map layer owns cost; runPlan never
+    // fabricates it — see the runner's rollup note).
+    if (report.usage !== undefined) {
+      fail(`fresh-run report.usage is ${JSON.stringify(report.usage)} — RunReport usage must be replay-only on a fresh run (frozen JobOutcome contract)`);
+    }
+    for (const row of report.jobs) {
+      if (row.usage !== undefined) {
+        fail(`fresh-run row '${row.jobId}'.usage is ${JSON.stringify(row.usage)} — per-job usage must be replay-only on a fresh run (frozen JobOutcome contract)`);
+      }
+      if (row.costUSD !== undefined) {
+        fail(`fresh-run row '${row.jobId}'.costUSD is ${row.costUSD} — costUSD is derived-only and runPlan never fabricates it`);
+      }
+    }
+
     // Leg 2 — the journal evidence in the temp dir.
     const log = openRunLog(journalDir);
     const runs = await log.runs();
@@ -161,186 +239,59 @@ async function runPlanParent() {
     }
     if (new Set(started.map((e) => e.jobId)).size !== 2) fail('the two job-started events do not cover two distinct jobs');
 
-    // Leg 3 — narration never touched stdout: whatever the child said on
-    // stderr must be `cq: `-prefixed narration (the I1 halves; the stdout
-    // half was the whole-document JSON parse above).
+    // Leg 3 — the I1 halves at the stream boundary: whatever the CLI said on
+    // stderr must be `cq: `-prefixed narration (the stdout half was the
+    // whole-document JSON parse above), AND that narration is the
+    // failures-only human view: with both rows ok it is the counts summary
+    // alone — every row silent, no per-row lines.
     for (const line of stderr.split('\n')) {
       if (line !== '' && line.startsWith('cq: ') === false) {
         fail(`non-narration line on the child's stderr (I1): '${line}'`);
       }
     }
+    const narrated = stderr.split('\n').filter((line) => line !== '');
+    if (narrated.some((line) => line.startsWith('cq: done 2,')) === false) {
+      fail(`the child's stderr narration does not carry the counts summary line 'cq: done 2, …' (renderHuman's summary):\n${stderr}`);
+    }
+    for (const line of narrated) {
+      // renderHuman's per-row form is `<jobId> (<op>): <status>`; with all
+      // rows ok the failures-only default must render NONE of them.
+      if (line.includes(' (agent-run): ')) {
+        fail(`failures-only narration rendered a per-row line for an ok row (I1): '${line}'`);
+      }
+    }
 
-    process.stdout.write(`smoke: ok — 2/2 jobs done from dist/; journal ${runs[0]}.ndjson; I1 contract held\n`);
+    // Leg 4 — the usage fold, observed at the CLI boundary (see the header):
+    // legs 0 + 1 already proved child exit 0 with both rows ok, which is
+    // exactly (a) ∧ (b) ∧ (c) — the fixture op's ungoverned guard and
+    // no-usage guard both passed, so ctx.reportUsage WAS called with the
+    // fixture's fixed usage ×2. The rollup itself lives behind the CLI's
+    // composition, where a generic consumer cannot reach it — by design.
+
+    process.stdout.write(`smoke: ok — 2/2 jobs done via dist/cli.js run-plan; journal ${runs[0]}.ndjson; I1 contract held\n`);
   } finally {
     await rm(journalDir, { recursive: true, force: true });
+    await rm(planDir, { recursive: true, force: true });
   }
 }
 
 // ---------------------------------------------------------------------------
-// Child mode (--plan-run <journalDir>): the REAL composition over dist/.
-// ---------------------------------------------------------------------------
-
-async function runPlanChild(journalDir) {
-  const {
-    BudgetGovernor,
-    RunReportSchema,
-    RoutingTableSchema,
-    SubprocessDriver,
-    defaultHarnessConfig,
-    defaultRoutingTable,
-    emitReport,
-    governRegistry,
-    governorConfig,
-    narrate,
-    currentJobContext,
-    runPlan,
-    withBudgetStop,
-  } = await importDist();
-  const { z } = await import('zod');
-
-  // The fixture route's key VALUE (fake — see header). The driver reads it
-  // from the environment at dispatch time; a missing one throws pre-spawn.
-  process.env.SMOKE_API_KEY ??= 'smoke-fake-key';
-  // A stray host FAKE_AGENT_MODE would re-script the fixture (up to a
-  // SIGTERM-ignoring hang) — the smoke always wants the default 'ok' run.
-  // Same for FAKE_AGENT_SERVED_MODEL: the parent pins the served model as
-  // 'smoke-1', so a stray override would masquerade as a driver regression.
-  delete process.env.FAKE_AGENT_MODE;
-  delete process.env.FAKE_AGENT_SERVED_MODEL;
-
-  const scratchDir = await mkdtemp(join(tmpdir(), 'smoke-run-plan-ws-'));
-  try {
-    // The routing table is CONFIG: the shipped default extended with the
-    // fixture endpoint (the subprocess test's conformance-table posture —
-    // the URL is a black hole; the fixture IS the model).
-    const routingTable = RoutingTableSchema.parse({
-      endpoints: {
-        ...defaultRoutingTable().endpoints,
-        smoke: {
-          baseUrlEnv: 'SMOKE_BASE_URL',
-          baseUrlDefault: 'http://127.0.0.1:1/anthropic',
-          keyEnv: 'SMOKE_API_KEY',
-          models: ['smoke-1'],
-          notes: 'T1.7 from-source smoke: the fake agent CLI is the model; the URL is never contacted',
-        },
-      },
-    });
-    const driver = new SubprocessDriver({
-      binary: ['node', FAKE_CLI],
-      routingTable,
-      sessionsDir: join(scratchDir, 'sessions'),
-      harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
-      // no `spawn` override — the REAL spawnManaged runs the fixture child
-    });
-
-    // The minimal governed op: delegate to the driver on the frozen seam,
-    // fold the WorkerResult into the op-result taxonomy, report usage
-    // through the governed job context (the kernel's observer hook). The
-    // served model id is the op's value — the remap-detection fact.
-    const jobInputSchema = z.object({ jobId: z.string() });
-    const agentRunOp = async (raw) => {
-      const { jobId } = jobInputSchema.parse(raw);
-      const ctx = currentJobContext();
-      let result;
-      try {
-        result = await driver.run({
-          prompt: `smoke job ${jobId}: reply with the word ok`,
-          modelSpec: { provider: 'smoke', model: 'smoke-1' },
-          toolPolicy: { allow: [], mode: 'none' },
-          sandboxPolicy: { level: 'none' },
-          budget: {},
-        });
-      } catch (err) {
-        return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
-      }
-      // The fixture contract guarantees usage on every result (fixed
-      // numbers): a driver result WITHOUT it is exactly the regression
-      // this smoke must catch, so it fails the job — never a silent skip
-      // of the reportUsage fold.
-      if (result.usage === undefined) {
-        return {
-          status: 'failed',
-          error: 'driver result carries no usage — WorkerResult.usage reporting regressed (the fixture always reports fixed usage)',
-        };
-      }
-      if (ctx !== undefined) ctx.reportUsage(result.usage);
-      if (result.stopReason === 'complete') return { status: 'ok', value: result.model ?? 'unreported' };
-      return { status: 'failed', error: `agent run stopped: ${result.stopReason}` };
-    };
-    const registry = {
-      get: (name) =>
-        name === 'agent-run'
-          ? { name, inputSchema: jobInputSchema, importer: () => Promise.resolve(agentRunOp) }
-          : undefined,
-    };
-
-    const runOptions = { concurrency: 2, stopOnError: false, journalDir, maxUsd: 2 };
-    const governor = new BudgetGovernor(governorConfig(runOptions, { perJobWallClockMs: 60_000 }));
-    const plan = {
-      id: 'smoke-from-source',
-      label: 'T1.7 from-source smoke',
-      jobs: [
-        { id: 'j1', op: 'agent-run', input: { jobId: 'j1' } },
-        { id: 'j2', op: 'agent-run', input: { jobId: 'j2' } },
-      ],
-    };
-
-    // THE COMPOSITION (kernel README, "Budget governor"): the governed
-    // registry decorates the view; withBudgetStop annotates the report only
-    // on an actual trip.
-    const raw = await runPlan(plan, runOptions, governRegistry(registry, governor));
-    const report = withBudgetStop(raw, plan, governor);
-
-    // The reportUsage fold, observed where it lands: on a fresh run the
-    // RunReport carries usage only from REPLAYED journal events (frozen
-    // JobOutcome contract), so the fold's evidence on this path is the
-    // governor's rollup — the fixture's fixed usage {10,5,2,3} once per
-    // job, twice here. A dropped reportUsage call (or a regressed
-    // WorkerResult.usage sneaking past the op guard above) leaves this
-    // undefined or short. Key order is the driver's canonical Usage order
-    // on both sides (same in-process fold), so the whole-object compare
-    // here is not order-sensitive.
-    assertDeepEqual(
-      governor.usage,
-      { input: 20, output: 10, cacheRead: 4, cacheWrite: 6 },
-      'governor usage rollup (fixture fixed usage ×2 jobs — the reportUsage fold)',
-    );
-
-    // THE I1 CONTRACT: stdout carries the report (one JSON artifact, via the
-    // shipped emitReport helper); narration rides stderr under `cq: `.
-    RunReportSchema.parse(report); // never emit what the schema rejects
-    emitReport(report);
-    narrate(`smoke: ${report.counts.done}/2 jobs done (plan ${plan.id}, run ${report.runId})`);
-    process.exitCode = report.counts.done === 2 ? 0 : 1;
-  } finally {
-    await rm(scratchDir, { recursive: true, force: true });
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Shared helpers
+// Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Import the BUILT barrel. A missing dist is the smoke's most likely
- * failure mode (the from-source point is that dist exists and works) —
- * name the fix instead of leaking an ERR_MODULE_NOT_FOUND.
+ * Import the BUILT barrel for the parent's own assertions (the schema mirror
+ * and the journal reader). The child under test is dist/cli.js; this import
+ * only reads evidence, never runs the plan.
  */
 async function importDist() {
   try {
     return await import('../dist/index.js');
   } catch (e) {
     fail(
-      `cannot import dist/index.js — run \`npm run build\` first (the from-source smoke drives the BUILT artifact)\n  (${e instanceof Error ? e.message : String(e)})`,
+      `cannot import dist/index.js — run \`npm run build\` first — from-source IS the point (the smoke spawns the BUILT CLI)\n  (${e instanceof Error ? e.message : String(e)})`,
     );
   }
-}
-
-/** Assert deep equality with a readable diff, then exit non-zero. */
-function assertDeepEqual(actual, expected, what) {
-  const a = JSON.stringify(actual);
-  const b = JSON.stringify(expected);
-  if (a !== b) fail(`${what}: expected ${b}, got ${a}`);
 }
 
 function fail(message) {
