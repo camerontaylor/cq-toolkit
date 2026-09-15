@@ -33,13 +33,13 @@
 //     removed/added content). Multiple occurrences per side resolve
 //     LAST-minus against LAST-plus (hunks list old then new); a value count
 //     mismatch between the sides means the pair cannot be lined up at all.
-//     `"direction"`, `"metric"`, and `"target"` are identity fields: they
-//     are scanned per side from the `-`/`+` lines FIRST, and when a side's
-//     ± lines do not carry the field, from the section's CONTEXT lines
-//     (space-prefixed hunk context — which is exactly where the direction
-//     line of an unchanged baseline sits in a real value-only `git diff`
-//     hunk). ± occurrences always win over context for their side; context
-//     fills the gap.
+//     `"direction"`, `"metric"`, `"target"`, and `"unit"` are identity
+//     fields: they are scanned per side from the `-`/`+` lines FIRST, and
+//     when a side's ± lines do not carry the field, from the section's
+//     CONTEXT lines (space-prefixed hunk context — which is exactly where
+//     the direction line of an unchanged baseline sits in a real value-only
+//     `git diff` hunk). ± occurrences always win over context for their
+//     side; context fills the gap.
 //
 // FAIL-CLOSED (I5: non-passing evidence, never a pass) — a MODIFIED section
 // whose value pair is missing or unpairable (truncated hunks, renamed
@@ -56,9 +56,13 @@
 // (oldValue === newValue — captureBaseline legitimately rewrites an
 // equal-value baseline when only the clock moves) is skipped silently; only
 // a direction flip survives that skip, and only DIFFERING values with an
-// unreconstructable direction stay fail-closed. Both a 'loosened' and a
-// 'direction changed' violation can fire on one section; 'unparsable' is
-// terminal.
+// unreconstructable direction stay fail-closed. A UNIT change between the
+// sides (Codex P1: `0.8 ratio` → `70 pct` must never read as an 87.5×
+// tightening) is why:'unit changed' — incomparable scale: the loosens
+// comparison NEVER runs across units, the section is terminal, and a unit
+// appearing or vanishing re-scales the evidence exactly as much. Both a
+// 'loosened' and a 'direction changed' violation can fire on one section;
+// 'unparsable' is terminal.
 import { loosens } from './format.js';
 import type { Direction } from './format.js';
 
@@ -74,7 +78,10 @@ export interface BaselineViolation {
   /** Present only on 'direction changed' violations (rendered by formatViolations). */
   oldDirection?: string;
   newDirection?: string;
-  why: 'loosened' | 'direction changed' | 'unparsable baseline diff';
+  /** Present only on 'unit changed' violations; an absent side is undefined (rendered 'undefined'). */
+  oldUnit?: string;
+  newUnit?: string;
+  why: 'loosened' | 'direction changed' | 'unit changed' | 'unparsable baseline diff';
 }
 
 export type DiffVerdict =
@@ -91,6 +98,7 @@ const VALUE_RE = /"value"\s*:\s*(-?(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+)?)/g;
 const DIRECTION_RE = /"direction"\s*:\s*"([^"]*)"/g;
 const METRIC_RE = /"metric"\s*:\s*"([^"]*)"/g;
 const TARGET_RE = /"target"\s*:\s*"([^"]*)"/g;
+const UNIT_RE = /"unit"\s*:\s*"([^"]*)"/g;
 
 function isDirection(d: string): d is Direction {
   return d === 'lower-is-better' || d === 'higher-is-better';
@@ -208,12 +216,14 @@ function judgeModified(
     direction: preferDiffLines(scanSide(minus, DIRECTION_RE), scanSide(context, DIRECTION_RE)),
     metric: preferDiffLines(scanSide(minus, METRIC_RE), scanSide(context, METRIC_RE)),
     target: preferDiffLines(scanSide(minus, TARGET_RE), scanSide(context, TARGET_RE)),
+    unit: preferDiffLines(scanSide(minus, UNIT_RE), scanSide(context, UNIT_RE)),
   };
   const newSide = {
     value: scanSide(plus, VALUE_RE),
     direction: preferDiffLines(scanSide(plus, DIRECTION_RE), scanSide(context, DIRECTION_RE)),
     metric: preferDiffLines(scanSide(plus, METRIC_RE), scanSide(context, METRIC_RE)),
     target: preferDiffLines(scanSide(plus, TARGET_RE), scanSide(context, TARGET_RE)),
+    unit: preferDiffLines(scanSide(plus, UNIT_RE), scanSide(context, UNIT_RE)),
   };
   const unparsable = (): BaselineViolation => ({ path, why: 'unparsable baseline diff' });
   // The ratcheted quantity must pair up old→new: a count mismatch (two
@@ -236,6 +246,28 @@ function judgeModified(
   // A flip redefines which way "tighten" points — incomparable evidence
   // (fail-closed), the diff-side twin of captureBaseline's identity check.
   const flip = oldDir !== undefined && newDir !== undefined && oldDir !== newDir;
+  // Unit identity (Codex P1): a scale change is incomparable however the
+  // numbers line up — `0.8 ratio` → `70 pct` would otherwise read as an
+  // 87.5× "tightening". Undefined counts as a value on BOTH sides: adding
+  // or dropping the unit line re-scales the evidence just as much. The
+  // section is TERMINAL here — the loosens comparison never runs across
+  // units, and a flip is moot once the scale itself moved.
+  const oldUnit = oldSide.unit.last;
+  const newUnit = newSide.unit.last;
+  if (oldUnit !== newUnit) {
+    return [
+      {
+        path,
+        target,
+        metric,
+        oldValue,
+        newValue,
+        why: 'unit changed',
+        oldUnit,
+        newUnit,
+      },
+    ];
+  }
   // Same-value re-capture: with oldValue === newValue no loosening is
   // possible, and captureBaseline legitimately rewrites an equal-value
   // baseline when only the clock moves — skip the section silently
@@ -322,6 +354,11 @@ export function formatViolations(violations: BaselineViolation[]): string[] {
     }
     if (v.why === 'direction changed') {
       return `${v.path}: direction changed ${v.oldDirection} → ${v.newDirection}`;
+    }
+    if (v.why === 'unit changed') {
+      // An absent side is rendered 'undefined' — a unit that appears or
+      // vanishing re-scales the evidence exactly like a rename.
+      return `${v.path}: unit changed ${v.oldUnit ?? 'undefined'} → ${v.newUnit ?? 'undefined'} — incomparable scale`;
     }
     return `${v.path}: unparsable baseline diff — non-passing evidence (I5)`;
   });

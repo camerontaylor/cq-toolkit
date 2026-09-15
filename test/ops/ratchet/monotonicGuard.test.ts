@@ -35,6 +35,13 @@
 //      mismatch, garbage content), a non-Direction string on the governing
 //      side, and a baselines body with NO direction on any line (± or
 //      context) all yield 'unparsable baseline diff', NEVER a pass.
+//   5b. Unit rides in the identity set with the same ±-then-context
+//       precedence (Codex P1): a unit change between the sides — including
+//       the unit appearing or vanishing, undefined counting as a value — is
+//       why:'unit changed' (incomparable scale) and TERMINAL: the loosens
+//       comparison never runs across units, so `0.8 ratio → 70 pct` can
+//       never read as an 87.5× tightening. Same unit both sides (± or
+//       context) leaves the tighten/loosen paths untouched.
 //   6. A hunk that carries the direction and value lines as ± pairs is
 //      judged from the ± sides directly (rule 3's new-side preference).
 //   6. Whitespace-only rewrites and index/mode-only sections are skipped.
@@ -234,6 +241,126 @@ describe('checkDiffMonotonicity', () => {
           why: 'direction changed',
           oldDirection: 'lower-is-better',
           newDirection: 'higher-is-better',
+        },
+      ],
+      filesChecked: 1,
+    });
+  });
+
+  test('the thread scenario (0.8 ratio → 70 pct) fails as unit changed — never read as a tightening', () => {
+    const diff = fullRewrite(
+      REL_COV,
+      body('higher-is-better', 0.8, { target: COV_TARGET, metric: COV_METRIC, unit: 'ratio' }),
+      body('higher-is-better', 70, { target: COV_TARGET, metric: COV_METRIC, unit: 'pct' }),
+    );
+    // Raw numbers would "tighten" 0.8 → 70; across the scale change that is
+    // meaningless — the section is terminal at 'unit changed', so no
+    // loosened (or flipped) verdict rides along.
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL_COV,
+          target: COV_TARGET,
+          metric: COV_METRIC,
+          oldValue: 0.8,
+          newValue: 70,
+          why: 'unit changed',
+          oldUnit: 'ratio',
+          newUnit: 'pct',
+        },
+      ],
+      filesChecked: 1,
+    });
+  });
+
+  test('a unit flip at EQUAL values still fails as unit changed (scale moved, not the number)', () => {
+    const diff = fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3, { unit: 'failures' }));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 3,
+          why: 'unit changed',
+          oldUnit: 'errors',
+          newUnit: 'failures',
+        },
+      ],
+      filesChecked: 1,
+    });
+  });
+
+  test.each([
+    {
+      label: 'a unit ADDED between the sides (undefined → errors)',
+      oldOverrides: { unit: undefined },
+      newOverrides: {},
+      oldUnit: undefined,
+      newUnit: 'errors',
+    },
+    {
+      label: 'a unit REMOVED between the sides (errors → undefined)',
+      oldOverrides: {},
+      newOverrides: { unit: undefined },
+      oldUnit: 'errors',
+      newUnit: undefined,
+    },
+  ])('$label fails as unit changed — one-sided scale is a re-scale too', ({ oldOverrides, newOverrides, oldUnit, newUnit }) => {
+    const diff = fullRewrite(REL, body('lower-is-better', 3, oldOverrides), body('lower-is-better', 3, newOverrides));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        {
+          path: REL,
+          target: TARGET,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 3,
+          why: 'unit changed',
+          oldUnit,
+          newUnit,
+        },
+      ],
+      filesChecked: 1,
+    });
+  });
+
+  test('± unit occurrences win over context for their side (change visible despite unchanged context unit)', () => {
+    // Context carries the OLD unit while the ± sides rename it: the new
+    // side's ± unit must win over the shared context line, so the scale
+    // change is detected. (If context won, newUnit would equal oldUnit and
+    // the re-scale would slip through a same-unit pass.)
+    const diff = [
+      `diff --git a/${REL} b/${REL}`,
+      'index 1111111..2222222 100644',
+      `--- a/${REL}`,
+      `+++ b/${REL}`,
+      '@@ -2,5 +2,5 @@',
+      '  "metric": "typecheck-count",',
+      '  "unit": "errors",',
+      '-  "unit": "errors",',
+      '-  "value": 3,',
+      '+  "unit": "failures",',
+      '+  "value": 3,',
+      '  "capturedAt": "2026-09-15T00:00:00.000Z",',
+    ].join('\n');
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      // The hand-built hunk carries no `"target"` line, so target stays
+      // undefined while metric (context) is recovered.
+      violations: [
+        {
+          path: REL,
+          metric: METRIC,
+          oldValue: 3,
+          newValue: 3,
+          why: 'unit changed',
+          oldUnit: 'errors',
+          newUnit: 'failures',
         },
       ],
       filesChecked: 1,
@@ -528,6 +655,25 @@ describe('formatViolations', () => {
     if (verdict.ok) throw new Error('unreachable');
     expect(formatViolations(verdict.violations)).toEqual([
       `${REL}: direction changed lower-is-better → higher-is-better`,
+    ]);
+  });
+
+  test('unit changed renders old → new — with undefined for an absent side — verbatim', () => {
+    const flipped = checkDiffMonotonicity(
+      fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3, { unit: 'failures' })),
+    );
+    expect(flipped.ok).toBe(false);
+    if (flipped.ok) throw new Error('unreachable');
+    expect(formatViolations(flipped.violations)).toEqual([
+      `${REL}: unit changed errors → failures — incomparable scale`,
+    ]);
+    const added = checkDiffMonotonicity(
+      fullRewrite(REL, body('lower-is-better', 3, { unit: undefined }), body('lower-is-better', 3)),
+    );
+    expect(added.ok).toBe(false);
+    if (added.ok) throw new Error('unreachable');
+    expect(formatViolations(added.violations)).toEqual([
+      `${REL}: unit changed undefined → errors — incomparable scale`,
     ]);
   });
 
