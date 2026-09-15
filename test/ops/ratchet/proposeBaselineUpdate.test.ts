@@ -433,7 +433,11 @@ describe('proposeBaselineUpdate', () => {
     ).resolves.toMatchObject({
       status: 'ok',
       value: {
-        proposal: 'updated',
+        // review-debt #87 item 1: the VERDICT follows the upsert's
+        // authoritative created flag — the found PR closed between find and
+        // upsert, so the impl's fresh creation is BOTH the identity AND the
+        // verdict truth (the old code said 'updated' from the stale find).
+        proposal: 'created',
         prNumber: 9,
         prUrl: 'https://github.com/acme/repo/pull/9',
       },
@@ -605,6 +609,97 @@ describe('proposeBaselineUpdate', () => {
         ],
       },
     });
+  });
+
+  test('a MISSING baselines dir skips every improvement with the I5 wording (containment.missing all-skip — review-debt #87)', async () => {
+    // The ordinary no-baseline-yet ws: the dir was never created. Every
+    // judged improvement skips with the no-usable-baseline reason, the
+    // proposal is 'none', and no effects are ever consulted.
+    const effects = makeFakeEffects();
+    await expect(
+      createProposeBaselineUpdate(effects)(
+        proposeInput({
+          improvements: [
+            { target: TARGET, metric: METRIC, value: 7 },
+            { target: 'other-target', metric: METRIC, value: 5 },
+          ],
+        }),
+      ),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: {
+        proposal: 'none',
+        prNumber: null,
+        prUrl: null,
+        head: null,
+        applied: [],
+        skipped: [
+          {
+            target: TARGET,
+            metric: METRIC,
+            reason: expect.stringMatching(
+              /not found — no usable baseline — refusing to propose from nothing \(I5\)/,
+            ),
+          },
+          {
+            target: 'other-target',
+            metric: METRIC,
+            reason: expect.stringMatching(
+              /not found — no usable baseline — refusing to propose from nothing \(I5\)/,
+            ),
+          },
+        ],
+      },
+    });
+    expect(effects.findCalls()).toBe(0);
+    expect(effects.upsertCalls()).toBe(0);
+  });
+
+  test('a SYMLINK at the baseline leaf is skipped as non-regular even though its target parses (review-debt #87)', async () => {
+    // The leaf-symlink variant of the non-regular pin: the link points at a
+    // REAL, PARSEABLE baseline file elsewhere — lstat (not stat) sees the
+    // link itself, and evidence through a replaceable leaf is refused even
+    // when the bytes would have parsed.
+    const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+    try {
+      const real = join(outside, 'real-baseline.json');
+      await writeFile(
+        real,
+        renderBaseline({
+          schemaVersion: 1,
+          target: TARGET,
+          metric: METRIC,
+          direction: 'lower-is-better',
+          value: 9,
+          unit: 'errors',
+          capturedAt: BASELINE_CAPTURED_AT,
+        }),
+        'utf8',
+      );
+      await mkdir(join(ws, 'baselines'), { recursive: true });
+      await symlink(real, join(ws, REL));
+      const effects = makeFakeEffects();
+      const result = await createProposeBaselineUpdate(effects)(
+        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      );
+      expect(result).toMatchObject({
+        status: 'ok',
+        value: {
+          proposal: 'none',
+          applied: [],
+          skipped: [
+            {
+              target: TARGET,
+              metric: METRIC,
+              reason: expect.stringMatching(/is not a regular file — refusing to read as evidence/),
+            },
+          ],
+        },
+      });
+      expect(effects.upsertCalls()).toBe(0);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   test('a baselines dir escaping the ws skips EVERY improvement and calls no effects', async () => {
@@ -794,7 +889,13 @@ describe('proposeBaselineUpdate', () => {
       'ratchet/.hidden',
       'has..dots',
       'has space',
-      'under_score',
+      // review-debt #87 round-3: git check-ref-format rejects trailing-dot
+      // components and *.lock components (reflock-reserved).
+      'main.',
+      'ratchet/nightly.',
+      'release.lock',
+      'ratchet.lock/nightly',
+      'has space',
     ]) {
       await expect(propose(proposeInput({ headPrefix: bad }))).resolves.toEqual({
         status: 'failed',
@@ -828,6 +929,23 @@ describe('proposeBaselineUpdate', () => {
     });
   });
 
+  test('an UNDERSCORE-bearing headPrefix is accepted (review-debt #87: git allows _ in ref segments)', async () => {
+    // The old character class excluded '_' — stricter than git. A prefix
+    // like 'ratchet/nightly_lock' is a perfectly legal branch name.
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects = makeFakeEffects();
+    const result = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        headPrefix: 'ratchet/nightly_lock',
+        improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
+      }),
+    );
+    expect(result).toMatchObject({
+      status: 'ok',
+      value: { head: expect.stringMatching(/^ratchet\/nightly_lock-[0-9a-f]{12}$/) },
+    });
+  });
+
   test('base gets the same git-ref discipline (arg-error table)', async () => {
     const effects = makeFakeEffects();
     const propose = createProposeBaselineUpdate(effects);
@@ -840,7 +958,10 @@ describe('proposeBaselineUpdate', () => {
       'seg/.hidden',
       '.dot',
       'has space',
-      'under_score',
+      // review-debt #87 round-3: trailing-dot and *.lock components.
+      'main.',
+      'release.lock',
+      'ratchet.lock/nightly',
     ]) {
       await expect(propose(proposeInput({ base: bad }))).resolves.toEqual({
         status: 'failed',
