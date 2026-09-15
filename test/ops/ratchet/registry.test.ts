@@ -12,9 +12,11 @@
 //      must be non-negative INTEGERS (0.5 → null); cyclic source data
 //      terminates as null (or still extracts when a count is reachable)
 //      instead of recursing forever; raw compiler text is counted by
-//      /error TS\d+:/ lines; text with no error lines (empty or otherwise)
-//      and non-text non-object garbage are null — non-passing evidence
-//      (I5), never a fabricated pass.
+//      ANCHORED tsc diagnostic-header lines (classic `path(line,col):` and
+//      pretty `path:line:col -` shapes) — quoted diagnostic text in
+//      displayed source lines never counts; text with no headers (empty or
+//      otherwise) and non-text non-object garbage are null — non-passing
+//      evidence (I5), never a fabricated pass.
 import { describe, expect, test } from 'vitest';
 import { typecheckCount } from '../../../src/ops/ratchet/adapters/typecheckCount.js';
 import { getAdapter, listAdapters, registerAdapter } from '../../../src/ops/ratchet/registry.js';
@@ -68,6 +70,20 @@ describe('typecheckCount', () => {
     'src/b.ts(4,1): error TS2304: Cannot find name \'missing\'.\n' +
     'src/c.ts(9,3): error TS2345: Argument of type \'x\' is not assignable.\n';
 
+  // A real diagnostic header followed by a displayed SOURCE line that merely
+  // quotes the literal text — the unanchored /error TS\d+:/ counted 2 here.
+  const TSC_OUTPUT_WITH_QUOTED_TEXT =
+    'src/a.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.\n' +
+    'const message = "error TS1234:";';
+
+  const TSC_PRETTY_OUTPUT =
+    'src/p.ts:3:1 - error TS2304: Cannot find name \'missing\'.\n' +
+    'src/q.ts:4:5 - error TS2571: Object is possibly \'undefined\'.';
+
+  const TSC_MIXED_OUTPUT =
+    'src/a.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.\n' +
+    'src/p.ts:3:1 - error TS2304: Cannot find name \'missing\'.';
+
   // Cyclic source data: the visited-set must bound the descent either way.
   const cyclicNoCount: Record<string, unknown> = { name: 'loop' };
   cyclicNoCount['self'] = cyclicNoCount;
@@ -80,6 +96,10 @@ describe('typecheckCount', () => {
     ['nested count object', { outer: { count: 7 } }, 7],
     ['structured zero is a real zero', { count: 0 }, 0],
     ['raw tsc output with several errors', TSC_OUTPUT, 3],
+    ['pretty-format tsc headers count', TSC_PRETTY_OUTPUT, 2],
+    ['classic and pretty headers count together', TSC_MIXED_OUTPUT, 2],
+    ['quoted diagnostic text in a source line is not counted', TSC_OUTPUT_WITH_QUOTED_TEXT, 1],
+    ['a file of only quoted diagnostic text yields null', 'const message = "error TS1234:";\nconst other = "error TS9999:";', null],
     ['negative count', { count: -1 }, null],
     ['non-integer count (a fraction of an error is unusable)', { count: 0.5 }, null],
     ['non-finite count', { count: Number.POSITIVE_INFINITY }, null],
