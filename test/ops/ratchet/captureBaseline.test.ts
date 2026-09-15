@@ -36,6 +36,7 @@
 // assertions); temp dirs under os.tmpdir(), removed in afterEach. The real
 // typecheck-count adapter is used so capture is exercised end-to-end with a
 // production adapter.
+import { spawnSync } from 'node:child_process';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -476,8 +477,8 @@ describe('captureBaseline', () => {
         expect(await readFile(outsideFile, 'utf8')).toBe('precious — must not be truncated');
 
         // Exhaustion: plant EVERY remaining temp name — the bounded retries
-        // give up as indeterminate. The last planted symlink is removed by
-        // the best-effort cleanup (the link only; its target stays intact).
+        // give up as indeterminate, and the colliding entries stay untouched
+        // (cleanup only removes a temp this invocation created).
         for (let c = 3; c <= 7; c++) {
           await symlink(outsideFile, join(ws, 'baselines', `.${basename(REL)}.${process.pid}.${c}.tmp`));
         }
@@ -486,7 +487,57 @@ describe('captureBaseline', () => {
           status: 'indeterminate',
           detail: expect.stringMatching(/writing baseline.*failed/s),
         });
+        const tempDebris = (await readdir(join(ws, 'baselines')))
+          .filter((n) => n.endsWith('.tmp'))
+          .sort();
+        // Leg 1's planted .1 link and leg 2's planted .3–.7 links: ALL still
+        // there — none of them was created by this invocation.
+        expect(tempDebris).toEqual(
+          [1, 3, 4, 5, 6, 7].map((c) => `.${basename(REL)}.${process.pid}.${c}.tmp`),
+        );
         expect(await readFile(outsideFile, 'utf8')).toBe('precious — must not be truncated');
+      } finally {
+        await rm(outside, { recursive: true, force: true });
+      }
+    } finally {
+      vi.resetModules(); // later tests keep using the static module bindings
+    }
+  });
+
+  test('planting ALL five temp names exhausts the retries — indeterminate, all untouched', async () => {
+    // A fresh module instance starts its temp counter at 0, so the five
+    // candidates are exactly counters 1..5 — plant every one of them.
+    vi.resetModules();
+    try {
+      const captureMod = await import('../../../src/ops/ratchet/captureBaseline.js');
+      const registryMod = await import('../../../src/ops/ratchet/registry.js');
+      registryMod.registerAdapter(typecheckCount);
+      const captureFresh = captureMod.createCaptureBaseline(
+        new Map([[METRIC, () => Promise.resolve(sourceRaw)]]),
+      );
+
+      const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+      try {
+        await mkdir(join(ws, 'baselines'), { recursive: true });
+        const outsideFile = join(outside, 'precious.txt');
+        await writeFile(outsideFile, 'precious — must not be truncated', 'utf8');
+        const plantedNames = [1, 2, 3, 4, 5].map(
+          (c) => `.${basename(REL)}.${process.pid}.${c}.tmp`,
+        );
+        for (const name of plantedNames) {
+          await symlink(outsideFile, join(ws, 'baselines', name));
+        }
+        sourceRaw = { count: 3 };
+        await expect(captureFresh(captureInput())).resolves.toEqual({
+          status: 'indeterminate',
+          detail: expect.stringMatching(/writing baseline.*failed/s),
+        });
+        // Every colliding entry is untouched — cleanup never deletes a temp
+        // this invocation did not create.
+        expect((await readdir(join(ws, 'baselines'))).sort()).toEqual([...plantedNames].sort());
+        expect(await readFile(outsideFile, 'utf8')).toBe('precious — must not be truncated');
+        // And no baseline was published anywhere.
+        await expect(stat(join(ws, REL))).rejects.toThrow();
       } finally {
         await rm(outside, { recursive: true, force: true });
       }
@@ -788,21 +839,84 @@ describe('pruneBaselines', () => {
     expect(await readFile(misnamed, 'utf8')).toContain('"value": 9');
   });
 
-  test('an unreadable file (I/O fault) is reported unreadable, distinct from skipped', async () => {
+  test('a directory entry is skipped (non-regular, never followed)', async () => {
     await captureBaselineFor(TARGET, 2);
-    // A directory named *.json: exists, but readFile fails (EISDIR) — an I/O
-    // fault, not unparseable content.
     await mkdir(join(ws, 'baselines', 'weird.json'), { recursive: true });
     await expect(
       pruneBaselines({ ws, live: [{ target: TARGET, metric: METRIC }] }),
     ).resolves.toEqual({
       deleted: [],
       kept: 1,
-      skipped: [],
-      unreadable: ['baselines/weird.json'],
+      skipped: ['baselines/weird.json'],
+      unreadable: [],
     });
-    // The unreadable entry is left untouched.
     await expect(stat(join(ws, 'baselines', 'weird.json'))).resolves.toBeTruthy();
+  });
+
+  test('a symlinked entry is skipped even when its content matches live (never followed)', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+    try {
+      await mkdir(join(ws, 'baselines'), { recursive: true });
+      const bytes = renderBaseline({
+        schemaVersion: 1,
+        target: TARGET,
+        metric: METRIC,
+        direction: 'lower-is-better',
+        value: 7,
+        unit: 'errors',
+        capturedAt: CAPTURED_AT,
+      });
+      const outsideFile = join(outside, 'live-baseline.json');
+      await writeFile(outsideFile, bytes, 'utf8');
+      await symlink(outsideFile, join(ws, 'baselines', 'linked.json'));
+      // Content matches live: without the lstat check the scan would follow
+      // the link and count it kept — it must be skipped instead, and the
+      // outside file never touched.
+      await expect(
+        pruneBaselines({ ws, live: [{ target: TARGET, metric: METRIC }] }),
+      ).resolves.toEqual({
+        deleted: [],
+        kept: 0,
+        skipped: ['baselines/linked.json'],
+        unreadable: [],
+      });
+      expect(await readFile(outsideFile, 'utf8')).toBe(bytes);
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a FIFO entry is skipped without blocking the scan', async () => {
+    await mkdir(join(ws, 'baselines'), { recursive: true });
+    const fifo = join(ws, 'baselines', 'pipe.json');
+    // node:fs cannot create FIFOs; the POSIX mkfifo tool is the stand-in
+    // (repo tests are POSIX-only by convention).
+    const made = spawnSync('mkfifo', [fifo], { stdio: 'ignore' });
+    expect(made.status).toBe(0);
+    // The lstat leaf check classifies it before any readFile — the scan
+    // completes instead of blocking on an open with no writer.
+    await expect(pruneBaselines({ ws, live: [] })).resolves.toEqual({
+      deleted: [],
+      kept: 0,
+      skipped: ['baselines/pipe.json'],
+      unreadable: [],
+    });
+    await expect(stat(fifo)).resolves.toBeTruthy();
+  });
+
+  test('an unreadable regular file (I/O fault) is reported unreadable, distinct from skipped', async () => {
+    await mkdir(join(ws, 'baselines'), { recursive: true });
+    const locked = join(ws, 'baselines', 'locked.json');
+    await writeFile(locked, 'locked content', 'utf8');
+    await chmod(locked, 0o000);
+    const outcome = await pruneBaselines({ ws, live: [] }).finally(() => chmod(locked, 0o644));
+    expect(outcome).toEqual({
+      deleted: [],
+      kept: 0,
+      skipped: [],
+      unreadable: ['baselines/locked.json'],
+    });
+    await expect(readFile(locked, 'utf8')).resolves.toBe('locked content');
   });
 
   test('a scan that cannot start returns the zero outcome with an error, never a throw', async () => {

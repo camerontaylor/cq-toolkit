@@ -340,6 +340,7 @@ export function createCaptureBaseline(
     }
 
     let tempPath: string | undefined;
+    let tempCreated = false;
     try {
       // Atomic publish: bytes land in a unique temp file in the SAME
       // directory, then rename over the target — a crash mid-write can
@@ -347,7 +348,9 @@ export function createCaptureBaseline(
       // EXCLUSIVELY ('wx'): the PID/counter name is predictable, and a
       // pre-planted symlink there would make a plain 'w' write follow it
       // and truncate the outside target. EEXIST advances the counter —
-      // bounded retries, then indeterminate.
+      // bounded retries, then indeterminate. Cleanup below only ever
+      // removes a temp THIS invocation actually created: exhausted retries
+      // collide on pre-existing entries that must stay untouched.
       for (let attempt = 0; attempt < 5; attempt++) {
         tempPath = join(
           dirname(absPath),
@@ -355,21 +358,23 @@ export function createCaptureBaseline(
         );
         try {
           await writeFile(tempPath, bytes, { flag: 'wx' });
+          tempCreated = true;
           break;
         } catch (err) {
           if ((err as { code?: unknown }).code !== 'EEXIST' || attempt === 4) throw err;
         }
       }
-      if (tempPath === undefined) {
-        // Unreachable (the loop always runs), but rename needs the path.
-        throw new Error('temp file could not be created');
+      if (tempCreated === false || tempPath === undefined) {
+        throw new Error('all temp candidates already existed');
       }
       await rename(tempPath, absPath);
     } catch (err) {
       // Best-effort temp cleanup: a failed publish must not litter
       // baselines/ with .tmp debris (unlink errors are swallowed — the
-      // indeterminate verdict already names the primary fault).
-      if (tempPath !== undefined) {
+      // indeterminate verdict already names the primary fault). Ownership
+      // guard: only a temp created by THIS invocation is removed — a
+      // colliding pre-existing entry is never ours to delete.
+      if (tempPath !== undefined && tempCreated) {
         await unlink(tempPath).catch(() => undefined);
       }
       return {
@@ -395,7 +400,7 @@ export interface PruneBaselinesOutcome {
   deleted: string[];
   /** Files kept because their (target, metric) is live. */
   kept: number;
-  /** Readable but unclassifiable content (unparseable, or name/content disagreement) — never deleted. */
+  /** Readable-but-unclassifiable content, or a non-regular entry (symlink/fifo/dir — never followed, never deleted). */
   skipped: string[];
   /** File exists but readFile/unlink failed (I/O fault) — left untouched. */
   unreadable: string[];
@@ -444,6 +449,20 @@ export async function pruneBaselines(input: PruneBaselinesInput): Promise<PruneB
   // regardless of the filesystem's readdir order.
   for (const name of names.filter((n) => n.endsWith('.json')).sort()) {
     const relPath = `baselines/${name}`;
+    // Leaf check mirroring capture's: lstat BEFORE readFile — a non-regular
+    // entry (symlink, fifo, dir) is never followed (outside escapes) and
+    // never deleted; it is skipped as unclassifiable.
+    try {
+      const leafStat = await lstat(join(baselinesDir, name));
+      if (leafStat.isFile() === false) {
+        skipped.push(relPath);
+        continue;
+      }
+    } catch (err) {
+      if (isEnoent(err)) continue; // raced away — nothing left to classify
+      skipped.push(relPath); // uninspectable → unclassifiable
+      continue;
+    }
     let text: string;
     try {
       text = await readFile(join(baselinesDir, name), 'utf8');
