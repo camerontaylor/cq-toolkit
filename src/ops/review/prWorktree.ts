@@ -421,12 +421,19 @@ export async function resolvePrWorktree(
   // alike, so a forked PR's headRefName (which names a branch in the
   // contributor's fork) never triggers a base-repo fetch that would fail —
   // or silently grab an unrelated same-named base-repo branch. The fetched
-  // commit is NAMED: `rev-parse FETCH_HEAD` yields the expectedSha every
+  // commit is NAMED: `rev-parse refs/cq-review/pr-<pr>` yields the
+  // expectedSha every
   // reuse candidate must sit at, and the local branch label is (re)pointed
   // at that sha downstream — the label follows the truth, never the other
   // way round. A fetch failure means the PR head's state is unknown:
   // throw, touch nothing.
-  const fetchArgs = ['-C', repoRoot, 'fetch', 'origin', `refs/pull/${opts.pr}/head`];
+  // The fetch lands in a PR-SPECIFIC local ref — FETCH_HEAD is repo-global
+  // shared state, so two concurrent PR jobs would clobber each other's
+  // fetch and the first job would resolve the second PR's commit (fixes
+  // built against the wrong code). `+` allows non-fast-forward updates:
+  // a force-pushed PR head must still refresh the ref.
+  const prRef = `refs/cq-review/pr-${opts.pr}`;
+  const fetchArgs = ['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${opts.pr}/head:${prRef}`];
   const fetch = await opts.run(fetchArgs);
   if (fetch.code !== 0) {
     throw gitFail(
@@ -436,11 +443,11 @@ export async function resolvePrWorktree(
       fetchArgs,
     );
   }
-  const fetchHeadArgs = ['-C', repoRoot, 'rev-parse', 'FETCH_HEAD'];
+  const fetchHeadArgs = ['-C', repoRoot, 'rev-parse', prRef];
   const fetchHead = await opts.run(fetchHeadArgs);
   if (fetchHead.code !== 0) {
     throw gitFail(
-      'rev-parse FETCH_HEAD failed — the fetched truth is unnameable',
+      `rev-parse ${prRef} failed — the fetched truth is unnameable`,
       fetchHead.code,
       fetchHead.stderr,
       fetchHeadArgs,
