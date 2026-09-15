@@ -834,6 +834,28 @@ describe('run-plan through the governed kernel', () => {
     expect(RunReportSchema.parse(JSON.parse(out)).counts.done).toBe(1);
   });
 
+  test('--max-usd=0 is accepted: a zero-budget hard-zero cap does not reject the run (exit 0)', async () => {
+    // RunPlanInputSchema used z.number().positive(), rejecting --max-usd=0 as
+    // a usage error — but the governor explicitly accepts maxUsd >= 0 (a
+    // valid hard-zero spend ceiling, src/kernel/governor.ts). The cap binds
+    // only on PRICED spend: the echo fixture reports no usage, so nothing
+    // trips and the trivial plan still passes (no journal: fresh governor
+    // starts at zero — the seeded-DD-9 path never engages).
+    const { planPath } = await writePlanFile(singleJobPlan('echo'));
+    const { code, out, err } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      '--max-usd=0',
+    ]);
+    expect(code).toBe(0);
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.counts.done).toBe(1);
+    expect(report.counts['budget-exhausted']).toBe(0);
+    expect(report.stoppedEarly).toBe(false);
+    expect(err).toContain('cq: done 1');
+  });
+
   test('failing job: exit 1 with a failed row, narrated', async () => {
     const { planPath } = await writePlanFile(singleJobPlan('boom'));
     const { code, out, err } = await capture([

@@ -5,7 +5,7 @@
 //   1. The src/ops family scan sees every planned family dir (the scan is
 //      exercised for real, not vacuously).
 //   2. The teeth (PER FAMILY): every op module a family dir contains (`*.ts`
-//      except registry.ts / index.ts / *.test.ts) must have a matching entry
+//      except registry.ts / index.ts / *.test.ts / *.d.ts) must have a matching entry
 //      name in THAT family's own registry module (source-layout import of
 //      registry.ts through vitest) — basename === entry.name. A global name
 //      set would mask an orphan in family alpha behind family beta's
@@ -129,6 +129,10 @@ describe('registry family scan (src/ops)', () => {
             dirent.name.endsWith('.ts') &&
             dirent.name !== 'registry.ts' &&
             dirent.name !== 'index.ts' &&
+            // A `.d.ts` declaration file is ambient typing, never an op module
+            // (mirror of planModuleStem in src/plans/registry.ts) — without
+            // this, a future types.d.ts is misread as op 'types.d'.
+            !dirent.name.endsWith('.d.ts') &&
             !dirent.name.endsWith('.test.ts'),
         )
         .map((dirent) => dirent.name.replace(/\.ts$/, ''));

@@ -80,7 +80,9 @@ export const RunPlanInputSchema = z
     /** NDJSON journal directory; enables persistence and resume (flag: --journal-dir). */
     journalDir: z.string().optional(),
     /** Run-level USD cap, governed (flag: --max-usd). */
-    maxUsd: z.number().positive().optional(),
+    // Zero-budget is expressible: the governor accepts maxUsd >= 0 (a valid
+    // hard-zero spend ceiling); its DD-9 fail-loud covers unpriced maxUsd.
+    maxUsd: z.number().min(0).optional(),
     /** Run-level token rollup cap, DD-9 (flag: --max-tokens). */
     maxTokens: z.number().int().positive().optional(),
     /** Resume an interrupted run from its journal; requires journalDir (flag: --resume, maps 1:1). */
