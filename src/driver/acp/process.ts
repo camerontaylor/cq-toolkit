@@ -56,16 +56,48 @@ export interface AcpSpawnOptions {
 export type AcpSpawnFn = (opts: AcpSpawnOptions) => ChildProcess;
 
 /**
+ * win32 shim translation (review-debt #54/#55): Node's CVE-2024-27980
+ * hardening throws EINVAL for a DIRECT shell-less spawn of a .cmd/.bat
+ * file — while the PATH walk (issue #40) now deliberately RESOLVES those
+ * shims, since npm-installed bare commands ship as .cmd shims on Windows.
+ * The resolution's finds must therefore be launched through cmd.exe:
+ * `/d` skips AutoRun scripts, `/s` makes cmd apply its full quoting rules
+ * to everything after `/c` (the Node-documented shape for .bat/.cmd), and
+ * the whole command line rides ONE verbatim token. PURE argv mapping —
+ * unit-tested on every platform; the routing is win32-only at runtime,
+ * keyed on the injectable platform (unobservable on the linux/macOS
+ * suite, like the PATHEXT walk itself).
+ */
+export function argvForShimSpawn(
+  command: string,
+  args: readonly string[],
+  platform: NodeJS.Platform = process.platform,
+): { command: string; args: string[]; windowsVerbatimArguments: boolean } {
+  if (platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    return {
+      command: 'cmd.exe',
+      args: ['/d', '/s', '/c', [command, ...args].join(' ')],
+      windowsVerbatimArguments: true,
+    };
+  }
+  return { command, args: [...args], windowsVerbatimArguments: false };
+}
+
+/**
  * Spawn the harness binary: no shell, piped stdio, cwd = workspace.
  * stdout/stderr are utf8-decoded; a write into a dead child's stdin
  * (EPIPE) is swallowed — the exit promise carries the real diagnosis.
  */
 export function spawnAcpProcess(opts: AcpSpawnOptions): ChildProcess {
-  const child = spawn(opts.command, [...opts.args], {
+  const spec = argvForShimSpawn(opts.command, opts.args);
+  const child = spawn(spec.command, spec.args, {
     cwd: opts.cwd,
     shell: false, // driver-built argv — nothing is ever re-interpreted by a shell
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...opts.env },
+    // Only ever set on the win32 shim path (ignored elsewhere): the /s
+    // token must reach cmd.exe verbatim, not node-quoted.
+    ...(spec.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
   });
   child.stdout?.setEncoding('utf8');
   child.stderr?.setEncoding('utf8');
