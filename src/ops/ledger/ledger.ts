@@ -80,6 +80,13 @@ export interface LedgerStore {
  * escalateAt) is rejected, not silently tolerated.
  */
 export interface LedgerRecordInput {
+  /**
+   * Containment root: the ledger file must resolve to a STRICT descendant
+   * of an existing directory here. Enforced by the registry-bound
+   * {@link pathLedgerStore} at the seam (the pure op treats it as opaque
+   * selector input for stores that do their own checking).
+   */
+  root: string;
   /** Path of the ledger file the registry-bound store reads and writes. */
   storePath: string;
   /** The error signature to record (1..500 chars). */
@@ -102,6 +109,12 @@ export interface LedgerRecordReport {
 
 /** The read-only query's input; thresholds resolve and validate as for record. */
 export interface LedgerQueryInput {
+  /**
+   * Containment root, exactly as for {@link LedgerRecordInput}: the ledger
+   * file must resolve to a strict descendant of an existing directory here
+   * (enforced by the registry-bound store at the seam).
+   */
+  root: string;
   /** Path of the ledger file the registry-bound store reads. */
   storePath: string;
   /** Per-call threshold overrides (resolved pair validated). */
@@ -293,9 +306,19 @@ function signatureFaultOf(signature: string): string | null {
   return null;
 }
 
-/** Boundary validation of an optional bounded field: at most `max` chars when present. */
-function lengthFaultOf(field: string, value: string | undefined, max: number): string | null {
-  if (value !== undefined && value.length > max) {
+/**
+ * Boundary validation of an optional bounded field: a string of at most
+ * `max` chars when present. A NON-STRING value (reachable from an untyped
+ * caller past any schema) is a fault, never a backfill — a poisoned
+ * component would make parseLedger reject the store file forever, and a
+ * null must not surface as a TypeError across the op seam.
+ */
+function lengthFaultOf(field: string, value: unknown, max: number): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== 'string') {
+    return `ledger: ${field} must be a string (got ${value === null ? 'null' : typeof value})`;
+  }
+  if (value.length > max) {
     return `ledger: ${field} exceeds ${String(max)} characters (${String(value.length)})`;
   }
   return null;

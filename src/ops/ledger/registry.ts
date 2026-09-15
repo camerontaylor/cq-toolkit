@@ -33,14 +33,17 @@ export const LedgerThresholdsOverrideSchema = z
 
 /**
  * Registry-time mirror of {@link LedgerRecordInput}: the full input, and
- * only it. `storePath` is REQUIRED — the registry-bound store is built per
- * dispatch from this path. String fields are bounded: an empty signature
- * is noise, and unbounded signature (500) / component (200) / note (500)
+ * only it. `root` + `storePath` are REQUIRED — the registry-bound store is
+ * built per dispatch, contained to strict descendants of an existing root
+ * (pathLedgerStore's seam check), so a dispatch can never aim the write
+ * outside the root. String fields are bounded: an empty signature is
+ * noise, and unbounded signature (500) / component (200) / note (500)
  * would let one input bloat the committed file. Strict: an unknown key
  * must fail loudly, not be silently stripped.
  */
 export const LedgerRecordInputSchema: z.ZodType<LedgerRecordInput> = z
   .object({
+    root: z.string().min(1),
     storePath: z.string().min(1),
     signature: z.string().min(1).max(500),
     component: z.string().max(200).optional(),
@@ -52,6 +55,7 @@ export const LedgerRecordInputSchema: z.ZodType<LedgerRecordInput> = z
 /** Registry-time mirror of {@link LedgerQueryInput}: the full input, and only it. */
 export const LedgerQueryInputSchema: z.ZodType<LedgerQueryInput> = z
   .object({
+    root: z.string().min(1),
     storePath: z.string().min(1),
     thresholds: LedgerThresholdsOverrideSchema.optional(),
   })
@@ -65,12 +69,15 @@ export const registry: OpRegistryEntry[] = [
     // The dispatch seam re-validates input through inputSchema.parseAsync
     // before invoking the op, so the erased op typing is safe here. The
     // importer resolves BOTH the op module and the fs store, binding the
-    // store INPUT-DRIVEN (pathLedgerStore(input.storePath)) — no op wiring
-    // exists at registry module scope.
+    // store INPUT-DRIVEN (pathLedgerStore(input.root, input.storePath) —
+    // containment checked at the seam) — no op wiring exists at registry
+    // module scope.
     importer: () =>
       Promise.all([import('./ledger.js'), import('./store.js')]).then(
         ([m, s]) =>
-          m.makeLedgerRecord((input) => s.pathLedgerStore(input.storePath)) as Op<unknown, unknown>,
+          m.makeLedgerRecord((input) =>
+            s.pathLedgerStore(input.root, input.storePath),
+          ) as Op<unknown, unknown>,
       ),
   },
   {
@@ -79,7 +86,9 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([import('./ledger.js'), import('./store.js')]).then(
         ([m, s]) =>
-          m.makeLedgerQuery((input) => s.pathLedgerStore(input.storePath)) as Op<unknown, unknown>,
+          m.makeLedgerQuery((input) =>
+            s.pathLedgerStore(input.root, input.storePath),
+          ) as Op<unknown, unknown>,
       ),
   },
 ];

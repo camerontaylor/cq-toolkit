@@ -20,9 +20,9 @@
 // is the sync node:fs adapter the registry importer binds — the only
 // node:fs touch in the lane's storage (sync for v1: ledger entries are one
 // small JSON file, and the ops are async at the Op boundary regardless).
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
-import { lockSync } from 'proper-lockfile';
+import { mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { lock } from 'proper-lockfile';
 import type { LockOptions } from 'proper-lockfile';
 import { z } from 'zod';
 import type { LedgerStore } from './ledger.js';
@@ -156,24 +156,34 @@ export function parseLedger(text: string): LedgerFile {
 }
 
 /**
- * The OPTIONAL shipped store: a sync node:fs adapter over one JSON file at
- * `path`. Load of a missing file yields the empty ledger (missing entries
- * start empty — recording is the only writer); any other read fault, or a
- * corrupt committed file (via parseLedger), throws — the ops map that to
- * `failed`, the read-only query likewise. Save is an ATOMIC publish
+ * The OPTIONAL shipped store: a containment-checked node:fs adapter over
+ * one JSON ledger inside `root`. TRUST SURFACE (the captureBaseline
+ * containment rule, enforced at this seam BEFORE any filesystem effect):
+ * `root` must exist (realpath — a missing root refuses the store outright)
+ * and `target` must resolve (path.resolve — deliberately no realpath: the
+ * target may not exist yet) to a STRICT DESCENDANT of the resolved root —
+ * never the root itself, never outside it. mkdir -p of the target's parent
+ * and the publish happen only after containment passes, so a registry
+ * input can never point the write anywhere else.
+ *
+ * Load of a missing file yields the empty ledger (missing entries start
+ * empty — recording is the only writer); any other read fault, or a corrupt
+ * committed file (via parseLedger), throws — the ops map that to `failed`,
+ * the read-only query likewise. Save is an ATOMIC publish
  * ({@link publishAtomic}): unique temp file, exclusive create, rename over
  * the target — a crash mid-write can never leave a torn ledger at the path,
  * and a pre-planted symlink there is replaced, never followed. `lock` (see
- * {@link LedgerStore.lock}) is implemented with proper-lockfile's sync
- * adapter around the ledger path, so record's load→mutate→save critical
- * section is mutually exclusive ACROSS processes too.
+ * {@link LedgerStore.lock}) wraps the ledger path with proper-lockfile,
+ * THENABLE and with bounded acquire backoff, so concurrent recorders of one
+ * storePath — across processes — serialize instead of being dropped.
  */
-export function pathLedgerStore(path: string): LedgerStore {
+export function pathLedgerStore(root: string, target: string): LedgerStore {
+  const targetAbs = containLedgerTarget(root, target);
   return {
     load: () => {
       let text: string;
       try {
-        text = readFileSync(path, 'utf8');
+        text = readFileSync(targetAbs, 'utf8');
       } catch (err) {
         if (isEnoent(err)) return { version: 1, entries: [] };
         throw err;
@@ -181,38 +191,71 @@ export function pathLedgerStore(path: string): LedgerStore {
       return parseLedger(text);
     },
     save: (file) => {
-      publishAtomic(path, serializeLedger(file));
+      publishAtomic(targetAbs, serializeLedger(file));
     },
     lock: (fn) => {
-      // The lockfile (a <path>.lock directory) needs its parent to exist —
-      // on a first record the ledger file itself does not yet.
-      mkdirSync(dirname(path), { recursive: true });
-      const release = lockSync(path, LOCK_OPTIONS);
-      try {
-        return fn();
-      } finally {
-        try {
-          release();
-        } catch {
-          // Best-effort release: fn's outcome (already computed) outranks a
-          // compromised-lock release fault; staleness bounds any leftover.
-        }
-      }
+      // The lockfile (a <target>.lock directory) needs its parent to exist
+      // BEFORE acquire — without it, every attempt fails ENOENT and the
+      // retry backoff burns out. On a first record the ledger file itself
+      // does not exist yet; containment has already passed.
+      mkdirSync(dirname(targetAbs), { recursive: true });
+      return lock(targetAbs, LOCK_OPTIONS).then((release) =>
+        Promise.resolve()
+          .then(fn)
+          .then(
+            (value) => release().catch(() => undefined).then(() => value),
+            (err) =>
+              release()
+                .catch(() => undefined)
+                .then(() => {
+                  throw err;
+                }),
+          ),
+      );
     },
   };
 }
 
 /**
  * proper-lockfile tuning: no realpath (the ledger may not exist yet on a
- * first record) and bounded staleness. Acquire is FAIL-FAST — the sync
- * adapter supports no retries — so a contended lock surfaces as the op's
- * `failed` (naming the lock fault) instead of a hang; the staleness check
- * clears locks left by crashed processes.
+ * first record), bounded staleness (a crashed holder's lock is stealable
+ * after 5s), and bounded acquire BACKOFF — {retries: 8, factor: 2,
+ * minTimeout: 25} — so a contended recorder waits its turn instead of
+ * dropping its increment.
  */
 const LOCK_OPTIONS: LockOptions = {
   realpath: false,
   stale: 5000,
+  retries: { retries: 8, factor: 2, minTimeout: 25 },
 };
+
+/**
+ * P1 containment, resolved eagerly at store creation (the registry binds a
+ * fresh store per dispatch, so every op call re-checks): realpath the root
+ * — it must EXIST; path.resolve the target (no realpath — it may not exist
+ * yet) and require it to be a STRICT descendant of the resolved root: the
+ * relative form must be non-empty (never the root itself), never escape
+ * upward ('..' — compared against the separator so a root-child literally
+ * named '..foo' stays legal), and never absolute. The resolved target is
+ * what every later operation touches.
+ */
+function containLedgerTarget(root: string, target: string): string {
+  let rootAbs: string;
+  try {
+    rootAbs = realpathSync(root);
+  } catch (err) {
+    if (isEnoent(err)) throw new Error(`root does not resolve: '${root}' does not exist`, { cause: err });
+    throw err;
+  }
+  const targetAbs = resolve(target);
+  const rel = relative(rootAbs, targetAbs);
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    throw new Error(
+      `'${target}' does not resolve to a strict descendant of root '${rootAbs}' — refusing to touch it`,
+    );
+  }
+  return targetAbs;
+}
 
 /** Temp-name salt: uniqueness within a process; EEXIST collisions advance the counter, bounded. */
 let tempFileCounter = 0;

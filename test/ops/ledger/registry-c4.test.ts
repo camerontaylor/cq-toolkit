@@ -4,9 +4,10 @@
 // plain-JSON boundary the input-driven store binding depends on — and
 // their importers resolve end-to-end through the REAL pathLedgerStore (the
 // one place real fs is allowed here, mirroring C1's subprocessRunCheck
-// precedent): a record→query round trip over a mkdtemp file, cleaned up
-// per test.
-import { lstat, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+// precedent): a record→query round trip over a mkdtemp root, cleaned up
+// per test. The containment surface (root → strict descendant), the async
+// retried lock, and the atomic publish are all exercised HERE.
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -39,62 +40,90 @@ describe('ledger registry: the two C4 entries', () => {
 });
 
 describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only it)', () => {
-  test('accepts the plain JSON a dispatcher sends (storePath-based, optional fields included)', () => {
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 'sig-a' }).success).toBe(true);
+  test('accepts the plain JSON a dispatcher sends (root + storePath, optional fields included)', () => {
     expect(
-      LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 'sig-a', component: 'c', note: 'n' })
-        .success,
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'ws/ledger.json', signature: 'sig-a' }).success,
     ).toBe(true);
-    expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json' }).success).toBe(true);
+    expect(
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'ws/ledger.json',
+        signature: 'sig-a',
+        component: 'c',
+        note: 'n',
+      }).success,
+    ).toBe(true);
+    expect(LedgerQueryInputSchema.safeParse({ root: 'ws', storePath: 'ws/ledger.json' }).success).toBe(true);
   });
 
   test('rejects smuggled unknown keys at every level (strict)', () => {
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', memoize: true }).success).toBe(
-      false,
-    );
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', memoize: true })
+        .success,
+    ).toBe(false);
     expect(
       LedgerRecordInputSchema.safeParse({
+        root: 'ws',
         storePath: 'l.json',
         signature: 's',
         thresholds: { suppressAt: 1, escalateAt: 2, cache: true },
       }).success,
     ).toBe(false);
-    expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json', store: {} }).success).toBe(false);
+    expect(LedgerQueryInputSchema.safeParse({ root: 'ws', storePath: 'l.json', store: {} }).success).toBe(false);
   });
 
-  test('rejects missing/empty storePath and out-of-bounds signatures', () => {
-    expect(LedgerRecordInputSchema.safeParse({ signature: 's' }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: '', signature: 's' }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: '' }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's'.repeat(501) }).success).toBe(
+  test('rejects missing/empty root and storePath and out-of-bounds signatures', () => {
+    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's' }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ root: '', storePath: 'l.json', signature: 's' }).success).toBe(
       false,
     );
+    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', signature: 's' }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: '', signature: 's' }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: '' }).success).toBe(
+      false,
+    );
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's'.repeat(501) }).success,
+    ).toBe(false);
     expect(LedgerQueryInputSchema.safeParse({}).success).toBe(false);
+    expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json' }).success).toBe(false);
   });
 
   test('bounds component at 200 and note at 500 chars, mirroring the op-level validation', () => {
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', component: 'c'.repeat(200) }).success).toBe(true);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', component: 'c'.repeat(201) }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', note: 'n'.repeat(500) }).success).toBe(true);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', note: 'n'.repeat(501) }).success).toBe(false);
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', component: 'c'.repeat(200) })
+        .success,
+    ).toBe(true);
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', component: 'c'.repeat(201) })
+        .success,
+    ).toBe(false);
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: 'n'.repeat(500) })
+        .success,
+    ).toBe(true);
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: 'n'.repeat(501) })
+        .success,
+    ).toBe(false);
   });
 });
 
-describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdtemp file)', () => {
-  test('ledger.record: record → suppress → escalate against a real file, including the mkdir -p parent', async () => {
+describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdtemp root)', () => {
+  test('ledger.record: record → suppress → escalate inside the root, including the mkdir -p parent', async () => {
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
-    // A missing parent directory: the save must create it.
+    // A missing parent directory inside the root: the save must create it.
     const storePath = join(scratchDir, 'state', 'nested', 'ledger.json');
     const op = await entryNamed('ledger.record').importer();
-    await expect(op({ storePath, signature: 'sig-a' })).resolves.toEqual({
+    await expect(op({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
       status: 'ok',
       value: { signature: 'sig-a', count: 1, escalated: false },
     });
-    await expect(op({ storePath, signature: 'sig-a' })).resolves.toEqual({
+    await expect(op({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
       status: 'ok',
       value: { signature: 'sig-a', count: 2, escalated: false },
     });
-    await expect(op({ storePath, signature: 'sig-a' })).resolves.toEqual({
+    await expect(op({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
       status: 'needs-human',
       reason: 'error signature exceeded escalation threshold: sig-a (count 3 ≥ 3)',
     });
@@ -110,10 +139,10 @@ describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdte
     const storePath = join(scratchDir, 'ledger.json');
     const record = await entryNamed('ledger.record').importer();
     const query = await entryNamed('ledger.query').importer();
-    await record({ storePath, signature: 'sig-z' });
-    await record({ storePath, signature: 'sig-a' });
-    await record({ storePath, signature: 'sig-a' });
-    await expect(query({ storePath })).resolves.toEqual({
+    await record({ root: scratchDir, storePath, signature: 'sig-z' });
+    await record({ root: scratchDir, storePath, signature: 'sig-a' });
+    await record({ root: scratchDir, storePath, signature: 'sig-a' });
+    await expect(query({ root: scratchDir, storePath })).resolves.toEqual({
       status: 'ok',
       value: {
         entries: [
@@ -146,14 +175,14 @@ describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdte
     );
   });
 
-  test('the store is input-driven: two paths keep independent counts', async () => {
+  test('the store is input-driven: two paths inside one root keep independent counts', async () => {
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
     const op = await entryNamed('ledger.record').importer();
     const firstPath = join(scratchDir, 'one.json');
     const secondPath = join(scratchDir, 'two.json');
-    await op({ storePath: firstPath, signature: 'sig-a' });
-    await op({ storePath: firstPath, signature: 'sig-a' });
-    await expect(op({ storePath: secondPath, signature: 'sig-a' })).resolves.toEqual({
+    await op({ root: scratchDir, storePath: firstPath, signature: 'sig-a' });
+    await op({ root: scratchDir, storePath: firstPath, signature: 'sig-a' });
+    await expect(op({ root: scratchDir, storePath: secondPath, signature: 'sig-a' })).resolves.toEqual({
       status: 'ok',
       value: { signature: 'sig-a', count: 1, escalated: false },
     });
@@ -163,16 +192,16 @@ describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdte
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
     const storePath = join(scratchDir, 'ledger.json');
     const record = await entryNamed('ledger.record').importer();
-    await record({ storePath, signature: 'sig-b' });
+    await record({ root: scratchDir, storePath, signature: 'sig-b' });
     const corrupted = (await readFile(storePath, 'utf8')).replace('"count": 1', '"count": 0');
     await writeFile(storePath, corrupted, 'utf8');
-    const recorded = await record({ storePath, signature: 'sig-b' });
+    const recorded = await record({ root: scratchDir, storePath, signature: 'sig-b' });
     expect(recorded.status).toBe('failed');
     if (recorded.status === 'failed') {
       expect(recorded.error).toContain('ledger: schema violation');
     }
     const query = await entryNamed('ledger.query').importer();
-    const queried = await query({ storePath });
+    const queried = await query({ root: scratchDir, storePath });
     expect(queried.status).toBe('failed');
     if (queried.status === 'failed') {
       expect(queried.error).toContain('ledger: schema violation');
@@ -180,13 +209,138 @@ describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdte
   });
 });
 
+describe('pathLedgerStore containment (the trust surface is checked at the seam)', () => {
+  test('a storePath inside an existing root is accepted (the happy containment row)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const storePath = join(root, 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    await expect(op({ root, storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+  });
+
+  test('a storePath outside the root (a sibling) is refused and nothing is written', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const storePath = join(scratchDir, 'outside.json'); // a sibling of the root
+    const op = await entryNamed('ledger.record').importer();
+    const result = await op({ root, storePath, signature: 'sig-a' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('strict descendant');
+    }
+    // The refused target was never created.
+    await expect(stat(storePath)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  test('a storePath equal to the root is refused (strict descendant, never the root itself)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const op = await entryNamed('ledger.record').importer();
+    const result = await op({ root, storePath: root, signature: 'sig-a' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('strict descendant');
+    }
+  });
+
+  test('a nonexistent root refuses the store (root must resolve)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'missing');
+    const storePath = join(root, 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    const result = await op({ root, storePath, signature: 'sig-a' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('root does not resolve');
+    }
+    // Containment refuses BEFORE any mkdir: the root was never created.
+    await expect(stat(root)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('pathLedgerStore.lock (contention contract: bounded backoff, live holders win, abandoned locks are recovered)', () => {
+  test('8 parallel registry-bound records on one path ALL land (counts 1..8, none lost)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    const op = await entryNamed('ledger.record').importer();
+    const results = await Promise.all(
+      Array.from({ length: 8 }, () => op({ root: scratchDir, storePath, signature: 'sig-a' })),
+    );
+    // Every record observed its OWN increment: the counts 1..8 each appear
+    // exactly once (ok values at 1–2, the escalation reason above that).
+    const observed = results
+      .map((result) =>
+        result.status === 'ok'
+          ? (result.value as { count: number }).count
+          : result.status === 'needs-human'
+            ? Number(/count (\d+)/.exec(result.reason)?.[1])
+            : Number.NaN,
+      )
+      .sort((a, b) => a - b);
+    expect(observed).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    const query = await entryNamed('ledger.query').importer();
+    await expect(query({ root: scratchDir, storePath })).resolves.toEqual({
+      status: 'ok',
+      value: {
+        entries: [{ signature: 'sig-a', count: 8 }],
+        knownNoise: ['sig-a'],
+        needsHuman: ['sig-a'],
+      },
+    });
+  }, 20_000);
+
+  test('an ABANDONED lock is stolen once staleness passes (crash recovery), and the record lands', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    await mkdir(`${storePath}.lock`); // left by a crashed holder — never mtime-updated again
+    const op = await entryNamed('ledger.record').importer();
+    // The acquire backoff (retries: 8, factor: 2, minTimeout: 25) outlives
+    // the 5s stale window, so the crashed holder's lock is detected stale,
+    // removed, and the record proceeds.
+    await expect(op({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+    // The stale lock was consumed: only the ledger remains.
+    expect(await readdir(scratchDir)).toEqual(['ledger.json']);
+  }, 30_000);
+
+  test('a LIVE held lock fails the record with a fault naming the lock (held locks are honored, never dropped into)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    // A genuinely live holder: proper-lockfile keeps refreshing the lock's
+    // mtime (update: 1000), so it never goes stale — the record's bounded
+    // backoff exhausts and the op reports `failed` naming the lock.
+    const { lock } = await import('proper-lockfile');
+    const release = await lock(storePath, { realpath: false, update: 1000 });
+    try {
+      const op = await entryNamed('ledger.record').importer();
+      const result = await op({ root: scratchDir, storePath, signature: 'sig-a' });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toContain('Lock file is already being held');
+      }
+      // The critical section never ran: no ledger file was created.
+      await expect(stat(storePath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await release();
+    }
+  }, 30_000);
+});
+
 describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare write)', () => {
   test('a successful save (create AND rewrite) leaves no leftover temp files', async () => {
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
     const storePath = join(scratchDir, 'ledger.json');
     const record = await entryNamed('ledger.record').importer();
-    await record({ storePath, signature: 'sig-a' });
-    await record({ storePath, signature: 'sig-a' }); // a rewrite, not just a create
+    await record({ root: scratchDir, storePath, signature: 'sig-a' });
+    await record({ root: scratchDir, storePath, signature: 'sig-a' }); // a rewrite, not just a create
     expect(await readdir(scratchDir)).toEqual(['ledger.json']);
   });
 
@@ -203,7 +357,7 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
     await writeFile(sentinelPath, sentinelBytes, 'utf8');
     await symlink(sentinelPath, storePath);
     const record = await entryNamed('ledger.record').importer();
-    await expect(record({ storePath, signature: 'sig-a' })).resolves.toEqual({
+    await expect(record({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
       status: 'ok',
       value: { signature: 'sig-a', count: 1, escalated: false },
     });

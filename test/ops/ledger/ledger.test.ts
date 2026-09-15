@@ -46,8 +46,8 @@ function brokenStore(): LedgerStore {
   };
 }
 
-function record(store: LedgerStore, input: Omit<LedgerRecordInput, 'storePath'>) {
-  return makeLedgerRecord(() => store)({ ...input, storePath: 'unused-by-the-fake' });
+function record(store: LedgerStore, input: Omit<LedgerRecordInput, 'root' | 'storePath'>) {
+  return makeLedgerRecord(() => store)({ ...input, root: 'unused-root', storePath: 'unused-by-the-fake' });
 }
 
 describe('ledger.record — the decision table (default thresholds: suppress 2, escalate 3)', () => {
@@ -73,7 +73,7 @@ describe('ledger.record — the decision table (default thresholds: suppress 2, 
     const store = memoryStore();
     await record(store, { signature: 'sig-a' });
     await record(store, { signature: 'sig-a' });
-    const query = await makeLedgerQuery(() => store)({ storePath: 'ignored' });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored' });
     expect(query).toEqual({
       status: 'ok',
       value: {
@@ -107,7 +107,7 @@ describe('ledger.record — the decision table (default thresholds: suppress 2, 
     const store = memoryStore();
     await record(store, { signature: 'sig-mmm' });
     await record(store, { signature: 'sig-aaa' });
-    const query = await makeLedgerQuery(() => store)({ storePath: 'ignored' });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored' });
     expect(query.status === 'ok' && query.value.entries.map((e) => e.signature)).toEqual([
       'sig-aaa',
       'sig-mmm',
@@ -120,7 +120,7 @@ describe('ledger.record — the decision table (default thresholds: suppress 2, 
     expect(first.status).toBe('ok'); // count 2
     const second = await record(store, { signature: 'sig-b', component: 'other', note: 'other' });
     expect(second.status).toBe('needs-human'); // count 3 — escalation rides along, fields intact
-    const query = await makeLedgerQuery(() => store)({ storePath: 'ignored' });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored' });
     expect(query.status === 'ok' && query.value.entries).toEqual([
       { signature: 'sig-b', count: 3, component: 'core', note: 'first sighting' },
     ]);
@@ -130,7 +130,7 @@ describe('ledger.record — the decision table (default thresholds: suppress 2, 
   test('component/note are stamped on a brand-new entry', async () => {
     const store = memoryStore();
     await record(store, { signature: 'sig-c', component: 'review', note: 'gh thread 12' });
-    const query = await makeLedgerQuery(() => store)({ storePath: 'ignored' });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored' });
     expect(query.status === 'ok' && query.value.entries).toEqual([
       { signature: 'sig-c', count: 1, component: 'review', note: 'gh thread 12' },
     ]);
@@ -143,7 +143,7 @@ describe('ledger.record — threshold overrides', () => {
     await expect(record(store, { signature: 'sig-a', thresholds: { suppressAt: 1, escalateAt: 2 } })).resolves.toEqual(
       { status: 'ok', value: { signature: 'sig-a', count: 1, escalated: false } },
     );
-    const query = await makeLedgerQuery(() => store)({ storePath: 'ignored', thresholds: { suppressAt: 1, escalateAt: 2 } });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored', thresholds: { suppressAt: 1, escalateAt: 2 } });
     expect(query.status === 'ok' && query.value.knownNoise).toEqual(['sig-a']);
     await expect(record(store, { signature: 'sig-a', thresholds: { suppressAt: 1, escalateAt: 2 } })).resolves.toEqual({
       status: 'needs-human',
@@ -157,8 +157,8 @@ describe('ledger.record — threshold overrides', () => {
   });
 
   test('an override pair with escalateAt ≤ suppressAt is rejected by the registry schema AND the op', async () => {
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', thresholds: { suppressAt: 3, escalateAt: 3 } }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', thresholds: { suppressAt: 1, escalateAt: 2 } }).success).toBe(true);
+    expect(LedgerRecordInputSchema.safeParse({ root: 'unused-root', storePath: 'l.json', signature: 's', thresholds: { suppressAt: 3, escalateAt: 3 } }).success).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ root: 'unused-root', storePath: 'l.json', signature: 's', thresholds: { suppressAt: 1, escalateAt: 2 } }).success).toBe(true);
     const store = memoryStore();
     await expect(
       record(store, { signature: 'sig-a', thresholds: { suppressAt: 3, escalateAt: 3 } }),
@@ -186,7 +186,7 @@ describe('ledger.record — threshold overrides', () => {
     ];
     for (const thresholds of bad) {
       expect(
-        LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's', thresholds }).success,
+        LedgerRecordInputSchema.safeParse({ root: 'unused-root', storePath: 'l.json', signature: 's', thresholds }).success,
       ).toBe(false);
       const store = memoryStore();
       await expect(record(store, { signature: 'sig-a', thresholds })).resolves.toEqual({
@@ -221,7 +221,7 @@ describe('ledger.record — boundary validation and store faults', () => {
 
   test('a throwing load → failed, naming the cause', async () => {
     const op = makeLedgerRecord(() => brokenStore());
-    await expect(op({ storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
+    await expect(op({ root: 'unused-root', storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
       status: 'failed',
       error: 'ledger: could not load the error ledger — EACCES: unreadable ledger',
     });
@@ -242,7 +242,7 @@ describe('ledger.record — boundary validation and store faults', () => {
     const op = makeLedgerRecord(() => {
       throw new Error('bad path');
     });
-    await expect(op({ storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
+    await expect(op({ root: 'unused-root', storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
       status: 'failed',
       error: 'ledger: could not load the error ledger — bad path',
     });
@@ -255,14 +255,14 @@ describe('ledger.query — read-only, deterministic, canonical', () => {
     await record(store, { signature: 'sig-a' });
     const savesAfterRecord = store.saves();
     const query = makeLedgerQuery(() => store);
-    await query({ storePath: 'ignored' });
-    await query({ storePath: 'ignored' });
+    await query({ root: 'unused-root', storePath: 'ignored' });
+    await query({ root: 'unused-root', storePath: 'ignored' });
     expect(store.saves()).toBe(savesAfterRecord);
   });
 
   test('a query on a fresh store sees the empty ledger and still never saves', async () => {
     const store = memoryStore();
-    await expect(makeLedgerQuery(() => store)({ storePath: 'ignored' })).resolves.toEqual({
+    await expect(makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored' })).resolves.toEqual({
       status: 'ok',
       value: { entries: [], knownNoise: [], needsHuman: [] },
     });
@@ -276,8 +276,8 @@ describe('ledger.query — read-only, deterministic, canonical', () => {
     await record(store, { signature: 'sig-a' });
     await record(store, { signature: 'sig-a' });
     const query = makeLedgerQuery(() => store);
-    const first = await query({ storePath: 'ignored' });
-    const second = await query({ storePath: 'ignored' });
+    const first = await query({ root: 'unused-root', storePath: 'ignored' });
+    const second = await query({ root: 'unused-root', storePath: 'ignored' });
     expect(first).toEqual(second);
     expect(first).toEqual({
       status: 'ok',
@@ -298,7 +298,7 @@ describe('ledger.query — read-only, deterministic, canonical', () => {
       { signature: 'sig-m', count: 2 },
       { signature: 'sig-a', count: 1 },
     ]);
-    const query = await makeLedgerQuery(() => store)({ storePath: 'ignored' });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored' });
     expect(query.status === 'ok' && query.value.entries.map((e) => e.signature)).toEqual([
       'sig-a',
       'sig-m',
@@ -316,27 +316,27 @@ describe('ledger.query — read-only, deterministic, canonical', () => {
   test('threshold overrides reshape the same store state (and stay deterministic)', async () => {
     const store = memoryStore([{ signature: 'sig-a', count: 2 }]);
     const query = makeLedgerQuery(() => store);
-    const strict = await query({ storePath: 'ignored', thresholds: { suppressAt: 1, escalateAt: 2 } });
+    const strict = await query({ root: 'unused-root', storePath: 'ignored', thresholds: { suppressAt: 1, escalateAt: 2 } });
     expect(strict.status === 'ok' && strict.value.knownNoise).toEqual(['sig-a']);
     expect(strict.status === 'ok' && strict.value.needsHuman).toEqual(['sig-a']);
-    const lax = await query({ storePath: 'ignored', thresholds: { suppressAt: 5, escalateAt: 9 } });
+    const lax = await query({ root: 'unused-root', storePath: 'ignored', thresholds: { suppressAt: 5, escalateAt: 9 } });
     expect(lax.status === 'ok' && lax.value.knownNoise).toEqual([]);
     expect(lax.status === 'ok' && lax.value.needsHuman).toEqual([]);
   });
 
   test('a throwing load → failed; invalid thresholds → failed without touching the store', async () => {
-    await expect(makeLedgerQuery(() => brokenStore())({ storePath: 'l.json' })).resolves.toEqual({
+    await expect(makeLedgerQuery(() => brokenStore())({ root: 'unused-root', storePath: 'l.json' })).resolves.toEqual({
       status: 'failed',
       error: 'ledger: could not load the error ledger — EACCES: unreadable ledger',
     });
     const store = memoryStore();
     await expect(
-      makeLedgerQuery(() => store)({ storePath: 'ignored', thresholds: { suppressAt: 4, escalateAt: 4 } }),
+      makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'ignored', thresholds: { suppressAt: 4, escalateAt: 4 } }),
     ).resolves.toEqual({
       status: 'failed',
       error: 'ledger: invalid thresholds — escalateAt (4) must be greater than suppressAt (4)',
     });
-    expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json', thresholds: { escalateAt: 1 } }).success).toBe(
+    expect(LedgerQueryInputSchema.safeParse({ root: 'unused-root', storePath: 'l.json', thresholds: { escalateAt: 1 } }).success).toBe(
       false,
     );
   });
@@ -364,6 +364,24 @@ describe('ledger.record — component/note bounds (mirroring the registry schema
       status: 'ok',
       value: { signature: 'sig-a', count: 1, escalated: false },
     });
+  });
+
+  test('a non-string component or note is failed without touching the store (no TypeError across the seam)', async () => {
+    const store = memoryStore();
+    const untyped = (value: unknown) => value as string | undefined; // an untyped caller past any schema
+    await expect(record(store, { signature: 'sig-a', component: untyped(42) })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: component must be a string (got number)',
+    });
+    await expect(record(store, { signature: 'sig-a', component: untyped(null) })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: component must be a string (got null)',
+    });
+    await expect(record(store, { signature: 'sig-a', note: untyped(false) })).resolves.toEqual({
+      status: 'failed',
+      error: 'ledger: note must be a string (got boolean)',
+    });
+    expect(store.saves()).toBe(0);
   });
 });
 
@@ -405,7 +423,7 @@ describe('ledger.record — the store lock (concurrent records of one storePath)
     const store = lockingStore();
     const record = makeLedgerRecord(() => store);
     const results = await Promise.all(
-      Array.from({ length: 8 }, () => record({ storePath: 'unused-by-the-fake', signature: 'sig-a' })),
+      Array.from({ length: 8 }, () => record({ root: 'unused-root', storePath: 'unused-by-the-fake', signature: 'sig-a' })),
     );
     // Each record observed its OWN increment — the counts 1..8 each appear
     // exactly once (ok values for counts 1–2, the reason string above that).
@@ -420,7 +438,7 @@ describe('ledger.record — the store lock (concurrent records of one storePath)
       .sort((a, b) => a - b);
     expect(observed).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(results.filter((result) => result.status === 'needs-human')).toHaveLength(6);
-    const query = await makeLedgerQuery(() => store)({ storePath: 'unused-by-the-fake' });
+    const query = await makeLedgerQuery(() => store)({ root: 'unused-root', storePath: 'unused-by-the-fake' });
     expect(query.status === 'ok' && query.value.entries).toEqual([{ signature: 'sig-a', count: 8 }]);
     expect(store.lockCalls()).toBe(8);
   });
@@ -433,7 +451,7 @@ describe('ledger.record — the store lock (concurrent records of one storePath)
         throw new Error('lock stolen');
       },
     };
-    await expect(makeLedgerRecord(() => store)({ storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
+    await expect(makeLedgerRecord(() => store)({ root: 'unused-root', storePath: 'l.json', signature: 'sig-a' })).resolves.toEqual({
       status: 'failed',
       error: 'ledger: could not update the error ledger — lock stolen',
     });
