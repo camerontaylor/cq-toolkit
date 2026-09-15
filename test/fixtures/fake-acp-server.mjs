@@ -263,6 +263,10 @@ const NO_SERVED_MODEL = process.env.FAKE_ACP_NO_SERVED_MODEL === '1';
 // session/request_permission names a session that is NOT this run's —
 // the driver must reject it before any answer/evidence effects.
 const FOREIGN_PERMISSION_SESSION = process.env.FAKE_ACP_FOREIGN_PERMISSION_SESSION === '1';
+// The malformed-usage persona (PR #97 review, Codex P1): the turn settles
+// end_turn CARRYING a usage the wire gate must reject (negative count) —
+// the driver may not substitute zeros and report a green run.
+const MALFORMED_USAGE = process.env.FAKE_ACP_MALFORMED_USAGE === '1';
 // The stale-mode persona (PR #53 review, Codex P1): the agent announces
 // its initial mode 'build' right after session/new — BEFORE the pin —
 // and the set_config_option answer carries neither a modes echo nor a
@@ -329,7 +333,9 @@ function emitBigFrameChunk() {
   });
 }
 
-const USAGE = {
+const USAGE = MALFORMED_USAGE
+  ? { totalTokens: 20, inputTokens: -1, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 3 }
+  : {
   // INCLUSIVE wire arithmetic (the live sample's shape): totalTokens =
   // inputTokens + outputTokens, cachedRead/cachedWrite INSIDE inputTokens.
   totalTokens: 20,

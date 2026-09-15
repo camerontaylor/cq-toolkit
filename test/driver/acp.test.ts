@@ -717,6 +717,49 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test('a response CARRYING usage the wire gate rejects is an ERROR run — never zeros-that-look-measured (PR #97 review, Codex P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_MALFORMED_USAGE: the turn settles end_turn with
+      // inputTokens: -1. The verdict must pin to 'error' — the old code
+      // treated the unshapeable usage as ABSENT, substituted zeros, and
+      // classified the run 'complete', erasing accounting and bypassing
+      // the unpriced check under a USD cap.
+      const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_MALFORMED_USAGE: '1' }, []));
+      const result = await driver.run(invocation({ prompt: 'malformed-usage run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never trusted numbers
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"malformed-reported-usage"'))).toBe(true);
+    });
+  });
+
+  test('a foreign-session ask whose REJECTION write fails settles error — never a hung run (PR #97 review, Codex P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FOREIGN ask + stdin destroyed: the failRequest write EPIPEs, and
+      // the vendor would otherwise wait forever for an answer that can
+      // never be delivered. The broken-channel posture applies: verdict
+      // 'error', the child terminated via the settle ladder, the run
+      // settles.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: '{"path":"a.txt"}',
+            FAKE_ACP_FOREIGN_PERMISSION_SESSION: '1',
+            FAKE_ACP_CLOSE_STDIN_ON_PERMISSION: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'foreign-ask-dead-stdin run' }));
+      expect(result.stopReason).toBe('error');
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"permission-rejection-send-failed"'))).toBe(true);
+    });
+  }, 20_000);
+
   test('a session/request_permission naming a FOREIGN session is rejected: no answer, no evidence — the ungated tool card fails the run (PR #37 review, Codex P2)', async () => {
     await withScratch(async (scratchDir, store) => {
       // FAKE_ACP_FOREIGN_PERMISSION_SESSION: the ask names a session that
