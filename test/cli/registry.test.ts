@@ -13,11 +13,22 @@
 //      all entry names plus 'run-plan'; the empty registry still yields
 //      ['run-plan'].
 //   4. Fixture-root DI: the pure-op fixture family under
-//      test/fixtures/cli-ops/ resolves exactly its five names through the
+//      test/fixtures/cli-ops/ resolves exactly its six names through the
 //      same list()/get() seam, and get('echo').importer() yields an async fn.
 //   5. Registry integrity defects surface loudly: duplicate op names across
 //      families reject naming the op; a malformed entry (no inputSchema/
 //      importer) rejects.
+//   6. ABSENT vs BROKEN (the narrow tolerance): a family dir with no
+//      registry.js resolves to no entries; a PRESENT-but-broken registry
+//      (an evaluation throw, or a registry importing a MISSING TRANSITIVE
+//      dep) rejects loudly naming the family — only a not-found for the
+//      requested registry.js itself counts as absent.
+//   7. Plan-registry discovery (src/plans): sibling modules in BOTH layouts
+//      (.ts source and .js dist) are discovered; reserved stems (registry/
+//      index, whatever the extension), *.test.* siblings, and .d.ts
+//      declaration files are skipped.
+//   8. The root barrel exposes the registry as listOps/getOp aliases — the
+//      generic list/get names never sit on it (star-export collision rule).
 //
 // Fixture/generated registries are plain ESM .js files (package
 // "type":"module") that import 'zod' from the repo's node_modules — so the
@@ -26,10 +37,12 @@
 // cleans up with rm.
 import { readdirSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { subcommandNames } from '../../src/cli/main.js';
+import { getPlan, listPlans } from '../../src/plans/registry.js';
 import { get, list } from '../../src/registry/index.js';
 
 const srcOps = fileURLToPath(new URL('../../src/ops/', import.meta.url));
@@ -52,6 +65,19 @@ afterEach(async () => {
 /** Make a fresh tmp ops root under the repo (zod-resolvable), auto-cleaned. */
 async function makeTmpOpsRoot(prefix: string): Promise<string> {
   const dir = await mkdtemp(join(tmpParent, prefix));
+  tmpDirs.push(dir);
+  return dir;
+}
+
+/**
+ * Fresh tmp plans root (OS tmpdir) carrying its own package.json
+ * {"type":"module"} so the generated `.js` plan sibling is ESM; the `.ts`
+ * siblings are plain erasable syntax, transformed by the module runner.
+ * Nothing here needs the repo's node_modules (plan modules are pure data).
+ */
+async function makeTmpPlansRoot(prefix: string): Promise<string> {
+  const dir = await mkdtemp(join(tmpdir(), prefix));
+  await writeFile(join(dir, 'package.json'), '{"type":"module"}\n');
   tmpDirs.push(dir);
   return dir;
 }
@@ -118,9 +144,9 @@ describe('registry ⇄ CLI subcommand surface', () => {
 });
 
 describe('fixture-root DI (test/fixtures/cli-ops)', () => {
-  test('the fixture family resolves exactly its five ops through the same seam', async () => {
+  test('the fixture family resolves exactly its six ops through the same seam', async () => {
     const names = (await list({ opsRoot: join(fixtureOps) })).map((entry) => entry.name).sort();
-    expect(names).toEqual(['boom', 'budget', 'echo', 'indet', 'needshuman']);
+    expect(names).toEqual(['boom', 'budget', 'echo', 'garbage', 'indet', 'needshuman']);
   });
 
   test("get('echo') yields an entry whose importer() is an async op fn", async () => {
@@ -150,5 +176,82 @@ describe('registry integrity defects reject loudly', () => {
       "export const registry = [{ name: 'x' }];\n",
     );
     await expect(list({ opsRoot: tmp })).rejects.toThrow(/'x'/);
+  });
+});
+
+describe('absent vs broken family registries (the narrow tolerance)', () => {
+  test('an ABSENT registry.js is tolerated: the family contributes no entries', async () => {
+    const tmp = await makeTmpOpsRoot('cq-registry-absent-');
+    await mkdir(join(tmp, 'empty-family'), { recursive: true });
+    // Only a not-found for the requested registry.js itself counts as absent.
+    await expect(list({ opsRoot: tmp })).resolves.toEqual([]);
+  });
+
+  test('a PRESENT-but-broken registry (evaluation throw) rejects naming the family', async () => {
+    const tmp = await makeTmpOpsRoot('cq-registry-kaboom-');
+    await mkdir(join(tmp, 'kaboom-family'), { recursive: true });
+    await writeFile(join(tmp, 'kaboom-family', 'registry.js'), "throw new Error('kaboom');\n");
+    // Loud, not silently-tolerated: the message names the family and the
+    // registry path (with the original error attached as cause).
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/kaboom-family/);
+  });
+
+  test('a registry importing a MISSING TRANSITIVE dep rejects (not tolerated as absent)', async () => {
+    // The not-found names './nope-missing.js' — a transitive dependency — as
+    // the resolution target, never the requested registry.js itself, so the
+    // absent classifier does not apply: this throws loudly.
+    const tmp = await makeTmpOpsRoot('cq-registry-transitive-');
+    await mkdir(join(tmp, 'transitive'), { recursive: true });
+    await writeFile(
+      join(tmp, 'transitive', 'registry.js'),
+      "import './nope-missing.js';\nexport const registry = [];\n",
+    );
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/transitive/);
+  });
+});
+
+describe('plan registry (src/plans) — .ts discovery + skip rules', () => {
+  test('discovers .ts and .js plan siblings; skips reserved stems, tests, and .d.ts', async () => {
+    const root = await makeTmpPlansRoot('cq-plans-discovery-');
+    // One plan module per layout: .ts (source) and .js (dist).
+    await writeFile(
+      join(root, 'alpha.ts'),
+      "export const plan = { name: 'alpha', importer: async () => ({ id: 'alpha', jobs: [] }) };\n",
+    );
+    await writeFile(
+      join(root, 'beta.js'),
+      "export const plan = { name: 'beta', importer: async () => ({ id: 'beta', jobs: [] }) };\n",
+    );
+    // Reserved stem (registry, whatever its extension and however valid its
+    // content) — never imported, never listed.
+    await writeFile(
+      join(root, 'registry.ts'),
+      "export const plan = { name: 'reserved-never', importer: async () => ({ id: 'x', jobs: [] }) };\n",
+    );
+    // Test sibling — skipped in either layout.
+    await writeFile(
+      join(root, 'skip.test.ts'),
+      "export const plan = { name: 'test-never', importer: async () => ({ id: 'x', jobs: [] }) };\n",
+    );
+    // Declaration file — ambient typing, never a module candidate.
+    await writeFile(join(root, 'types.d.ts'), 'export type PlanName = string;\n');
+    const names = (await listPlans({ plansRoot: root })).map((entry) => entry.name);
+    expect(names).toEqual(['alpha', 'beta']);
+    const alpha = await getPlan('alpha', { plansRoot: root });
+    expect(alpha?.name).toBe('alpha');
+    expect(typeof alpha?.importer).toBe('function');
+  });
+});
+
+describe('root barrel aliases (src/index.js)', () => {
+  test('exposes listOps/getOp; the generic list/get names never sit on the barrel', async () => {
+    const barrel = await import('../../src/index.js');
+    // Aliases of the same registry seam, not re-implementations.
+    expect(barrel.listOps).toBe(list);
+    expect(barrel.getOp).toBe(get);
+    // The bare generic names would collide (star-export ambiguity) with the
+    // first family barrel that ever exports them — they must stay absent.
+    expect(Object.hasOwn(barrel, 'list')).toBe(false);
+    expect(Object.hasOwn(barrel, 'get')).toBe(false);
   });
 });

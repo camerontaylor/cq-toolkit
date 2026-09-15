@@ -10,4 +10,7 @@ export const registry = [
   { name: 'needshuman', inputSchema: z.object({}).strict(), importer: lazy('./needshuman.js') },
   { name: 'budget', inputSchema: z.object({}).strict(), importer: lazy('./budget.js') },
   { name: 'indet', inputSchema: z.object({}).strict(), importer: lazy('./indet.js') },
+  // NOT a taxonomy verdict: the CX1 gate probe — the CLI must reject this
+  // result (exit 1, stdout EMPTY) before any artifact is written.
+  { name: 'garbage', inputSchema: z.object({}).strict(), importer: lazy('./garbage.js') },
 ];
