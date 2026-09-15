@@ -427,6 +427,36 @@ describe('per-action failure isolation', () => {
     expect(calls.map((c) => c.label)).toEqual(['reply:1201', 'resolve:PRRT_1']);
   });
 
+  test('a MIXED errors payload (already-resolved next to a real failure) is NOT idempotent — failed, unrecorded', async () => {
+    const calls: GhCall[] = [];
+    const log = memLog();
+    const result = await replyAndResolve(
+      [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
+      baseOpts(
+        recordingGh(calls, undefined, (label) =>
+          label === 'resolve:PRRT_1'
+            ? {
+                code: 0,
+                stdout: JSON.stringify({
+                  errors: [{ message: 'Thread is already resolved' }, { message: 'Bad credentials' }],
+                }),
+                stderr: '',
+              }
+            : undefined,
+        ),
+        log,
+      ),
+    );
+    // Already-resolved must be the SOLE error to read as a landed replay —
+    // a mixed payload does not prove the mutation landed, so it stays a
+    // plain retriable failure.
+    expect(result.skippedAlreadyResolved).toBe(0);
+    expect(result.failed).toHaveLength(1);
+    expect(result.failed[0]?.action.actionId).toBe('s1');
+    expect(result.failed[0]?.error).toContain('GraphQL errors: Thread is already resolved; Bad credentials');
+    expect((await log.load()).map((r) => r.actionId)).toEqual(['r1']);
+  });
+
   test('IDEMPOTENT REPLAY across runs: mutation landed, record did not → the re-run converges (skippedAlreadyResolved 1, failed 0, no duplicate anything)', async () => {
     const actions: ReviewAction[] = [mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')];
 
@@ -658,6 +688,7 @@ describe('pre-flight validation', () => {
     ['empty actionId', REPO, [mkReply('', 1201)]],
     ['bad threadRootRestId', REPO, [mkReply('r1', 0)]],
     ['empty threadId', REPO, [mkResolve('s1', '')]],
+    ['whitespace threadId', REPO, [mkResolve('s1', '   ')]],
     ['whitespace reply body', REPO, [mkReply('r1', 1201, '   ')]],
     ['empty issue-comment body', REPO, [mkIssue('i1', '')]],
   ])('%s throws before a single gh invocation or push', async (_label, optsPartial, actions) => {

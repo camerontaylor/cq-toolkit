@@ -63,8 +63,8 @@
 // through the injected WorktreeRegistry; the clock is injected (nowMs,
 // never Date.now); the only direct fs touch is the worktreeRoot mkdir and
 // the registry entry's directory-existence check.
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
-import { join, sep } from 'node:path';
+import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, sep } from 'node:path';
 import type { GhFn } from './gh.js';
 
 /** One registry entry: where the PR's worktree lives and what it is on. */
@@ -89,6 +89,13 @@ export type RegistryMap = Record<string, WorktreeRegistryEntry>;
 export interface WorktreeRegistry {
   load(): Promise<RegistryMap>;
   save(map: RegistryMap): Promise<void>;
+  /**
+   * MERGE-ON-SAVE for ONE key: load → set the key (null clears it) → save.
+   * Resolves and removals scope their write to their OWN key, so concurrent
+   * runs for different PRs can no longer drop each other's entries the way
+   * a whole-map save would (last writer erasing everything it never saw).
+   */
+  update(key: string, entry: WorktreeRegistryEntry | null): Promise<void>;
 }
 
 /**
@@ -133,7 +140,18 @@ export function fileWorktreeRegistry(path: string): WorktreeRegistry {
     await writeFile(tmpPath, `${JSON.stringify(map, null, 2)}\n`, 'utf8');
     await rename(tmpPath, path);
   };
-  return { load, save };
+  const update = async (key: string, entry: WorktreeRegistryEntry | null): Promise<void> => {
+    // Load-merge-save scoped to ONE key: a concurrent run's entries for
+    // other PRs are read fresh and written back untouched.
+    const map = await load();
+    if (entry === null) {
+      delete map[key];
+    } else {
+      map[key] = entry;
+    }
+    await save(map);
+  };
+  return { load, save, update };
 }
 
 /** What resolvePrWorktree/removePrWorktree need — everything injected. */
@@ -218,11 +236,55 @@ const directoryExists = async (path: string): Promise<boolean> => {
 };
 
 /**
- * The OWNERSHIP boundary: a path is OURS only when it lives STRICTLY INSIDE
- * the review worktreeRoot (`<root>/<segment>…`). The root itself — and any
- * path outside it — is not a tree this module created or may claim/remove.
+ * Canonicalize a path for the ownership compare: `realpath` the LONGEST
+ * EXISTING prefix, then re-join the not-yet-existing remainder (segments
+ * under the resolved ancestor). This is total — a registry entry or a
+ * caller-supplied path may not exist yet — and it is what makes the
+ * boundary robust against SYMLINK DIVERGENCE: on macOS /tmp is a symlink
+ * to /private/tmp (and tmpdir() hands out /var/... under /private/var), so
+ * a raw string prefix compare would misclassify our own trees spelled
+ * through the non-canonical alias as foreign. A path with NO existing
+ * ancestor at all resolves to itself normalized and then simply fails the
+ * prefix compare — treated as outside-root (the safe direction).
  */
-const isInsideRoot = (path: string, root: string): boolean => path.startsWith(`${root}${sep}`);
+const canonicalize = async (path: string): Promise<string> => {
+  let probe = path;
+  let remainder = '';
+  for (;;) {
+    try {
+      const real = await realpath(probe);
+      return remainder === '' ? real : join(real, remainder);
+    } catch {
+      const parent = dirname(probe);
+      if (parent === probe) {
+        // Walked off the filesystem root without finding anything that
+        // exists: the path is unresolvable — return it (normalized) and let
+        // the prefix compare classify it outside-root.
+        return path;
+      }
+      remainder = remainder === '' ? basename(probe) : join(basename(probe), remainder);
+      probe = parent;
+    }
+  }
+};
+
+/**
+ * The OWNERSHIP boundary: a path is OURS only when it lives STRICTLY INSIDE
+ * the review worktreeRoot (`<root>/<segment>…`) — both sides CANONICALIZED
+ * (see canonicalize: realpath semantics, symlink-proof), and a trailing
+ * separator on the root is stripped before the compare (a caller spelling
+ * `…/worktrees/` must not double the separator and miss every child). The
+ * root itself — and any path outside it — is not a tree this module created
+ * or may claim/remove.
+ */
+const isInsideRoot = async (path: string, root: string): Promise<boolean> => {
+  let trimmed = root;
+  while (trimmed.length > 1 && trimmed.endsWith(sep)) {
+    trimmed = trimmed.slice(0, -1);
+  }
+  const [canonicalPath, canonicalRoot] = await Promise.all([canonicalize(path), canonicalize(trimmed)]);
+  return canonicalPath.startsWith(`${canonicalRoot}${sep}`);
+};
 
 /** Validate the shared opts, fail loud before any I/O (E1/E3 convention).
  * headRefName gets only the local safety checks (non-empty, never reads as
@@ -301,6 +363,11 @@ export async function resolvePrWorktree(
   if (entry !== undefined) {
     const valid =
       (await directoryExists(entry.path)) &&
+      // OWNERSHIP applies to the registry too: an entry pointing outside
+      // the CURRENT worktreeRoot describes a tree this module no longer
+      // owns (the root moved, or the entry predates the boundary) — stale
+      // by definition, resolution proceeds to (re)create inside the root.
+      (await isInsideRoot(entry.path, worktreeRoot)) &&
       (await (async () => {
         const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
         const branch = await opts.run(branchArgs);
@@ -342,7 +409,7 @@ export async function resolvePrWorktree(
     const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
     const head = await opts.run(headArgs);
     const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
-    if (!isInsideRoot(candidate.path, worktreeRoot)) {
+    if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
       if (atSha) {
         foreign.push({ path: candidate.path, branch: candidate.branch });
       }
@@ -364,8 +431,7 @@ export async function resolvePrWorktree(
     }
   }
   if (existing !== null) {
-    map[key] = { path: existing.path, branch: opts.headRefName, createdAt: opts.nowMs };
-    await opts.registry.save(map);
+    await opts.registry.update(key, { path: existing.path, branch: opts.headRefName, createdAt: opts.nowMs });
     return { path: existing.path, reused: true, branch: opts.headRefName, foreign };
   }
 
@@ -386,9 +452,10 @@ export async function resolvePrWorktree(
     throw gitFail(`worktree add -B ${opts.headRefName} ${wtPath} ${expectedSha} failed`, add.code, add.stderr, addArgs);
   }
   // The post-success prune: registering the fresh tree OVERWRITES any stale
-  // entry — only now, with the new truth on disk, is the old pointer retired.
-  map[key] = { path: wtPath, branch: opts.headRefName, createdAt: opts.nowMs };
-  await opts.registry.save(map);
+  // entry — only now, with the new truth on disk, is the old pointer retired
+  // (the update is a per-key load-merge-save: concurrent resolves for other
+  // PRs never lose their entries to this write).
+  await opts.registry.update(key, { path: wtPath, branch: opts.headRefName, createdAt: opts.nowMs });
   return { path: wtPath, reused: false, branch: opts.headRefName, foreign };
 }
 
@@ -410,7 +477,7 @@ export async function resolvePrWorktree(
 export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }): Promise<void> {
   validateOpts(opts);
   const worktreeRoot = opts.worktreeRoot ?? join(opts.repoRoot, '.cq-review-worktrees');
-  if (!isInsideRoot(opts.path, worktreeRoot)) {
+  if (!(await isInsideRoot(opts.path, worktreeRoot))) {
     throw new Error(
       `removePrWorktree: refusing to remove ${JSON.stringify(opts.path)} — it is outside the review worktreeRoot ${JSON.stringify(worktreeRoot)}; review ops removes only trees it created under its own root`,
     );
@@ -428,7 +495,8 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
   const key = String(opts.pr);
   const map = await opts.registry.load();
   if (map[key]?.path === opts.path) {
-    delete map[key];
-    await opts.registry.save(map);
+    // Per-key merge-on-write: other PRs' entries are re-read fresh and
+    // preserved (a whole-map delete+save would drop them).
+    await opts.registry.update(key, null);
   }
 }

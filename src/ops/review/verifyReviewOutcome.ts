@@ -18,17 +18,23 @@
 //                         head-sha VERIFIED at capture time — snapshotPrState
 //                         throws without one — so identical shas mean no
 //                         signal and any difference means the PR moved).
-//       responder-reply — a review- or issue-comment id present in `after`
-//                         and absent from `before` (REST-counted: GraphQL
-//                         lags fresh writes, REST does not — the workstream
-//                         contract counts comments over REST). The diff is
-//                         AUTHOR-BLIND by choice: REST ids carry no author
-//                         here, and any new comment IS evidence the PR
-//                         moved — the conservative anti-hallucination
-//                         direction (we never claim progress from nothing;
-//                         a new comment is never nothing). responderLogin,
-//                         when the caller knows it, is recorded in the
-//                         reason detail — never used to filter.
+//       responder-reply — a review- or issue-comment entry present in
+//                         `after` and absent from `before` (REST-counted:
+//                         GraphQL lags fresh writes, REST does not — the
+//                         workstream contract counts comments over REST).
+//                         Entries carry their author (REST snake_case
+//                         user.login; absent → null). When the caller
+//                         KNOWS the responder login, attribution is
+//                         STRICT: a new comment counts as responder-reply
+//                         evidence only if its author === responderLogin —
+//                         a null author does NOT count, because
+//                         certifying progress from an unattributable
+//                         comment is exactly the hallucination this module
+//                         exists to refuse (fail toward NOT certifying).
+//                         When responderLogin is null the diff stays
+//                         AUTHOR-BLIND by necessity: there is no claimed
+//                         identity to check against, so any new id
+//                         counts (a new comment is never nothing).
 //       thread-resolved — a thread id in `after`'s resolved set that was
 //                         not in `before`'s.
 //   - summary: progress → "PROGRESS: " + kinds joined ", "; no evidence →
@@ -74,10 +80,16 @@ export interface PrSnapshot {
    * (a headless snapshot could not see new-commit movement).
    */
   headSha: string;
-  /** REST review-comment ids (the pulls/{pr}/comments collection). */
-  reviewCommentIds: number[];
-  /** REST issue-comment ids (the issues/{pr}/comments collection). */
-  issueCommentIds: number[];
+  /**
+   * REST review comments (the pulls/{pr}/comments collection): numeric id
+   * plus the author's login (snake_case `user.login`; absent → null).
+   */
+  reviewComments: Array<{ id: number; author: string | null }>;
+  /**
+   * REST issue comments (the issues/{pr}/comments collection): numeric id
+   * plus the author's login (snake_case `user.login`; absent → null).
+   */
+  issueComments: Array<{ id: number; author: string | null }>;
   /** GraphQL thread node ids that ARE resolved at snapshot time. */
   resolvedThreadIds: string[];
 }
@@ -171,7 +183,7 @@ interface GraphqlPayload {
  * only the junk, so it throws (a bad snapshot must never become a silent
  * "NO PROGRESS").
  */
-const slurpedComments = (payload: unknown, path: string): Array<{ id?: unknown }> => {
+const slurpedComments = (payload: unknown, path: string): Array<{ id?: unknown; user?: unknown }> => {
   if (!Array.isArray(payload)) {
     throw new Error(`gh api ${path} returned a non-array payload — snapshot untrustworthy`);
   }
@@ -184,37 +196,49 @@ const slurpedComments = (payload: unknown, path: string): Array<{ id?: unknown }
       `gh api ${path} returned a MIXED page payload (array pages alongside non-array entries) — snapshot untrustworthy`,
     );
   }
-  const flat = allPages ? (payload as unknown[][]).flat() : (payload as Array<{ id?: unknown }>);
-  return flat as Array<{ id?: unknown }>;
+  const flat = allPages ? (payload as unknown[][]).flat() : (payload as Array<{ id?: unknown; user?: unknown }>);
+  return flat as Array<{ id?: unknown; user?: unknown }>;
 };
 
 /**
- * Extract the numeric REST ids from a raw comment list. STRICT: an entry
- * without a safe-integer id is a payload this module cannot trust —
- * filtering it out would silently shrink the reply-novelty evidence (a
- * missed responder reply reads as NO PROGRESS) — so it throws.
+ * Extract one REST comment entry per raw comment: the numeric id (STRICT —
+ * an entry without a safe-integer id is a payload this module cannot
+ * trust; filtering it out would silently shrink the reply-novelty
+ * evidence) plus the author's login (snake_case `user.login`;
+ * absent/non-string → null — attribution then simply cannot match a known
+ * responder, which is the conservative direction).
  */
-const commentIds = (raws: Array<{ id?: unknown }>, path: string): number[] =>
+const commentEntries = (
+  raws: Array<{ id?: unknown; user?: unknown }>,
+  path: string,
+): Array<{ id: number; author: string | null }> =>
   raws.map((raw, index) => {
-    if (typeof raw?.id === 'number' && Number.isSafeInteger(raw.id)) {
-      return raw.id;
+    if (typeof raw?.id !== 'number' || !Number.isSafeInteger(raw.id)) {
+      throw new Error(
+        `gh api ${path} returned a comment entry without a numeric id (entry ${index}) — snapshot untrustworthy`,
+      );
     }
-    throw new Error(
-      `gh api ${path} returned a comment entry without a numeric id (entry ${index}) — snapshot untrustworthy`,
-    );
+    const login = (raw.user as { login?: unknown } | null | undefined)?.login;
+    return { id: raw.id, author: typeof login === 'string' && login !== '' ? login : null };
   });
 
 /** Fetch one REST comment collection paginated, tolerant of both slurp shapes. */
-const fetchRestCommentIds = async (run: GhFn, path: string): Promise<number[]> =>
-  commentIds(slurpedComments(await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']), path), path);
+const fetchRestComments = async (
+  run: GhFn,
+  path: string,
+): Promise<Array<{ id: number; author: string | null }>> =>
+  commentEntries(
+    await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']).then((payload) =>
+      slurpedComments(payload, path),
+    ),
+    path,
+  );
 
 /**
- * Capture one instant of the PR's state: REST head sha, REST comment id
- * collections (both `--paginate --slurp`, both payload shapes accepted),
- * and the GraphQL resolved-thread set (first page only — REST cannot carry
- * resolution state, and progress needs any ONE signal, so the 100-thread
- * page cap is acceptable here; see module doc). Throws loudly on any
- * payload it cannot trust.
+ * Capture one instant of the PR's state: REST head sha, REST comment
+ * collections with their authors (both `--paginate --slurp`, both payload
+ * shapes accepted), and the GraphQL resolved-thread set (paginated to the
+ * end — see module doc). Throws loudly on any payload it cannot trust.
  */
 export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnapshot> {
   // Validation before any argv is built (E1/E3-s1 convention).
@@ -242,11 +266,11 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
   }
   const headSha: string = sha;
 
-  const reviewCommentIds = await fetchRestCommentIds(
+  const reviewComments = await fetchRestComments(
     opts.run,
     `repos/${opts.owner}/${opts.repo}/pulls/${opts.pr}/comments?per_page=100`,
   );
-  const issueCommentIds = await fetchRestCommentIds(
+  const issueComments = await fetchRestComments(
     opts.run,
     `repos/${opts.owner}/${opts.repo}/issues/${opts.pr}/comments?per_page=100`,
   );
@@ -279,6 +303,14 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     // Explicit annotation: the loop-carried cursor must never leak into the
     // payload's inferred type (the annotation severs the flow).
     const payload: GraphqlPayload = await ghJson<GraphqlPayload>(opts.run, args);
+    // Runtime shape guards: a non-array errors or nodes payload is not a
+    // GraphQL document this module can trust (the types promise arrays;
+    // the wire does not have to).
+    if (payload.errors !== undefined && payload.errors !== null && !Array.isArray(payload.errors)) {
+      throw new Error(
+        `gh api graphql returned a non-array errors payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
+      );
+    }
     if (payload.errors !== undefined && payload.errors.length > 0) {
       const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
       throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
@@ -287,6 +319,11 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     if (threads === undefined || threads === null) {
       throw new Error(
         `gh api graphql returned no reviewThreads payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
+      );
+    }
+    if (!Array.isArray(threads.nodes)) {
+      throw new Error(
+        `gh api graphql returned non-array reviewThreads.nodes for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
       );
     }
     // Resolution state is STRICT too: a RESOLVED node without a string id
@@ -321,8 +358,8 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
   return {
     at: opts.nowMs,
     headSha,
-    reviewCommentIds,
-    issueCommentIds,
+    reviewComments,
+    issueComments,
     resolvedThreadIds,
   };
 }
@@ -354,18 +391,30 @@ export function verifyPrOutcome(
     });
   }
 
-  // responder-reply: a REST comment id (either collection) present in
-  // `after` and absent from `before`.
-  const newReviewIds = after.reviewCommentIds.filter((id) => !before.reviewCommentIds.includes(id));
-  const newIssueIds = after.issueCommentIds.filter((id) => !before.issueCommentIds.includes(id));
-  if (newReviewIds.length > 0 || newIssueIds.length > 0) {
+  // responder-reply: a REST comment entry (either collection) present in
+  // `after` and absent from `before` — gated by ATTRIBUTION when the
+  // responder login is known (strict author === responderLogin; a null
+  // author never counts: progress must not be certified from an
+  // unattributable comment) and blind when it is null (any new id counts —
+  // there is no claimed identity to check against).
+  const newReviewEntries = after.reviewComments.filter(
+    (entry) => !before.reviewComments.some((prior) => prior.id === entry.id),
+  );
+  const newIssueEntries = after.issueComments.filter(
+    (entry) => !before.issueComments.some((prior) => prior.id === entry.id),
+  );
+  const countsAsReply = (entry: { author: string | null }): boolean =>
+    opts.responderLogin === null || entry.author === opts.responderLogin;
+  const countedReview = newReviewEntries.filter(countsAsReply);
+  const countedIssue = newIssueEntries.filter(countsAsReply);
+  if (countedReview.length > 0 || countedIssue.length > 0) {
     const who =
       opts.responderLogin === null
-        ? 'responder unknown'
-        : `responder ${opts.responderLogin} recorded (id-novelty is author-blind)`;
+        ? 'responder unknown (id-novelty is author-blind)'
+        : `responder ${opts.responderLogin} recorded (attribution strict: author === responderLogin)`;
     reasons.push({
       kind: 'responder-reply',
-      detail: `${who}; new review comment ids [${newReviewIds.join(', ')}]; new issue comment ids [${newIssueIds.join(', ')}]`,
+      detail: `${who}; new review comment ids [${countedReview.map((entry) => entry.id).join(', ')}]; new issue comment ids [${countedIssue.map((entry) => entry.id).join(', ')}]`,
     });
   }
 

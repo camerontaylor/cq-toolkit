@@ -106,8 +106,8 @@ const snapshotOpts = (fixture: FakeGhFixture, calls?: string[][]): SnapshotPrSta
 const baseSnapshot = (overrides?: Partial<PrSnapshot>): PrSnapshot => ({
   at: NOW,
   headSha: 'abc123',
-  reviewCommentIds: [9001],
-  issueCommentIds: [5001],
+  reviewComments: [{ id: 9001, author: 'pr-author' }],
+  issueComments: [{ id: 5001, author: 'pr-author' }],
   resolvedThreadIds: ['PRRT_old'],
   ...overrides,
 });
@@ -120,14 +120,14 @@ describe('the anti-hallucination contract', () => {
   test('identical snapshots (a hallucinated "done") → progress false, summary EXACTLY "NO PROGRESS"', () => {
     const before = Object.freeze({
       ...baseSnapshot(),
-      reviewCommentIds: Object.freeze([9001]),
-      issueCommentIds: Object.freeze([5001]),
+      reviewComments: Object.freeze([{ id: 9001, author: 'pr-author' }]),
+      issueComments: Object.freeze([{ id: 5001, author: 'pr-author' }]),
       resolvedThreadIds: Object.freeze(['PRRT_old']),
     }) as PrSnapshot;
     const after = Object.freeze({
       ...baseSnapshot(),
-      reviewCommentIds: Object.freeze([9001]),
-      issueCommentIds: Object.freeze([5001]),
+      reviewComments: Object.freeze([{ id: 9001, author: 'pr-author' }]),
+      issueComments: Object.freeze([{ id: 5001, author: 'pr-author' }]),
       resolvedThreadIds: Object.freeze(['PRRT_old']),
     }) as PrSnapshot;
     const outcome = verifyPrOutcome(before, after, { responderLogin: 'pr-author' });
@@ -157,26 +157,92 @@ describe('progress signals', () => {
     expect(outcome.summary).toBe('PROGRESS: new-commit');
   });
 
-  test('a NEW review comment id alone → responder-reply reason, summary "PROGRESS: responder-reply"', () => {
-    const outcome = verifyPrOutcome(baseSnapshot(), baseSnapshot({ reviewCommentIds: [9001, 9002] }), {
-      responderLogin: 'pr-author',
-    });
+  test('a responder-AUTHORED new review comment with a KNOWN responder → responder-reply (the strict attribution gate passes)', () => {
+    const outcome = verifyPrOutcome(
+      baseSnapshot(),
+      baseSnapshot({
+        reviewComments: [
+          { id: 9001, author: 'pr-author' },
+          { id: 9002, author: 'pr-author' },
+        ],
+      }),
+      { responderLogin: 'pr-author' },
+    );
     expect(outcome.progress).toBe(true);
     expect(outcome.reasons).toHaveLength(1);
     expect(outcome.reasons[0]?.kind).toBe('responder-reply');
-    // responderLogin is RECORDED in the detail (never used to filter).
+    // responderLogin is RECORDED in the detail — and the gate it passed.
     expect(outcome.reasons[0]?.detail).toContain('responder pr-author');
+    expect(outcome.reasons[0]?.detail).toContain('attribution strict');
     expect(outcome.reasons[0]?.detail).toContain('9002');
     expect(outcome.summary).toBe('PROGRESS: responder-reply');
   });
 
-  test('a NEW issue comment id alone → responder-reply reason, summary "PROGRESS: responder-reply"', () => {
-    const outcome = verifyPrOutcome(baseSnapshot(), baseSnapshot({ issueCommentIds: [5001, 5002] }), {
-      responderLogin: null,
-    });
+  test('a THIRD-PARTY new comment with a KNOWN responder is NOT progress (attribution is strict — no certifying without evidence)', () => {
+    const outcome = verifyPrOutcome(
+      baseSnapshot(),
+      baseSnapshot({
+        reviewComments: [
+          { id: 9001, author: 'pr-author' },
+          { id: 9002, author: 'someone-else' },
+        ],
+      }),
+      { responderLogin: 'pr-author' },
+    );
+    expect(outcome.progress).toBe(false);
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.summary).toBe('NO PROGRESS');
+  });
+
+  test('a NULL-author new comment with a KNOWN responder does NOT count (unattributable ≠ evidence)', () => {
+    const outcome = verifyPrOutcome(
+      baseSnapshot(),
+      baseSnapshot({
+        reviewComments: [
+          { id: 9001, author: 'pr-author' },
+          { id: 9002, author: null },
+        ],
+      }),
+      { responderLogin: 'pr-author' },
+    );
+    expect(outcome.progress).toBe(false);
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.summary).toBe('NO PROGRESS');
+  });
+
+  test('mixed authorship: only the responder-attributed new comment lands in the reason detail', () => {
+    const outcome = verifyPrOutcome(
+      baseSnapshot(),
+      baseSnapshot({
+        reviewComments: [
+          { id: 9001, author: 'pr-author' },
+          { id: 9002, author: 'someone-else' },
+          { id: 9003, author: 'pr-author' },
+        ],
+      }),
+      { responderLogin: 'pr-author' },
+    );
+    expect(outcome.progress).toBe(true);
+    expect(outcome.reasons[0]?.detail).toContain('9003');
+    expect(outcome.reasons[0]?.detail).not.toContain('9002');
+  });
+
+  test('a new comment with an UNKNOWN responder login → blind id-novelty preserved (any author counts)', () => {
+    const outcome = verifyPrOutcome(
+      baseSnapshot(),
+      baseSnapshot({
+        issueComments: [
+          { id: 5001, author: 'pr-author' },
+          { id: 5002, author: 'someone-else' },
+        ],
+      }),
+      { responderLogin: null },
+    );
     expect(outcome.progress).toBe(true);
     expect(outcome.reasons).toHaveLength(1);
     expect(outcome.reasons[0]?.kind).toBe('responder-reply');
+    // Blind mode named in the detail.
+    expect(outcome.reasons[0]?.detail).toContain('author-blind');
     expect(outcome.reasons[0]?.detail).toContain('5002');
     expect(outcome.summary).toBe('PROGRESS: responder-reply');
   });
@@ -197,7 +263,18 @@ describe('progress signals', () => {
   test('multiple reasons → ALL present in the fixed order, summary lists every kind', () => {
     const outcome = verifyPrOutcome(
       baseSnapshot(),
-      baseSnapshot({ headSha: 'def456', reviewCommentIds: [9001, 9002], issueCommentIds: [5001, 5002], resolvedThreadIds: ['PRRT_old', 'PRRT_new'] }),
+      baseSnapshot({
+        headSha: 'def456',
+        reviewComments: [
+          { id: 9001, author: 'pr-author' },
+          { id: 9002, author: 'pr-author' },
+        ],
+        issueComments: [
+          { id: 5001, author: 'pr-author' },
+          { id: 5002, author: 'pr-author' },
+        ],
+        resolvedThreadIds: ['PRRT_old', 'PRRT_new'],
+      }),
       { responderLogin: 'pr-author' },
     );
     expect(outcome.reasons.map((reason) => reason.kind)).toEqual([
@@ -241,8 +318,12 @@ describe('snapshotPrState', () => {
     expect(snapshot).toEqual({
       at: NOW,
       headSha: 'abc123',
-      reviewCommentIds: [9001, 9002],
-      issueCommentIds: [5001],
+      // The fake serves no user field → authors are null in the snapshot.
+      reviewComments: [
+        { id: 9001, author: null },
+        { id: 9002, author: null },
+      ],
+      issueComments: [{ id: 5001, author: null }],
       resolvedThreadIds: ['PRRT_1', 'PRRT_3'],
     });
     // The invocation plan: PR object → review comments → issue comments → graphql.
@@ -254,6 +335,24 @@ describe('snapshotPrState', () => {
     expect(reviewArgs).toContain('--slurp');
     expect(issueArgs).toContain('--paginate');
     expect(issueArgs).toContain('--slurp');
+  });
+
+  test('comment AUTHORS land in the snapshot (snake_case user.login; absent → null)', async () => {
+    const snapshot = await snapshotPrState(
+      snapshotOpts({
+        headSha: 'abc123',
+        pullsComments: [
+          { id: 9001, user: { login: 'reviewer-1' } },
+          { id: 9002, user: {} },
+        ],
+        issuesComments: [{ id: 5001 }],
+      }),
+    );
+    expect(snapshot.reviewComments).toEqual([
+      { id: 9001, author: 'reviewer-1' },
+      { id: 9002, author: null },
+    ]);
+    expect(snapshot.issueComments).toEqual([{ id: 5001, author: null }]);
   });
 
   test('the graphql call passes EXACTLY ONE `-f query=` whose document declares NO `$query` variable (the collision rule) and paginates via `$threadsCursor`', async () => {
@@ -404,15 +503,15 @@ describe('REST slurp shape-defensiveness', () => {
       }),
     );
     // Neither shape fails, and both read as the same snapshot.
-    expect(paginated.reviewCommentIds).toEqual([9001, 9002, 9003]);
-    expect(paginated.issueCommentIds).toEqual([5001, 5002]);
+    expect(paginated.reviewComments.map((entry) => entry.id)).toEqual([9001, 9002, 9003]);
+    expect(paginated.issueComments.map((entry) => entry.id)).toEqual([5001, 5002]);
     expect(flat).toEqual(paginated);
     // An EMPTY payload reads as an empty collection under either reading.
     const empty = await snapshotPrState(
       snapshotOpts({ headSha: 'abc123', pullsComments: [], issuesComments: [], threads }),
     );
-    expect(empty.reviewCommentIds).toEqual([]);
-    expect(empty.issueCommentIds).toEqual([]);
+    expect(empty.reviewComments).toEqual([]);
+    expect(empty.issueComments).toEqual([]);
   });
 });
 
@@ -540,6 +639,42 @@ describe('untrustworthy fetches throw loudly', () => {
         }),
       ),
     ).rejects.toThrow(/RESOLVED reviewThread node without a string id/);
+  });
+
+  test('a NON-ARRAY errors payload throws (the wire does not have to honor the types)', async () => {
+    const base = fakeGh({ headSha: 'abc123' });
+    const run: GhFn = async (args) => {
+      if (args.includes('graphql')) {
+        return { code: 0, stdout: JSON.stringify({ errors: { message: 'not an array' } }), stderr: '' };
+      }
+      return base(args);
+    };
+    await expect(snapshotPrState({ ...COORDS, run, nowMs: NOW })).rejects.toThrow(
+      /non-array errors payload for octo\/widget#7/,
+    );
+  });
+
+  test('a NON-ARRAY reviewThreads.nodes payload throws', async () => {
+    const base = fakeGh({ headSha: 'abc123' });
+    const run: GhFn = async (args) => {
+      if (args.includes('graphql')) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            data: {
+              repository: {
+                pullRequest: { reviewThreads: { nodes: 'nope', pageInfo: { hasNextPage: false } } },
+              },
+            },
+          }),
+          stderr: '',
+        };
+      }
+      return base(args);
+    };
+    await expect(snapshotPrState({ ...COORDS, run, nowMs: NOW })).rejects.toThrow(
+      /non-array reviewThreads\.nodes for octo\/widget#7/,
+    );
   });
 
   test('validation fails loud before any argv is built', async () => {

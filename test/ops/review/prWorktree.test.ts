@@ -49,11 +49,16 @@
 // rev-parse answers, `worktree add -B` moving the branch to FETCH_HEAD).
 // No spawned process, no real clocks (nowMs injected).
 import { describe, expect, test } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileWorktreeRegistry, removePrWorktree, resolvePrWorktree } from '../../../src/ops/review/prWorktree.js';
-import type { PrWorktreeOpts, RegistryMap, WorktreeRegistry } from '../../../src/ops/review/prWorktree.js';
+import type {
+  PrWorktreeOpts,
+  RegistryMap,
+  WorktreeRegistry,
+  WorktreeRegistryEntry,
+} from '../../../src/ops/review/prWorktree.js';
 import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
 
 // ---------------------------------------------------------------------------
@@ -193,7 +198,7 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
     return { code: 2, stdout: '', stderr: `fake git: unexpected argv ${JSON.stringify(args)}` };
   };
 
-/** An in-memory WorktreeRegistry that records load/save calls in order. */
+/** An in-memory WorktreeRegistry that records load/save/update calls in order. */
 const memRegistry = (initial: RegistryMap = {}): WorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
   const calls: string[] = [];
   let stored: RegistryMap = { ...initial };
@@ -206,6 +211,14 @@ const memRegistry = (initial: RegistryMap = {}): WorktreeRegistry & { calls: str
     save: async (map: RegistryMap) => {
       calls.push('save');
       stored = { ...map };
+    },
+    update: async (key: string, entry: WorktreeRegistryEntry | null) => {
+      calls.push(entry === null ? `update:${key}:null` : `update:${key}`);
+      if (entry === null) {
+        delete stored[key];
+      } else {
+        stored[key] = { ...entry };
+      }
     },
     current: () => ({ ...stored }),
   };
@@ -295,24 +308,28 @@ describe('fetch-first — origin branch is truth', () => {
 // ---------------------------------------------------------------------------
 
 describe('registry consult', () => {
-  test('a registry hit whose entry still points at truth (branch AND fetched sha) → reused=true, and NO worktree list/add ever runs', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-hit-'));
+  test('a registry hit whose entry still points at truth (in-root, branch AND fetched sha) → reused=true, and NO worktree list/add ever runs', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-hit-'));
     try {
       const calls: string[][] = [];
-      const registry = memRegistry({ '7': { path: dir, branch: BRANCH, createdAt: NOW - 1000 } });
-      const model = mkModel([], { headOf: { [dir]: { branch: BRANCH, head: SHA_B } } });
-      const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
-      expect(result).toEqual({ path: dir, reused: true, branch: BRANCH, foreign: [] });
+      // The entry lives INSIDE the worktreeRoot (ownership applies to the
+      // registry consult too).
+      const entryDir = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      await mkdir(entryDir, { recursive: true });
+      const registry = memRegistry({ '7': { path: entryDir, branch: BRANCH, createdAt: NOW - 1000 } });
+      const model = mkModel([], { headOf: { [entryDir]: { branch: BRANCH, head: SHA_B } } });
+      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      expect(result).toEqual({ path: entryDir, reused: true, branch: BRANCH, foreign: [] });
       // fetch → FETCH_HEAD → the entry's branch rev-parse → its sha
       // rev-parse — no scan, no add.
       expect(calls.map((args) => args[2])).toEqual(['fetch', 'rev-parse', 'rev-parse', 'rev-parse']);
-      expect(calls[1]).toEqual(['-C', '/repo', 'rev-parse', 'FETCH_HEAD']);
-      expect(calls[2]).toEqual(['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD']);
-      expect(calls[3]).toEqual(['-C', dir, 'rev-parse', 'HEAD']);
+      expect(calls[1]).toEqual(['-C', repoRoot, 'rev-parse', 'FETCH_HEAD']);
+      expect(calls[2]).toEqual(['-C', entryDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
+      expect(calls[3]).toEqual(['-C', entryDir, 'rev-parse', 'HEAD']);
       // A valid hit is not re-registered (the entry already exists).
       expect(registry.calls).toEqual(['load']);
     } finally {
-      await rm(dir, { recursive: true, force: true });
+      await rm(repoRoot, { recursive: true, force: true });
     }
   });
 
@@ -331,7 +348,7 @@ describe('registry consult', () => {
     // the scan found the branch checked out in OUR root AT THE FETCHED sha
     // and the register overwrote the stale entry.
     expect(result).toEqual({ path: candidate, reused: true, branch: BRANCH, foreign: [] });
-    expect(registry.calls).toEqual(['load', 'save']);
+    expect(registry.calls).toEqual(['load', 'update:7']);
     expect(registry.current()).toEqual({
       '7': { path: candidate, branch: BRANCH, createdAt: NOW },
     });
@@ -342,13 +359,40 @@ describe('registry consult', () => {
     expect(calls[3]).toEqual(['-C', candidate, 'rev-parse', 'HEAD']);
   });
 
+  test('a registry entry pointing OUTSIDE the current worktreeRoot is stale by definition — resolution recreates INSIDE', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-outroot-'));
+    try {
+      const calls: string[][] = [];
+      // The entry's tree EXISTS, holds the right branch, even sits AT the
+      // fetched sha — but it lives outside the CURRENT worktreeRoot: this
+      // module does not own it, so the consult must not reuse it.
+      const outsidePath = join(repoRoot, 'outside-tree');
+      await mkdir(outsidePath, { recursive: true });
+      const registry = memRegistry({ '7': { path: outsidePath, branch: BRANCH, createdAt: NOW - 1000 } });
+      const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
+        headOf: { [outsidePath]: { branch: BRANCH, head: SHA_B } },
+      });
+      const expectedPath = join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`);
+      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      expect(result).toEqual({ path: expectedPath, reused: false, branch: BRANCH, foreign: [] });
+      // The inside-the-root entry (created fresh) replaced the outside pointer.
+      expect(registry.current()).toEqual({
+        '7': { path: expectedPath, branch: BRANCH, createdAt: NOW },
+      });
+      expect(registry.calls).toEqual(['load', 'update:7']);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+
   test('a STALE entry pointing at the WRONG branch is skipped, and a fresh tree is created (the register overwrites the stale entry)', async () => {
     const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-stale-'));
     try {
       const calls: string[][] = [];
-      // The stale tree EXISTS on disk but holds the wrong branch — the
-      // rev-parse check is what exposes it.
-      const staleDir = join(repoRoot, 'stale-tree');
+      // The stale tree EXISTS on disk INSIDE the worktreeRoot but holds the
+      // wrong branch — the rev-parse check is what exposes it (it passes
+      // the ownership gate first).
+      const staleDir = join(repoRoot, '.cq-review-worktrees', 'stale-tree');
       await mkdir(staleDir, { recursive: true });
       const registry = memRegistry({ '7': { path: staleDir, branch: BRANCH, createdAt: NOW - 1000 } });
       const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
@@ -357,8 +401,8 @@ describe('registry consult', () => {
       const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
       expect(result.reused).toBe(false);
       expect(result.foreign).toEqual([]);
-      // NO up-front prune: load, then the create's register — ONE save.
-      expect(registry.calls).toEqual(['load', 'save']);
+      // NO up-front prune: load, then the create's per-key register.
+      expect(registry.calls).toEqual(['load', 'update:7']);
       expect(registry.current()['7']?.path).toBe(join(repoRoot, '.cq-review-worktrees', `pr-${PR}-${BRANCH}`));
       // rev-parse ran against the stale tree and exposed the wrong branch.
       expect(calls[2]).toEqual(['-C', staleDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
@@ -386,7 +430,7 @@ describe('registry consult', () => {
       expect(result).toEqual({ path: stalePath, reused: false, branch: BRANCH, foreign: [] });
       // The stale entry was overwritten by the successful register — load
       // plus ONE save, no up-front prune.
-      expect(registry.calls).toEqual(['load', 'save']);
+      expect(registry.calls).toEqual(['load', 'update:7']);
       expect(registry.current()).toEqual({
         '7': { path: stalePath, branch: BRANCH, createdAt: NOW },
       });
@@ -667,6 +711,50 @@ describe('ownership boundary — foreign trees are surfaced, never claimed', () 
 });
 
 // ---------------------------------------------------------------------------
+// Path canonicalization — the ownership boundary is symlink-proof
+// ---------------------------------------------------------------------------
+
+describe('path canonicalization — symlink-proof ownership', () => {
+  test('a porcelain tree stored under the CANONICAL spelling is classified in-root (and refreshed) even when the caller spelled worktreeRoot through an alias', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-sym-'));
+    try {
+      const calls: string[][] = [];
+      const registry = memRegistry();
+      const canonicalRoot = join(repoRoot, '.cq-review-worktrees');
+      await mkdir(canonicalRoot, { recursive: true });
+      // The caller's alias: a symlink to the same directory whose spelling
+      // diverges from the canonical one (on macOS tmpdir() itself sits
+      // behind /var → /private/var; the symlink makes the divergence
+      // explicit and platform-independent).
+      const aliasRoot = join(repoRoot, 'alias-link');
+      await symlink(canonicalRoot, aliasRoot, 'dir');
+      // The stale round-1 tree exists under the CANONICAL spelling (what
+      // git/porcelain report), holding the branch at a stale sha.
+      const stalePath = join(canonicalRoot, `pr-${PR}-${BRANCH}`);
+      await mkdir(stalePath, { recursive: true });
+      const model = mkModel([
+        { path: repoRoot, branch: 'main', head: SHA_MAIN },
+        { path: stalePath, branch: BRANCH, head: SHA_A },
+      ]);
+      const aliasPath = join(aliasRoot, `pr-${PR}-${BRANCH}`);
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, worktreeRoot: aliasRoot, run: fakeGit(model, calls) }),
+      );
+      // Canonicalization, not a raw prefix compare: the stale tree is OURS
+      // (its canonical path lives inside the canonicalized root) — so it is
+      // REFRESHED (removed + recreated), never misclassified as foreign and
+      // never left blocking the create with a phantom branch hold.
+      expect(result).toEqual({ path: aliasPath, reused: false, branch: BRANCH, foreign: [] });
+      expect(calls).toContainEqual(['-C', repoRoot, 'worktree', 'remove', stalePath]);
+      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', BRANCH, aliasPath, SHA_B]);
+      expect(registry.current()['7']?.path).toBe(aliasPath);
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // removePrWorktree — the cleanup primitive
 // ---------------------------------------------------------------------------
 
@@ -887,6 +975,27 @@ describe('fileWorktreeRegistry', () => {
       // the file, nothing was lost between cycles).
       const final = await fileWorktreeRegistry(path).load();
       expect(final['7']?.path).toBe('/repo/.cq-review-worktrees/pr-7-14');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('update() MERGES per key: sequential updates for different PRs preserve each other (no whole-map clobber)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'cq-wt-reg-'));
+    try {
+      const path = join(dir, 'worktrees.json');
+      const registry = fileWorktreeRegistry(path);
+      const entry7: WorktreeRegistryEntry = { path: '/t/pr-7', branch: 'b7', createdAt: NOW };
+      const entry9: WorktreeRegistryEntry = { path: '/t/pr-9', branch: 'b9', createdAt: NOW + 1 };
+      await registry.update('7', entry7);
+      await registry.update('9', entry9);
+      // Each update re-reads the file before writing its ONE key: the first
+      // entry survives the second update (concurrent resolves for different
+      // PRs can no longer drop each other).
+      expect(await registry.load()).toEqual({ '7': entry7, '9': entry9 });
+      // Clearing one key leaves the other untouched.
+      await registry.update('7', null);
+      expect(await registry.load()).toEqual({ '9': entry9 });
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -321,9 +321,9 @@ export async function replyAndResolve(
         `replyAndResolve: action ${JSON.stringify(action.actionId)} has threadRootRestId ${JSON.stringify(action.threadRootRestId)} — must be a positive safe integer`,
       );
     }
-    if (action.kind === 'resolve_thread' && action.threadId === '') {
+    if (action.kind === 'resolve_thread' && action.threadId.trim() === '') {
       throw new Error(
-        `replyAndResolve: action ${JSON.stringify(action.actionId)} has an empty threadId — must be the GraphQL reviewThread node id`,
+        `replyAndResolve: action ${JSON.stringify(action.actionId)} has an empty or whitespace-only threadId — must be the GraphQL reviewThread node id`,
       );
     }
     if ((action.kind === 'review_reply' || action.kind === 'issue_comment') && action.body.trim() === '') {
@@ -468,14 +468,19 @@ export async function replyAndResolve(
       continue;
     }
     if (payload.errors !== undefined && payload.errors.length > 0) {
-      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
+      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error));
       // SUCCESS-EQUIVALENT replay: GitHub rejects a resolve of an
-      // already-resolved thread with exactly this error — meaning a prior
-      // run's mutation LANDED but its record did not (the one crash
-      // window). Retrying would fail forever; the run must CONVERGE:
-      // record it (resultRef = threadId, exactly the landed success) and
-      // count it as an idempotent skip, NOT a failure.
-      if (/already resolved/i.test(messages)) {
+      // already-resolved thread with this error — meaning a prior run's
+      // mutation LANDED but its record did not (the one crash window).
+      // Retrying would fail forever; the run must CONVERGE: record it
+      // (resultRef = threadId, exactly the landed success) and count it as
+      // an idempotent skip, NOT a failure. The reading is STRICT:
+      // already-resolved must be the SOLE error — EVERY message must
+      // match. A mixed payload (already-resolved next to a real failure
+      // like Bad credentials) does not prove the mutation landed, so it
+      // stays a plain failure: only a demonstrably-landed mutation may be
+      // recorded as converged.
+      if (messages.every((message) => /already resolved/i.test(message))) {
         const record: DispatchRecord = {
           actionId: action.actionId,
           kind: action.kind,
@@ -488,7 +493,7 @@ export async function replyAndResolve(
         skippedAlreadyResolved += 1;
         continue;
       }
-      failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages}` });
+      failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages.join('; ')}` });
       continue;
     }
     // Exit 0 + no errors is still not PROOF: the mutation's EFFECT must be
