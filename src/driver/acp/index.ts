@@ -665,21 +665,12 @@ export class AcpDriver implements Driver {
       );
     }
 
-    // --- I6 isolation: fresh record + fresh workspace, or a real resume.
-    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
-    const record =
-      sessionRef === undefined
-        ? await store.create(await tempWorkspace(this.workspaceRoot))
-        : await loadSessionOrThrow(store, sessionRef);
-    const workspace = record.workspace;
-
     // --- Child env: the host environment rides (the vendor reads its own
     // credentials app-side, OQ-1); envNames adds explicitly configured
     // NAMES (values read AT run time — the one place a secret value is
     // ever touched); modelEnv hands the REQUESTED model id to the harness.
-    // This block sits ABOVE the user-turn append: a missing envNames entry
-    // is a PRE-DISPATCH throw and must never leave a dangling user turn
-    // in the record.
+    // Validated BEFORE the session exists: a missing envNames entry is a
+    // PRE-DISPATCH throw and must never leave a dangling record.
     const childEnv = { ...process.env } as Record<string, string>;
     for (const name of this.envNames) {
       const value = process.env[name];
@@ -691,6 +682,14 @@ export class AcpDriver implements Driver {
     if (this.modelEnv !== undefined) {
       childEnv[this.modelEnv] = modelSpec.model;
     }
+
+    // --- I6 isolation: fresh record + fresh workspace, or a real resume.
+    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
+    const record =
+      sessionRef === undefined
+        ? await store.create(await tempWorkspace(this.workspaceRoot))
+        : await loadSessionOrThrow(store, sessionRef);
+    const workspace = record.workspace;
 
     // --- Governed cancellation (I8): checked before the user-turn append
     // AND before the spawn — the envNames hoist rationale applies
