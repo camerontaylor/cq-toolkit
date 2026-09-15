@@ -102,7 +102,12 @@ if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
 
 // --- The fixture (identical across every cell) --------------------------------
 const PROMPT = 'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
-const MODEL_GLM = 'glm-4.6';
+// The zai coding wire SERVES `glm-5.3-flash` for a `glm-4.6` request
+// (observed live — see the eval history) — the conductor decision: eval
+// wires request the id the wire actually serves. The anthropic-compat
+// lanes (claude-agent/subprocess) serve glm-4.6 truthfully, so their
+// cells keep glm-4.6.
+const MODEL_GLM = 'glm-5.3-flash';
 // The deepseek wire SERVES `deepseek-flash` for a `deepseek-chat` request
 // (observed live, docs/eval-axes-demo.md history) — the conductor decision:
 // eval wires request the id the wire actually serves, so the identity check
