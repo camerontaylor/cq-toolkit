@@ -36,7 +36,7 @@
 // assertions); temp dirs under os.tmpdir(), removed in afterEach. The real
 // typecheck-count adapter is used so capture is exercised end-to-end with a
 // production adapter.
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test } from 'vitest';
@@ -58,6 +58,7 @@ const METRIC = 'typecheck-count';
 const THROWING_METRIC = 'throwing-adapter';
 const OBJECT_THROWING_METRIC = 'object-throwing-adapter';
 const CRAFTED_INFINITE_METRIC = 'crafted-infinite';
+const UNIT_SHIFTING_METRIC = 'unit-shifting';
 const REL = baselineRelPath(TARGET, METRIC);
 
 let ws: string;
@@ -89,6 +90,18 @@ beforeAll(() => {
     // baseline file could never parse back — the op must refuse it.
     extract: () => ({ value: 10 ** 400, unit: 'errors' }),
   });
+  registerAdapter({
+    id: UNIT_SHIFTING_METRIC,
+    direction: 'lower-is-better',
+    // The reading's unit follows the source data, so the same (target,
+    // metric) path can be captured with different units — exactly the
+    // identity-check scenario.
+    extract: (raw) => {
+      const record = raw as { count?: unknown; unit?: string };
+      if (typeof record.count !== 'number') return null;
+      return { value: record.count, unit: record.unit };
+    },
+  });
 });
 
 // Sources are composition-time wiring (round-1 fix): they live in this
@@ -99,6 +112,7 @@ const sources: SourceCatalog = new Map<string, MetricSource>([
   [THROWING_METRIC, () => Promise.resolve({ count: 1 })],
   [OBJECT_THROWING_METRIC, () => Promise.resolve({ count: 1 })],
   [CRAFTED_INFINITE_METRIC, () => Promise.resolve({ count: 1 })],
+  [UNIT_SHIFTING_METRIC, () => Promise.resolve(sourceRaw)],
   ['exploding-source', () => Promise.reject(new Error('boom'))],
   ['rejecting-null', () => Promise.reject(null)],
   ['rejecting-string', () => Promise.reject('boom-string')],
@@ -379,11 +393,94 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3 };
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
+      // The foreign baseline differs in target AND unit (it carries none) —
+      // the message lists every disagreeing field.
       error: expect.stringMatching(
-        /holds \(elsewhere, typecheck-count, lower-is-better\).*\(typecheck, typecheck-count, lower-is-better\)/s,
+        /disagrees on target 'elsewhere' → 'typecheck'; unit undefined → 'errors' — incomparable scale — refusing to overwrite/s,
       ),
     });
     expect(await readFile(join(ws, REL), 'utf8')).toBe(foreignBytes);
+  });
+
+  test('a unit change fails the identity check as incomparable scale, untouched', async () => {
+    const input = captureInput({
+      target: 'unit-a',
+      metric: UNIT_SHIFTING_METRIC,
+      sourceId: UNIT_SHIFTING_METRIC,
+    });
+    sourceRaw = { count: 3, unit: 'errors' };
+    await expect(capture(input)).resolves.toMatchObject({ status: 'ok' });
+    sourceRaw = { count: 5 }; // reading now carries NO unit
+    await expect(capture(input)).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(
+        /for metric 'unit-shifting' disagrees on unit 'errors' → undefined — incomparable scale — refusing to overwrite/,
+      ),
+    });
+    expect(parseBaseline(await readFile(join(ws, baselineRelPath('unit-a', UNIT_SHIFTING_METRIC)), 'utf8')).unit).toBe('errors');
+  });
+
+  test('the unit mismatch is symmetric (none → defined also fails)', async () => {
+    const input = captureInput({
+      target: 'unit-b',
+      metric: UNIT_SHIFTING_METRIC,
+      sourceId: UNIT_SHIFTING_METRIC,
+    });
+    sourceRaw = { count: 3 }; // no unit
+    await expect(capture(input)).resolves.toMatchObject({ status: 'ok' });
+    sourceRaw = { count: 5, unit: 'errors' };
+    await expect(capture(input)).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/disagrees on unit undefined → 'errors' — incomparable scale/),
+    });
+  });
+
+  test('a unit rename (errors → failures) fails the identity check', async () => {
+    const input = captureInput({
+      target: 'unit-c',
+      metric: UNIT_SHIFTING_METRIC,
+      sourceId: UNIT_SHIFTING_METRIC,
+    });
+    sourceRaw = { count: 3, unit: 'errors' };
+    await expect(capture(input)).resolves.toMatchObject({ status: 'ok' });
+    sourceRaw = { count: 3, unit: 'failures' };
+    await expect(capture(input)).resolves.toEqual({
+      status: 'failed',
+      error: expect.stringMatching(/disagrees on unit 'errors' → 'failures' — incomparable scale/),
+    });
+  });
+
+  test('a symlinked baselines dir pointing outside ws fails capture (nothing written outside)', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+    try {
+      await symlink(outside, join(ws, 'baselines'), 'dir');
+      sourceRaw = { count: 3 };
+      await expect(capture(captureInput())).resolves.toEqual({
+        status: 'failed',
+        error: expect.stringMatching(/resolves outside the workspace \('.*cq-outside-[^']*'\) — refusing/s),
+      });
+      await expect(readdir(outside)).resolves.toEqual([]); // nothing written outside
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  test('a symlinked baselines dir pointing outside ws: prune reports the fault, deletes nothing', async () => {
+    const outside = await mkdtemp(join(tmpdir(), 'cq-outside-'));
+    try {
+      await writeFile(join(outside, 'stale.json'), 'precious', 'utf8');
+      await symlink(outside, join(ws, 'baselines'), 'dir');
+      await expect(pruneBaselines({ ws, live: [] })).resolves.toEqual({
+        deleted: [],
+        kept: 0,
+        skipped: [],
+        unreadable: [],
+        error: expect.stringMatching(/resolves outside the workspace \('.*cq-outside-[^']*'\)/),
+      });
+      expect(await readFile(join(outside, 'stale.json'), 'utf8')).toBe('precious');
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 
   test('a failed publish cleans up its temp file (no *.tmp debris)', async () => {

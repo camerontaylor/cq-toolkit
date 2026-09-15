@@ -20,22 +20,30 @@
 // rejections are not assumed to be Errors: any thrown value is mapped to a
 // message). The write path does not trust its own output either: a
 // non-finite reading and an unparseable capturedAt both fail the capture.
-// A corrupt EXISTING baseline is likewise a failure: capture never silently
-// overwrites evidence it cannot classify. Baselines land via temp-file +
-// rename in the same directory, so a crash mid-write can never leave a torn
-// baseline. Capture does NOT judge tightening (that is the
+// A corrupt EXISTING baseline is likewise a failure, as is an EXISTING
+// baseline whose identity (target, metric, direction, unit) disagrees with
+// the capture: evidence is never silently re-identified, re-scaled, or
+// overwritten. Baselines land via temp-file + rename in the same
+// directory, so a crash mid-write can never leave a torn baseline at the
+// target path — and a failed publish cleans up its temp file (best-effort).
+// P1 containment: before any mutation the baselines dir is
+// realpath-resolved and must stay INSIDE the resolved ws; a symlinked
+// baselines dir pointing outside fails the capture and makes prune return
+// the zero outcome with `error` — nothing outside the workspace is ever
+// touched. Capture does NOT judge tightening (that is the
 // checkRatchet/guard's job in H2) — it records facts and reports the
 // lifecycle trio created/updated/unchanged, rewriting an equal-value
 // baseline only when the rendered bytes differ.
 //
 // pruneBaselines deletes baseline files whose (target, metric) is no longer
 // live, and NEVER THROWS: I/O faults are reported per-file in `unreadable`
-// (distinct from `skipped`, which means readable-but-unclassifiable content
-// — including a file whose name disagrees with its parsed (target, metric) —
+// (distinct from `skipped`, which means readable-but-unclassifiable content —
+// including a file whose name disagrees with its parsed (target, metric) —
 // nothing is deleted that cannot be classified), and a scan that cannot
-// start at all returns the zero outcome with `error` describing the fault.
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+// start at all returns the zero outcome with `error` describing the fault
+// (including a baselines dir that resolves outside the ws — P1).
+import { mkdir, readFile, readdir, realpath, rename, unlink, writeFile } from 'node:fs/promises';
+import { basename, dirname, join, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline } from './format.js';
 import type { BaselineFile } from './format.js';
@@ -67,6 +75,41 @@ function errorMessage(err: unknown): string {
   }
   if (typeof err === 'string') return err;
   return 'unknown error';
+}
+
+/**
+ * P1 containment: the baselines dir must resolve INSIDE the resolved ws.
+ * realpath resolves intermediate symlinks, so a symlinked baselines dir
+ * pointing outside the workspace fails the prefix check — neither capture
+ * nor prune may touch anything outside the ws. `missing` (ENOENT) is
+ * reported separately: for capture it means a vanishing dir mid-op, for
+ * prune the ordinary no-baselines-yet case.
+ */
+async function resolveBaselinesDir(
+  ws: string,
+): Promise<{ ok: true; dir: string } | { ok: false; missing: boolean; error: string }> {
+  const baselinesDir = join(ws, 'baselines');
+  let wsReal: string;
+  let dirReal: string;
+  try {
+    [wsReal, dirReal] = await Promise.all([realpath(ws), realpath(baselinesDir)]);
+  } catch (err) {
+    if (isEnoent(err)) return { ok: false, missing: true, error: `${baselinesDir} does not exist` };
+    return {
+      ok: false,
+      missing: false,
+      error: `could not resolve '${baselinesDir}' — ${errorMessage(err)}`,
+    };
+  }
+  const prefix = wsReal.endsWith(sep) ? wsReal : wsReal + sep;
+  if (dirReal !== wsReal && dirReal.startsWith(prefix) === false) {
+    return {
+      ok: false,
+      missing: false,
+      error: `baselines dir '${baselinesDir}' resolves outside the workspace ('${dirReal}') — refusing to touch it`,
+    };
+  }
+  return { ok: true, dir: dirReal };
 }
 
 /** Capture one (target, metric) baseline in a workspace. Fully serializable: survives structuredClone. */
@@ -194,20 +237,30 @@ export function createCaptureBaseline(
         };
       }
       // Identity check BEFORE the value is trusted: a file at the expected
-      // path that belongs to another (target, metric, direction) — mistaken
-      // move, adapter direction change — is never accepted as `previous` nor
-      // overwritten.
-      if (
-        existing.target !== input.target ||
-        existing.metric !== input.metric ||
-        existing.direction !== adapter.direction
-      ) {
+      // path that belongs to another identity — mistaken move, adapter
+      // direction change, UNIT change — is never accepted as `previous` nor
+      // overwritten: values in different units are never the same ratchet
+      // evidence. Every disagreeing field is named.
+      const disagreements: string[] = [];
+      if (existing.target !== input.target) {
+        disagreements.push(`target '${existing.target}' → '${input.target}'`);
+      }
+      if (existing.metric !== input.metric) {
+        disagreements.push(`metric '${existing.metric}' → '${input.metric}'`);
+      }
+      if (existing.direction !== adapter.direction) {
+        disagreements.push(`direction '${existing.direction}' → '${adapter.direction}'`);
+      }
+      if (existing.unit !== reading.unit) {
+        const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
+        disagreements.push(`unit ${renderUnit(existing.unit)} → ${renderUnit(reading.unit)}`);
+      }
+      if (disagreements.length > 0) {
         return {
           status: 'failed',
           error:
-            `ratchet: existing baseline '${relPath}' holds ` +
-            `(${existing.target}, ${existing.metric}, ${existing.direction}) but this capture is ` +
-            `(${input.target}, ${input.metric}, ${adapter.direction}) — refusing to overwrite`,
+            `ratchet: existing baseline '${relPath}' for metric '${input.metric}' disagrees on ` +
+            `${disagreements.join('; ')} — incomparable scale — refusing to overwrite`,
         };
       }
       previous = existing.value;
@@ -222,6 +275,18 @@ export function createCaptureBaseline(
     let tempPath: string | undefined;
     try {
       await mkdir(join(input.ws, 'baselines'), { recursive: true });
+      // P1 containment, after the dir is ensured to exist: both paths
+      // realpath-resolved, baselines required to stay inside the ws.
+      const containment = await resolveBaselinesDir(input.ws);
+      if (containment.ok === false) {
+        if (containment.missing) {
+          return {
+            status: 'indeterminate',
+            detail: `ratchet: baselines dir vanished during capture — ${containment.error}`,
+          };
+        }
+        return { status: 'failed', error: containment.error };
+      }
       // Atomic publish: bytes land in a unique temp file in the SAME
       // directory, then rename over the target — a crash mid-write can
       // never leave a torn baseline at the target path.
@@ -274,7 +339,20 @@ export async function pruneBaselines(input: PruneBaselinesInput): Promise<PruneB
   // is normalized through the same path rule as the live list, so hand-renamed
   // or drifted filenames cannot strand a live baseline nor spare a dead one.
   const liveKeys = new Set(input.live.map((entry) => baselineRelPath(entry.target, entry.metric)));
-  const baselinesDir = join(input.ws, 'baselines');
+  // P1 containment before any scan or unlink: an escape is the zero outcome
+  // with `error` naming the resolved path — prune never touches outside ws.
+  const containment = await resolveBaselinesDir(input.ws);
+  if (containment.ok === false) {
+    if (containment.missing) return { deleted: [], kept: 0, skipped: [], unreadable: [] }; // no baselines yet
+    return {
+      deleted: [],
+      kept: 0,
+      skipped: [],
+      unreadable: [],
+      error: containment.error,
+    };
+  }
+  const baselinesDir = containment.dir;
   let names: string[];
   try {
     names = await readdir(baselinesDir);
