@@ -41,7 +41,7 @@ prevents opening the PR.
 |---------------------|----------|-------------|-----------------|
 | | | | |
 
-## Final gates (actual exits, final reviewed state)
+## Final gates (actual exits, final implementation state)
 
 - [ ] `node scripts/ratchet-typecheck.mjs` — exit 0
 - [ ] `npm run lint` — exit 0
@@ -55,3 +55,14 @@ CI on the PR: build, from-source smoke, denylist scan + self-test.
 CLI cycles are author-side pre-PR evidence; the CodeRabbit App's PR review
 and non-author acceptance (doctrine I2) are judged on the opened PR at its
 final head.
+
+## Final-head acceptance (pending until PR review)
+
+- [ ] Non-author review covers the final PR head, including cycle-2 and PR-feedback fixes.
+- Final HEAD SHA:
+- Reviewer and review evidence link: <!-- pending when opening the PR -->
+- I2 acceptance: <!-- explicit all-clear after this commit, or at least 10 minutes settled since it; record evidence -->
+- [ ] All external review threads addressed; complete paginated review data checked.
+
+Passing gates and completed CLI cycles alone do not complete this section.
+Reset this evidence after any further commit; earlier-head reviews do not qualify.

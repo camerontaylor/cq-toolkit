@@ -15,14 +15,17 @@ re-verify against the official docs when behavior surprises:
 ## 1. Install, preflight, authenticate (once per machine)
 
 macOS: `brew install --cask coderabbit` — Homebrew verifies the artifact
-checksum from the cask definition. Other platforms and fallbacks:
+checksum from the cask definition. Also run `brew install coreutils` for
+the `gtimeout` command used below. Other platforms and fallbacks:
 <https://www.coderabbit.ai/cli>. Note: the cask installs the `coderabbit`
 binary; a `cr` alias is NOT guaranteed — use the full `coderabbit` command.
 
 **Preflight (bounded).** Before relying on the CLI, verify the runtime
 actually starts: run `coderabbit --version` and `coderabbit review --help`
-under a timeout (e.g. `timeout 30 coderabbit --version`). Both must return
-promptly. If the binary hangs or help shows a flag this protocol uses is
+under a timeout. On macOS, use `gtimeout 30 coderabbit --version` and
+`gtimeout 30 coderabbit review --help`; on systems with GNU `timeout`, use
+`timeout` instead of `gtimeout`. Both must return promptly. If the binary
+hangs or help shows a flag this protocol uses is
 absent, use the supported update route (`coderabbit update`, or reinstall
 via the package manager) rather than inventing replacement flags — and
 never claim a CLI validation or review succeeded when the runtime will not
@@ -241,14 +244,33 @@ additionally carries `policy/DOCTRINE.md` as a repo-wide guideline.
 
 The App reviews the PR under `.coderabbit.yaml` (automatic review enabled
 for `merge-queue` and `main` targets; drafts and WIP-titled PRs excluded).
-To address App review comments, fetch the consolidated fix prompt:
+To address App review comments, fetch the consolidated fix prompt. The
+following command was verified with CLI **0.7.7**. Before using it, run
+`coderabbit pullrequest --help` under the platform's 30-second timeout
+(§1), and confirm that it lists `--show-prompts` and `--agent` together:
 
 ```bash
 coderabbit pullrequest <number-or-url> --show-prompts --agent
 ```
 
-Requires `reviews.enable_prompt_for_ai_agents` (on, deliberately) and
-existing auth. PR-level review evidence and I2 acceptance are judged on
+If the installed CLI lacks this capability, read the PR's review threads,
+review summaries, and conversation comments through GitHub instead. With
+authenticated `gh`, these paginated reads retrieve the feedback (substitute
+the repository and PR number):
+
+```bash
+gh api repos/OWNER/REPO/pulls/NUMBER/comments --paginate --slurp
+gh api repos/OWNER/REPO/pulls/NUMBER/reviews --paginate --slurp
+gh api repos/OWNER/REPO/issues/NUMBER/comments --paginate --slurp
+```
+
+This fallback retrieves PR feedback only; it does not replace either
+mandatory CLI review cycle. Do not substitute local `review --show-prompts`
+for the App-review command: these are different review scopes.
+
+The consolidated prompt requires `reviews.enable_prompt_for_ai_agents`
+(on, deliberately) and existing CodeRabbit auth. PR-level review evidence
+and I2 acceptance are judged on
 the opened PR at its final head — the CLI cycles do not substitute for
 either. This includes changes made while addressing cycle 2 or PR feedback:
 request fresh non-author review after the last code/configuration/documentation
