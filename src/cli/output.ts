@@ -72,6 +72,24 @@ export function assertJsonLossless(value: unknown): void {
     case 'object': {
       if (value === null) return;
       if (Array.isArray(value)) {
+        // Arrays carry ONLY their indexed elements and `length`: any other
+        // own key — a symbol, a hidden non-enumerable toJSON, an enumerable
+        // `extra` property — is dropped by JSON.stringify exactly like the
+        // object-side cases (PR #103 review, Codex P1; this branch returned
+        // before the Reflect.ownKeys loop below, leaving arrays unvalidated).
+        for (const key of Reflect.ownKeys(value)) {
+          if (key === 'length') continue;
+          if (typeof key === 'symbol') {
+            throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
+          }
+          const index = Number(key);
+          if (Number.isInteger(index) && index >= 0 && String(index) === key) continue;
+          throw new Error(
+            key === 'toJSON'
+              ? "own 'toJSON' on an array — JSON.stringify invokes the hook, so the serialized shape diverges from the walked one"
+              : `non-index own member '${key}' on an array — JSON.stringify drops it`,
+          );
+        }
         for (let i = 0; i < value.length; i++) {
           const element = value[i];
           if (element === undefined) throw new Error(`undefined array element at [${i}]`);

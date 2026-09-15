@@ -414,6 +414,11 @@ if (verdictJson.error !== undefined || verdictJson.spendStopped !== true) {
       : `spendStopped=${String(verdictJson.spendStopped)}` +
         (verdictJson.inconclusiveReason !== undefined ? ` — ${verdictJson.inconclusiveReason}` : '');
   console.error(`dd1-abort-spike: ABORT VERDICT FAILED for lane '${lane}': ${why}`);
-  process.exit(1);
+  // exitCode, not exit (PR #101 review, Codex P2): process.exit forcibly
+  // terminates before a piped stdout drains, truncating the verdict JSON
+  // this evidence path exists to deliver. exitCode lets the process end
+  // naturally after the streams flush — the exit status is identical (1).
+  process.exitCode = 1;
+} else {
+  console.error(`dd1-abort-spike: abort verdict passed for lane '${lane}' (spend verifiably stopped)`);
 }
-console.error(`dd1-abort-spike: abort verdict passed for lane '${lane}' (spend verifiably stopped)`);
