@@ -346,6 +346,27 @@ describe('registry integrity defects reject loudly', () => {
     await expect(list({ opsRoot: tmp })).rejects.toThrow(/wrapped-strip/);
   });
 
+  test('a .catch() wrapper REJECTS at scan — the fallback would swallow unknown-key rejection (PR #112 review)', async () => {
+    // zod's catch replaces ANY inner failure, including the
+    // unrecognized_keys failure a strict object raises on a typo'd flag —
+    // the typo would reach the op as fallback data instead of exit 2.
+    // Incompatible with the convention whatever the inner strictness says.
+    const tmp = await makeTmpOpsRoot('cq-registry-caught-');
+    await mkdir(join(tmp, 'caughtfam'), { recursive: true });
+    await writeFile(
+      join(tmp, 'caughtfam', 'registry.js'),
+      [
+        "import { z } from 'zod';",
+        'export const registry = [',
+        "  { name: 'caught-strict', inputSchema: z.object({ a: z.string() }).strict().catch({ a: 'x' }), importer: async () => async () => ({ status: 'ok', value: null }) },",
+        '];',
+        '',
+      ].join('\n'),
+    );
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/wraps its object in \.catch\(\)/);
+    await expect(list({ opsRoot: tmp })).rejects.toThrow(/caught-strict/);
+  });
+
   test('a STRICT object behind wrappers scans clean — the unwrapping never over-rejects (review-debt #82)', async () => {
     const tmp = await makeTmpOpsRoot('cq-registry-wrapped-ok-');
     await mkdir(join(tmp, 'wrapok'), { recursive: true });
@@ -357,8 +378,7 @@ describe('registry integrity defects reject loudly', () => {
         "  { name: 'wrapped-strict', inputSchema: z.object({ a: z.string() }).strict().optional(), importer: async () => async () => ({ status: 'ok', value: null }) },",
         "  { name: 'nullish-strict', inputSchema: z.object({ a: z.string() }).strict().nullish(), importer: async () => async () => ({ status: 'ok', value: null }) },",
         "  { name: 'readonly-strict', inputSchema: z.object({ a: z.string() }).strict().readonly(), importer: async () => async () => ({ status: 'ok', value: null }) },",
-        "  { name: 'caught-strict', inputSchema: z.object({ a: z.string() }).strict().catch({ a: 'x' }), importer: async () => async () => ({ status: 'ok', value: null }) },",
-        '];',
+                '];',
         '',
       ].join('\n'),
     );
@@ -366,7 +386,6 @@ describe('registry integrity defects reject loudly', () => {
       { name: 'wrapped-strict' },
       { name: 'nullish-strict' },
       { name: 'readonly-strict' },
-      { name: 'caught-strict' },
     ]);
   });
 

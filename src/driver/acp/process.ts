@@ -76,11 +76,32 @@ export function argvForShimSpawn(
   if (platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
     return {
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', [command, ...args].join(' ')],
+      args: ['/d', '/s', '/c', [cmdQuote(command), ...args.map(cmdQuote)].join(' ')],
       windowsVerbatimArguments: true,
     };
   }
   return { command, args: [...args], windowsVerbatimArguments: false };
+}
+
+/**
+ * Quote ONE argv element for the cmd.exe /s /c command string (PR #111
+ * review, Codex P1): a bare join(' ') destroys every element boundary —
+ * a path like `C:\Program Files\nodejs\z.cmd` parses as `C:\Program`,
+ * and a two-word argument splits in two. An element containing whitespace,
+ * a quote, or a cmd metacharacter is wrapped in double quotes with
+ * internal quotes doubled (the MSVCRT-at-the-callee convention); with /s,
+ * cmd applies its full quoting rules to the string after /c. Residual,
+ * documented: %-expansion cannot be escaped in cmd — argv elements are
+ * DRIVER CONFIGURATION (trusted input), not untrusted data, so the
+ * boundary-preservation goal is met without pretending to full cmd
+ * escaping.
+ */
+function cmdQuote(element: string): string {
+  if (element === '') return '""';
+  if (/[\s"&|<>^()%!]/.test(element)) {
+    return `"${element.replace(/"/g, '""')}"`;
+  }
+  return element;
 }
 
 /**
