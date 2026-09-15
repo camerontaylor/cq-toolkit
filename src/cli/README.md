@@ -16,8 +16,16 @@ THE I1 CLI CONTRACT (landed):
   JSON-parsed when they parse): ops take EXACT schema keys; run-plan takes
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
   --stop-on-error).
-- `--help` renders the subcommand's input schema; an unknown flag or
-  subcommand exits 2.
+- `--help` renders the subcommand's input schema; an unknown subcommand
+  exits 2.
+- Unknown-flag enforcement is two-tier: unknown flag SYNTAX (positional
+  tokens, duplicate flags) and unknown KEYS for run-plan are rejected by
+  the CLI (exit 2); for op subcommands, unknown KEYS are rejected by the
+  op's own `.strict()` zod schema — the family convention REQUIRES
+  `.strict()` (see src/ops/README.md) — so key enforcement is
+  schema-delegated there.
+- `--ops-root` is reserved for run-plan (op subcommands reject it with
+  exit 2), and op help lists `--json`.
 - No-logic-in-CLI is enforced by the eslint boundary rule
   cq/no-cli-beyond-registry-kernel (src/cli may import only the registry,
   the kernel, intra-CLI modules, node: builtins, and zod in run-plan.ts).

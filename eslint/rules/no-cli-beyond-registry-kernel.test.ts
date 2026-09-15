@@ -1,11 +1,14 @@
 // RuleTester suite for the CLI import-boundary rule ("no-logic-in-CLI", I1).
-// The rule CORE checks every import source against the CLI allowlist
-// (./ siblings, ../registry/, ../kernel/, node: builtins, and 'zod' only in
-// the configured zodFiles); the src/cli/** scoping lives in eslint.config.js
-// (the rule is applied to src/cli/** and src/cli.ts there). Because RuleTester
-// runs the rule core without the repo config, a violation OUTSIDE src/cli is
-// a valid case of the CONFIG, not of the rule, and cannot be expressed here —
-// it is covered by the eslint.config.js files scoping.
+// The rule CORE checks every import source by RESOLVE-THEN-CONTAIN: relative
+// sources are resolved lexically against the importing file's repo-relative
+// path, and the RESOLVED path must land inside src/cli/ — or, when the
+// importing file itself is under src/cli/**, inside src/registry/ or
+// src/kernel/ (node: builtins everywhere; 'zod' only in the configured
+// zodFiles). The src/cli/** scoping lives in eslint.config.js (the rule is
+// applied to src/cli/** and src/cli.ts there). Because RuleTester runs the
+// rule core without the repo config, a violation OUTSIDE src/cli is a valid
+// case of the CONFIG, not of the rule, and cannot be expressed here — it is
+// covered by the eslint.config.js files scoping.
 import { RuleTester } from 'eslint';
 import tseslint from 'typescript-eslint';
 import { describe, it } from 'vitest';
@@ -55,7 +58,15 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       options: OPTIONS,
     },
     {
-      code: "export { runCli } from './main.js';", // re-export sources checked too
+      // The bin shim (src/cli.ts lives in src/, not src/cli/): its ONLY
+      // allowed relative targets are src/cli/** — './cli/main.js' resolves
+      // inside ('./main.js' would resolve to src/main.js and is flagged).
+      code: "export { runCli } from './cli/main.js';", // re-export sources checked too
+      filename: 'src/cli.ts',
+      options: OPTIONS,
+    },
+    {
+      code: "import { runCli } from './cli/main.js';", // shim: resolves into src/cli/
       filename: 'src/cli.ts',
       options: OPTIONS,
     },
@@ -82,6 +93,38 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
     {
       code: "import { planOf } from '../plans/index.js';",
       filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // Traversal bypass probe: textually starts with './', resolves OUTSIDE
+      // the CLI layer (src/ops/index.js) — resolve-then-contain catches it.
+      code: "import { gates } from './../ops/index.js';",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // Traversal bypass probe: textually starts with '../kernel/', resolves
+      // to src/driver/index.js — a raw prefix match would let it through.
+      code: "import { makeDriver } from '../kernel/../driver/index.js';",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // Multi-hop traversal: './' + '../' segments collapse to docs/, far
+      // outside src/cli|registry|kernel.
+      code: "import { x } from '../ops/../../docs/x.js';",
+      filename: 'src/cli/main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      // The shim may reach ONLY src/cli/** relatively: './driver/x.js'
+      // resolves to src/driver/x.js — outside the CLI layer.
+      code: "import { makeDriver } from './driver/x.js';",
+      filename: 'src/cli.ts',
       options: OPTIONS,
       errors: [{ messageId: 'beyondRegistryKernel' }],
     },
