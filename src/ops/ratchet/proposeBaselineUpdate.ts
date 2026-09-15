@@ -189,7 +189,8 @@ const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
  * exist as a git ref at all — and could not ride clean markdown into the
  * PR body either.
  */
-function violatesRefShapeRules(value: string): boolean {
+function violatesRefShapeRules(value: string, opts?: { finalComponentMayEndLock?: boolean }): boolean {
+  const segments = value.split('/');
   return (
     REF_PATTERN.test(value) === false ||
     value.startsWith('/') ||
@@ -198,17 +199,30 @@ function violatesRefShapeRules(value: string): boolean {
     value.includes('..') ||
     value.includes('@{') ||
     value === '@' ||
-    value.split('/').some((segment) => segment.startsWith('.'))
+    segments.some(
+      (segment, i) =>
+        segment.startsWith('.') ||
+        // *.lock binds EVERY component — with one composition exception:
+        // the head PREFIX's final component is joined with '-<digest>'
+        // before it becomes a ref, so ITS .lock ending is judged on the
+        // composed head instead ('release.lock' → 'release.lock-<digest>'
+        // is valid; 'ratchet.lock/nightly' — an INNER .lock component —
+        // is not).
+        (segment.endsWith('.lock') && !(opts?.finalComponentMayEndLock === true && i === segments.length - 1)),
+    )
   );
 }
 
 /**
- * Whole-ref END rules (PR #110 review): the trailing-dot and *.lock
- * restrictions bind the END OF THE COMPLETE REF — a BASE is a complete ref
- * and is validated with them; the head PREFIX is validated with the shape
- * rules only, because the head is judged as the branch it actually
- * becomes (`<prefix>-<digest>`, below) — a prefix like 'release.lock' or
- * 'main.' is legal when its composition does not end in '.lock' or '.'.
+ * Whole-ref END rules (PR #110 review, corrected by PR #118's review):
+ * git's actual scoping, VERIFIED against `git check-ref-format --branch`
+ * (2026-09-16) — the TRAILING-DOT restriction binds the end of the
+ * complete ref only ('release./main' is valid, 'main.' is not), while the
+ * *.lock restriction binds EVERY component ('ratchet.lock/nightly' and
+ * 'a/b.lock/c' are invalid; 'release.lock-<digest>' is valid). The BASE
+ * is a complete ref and takes the whole-ref rules; the head PREFIX takes
+ * the shape rules (component .lock included), and the composed head takes
+ * the whole-ref END rules.
  */
 function violatesWholeRefRules(value: string): boolean {
   return violatesRefShapeRules(value) || value.endsWith('.') || value.endsWith('.lock');
@@ -282,7 +296,7 @@ export function createProposeBaselineUpdate(
       }
       // A git ref, not free text (see violatesRefShapeRules) — else the head
       // could not exist at all.
-      if (violatesRefShapeRules(input.headPrefix)) {
+      if (violatesRefShapeRules(input.headPrefix, { finalComponentMayEndLock: true })) {
         return {
           status: 'failed',
           error: "ratchet: invalid input — 'headPrefix' would form an invalid git ref",
