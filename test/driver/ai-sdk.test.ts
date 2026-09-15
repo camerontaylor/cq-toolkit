@@ -581,15 +581,20 @@ describe.skipIf(!process.env.LIVE_DRIVERS)('live ai-sdk driver (opt-in: LIVE_DRI
     expect(typeof parsed.usage.input).toBe('number');
     expect(typeof parsed.usage.output).toBe('number');
     expect(parsed.stopReason).toBe('complete');
-    // costUSD is derived-only: present exactly when the price map knows the
-    // model. `deepseek-flash` (the wire's served id) has NO published rates
-    // (models.dev/deepseek lists no such id, checked 2026-09-15) — under
-    // never-fabricate the cost stays absent and the run is bounded by the
-    // declared maxUsd/maxTokens instead; the DD-8 refresh owns adding the
-    // id when its rates are published.
-    expect(parsed.costUSD).toBeUndefined();
-    // The observed-model identity on the live wire: the served id is what
-    // was requested (the tripwire fires on any vendor-side change).
-    expect(parsed.model).toBe('deepseek-flash');
+    // Per-leg cost posture: `deepseek-flash` (the wire's served id) has NO
+    // published rates (models.dev/deepseek lists no such id, checked
+    // 2026-09-15) — under never-fabricate its cost stays absent and the run
+    // is bounded by the declared maxUsd/maxTokens instead; the priced legs
+    // (e.g. the anthropic entry) assert a real figure under the cap. The
+    // observed-model identity asserts what the SDK SURFACES (a remap it
+    // does not surface is recorded, not caught — the fold falls back to the
+    // requested id).
+    if (model === 'deepseek-flash') {
+      expect(parsed.costUSD).toBeUndefined();
+    } else {
+      expect(parsed.costUSD).toBeDefined();
+      expect(parsed.costUSD as number).toBeLessThan(2);
+    }
+    expect(parsed.model).toBe(model);
   }, 60_000);
 });
