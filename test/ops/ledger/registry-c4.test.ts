@@ -7,7 +7,7 @@
 // precedent): a record→query round trip over a mkdtemp root, cleaned up
 // per test. The containment surface (root → strict descendant), the async
 // retried lock, and the atomic publish are all exercised HERE.
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -409,6 +409,40 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
       expect(result.error).toContain('refusing to read');
     }
   });
+
+  test('a query over a DANGLING intermediate symlink is a containment fault, never an ok empty view (PR #78 review: ENOENT ≠ missing file)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    // The escape target never exists, so realpath of the target ENOENTs —
+    // the load must NOT read that as "missing in-root ledger" and hand
+    // dispatch an empty (all-suppression-dropped) view.
+    await symlink(join(scratchDir, 'outside'), join(root, 'escape'));
+    const query = await entryNamed('ledger.query').importer();
+    const result = await query({ root, storePath: join(root, 'escape', 'ledger.json') });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('does not resolve');
+    }
+  });
+
+  test('a direct-store load through an escaping symlink whose file is ABSENT through the link fails, never the empty ledger', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const root = join(scratchDir, 'ws');
+    await mkdir(root);
+    const target = join(root, 'sub', 'ledger.json');
+    // Store created on the clean path (stage A passes on missing segments);
+    // the escape is planted AFTER creation, pointing at an existing outside
+    // dir where the ledger file itself does NOT exist — realpath of the
+    // target ENOENTs through the escape, which must surface as a
+    // containment fault, not an empty in-root ledger.
+    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+    const store = pathLedgerStore(root, target);
+    const outside = join(scratchDir, 'outside');
+    await mkdir(outside);
+    await symlink(outside, join(root, 'sub'));
+    expect(() => store.load()).toThrow(/strict descendant.*refusing to read/s);
+  });
 });
 
 describe('pathLedgerStore.lock (contention contract: bounded backoff, live holders win, abandoned locks are recovered)', () => {
@@ -446,39 +480,63 @@ describe('pathLedgerStore.lock (contention contract: bounded backoff, live holde
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
     const storePath = join(scratchDir, 'ledger.json');
     await mkdir(`${storePath}.lock`); // left by a crashed holder — never mtime-updated again
+    // Backdate the abandoned lock dir's mtime past the 30s stale window —
+    // the deterministic stand-in for waiting out the window in wall-clock
+    // time. The one-call recovery guarantee for a JUST-crashed holder is
+    // arithmetic instead: the acquire backoff (retries: 11, factor: 2,
+    // minTimeout: 25 → cumulative ≈ 51s) outlives the 30s stale window,
+    // and the sync critical section the window must cover is bounded well
+    // under it (PR #78 review, Codex P2 — a 5s window could expire a lock
+    // whose holder was merely blocked in sync fs work).
+    const staleAgo = new Date(Date.now() - 35_000);
+    await utimes(`${storePath}.lock`, staleAgo, staleAgo);
     const op = await entryNamed('ledger.record').importer();
-    // The acquire backoff (retries: 8, factor: 2, minTimeout: 25) outlives
-    // the 5s stale window, so the crashed holder's lock is detected stale,
-    // removed, and the record proceeds.
     await expect(op({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
       status: 'ok',
       value: { signature: 'sig-a', count: 1, escalated: false },
     });
     // The stale lock was consumed: only the ledger remains.
     expect(await readdir(scratchDir)).toEqual(['ledger.json']);
-  }, 30_000);
+  }, 20_000);
 
-  test('a LIVE held lock fails the record with a fault naming the lock (held locks are honored, never dropped into)', async () => {
+  test('a LIVE held lock is waited out, never stolen from (the record lands only after the holder releases)', async () => {
     scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
     const storePath = join(scratchDir, 'ledger.json');
-    // A genuinely live holder: proper-lockfile keeps refreshing the lock's
-    // mtime (update: 1000), so it never goes stale — the record's bounded
-    // backoff exhausts and the op reports `failed` naming the lock.
+    // A genuinely live holder: proper-lockfile refreshes the lock's mtime
+    // (update: 1000), so it never goes stale inside the record's 30s
+    // window. The holder releases after 1.2s — well inside the record's
+    // ≈51s cumulative backoff — so the record must WAIT for the release
+    // and then proceed. Had it stolen the live lock instead, the external
+    // release() below would reject (compromised lock) and fail the test.
     const { lock } = await import('proper-lockfile');
     const release = await lock(storePath, { realpath: false, update: 1000 });
+    let releaseOutcome: 'pending' | 'fulfilled' | 'rejected' = 'pending';
+    const released = new Promise<void>((resolve) => {
+      setTimeout(() => {
+        void release().then(
+          () => {
+            releaseOutcome = 'fulfilled';
+            resolve();
+          },
+          () => {
+            releaseOutcome = 'rejected';
+            resolve();
+          },
+        );
+      }, 1_200);
+    });
     try {
       const op = await entryNamed('ledger.record').importer();
-      const result = await op({ root: scratchDir, storePath, signature: 'sig-a' });
-      expect(result.status).toBe('failed');
-      if (result.status === 'failed') {
-        expect(result.error).toContain('Lock file is already being held');
-      }
-      // The critical section never ran: no ledger file was created.
-      await expect(stat(storePath)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(op({ root: scratchDir, storePath, signature: 'sig-a' })).resolves.toEqual({
+        status: 'ok',
+        value: { signature: 'sig-a', count: 1, escalated: false },
+      });
     } finally {
-      await release();
+      await released;
     }
-  }, 30_000);
+    expect(releaseOutcome).toBe('fulfilled'); // clean external release: nothing was stolen
+    expect(await readdir(scratchDir)).toEqual(['ledger.json']);
+  }, 20_000);
 });
 
 describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare write)', () => {
@@ -516,6 +574,25 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
     expect(stat.isSymbolicLink()).toBe(false);
     expect(parseLedger(await readFile(storePath, 'utf8')).entries).toEqual([
       { signature: 'sig-a', count: 1 },
+    ]);
+  });
+
+  test('a NEW ledger is created 0600 and an update PRESERVES the ledger mode (the inode swap never widens permissions)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+    const storePath = join(scratchDir, 'ledger.json');
+    const record = await entryNamed('ledger.record').importer();
+    await record({ root: scratchDir, storePath, signature: 'sig-a' });
+    // The first publish is a fresh create: restrictive by default — 0600,
+    // not the 0666&umask (typically 0644) a bare writeFileSync temp gets.
+    expect((await stat(storePath)).mode & 0o777).toBe(0o600);
+    // An operator tightens it further still (a group-readable 0640 proof:
+    // any non-default mode works); the next record swaps the inode via
+    // temp+rename and must carry the mode ACROSS the swap.
+    await chmod(storePath, 0o640);
+    await record({ root: scratchDir, storePath, signature: 'sig-a' });
+    expect((await stat(storePath)).mode & 0o777).toBe(0o640);
+    expect(parseLedger(await readFile(storePath, 'utf8')).entries).toEqual([
+      { signature: 'sig-a', count: 2 },
     ]);
   });
 });

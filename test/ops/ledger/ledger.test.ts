@@ -486,4 +486,35 @@ describe('ledger.record — the store lock (concurrent records of one storePath)
       error: 'ledger: could not update the error ledger — lock release failed — compromised lock',
     });
   });
+
+  test('a class-shaped store whose lock uses `this` keeps its receiver (the op calls through the store, never destructured)', async () => {
+    // PR #78 review (CodeRabbit): `const { lock } = store` would invoke
+    // this lock without its receiver — `this.calls` throws in strict mode,
+    // and a usable lock maps to `failed`. Calling `store.lock(...)`
+    // preserves the receiver; all three instrumented methods must run.
+    class ReceiverCountingStore {
+      calls = 0;
+      file: LedgerFile = { version: 1, entries: [] };
+      load(): LedgerFile {
+        this.calls++;
+        return structuredClone(this.file);
+      }
+      save(next: LedgerFile): void {
+        this.calls++;
+        this.file = structuredClone(next);
+      }
+      lock<T>(fn: () => T): T {
+        this.calls++;
+        return fn();
+      }
+    }
+    const store = new ReceiverCountingStore();
+    await expect(
+      makeLedgerRecord(() => store)({ root: 'unused-root', storePath: 'l.json', signature: 'sig-a' }),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: { signature: 'sig-a', count: 1, escalated: false },
+    });
+    expect(store.calls).toBe(3); // lock + load + save, all through the receiver
+  });
 });
