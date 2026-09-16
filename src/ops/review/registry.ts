@@ -394,18 +394,21 @@ type VerifyReviewOutcomeOpInput = z.infer<typeof VerifyReviewOutcomeOpInputSchem
 
 /**
  * Registry-time mirror of {@link FixableReviewItem}: the full item, and
- * only it. Bounds are the conservative JSON-boundary set: ids/bodies
- * non-empty (an empty body is nothing to fix — rejected here, not turned
- * into an empty fixer run), at most 100 prior comments (a comment flood is
- * a fetch/classification bug, not a fixer prompt), path/line nullable the
- * way the thread vocabulary carries unanchored items.
+ * only it. Bounds are the conservative JSON-boundary set: ids and comment
+ * bodies non-empty, at most 100 prior comments (a comment flood is a
+ * fetch/classification bug, not a fixer prompt), path/line nullable the way
+ * the thread vocabulary carries unanchored items. `item.body` accepts the
+ * EMPTY string on purpose — fetchReviewState maps a thread whose root
+ * comment was deleted to `body: ''`, and the registry must accept what the
+ * fetch actually produces (round-trip honesty: a real item would otherwise
+ * be undispatchable through the JSON boundary).
  */
 const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
   .object({
     id: z.string().min(1),
     path: z.string().min(1).nullable(),
     line: z.number().int().nullable(),
-    body: z.string().min(1),
+    body: z.string(),
     comments: z
       .array(
         z

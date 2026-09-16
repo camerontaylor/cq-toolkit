@@ -12,8 +12,11 @@
 //      any OTHER pure-stage throw propagates — a bug must look like one)
 //   3. enrichment              — ClassifiedItem.id correlated against the
 //      fetched state into FixableReviewItems (thread body + prior comments);
-//      an id that no longer correlates (race) → the batch is recorded in
-//      `skipped` (reason 'item-vanished') — NOT a failure
+//      an id that no longer correlates (race) is recorded ('item-vanished')
+//      and the unprocessed remainder of its batch is recorded too
+//      ('batch-abandoned-item-vanished') — never silently dropped, never
+//      fixed from suspect data; already-correlated siblings keep their fix
+//      jobs. Races are NOT failures.
 //   4. fix fan-out             — one runPlan job per ITEM (the fix op is
 //      single-item by contract; the default isolated batches are one item
 //      each, and a shared batch fans into per-item jobs dispatched at the
@@ -192,10 +195,16 @@ export interface ReviewLoopOutcome {
  * REST id a review_reply must anchor to (ReviewThread.rootDatabaseId; null
  * = unanchorable, recorded as a failure reason, never guessed around).
  */
-interface EnrichedSource {
+export interface EnrichedSource {
   itemId: string;
   kind: ClassifiedItem['kind'];
   threadRootRestId: number | null;
+}
+
+/** One correlation result: the fixer payload plus the action-builder source. */
+export interface EnrichedFixItem {
+  source: EnrichedSource;
+  item: FixableReviewItem;
 }
 
 /**
@@ -233,6 +242,53 @@ const enrichItem = (item: ClassifiedItem, state: FetchedReviewState): FixableRev
   }
   return { id: String(comment.id), path: null, line: null, body: comment.body, comments: [] };
 };
+
+/**
+ * Correlate every planned item of every batch against the fetched state
+ * (stage 3 of the module doc), batch by batch, in order. Per batch:
+ *   - a correlated item joins `items` — it gets a fix job;
+ *   - an item that no longer correlates (a race — it vanished upstream) is
+ *     recorded with reason 'item-vanished', and every item AFTER it in the
+ *     same batch is recorded with reason 'batch-abandoned-item-vanished':
+ *     the race makes the rest of the batch's correlation data suspect, so
+ *     unprocessed siblings are recorded, never silently dropped, and never
+ *     fixed from suspect data (the next run re-plans them) — while
+ *     ALREADY-correlated siblings keep their fix jobs;
+ *   - then the batch is done (the vanished item terminates it).
+ * A 1:1 isolated batch that vanishes therefore yields exactly one
+ * 'item-vanished' row and no jobs — a no-op against the previous
+ * wholesale-skip behavior, by construction.
+ */
+export function enrichBatches(
+  batches: PlannedBatch[],
+  state: FetchedReviewState,
+): { items: EnrichedFixItem[]; skipped: Array<{ id: string; reason: string }> } {
+  const items: EnrichedFixItem[] = [];
+  const skipped: Array<{ id: string; reason: string }> = [];
+  for (const batch of batches) {
+    let index = 0;
+    for (const planned of batch.items) {
+      const item = enrichItem(planned, state);
+      if (item === null) {
+        skipped.push({ id: planned.id, reason: 'item-vanished' });
+        for (const rest of batch.items.slice(index + 1)) {
+          skipped.push({ id: rest.id, reason: 'batch-abandoned-item-vanished' });
+        }
+        break;
+      }
+      const threadRootRestId =
+        planned.kind === 'thread'
+          ? (state.threads.find((candidate) => candidate.id === planned.id)?.rootDatabaseId ?? null)
+          : null;
+      items.push({
+        item,
+        source: { itemId: planned.id, kind: planned.kind, threadRootRestId },
+      });
+      index += 1;
+    }
+  }
+  return { items, skipped };
+}
 
 /**
  * Build the fix plan: one job per fix input, op 'review.fixItem', ids
@@ -339,45 +395,24 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const batches = planReviewBatch(classification, opts.planBatchConfig ?? defaultPlanBatchConfig);
 
   // (3) Enrich every planned item into the fixer payload. One job per ITEM
-  // (the fix op is single-item by contract); a vanished id skips its whole
-  // batch as a recorded race, not a failure.
+  // (the fix op is single-item by contract); vanished races are RECORDED,
+  // never silently dropped (see enrichBatches for the per-batch policy).
+  const { items: correlated, skipped: vanishedRows } = enrichBatches(batches, state);
+  skipped.push(...vanishedRows);
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
-  for (const batch of batches) {
-    const enriched: Array<{ input: FixReviewItemInput; source: EnrichedSource }> = [];
-    let vanished = false;
-    for (const planned of batch.items) {
-      const item = enrichItem(planned, state);
-      if (item === null) {
-        skipped.push({ id: planned.id, reason: 'item-vanished' });
-        vanished = true;
-        break;
-      }
-      const threadRootRestId =
-        planned.kind === 'thread'
-          ? (state.threads.find((candidate) => candidate.id === planned.id)?.rootDatabaseId ?? null)
-          : null;
-      enriched.push({
-        input: {
-          ...(opts.repo !== undefined ? { repo: `${opts.owner}/${opts.repo}` } : {}),
-          pr: opts.pr,
-          item,
-          worktree: { path: worktree.path, branch: worktree.branch },
-          driver: opts.driver,
-          ...(opts.harness !== undefined ? { harness: opts.harness } : {}),
-          ...(opts.promptOverride !== undefined ? { promptOverride: opts.promptOverride } : {}),
-          ...(opts.fixBudget !== undefined ? { budget: opts.fixBudget } : {}),
-        },
-        source: { itemId: planned.id, kind: planned.kind, threadRootRestId },
-      });
-    }
-    if (vanished) {
-      continue;
-    }
-    for (const entry of enriched) {
-      sources.set(`fix-${fixInputs.length + 1}`, entry.source);
-      fixInputs.push(entry.input);
-    }
+  for (const entry of correlated) {
+    sources.set(`fix-${fixInputs.length + 1}`, entry.source);
+    fixInputs.push({
+      ...(opts.repo !== undefined ? { repo: `${opts.owner}/${opts.repo}` } : {}),
+      pr: opts.pr,
+      item: entry.item,
+      worktree: { path: worktree.path, branch: worktree.branch },
+      driver: opts.driver,
+      ...(opts.harness !== undefined ? { harness: opts.harness } : {}),
+      ...(opts.promptOverride !== undefined ? { promptOverride: opts.promptOverride } : {}),
+      ...(opts.fixBudget !== undefined ? { budget: opts.fixBudget } : {}),
+    });
   }
 
   // (4) The governed fix run. concurrency is FORCED to 1 (the shared

@@ -153,6 +153,16 @@ describe('review family registry entries', () => {
     expect(entry.inputSchema.safeParse(input).success).toBe(false);
   });
 
+  test('review.fixItem: an EMPTY item body is accepted (a deleted root comment fetches as body "")', () => {
+    // Round-trip honesty: fetchReviewState maps a thread whose root comment
+    // was deleted to body '' — such a real item must stay dispatchable
+    // through the JSON boundary.
+    const entry = entryByName('review.fixItem');
+    const input = minimalInput('review.fixItem');
+    (input as { item: { body: string } }).item.body = '';
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+  });
+
   test.each(ENTRY_NAMES)('%s: importer resolves to a callable async op', async (name) => {
     const op = await entryByName(name).importer();
     expect(typeof op).toBe('function');

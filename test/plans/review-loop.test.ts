@@ -45,12 +45,16 @@ import { PlanSchema } from '../../src/kernel/schema.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry } from '../../src/kernel/types.js';
 import type { Plan } from '../../src/kernel/types.js';
+import type { ClassifiedItem } from '../../src/ops/review/classifyThreads.js';
+import type { FetchedReviewState } from '../../src/ops/review/fetchReviewState.js';
 import { makeFixReviewItem } from '../../src/ops/review/fixReviewItem.js';
 import { FixReviewItemInputSchema } from '../../src/ops/review/registry.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { PlannedBatch } from '../../src/ops/review/planReviewBatch.js';
 import type { RegistryMap, WorktreeRegistry } from '../../src/ops/review/prWorktree.js';
+import type { ReviewThread } from '../../src/ops/review/threads.js';
 import { listPlans } from '../../src/plans/registry.js';
-import { runReviewLoop } from '../../src/plans/review-loop.js';
+import { enrichBatches, runReviewLoop } from '../../src/plans/review-loop.js';
 import type { ReviewLoopOutcome } from '../../src/plans/review-loop.js';
 
 // ---------------------------------------------------------------------------
@@ -149,9 +153,25 @@ const fakeGh =
     if (args.includes('graphql')) {
       const query = flagValue(args, 'query');
       if (query.includes('resolveReviewThread')) {
+        // The fake echoes the REQUESTED thread and fails loudly on a
+        // missing or unexpected one — a resolve can only ever target a
+        // thread the world actually served.
+        const threadId = flagValue(args, 'threadId');
+        const known = world.threads.flatMap((node) =>
+          typeof node === 'object' && node !== null && 'id' in node
+            ? [String((node as { id: unknown }).id)]
+            : [],
+        );
+        if (threadId === '' || !known.includes(threadId)) {
+          return {
+            code: 1,
+            stdout: '',
+            stderr: `fake gh: resolveReviewThread for unexpected threadId ${JSON.stringify(threadId)}`,
+          };
+        }
         return ok(
           JSON.stringify({
-            data: { resolveReviewThread: { thread: { id: 'T1', isResolved: true } } },
+            data: { resolveReviewThread: { thread: { id: threadId, isResolved: true } } },
           }),
         );
       }
@@ -481,11 +501,13 @@ describe('review-loop failure handling', () => {
       actionableThread('T1', 'src/a.ts', 3, 101),
       actionableThread('T2', 'src/b.ts', 8, 102),
     ];
+    const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
         completeWorker('not json at all'),
         completeWorker(fixLine(true, 'Fixed.', ['beef456'])),
       ],
+      ghLog,
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons.some((reason) => reason.includes('fix job fix-1 ended failed'))).toBe(
@@ -499,6 +521,13 @@ describe('review-loop failure handling', () => {
       'review-loop:7:reply:T2',
       'review-loop:7:resolve:T2',
     ]);
+    // The resolve mutation targets T2 SPECIFICALLY — the fake echoes the
+    // requested thread and would fail loudly on any other id.
+    const resolveArgs = ghLog.find((args) =>
+      flagValue(args, 'query').includes('resolveReviewThread'),
+    );
+    expect(resolveArgs).toBeDefined();
+    expect(flagValue(resolveArgs ?? [], 'threadId')).toBe('T2');
   });
 });
 
@@ -553,5 +582,80 @@ describe('review-loop plan registry entry', () => {
     expect(emptyPlan.id).toBe('review-loop');
     expect(emptyPlan.jobs).toEqual([]);
     expect(PlanSchema.parse(emptyPlan)).toEqual(emptyPlan);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CodeRabbit cycle 1 — enrichment abandonment inside a shared batch
+// ---------------------------------------------------------------------------
+
+/** A minimal fetched thread for the enrichment unit fixtures. */
+const enrichThread = (id: string, rootDatabaseId: number): ReviewThread => ({
+  id,
+  rootDatabaseId,
+  path: 'src/a.ts',
+  line: 3,
+  isResolved: false,
+  isOutdated: false,
+  authorLogin: 'reviewer',
+  createdAt: '2026-09-14T00:00:00Z',
+  body: `Fix src/a.ts (${id}).`,
+  replies: [],
+});
+
+/** A clean fetched state over the given threads. */
+const enrichmentState = (threads: ReviewThread[]): FetchedReviewState => ({
+  repo: { owner: 'octo', name: 'widget' },
+  pr: 7,
+  authorLogin: 'prauthor',
+  headRefName: 'pr-7-fix',
+  headRefOid: 'sha',
+  threads,
+  reviews: [],
+  restReviewComments: [],
+  restIssueComments: [],
+  truncated: false,
+  truncatedBecause: [],
+});
+
+const plannedThread = (id: string): ClassifiedItem => ({
+  kind: 'thread',
+  id,
+  verdict: 'actionable',
+  path: 'src/a.ts',
+  reason: 'thread_needs_response',
+});
+
+describe('enrichBatches batch abandonment (CodeRabbit cycle 1)', () => {
+  test('a vanished item keeps its row, unprocessed siblings are batch-abandoned, correlated siblings keep their jobs', () => {
+    const state = enrichmentState([enrichThread('T-sib', 101), enrichThread('T-tail', 103)]);
+    // Shared batch: the correlated sibling first, then a GHOST (the race —
+    // its id no longer correlates), then an unprocessed tail item.
+    const batch: PlannedBatch = {
+      mode: 'shared',
+      worktreeHint: 'shared-pr-worktree',
+      items: [plannedThread('T-sib'), plannedThread('T-ghost'), plannedThread('T-tail')],
+    };
+    const { items, skipped } = enrichBatches([batch], state);
+    expect(skipped).toEqual([
+      { id: 'T-ghost', reason: 'item-vanished' },
+      { id: 'T-tail', reason: 'batch-abandoned-item-vanished' },
+    ]);
+    // Only the already-correlated sibling gets a fix job.
+    expect(items.map((entry) => entry.source.itemId)).toEqual(['T-sib']);
+    expect(items[0]?.source.threadRootRestId).toBe(101);
+    expect(items[0]?.item.body).toBe('Fix src/a.ts (T-sib).');
+  });
+
+  test('isolated mode is a no-op: a vanished 1:1 batch yields exactly the item-vanished row and no jobs', () => {
+    const state = enrichmentState([]);
+    const batch: PlannedBatch = {
+      mode: 'isolated',
+      worktreeHint: null,
+      items: [plannedThread('T-ghost')],
+    };
+    const { items, skipped } = enrichBatches([batch], state);
+    expect(skipped).toEqual([{ id: 'T-ghost', reason: 'item-vanished' }]);
+    expect(items).toEqual([]);
   });
 });
