@@ -194,6 +194,17 @@ describe('makeAstGrepScan (the injected-runner verdict policy)', () => {
     expect(result.fault).toContain('silently absent');
   });
 
+  test('an EMPTY result behind a NON-ZERO exit is non-passing evidence — never a clean no-op (P1)', async () => {
+    // Mirrors the gates' checkRunner rule: [] behind exit 1 is a failed
+    // ast-grep run, not a completed scan that matched nothing.
+    const run = fakeRunner({ stdout: '[]', stderr: '', exitCode: 1 });
+    const result = await makeAstGrepScan(run)({ dir: '/ws', rule: 'r', files: ['src/a.ts'] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.fault).toContain('NO matches behind exit code 1');
+    expect(result.fault).toContain('non-passing evidence');
+  });
+
   test('crash text (stderr + non-zero exit) is a fault naming the exit and the stderr (the stderr rule fires first)', async () => {
     const run = fakeRunner({ stdout: '', stderr: 'error: unrecognized flag', exitCode: 2 });
     const result = await makeAstGrepScan(run)({ dir: '/ws', rule: 'r', files: ['src/a.ts'] });
@@ -626,6 +637,27 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
       'mutated mid-flight;\n',
     );
+  });
+
+  test('an exit-1 empty-result scan fails the APPLY as non-passing evidence — nothing written (P1)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    const failedEmptyRun = fakeRunner({ stdout: '[]', stderr: '', exitCode: 1 });
+    const result = await makeOp(
+      store,
+      failedEmptyRun,
+    )({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('NO matches behind exit code 1');
+      expect(result.error).toContain('non-passing evidence');
+    }
+    expect(store.written.size).toBe(0);
   });
 
   test('files: [] at the LIBRARY level is a refused unscoped scan (L2)', async () => {

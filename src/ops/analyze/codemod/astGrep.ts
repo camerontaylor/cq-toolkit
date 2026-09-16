@@ -171,9 +171,12 @@ export function parseAstGrepJson(stdout: string): AstGrepScanResult {
  * legit error-severity-matched path keeps stderr empty — while ANY stderr
  * line is a fault naming it, because `scan` still exits 0 when a REQUESTED
  * file errors (missing/unreadable) and simply omits it from the matches:
- * a plan silently missing a requested target is never accepted. Unparsable
- * output (crash text, truncation) is likewise a fault naming the exit, so a
- * missing binary is an honest `failed`, never an empty match set.
+ * a plan silently missing a requested target is never accepted. ALSO
+ * behind a numeric exit (mirroring the gates' checkRunner rule): an EMPTY
+ * parsed result is non-passing evidence, never a clean no-op — `[]` behind
+ * exit 1 is a failed run, accepted only with matches present. Unparsable
+ * output (crash text, truncation) is likewise a fault naming the exit, so
+ * a missing binary is an honest `failed`, never an empty match set.
  */
 export function makeAstGrepScan(
   run: RunCheck,
@@ -223,6 +226,23 @@ export function makeAstGrepScan(
       return {
         ok: false,
         fault: `ast-grep codemod: ${result.fault} — exit code ${raw.exitCode}${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
+      };
+    }
+    // EMPTY RESULT BEHIND A NON-ZERO EXIT — mirroring the gates' checkRunner
+    // rule (parseCheckOutput downgrades a parsed EMPTY failure set behind
+    // any non-zero exit to non-passing evidence): `[]` behind exit 1 is an
+    // ast-grep FAILURE (crashed rule, aborted scan), never a clean no-op —
+    // accepting it would let both codemod ops report an honest-looking
+    // zero-edit success for a failed run. The documented error-severity
+    // case stays accepted ONLY when matches are present.
+    if (
+      raw.exitCode !== 0 &&
+      result.outcome.plannedEdits.length === 0 &&
+      result.outcome.unfixedMatches === 0
+    ) {
+      return {
+        ok: false,
+        fault: `ast-grep codemod: the scan produced NO matches behind exit code ${raw.exitCode} — an empty result behind a non-zero exit is non-passing evidence (a failed rule or aborted scan), never a clean no-op`,
       };
     }
     // FILE-MATCH CANONICALIZATION (both sides, before any filtering or
