@@ -163,6 +163,24 @@ describe('review family registry entries', () => {
     expect(entry.inputSchema.safeParse(input).success).toBe(true);
   });
 
+  test('review.fixItem: an empty COMMENT body is accepted (a deleted reply fetches as body "")', () => {
+    // Same round-trip honesty as the item body: a deleted REPLY also
+    // fetches with body '', so the comments mirror accepts it. The array's
+    // .max(100) dispatch-boundary cap is untouched (over-flooded comment
+    // lists still reject — asserted by the cap's own contract below being
+    // shape-only here).
+    const entry = entryByName('review.fixItem');
+    const input = minimalInput('review.fixItem');
+    (
+      input as {
+        item: {
+          comments: Array<{ authorLogin: string | null; body: string; createdAt: string | null }>;
+        };
+      }
+    ).item.comments = [{ authorLogin: 'someone', body: '', createdAt: null }];
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+  });
+
   test.each(ENTRY_NAMES)('%s: importer resolves to a callable async op', async (name) => {
     const op = await entryByName(name).importer();
     expect(typeof op).toBe('function');

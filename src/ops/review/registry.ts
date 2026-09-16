@@ -394,14 +394,16 @@ type VerifyReviewOutcomeOpInput = z.infer<typeof VerifyReviewOutcomeOpInputSchem
 
 /**
  * Registry-time mirror of {@link FixableReviewItem}: the full item, and
- * only it. Bounds are the conservative JSON-boundary set: ids and comment
- * bodies non-empty, at most 100 prior comments (a comment flood is a
- * fetch/classification bug, not a fixer prompt), path/line nullable the way
- * the thread vocabulary carries unanchored items. `item.body` accepts the
- * EMPTY string on purpose — fetchReviewState maps a thread whose root
- * comment was deleted to `body: ''`, and the registry must accept what the
- * fetch actually produces (round-trip honesty: a real item would otherwise
- * be undispatchable through the JSON boundary).
+ * only it. Bounds are the conservative JSON-boundary set: ids non-empty,
+ * path/line nullable the way the thread vocabulary carries unanchored
+ * items. Bodies accept the EMPTY string on purpose — fetchReviewState maps
+ * a deleted root comment AND a deleted reply to `body: ''` — and the
+ * registry must accept what the fetch actually produces (round-trip
+ * honesty: a real item would otherwise be undispatchable through the JSON
+ * boundary). The comments array's `.max(100)` is the dispatch boundary's
+ * deliberate cap, riding this schema alone (the FixableReviewItem type
+ * itself is unbounded): a comment flood is a fetch/classification bug, not
+ * a fixer prompt.
  */
 const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
   .object({
@@ -414,7 +416,7 @@ const FixableReviewItemSchema: z.ZodType<FixableReviewItem> = z
         z
           .object({
             authorLogin: z.string().nullable(),
-            body: z.string().min(1),
+            body: z.string(),
             createdAt: z.string().min(1).nullable(),
           })
           .strict(),

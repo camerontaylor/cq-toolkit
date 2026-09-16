@@ -63,6 +63,17 @@ import type { ReviewLoopOutcome } from '../../src/plans/review-loop.js';
 
 const NOW = 1_750_000_000_000;
 const COORDS = { owner: 'octo', repo: 'widget', pr: 7 } as const;
+
+/**
+ * Fixture timestamps are DERIVED from the injected clock, never absolute —
+ * an absolute "September 2026" stamp is a time bomb against the classify
+ * table's recency heuristics (an unknowingly future date flips the
+ * last-word/answered comparisons under a real clock). ROOT_AGE keeps the
+ * anchors an hour old; REPLY_AGE is "recently replied".
+ */
+const ROOT_AGE = 60 * 60_000;
+const REPLY_AGE = 5 * 60_000;
+const iso = (ageMs: number): string => new Date(NOW - ageMs).toISOString();
 /** The review worktree's branch label (reviewBranchFor(7)) and its checked-out sha. */
 const LABEL = 'cq-review/pr-7';
 const SHA = 'b7e5f1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8';
@@ -85,7 +96,7 @@ const rootComment = (databaseId: number, login: string, body: string): unknown =
   databaseId,
   author: { login },
   body,
-  createdAt: '2026-09-14T00:00:00Z',
+  createdAt: iso(ROOT_AGE),
 });
 
 /** One actionable thread: external reviewer, unresolved, fresh. */
@@ -438,8 +449,8 @@ describe('review-loop happy path', () => {
   test('the fix job input carries the correlated thread body and prior comments', async () => {
     const world = defaultWorld();
     world.pullsComments = [
-      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', '2026-09-14T00:00:00Z', null),
-      restComment(201, 'reviewer', 'See the timeout path too.', '2026-09-15T00:00:00Z', 101),
+      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
+      restComment(201, 'reviewer', 'See the timeout path too.', iso(REPLY_AGE), 101),
     ];
     const invocations: OpInvocation[] = [];
     const { outcome } = await runLoop(world, {
@@ -465,7 +476,7 @@ describe('review-loop happy path', () => {
       {
         authorLogin: 'reviewer',
         body: 'See the timeout path too.',
-        createdAt: '2026-09-15T00:00:00Z',
+        createdAt: iso(REPLY_AGE),
       },
     ]);
     // And the worker actually received that payload.
@@ -550,8 +561,8 @@ describe('review-loop re-run no-op', () => {
   test('a responded thread → zero batches, zero jobs, zero mutations, ok, no NO PROGRESS', async () => {
     const world = defaultWorld();
     world.pullsComments = [
-      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', '2026-09-14T00:00:00Z', null),
-      restComment(202, 'prauthor', 'Addressed in the pushed commit.', '2026-09-15T12:00:00Z', 101),
+      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
+      restComment(202, 'prauthor', 'Addressed in the pushed commit.', iso(REPLY_AGE), 101),
     ];
     const invocations: OpInvocation[] = [];
     const ghLog: string[][] = [];
@@ -598,7 +609,7 @@ const enrichThread = (id: string, rootDatabaseId: number): ReviewThread => ({
   isResolved: false,
   isOutdated: false,
   authorLogin: 'reviewer',
-  createdAt: '2026-09-14T00:00:00Z',
+  createdAt: iso(ROOT_AGE),
   body: `Fix src/a.ts (${id}).`,
   replies: [],
 });
