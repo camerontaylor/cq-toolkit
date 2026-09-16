@@ -123,7 +123,7 @@ describe.skipIf(!existsSync(join(ROOT, 'dist', 'index.js')))('demo-eval-axes: th
     // ZAI_API_KEY='x' is never used: the credential gate refuses before
     // makeDriver — the selected deepseek cells are never constructed, no
     // network is touched, no paid call is made.
-    const res = runDemo(['--only', 'deepseek-chat'], { ZAI_API_KEY: 'x' });
+    const res = runDemo(['--only', 'deepseek-flash'], { ZAI_API_KEY: 'x' });
     expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
     expect(res.stderr).toContain('DEEPSEEK_API_KEY');
   });
