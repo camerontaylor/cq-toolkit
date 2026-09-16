@@ -24,20 +24,25 @@
 // names a human. The fail-closed rules, in the order they fire:
 //   1. truncated fetch data            → `review_data_truncated`  (UC row 42)
 //   2. no F1 classification            → `unclassified`
-//   3. base ref resolves to nothing    → `unresolved_base`
+//   3. F1 verdict is not `eligible`    → `not_eligible`
+//      (never / conflicting / awaiting / has-issues — a PR F1 judged not
+//      mergeable is not re-graded into the order by the planner)
+//   4. base ref resolves to nothing    → `unresolved_base`
 //      (neither the base branch nor any fetched headRefName — a stack
 //      position that cannot be computed is a stack position that must not
 //      be guessed)
-//   4. a stack cycle (X on Y, Y on X —
+//   5. a stack cycle (X on Y, Y on X —
 //      possible via misconfigured bases;
 //      a PR stacked on itself counts)   → `stack_cycle`
-//   5. base PR held by any rule above   → `stack_base_needs_human`
+//   6. base PR held by any rule above   → `stack_base_needs_human`
 //      (fail-closed CASCADE: merging a stacked PR merges its base's
 //      commits with it — ordering the child while the parent is held
 //      would merge the parent UNINVITED, so the child is held too,
 //      transitively)
-// Rules 1–2 are F1's per-PR gates carried to the stack level, in F1's
-// order (truncated first — first match wins).
+// Rules 1–3 are F1's per-PR acceptance decision carried to the stack
+// level WHOLE — truncation, nullness, AND the verdict: only a PR F1 said
+// `eligible` is ever ordered for immediate merge (first match wins,
+// truncated first).
 //
 // CLOSED-ANCESTOR RETARGET (`retarget-self`): an open PR whose base head
 // is owned by a CLOSED PR (the rung it stacked on was already merged or
@@ -101,6 +106,7 @@ export interface PlanMergeInput {
 export type PlanBlockReason =
   | 'review_data_truncated'
   | 'unclassified'
+  | 'not_eligible'
   | 'unresolved_base'
   | 'stack_cycle'
   | 'stack_base_needs_human';
@@ -126,7 +132,8 @@ export interface PlannedMergeEntry {
  * children), the withheld PRs with reasons (PR-number order), and the base
  * branch the plan was built against (echoed for the caller's report). */
 export interface PlanMergeResult {
-  /** Mergeable PRs in execution order. */
+  /** PRs cleared to merge — every gate open, F1 verdict `eligible` — in
+   * execution order. */
   order: PlannedMergeEntry[];
   /** Open PRs withheld from the order, each with exactly one reason,
    * in PR-number order. */
@@ -169,17 +176,21 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     }
   }
 
-  // Fail-closed gates 1–2 (F1's carry, first match wins): truncated fetch
+  // Fail-closed gates 1–3 (F1's carry, first match wins): truncated fetch
   // data means the classification's evidence may be missing — the PR is
   // never ordered for merge (UC row 42); a missing classification means
-  // the acceptance decision was never made. Open PRs only: a closed PR's
-  // absent classification is expected, not a failure.
+  // the acceptance decision was never made; a classification that came
+  // back anything but `eligible` means F1 judged the PR not mergeable —
+  // the planner re-grades nothing, it carries the verdict. Open PRs
+  // only: a closed PR's absent classification is expected, not a failure.
   for (const candidate of sorted) {
     if (candidate.state !== 'open') continue;
     if (candidate.truncated) {
       withhold(candidate.pr, 'review_data_truncated');
     } else if (candidate.classification === null) {
       withhold(candidate.pr, 'unclassified');
+    } else if (candidate.classification.verdict !== 'eligible') {
+      withhold(candidate.pr, 'not_eligible');
     }
   }
 

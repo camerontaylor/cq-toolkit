@@ -16,20 +16,31 @@
 //      ordered for merge — needs-human, review_data_truncated — and beats
 //      the unclassified gate (first match wins, F1's row order).
 //   5. UNCLASSIFIED: classification null → needs-human, unclassified.
-//   6. STACK CYCLE: A on B, B on A (misconfigured bases) → both cycle
+//   6. NON-ELIGIBLE VERDICT: F1's verdict is the planner's gate too — the
+//      FULL acceptance decision carries to the stack level. Only
+//      `eligible` is ever ordered; never / conflicting / awaiting /
+//      has-issues each → needs-human, not_eligible, absent from the
+//      order — and a non-eligible parent cascades its children like any
+//      withheld rung.
+//   7. STACK CYCLE: A on B, B on A (misconfigured bases) → both cycle
 //      members needs-human with stack_cycle, absent from the order;
-//      independent PRs still plan.
-//   7. THE FAIL-CLOSED CASCADE: a child of any withheld PR is withheld
+//      independent PRs still plan; a tail leading into the cycle cascades
+//      (6 → 5 → (1 ⇄ 2): 5 and 6 are stack_base_needs_human).
+//   8. THE FAIL-CLOSED CASCADE: a child of any withheld PR is withheld
 //      too (stack_base_needs_human) — ordering it would merge its base's
 //      commits uninvited.
-//   8. UNRESOLVED BASE: a base ref that is neither the base branch nor
+//   9. UNRESOLVED BASE: a base ref that is neither the base branch nor
 //      any fetched head is not guessed — needs-human, unresolved_base.
-//   9. CLOSED PRs are structural only: they appear in neither bucket,
+//  10. CLOSED PRs are structural only: they appear in neither bucket,
 //      even when truncated or unclassified (the gates are open-PR gates).
-//  10. BASE-BRANCH CONFIGURABILITY: the base branch name is input, never
+//  11. DUPLICATE HEAD NAMES resolve deterministically: the stack head
+//      resolves to the LOWER-NUMBERED open owner; an open owner outranks
+//      a closed owner of the same head; the lowest-numbered closed owner
+//      anchors retarget-self.
+//  12. BASE-BRANCH CONFIGURABILITY: the base branch name is input, never
 //      a hardcoded constant — the same stack plans identically under any
 //      branch name, and the result echoes the name it was given.
-//  11. DETERMINISM: same input → deep-equal plan, whatever order the
+//  13. DETERMINISM: same input → deep-equal plan, whatever order the
 //      input array arrived in.
 //
 // Pure data tests: no I/O, no clocks — instant by construction.
@@ -52,6 +63,14 @@ const ELIGIBLE: PrClassification = {
   reason: 'settle_window_elapsed',
   unresolvedExternalThreads: 0,
 };
+
+/** A classification with a specific verdict/reason (thread count is not the
+ * planner's business — any value plans identically). */
+const classified = (verdict: PrClassification['verdict'], reason: PrClassification['reason']): PrClassification => ({
+  verdict,
+  reason,
+  unresolvedExternalThreads: 0,
+});
 
 /** An open, classified, untruncated PR — all gates open. */
 const planned = (
@@ -176,6 +195,58 @@ describe('planMergeOrder — fail-closed gates (nothing merges uninvited)', () =
     expect(result.needsHuman).toEqual([{ pr: 8, reason: 'review_data_truncated' }]);
   });
 
+  test('a `never` verdict is never ordered: needs-human, not_eligible', () => {
+    const result = plan('main', [
+      planned(13, 'main', 'still-draft', { classification: classified('never', 'is_draft') }),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 13, reason: 'not_eligible' }]);
+  });
+
+  test('a `conflicting` verdict is never ordered: needs-human, not_eligible', () => {
+    const result = plan('main', [
+      planned(14, 'main', 'dirty', {
+        classification: classified('conflicting', 'merge_conflicts'),
+      }),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 14, reason: 'not_eligible' }]);
+  });
+
+  test('an `awaiting` verdict is never ordered: needs-human, not_eligible', () => {
+    const result = plan('main', [
+      planned(15, 'main', 'settling', {
+        classification: classified('awaiting', 'settle_window_pending'),
+      }),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 15, reason: 'not_eligible' }]);
+  });
+
+  test('a `has-issues` verdict is never ordered: needs-human, not_eligible', () => {
+    const result = plan('main', [
+      planned(16, 'main', 'threaded', {
+        classification: classified('has-issues', 'unresolved_external_threads'),
+      }),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 16, reason: 'not_eligible' }]);
+  });
+
+  test('the cascade reaches a non-eligible parent: awaiting root, eligible child → both withheld', () => {
+    const result = plan('main', [
+      planned(1, 'main', 'awaiting-root', {
+        classification: classified('awaiting', 'settle_window_pending'),
+      }),
+      planned(2, 'awaiting-root', 'eligible-child'),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([
+      { pr: 1, reason: 'not_eligible' },
+      { pr: 2, reason: 'stack_base_needs_human' },
+    ]);
+  });
+
   test('a base ref that resolves to nothing is not guessed: unresolved_base', () => {
     const result = plan('main', [planned(12, 'ghost-branch', 'adrift')]);
     expect(result.order).toEqual([]);
@@ -227,6 +298,23 @@ describe('planMergeOrder — stack cycles go to a human', () => {
       { pr: 4, reason: 'stack_base_needs_human' },
     ]);
   });
+
+  test('a tail leading into a cycle cascades: 6 → 5 → (1 ⇄ 2), independent PR still plans', () => {
+    const result = plan('main', [
+      planned(1, 'h2', 'h1'), // ─ the mutual cycle
+      planned(2, 'h1', 'h2'), // ┘
+      planned(5, 'h1', 'tail-1'), // stacks onto cycle member 1
+      planned(6, 'tail-1', 'tail-2'), // stacks onto the tail
+      planned(7, 'main', 'independent'),
+    ]);
+    expect(result.order).toEqual([{ pr: 7, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([
+      { pr: 1, reason: 'stack_cycle' },
+      { pr: 2, reason: 'stack_cycle' },
+      { pr: 5, reason: 'stack_base_needs_human' },
+      { pr: 6, reason: 'stack_base_needs_human' },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -244,6 +332,55 @@ describe('planMergeOrder — closed PRs appear in neither bucket', () => {
       planned(21, 'main', 'live'),
     ]);
     expect(result.order).toEqual([{ pr: 21, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Duplicate head names resolve deterministically
+// ---------------------------------------------------------------------------
+
+describe('planMergeOrder — duplicate head names', () => {
+  test('two open PRs sharing a head: the stack resolves to the lower-numbered owner', () => {
+    const result = plan('main', [
+      planned(1, 'main', 'shared'),
+      planned(2, 'main', 'shared'),
+      planned(3, 'shared', 'child'),
+    ]);
+    // The child stacks onto owner 1 — never onto 2 (and never into a
+    // dangling edge or a guessed split).
+    expect(result.order).toEqual([
+      { pr: 1, action: 'merge', basePr: null, depth: 0 },
+      { pr: 2, action: 'merge', basePr: null, depth: 0 },
+      { pr: 3, action: 'merge', basePr: 1, depth: 1 },
+    ]);
+    expect(result.needsHuman).toEqual([]);
+  });
+
+  test('an open owner outranks a closed owner of the same head (closed is structural)', () => {
+    const result = plan('main', [
+      planned(10, 'main', 'shared', { state: 'closed' }),
+      planned(11, 'main', 'shared'),
+      planned(12, 'shared', 'child'),
+    ]);
+    // The child stacks onto the LIVE owner 11 — the closed 10 does not
+    // turn the rung into a retarget-self.
+    expect(result.order).toEqual([
+      { pr: 11, action: 'merge', basePr: null, depth: 0 },
+      { pr: 12, action: 'merge', basePr: 11, depth: 1 },
+    ]);
+    expect(result.needsHuman).toEqual([]);
+  });
+
+  test('two closed owners sharing a head: retarget-self still fires (lowest anchors)', () => {
+    const result = plan('main', [
+      planned(20, 'main', 'old', { state: 'closed' }),
+      planned(21, 'main', 'old', { state: 'closed' }),
+      planned(22, 'old', 'child'),
+    ]);
+    // Both closed owners claim 'old'; the lowest-numbered one anchors, and
+    // the child's plan is the same either way: retarget-self at root depth.
+    expect(result.order).toEqual([{ pr: 22, action: 'retarget-self', basePr: null, depth: 0 }]);
     expect(result.needsHuman).toEqual([]);
   });
 });
