@@ -111,7 +111,10 @@ export interface CleanupEffects {
    * so this is the one seam member beyond the listed set: smallest deviation,
    * flagged in the D2 notes. Also the branch-activity half of a worktree
    * candidate's age basis (an old dir with a fresh tip commit is kept —
-   * the branch delete would destroy unpushed work).
+   * the branch delete would destroy unpushed work). ABSENCE contract: a
+   * branch deleted between the listing and this probe rejects with an
+   * ENOENT-coded error — the op reads the code and keeps/skips the row
+   * instead of failing it; any other fault throws.
    */
   branchTimeMs(repoRoot: string, branch: string): Promise<number>;
 }
@@ -283,6 +286,16 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
       try {
         tipMs = await git.branchTimeMs(input.repoRoot, branch);
       } catch (err) {
+        if (isAbsence(err)) {
+          // The ref vanished between the listing and this probe (deleted
+          // concurrently): there is no commit activity to weigh and no
+          // branch -D to protect — the row is kept, never a failure.
+          kept.push({
+            path: real,
+            reason: `branch already gone — '${branch}' vanished between the listing and the age probe`,
+          });
+          continue;
+        }
         return {
           status: 'failed',
           error: `sweep: could not read the age of branch '${branch}' — ${messageOf(err)}${progressNote()}`,
@@ -327,12 +340,45 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
         removed.push({ path: real, branch });
         continue;
       }
+      // Step-by-step completion tracking (r2#1): when the tree removal has
+      // succeeded but the branch delete faults, the failed error must say
+      // exactly that — and the completed removal must reach progressNote.
+      let removedTree = false;
       try {
         await inGuard(async () => {
-          // REVALIDATION under the lock: existence, age (dir AND tip) and
-          // strict cleanliness, from scratch. A candidate whose state
-          // changed since the first probe moves to kept/skippedDirty —
-          // never removed on stale evidence.
+          // REVALIDATION under the lock, from scratch — a candidate whose
+          // state changed since the first probe is never removed on stale
+          // evidence.
+          //
+          // (jJrLJ) The path→branch ASSOCIATION first: a worker can switch
+          // the branch at the path while cleanup waits on the mutex, and
+          // the mtime/tip/clean rechecks below would then pass for a
+          // checkout that may now host a branch OUTSIDE the prefix.
+          // Re-list and verify the path is still registered to the SAME
+          // branch.
+          const relisted = await git.listWorktrees();
+          let association: 'same' | 'changed' | 'unregistered' = 'unregistered';
+          for (const listed of relisted) {
+            if ((await realpathOf(listed.path)) === real) {
+              association = listed.branch === branch ? 'same' : 'changed';
+              break;
+            }
+          }
+          if (association === 'unregistered') {
+            kept.push({
+              path: real,
+              reason:
+                'revalidated inside the mutex: the path is no longer a registered worktree — never removed on stale evidence',
+            });
+            return;
+          }
+          if (association === 'changed') {
+            kept.push({
+              path: real,
+              reason: `revalidated inside the mutex: the branch changed under the mutex at '${real}' — the checkout may now host a branch outside the run prefix, never removed on stale evidence`,
+            });
+            return;
+          }
           let reMtimeMs: number;
           try {
             reMtimeMs = await git.modifiedTimeMs(real);
@@ -347,7 +393,20 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
             }
             throw rerr;
           }
-          const reTipMs = await git.branchTimeMs(input.repoRoot, branch);
+          let reTipMs: number;
+          try {
+            reTipMs = await git.branchTimeMs(input.repoRoot, branch);
+          } catch (rerr) {
+            if (isAbsence(rerr)) {
+              kept.push({
+                path: real,
+                reason:
+                  'revalidated inside the mutex: the branch is already gone — never removed on stale evidence',
+              });
+              return;
+            }
+            throw rerr;
+          }
           const reAgeMs = Date.now() - Math.max(reMtimeMs, reTipMs);
           if (reAgeMs <= input.olderThanMs) {
             kept.push({
@@ -367,18 +426,29 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
           }
           // The state held: plain removal for a clean tree (git itself
           // backstops a raced dirty tree); the explicit force path
-          // otherwise. The row records only after BOTH mutations succeed.
+          // otherwise. The completed tree removal is RECORDED before the
+          // branch delete is attempted — a later fault must not make it
+          // invisible (r2#1).
           if (reClean) await git.worktreeRemove(input.repoRoot, real);
           else await git.worktreeRemove(input.repoRoot, real, { force: true });
+          removedTree = true;
+          removed.push({ path: real, branch });
           // Prefix re-check before the delete: the branch namespace guard
           // is load-bearing even here, against a raced relisting.
-          if (branch.startsWith(prefix)) await git.branchDelete(input.repoRoot, branch);
-          removed.push({ path: real, branch });
+          try {
+            if (branch.startsWith(prefix)) await git.branchDelete(input.repoRoot, branch);
+          } catch (bErr) {
+            throw new Error(
+              `removed worktree '${real}'; could not delete branch '${branch}' — ${messageOf(bErr)}`,
+            );
+          }
         });
       } catch (err) {
         return {
           status: 'failed',
-          error: `sweep: could not remove worktree '${real}' on branch '${branch}' — ${messageOf(err)}${progressNote()}`,
+          error: removedTree
+            ? `sweep: ${messageOf(err)}${progressNote()}`
+            : `sweep: could not remove worktree '${real}' on branch '${branch}' — ${messageOf(err)}${progressNote()}`,
         };
       }
     }
@@ -401,6 +471,10 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
       try {
         tipMs = await git.branchTimeMs(input.repoRoot, branch);
       } catch (err) {
+        // An ABSENT ref is not a fault here: the branch was deleted
+        // concurrently between the listing and the probe — there is
+        // nothing left to delete.
+        if (isAbsence(err)) continue;
         return {
           status: 'failed',
           error: `sweep: could not read the age of branch '${branch}' — ${messageOf(err)}${progressNote()}`,
@@ -414,8 +488,15 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
       try {
         await inGuard(async () => {
           // Light revalidation under the lock: a branch that gained a
-          // recent commit between the probe and the guard is left alone.
-          const reTipMs = await git.branchTimeMs(input.repoRoot, branch);
+          // recent commit — or that vanished — between the probe and the
+          // guard is left alone.
+          let reTipMs: number;
+          try {
+            reTipMs = await git.branchTimeMs(input.repoRoot, branch);
+          } catch (rerr) {
+            if (isAbsence(rerr)) return;
+            throw rerr;
+          }
           if (Date.now() - reTipMs <= input.olderThanMs) return;
           await git.branchDelete(input.repoRoot, branch);
           branchOnly.push(branch);
@@ -704,10 +785,22 @@ export function makeSubprocessCleanupEffects(
         root,
         timeoutMs,
       );
-      const seconds = Number(out.trim());
-      if (out.trim() === '' || !Number.isFinite(seconds)) {
-        // An unageable branch is never silently treated as aged.
-        throw new Error(`branch '${branch}' has no committer date — it is not a local head`);
+      const raw = out.trim();
+      if (raw === '') {
+        // EMPTY output is the ABSENCE class: the ref does not exist — it
+        // was deleted concurrently between the listing and this probe. The
+        // absence CODE is what the op reads to keep the row instead of
+        // failing it; an unageable branch is never silently aged.
+        const err = new Error(`branch '${branch}' has no ref — it is already gone`) as Error & {
+          code?: string;
+        };
+        err.code = 'ENOENT';
+        throw err;
+      }
+      const seconds = Number(raw);
+      if (!Number.isFinite(seconds)) {
+        // Non-empty NON-numeric output is a real fault, not an absence.
+        throw new Error(`branch '${branch}' has an unparseable committer date '${raw}'`);
       }
       return seconds * 1000;
     },

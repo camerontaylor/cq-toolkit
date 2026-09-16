@@ -21,12 +21,17 @@
 //   (d) the REAL makePlanSweep factory bound with the REAL makeLedgerQuery
 //       over the memory store reproduces the same semantics end-to-end.
 // Also pinned: gitMutex is NOT a registry op (library utility only).
+import { execFile } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { OpRegistryEntry, OpResult } from '../../../src/kernel/types.js';
 import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
 import type { LedgerStore } from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery } from '../../../src/ops/ledger/ledger.js';
 import { get } from '../../../src/registry/index.js';
+import type { CleanupReport } from '../../../src/ops/sweep/cleanup.js';
 import { SWEEP_UNIT_OP, makePlanSweep } from '../../../src/ops/sweep/planSweep.js';
 import type { PlanSweepInput } from '../../../src/ops/sweep/planSweep.js';
 import { registry } from '../../../src/ops/sweep/registry.js';
@@ -264,6 +269,47 @@ describe('sweep registry surface', () => {
       const plan = result.value as SalvagePlan;
       expect(plan.rows).toEqual([]);
       expect(Object.values(plan.counts).every((n) => n === 0)).toBe(true);
+    }
+  });
+
+  test('the cleanup importer dispatches through the registry get/importer path — dry run on a scratch repo, ok report (PR156 r2#3)', async () => {
+    // A REAL scratch repo (the subprocess binding runs real git): a bare
+    // init is enough — no commits, no run worktrees, nothing under the
+    // prefix, and dry-run means zero mutators regardless.
+    const dir = mkdtempSync(join(tmpdir(), 'cleanup-importer-'));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        execFile(
+          'git',
+          ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'init', '-q', '-b', 'main', dir],
+          { timeout: 10_000, killSignal: 'SIGKILL' },
+          (error) => (error === null ? resolve() : reject(error)),
+        );
+      });
+      const entry = await get('sweep.cleanup');
+      expect(entry).toBeDefined();
+      if (entry === undefined) return;
+      const op = await entry.importer();
+      const result = await op({
+        repoRoot: dir,
+        worktreesDir: join(dir, 'wt'),
+        runPrefix: 'cq/x',
+        olderThanMs: 1_000,
+        dryRun: true,
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        const report = result.value as CleanupReport;
+        expect(report.dryRun).toBe(true);
+        expect(report.removed).toEqual([]);
+        expect(report.pruned).toEqual([]);
+        expect(report.skippedDirty).toEqual([]);
+        expect(report.branchesRemoved).toEqual([]);
+        // The main checkout is accounted for as an untouchable kept row.
+        expect(report.kept).toHaveLength(1);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
