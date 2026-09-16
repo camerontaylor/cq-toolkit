@@ -1148,6 +1148,26 @@ describe('formatViolations', () => {
     expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
+  test('a MINIFIED key with an UNDECODABLE value fails closed — key presence is what the delimiter anchor buys (PR #128 review, Codex P2)', () => {
+    // The behavior the delimiter-aware KEY regexes actually change: key
+    // PRESENCE with an uncapturable/undecodable value. A minified
+    // baseline carrying "unit":"bad\\x" (invalid JSON escape) after a
+    // ',' — the line-start-only anchor missed the key entirely, so both
+    // sides read unit-less and a value-only tightening PASSED a file
+    // parseBaseline rejects; the delimiter-aware key check fails closed.
+    // (The PR #126 row's VALID units exercise the value regex, which was
+    // never anchored — this row pins the key regex itself, verified by
+    // revert-and-run.)
+    const bad = (value: number): string =>
+      `{"schemaVersion":1,"target":"typecheck","metric":"typecheck-count","direction":"lower-is-better","value":${value},"unit":"bad\\x","capturedAt":"2026-09-15T00:00:00.000Z"}`;
+    const diff = fullRewrite(REL, bad(5), bad(3));
+    const verdict = checkDiffMonotonicity(diff);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) {
+      expect(verdict.violations[0]?.why).toBe('unparsable baseline diff');
+    }
+  });
+
   test('a MINIFIED one-line baseline: real keys still match the key check (PR #126 review, Codex P2)', () => {
     // A hand-edited baseline placing properties on ONE line: the unit key
     // follows '{' or ',' instead of a line start — the line-start-only
