@@ -1,0 +1,885 @@
+// Analyze lane G2 — test evidence for the sidecar contract: the four
+// acceptance behaviors (missing sidecar → clear error; missing approval →
+// needs-human refusal; overlapping planned edits → the whole apply blocked;
+// dry-run shows the diffs and writes nothing), the stale-sidecar detection
+// (analysis-time digests vs current bytes), the unknown-cluster fault, the
+// empty-plan honesty, and the PINNED order of operations (staleness is
+// checked before approval; approval before any scan). The sidecar under
+// test is the real render op's output format; the runner and store are
+// injected fakes — no ast-grep binary, no real fs.
+import { resolve, sep } from 'node:path';
+import { describe, expect, test } from 'vitest';
+import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
+import type { AnalyzeFileStore } from '../../../src/ops/analyze/analysisStore.js';
+import { AnalysisStoreError } from '../../../src/ops/analyze/analysisStore.js';
+import { makeApplyRemediation } from '../../../src/ops/analyze/applyRemediation.js';
+import { clusterErrors, clusterSignature } from '../../../src/ops/analyze/clusterErrors.js';
+import {
+  contentDigest,
+  renderAnalysisReport,
+  serializeAnalysisSidecar,
+} from '../../../src/ops/analyze/renderAnalysisReport.js';
+import type { ClusterErrorsReport } from '../../../src/ops/analyze/clusterErrors.js';
+import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
+
+function failureOf(overrides: Partial<CheckFailure>): CheckFailure {
+  return {
+    file: 'src/a.ts',
+    line: 1,
+    column: 1,
+    ruleId: 'no-unused-vars',
+    message: "'x' is defined but never used",
+    severity: 'error',
+    ...overrides,
+  };
+}
+
+/** The fixture report: one two-member cluster over src/a.ts + src/b.ts. */
+function fixtureReport(): ClusterErrorsReport {
+  return clusterErrors({
+    tool: 'eslint',
+    exitCode: 1,
+    failures: [
+      failureOf({
+        file: 'src/a.ts',
+        line: 5,
+        column: 1,
+        message: "'a' is assigned a value but never used",
+      }),
+      failureOf({
+        file: 'src/b.ts',
+        line: 9,
+        column: 3,
+        message: "'b' is assigned a value but never used",
+      }),
+    ],
+  });
+}
+
+/** The sidecar the render op would publish for `report`, serialized. */
+function sidecarTextFor(report: ClusterErrorsReport, fileContents: Record<string, string>): string {
+  const evidence = report.clusters.map((cluster) => ({
+    clusterId: cluster.id,
+    signature: cluster.signature,
+    targets: [
+      ...new Set(
+        cluster.failures
+          .map((failure) => failure.file)
+          .filter((file): file is string => file !== null),
+      ),
+    ]
+      .sort()
+      .map((file) => ({ file, digest: contentDigest(fileContents[file] as string) })),
+  }));
+  return serializeAnalysisSidecar(renderAnalysisReport(report, { evidence }).sidecar);
+}
+
+/**
+ * In-memory store ROOTED at a directory, resolving paths exactly like the
+ * real pathAnalysisFileStore (resolve(root, path), cwd-anchored for
+ * relative roots) — this is what catches store-relative path discipline
+ * regressions: the pre-M1 op handed the store the FULL sidecarPath while
+ * its store was rooted at dirname(sidecarPath), so the read resolved to
+ * root/root/… and failed closed only by accident of the fixture shape.
+ */
+function memoryStore(
+  root: string,
+  files: Record<string, string>,
+): AnalyzeFileStore & {
+  written: Map<string, Uint8Array>;
+} {
+  const backing = new Map<string, Uint8Array>(
+    Object.entries(files).map(([path, text]) => [resolve(root, path), Buffer.from(text, 'utf8')]),
+  );
+  const written = new Map<string, Uint8Array>();
+  return {
+    written,
+    readBytes: async (path) => {
+      const bytes = backing.get(resolve(root, path));
+      if (bytes === undefined) {
+        throw new AnalysisStoreError(`analysis store: '${path}' does not resolve`);
+      }
+      return Uint8Array.from(bytes);
+    },
+    readText: async (path) => {
+      const bytes = backing.get(resolve(root, path));
+      if (bytes === undefined) {
+        throw new AnalysisStoreError(`analysis store: '${path}' does not resolve`);
+      }
+      return Buffer.from(bytes).toString('utf8');
+    },
+    writeBytes: async (path, bytes) => {
+      const copy = Uint8Array.from(bytes);
+      const key = resolve(root, path);
+      written.set(key, copy);
+      backing.set(key, copy);
+    },
+    isDirectory: async () => true,
+  };
+}
+
+/**
+ * A fake ast-grep runner: reports one `foo_bar` → `fooBar` fix per match in
+ * the CURRENT content it is handed at construction (the test's stand-in for
+ * the shape-match — offsets are computed against those bytes).
+ */
+function codemodRunner(fileContents: Record<string, string>): RunCheck & { commands: unknown[] } {
+  const matches: object[] = [];
+  for (const [file, text] of Object.entries(fileContents)) {
+    for (
+      let index = text.indexOf('foo_bar');
+      index !== -1;
+      index = text.indexOf('foo_bar', index + 1)
+    ) {
+      matches.push({
+        file,
+        replacement: 'fooBar',
+        replacementOffsets: { start: index, end: index + 'foo_bar'.length },
+      });
+    }
+  }
+  const runner = async (): Promise<RawCheckOutput> => ({
+    stdout: JSON.stringify(matches),
+    stderr: '',
+    exitCode: 0,
+  });
+  runner.commands = [] as unknown[];
+  return runner as RunCheck & { commands: unknown[] };
+}
+
+const FIXTURE_FILES: Record<string, string> = {
+  'src/a.ts': 'const foo_bar = 1;\n',
+  'src/b.ts': 'export const foo_bar = 2;\n',
+};
+const SIDECAR_PATH = '/ws/analysis-deadbeef.sidecar.json';
+
+function makeOp(store: AnalyzeFileStore, run: RunCheck = codemodRunner(FIXTURE_FILES)) {
+  return makeApplyRemediation(() => store, run);
+}
+
+function baseInput(): {
+  sidecarPath: string;
+  clusterId: string;
+  approved: true;
+  rule: string;
+  dryRun: boolean;
+} {
+  return {
+    sidecarPath: SIDECAR_PATH,
+    clusterId: fixtureReport().clusters[0]?.id ?? '',
+    approved: true,
+    rule: 'id: rename\nlanguage: ts\nrule:\n  pattern: foo_bar',
+    dryRun: false,
+  };
+}
+
+describe('applyRemediation acceptance: fail-closed sidecar contract', () => {
+  test('a MISSING sidecar fails with a clear error (acceptance: missing sidecar → clear error)', async () => {
+    const store = memoryStore('/ws', FIXTURE_FILES); // no sidecar in it
+    const result = await makeOp(store)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('failed closed');
+      expect(result.error).toContain(SIDECAR_PATH);
+      expect(result.error).toContain('missing, unreadable, or invalid');
+    }
+  });
+
+  test('a corrupt sidecar (wrong version, drifted report) fails closed through the strict parse', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: '{"schemaVersion": 2, "report": {}, "evidence": []}',
+    });
+    const result = await makeOp(store)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('expected schemaVersion 1');
+    }
+    const drifted = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: serializeAnalysisSidecar(
+        renderAnalysisReport(fixtureReport()).sidecar,
+      ).replace('"clusters"', '"clusterz"'),
+    });
+    const driftedResult = await makeOp(drifted)(baseInput());
+    expect(driftedResult.status).toBe('failed');
+  });
+
+  test('a STALE sidecar (any target drifted since analysis) fails naming the file and both digests', async () => {
+    const driftedFiles = { ...FIXTURE_FILES, 'src/b.ts': 'export const foo_bar = 3;\n' };
+    const store = memoryStore('/ws', {
+      ...driftedFiles,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store, codemodRunner(driftedFiles))(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('stale sidecar');
+      expect(result.error).toContain("'src/b.ts'");
+      expect(result.error).toContain('changed since analysis');
+      expect(result.error).toContain('re-run');
+    }
+  });
+
+  test('an EVIDENCE-FREE sidecar is an apply fault naming the uncovered cluster (M2: absence never disables staleness)', async () => {
+    // A hand-built or pure-core sidecar with evidence: [] must fail closed —
+    // with no coverage contract it would silently skip ALL staleness
+    // checking while targets derive from cluster.failures.
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: serializeAnalysisSidecar(renderAnalysisReport(fixtureReport()).sidecar),
+    });
+    const result = await makeOp(store)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('failed closed');
+      expect(result.error).toContain('evidence does not cover cluster');
+      expect(result.error).toContain(fixtureReport().clusters[0]?.id ?? '');
+    }
+  });
+
+  test('a DELETED target is stale too (nothing to re-digest is still drift)', async () => {
+    const store = memoryStore('/ws', {
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('stale sidecar');
+      expect(result.error).toContain('no longer readable');
+    }
+  });
+
+  test('missing approval (or clusterId) REFUSES as needs-human, naming the required shape', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const op = makeOp(store);
+    const { approved: _approved, ...needsApproval } = baseInput();
+    void _approved;
+    for (const approved of [undefined, false]) {
+      const result = await op({
+        ...needsApproval,
+        ...(approved === undefined ? {} : { approved }),
+      });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('never auto-applied');
+        expect(result.reason).toContain('{ clusterId: "<id>", approved: true }');
+      }
+    }
+    const { clusterId: _clusterId, ...noClusterInput } = baseInput();
+    void _clusterId;
+    const noCluster = await op(noClusterInput);
+    expect(noCluster.status).toBe('needs-human');
+  });
+
+  test('stale is WHOLE-SIDECAR: a NON-remediated cluster’s target drift fails the apply (L5 cross-cluster pin)', async () => {
+    // Two single-member clusters on different files; only cluster A is
+    // requested, but cluster B's target drifted — the apply must refuse:
+    // trusting the un-drifted parts of a drifted snapshot is exactly how
+    // wrong edits slip past.
+    const first = failureOf({ file: 'src/a.ts', line: 5, column: 1, message: 'alpha one' });
+    const second = failureOf({ file: 'src/b.ts', line: 9, column: 3, message: 'beta two' });
+    const report = clusterErrors({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [first, second],
+    });
+    expect(report.clusters).toHaveLength(2);
+    const driftedFiles = { ...FIXTURE_FILES, 'src/b.ts': 'export const foo_bar = 99;\n' };
+    const store = memoryStore('/ws', {
+      ...driftedFiles,
+      [SIDECAR_PATH]: sidecarTextFor(report, FIXTURE_FILES),
+    });
+    const clusterA = report.clusters.find(
+      (cluster) => (cluster.failures[0] as CheckFailure).file === 'src/a.ts',
+    );
+    const result = await makeOp(
+      store,
+      codemodRunner(driftedFiles),
+    )({
+      ...baseInput(),
+      clusterId: (clusterA as NonNullable<typeof clusterA>).id,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('stale sidecar');
+      expect(result.error).toContain("'src/b.ts'");
+    }
+  });
+
+  test('the pinned order: staleness is checked BEFORE approval, and approval BEFORE any scan', async () => {
+    const staleStore = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      'src/b.ts': 'export const foo_bar = 3;\n',
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const { approved: _drop, ...unapprovedInput } = baseInput();
+    void _drop;
+    const staleResult = await makeOp(staleStore)(unapprovedInput);
+    // Stale (step 2) fires before the approval refusal (step 3).
+    expect(staleResult.status).toBe('failed');
+    // A valid sidecar + missing approval runs NO scan (the runner would
+    // fail the op if it were invoked — this fake's content has no matches,
+    // so a scan would have produced the honest empty ok instead).
+    const cleanStore = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const refusingRunner: RunCheck & { commands: unknown[] } = Object.assign(
+      async () => {
+        throw new Error('the scan must not run before approval');
+      },
+      { commands: [] },
+    );
+    const refused = await makeOp(cleanStore, refusingRunner)(unapprovedInput);
+    expect(refused.status).toBe('needs-human');
+  });
+
+  test('an approved but UNKNOWN clusterId is `failed`, listing the ids the sidecar carries', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store)({ ...baseInput(), clusterId: '00000000' });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("unknown cluster id '00000000'");
+      expect(result.error).toContain(fixtureReport().clusters[0]?.id ?? '');
+    }
+  });
+});
+
+describe('colliding cluster ids: the signature disambiguator (F2)', () => {
+  // The G1-pinned FNV collision: two distinct signatures share one 32-bit id.
+  const collidingReport = clusterErrors({
+    tool: 'eslint',
+    exitCode: 1,
+    failures: [
+      failureOf({ file: 'src/a.ts', ruleId: 'r', message: 'tjivlzyj' }),
+      failureOf({ file: 'src/b.ts', ruleId: 'r', message: 'qcmqx' }),
+    ],
+  });
+  const files = { 'src/a.ts': 'foo_bar();\n', 'src/b.ts': 'foo_bar();\n' };
+  const [clusterA, clusterB] = collidingReport.clusters;
+
+  test('WITHOUT the disambiguator an ambiguous id is a failed fault naming it', async () => {
+    const store = memoryStore('/ws', {
+      ...files,
+      [SIDECAR_PATH]: sidecarTextFor(collidingReport, files),
+    });
+    const result = await makeOp(
+      store,
+      codemodRunner(files),
+    )({
+      ...baseInput(),
+      clusterId: clusterA?.id ?? '',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain(`ambiguous cluster id '${clusterA?.id}'`);
+      expect(result.error).toContain('pass the cluster');
+      expect(result.error).toContain('signature');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('WITH the signature each colliding cluster applies independently', async () => {
+    // A runner scoped like the real ast-grep: only the REQUESTED files'
+    // matches come back (the scan is invoked with targets, not both files).
+    const contents: Record<string, string> = files;
+    const scopedRunner: RunCheck = async (cmd) => {
+      const requested = cmd.args.slice(cmd.args.indexOf('--') + 1);
+      const matches: object[] = [];
+      for (const file of requested) {
+        const text = contents[file] as string;
+        for (
+          let index = text.indexOf('foo_bar');
+          index !== -1;
+          index = text.indexOf('foo_bar', index + 1)
+        ) {
+          matches.push({
+            file,
+            replacement: 'fooBar',
+            replacementOffsets: { start: index, end: index + 'foo_bar'.length },
+          });
+        }
+      }
+      return { stdout: JSON.stringify(matches), stderr: '', exitCode: 0 };
+    };
+    for (const cluster of [clusterA, clusterB]) {
+      const freshStore = memoryStore('/ws', {
+        ...files,
+        [SIDECAR_PATH]: sidecarTextFor(collidingReport, files),
+      });
+      const result = await makeOp(
+        freshStore,
+        scopedRunner,
+      )({
+        ...baseInput(),
+        clusterId: cluster?.id ?? '',
+        signature: cluster?.signature ?? '',
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok' || result.value.mode !== 'applied') continue;
+      // Each cluster's evidence targets only its own member file.
+      const failure = (cluster?.failures[0] ?? null) as CheckFailure | null;
+      expect(result.value.targets).toEqual(failure === null ? [] : [failure.file as string]);
+      expect(result.value.clusterId).toBe(cluster === undefined ? '' : cluster.id);
+    }
+  });
+
+  test('a WRONG disambiguating signature is a fault listing the id signatures', async () => {
+    const store = memoryStore('/ws', {
+      ...files,
+      [SIDECAR_PATH]: sidecarTextFor(collidingReport, files),
+    });
+    const result = await makeOp(
+      store,
+      codemodRunner(files),
+    )({
+      ...baseInput(),
+      clusterId: clusterA?.id ?? '',
+      signature: 'no-match',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("no cluster with id '" + (clusterA?.id ?? '') + "'");
+      expect(result.error).toContain(clusterA?.signature ?? '');
+      expect(result.error).toContain(clusterB?.signature ?? '');
+    }
+  });
+});
+
+describe('applyRemediation store-relative path discipline (M1 regressions)', () => {
+  test('a RELATIVE sidecarPath with a NESTED dir component (no input.dir): the store is rooted at its dirname and reads the basename', async () => {
+    // Pre-M1 the op passed the FULL sidecarPath to a store rooted at
+    // dirname(sidecarPath): the read resolved to
+    // 'ws/reports/ws/reports/analysis-….json' and failed — or, with lenient
+    // fakes, silently read nothing. The store-relative form is the basename.
+    const root = 'ws/reports';
+    const sidecarPath = `${root}/analysis-deadbeef.sidecar.json`;
+    const files = {
+      'src/a.ts': FIXTURE_FILES['src/a.ts'] as string,
+      'src/b.ts': FIXTURE_FILES['src/b.ts'] as string,
+      'analysis-deadbeef.sidecar.json': sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    };
+    const store = memoryStore(root, files);
+    const result = await makeOp(
+      store,
+      codemodRunner(FIXTURE_FILES),
+    )({
+      ...baseInput(),
+      sidecarPath,
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok' || result.value.mode !== 'applied') return;
+    expect(result.value.plannedEdits).toBe(2);
+    // The writes landed inside the nested root, anchored on the RESOLVED
+    // root: every key is under it, and NONE of them re-enters a 'ws'
+    // segment below it (the double-root signature '…/ws/reports/ws/…' that
+    // a root-joined write path would produce).
+    const rootAbs = resolve(root);
+    expect(store.written.get(resolve(root, 'src/a.ts'))).toBeDefined();
+    expect(
+      [...store.written.keys()].every(
+        (key) => key.startsWith(`${rootAbs}${sep}`) && !key.includes(`${rootAbs}${sep}ws${sep}`),
+      ),
+    ).toBe(true);
+  });
+
+  test('an EXPLICIT input.dir keeps working with a nested sidecar: addressed relative to dir', async () => {
+    // dir given → the store is rooted at dir and the sidecar (in a nested
+    // reports/ directory under it) must be addressed relative to dir.
+    const files = {
+      'src/a.ts': FIXTURE_FILES['src/a.ts'] as string,
+      'src/b.ts': FIXTURE_FILES['src/b.ts'] as string,
+      'reports/analysis-deadbeef.sidecar.json': sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    };
+    const store = memoryStore('/ws', files);
+    const result = await makeOp(
+      store,
+      codemodRunner(FIXTURE_FILES),
+    )({
+      ...baseInput(),
+      sidecarPath: '/ws/reports/analysis-deadbeef.sidecar.json',
+      dir: '/ws',
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok' || result.value.mode !== 'applied') return;
+    expect(result.value.plannedEdits).toBe(2);
+    expect(store.written.get(resolve('/ws', 'src/b.ts'))).toBeDefined();
+  });
+});
+
+describe('applyRemediation acceptance: dry-run, collision block, honest apply', () => {
+  test('a DRY RUN shows the diffs and the planned edit count and writes NOTHING (acceptance)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store)({ ...baseInput(), dryRun: true });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    expect(result.value.mode).toBe('dry-run');
+    expect(result.value.clusterId).toBe(fixtureReport().clusters[0]?.id);
+    expect(result.value.targets).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(result.value.plannedEdits).toBe(2);
+    expect(result.value.files.map((file) => file.diff)).toEqual([
+      expect.stringContaining('-const foo_bar = 1;'),
+      expect.stringContaining('+export const fooBar = 2;'),
+    ]);
+    expect(store.written.size).toBe(0);
+    // The dry-run is STILL part of the remediation decision path: even a
+    // preview of a named cluster refuses without the explicit approval (the
+    // sidecar-free codemod op is the un-gated preview surface, not this one).
+    const { approved: _dropDry, ...dryNoApproval } = baseInput();
+    void _dropDry;
+    const unapproved = await makeOp(store)({ ...dryNoApproval, dryRun: true });
+    expect(unapproved.status).toBe('needs-human');
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a COLLISION in the planned edits blocks the whole apply (acceptance)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const collidingRunner: RunCheck = async () => ({
+      stdout: JSON.stringify([
+        { file: 'src/a.ts', replacement: 'one', replacementOffsets: { start: 0, end: 10 } },
+        { file: 'src/a.ts', replacement: 'two', replacementOffsets: { start: 5, end: 15 } },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const result = await makeOp(store, collidingRunner)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('collision');
+      expect(result.error).toContain('blocked');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('the HAPPY PATH applies the cluster remediation and reports per-file results with after-digests', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store)(baseInput());
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok' || result.value.mode !== 'applied') return;
+    expect(result.value.plannedEdits).toBe(2);
+    const byFile = new Map(result.value.files.map((file) => [file.file, file]));
+    expect(byFile.get('src/a.ts')?.edits).toBe(1);
+    // The rooted store's write keys are resolved against the root, so the
+    // caller-facing dir-relative path and the write key agree.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('const fooBar = 1;\n');
+    expect(byFile.get('src/b.ts')?.digestAfter).toBe(contentDigest('export const fooBar = 2;\n'));
+    expect(store.written.size).toBe(2);
+  });
+
+  test('a write fault mid-apply names the files ALREADY written in their remediated form (T2)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // The store faults on the SECOND target, after the first is on disk
+    // (a delegating wrapper — the underlying store keeps the real writes).
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        if (path === 'src/b.ts') {
+          throw new AnalysisStoreError('analysis store: disk full on second write');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/b.ts'");
+      // F3: the first target was RESTORED (best-effort rollback), not stranded.
+      expect(result.error).toContain('rolled back src/a.ts');
+      expect(result.error).toContain('original bytes restored');
+    }
+    // The first target's ORIGINAL bytes are back on disk.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('const foo_bar = 1;\n');
+  });
+
+  test('when the ROLLBACK itself faults, the already-written wording survives and names the rollback failure (F3)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // Faults on the second target's write AND on every subsequent restore.
+    let writeCount = 0;
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        writeCount += 1;
+        if (writeCount >= 2) {
+          throw new AnalysisStoreError(`analysis store: disk full on write ${writeCount}`);
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/b.ts'");
+      // src/b.ts is the FAULTED file (its restore failure is noted
+      // separately); src/a.ts is the STRANDED already-written one.
+      expect(result.error).toContain('rollback FAILED for src/a.ts');
+      expect(result.error).toContain('restored: none');
+      expect(result.error).toContain('already written (stranded): src/a.ts');
+      expect(result.error).toContain('partial-write restore failed');
+    }
+    // The first write (src/a.ts remediated) landed before the fault and
+    // could not be undone — the stranded state is named, not hidden.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('const fooBar = 1;\n');
+  });
+
+  test('a target mutated between read and scan fails the apply — the offsets are stale, nothing written (R2-5)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // The runner performs the drift ITSELF at scan time (ast-grep re-reads
+    // the file then): the analysis-time digest no longer matches.
+    const driftOnScan: RunCheck = async () => {
+      const raw: RawCheckOutput = { stdout: '[]', stderr: '', exitCode: 0 };
+      await store.writeBytes('src/a.ts', Buffer.from('mutated mid-flight;\n', 'utf8'));
+      return raw;
+    };
+    const result = await makeOp(store, driftOnScan)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('file changed during remediation planning');
+      expect(result.error).toContain("'src/a.ts'");
+      expect(result.error).toContain('nothing was written');
+    }
+    // The only write is the drift itself — never a remediation splice.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('mutated mid-flight;\n');
+  });
+
+  test('a PARTIAL rollback states both lists: restored files AND stranded files (L3)', async () => {
+    // Three targets; the store faults on c's first write, allows c's
+    // restore, but faults b's restore — so a and c come back, b is stranded.
+    const three = {
+      'src/a.ts': 'foo_bar_a();\n',
+      'src/b.ts': 'foo_bar_b();\n',
+      'src/c.ts': 'foo_bar_c();\n',
+    };
+    const oneCluster = clusterErrors({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [
+        failureOf({ file: 'src/a.ts', line: 1, column: 1, message: 'same shape' }),
+        failureOf({ file: 'src/b.ts', line: 1, column: 1, message: 'same shape' }),
+        failureOf({ file: 'src/c.ts', line: 1, column: 1, message: 'same shape' }),
+      ],
+    });
+    const store = memoryStore('/ws', {
+      ...three,
+      [SIDECAR_PATH]: sidecarTextFor(oneCluster, three),
+    });
+    const writeCounts = new Map<string, number>();
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        const count = (writeCounts.get(path) ?? 0) + 1;
+        writeCounts.set(path, count);
+        if (path === 'src/c.ts' && count === 1) {
+          throw new AnalysisStoreError('analysis store: disk full on c');
+        }
+        if (path === 'src/b.ts' && count === 2) {
+          throw new AnalysisStoreError('analysis store: disk full restoring b');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(
+      flaky,
+      codemodRunner(three),
+    )({
+      ...baseInput(),
+      clusterId: oneCluster.clusters[0]?.id ?? '',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/c.ts'");
+      // BOTH lists, verbatim: b's restore failed (stranded), a's restore
+      // succeeded (c's own partial-write restore also succeeded silently).
+      expect(result.error).toContain('rollback FAILED for src/b.ts');
+      expect(result.error).toContain('restored: src/a.ts');
+      // Y1: a restored file is listed ONLY under restored — b (whose
+      // restore failed) is the one stranded entry.
+      expect(result.error).toContain('already written (stranded): src/b.ts');
+      expect(result.error).not.toContain('stranded): src/a.ts');
+    }
+    // The verbatim on-disk state: a and c carry their ORIGINAL bytes; b
+    // holds its remediated form (stranded, as stated).
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('foo_bar_a();\n');
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/c.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('foo_bar_c();\n');
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/b.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('fooBar_b();\n');
+  });
+
+  test('a SPLICE fault on a later target happens in preflight: NOTHING written, no rollback needed (Y2)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // Valid offsets for the FIRST target, out-of-bounds offsets for the
+    // SECOND — pre-Y2 the first file was written (and rolled back); with
+    // the preflight the fault happens before any write.
+    const mixedRunner: RunCheck = async () => ({
+      stdout: JSON.stringify([
+        {
+          file: 'src/a.ts',
+          replacement: 'fooBar',
+          replacementOffsets: { start: 6, end: 13 },
+        },
+        {
+          file: 'src/b.ts',
+          replacement: 'fooBar',
+          replacementOffsets: { start: 100, end: 200 },
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const result = await makeOp(store, mixedRunner)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not apply the plan to 'src/b.ts'");
+      // No rollback message: nothing had been written to roll back.
+      expect(result.error).not.toContain('rolled back');
+      expect(result.error).not.toContain('already written');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('an EMPTY planned-edit set is the honest ok: zero counts plus the note — not a silent success', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    const result = await makeOp(store, codemodRunner({}))(baseInput());
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok' || result.value.mode !== 'applied') return;
+    expect(result.value.plannedEdits).toBe(0);
+    expect(result.value.note).toContain('nothing matched');
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a cluster with ZERO target files short-circuits: honest empty ok, the runner is never invoked (M2)', async () => {
+    // Every member failure carries file: null — nothing is addressable.
+    const report = clusterErrors({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [
+        failureOf({ file: null, line: 1, column: 1, message: 'unattributed failure one' }),
+        failureOf({ file: null, line: 2, column: 1, message: 'unattributed failure two' }),
+      ],
+    });
+    const files = {
+      [SIDECAR_PATH]: sidecarTextFor(report, {}),
+    };
+    const store = memoryStore('/ws', files);
+    const probingRunner: RunCheck & { commands: unknown[] } = Object.assign(
+      async () => {
+        throw new Error('the scan must not run for a zero-target cluster');
+      },
+      { commands: [] },
+    );
+    for (const dryRun of [true, false]) {
+      const result = await makeOp(
+        store,
+        probingRunner,
+      )({
+        ...baseInput(),
+        clusterId: report.clusters[0]?.id ?? '',
+        dryRun,
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') continue;
+      expect(result.value.mode).toBe(dryRun ? 'dry-run' : 'applied');
+      expect(result.value.targets).toEqual([]);
+      expect(result.value.plannedEdits).toBe(0);
+      expect(result.value.files).toEqual([]);
+      expect(result.value.note).toContain('no target files');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('the cluster targets are the member files (deduped, sorted); noise is never a target', async () => {
+    // A report with two members in ONE file plus ledger noise in another.
+    const noiseFailure = failureOf({
+      file: 'src/noise.ts',
+      ruleId: 'no-console',
+      message: 'Unexpected console statement.',
+    });
+    const set: FailureSet = {
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [
+        failureOf({ file: 'src/shared.ts', line: 1, column: 1 }),
+        failureOf({ file: 'src/shared.ts', line: 8, column: 3 }),
+        noiseFailure,
+      ],
+    };
+    const noiseSignature = clusterSignature(noiseFailure, 'eslint');
+    const report = clusterErrors(set, {
+      entries: [{ signature: noiseSignature, count: 2 }],
+      knownNoise: [noiseSignature],
+      needsHuman: [],
+    });
+    const files = { 'src/shared.ts': 'foo_bar();\nfoo_bar();\n' };
+    const store = memoryStore('/ws', { ...files, [SIDECAR_PATH]: sidecarTextFor(report, files) });
+    const result = await makeOp(
+      store,
+      codemodRunner(files),
+    )({
+      ...baseInput(),
+      clusterId: report.clusters[0]?.id ?? '',
+    });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      expect(result.value.targets).toEqual(['src/shared.ts']);
+      expect(JSON.stringify(result.value)).not.toContain('src/noise.ts');
+    }
+  });
+});

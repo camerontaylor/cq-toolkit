@@ -1,27 +1,41 @@
-// Analyze lane G1 — registry-slice test evidence: the two NEW entries
-// (analyze.collectFailures, analyze.clusterErrors) validate the full input
-// and only it — strict unknown-key rejection is load-bearing at every family
-// boundary — and their importers resolve lazily to the ops (the aggregator
-// with its policy-to-failed mapping, the pure clustering decision op).
+// Analyze lane G1+G2 — registry-slice test evidence: the entries
+// (analyze.collectFailures, analyze.clusterErrors, and the G2
+// analyze.renderAnalysisReport) validate the full input and only it —
+// strict unknown-key rejection is load-bearing at every family boundary —
+// and their importers resolve lazily to the ops (the aggregator with its
+// policy-to-failed mapping, the pure clustering decision op, the
+// report-pair publisher bound to the containment-checked path store).
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
 import { FailureSetSchema } from '../../../src/ops/gates/registry.js';
 import {
   ANALYZE_IDENTIFIER_ENCODED_MAX,
+  AgenticRemediationInputSchema,
+  AnalyzeReportSchema,
+  ApplyRemediationInputSchema,
+  AstGrepCodemodInputSchema,
   ClusterErrorsInputSchema,
   CollectFailuresInputSchema,
   LedgerViewSchema,
+  RenderAnalysisReportInputSchema,
   registry,
 } from '../../../src/ops/analyze/registry.js';
 
 /** A minimal valid FailureSet (the gates registry test's idiom). */
 const EMPTY_FAILURE_SET = { tool: 'eslint', failures: [], exitCode: 0 };
 
-describe('analyze registry: the two G1 entries', () => {
+describe('analyze registry: the lane entries', () => {
   test('the registry names the lane ops in order', () => {
     expect(registry.map((entry) => entry.name)).toEqual([
       'analyze.collectFailures',
       'analyze.clusterErrors',
+      'analyze.renderAnalysisReport',
+      'analyze.astGrepCodemod',
+      'analyze.agenticRemediation',
+      'analyze.applyRemediation',
     ]);
   });
 });
@@ -304,4 +318,270 @@ describe('the analyze boundary bounds tool/ruleId by ENCODED size (provable sign
       }).success,
     ).toBe(true);
   });
+});
+
+describe('AnalyzeReportSchema / RenderAnalysisReportInputSchema (full input, and only it)', () => {
+  const CLUSTER = {
+    id: '0deadbe0',
+    signature: '["eslint","r","boom <num>"]',
+    tool: 'eslint',
+    ruleId: 'r',
+    confidence: 'high' as const,
+    failures: [
+      {
+        file: 'src/a.ts',
+        line: 1,
+        column: 1,
+        ruleId: 'r',
+        message: 'boom 1',
+        severity: 'error' as const,
+      },
+    ],
+    size: 1,
+  };
+
+  test('parses the full report input and rejects shape drift and smuggled keys', () => {
+    const valid = { report: { clusters: [CLUSTER], noise: [] }, dir: 'ws' };
+    expect(RenderAnalysisReportInputSchema.parse(valid)).toEqual(valid);
+    expect(
+      RenderAnalysisReportInputSchema.safeParse({ ...valid, path: 'convention' }).success,
+    ).toBe(false);
+    expect(RenderAnalysisReportInputSchema.safeParse({ report: valid.report }).success).toBe(false);
+    expect(
+      AnalyzeReportSchema.safeParse({
+        clusters: [{ ...CLUSTER, id: 'not-hex' }],
+        noise: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      AnalyzeReportSchema.safeParse({
+        clusters: [{ ...CLUSTER, confidence: 'certain' }],
+        noise: [],
+      }).success,
+    ).toBe(false);
+    expect(
+      AnalyzeReportSchema.safeParse({ clusters: [{ ...CLUSTER, size: 2 }], noise: [] }).success,
+    ).toBe(false);
+    expect(RenderAnalysisReportInputSchema.safeParse({ ...valid, dir: '' }).success).toBe(false);
+  });
+
+  test('analyze.renderAnalysisReport resolves through its importer (the default path-store binding)', async () => {
+    const entry = registry.find((candidate) => candidate.name === 'analyze.renderAnalysisReport');
+    if (!entry) throw new Error('analyze.renderAnalysisReport missing from the registry');
+    const op = await entry.importer();
+    expect(typeof op).toBe('function');
+    // A missing dir must be a `failed` result, not a throw across the seam.
+    const result = await op({ report: { clusters: [], noise: [] }, dir: 'definitely/missing' });
+    expect(result.status).toBe('failed');
+  });
+});
+
+describe('AstGrepCodemodInputSchema / ApplyRemediationInputSchema (full input, and only it)', () => {
+  test('the codemod schema: at least one file, non-empty rule, timeout defaulted at this boundary', () => {
+    const valid = { dir: 'ws', rule: 'id: r', files: ['src/a.ts'], dryRun: true };
+    const parsed = AstGrepCodemodInputSchema.parse(valid);
+    expect(parsed).toEqual({ ...valid, timeoutMs: 600_000 });
+    expect(AstGrepCodemodInputSchema.safeParse({ ...valid, files: [] }).success).toBe(false);
+    expect(AstGrepCodemodInputSchema.safeParse({ ...valid, rule: '' }).success).toBe(false);
+    expect(AstGrepCodemodInputSchema.parse({ ...valid, dryRun: false }).timeoutMs).toBe(600_000);
+    // A smuggled rule FILE indirection must fail loudly — the rule rides the input.
+    expect(AstGrepCodemodInputSchema.safeParse({ ...valid, rulePath: 'r.yml' }).success).toBe(
+      false,
+    );
+  });
+
+  test('the agenticRemediation schema: the frozen driver-seam policy objects ride the kernel mirrors', () => {
+    const cluster = {
+      id: '0deadbe0',
+      signature: '["oxlint","r","boom"]',
+      tool: 'oxlint',
+      ruleId: 'r',
+      confidence: 'low' as const,
+      failures: [
+        {
+          file: 'src/a.ts',
+          line: 1,
+          column: 1,
+          ruleId: 'r',
+          message: 'boom',
+          severity: 'error' as const,
+        },
+      ],
+      size: 1,
+    };
+    const valid = {
+      clusterId: '0deadbe0',
+      cluster,
+      modelSpec: { model: 'glm-4.6', provider: 'zai' },
+    };
+    expect(AgenticRemediationInputSchema.parse(valid)).toEqual(valid);
+    // An SDK-model object instead of the plain-data spec is a shape error.
+    expect(
+      AgenticRemediationInputSchema.safeParse({ ...valid, modelSpec: { model: 5 } }).success,
+    ).toBe(false);
+    expect(AgenticRemediationInputSchema.safeParse({ ...valid, driver: {} }).success).toBe(false);
+  });
+
+  test('the applyRemediation schema: clusterId and approved are OPTIONAL — their ABSENCE is the needs-human refusal', () => {
+    const valid = { sidecarPath: 'ws/analysis-x.sidecar.json', rule: 'id: r', dryRun: true };
+    const parsed = ApplyRemediationInputSchema.parse(valid);
+    expect(parsed).toEqual({ ...valid, timeoutMs: 600_000 });
+    // A present-but-empty clusterId is shape noise the boundary rejects; a
+    // MISSING one is a decision the op refuses.
+    expect(ApplyRemediationInputSchema.safeParse({ ...valid, clusterId: '' }).success).toBe(false);
+    expect(
+      ApplyRemediationInputSchema.safeParse({ ...valid, clusterId: 'abc12345', approved: 'yes' })
+        .success,
+    ).toBe(false);
+    expect(ApplyRemediationInputSchema.safeParse({ ...valid, store: '/convention' }).success).toBe(
+      false,
+    );
+  });
+
+  test('both importers resolve; the apply op fails CLOSED on a missing sidecar (no scan, no write)', async () => {
+    for (const name of ['analyze.astGrepCodemod', 'analyze.applyRemediation']) {
+      const entry = registry.find((candidate) => candidate.name === name);
+      if (!entry) throw new Error(`${name} missing from the registry`);
+      expect(typeof entry.inputSchema).toBe('object');
+      const op = await entry.importer();
+      expect(typeof op).toBe('function');
+    }
+    const apply = registry.find((candidate) => candidate.name === 'analyze.applyRemediation');
+    if (!apply) throw new Error('analyze.applyRemediation missing from the registry');
+    const op = await apply.importer();
+    const result = await op({
+      sidecarPath: '/nonexistent/analysis-00000000.sidecar.json',
+      clusterId: '0deadbe0',
+      approved: true,
+      rule: 'id: r',
+      dryRun: false,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('failed closed');
+    }
+  });
+});
+
+describe('the agentic importer resolves (the subprocess floor lane, composed at the importer)', () => {
+  test('analyze.agenticRemediation resolves to an op over a constructed driver (construction spawns nothing)', async () => {
+    const entry = registry.find((candidate) => candidate.name === 'analyze.agenticRemediation');
+    if (!entry) throw new Error('analyze.agenticRemediation missing from the registry');
+    const op = await entry.importer();
+    expect(typeof op).toBe('function');
+    // The importer's op is erased — assert over the WHOLE result: a MISSING
+    // driver would be `failed`, but the registry binds the subprocess floor
+    // driver, so a complete scripted... the honest check here is that the
+    // wired driver produces the taxonomy mapping, not a fabricated run.
+    const cluster = {
+      id: '0deadbe0',
+      signature: '["oxlint","r","boom"]',
+      tool: 'oxlint',
+      ruleId: 'r',
+      confidence: 'low' as const,
+      failures: [
+        {
+          file: 'src/a.ts',
+          line: 1,
+          column: 1,
+          ruleId: 'r',
+          message: 'boom',
+          severity: 'error' as const,
+        },
+      ],
+      size: 1,
+    };
+    const result = await op({
+      clusterId: '0deadbe0',
+      cluster,
+      modelSpec: { model: 'definitely-not-a-model', provider: 'definitely-not-a-provider' },
+      // Invocation data only: SubprocessDriver IGNORES Budget.wallClockMs
+      // (the governor owns wall clock — I8). The no-hang protection here is
+      // the unroutable model (routing throws PRE-dispatch, before any spawn)
+      // plus this test's own explicit vitest timeout below.
+      budget: { wallClockMs: 5_000 },
+    });
+    // The real driver runs (no binary/spawn succeeds in the sandbox) — the
+    // op must surface that honestly, never as an ok with a fabricated
+    // WorkerResult and never as a throw across the seam.
+    expect(['failed', 'indeterminate']).toContain(result.status);
+  }, 20_000);
+});
+
+describe('the applyRemediation signature disambiguator through the registry (Z1)', () => {
+  test('the schema accepts the colliding-id input WITH signature and rejects a non-string one', () => {
+    const valid = {
+      sidecarPath: 'ws/analysis-e6854fd8.sidecar.json',
+      clusterId: 'e6854fd8',
+      signature: '["eslint","r","tjivlzyj"]',
+      approved: true,
+      rule: 'id: r',
+      dryRun: true,
+    };
+    expect(ApplyRemediationInputSchema.parse(valid).signature).toBe('["eslint","r","tjivlzyj"]');
+    expect(ApplyRemediationInputSchema.safeParse({ ...valid, signature: 7 }).success).toBe(false);
+    expect(ApplyRemediationInputSchema.safeParse({ ...valid, signature: '' }).success).toBe(false);
+  });
+
+  test('a colliding-pair sidecar dispatched WITHOUT signature fails naming the ambiguity (selection precedes the scan)', async () => {
+    const { clusterErrors } = await import('../../../src/ops/analyze/clusterErrors.js');
+    const { contentDigest, renderAnalysisReport, serializeAnalysisSidecar } =
+      await import('../../../src/ops/analyze/renderAnalysisReport.js');
+    const failure = (file: string, message: string) => ({
+      file,
+      line: 1,
+      column: 1,
+      ruleId: 'r',
+      message,
+      severity: 'error' as const,
+    });
+    // The G1-pinned FNV collision: two distinct signatures, one 32-bit id.
+    const report = clusterErrors({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [failure('src/a.ts', 'tjivlzyj'), failure('src/b.ts', 'qcmqx')],
+    });
+    const contents: Record<string, string> = {
+      'src/a.ts': 'tjivlzyj;\n',
+      'src/b.ts': 'qcmqx;\n',
+    };
+    const evidence = report.clusters.map((cluster) => ({
+      clusterId: cluster.id,
+      signature: cluster.signature,
+      targets: [
+        ...new Set(cluster.failures.map((f) => f.file).filter((f): f is string => f !== null)),
+      ]
+        .sort()
+        .map((file) => ({ file, digest: contentDigest(contents[file] as string) })),
+    }));
+    const sidecarText = serializeAnalysisSidecar(
+      renderAnalysisReport(report, { evidence }).sidecar,
+    );
+    const dir = await mkdtemp(join(tmpdir(), 'analyze-z1-'));
+    try {
+      await mkdir(join(dir, 'src'), { recursive: true });
+      await writeFile(join(dir, 'src', 'a.ts'), contents['src/a.ts'] as string, 'utf8');
+      await writeFile(join(dir, 'src', 'b.ts'), contents['src/b.ts'] as string, 'utf8');
+      await writeFile(join(dir, 'analysis-e6854fd8.sidecar.json'), sidecarText, 'utf8');
+      const entry = registry.find((candidate) => candidate.name === 'analyze.applyRemediation');
+      if (!entry) throw new Error('analyze.applyRemediation missing from the registry');
+      const op = await entry.importer();
+      const result = await op({
+        sidecarPath: join(dir, 'analysis-e6854fd8.sidecar.json'),
+        clusterId: 'e6854fd8',
+        approved: true,
+        rule: 'id: r',
+        dryRun: false,
+      });
+      // The ambiguity fault fires at cluster SELECTION — before the scan —
+      // so this dispatch is deterministic without an ast-grep binary.
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toContain("ambiguous cluster id 'e6854fd8'");
+        expect(result.error).toContain('pass the cluster');
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 20_000);
 });
