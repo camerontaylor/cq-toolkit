@@ -21,6 +21,11 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json-summary'],
       reportsDirectory: 'coverage',
+      // ALL source files count (review-debt #117): without include, the
+      // v8 provider reports only files LOADED during the run — a PR adding
+      // a completely untested module never lowered coverage, so the
+      // ratchet could not see it.
+      include: ['src/**'],
     },
   },
 });
