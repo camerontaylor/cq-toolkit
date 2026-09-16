@@ -577,6 +577,13 @@ export async function replyAndResolve(
   // are unrecorded failures: they retry once the reply lands.
   const replyFailed = failed.some((f) => f.action.kind === 'review_reply');
   for (const action of resolves) {
+    // review-debt #122: refresh BEFORE the outer dedupe check. The startup
+    // `seen` snapshot may predate another job recording this resolve — an
+    // outer check on that stale snapshot classifies a converged resolve as
+    // withheld/failed instead of skippedAlreadyDispatched. The refresh is a
+    // no-op for unlocked (in-memory) logs; the inner runExclusive refresh
+    // stays as is.
+    await refreshSeenUnderLock();
     // An already-dispatched resolve is DONE regardless of any failed reply
     // — the dedupe check must run first, or a converged action counts as
     // withheld forever.

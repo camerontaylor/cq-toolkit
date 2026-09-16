@@ -1480,3 +1480,214 @@ describe('canonical reclaim — the target slot matches across spelling divergen
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// review-debt #121 — removePrWorktree's registry tail runs under withLock
+// ---------------------------------------------------------------------------
+
+/**
+ * A one-shot gate for deterministic interleaving: the pausing side resolves
+ * `reached` when it ARRIVES; the test calls `release` to let it continue.
+ */
+const deferredGate = (): { reached: Promise<void>; release: () => void } => {
+  let release!: () => void;
+  const reached = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { reached, release };
+};
+
+/**
+ * An in-memory registry with a REAL async mutex on withLock (queued critical
+ * sections can neither observe nor mutate `stored` until released), a call
+ * log carrying the lock depth, and a pause hook that can suspend the NEXT
+ * save mid-write — the deterministic interleaving rig for the registry-tail
+ * races. update() delegates to its own save, mirroring the real per-key
+ * primitive's load-merge-save shape.
+ */
+const mutexRegistry = (
+  initial: RegistryMap = {},
+): {
+  registry: WorktreeRegistry;
+  calls: string[];
+  current: () => RegistryMap;
+  pauseNextSave: () => { reached: Promise<void>; release: () => void };
+} => {
+  const calls: string[] = [];
+  let stored: RegistryMap = { ...initial };
+  let queue: Promise<unknown> = Promise.resolve();
+  let depth = 0;
+  let hooked: { reached: () => void; gate: Promise<void> } | null = null;
+  const registry: WorktreeRegistry = {
+    load: async () => {
+      calls.push(`load@${String(depth)}`);
+      return { ...stored };
+    },
+    save: async (map: RegistryMap) => {
+      if (hooked !== null) {
+        const hook = hooked;
+        hooked = null;
+        calls.push('save:paused');
+        hook.reached();
+        await hook.gate;
+      }
+      calls.push('save');
+      stored = { ...map };
+    },
+    update: async (key: string, entry: WorktreeRegistryEntry | null) => {
+      calls.push(`${entry === null ? `update:${key}:null` : `update:${key}`}@${String(depth)}`);
+      const merged: RegistryMap = { ...stored };
+      if (entry === null) {
+        delete merged[key];
+      } else {
+        merged[key] = { ...entry };
+      }
+      await registry.save(merged);
+    },
+    withLock: <T>(fn: () => Promise<T>): Promise<T> => {
+      const run = queue.then(async () => {
+        depth += 1;
+        try {
+          return await fn();
+        } finally {
+          depth -= 1;
+        }
+      });
+      queue = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    },
+  };
+  return {
+    calls,
+    current: () => ({ ...stored }),
+    registry,
+    pauseNextSave: () => {
+      const pause = deferredGate();
+      const continueSave = deferredGate();
+      hooked = { reached: pause.release, gate: continueSave.reached };
+      return { reached: pause.reached, release: continueSave.release };
+    },
+  };
+};
+
+describe('removePrWorktree lock discipline (review-debt #121)', () => {
+  test('the registry tail (load + conditional update) runs entirely under withLock', async () => {
+    const path = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
+    const harness = mutexRegistry({ '7': { path, branch: LABEL, createdAt: NOW - 1000 } });
+    const model = mkModel([{ path, branch: LABEL, head: SHA_B }]);
+    await removePrWorktree({
+      ...baseOpts(model, harness.registry, { run: fakeGit(model) }),
+      path,
+    });
+    // Both registry operations ran at lock depth 1 — inside withLock — in
+    // the documented order, and the entry for the removed path was pruned.
+    expect(harness.calls).toEqual(['load@1', 'update:7:null@1', 'save']);
+    expect(harness.current()).toEqual({});
+  });
+
+  test('two racing removes for DIFFERENT PRs serialize under the lock — neither removal is lost', async () => {
+    const path7 = '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix';
+    const path9 = '/repo/.git/cq-review-worktrees/pr-9-pr-9-fix';
+    const harness = mutexRegistry({
+      '7': { path: path7, branch: LABEL, createdAt: NOW - 1000 },
+      '9': { path: path9, branch: LABEL, createdAt: NOW - 1000 },
+    });
+    const model = mkModel([
+      { path: path7, branch: LABEL, head: SHA_B },
+      { path: path9, branch: LABEL, head: SHA_B },
+    ]);
+    // Suspend remove7's tail INSIDE its critical section, mid-save. remove9
+    // must BLOCK at the lock (never observing or mutating the suspended
+    // state), then converge after the release — both removals land.
+    const pause = harness.pauseNextSave();
+    const remove7 = removePrWorktree({
+      ...baseOpts(model, harness.registry, { run: fakeGit(model) }),
+      pr: 7,
+      path: path7,
+    });
+    await pause.reached;
+    const remove9 = removePrWorktree({
+      ...baseOpts(model, harness.registry, { run: fakeGit(model) }),
+      pr: 9,
+      path: path9,
+    });
+    // A full macrotask turn: every pre-lock step of remove9 has settled, and
+    // its critical section is still queued (the lock is held).
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    const settled = await Promise.race([
+      remove9.then(
+        () => 'done' as const,
+        () => 'error' as const,
+      ),
+      Promise.resolve('pending' as const),
+    ]);
+    expect(settled).toBe('pending');
+    pause.release();
+    await Promise.all([remove7, remove9]);
+    // Deterministic serialized order, and NEITHER key was lost or resurrected
+    // (the unlocked interleave would overwrite one removal with the other's
+    // stale whole-map write).
+    expect(harness.calls).toEqual([
+      'load@1',
+      'update:7:null@1',
+      'save:paused',
+      'save',
+      'load@1',
+      'update:9:null@1',
+      'save',
+    ]);
+    expect(harness.current()).toEqual({});
+  });
+
+  test('a remove racing a resolvePrWorktree for the SAME pr leaves the registry pointing at one consistent tree', async () => {
+    const repoRoot = await mkdtemp(join(tmpdir(), 'cq-wt-race-'));
+    try {
+      const worktreeRoot = join(repoRoot, '.git', 'cq-review-worktrees');
+      const oldPath = join(worktreeRoot, 'pr-7-old');
+      const freshPath = join(worktreeRoot, `pr-${PR}-${BRANCH}`);
+      const harness = mutexRegistry({
+        '7': { path: oldPath, branch: LABEL, createdAt: NOW - 1000 },
+      });
+      // The entry points at a GONE tree (the remove's target); no listed
+      // trees, so the resolve must (re)create the fresh one and register it.
+      const model = mkModel();
+      const calls: string[][] = [];
+      // Deterministic interleave: the remove's git worktree-remove parks on
+      // a gate while the resolve runs to completion (registering the fresh
+      // tree); then the remove resumes — its IN-LOCK re-load must see the
+      // fresh registration and leave it alone (path differs → no prune).
+      const removeGate = deferredGate();
+      const ungated = fakeGit(model, calls);
+      const gatedRun: GhFn = async (args) => {
+        if (args[2] === 'worktree' && args[3] === 'remove') {
+          await removeGate.reached;
+        }
+        return ungated(args);
+      };
+      const removePromise = removePrWorktree({
+        ...baseOpts(model, harness.registry, { repoRoot, run: gatedRun }),
+        path: oldPath,
+      });
+      const resolved = await resolvePrWorktree(
+        baseOpts(model, harness.registry, { repoRoot, run: ungated }),
+      );
+      expect(resolved.path).toBe(freshPath);
+      removeGate.release();
+      await removePromise;
+      // One consistent tree: the fresh registration survived; no stale prune.
+      expect(harness.current()['7']).toEqual({
+        path: freshPath,
+        branch: LABEL,
+        createdAt: NOW,
+      });
+      expect(harness.calls).not.toContain('update:7:null@1');
+    } finally {
+      await rm(repoRoot, { recursive: true, force: true });
+    }
+  });
+});
