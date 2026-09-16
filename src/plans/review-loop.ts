@@ -220,6 +220,8 @@ export interface EnrichedSource {
   itemId: string;
   kind: ClassifiedItem['kind'];
   threadRootRestId: number | null;
+  /** Stable fingerprint of the item's LATEST feedback round (roundFingerprint) — versioned into dispatch actionIds. */
+  roundFingerprint: string;
 }
 
 /** One correlation result: the fixer payload plus the action-builder source. */
@@ -303,13 +305,46 @@ export function enrichBatches(
           : null;
       items.push({
         item,
-        source: { itemId: planned.id, kind: planned.kind, threadRootRestId },
+        source: {
+          itemId: planned.id,
+          kind: planned.kind,
+          threadRootRestId,
+          roundFingerprint: roundFingerprint(planned.id, item),
+        },
       });
       index += 1;
     }
   }
   return { items, skipped };
 }
+
+/**
+ * FNV-1a 32-bit over a string → 8 hex chars: the short, stable,
+ * dependency-free hash behind the round fingerprint.
+ */
+const fnv1a32Hex = (text: string): string => {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+};
+
+/**
+ * The stable fingerprint of an item's LATEST feedback round (round-3 item
+ * 3): the last comment's timestamp + body when one exists, else the item id
+ * + body. Same feedback → same fingerprint (a retry is dispatch-idempotent);
+ * new feedback → a new fingerprint (the item re-opens).
+ */
+const roundFingerprint = (itemId: string, item: FixableReviewItem): string => {
+  const latest = item.comments[item.comments.length - 1];
+  const source =
+    latest === undefined
+      ? `${itemId}|${item.body}`
+      : `${itemId}|${latest.createdAt ?? ''}|${latest.body}`;
+  return fnv1a32Hex(source);
+};
 
 /**
  * Build the fix plan: one job per fix input, op 'review.fixItem', ids
@@ -497,9 +532,21 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // never silently dropped (see enrichBatches for the per-batch policy).
   const { items: correlated, skipped: vanishedRows } = enrichBatches(batches, state);
   skipped.push(...vanishedRows);
+  // (3b) ROUND-AWARE DISPATCH MEMORY (round-3 item 4): an enriched item
+  // whose round-versioned reply actionId is ALREADY dispatched was answered
+  // THIS round — skip it entirely (no fix job, no new commit, no duplicate
+  // reply); new feedback fingerprints a new round and re-opens the item.
+  const dispatched = new Set(
+    (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
+  );
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
   for (const entry of correlated) {
+    const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
+    if (dispatched.has(replyActionId)) {
+      skipped.push({ id: entry.source.itemId, reason: 'already-answered-this-round' });
+      continue;
+    }
     sources.set(`fix-${fixInputs.length + 1}`, entry.source);
     fixInputs.push({
       repo: `${opts.owner}/${opts.repo}`,
@@ -531,11 +578,26 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     ...(opts.runOptions?.maxTokens !== undefined ? { maxTokens: opts.runOptions.maxTokens } : {}),
   };
   const governor = new BudgetGovernor(governorConfig(runOptions, {}));
+  // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
+  // are checked against the OBSERVED worktree movement, not trusted.
+  const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const fixReport = withBudgetStop(
     await runPlan(plan, runOptions, governRegistry(view, governor)),
     plan,
     governor,
   );
+  const headAfter = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+  const headMoved =
+    headBefore.code === 0 &&
+    headAfter.code === 0 &&
+    headBefore.stdout.trim() !== headAfter.stdout.trim();
+  const claimedNoChange = fixReport.jobs.some(
+    (row) => row.result.status === 'ok' && !(row.result.value as FixReviewItemResult).changed,
+  );
+  const unreportedCommit = headMoved && claimedNoChange;
+  if (unreportedCommit) {
+    reasons.push('unreported-commit: worktree advanced but the worker reported no commit');
+  }
 
   // (5) Publish, then verify. The fix commits are LOCAL until pushed, so the
   // loop pushes the worktree branch BEFORE the after-snapshot — otherwise
@@ -563,7 +625,15 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       }
     }
   }
-  if (commits.length > 0 && allRowsOk) {
+  // Publish-time hygiene (round-3 item 2c): a dirty worktree means
+  // uncommitted worker side effects — nothing is pushed or resolved.
+  const statusAtPublish = await opts.git(['-C', worktree.path, 'status', '--porcelain']);
+  const dirtyWorktree = statusAtPublish.code === 0 && statusAtPublish.stdout.trim() !== '';
+  if (dirtyWorktree) {
+    reasons.push('dirty-worktree');
+  }
+  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree;
+  if (commits.length > 0 && publishable) {
     const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
     if (push.code !== 0) {
       const stderr = push.stderr.trim();
@@ -615,14 +685,17 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       continue; // unreachable: one source per built job, same order
     }
     const value = row.result.value as FixReviewItemResult;
+    const notes =
+      (publishWithheld
+        ? '\n\nNote: the fix is committed locally but publication was withheld; it is not yet on the remote.'
+        : '') +
+      (unreportedCommit
+        ? `\n\nNote: the worktree advanced during the run — an unreported commit (${headAfter.stdout.trim()}) was observed; a human should check it.`
+        : '');
     const body =
       value.changed && value.commits.length > 0
-        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${
-            publishWithheld
-              ? '\n\nNote: the fix is committed locally but publication was withheld; it is not yet on the remote.'
-              : ''
-          }`
-        : value.summary;
+        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${notes}`
+        : `${value.summary}${notes}`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
       // root is unanchorable (null rootDatabaseId) is recorded as a failure
@@ -635,7 +708,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       }
       actions.push({
         kind: 'review_reply',
-        actionId: `review-loop:${String(opts.pr)}:reply:${source.itemId}`,
+        actionId: `review-loop:${String(opts.pr)}:reply:${source.itemId}-${source.roundFingerprint}`,
         threadRootRestId: source.threadRootRestId,
         body,
       });
@@ -646,9 +719,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // snapshot alone: a hallucinated sha must not hide its thread (the
       // reply still posts — the summary reports what the worker claimed),
       // and the withheld resolve is recorded as a per-item failure reason.
-      if (publishWithheld) {
-        // Publication was withheld (a sibling failed): nothing is on the
-        // remote, so the thread must stay open regardless of local state.
+      if (publishWithheld || unreportedCommit || dirtyWorktree) {
+        // Publication withheld (a sibling failed), an unreported commit, or
+        // a dirty worktree: nothing is resolved — the thread stays open
+        // regardless of local state.
         continue;
       }
       if (value.changed && value.commits.length > 0 && value.truncated === true) {
@@ -671,7 +745,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
         if (verified) {
           actions.push({
             kind: 'resolve_thread',
-            actionId: `review-loop:${String(opts.pr)}:resolve:${source.itemId}`,
+            actionId: `review-loop:${String(opts.pr)}:resolve:${source.itemId}-${source.roundFingerprint}`,
             threadId: source.itemId,
           });
         } else {
@@ -685,7 +759,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // reply rides the top-level issues collection; nothing to resolve.
       actions.push({
         kind: 'issue_comment',
-        actionId: `review-loop:${String(opts.pr)}:reply:${source.itemId}`,
+        actionId: `review-loop:${String(opts.pr)}:reply:${source.itemId}-${source.roundFingerprint}`,
         body,
       });
     }
@@ -704,7 +778,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       pr: opts.pr,
       run: opts.gh,
       push:
-        commits.length > 0 && allRowsOk
+        commits.length > 0 && publishable
           ? { run: opts.git, args: worktreePushArgs(worktree.path, opts.headRefName, pushTarget) }
           : null,
       dispatchLog: fileDispatchLog(opts.dispatchLogPath),

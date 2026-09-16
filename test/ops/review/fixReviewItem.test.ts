@@ -783,3 +783,21 @@ describe('reviewFixHarness (round-3 item 9)', () => {
     expect(reviewFixHarness).toEqual(reviewFixHarness);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Slice 9 — non-overridable attribution requirement (item 1)
+// ---------------------------------------------------------------------------
+
+describe('attribution requirement under promptOverride (slice 9 item 1)', () => {
+  test('the user prompt always carries the item-id-in-commit-subject requirement', async () => {
+    const { driver, invocations } = scriptedDriver([
+      completeWorker({ changed: true, summary: 's', commits: ['a'.repeat(40)] }),
+    ]);
+    await makeFixReviewItem({ driver })(baseInput({ promptOverride: 'OVERRIDE PROMPT' }));
+    const prompt = invocations[0]?.prompt ?? '';
+    expect(prompt.startsWith('OVERRIDE PROMPT')).toBe(true);
+    expect(prompt).toContain(
+      'The commit subject MUST contain the review item id verbatim (PRRT_kwDOAbc123), on every commit you create.',
+    );
+  });
+});

@@ -363,6 +363,12 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   lines.push(
     '"changed" is true only when you committed a fix in the worktree above; "commits" lists the full shas of the commits you created (empty array when none).',
   );
+  // NON-overridable attribution requirement (round-3 item 1): the loop
+  // verifies per-item attribution by the commit subject, so this line rides
+  // the user prompt even when the system prompt is replaced.
+  lines.push(
+    `The commit subject MUST contain the review item id verbatim (${singleLine(input.item.id)}), on every commit you create.`,
+  );
   return { text: lines.join('\n'), truncated };
 };
 

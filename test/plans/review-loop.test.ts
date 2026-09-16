@@ -116,6 +116,17 @@ interface LoopWorld {
   laggingOrigin?: boolean;
   /** Commit messages the fake git answers for `log -1 --format=%B <sha>`. */
   commitMessages: Record<string, string>;
+  /** REST issue comments (the top-level PR conversation) served to the fetch. */
+  issueComments: unknown[];
+  /**
+   * The worktree HEAD advances after this many reads of `rev-parse HEAD`
+   * at the worktree path (read 1 is resolvePrWorktree's candidate check,
+   * read 2 is the loop's pre-fix boundary, read 3 is the post-fix
+   * boundary — 2 models "a commit landed during the fix stage").
+   */
+  worktreeAdvancesAt?: number;
+  /** When true, `status --porcelain` reports a dirty worktree. */
+  dirty?: boolean;
   /** GraphQL thread nodes served to fetchReviewState. */
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
@@ -148,6 +159,7 @@ const defaultWorld = (): LoopWorld => ({
   advanceOnPush: true,
   knownShas: [SHA, NEW_SHA],
   commitMessages: { [NEW_SHA]: 'Fix review item T1 in src/a.ts' },
+  issueComments: [],
   threads: [
     actionableThread('T1', 'src/a.ts', 3, 101),
     {
@@ -269,7 +281,7 @@ const fakeGh =
       return ok(JSON.stringify(world.pullsComments));
     }
     if (path.startsWith(`repos/${COORDS.owner}/${COORDS.repo}/issues/${String(COORDS.pr)}/`)) {
-      return ok('[]');
+      return ok(JSON.stringify(world.issueComments));
     }
     return { code: 1, stdout: '', stderr: `unexpected gh argv: ${args.join(' ')}` };
   };
@@ -277,6 +289,7 @@ const fakeGh =
 /** The routed git fake: prWorktree's model (a reusable on-label tree) + pushes. */
 const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn => {
   let pushCount = 0;
+  let worktreeHeadReads = 0;
   return async (args) => {
     log.push(args);
     // prWorktree composes every git argv with a leading '-C <path>' — the
@@ -327,7 +340,18 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       return ok(`${LABEL}\n`);
     }
     if (rest[0] === 'rev-parse' && rest[1] === 'HEAD') {
+      if (args[1] === worktreePath) {
+        // The loop's per-stage worktree HEAD reads (slice 9 item 2): the
+        // head advances after the configured read count.
+        worktreeHeadReads += 1;
+        const advanced =
+          world.worktreeAdvancesAt !== undefined && worktreeHeadReads > world.worktreeAdvancesAt;
+        return ok(`${advanced ? '4444'.repeat(10) : SHA}\n`);
+      }
       return ok(`${SHA}\n`);
+    }
+    if (rest[0] === 'status' && rest[1] === '--porcelain') {
+      return world.dirty === true ? ok(' M src/a.ts\n') : ok('');
     }
     if (rest[0] === 'push') {
       pushCount += 1;
@@ -403,6 +427,8 @@ const runLoop = async (
     gitLog?: string[][];
     invocations?: OpInvocation[];
     headRepo?: string;
+    dispatchLogPath?: string;
+    promptOverride?: string;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -450,11 +476,16 @@ const runLoop = async (
     driver: { model: 'test-model', provider: 'test-provider' },
     driverRegistryView: view,
     nowMs: NOW,
-    dispatchLogPath: join(scratch, 'dispatch.jsonl'),
+    dispatchLogPath: o.dispatchLogPath ?? join(scratch, 'dispatch.jsonl'),
     worktreeRoot: scratch,
+    ...(o.promptOverride !== undefined ? { promptOverride: o.promptOverride } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
 };
+
+/** Count of recorded git push invocations. */
+const gitLogPushes = (gitLog: string[][]): number =>
+  gitLog.filter((args) => args[2] === 'push').length;
 
 /** Gh mutation argv: a REST POST or the resolveReviewThread graphql mutation. */
 const isGhMutation = (args: string[]): boolean => {
@@ -610,8 +641,9 @@ describe('review-loop failure handling', () => {
     // Nothing was published (mixed-worktree guard): the after-snapshot lags.
     expect(outcome.verify?.progress).toBe(false);
     expect(outcome.actionsPosted).toBe(1); // T2's reply; the resolve is withheld
+    // Round-versioned actionId: reply:<itemId>-<round fingerprint>.
     expect(outcome.reply?.posted.map((record) => record.actionId)).toEqual([
-      'review-loop:7:reply:T2',
+      expect.stringMatching(/^review-loop:7:reply:T2-[0-9a-f]{8}$/),
     ]);
     expect(
       outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
@@ -1145,5 +1177,174 @@ describe('package surface (round-3 item 12)', () => {
     expect(typeof surface['runReviewLoop']).toBe('function');
     expect(typeof surface['buildReviewLoopPlan']).toBe('function');
     expect(surface['plan']).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Slice 9 — attribution under override, observed worktree movement,
+// round-versioned dispatch keys, already-answered skip
+// ---------------------------------------------------------------------------
+
+describe('attribution under promptOverride (slice 9 item 1)', () => {
+  test('an override-run worker whose commit names the item resolves normally', async () => {
+    const world = defaultWorld();
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
+      promptOverride: 'OVERRIDE PROMPT',
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.actionsPosted).toBe(2);
+    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(true);
+  });
+});
+
+describe('observed worktree movement (slice 9 item 2)', () => {
+  test('a worker claiming no change while the worktree advanced → unreported-commit reason, no publish', async () => {
+    const world = defaultWorld();
+    world.worktreeAdvancesAt = 2; // a commit lands during the fix stage
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, 'Nothing to change.', []))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual(
+      'unreported-commit: worktree advanced but the worker reported no commit',
+    );
+    expect(gitLogPushes(ghLog)).toBe(0); // no publish
+    // The reply still posts and NOTES the observed commit.
+    expect(outcome.actionsPosted).toBe(1);
+    const post = ghLog.find((args) => args.includes('-X'));
+    expect(post?.some((arg) => arg.includes('unreported commit'))).toBe(true);
+  });
+
+  test('a dirty worktree at publish time → dirty-worktree reason, no push, no resolve', async () => {
+    const world = defaultWorld();
+    world.dirty = true;
+    const gitLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
+      gitLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual('dirty-worktree');
+    expect(gitLog.some((args) => args[2] === 'push')).toBe(false);
+    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
+    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+  });
+});
+
+describe('round-versioned dispatch keys (slice 9 item 3)', () => {
+  test('two rounds → both replies post, each resolve fires once; an exact re-run posts nothing', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-rounds-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = defaultWorld();
+    world.pullsComments = [
+      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
+      restComment(201, 'reviewer', 'Round one: also handle EBUSY.', iso(REPLY_AGE), 101),
+    ];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed round one.', [NEW_SHA]))],
+      dispatchLogPath,
+    });
+    expect(run1.outcome.status).toBe('ok');
+    expect(run1.outcome.actionsPosted).toBe(2);
+    const roundOneReply = run1.outcome.reply?.posted[0]?.actionId ?? '';
+
+    // Round two: NEW feedback on the same thread → a NEW fingerprint.
+    const world2 = defaultWorld();
+    world2.pullsComments = [
+      ...world.pullsComments,
+      restComment(202, 'reviewer', 'Round two: also handle EACCES.', iso(REPLY_AGE - 1), 101),
+    ];
+    const run2 = await runLoop(world2, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed round two.', [NEW_SHA]))],
+      dispatchLogPath,
+    });
+    expect(run2.outcome.status).toBe('ok');
+    expect(run2.outcome.actionsPosted).toBe(2);
+    const roundTwoReply = run2.outcome.reply?.posted[0]?.actionId ?? '';
+    expect(roundTwoReply).not.toBe(roundOneReply);
+    expect(roundTwoReply).toMatch(/^review-loop:7:reply:T1-[0-9a-f]{8}$/);
+
+    // Exact re-run of round two: the round-versioned ids are already
+    // dispatched — the loop skips the item before building fix jobs.
+    const invocations: OpInvocation[] = [];
+    const run3 = await runLoop(world2, {
+      driverResults: [],
+      invocations,
+      dispatchLogPath,
+    });
+    expect(run3.outcome.plan.jobs).toEqual([]);
+    expect(run3.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
+    expect(invocations).toHaveLength(0);
+    expect(run3.outcome.actionsPosted).toBe(0);
+    expect(run3.outcome.reply).toBeUndefined();
+  });
+});
+
+describe('already-answered skip for comment items (slice 9 item 4)', () => {
+  test('run 1 answers a comment item; an identical run 2 skips it; new feedback re-opens it', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-comments-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = defaultWorld();
+    world.threads = []; // ONLY the top-level comment item is actionable
+    world.issueComments = [
+      {
+        id: 555,
+        node_id: null,
+        user: { login: 'reviewer' },
+        body: 'Please also fix the docs.',
+        created_at: iso(ROOT_AGE),
+      },
+    ];
+
+    const run1Invocations: OpInvocation[] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Docs fixed.', [NEW_SHA]))],
+      invocations: run1Invocations,
+      dispatchLogPath,
+    });
+    expect(run1.outcome.status).toBe('ok');
+    expect(run1.outcome.plan.jobs).toHaveLength(1);
+    expect(run1.outcome.actionsPosted).toBe(1);
+
+    const run2Invocations: OpInvocation[] = [];
+    const run2 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 's', [NEW_SHA]))],
+      invocations: run2Invocations,
+      dispatchLogPath,
+    });
+    expect(run2.outcome.plan.jobs).toEqual([]);
+    expect(run2.outcome.skipped).toEqual([{ id: '555', reason: 'already-answered-this-round' }]);
+    expect(run2Invocations).toHaveLength(0); // the driver is never invoked for it
+    expect(run2.outcome.actionsPosted).toBe(0);
+    expect(run2.outcome.reply).toBeUndefined();
+
+    // NEW feedback (a fresh top-level comment) → a new item → actionable again.
+    const world3 = defaultWorld();
+    world3.threads = []; // only the comment items are in play
+    world3.issueComments = [
+      ...world.issueComments,
+      {
+        id: 556,
+        node_id: null,
+        user: { login: 'reviewer' },
+        body: 'New feedback: also the README.',
+        created_at: iso(REPLY_AGE),
+      },
+    ];
+    const run3Invocations: OpInvocation[] = [];
+    const run3 = await runLoop(world3, {
+      driverResults: [completeWorker(fixLine(true, 'README fixed.', [NEW_SHA]))],
+      invocations: run3Invocations,
+      dispatchLogPath,
+    });
+    expect(run3.outcome.status).toBe('ok');
+    expect(run3.outcome.plan.jobs).toHaveLength(1);
+    expect(run3Invocations).toHaveLength(1);
+    expect(run3.outcome.actionsPosted).toBe(1);
   });
 });
