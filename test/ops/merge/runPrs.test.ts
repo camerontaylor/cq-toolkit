@@ -592,6 +592,25 @@ describe('runMergePrs', () => {
     expect(outcome.needsHuman).toEqual([]);
   });
 
+  test('the pass-1 safety net: a refetch that omits a pass-1-WITHHELD pr keeps its withhold row', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
+    // The refreshed set omits the DRAFT pr 41 (withheld in pass 1 as
+    // not_eligible): pass 2 never re-plans it, so its pass-1 withhold row
+    // must survive — while 45 (merged in pass 2) suppresses its own.
+    const { refetch } = fakeRefetch([eligible(45)]);
+
+    const outcome = await runMergePrs(baseInput([draft(41), conflicting(45)], MODEL_SPEC), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    expect(outcome.firstPass.merged).toEqual([]);
+    expect(outcome.secondPass?.merged).toEqual([45]);
+    expect(outcome.needsHuman).toEqual([{ pr: 41, reason: 'not_eligible' }]);
+  });
+
   test('refetch THROW fails closed: no re-plan, secondPass null, every acted pr owed a row', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(acted(46, 'pushed 46'));

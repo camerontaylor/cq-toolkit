@@ -38,6 +38,8 @@
 //      the op's DEFAULT loader reads that same file (the source-side half
 //      of the dist-shipping regression guard).
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
@@ -52,6 +54,7 @@ import type { GhResult } from '../../../src/ops/review/gh.js';
 import type { MergeEffects } from '../../../src/ops/merge/effects.js';
 import { headRefFor } from '../../../src/ops/merge/effects.js';
 import {
+  DEFAULT_RESOLVE_SESSIONS_DIR,
   DEFAULT_RESOLVE_WALL_CLOCK_MS,
   MergeConflictContractError,
   MergeConflictInputSchema,
@@ -395,6 +398,24 @@ describe('renderConflictPrompt', () => {
       'keep {{unknown}} as-is',
     );
   });
+
+  test('ONE-pass render: values containing placeholders render VERBATIM (no re-substitution)', () => {
+    // Second-order injection: a sequential replaceAll would re-render a
+    // value that contains a LATER placeholder. The single-pass callback
+    // maps each key exactly once, so values land verbatim (inert by
+    // construction, not by caller validation).
+    const rendered = renderConflictPrompt(
+      'push to {{headBranch}}, never to {{protectedBranch}}, inside {{worktree}}',
+      {
+        headBranch: 'feat/topic',
+        protectedBranch: '{{worktree}}',
+        worktree: '{{protectedBranch}}/{{worktree}}',
+      },
+    );
+    expect(rendered).toBe(
+      'push to feat/topic, never to {{worktree}}, inside {{protectedBranch}}/{{worktree}}',
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -728,6 +749,28 @@ describe('resolveConflict op', () => {
     expect(driver.invocations).toHaveLength(0);
   });
 
+  test('headBranch === protectedBranch → failed; zero effects/driver calls', async () => {
+    const effects = new FakeMergeEffects();
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    // headBranch 'main' with the default protectedBranch 'main' — a
+    // cross-field rule the schema cannot express, refused before ANY
+    // effect call.
+    const result = await op({ ...baseInput(), headBranch: 'main' });
+    expect(result.status).toBe('failed');
+    expect(failedError(result)).toBe(
+      'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+    );
+    expect(effects.calls).toEqual([]);
+    expect(driver.invocations).toHaveLength(0);
+  });
+
   test('a driver pre-dispatch throw is an op outcome: failed, not a crash', async () => {
     const driver = new FakeDriver(new Error('unknown model for provider'));
     const op = makeResolveConflictOp({
@@ -951,6 +994,23 @@ describe('the acted verification', () => {
     const failedResult = await failedOp(baseInput());
     expect(failedResult.status).toBe('failed');
     expect(failedError(failedResult)).toContain('(session ses-driver-2)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The sessions-dir alignment contract (module doc coupling, pinned)
+// ---------------------------------------------------------------------------
+
+describe('the sessions-dir alignment contract', () => {
+  test('DEFAULT_RESOLVE_SESSIONS_DIR mirrors the subprocess driver default', () => {
+    // THE ALIGNMENT CONTRACT (resolveConflict module doc): the default
+    // createSession writes records to DEFAULT_RESOLVE_SESSIONS_DIR and the
+    // default SubprocessDriver reads them from ITS OWN PRIVATE
+    // defaultSessionsDir() in src/driver/subprocess/index.ts — the two
+    // stay equal by contract, not by import. If the driver ever changes
+    // its default, this test breaks loudly instead of the sessions going
+    // missing at runtime.
+    expect(DEFAULT_RESOLVE_SESSIONS_DIR).toBe(join(tmpdir(), 'cq-harness', 'sessions'));
   });
 });
 

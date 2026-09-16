@@ -21,8 +21,10 @@
 // bounds that remain are the allowlisted tool surface ({read, edit, run}
 // in allowlist mode), the prompt's hard constraints (no force, no squash,
 // no rebase, no amend, no protected-branch destination), and the
-// wall-clock budget request (Budget.wallClockMs). A future sandbox that
-// does carry network semantics must re-derive this.
+// wall-clock budget REQUEST (Budget.wallClockMs) — a request on the seam,
+// not an enforcement: its wiring is deferred (review-debt #137), so it is
+// not currently a bound on live paths. A future sandbox that does carry
+// network semantics must re-derive this.
 //
 // THE DECISION CONTRACT (the op's output vocabulary, UC row 44): the agent
 // ends with EXACTLY ONE JSON line {"decision":"acted|escalate","summary":
@@ -323,11 +325,15 @@ export const DEFAULT_RESOLVE_SESSIONS_DIR = join(tmpdir(), 'cq-harness', 'sessio
  * with no placeholder in the template are ignored.
  */
 export function renderConflictPrompt(template: string, vars: Record<string, string>): string {
-  let rendered = template;
-  for (const [key, value] of Object.entries(vars)) {
-    rendered = rendered.replaceAll(`{{${key}}}`, value);
-  }
-  return rendered;
+  // ONE pass, inert by construction: a value containing a LATER
+  // placeholder must never be re-rendered (second-order injection) — the
+  // replacement callback maps each key exactly once. Unknown placeholders
+  // are left as-is; vars with no placeholder in the template are ignored.
+  const keys = Object.keys(vars);
+  if (keys.length === 0) return template;
+  const escapedKeys = keys.map((key) => key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const placeholder = new RegExp(`\\{\\{(${escapedKeys.join('|')})\\}\\}`, 'g');
+  return template.replace(placeholder, (_match, key: string) => vars[key] ?? _match);
 }
 
 // ---------------------------------------------------------------------------
@@ -432,6 +438,16 @@ export function makeResolveConflictOp(
         status: 'failed',
         error:
           'resolveConflict: input.modelSpec is required to dispatch the conflict agent — bind a ModelSpec in the plan input (none is fabricated)',
+      };
+    }
+    // (a, cont.) STRUCTURAL, before ANY effect: the head branch must never
+    // BE the protected branch — dispatching a push-capable agent whose
+    // destination IS the protected branch is refused outright (a
+    // cross-field rule the schema cannot express).
+    if (input.headBranch === (input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH)) {
+      return {
+        status: 'failed',
+        error: 'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
       };
     }
 

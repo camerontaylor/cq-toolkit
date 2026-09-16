@@ -443,7 +443,9 @@ export async function runMergePrs(
   // pass never re-examined (omitted from the refresh, dropped by the
   // exclusion) would otherwise VANISH — so the surviving pass-1 rows
   // re-enter last, and addRow's first-reason rule makes any pass-2 row
-  // win.
+  // win. That includes PASS-1 PLAN WITHHOLDS: a pr the refreshed set
+  // omitted loses its pass-2 plan row, so its pass-1 withhold (draft,
+  // conflicting, …) must survive here.
   if (secondPass !== null) {
     const resolvedInPass2 = new Set<number>([...secondPass.merged, ...secondPass.retargeted]);
     for (const entry of firstPass.stale) {
@@ -454,6 +456,9 @@ export async function runMergePrs(
     }
     for (const entry of firstPass.blocked) {
       if (!resolvedInPass2.has(entry.pr)) addRow(entry.pr, entry.reason);
+    }
+    for (const row of plan1.needsHuman) {
+      if (!resolvedInPass2.has(row.pr)) addRow(row.pr, row.reason);
     }
   }
   const needsHuman = [...byPr.entries()]

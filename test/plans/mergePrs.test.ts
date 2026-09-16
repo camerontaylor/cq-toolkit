@@ -96,6 +96,29 @@ describe('the merge family op registry', () => {
     ).toBe(true);
   });
 
+  test("get('merge.resolveConflict') inputSchema: refname rejection at the dispatch boundary", async () => {
+    const entry = await get('merge.resolveConflict');
+    if (entry === undefined) throw new Error('no registry entry named merge.resolveConflict');
+    const parses = (over: Record<string, unknown>): boolean =>
+      entry.inputSchema.safeParse({
+        pr: 7,
+        repoRoot: '/repo',
+        headBranch: 'feat/7',
+        baseBranch: 'main',
+        ...over,
+      }).success;
+
+    // A well-formed input parses.
+    expect(parses({})).toBe(true);
+    // The refname gate is a SCHEMA rule: a hostile branch name is rejected
+    // at the dispatch boundary.
+    expect(parses({ headBranch: 'topic$(touch x)' })).toBe(false);
+    // headBranch === baseBranch === 'main' is NOT schema-rejected — that
+    // cross-field refusal is the OP's runtime check (headBranch vs the
+    // protected branch), which only exists at op level.
+    expect(parses({ headBranch: 'main', baseBranch: 'main' })).toBe(true);
+  });
+
   test('one dispatch smoke through the lazy importer chain: empty run → ok, empty totals', async () => {
     const entry = await get('merge.runPrs');
     if (entry === undefined) throw new Error('no registry entry named merge.runPrs');
