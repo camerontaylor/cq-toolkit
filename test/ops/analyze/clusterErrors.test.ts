@@ -15,7 +15,7 @@ import {
   messageTemplate,
 } from '../../../src/ops/analyze/clusterErrors.js';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
-import { COMPONENT_MAX_CHARS, SIGNATURE_MAX_CHARS } from '../../../src/ops/ledger/ledger.js';
+import { SIGNATURE_MAX_CHARS } from '../../../src/ops/ledger/ledger.js';
 import type { LedgerView } from '../../../src/ops/ledger/index.js';
 import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
 
@@ -149,6 +149,22 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
     expect(withFoo).toBe(withBar);
   });
 
+  test('escaped delimiters cannot close a span ("a\\"b" is ONE span)', () => {
+    // The body consumes backslash pairs, so the escaped quote does not end
+    // the span — changing the volatile tail must not change the signature.
+    expect(messageTemplate('Invalid value "a\\"b"')).toBe('Invalid value <str>');
+    const withB = clusterSignature(failureOf({ message: 'Invalid value "a\\"b"' }), 'eslint');
+    const withC = clusterSignature(failureOf({ message: 'Invalid value "a\\"c"' }), 'eslint');
+    expect(withB).toBe(withC);
+  });
+
+  test('a Windows path in quotes abstracts as ONE <str> span (escape pairs consumed)', () => {
+    // Each \X inside the span is consumed as an escape pair, so the back
+    //slashes cannot break the span and the closer is still found — the
+    // whole span abstracts (the documented Windows-path tradeoff).
+    expect(messageTemplate("cannot read 'C:\\temp\\log'")).toBe('cannot read <str>');
+  });
+
   test('pathological tokens normalize with correct output (token-wise scan, unbounded messages)', () => {
     const longToken = 'a'.repeat(200_000);
     // With a separator: the whole maximal non-space run is one <path>.
@@ -205,13 +221,15 @@ describe('clusterSignature (the ledger-matching form)', () => {
     expect(signature).toContain('…');
   });
 
-  test('escape-inflated overhead: the honest over-bound residual, deterministic and terminating', () => {
-    // Schema-valid raw lengths (200 ≤ COMPONENT_MAX_CHARS each) whose JSON
-    // escaping inflates the fixed overhead past SIGNATURE_MAX_CHARS: the
-    // budget bottoms out and the loop returns the over-bound signature
-    // deterministically — the ledger record boundary then rejects it, so
-    // the fail direction is no suppression, never wrong suppression.
-    const quoted = '"'.repeat(COMPONENT_MAX_CHARS);
+  test('escape-inflated overhead: the LIBRARY-only over-bound residual, deterministic and terminating', () => {
+    // Direct clusterSignature calls bypass the registry's 40-raw bounds, so
+    // 200 double-quote characters in tool and ruleId are constructible
+    // here: their JSON escaping inflates the fixed overhead past
+    // SIGNATURE_MAX_CHARS, the budget bottoms out, and the loop returns the
+    // over-bound signature deterministically. Through the op this input
+    // cannot pass the registry; the ledger record boundary would reject the
+    // over-bound result — no suppression, never wrong suppression.
+    const quoted = '"'.repeat(200);
     const failure = failureOf({ ruleId: quoted, message: 'x'.repeat(5000) });
     const signature = clusterSignature(failure, quoted);
     expect(signature.length).toBeGreaterThan(SIGNATURE_MAX_CHARS);

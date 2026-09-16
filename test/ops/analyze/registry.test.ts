@@ -6,8 +6,8 @@
 import { describe, expect, test } from 'vitest';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
 import { FailureSetSchema } from '../../../src/ops/gates/registry.js';
-import { COMPONENT_MAX_CHARS } from '../../../src/ops/ledger/ledger.js';
 import {
+  ANALYZE_COMPONENT_RAW_MAX,
   ClusterErrorsInputSchema,
   CollectFailuresInputSchema,
   LedgerViewSchema,
@@ -211,21 +211,21 @@ describe('the G1 importers resolve', () => {
   });
 });
 
-describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', () => {
-  test('a 201-char tool is rejected for collectFailures; the 200-char bound is accepted', () => {
+describe('the analyze boundary bounds tool/ruleId (40 raw chars: provable signature convergence)', () => {
+  test('a 41-char tool is rejected for collectFailures; the 40-char bound is accepted', () => {
     expect(
       CollectFailuresInputSchema.safeParse({
-        sets: [{ tool: 't'.repeat(COMPONENT_MAX_CHARS + 1), failures: [], exitCode: 0 }],
+        sets: [{ tool: 't'.repeat(ANALYZE_COMPONENT_RAW_MAX + 1), failures: [], exitCode: 0 }],
       }).success,
     ).toBe(false);
     expect(
       CollectFailuresInputSchema.safeParse({
-        sets: [{ tool: 't'.repeat(COMPONENT_MAX_CHARS), failures: [], exitCode: 0 }],
+        sets: [{ tool: 't'.repeat(ANALYZE_COMPONENT_RAW_MAX), failures: [], exitCode: 0 }],
       }).success,
     ).toBe(true);
   });
 
-  test('a 201-char ruleId is rejected for clusterErrors, with the issue naming the bound', () => {
+  test('a 41-char ruleId is rejected for clusterErrors, with the issue naming the bound', () => {
     const parsed = ClusterErrorsInputSchema.safeParse({
       set: {
         tool: 'eslint',
@@ -234,7 +234,7 @@ describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', ()
             file: null,
             line: null,
             column: null,
-            ruleId: 'r'.repeat(COMPONENT_MAX_CHARS + 1),
+            ruleId: 'r'.repeat(ANALYZE_COMPONENT_RAW_MAX + 1),
             message: 'm',
             severity: 'error',
           },
@@ -246,10 +246,10 @@ describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', ()
     if (parsed.success) return;
     const issue = parsed.error.issues[0];
     expect(issue === undefined).toBe(false);
-    expect(issue?.message).toContain(String(COMPONENT_MAX_CHARS));
+    expect(issue?.message).toContain(String(ANALYZE_COMPONENT_RAW_MAX));
   });
 
-  test('a 201-char ruleId is rejected for collectFailures too (no collect→cluster gap)', () => {
+  test('a 41-char ruleId is rejected for collectFailures too (no collect→cluster gap)', () => {
     expect(
       CollectFailuresInputSchema.safeParse({
         sets: [
@@ -260,7 +260,7 @@ describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', ()
                 file: null,
                 line: null,
                 column: null,
-                ruleId: 'r'.repeat(COMPONENT_MAX_CHARS + 1),
+                ruleId: 'r'.repeat(ANALYZE_COMPONENT_RAW_MAX + 1),
                 message: 'm',
                 severity: 'error',
               },
@@ -280,7 +280,7 @@ describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', ()
                 file: null,
                 line: null,
                 column: null,
-                ruleId: 'r'.repeat(COMPONENT_MAX_CHARS),
+                ruleId: 'r'.repeat(ANALYZE_COMPONENT_RAW_MAX),
                 message: 'm',
                 severity: 'error',
               },
@@ -295,7 +295,7 @@ describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', ()
   test('the bound is LOCAL to analyze: the gates FailureSetSchema still accepts an over-bound tool', () => {
     expect(
       FailureSetSchema.safeParse({
-        tool: 't'.repeat(COMPONENT_MAX_CHARS + 1),
+        tool: 't'.repeat(ANALYZE_COMPONENT_RAW_MAX + 1),
         failures: [],
         exitCode: 0,
       }).success,

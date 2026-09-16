@@ -28,39 +28,49 @@ import type { ClusterErrorsInput } from './clusterErrors.js';
 import type { CollectFailuresInput } from './collectFailures.js';
 
 /**
+ * Raw component cap for the analyze boundary. The arithmetic it pins: the
+ * worst-case JSON escape inflation is 6 units per character (\uXXXX for a
+ * lone surrogate), so with tool and ruleId each at most 40 RAW characters
+ * the canonical signature's fixed overhead is at most 6×(40+40) = 480 units
+ * plus ~10 of tuple punctuation — strictly under SIGNATURE_MAX_CHARS — and
+ * clusterSignature's truncation loop provably converges for EVERY
+ * schema-valid op input. 40 characters is generous for real tool names and
+ * rule ids. Exported so the boundary tests pin the SAME number.
+ */
+export const ANALYZE_COMPONENT_RAW_MAX = 40;
+
+/**
  * The gates' shared CheckFailureSchema shape with ONE local bound added:
- * ruleId is capped at the ledger component bound (it is part of the cluster
- * signature's fixed overhead). Shared by BOTH analyze ops so a
+ * ruleId is capped at the analyze raw component bound (it is part of the
+ * cluster signature's fixed overhead). Shared by BOTH analyze ops so a
  * collect→cluster chain can never pass a ruleId the cluster boundary would
- * reject (round-3 review); the gates' schema itself stays untouched, and
- * the z.ZodType<CheckFailure> annotation pins the mirror to the frozen
- * type at compile time, so a shape drift fails typecheck.
+ * reject; the gates' schema itself stays untouched, and the
+ * z.ZodType<CheckFailure> annotation pins the mirror to the frozen type at
+ * compile time, so a shape drift fails typecheck.
  */
 const AnalyzeCheckFailureSchema: z.ZodType<CheckFailure> = z
   .object({
     file: z.string().nullable(),
     line: z.number().nullable(),
     column: z.number().nullable(),
-    ruleId: z.string().max(COMPONENT_MAX_CHARS).nullable(),
+    ruleId: z.string().max(ANALYZE_COMPONENT_RAW_MAX).nullable(),
     message: z.string(),
     severity: z.enum(['error', 'warning']),
   })
   .strict();
 
 /**
- * LOCAL tightening of the reused gates FailureSet shape for the analyze ops:
- * `tool` is bounded to the ledger's COMPONENT_MAX_CHARS — ledger-domain
- * alignment that massively shrinks clusterSignature's over-bound class.
- * Honest limit: the bound caps RAW length, but JSON escaping can still
- * inflate a bound-respecting overhead past SIGNATURE_MAX_CHARS, in which
- * case clusterSignature returns its over-bound signature deterministically
- * and the ledger record boundary rejects it — no suppression for that
- * pathological row, never wrong suppression. The gates' shared schema
- * itself stays untouched.
+ * LOCAL tightening of the reused gates FailureSet shape for the analyze
+ * ops: `tool` is bounded to the analyze raw component bound. With tool and
+ * ruleId both at that bound, the signature's fixed JSON overhead provably
+ * fits SIGNATURE_MAX_CHARS (see {@link ANALYZE_COMPONENT_RAW_MAX}), so the
+ * over-bound residual is LIBRARY-CALL-ONLY — direct clusterSignature calls
+ * that bypass this boundary. The gates' shared schema itself stays
+ * untouched.
  */
 const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
-    tool: z.string().max(COMPONENT_MAX_CHARS),
+    tool: z.string().max(ANALYZE_COMPONENT_RAW_MAX),
     failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
   })
@@ -73,7 +83,7 @@ const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
  */
 const ClusterFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
-    tool: z.string().max(COMPONENT_MAX_CHARS),
+    tool: z.string().max(ANALYZE_COMPONENT_RAW_MAX),
     failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
   })

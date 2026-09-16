@@ -16,7 +16,9 @@
 //     the comparison unit carried on each cluster; the 8-hex id is its
 //     compact stable handle.
 //   - Template normalization is EXACTLY this pipeline, in this order:
-//       1. quoted spans ('…', "…", `…`)          → <str> — an OPENING
+//       1. quoted spans ('…', "…", `…`)          → <str> — bodies are
+//          ESCAPE-AWARE (a backslash consumes the character after it, so
+//          an escaped delimiter cannot close a span), and an OPENING
 //          delimiter must not be preceded by a Unicode letter, number, or
 //          underscore, so a contraction ("doesn't") or a possessive
 //          ("Users'") can never open a span
@@ -32,9 +34,12 @@
 //     harmless to grouping-by-shape and impossible to hit without a same-rule
 //     near-twin message. A <path> token includes adjacent non-space
 //     punctuation, so trailing separators are abstracted with the path. A
-//     quote abutting Unicode word chars on BOTH sides (said'foo') can never
-//     open a span, so such content stays literal — an accepted over-split
-//     class; an UNPAIRED quote also passes through conservatively.
+//     backslash immediately before a closing quote is consumed as an escape
+//     and extends the span (the Windows-path-in-quotes tradeoff) — accepted,
+//     deterministic. A quote abutting Unicode word chars on BOTH sides
+//     (said'foo') can never open a span, so such content stays literal —
+//     an accepted over-split class; an UNPAIRED quote also passes through
+//     conservatively.
 //   - Confidence honesty: a cluster of ≥ 2 members agreeing on the exact
 //     signature is 'high'; a singleton is 'low' — one sample cannot
 //     distinguish signal from noise, and v1 NEVER merges clusters (so a
@@ -94,17 +99,18 @@ export function messageTemplate(message: string): string {
 
 /**
  * Quoted spans of all three JS quote styles, non-greedy within one pair.
- * The OPENER is boundary-aware: it must NOT be preceded by a Unicode
- * letter, number, or underscore, so a straight apostrophe inside a word —
- * a contraction ("doesn't"), a possessive ("Users'"), or after a non-ASCII
- * letter ("café's") — can never open a span and pair with a LATER opening
- * quote (which would make the template depend on text after the apostrophe:
- * an over-split signature contract violation). A quote abutting Unicode
- * word chars on BOTH sides can therefore never open: such content stays
- * literal, and an unpaired quote passes through conservatively.
+ * ESCAPE-AWARE bodies: a backslash consumes the character after it as a
+ * pair, so an escaped delimiter cannot close a span ("a\"b" is ONE span)
+ * and a backslash directly before the closer extends the span. The OPENER
+ * is boundary-aware: it must NOT be preceded by a Unicode letter, number,
+ * or underscore, so a straight apostrophe inside a word — a contraction
+ * ("doesn't"), a possessive ("Users'"), or after a non-ASCII letter
+ * ("café's") — can never open a span. A quote abutting Unicode word chars
+ * on BOTH sides can therefore never open: such content stays literal, and
+ * an unpaired quote passes through conservatively.
  */
 const QUOTED_SPAN =
-  /(?<![\p{L}\p{N}_])'[^']*'|(?<![\p{L}\p{N}_])"[^"]*"|(?<![\p{L}\p{N}_])`[^`]*`/gu;
+  /(?<![\p{L}\p{N}_])'(?:\\.|[^'\\])*'|(?<![\p{L}\p{N}_])"(?:\\.|[^"\\])*"|(?<![\p{L}\p{N}_])`(?:\\.|[^`\\])*`/gu;
 
 /** Numbers with an optional decimal part (codes, counts, line:col refs). */
 const NUMBER_LIKE = /\d+(?:\.\d+)?/g;
@@ -135,14 +141,16 @@ export function clusterSignature(failure: CheckFailure, tool: string): string {
   // quote or backslash, say) costs more than one code unit, so a raw cut
   // of exactly the overage can still overflow; the loop terminates because
   // every removed character contributes at least one code unit.
-  // Honest residual: the registry bounds tool/ruleId by RAW length
-  // (COMPONENT_MAX_CHARS), but JSON ESCAPING can inflate even a bound-
-  // respecting overhead past SIGNATURE_MAX_CHARS (a tool of 200 double-
-  // quote characters serializes to ~400 units) — the budget then bottoms
-  // out at zero and the loop RETURNS AN OVER-BOUND SIGNATURE,
-  // deterministically and without hanging. The fail direction is safe: the
-  // ledger record boundary rejects an over-bound signature, so that
-  // pathological row gets NO suppression — never wrong suppression.
+  // Honest residual — unreachable through the op: the analyze registry
+  // bounds tool and ruleId to 40 RAW characters; worst-case JSON escape
+  // inflation is 6 units per character (\uXXXX for a lone surrogate), so
+  // the fixed overhead is at most 6×(40+40) = 480 units plus ~10 of tuple
+  // punctuation — strictly under SIGNATURE_MAX_CHARS — and this loop
+  // provably converges under the bound for EVERY schema-valid op input.
+  // Over-bound signatures are only possible for DIRECT LIBRARY CALLS that
+  // bypass the registry bound: such a signature is returned
+  // deterministically, the ledger record boundary rejects it, and the fail
+  // direction is safe — no suppression, never wrong suppression.
   let budget =
     SIGNATURE_MAX_CHARS -
     JSON.stringify([tool, failure.ruleId, '']).length -
