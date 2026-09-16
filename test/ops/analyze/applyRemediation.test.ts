@@ -645,8 +645,12 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.error).toContain("could not write 'src/b.ts'");
-      expect(result.error).toContain('rollback FAILED for');
-      expect(result.error).toContain('already written: src/a.ts');
+      // src/b.ts is the FAULTED file (its restore failure is noted
+      // separately); src/a.ts is the STRANDED already-written one.
+      expect(result.error).toContain('rollback FAILED for src/a.ts');
+      expect(result.error).toContain('restored: none');
+      expect(result.error).toContain('already written (stranded): src/a.ts');
+      expect(result.error).toContain('partial-write restore failed');
     }
     // The first write (src/a.ts remediated) landed before the fault and
     // could not be undone — the stranded state is named, not hidden.
@@ -678,6 +682,76 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     expect(
       Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
     ).toBe('mutated mid-flight;\n');
+  });
+
+  test('a PARTIAL rollback states both lists: restored files AND stranded files (L3)', async () => {
+    // Three targets; the store faults on c's first write, allows c's
+    // restore, but faults b's restore — so a and c come back, b is stranded.
+    const three = {
+      'src/a.ts': 'foo_bar_a();\n',
+      'src/b.ts': 'foo_bar_b();\n',
+      'src/c.ts': 'foo_bar_c();\n',
+    };
+    const oneCluster = clusterErrors({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [
+        failureOf({ file: 'src/a.ts', line: 1, column: 1, message: 'same shape' }),
+        failureOf({ file: 'src/b.ts', line: 1, column: 1, message: 'same shape' }),
+        failureOf({ file: 'src/c.ts', line: 1, column: 1, message: 'same shape' }),
+      ],
+    });
+    const store = memoryStore('/ws', {
+      ...three,
+      [SIDECAR_PATH]: sidecarTextFor(oneCluster, three),
+    });
+    const writeCounts = new Map<string, number>();
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        const count = (writeCounts.get(path) ?? 0) + 1;
+        writeCounts.set(path, count);
+        if (path === 'src/c.ts' && count === 1) {
+          throw new AnalysisStoreError('analysis store: disk full on c');
+        }
+        if (path === 'src/b.ts' && count === 2) {
+          throw new AnalysisStoreError('analysis store: disk full restoring b');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(
+      flaky,
+      codemodRunner(three),
+    )({
+      ...baseInput(),
+      clusterId: oneCluster.clusters[0]?.id ?? '',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/c.ts'");
+      // BOTH lists, verbatim: b's restore failed (stranded), a's restore
+      // succeeded (c's own partial-write restore also succeeded silently).
+      expect(result.error).toContain('rollback FAILED for src/b.ts');
+      expect(result.error).toContain('restored: src/a.ts');
+      expect(result.error).toContain('already written (stranded): src/a.ts, src/b.ts');
+    }
+    // The verbatim on-disk state: a and c carry their ORIGINAL bytes; b
+    // holds its remediated form (stranded, as stated).
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('foo_bar_a();\n');
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/c.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('foo_bar_c();\n');
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/b.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('fooBar_b();\n');
   });
 
   test('an EMPTY planned-edit set is the honest ok: zero counts plus the note — not a silent success', async () => {

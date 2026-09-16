@@ -588,6 +588,22 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     );
   });
 
+  test('files: [] at the LIBRARY level is a refused unscoped scan (L2)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    const result = await makeOp(store)({
+      dir: '/ws',
+      rule: 'r',
+      files: [],
+      dryRun: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('an unscoped scan is refused');
+      expect(result.error).toContain('at least one file');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
   test('a scan reporting DECORATED paths (./src/a.ts) still matches the requested targets and applies (L2)', async () => {
     const store = memoryStore(FIXTURE_FILES);
     const decoratedRunner = fakeRunner({

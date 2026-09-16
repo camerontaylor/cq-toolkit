@@ -266,7 +266,11 @@ export function makeApplyRemediation(
     // the SIDECAR EVIDENCE digests (the analysis-time anchor, already
     // verified pre-scan); after the scan and BEFORE anything is written,
     // each target is re-digested against them (dry-run included — a diff of
-    // drifted bytes would mislead the same way).
+    // drifted bytes would mislead the same way). Residual, one sentence: a
+    // concurrent write landing between this final freshness read and
+    // store.writeBytes is still a lost update — a documented TOCTOU-class
+    // residual of the same accepted window the analysis store's header
+    // records for a single-consumer local tool.
     const expectedDigest = new Map(
       sidecar.evidence.flatMap((clusterEvidence) =>
         clusterEvidence.targets.map((target) => [target.file, target.digest] as const),
@@ -388,10 +392,13 @@ export function makeApplyRemediation(
             error: `remediation: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
           };
         }
+        // BOTH lists, verbatim: what was restored AND what is stranded —
+        // the exact on-disk state, stated in one fault.
+        const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
         const stranded = appliedFiles.map((applied) => applied.file);
         return {
           status: 'failed',
-          error: `remediation: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; already written: ${stranded.join(', ')}${faultedFileRestoreFailed}`,
+          error: `remediation: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
         };
       }
       appliedFiles.push({

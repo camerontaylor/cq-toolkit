@@ -231,6 +231,36 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     expect(result.value.structuredOutput).toEqual(proposal);
   });
 
+  test('an OMITTED toolPolicy mode is NORMALIZED to none in the invocation — no approval needed, nothing exposed (H1)', async () => {
+    // The frozen seam reads an omitted mode as 'allowlist' — pre-H1 this
+    // input cleared the gate (gate read 'none') while the driver exposed
+    // the Edit tool. The invocation must carry mode 'none' EXPLICITLY.
+    const driver = fakeDriver(COMPLETE);
+    const result = await makeAgenticRemediation(driver)({
+      ...baseInput(),
+      toolPolicy: { allow: ['Edit'] },
+    });
+    expect(result.status).toBe('ok');
+    expect(driver.invocations).toHaveLength(1);
+    const invocation = driver.invocations[0] as OpInvocation;
+    expect(invocation.toolPolicy).toEqual({ allow: ['Edit'], mode: 'none' });
+    // The sandbox normalization is explicit too.
+    expect(invocation.sandboxPolicy).toEqual({ level: 'read-only' });
+  });
+
+  test('an EXPLICIT allowlist mode is write-capable and refused without approval (H1)', async () => {
+    const driver = fakeDriver(COMPLETE);
+    const result = await makeAgenticRemediation(driver)({
+      ...baseInput(),
+      toolPolicy: { allow: ['Edit'], mode: 'allowlist' },
+    });
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain("tool mode 'allowlist'");
+    }
+    expect(driver.invocations).toHaveLength(0);
+  });
+
   test('a clusterId that does not match cluster.id is a failed result (L3: the id names ITS cluster)', async () => {
     const result = await makeAgenticRemediation(fakeDriver(COMPLETE))({
       ...baseInput(),

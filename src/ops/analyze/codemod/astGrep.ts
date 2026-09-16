@@ -601,6 +601,15 @@ export function makeAstGrepCodemod(
           'codemod apply requires an explicit approval flag — remediation is never auto-applied; pass { approved: true } (or dryRun: true to preview the diffs)',
       };
     }
+    // The 'at least one file' rule is enforced HERE too, not only at the
+    // registry boundary: a direct library/barrel call with files: [] must
+    // not degrade into an unscoped scan over the whole directory.
+    if (input.files.length === 0) {
+      return {
+        status: 'failed',
+        error: 'ast-grep codemod: an unscoped scan is refused; pass at least one file',
+      };
+    }
     let store: AnalyzeFileStore;
     try {
       store = storeFor(input);
@@ -626,7 +635,11 @@ export function makeAstGrepCodemod(
     // the plan's byte offsets were computed against THIS read — drift in
     // between would splice a stale plan silently. Digest now, re-verify
     // after the scan and BEFORE anything is written (dry-run included: a
-    // diff of drifted bytes would mislead the same way).
+    // diff of drifted bytes would mislead the same way). Residual, one
+    // sentence: a concurrent write landing between this final freshness read
+    // and store.writeBytes is still a lost update — a documented TOCTOU-class
+    // residual of the same accepted window the analysis store's header
+    // records for a single-consumer local tool.
     const digestBeforeScan = new Map(
       files.map((file) => [
         file,

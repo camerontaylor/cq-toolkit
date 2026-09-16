@@ -97,14 +97,19 @@ export interface AgenticRemediationInput {
   /** Which model to ask (plain data — a model string + provider handle, never an SDK object). */
   modelSpec: ModelSpec;
   /**
-   * Tool policy for the worker. DEFAULTS to mode 'none' — the worker
-   * proposes; it cannot touch the workspace. WIDENING beyond mode 'none' is
-   * an APPROVAL-GATED decision like every other write path in this family:
-   * a write-capable policy (tool mode ≠ 'none' OR sandbox level ≠
-   * 'read-only') is refused as `needs-human` unless {@link approved} is true.
+   * Tool policy for the worker. NORMALIZED: an absent policy — or a policy
+   * with the mode OMITTED (which the frozen seam would read as 'allowlist')
+   * — is carried into the invocation as mode 'none' EXPLICITLY, so the
+   * worker proposes and cannot touch the workspace. An EXPLICIT widen (any
+   * explicit mode beyond 'none') is APPROVAL-GATED: refused as `needs-human`
+   * unless {@link approved} is true.
    */
   toolPolicy?: ToolPolicy;
-  /** Sandbox preference. DEFAULTS to 'read-only'; widening is approval-gated (see {@link toolPolicy}). */
+  /**
+   * Sandbox preference. NORMALIZED: an absent policy or level is carried
+   * into the invocation as 'read-only' EXPLICITLY; widening beyond it is
+   * approval-gated (see {@link toolPolicy}).
+   */
   sandboxPolicy?: SandboxPolicy;
   /** Budget caps for the one invocation; the driver enforces what it can locally. */
   budget?: Budget;
@@ -173,19 +178,37 @@ export function makeAgenticRemediation(
         error: `agentic remediation: clusterId '${input.clusterId}' does not match cluster.id '${input.cluster.id}' — pass the cluster's own id`,
       };
     }
-    // WRITE-POLICY APPROVAL GATE: the read-only, tool-less defaults propose
-    // freely, but a caller WIDENING the invocation past them is a write-cap
-    // decision on this family's one budget — refused as `needs-human` unless
-    // the explicit approval flag rides the input (the same defense this
-    // family applies to the codemod path; "the caller widened it" is the
-    // decision, and the decision needs a human flag).
-    const effectiveToolMode = input.toolPolicy?.mode ?? 'none';
-    const effectiveSandbox = input.sandboxPolicy?.level ?? 'read-only';
-    const writeCapable = effectiveToolMode !== 'none' || effectiveSandbox !== 'read-only';
+    // POLICY NORMALIZATION (the gate's belief must be what actually
+    // executes): the FROZEN seam reads an OMITTED toolPolicy.mode as
+    // 'allowlist' (driver/types.ts — and the shipped SubprocessDriver
+    // enforces exactly that), so an input like { allow: ['Edit'] } with no
+    // mode would otherwise clear a 'none'-reading gate while executing WITH
+    // the Edit tool exposed. The op therefore NORMALIZES: an absent policy
+    // or absent mode becomes mode 'none' EXPLICITLY, and an absent sandbox
+    // level becomes 'read-only' EXPLICITLY — the invocation below carries
+    // the normalized objects, so the driver enforces precisely what this
+    // gate judged.
+    const toolPolicy: ToolPolicy = {
+      allow: input.toolPolicy?.allow ?? [],
+      mode: input.toolPolicy?.mode ?? 'none',
+    };
+    const sandboxPolicy: SandboxPolicy = {
+      level: input.sandboxPolicy?.level ?? 'read-only',
+    };
+    // WRITE-POLICY APPROVAL GATE: the normalized read-only, tool-less
+    // defaults propose freely, but a caller EXPLICITLY WIDENING the
+    // invocation past them (any explicit mode — allowlist reads as
+    // allowlist now that normalization removed the ambiguity — or
+    // unrestricted, or a sandbox beyond read-only) is a write-cap decision
+    // on this family's one budget — refused as `needs-human` unless the
+    // explicit approval flag rides the input (the same defense this family
+    // applies to the codemod path; "the caller widened it" is the decision,
+    // and the decision needs a human flag).
+    const writeCapable = toolPolicy.mode !== 'none' || sandboxPolicy.level !== 'read-only';
     if (writeCapable && input.approved !== true) {
       return {
         status: 'needs-human',
-        reason: `agentic remediation with a write-capable policy (tool mode '${effectiveToolMode}', sandbox '${effectiveSandbox}') is an approval-gated decision — pass approved: true, or keep the read-only defaults (tool mode 'none', sandbox 'read-only')`,
+        reason: `agentic remediation with a write-capable policy (tool mode '${toolPolicy.mode}', sandbox '${sandboxPolicy.level}') is an approval-gated decision — pass approved: true, or keep the read-only defaults (tool mode 'none', sandbox 'read-only')`,
       };
     }
     if (driver === undefined) {
@@ -198,8 +221,8 @@ export function makeAgenticRemediation(
     const invocation: OpInvocation = {
       prompt: agenticRemediationPrompt(input),
       modelSpec: input.modelSpec,
-      toolPolicy: input.toolPolicy ?? { allow: [], mode: 'none' },
-      sandboxPolicy: input.sandboxPolicy ?? { level: 'read-only' },
+      toolPolicy,
+      sandboxPolicy,
       ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
       budget: input.budget ?? {},
     };
