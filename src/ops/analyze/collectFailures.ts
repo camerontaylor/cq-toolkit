@@ -74,14 +74,14 @@ export function failureIdentity(failure: CheckFailure, tool: string): string {
 /**
  * Sort failures by their exact {@link failureIdentity} (UTF-16 code-unit
  * order on the identity strings) — the deterministic presentation order for
- * aggregated failures and cluster members. Non-mutating.
+ * aggregated failures and cluster members. Non-mutating. Decorate-sort-
+ * undecorate: each identity is built ONCE, not on every comparison.
  */
 export function sortByIdentity(failures: readonly CheckFailure[], tool: string): CheckFailure[] {
-  return [...failures].sort((a, b) => {
-    const ia = failureIdentity(a, tool);
-    const ib = failureIdentity(b, tool);
-    return ia < ib ? -1 : ia > ib ? 1 : 0;
-  });
+  return [...failures]
+    .map((failure) => ({ identity: failureIdentity(failure, tool), failure }))
+    .sort((a, b) => (a.identity < b.identity ? -1 : a.identity > b.identity ? 1 : 0))
+    .map((pair) => pair.failure);
 }
 
 /**

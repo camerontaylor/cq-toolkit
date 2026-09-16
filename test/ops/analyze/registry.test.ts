@@ -249,6 +249,49 @@ describe('the analyze boundary bounds tool/ruleId (ledger-domain alignment)', ()
     expect(issue?.message).toContain(String(COMPONENT_MAX_CHARS));
   });
 
+  test('a 201-char ruleId is rejected for collectFailures too (no collect→cluster gap)', () => {
+    expect(
+      CollectFailuresInputSchema.safeParse({
+        sets: [
+          {
+            tool: 'eslint',
+            failures: [
+              {
+                file: null,
+                line: null,
+                column: null,
+                ruleId: 'r'.repeat(COMPONENT_MAX_CHARS + 1),
+                message: 'm',
+                severity: 'error',
+              },
+            ],
+            exitCode: 1,
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      CollectFailuresInputSchema.safeParse({
+        sets: [
+          {
+            tool: 'eslint',
+            failures: [
+              {
+                file: null,
+                line: null,
+                column: null,
+                ruleId: 'r'.repeat(COMPONENT_MAX_CHARS),
+                message: 'm',
+                severity: 'error',
+              },
+            ],
+            exitCode: 1,
+          },
+        ],
+      }).success,
+    ).toBe(true);
+  });
+
   test('the bound is LOCAL to analyze: the gates FailureSetSchema still accepts an over-bound tool', () => {
     expect(
       FailureSetSchema.safeParse({

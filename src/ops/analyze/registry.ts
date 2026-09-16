@@ -9,12 +9,11 @@
 // the ops may not.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
-// Reused from the gates family's shared spot: CheckFailure crosses the
-// boundary exactly as `gates.checkRunner` produced it, so the analyze input
-// schemas can never drift from the upstream shape (the same one-source
-// argument the gates registry makes for its own consumers).
-import { CheckFailureSchema } from '../gates/registry.js';
-import type { FailureSet } from '../gates/checkRunner.js';
+// The gates family's shared spot defines the upstream failure shape; the
+// analyze boundary re-mirrors it LOCALLY with one ledger-domain bound added
+// (see AnalyzeCheckFailureSchema), so a collect→cluster chain can never
+// pass a failure the cluster boundary would reject.
+import type { CheckFailure, FailureSet } from '../gates/checkRunner.js';
 // Runtime import of the ledger's field-bound constants — pulled from ONE
 // definition (the ledger record boundary) so a parse here rejects exactly
 // what a record could produce. Safe at module scope: the pure ledger
@@ -29,46 +28,53 @@ import type { ClusterErrorsInput } from './clusterErrors.js';
 import type { CollectFailuresInput } from './collectFailures.js';
 
 /**
+ * The gates' shared CheckFailureSchema shape with ONE local bound added:
+ * ruleId is capped at the ledger component bound (it is part of the cluster
+ * signature's fixed overhead). Shared by BOTH analyze ops so a
+ * collect→cluster chain can never pass a ruleId the cluster boundary would
+ * reject (round-3 review); the gates' schema itself stays untouched, and
+ * the z.ZodType<CheckFailure> annotation pins the mirror to the frozen
+ * type at compile time, so a shape drift fails typecheck.
+ */
+const AnalyzeCheckFailureSchema: z.ZodType<CheckFailure> = z
+  .object({
+    file: z.string().nullable(),
+    line: z.number().nullable(),
+    column: z.number().nullable(),
+    ruleId: z.string().max(COMPONENT_MAX_CHARS).nullable(),
+    message: z.string(),
+    severity: z.enum(['error', 'warning']),
+  })
+  .strict();
+
+/**
  * LOCAL tightening of the reused gates FailureSet shape for the analyze ops:
  * `tool` is bounded to the ledger's COMPONENT_MAX_CHARS — ledger-domain
- * alignment, so the fixed JSON overhead of a canonical cluster signature
- * (tool + ruleId + template) always fits SIGNATURE_MAX_CHARS and
- * clusterSignature's template-truncation loop always converges for
- * op-dispatched input; the over-bound residual is unreachable through the
- * op boundary. The gates' shared schema itself stays untouched, and the
- * failure shape is still the gates' ONE definition (CheckFailureSchema).
+ * alignment that massively shrinks clusterSignature's over-bound class.
+ * Honest limit: the bound caps RAW length, but JSON escaping can still
+ * inflate a bound-respecting overhead past SIGNATURE_MAX_CHARS, in which
+ * case clusterSignature returns its over-bound signature deterministically
+ * and the ledger record boundary rejects it — no suppression for that
+ * pathological row, never wrong suppression. The gates' shared schema
+ * itself stays untouched.
  */
 const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
     tool: z.string().max(COMPONENT_MAX_CHARS),
-    failures: z.array(CheckFailureSchema),
+    failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
   })
   .strict();
 
 /**
- * The clusterErrors variant additionally bounds EACH failure's ruleId to
- * the ledger component bound (ruleId is part of the cluster signature's
- * fixed overhead). Mirrors the gates' shared CheckFailureSchema shape with
- * that one bound added; the z.ZodType<FailureSet> annotation pins the
- * mirror to the frozen type at compile time, so a shape drift fails
- * typecheck.
+ * The clusterErrors variant: the same tightening (tool and each failure's
+ * ruleId bounded — ruleId is part of the cluster signature's fixed
+ * overhead), pinned to the frozen FailureSet type.
  */
 const ClusterFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
     tool: z.string().max(COMPONENT_MAX_CHARS),
-    failures: z.array(
-      z
-        .object({
-          file: z.string().nullable(),
-          line: z.number().nullable(),
-          column: z.number().nullable(),
-          ruleId: z.string().max(COMPONENT_MAX_CHARS).nullable(),
-          message: z.string(),
-          severity: z.enum(['error', 'warning']),
-        })
-        .strict(),
-    ),
+    failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
   })
   .strict();

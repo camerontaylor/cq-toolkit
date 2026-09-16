@@ -15,7 +15,7 @@ import {
   messageTemplate,
 } from '../../../src/ops/analyze/clusterErrors.js';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
-import { SIGNATURE_MAX_CHARS } from '../../../src/ops/ledger/ledger.js';
+import { COMPONENT_MAX_CHARS, SIGNATURE_MAX_CHARS } from '../../../src/ops/ledger/ledger.js';
 import type { LedgerView } from '../../../src/ops/ledger/index.js';
 import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
 
@@ -132,6 +132,23 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
     expect(withFoo).toBe(withBar);
   });
 
+  test("Unicode letters count as word chars for the opener boundary (café's)", () => {
+    // \w is ASCII-only: é is a Unicode letter but not \w, so under an ASCII
+    // lookbehind the apostrophe after café OPENS a span and pairs with the
+    // LATER quoted word — an over-split. The Unicode-aware boundary keeps
+    // the span at 'foo'.
+    expect(messageTemplate("café's setting rejects 'foo'")).toBe("café's setting rejects <str>");
+    const withFoo = clusterSignature(
+      failureOf({ message: "café's setting rejects 'foo'" }),
+      'eslint',
+    );
+    const withBar = clusterSignature(
+      failureOf({ message: "café's setting rejects 'bar'" }),
+      'eslint',
+    );
+    expect(withFoo).toBe(withBar);
+  });
+
   test('pathological tokens normalize with correct output (token-wise scan, unbounded messages)', () => {
     const longToken = 'a'.repeat(200_000);
     // With a separator: the whole maximal non-space run is one <path>.
@@ -173,6 +190,32 @@ describe('clusterSignature (the ledger-matching form)', () => {
     // …and the DOCUMENTED coarseness: messages differing only after the
     // truncation point sign ONE signature (accepted prefix-collision class).
     expect(clusterSignature(failureOf({ message: `${long}suffix` }), 'eslint')).toBe(signature);
+  });
+
+  test('escape inflation near the cut exercises the MULTI-iteration truncation path', () => {
+    // One raw double quote sits INSIDE the first budget window, so the
+    // first cut escapes it (+1 JSON unit) and overflows the bound by one —
+    // the loop must shrink the budget and cut again. Both calls agree
+    // (determinism) and terminate UNDER the bound.
+    const message = `${'x'.repeat(450)}"${'x'.repeat(5000)}`;
+    const signature = clusterSignature(failureOf({ message }), 'eslint');
+    expect(signature.length).toBeLessThanOrEqual(SIGNATURE_MAX_CHARS);
+    expect(clusterSignature(failureOf({ message }), 'eslint')).toBe(signature);
+    // Truncation actually happened (the marker is present).
+    expect(signature).toContain('…');
+  });
+
+  test('escape-inflated overhead: the honest over-bound residual, deterministic and terminating', () => {
+    // Schema-valid raw lengths (200 ≤ COMPONENT_MAX_CHARS each) whose JSON
+    // escaping inflates the fixed overhead past SIGNATURE_MAX_CHARS: the
+    // budget bottoms out and the loop returns the over-bound signature
+    // deterministically — the ledger record boundary then rejects it, so
+    // the fail direction is no suppression, never wrong suppression.
+    const quoted = '"'.repeat(COMPONENT_MAX_CHARS);
+    const failure = failureOf({ ruleId: quoted, message: 'x'.repeat(5000) });
+    const signature = clusterSignature(failure, quoted);
+    expect(signature.length).toBeGreaterThan(SIGNATURE_MAX_CHARS);
+    expect(clusterSignature(failure, quoted)).toBe(signature);
   });
 });
 

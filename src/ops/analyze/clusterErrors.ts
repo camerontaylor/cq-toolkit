@@ -17,8 +17,9 @@
 //     compact stable handle.
 //   - Template normalization is EXACTLY this pipeline, in this order:
 //       1. quoted spans ('…', "…", `…`)          → <str> — an OPENING
-//          delimiter must not be preceded by a word char, so a contraction
-//          ("doesn't") or a possessive ("Users'") can never open a span
+//          delimiter must not be preceded by a Unicode letter, number, or
+//          underscore, so a contraction ("doesn't") or a possessive
+//          ("Users'") can never open a span
 //       2. non-space runs containing / or \      → <path>  (posix + windows paths, URLs)
 //       3. numbers (optional decimal part)       → <num>   (counts, line:col refs)
 //       4. whitespace runs collapsed, trimmed
@@ -29,10 +30,11 @@
 //     to <path>, and a message LITERALLY containing '<num>' could collide
 //     with an abstracted digit — an accepted placeholder-collision class,
 //     harmless to grouping-by-shape and impossible to hit without a same-rule
-//     near-twin message. A quote abutting word chars on BOTH sides
-//     (said'foo') can never open a span, so such content stays literal —
-//     an accepted over-split class; an UNPAIRED quote also passes through
-//     conservatively.
+//     near-twin message. A <path> token includes adjacent non-space
+//     punctuation, so trailing separators are abstracted with the path. A
+//     quote abutting Unicode word chars on BOTH sides (said'foo') can never
+//     open a span, so such content stays literal — an accepted over-split
+//     class; an UNPAIRED quote also passes through conservatively.
 //   - Confidence honesty: a cluster of ≥ 2 members agreeing on the exact
 //     signature is 'high'; a singleton is 'low' — one sample cannot
 //     distinguish signal from noise, and v1 NEVER merges clusters (so a
@@ -92,15 +94,17 @@ export function messageTemplate(message: string): string {
 
 /**
  * Quoted spans of all three JS quote styles, non-greedy within one pair.
- * The OPENER is boundary-aware: it must NOT be preceded by a word char, so
- * a straight apostrophe inside a word — a contraction ("doesn't") or a
- * possessive ("Users'") — can never open a span and pair with a LATER
- * opening quote (which would make the template depend on text after the
- * apostrophe: an over-split signature contract violation). A quote abutting
+ * The OPENER is boundary-aware: it must NOT be preceded by a Unicode
+ * letter, number, or underscore, so a straight apostrophe inside a word —
+ * a contraction ("doesn't"), a possessive ("Users'"), or after a non-ASCII
+ * letter ("café's") — can never open a span and pair with a LATER opening
+ * quote (which would make the template depend on text after the apostrophe:
+ * an over-split signature contract violation). A quote abutting Unicode
  * word chars on BOTH sides can therefore never open: such content stays
  * literal, and an unpaired quote passes through conservatively.
  */
-const QUOTED_SPAN = /(?<!\w)'[^']*'|(?<!\w)"[^"]*"|(?<!\w)`[^`]*`/g;
+const QUOTED_SPAN =
+  /(?<![\p{L}\p{N}_])'[^']*'|(?<![\p{L}\p{N}_])"[^"]*"|(?<![\p{L}\p{N}_])`[^`]*`/gu;
 
 /** Numbers with an optional decimal part (codes, counts, line:col refs). */
 const NUMBER_LIKE = /\d+(?:\.\d+)?/g;
@@ -127,18 +131,18 @@ export function clusterSignature(failure: CheckFailure, tool: string): string {
   }
   // The template is the only unbounded component: cut it until the
   // canonical form fits. The budget starts at the fixed overhead's share
-  // and shrinks by the observed overage — an escaped character (a
-  // surviving double quote or backslash, say) costs more than one code
-  // unit, so a raw cut of exactly the overage can still overflow; the loop
-  // terminates because every removed character contributes at least one
-  // code unit.
-  // Reachability of the residual: the analyze registry bounds tool and
-  // ruleId to the ledger's COMPONENT_MAX_CHARS, so for op-dispatched input
-  // the fixed JSON overhead always leaves a positive template budget and
-  // this loop always converges under the bound. An over-bound signature is
-  // only possible for a direct library call that bypasses that bound — such
-  // a signature stays over-bound and cannot pass the ledger record
-  // boundary.
+  // and shrinks by the observed overage — an escaped character (a double
+  // quote or backslash, say) costs more than one code unit, so a raw cut
+  // of exactly the overage can still overflow; the loop terminates because
+  // every removed character contributes at least one code unit.
+  // Honest residual: the registry bounds tool/ruleId by RAW length
+  // (COMPONENT_MAX_CHARS), but JSON ESCAPING can inflate even a bound-
+  // respecting overhead past SIGNATURE_MAX_CHARS (a tool of 200 double-
+  // quote characters serializes to ~400 units) — the budget then bottoms
+  // out at zero and the loop RETURNS AN OVER-BOUND SIGNATURE,
+  // deterministically and without hanging. The fail direction is safe: the
+  // ledger record boundary rejects an over-bound signature, so that
+  // pathological row gets NO suppression — never wrong suppression.
   let budget =
     SIGNATURE_MAX_CHARS -
     JSON.stringify([tool, failure.ruleId, '']).length -
