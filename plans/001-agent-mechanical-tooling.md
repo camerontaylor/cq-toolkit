@@ -1,6 +1,6 @@
 # Mechanical tooling for agent-authored changes
 
-Status: planning consensus reached with Opus (max reasoning), 2026-09-16. Planning only. This document authorizes neither implementation nor the compatibility preflight; both remain outstanding.
+Status: implementation authorized by the user and completed across the six units, 2026-09-16. Evidence and deviations are recorded in `lint/README.md`. No PR has been opened; required pre-PR CodeRabbit cycles remain a separate obligation.
 
 ## Objective
 
@@ -177,3 +177,31 @@ Paseo agent `891e4e11-ec1d-4927-bb14-05602288051e`, model `claude-opus-5`, think
 - Round 3: approved integrated Oxlint typechecking as the ratchet's producer, requiring the build-divergence policy and declaration-comparison evidence. Both are incorporated, with the explicit preflight go/no-go and the single-CI-gate check.
 
 Consensus: one Oxlint-backed compiler-and-lint gate, the zero baseline and fail-closed contract preserved, TS7 for builds, and separate compiler checking only for a demonstrated gap. This approves the plan, not unperformed tests, code changes or a merge-ready claim.
+
+## Implementation record
+
+- Formatting, syntactic Oxlint conversion, Node 24 declarations, native TS7,
+  stricter compiler flags, typed lint/agent commands and calibrated Knip are
+  implemented in separate commits; formatting has its own mechanical commit.
+- The real integrated-checker fixture demonstrated omitted tsconfig inputs.
+  Applied the explicitly authorized fallback: direct TS7 compiler ratchet plus
+  typed Oxlint in one wrapper. The baseline remains zero. Gate and build use
+  TS7; no legacy compiler lane remains.
+- Fast mode opts into neither typed flag because this pinned CLI cannot negate
+  `--type-aware` with `=false`. Real diagnostic pairs and a failing checker shim
+  establish the mode separation without duplicating rule policy.
+- Exact optional schemas intentionally reject explicit undefined where SDK
+  interfaces require absence. JSON inputs are unchanged. Declaration differences
+  include `ZodExactOptional` in kernel and ledger schemas and async cancellation
+  return types in `JobCancelPort`; other observed barrel changes are formatting.
+- `no-unnecessary-condition` stays off after classifying the report; trust-boundary
+  and callback-state checks are retained. Narrow public-adapter preservation
+  exceptions and test matcher boundaries are documented in the local policy.
+- CI's static job runs static, format, test, Knip and build once each; its name
+  and triggers, companion smoke job, denylist and packaging workflows remain.
+- Architecture corpus, real CLI fixtures, fail-closed ratchet tests, typed/fast
+  fixtures, owned-file command tests and the unwired-file Knip fixture provide
+  enforcement evidence. Same-machine timing is recorded in `lint/README.md`.
+- Actionlint remains the separate follow-up specified above. These commits are
+  implementation evidence, not a claim of completed CodeRabbit review or merge
+  readiness; the two-cycle protocol applies before any PR.

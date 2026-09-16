@@ -36,6 +36,8 @@ jobs:
         run: npm run format:check
       - name: Test
         run: npm run test
+      - name: Check unused files and dependencies
+        run: npm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
       # emits dist/ and recompiles (checked emit, no --noCheck) — the
       # deliberate, boring-safe choice.

@@ -11,6 +11,7 @@ the toolkit's own quality gates run on the toolkit itself.
   `npm run lint` and `npm run typecheck` are aliases (run only one)
 - `npm run format:check`
 - `npm run test`
+- `npm run knip`
 
 CI additionally runs the build, the from-source smoke plan, and the
 denylist scan + self-test. Never alter source or baselines to hide a
@@ -21,7 +22,7 @@ failure; baselines only tighten (doctrine I5).
 Use `npm run lint:fast -- <owned-file...>` for syntactic feedback and
 `npm run fix -- <owned-file...>` for safe lint fixes, formatting and the full
 static gate. Lists must be explicit; never format the repository per turn.
-`npm run check` runs formatting checks, the static gate once and tests.
+`npm run check` runs formatting checks, the static gate once, tests and Knip.
 Changed-file lint does not establish correctness of dependents.
 
 ## Code review — mandatory before every PR

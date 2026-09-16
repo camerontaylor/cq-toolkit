@@ -16,7 +16,7 @@ for tool pins, architecture conformance and the integrated-checker fallback.
 
 ### Mechanical checks
 
-Use `npm run check` for read-only formatting, static checks and tests. `lint` and
+Use `npm run check` for read-only formatting, static checks, tests and Knip. `lint` and
 `typecheck` are compatibility aliases of `check:static`; run only one.
 For an inner loop, pass explicit owned files to `npm run lint:fast -- <file...>`
 or `npm run fix -- <file...>`. The latter applies safe lint fixes and formatting,

@@ -177,7 +177,69 @@ mode and untouched by fast mode (POSIX fixture; Windows not exercised locally).
 `fix -- <file...>` validates the complete list before writes, runs safe Oxlint
 `--fix` (no suggestions/dangerous fixes), formats the same files with Oxfmt,
 then runs the whole static gate. Paths are argv entries, never shell fragments;
-spaces and metacharacters remain literal. Empty lists, directories, symlinks,
+spaces and metacharacters remain literal. Empty lists, directories, file symlinks,
 repository escapes and tooling metadata are rejected; deleted files are skipped.
 An all-deleted fix still checks the package. Checks never format tracked files.
-`check` runs format, the static gate once, and tests; CI uses the same scripts.
+`check` runs format, the static gate once, tests and Knip; CI uses the same scripts.
+
+## Calibrated unused-code gate
+
+Knip 6.35.1 checks files, dependencies, unlisted dependencies and unresolved
+imports; export analysis is intentionally not gated. The SDK barrel and CLI are
+entries, as are the documented registry type seam, discovered operation
+registries, operator scripts and dynamically loaded CLI test fixtures. The
+selection helper's companion declaration is an explicit entry. Knip's built-in
+Vitest and Oxlint integrations discover test/config entries and the lint plugin;
+we avoid redundant patterns that could hide an unwired source file.
+
+The only ignored dependency is the optional Claude Agent SDK peer: the driver
+loads it through a constant module specifier at runtime. Removed `@ast-grep/napi`
+after confirming no source imports or executable consumers. Declared the tests'
+direct `@ai-sdk/provider` type dependency instead of relying on a transitive
+installation. A real isolated fixture fails for an unreferenced source file and
+passes after the SDK imports it.
+
+Local `check` runs format, static, tests and Knip once each. CI's existing static
+job runs the same scripts plus build. The from-source companion owns its build
+and smoke; the denylist and package-audit workflows retain their scan, self-test
+and packaging checks. Required job names and unfiltered triggers are unchanged.
+
+### Local timing sample
+
+Same macOS machine, Node 24.21.0, original revision
+`85dc1ebf1a580ee2bdda1d63ddb873b85ca4b12a` installed with `npm ci` in a disposable
+copy. One first run and three subsequent runs, sequentially with no test suite
+running. Times are seconds; the first run is not a controlled cold-cache result.
+
+| Command                                          |  First | Subsequent median |
+| ------------------------------------------------ | -----: | ----------------: |
+| Before: ratchet script then `npm run lint`       | 10.546 |             8.962 |
+| After: ratchet script (compiler plus typed lint) |  1.866 |             1.901 |
+| Before: ESLint on `src/kernel/schema.ts`         |  1.046 |             0.760 |
+| After: fast-lint script on the same file         |  0.249 |             0.256 |
+
+The full gate now checks a broader policy, so these are workflow measurements,
+not an engine-only benchmark or a general performance guarantee. Build, tests,
+formatting and Knip are excluded from this static-gate comparison.
+
+## Final validation (2026-09-16)
+
+After a fresh `npm ci`: static gate (zero type baseline), formatting and Knip
+passed. The full suite with `--maxWorkers 1` passed 1,389 tests in 55 files
+(four skipped, one todo); build, the external strict NodeNext declaration
+consumer and the governed from-source smoke also passed. The instantiated CI
+matches the canonical template byte-for-byte after token substitution.
+
+The default-concurrency `npm run check` did not pass on this machine: five
+existing timing-sensitive tests failed (ACP timeout, subprocess session timeout,
+SIGTERM/SIGKILL startup race, missing grandchild PID after the one-second startup
+budget, and review pagination timeout). The serial run passes those same
+assertions. No timeout, assertion or type baseline was weakened to mask them.
+
+The tracked candidate passes the nine-class denylist and all 13 self-tests.
+The 157-file package tarball passes its path allowlist and denylist scan with
+build-output exemptions disabled.
+The working-tree scan still rejects the pre-existing ignored ACP sandbox file
+under the agent scratch directory. That local state was not deleted or
+allowlisted. This is not an all-gates-green or ready-to-merge claim. Required
+CodeRabbit review cycles remain outstanding before a PR; none was opened.

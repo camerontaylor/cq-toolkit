@@ -31,9 +31,9 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job, plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the four command steps below are this repo's
+instantiation tokens; the five command steps below are this repo's
 `{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
-format check, test, build. This repo's `.github/workflows/ci.yml` IS this template
+format check, test, Knip, build. This repo's `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
 The `from-source` companion job below mirrors ci.yml's second job exactly
@@ -78,6 +78,8 @@ jobs:
         run: npm run format:check
       - name: Test
         run: npm run test
+      - name: Check unused files and dependencies
+        run: npm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
       # emits dist/ and recompiles (checked emit, no --noCheck) — the
       # deliberate, boring-safe choice.
