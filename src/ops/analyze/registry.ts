@@ -1,14 +1,25 @@
-// Analyze lane G1 — registry slice: the `analyze.collectFailures` and
-// `analyze.clusterErrors` op entries, typed against the FROZEN
-// OpRegistryEntry (src/kernel/types.ts). Both importers resolve through
-// DYNAMIC imports, so loading the registry never loads an op module: module
-// scope imports only zod, the ledger bound constants, and types (the
-// type-only imports are erased at compile time) — the gates registry's
-// lazy-import pattern. The zod schemas are registry-time mirrors of the
-// lane's inputs and live HERE because `inputSchema` must exist eagerly while
-// the ops may not.
+// Analyze lane G1+G2+G3 — registry slice: the `analyze.collectFailures`,
+// `analyze.clusterErrors`, `analyze.renderAnalysisReport`,
+// `analyze.astGrepCodemod`, `analyze.agenticRemediation`, and
+// `analyze.applyRemediation` op entries,
+// typed against the FROZEN OpRegistryEntry (src/kernel/types.ts). All
+// importers resolve through DYNAMIC imports, so loading the registry never
+// loads an op module: module scope imports only zod, the ledger bound
+// constants, and types (the type-only imports are erased at compile time) —
+// the gates registry's lazy-import pattern. The zod schemas are registry-
+// time mirrors of the lane's inputs and live HERE because `inputSchema`
+// must exist eagerly while the ops may not.
+import { dirname } from 'node:path';
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
+// The kernel's zod mirrors of the FROZEN driver-seam types (pure module:
+// zod + types only) — one definition, never re-mirrored here.
+import {
+  BudgetSchema,
+  ModelSpecSchema,
+  SandboxPolicySchema,
+  ToolPolicySchema,
+} from '../../kernel/schema.js';
 // The gates family's shared spot defines the upstream failure shape; the
 // analyze boundary re-mirrors it LOCALLY with one ledger-domain bound added
 // (see AnalyzeCheckFailureSchema), so a collect→cluster chain can never
@@ -24,8 +35,12 @@ import { COMPONENT_MAX_CHARS, NOTE_MAX_CHARS, SIGNATURE_MAX_CHARS } from '../led
 // discipline).
 import type { LedgerEntry } from '../ledger/store.js';
 import type { LedgerView } from '../ledger/ledger.js';
-import type { ClusterErrorsInput } from './clusterErrors.js';
+import type { Cluster, ClusterErrorsInput, ClusterErrorsReport } from './clusterErrors.js';
 import type { CollectFailuresInput } from './collectFailures.js';
+import type { AgenticRemediationInput } from './agenticRemediation.js';
+import type { ApplyRemediationInput } from './applyRemediation.js';
+import type { AstGrepCodemodInput } from './codemod/astGrep.js';
+import type { RenderAnalysisReportInput } from './renderAnalysisReport.js';
 
 /**
  * ENCODED-size cap for the identifiers that flow into the cluster
@@ -161,6 +176,116 @@ export const ClusterErrorsInputSchema: z.ZodType<ClusterErrorsInput> = z
   })
   .strict();
 
+/**
+ * Registry-time mirror of the G1 {@link Cluster} with the SAME identifier
+ * tightening the signatures carry (tool and ruleId encoded-bounded): a
+ * report that enters any analyze op through this boundary can only hold
+ * clusters the clusterErrors boundary could have produced, so the
+ * render→apply chain never sees identifiers outside the family's bound.
+ * The `z.ZodType<Cluster>` annotation pins the mirror to the frozen family
+ * type at compile time.
+ */
+const AnalyzeClusterSchema: z.ZodType<Cluster> = z
+  .object({
+    id: z.string().regex(/^[0-9a-f]{8}$/, 'expected 8 lowercase hex digits (the FNV-1a 32-bit id)'),
+    signature: z.string().min(1).max(SIGNATURE_MAX_CHARS),
+    tool: EncodedBoundedIdentifier,
+    ruleId: EncodedBoundedIdentifier.nullable(),
+    confidence: z.enum(['high', 'medium', 'low']),
+    failures: z.array(AnalyzeCheckFailureSchema),
+    size: z.number().int().min(1),
+  })
+  .strict()
+  // clusterErrors always sets size to the member count; a report that
+  // disagrees can never have come from the family, so the boundary rejects
+  // it instead of letting downstream planned-edit counts ride a lie.
+  .refine((cluster) => cluster.size === cluster.failures.length, {
+    message: 'size must equal failures.length',
+  });
+
+/**
+ * Registry-time mirror of the G1 {@link ClusterErrorsReport}: the full
+ * report, and only it — the shape both `analyze.renderAnalysisReport` and
+ * (as embedded sidecar payload) `analyze.applyRemediation` accept.
+ */
+export const AnalyzeReportSchema: z.ZodType<ClusterErrorsReport> = z
+  .object({
+    clusters: z.array(AnalyzeClusterSchema),
+    noise: z.array(AnalyzeCheckFailureSchema),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link RenderAnalysisReportInput}: the full input,
+ * and only it. `dir` is required and non-empty — the op wraps an EXISTING
+ * directory (the store refuses a missing root) and derives both output file
+ * names from the report fingerprint, so there is no path knob to misaim.
+ */
+export const RenderAnalysisReportInputSchema: z.ZodType<RenderAnalysisReportInput> = z
+  .object({
+    report: AnalyzeReportSchema,
+    dir: z.string().min(1),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link AgenticRemediationInput}: the full input,
+ * and only it — the cluster mirror is the SAME {@link AnalyzeClusterSchema}
+ * the report input accepts (one definition across the family chain), and
+ * the driver-seam policy objects ride the kernel schema mirrors of the
+ * FROZEN types. Strict: an unknown key must fail loudly.
+ */
+export const AgenticRemediationInputSchema: z.ZodType<AgenticRemediationInput> = z
+  .object({
+    clusterId: z.string().min(1),
+    cluster: AnalyzeClusterSchema,
+    modelSpec: ModelSpecSchema,
+    toolPolicy: ToolPolicySchema.exactOptional(),
+    sandboxPolicy: SandboxPolicySchema.exactOptional(),
+    budget: BudgetSchema.exactOptional(),
+    sessionRef: z.string().min(1).exactOptional(),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link AstGrepCodemodInput}: the full input, and
+ * only it. `files` requires at least one entry — an unscoped scan would
+ * sweep everything under `dir`, which is exactly the blast radius the
+ * approval gate exists to bound. `timeoutMs` defaults to 600_000 at this
+ * boundary (the gates' op-boundary precedent, a zod `.default`, not a
+ * minimum). `rule` must be non-empty: an empty rule text is a malformed
+ * invocation, not a scan that matches nothing.
+ */
+export const AstGrepCodemodInputSchema: z.ZodType<AstGrepCodemodInput> = z
+  .object({
+    dir: z.string().min(1),
+    rule: z.string().min(1),
+    files: z.array(z.string().min(1)).min(1),
+    dryRun: z.boolean(),
+    approved: z.boolean().exactOptional(),
+    timeoutMs: z.number().int().positive().default(600_000),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link ApplyRemediationInput}: the full input, and
+ * only it. `clusterId` and `approved` are OPTIONAL at the boundary — their
+ * ABSENCE is the `needs-human` refusal's whole point (UC §1 row 9: the op
+ * must refuse when the human decision is missing, not reject the input as
+ * malformed). `dir` defaults to the sidecar's directory in the op binding.
+ */
+export const ApplyRemediationInputSchema: z.ZodType<ApplyRemediationInput> = z
+  .object({
+    sidecarPath: z.string().min(1),
+    dir: z.string().min(1).exactOptional(),
+    clusterId: z.string().min(1).exactOptional(),
+    approved: z.boolean().exactOptional(),
+    rule: z.string().min(1),
+    dryRun: z.boolean(),
+    timeoutMs: z.number().int().positive().default(600_000),
+  })
+  .strict();
+
 /** Analyze-lane op registry (G1: failure-set aggregation; signature clustering). */
 export const registry: OpRegistryEntry[] = [
   {
@@ -178,5 +303,74 @@ export const registry: OpRegistryEntry[] = [
     // Pure decision op — no injected wiring; the `.default` resolution is
     // the documented family-registry seam (src/ops/README.md).
     importer: () => import('./clusterErrors.js').then((m) => m.default as Op<unknown, unknown>),
+  },
+  {
+    name: 'analyze.renderAnalysisReport',
+    inputSchema: RenderAnalysisReportInputSchema,
+    // The store is composed at the importer (the ledger registry's
+    // input-driven binding): the containment-checked path store over the
+    // input's `dir`. No op wiring exists at registry module scope.
+    importer: () =>
+      Promise.all([import('./renderAnalysisReport.js'), import('./analysisStore.js')]).then(
+        ([m, s]) =>
+          m.makeRenderAnalysisReport((input) => s.pathAnalysisFileStore(input.dir)) as Op<
+            unknown,
+            unknown
+          >,
+      ),
+  },
+  {
+    name: 'analyze.astGrepCodemod',
+    inputSchema: AstGrepCodemodInputSchema,
+    // The gates' subprocess runner + the path store over `dir`, composed at
+    // the importer — no ast-grep dependency, no shipped rules: the rule
+    // rides the input verbatim.
+    importer: () =>
+      Promise.all([
+        import('./codemod/astGrep.js'),
+        import('./analysisStore.js'),
+        import('../gates/checkRunner.js'),
+      ]).then(
+        ([m, s, runner]) =>
+          m.makeAstGrepCodemod(runner.subprocessRunCheck, (input) =>
+            s.pathAnalysisFileStore(input.dir),
+          ) as Op<unknown, unknown>,
+      ),
+  },
+  {
+    name: 'analyze.agenticRemediation',
+    inputSchema: AgenticRemediationInputSchema,
+    // The subprocess driver (the null-hypothesis floor lane) is composed at
+    // the importer — construction spawns nothing; a run is one fresh
+    // invocation (I6). The op returns the driver's WorkerResult and NEVER
+    // applies anything itself; its consumer decides outside the autonomous
+    // path.
+    importer: () =>
+      Promise.all([
+        import('./agenticRemediation.js'),
+        import('../../driver/subprocess/index.js'),
+      ]).then(
+        ([m, d]) => m.makeAgenticRemediation(new d.SubprocessDriver()) as Op<unknown, unknown>,
+      ),
+  },
+  {
+    name: 'analyze.applyRemediation',
+    inputSchema: ApplyRemediationInputSchema,
+    // The runner + the store with `dir` defaulted to the sidecar's
+    // directory, composed at the importer. NEVER dispatched by the plan
+    // runner's autonomous path: without { clusterId, approved: true } the
+    // op refuses as needs-human (UC §1 row 9).
+    importer: () =>
+      Promise.all([
+        import('./applyRemediation.js'),
+        import('./analysisStore.js'),
+        import('../gates/checkRunner.js'),
+      ]).then(
+        ([m, s, runner]) =>
+          m.makeApplyRemediation(
+            (input) => s.pathAnalysisFileStore(input.dir ?? dirname(input.sidecarPath)),
+            runner.subprocessRunCheck,
+          ) as Op<unknown, unknown>,
+      ),
   },
 ];
