@@ -5,8 +5,8 @@
 // git/gh mutation the executor can perform lives behind ONE interface,
 // MergeEffects — and `executeMerges` takes an instance as INPUT. A test
 // therefore exercises the whole merge flow through a FakeMergeEffects that
-// implements six async methods in memory: ZERO real git/gh processes, zero
-// networks, zero filesystems. The production implementation
+// implements seven async methods in memory: ZERO real git/gh processes,
+// zero networks, zero filesystems. The production implementation
 // (realMergeEffects) is just one more implementor of the same interface.
 //
 // I3 — MERGE COMMITS ONLY. The executor may never squash, force, rebase,
@@ -151,6 +151,13 @@ export interface MergeEffects {
    * argv regardless). Resolves with the exit code; executeMerges reads
    * `stderr` to decide bounded-retry eligibility. */
   mergePr(pr: number, opts: { method: 'merge' }): Promise<GhResult>;
+  /** Retarget PR `pr` onto `newBase` — the forge base-edit operation
+   * (`gh pr edit <pr> --base <newBase>` in the real implementation). This
+   * is the retarget-self action's WHOLE body: forge metadata, so it never
+   * touches a worktree, never pushes a ref (the read-only
+   * `refs/pull/<n>/head` is unpushable — the CR1 regression is pinned by
+   * test), and never merges (I3). Resolves with the exit code. */
+  retargetBase(pr: number, newBase: string): Promise<GhResult>;
   /** Push `ref` from the worktree at `fromPath`. Resolves with the exit
    * code; safeArgs refuses any push whose destination is the base branch
    * before the process level is ever reached. */
@@ -191,6 +198,9 @@ export interface RealMergeEffectsOpts {
  *   - worktreeRemove:  `git -C <root> worktree remove <path>` (no --force —
  *                   a refusing tree stays and throws)
  *   - mergePr:      `gh pr merge <pr> --merge`
+ *   - retargetBase: `gh pr edit <pr> --base <newBase>` (--base is not a
+ *                   forbidden token — the guard rejects squash / force /
+ *                   rebase / --hard / push-to-main only)
  *   - pushRef:      `git -C <fromPath> push origin <ref>`
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
@@ -249,8 +259,11 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const mergePr = (pr: number, method: { method: 'merge' }): Promise<GhResult> =>
     gh(['pr', 'merge', String(pr), `--${method.method}`]);
 
+  const retargetBase = (pr: number, newBase: string): Promise<GhResult> =>
+    gh(['pr', 'edit', String(pr), '--base', newBase]);
+
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
     git(['-C', fromPath, 'push', 'origin', ref]);
 
-  return { validateRef, fetchRef, worktreePrepare, worktreeRemove, mergePr, pushRef };
+  return { validateRef, fetchRef, worktreePrepare, worktreeRemove, mergePr, retargetBase, pushRef };
 }

@@ -1,12 +1,15 @@
 // executeMerges — the F2 plan's executor (goal F3, ws-f scope item 3;
 // UC §3 row 43). The plan is the ONLY source of actions: exactly the
-// entries in `plan.order` are acted on — 'merge' entries merge, 'retarget-
-// self' entries push their head ref — and `plan.needsHuman` entries are
-// NEVER executed (I2 carries through execution: a PR a human owes is not
-// merged by a machine). The executor is pure orchestration: every git/gh
-// mutation rides the injected MergeEffects seam (see ./effects.js — UC row
-// 43's load-bearing point: the whole flow is testable with ZERO real
-// git/gh), so this module contains no transport, no spawning, no fs.
+// entries in `plan.order` are acted on — 'merge' entries merge through a
+// prepared worktree, 'retarget-self' entries are retargeted onto the
+// plan's base branch by a FORGE BASE EDIT (retargetBase; a retarget never
+// touches a worktree and never pushes a ref) — and `plan.needsHuman`
+// entries are NEVER executed (I2 carries through execution: a PR a human
+// owes is not merged by a machine). The executor is pure orchestration:
+// every git/gh mutation rides the injected MergeEffects seam (see
+// ./effects.js — UC row 43's load-bearing point: the whole flow is
+// testable with ZERO real git/gh), so this module contains no transport,
+// no spawning, no fs.
 //
 // THE SEMANTICS, each pinned by a test:
 //   a. LIVE-STATE REVALIDATION per action — before merging PR N, its head
@@ -53,9 +56,12 @@
 // TOTALITY: every PR in plan.order lands in EXACTLY ONE of merged /
 // retargeted / stale / failed / blocked. Effect methods that REJECT
 // (a misbehaving fake, a spawn-level throw) are caught and recorded as
-// `failed` — the report is total by construction, not by optimism. (The
-// planner's duplicate_pr gate guarantees one entry per pr; executeMerges
-// relies on that and does not re-guard.)
+// `failed` — the report is total by construction, not by optimism. This
+// includes the baseline sweep (CR1): a validateRef THROW at startup fails
+// the run WHOLESALE — nothing executes and every planned pr is recorded
+// `failed` with the error, so the report is still total. (The planner's
+// duplicate_pr gate guarantees one entry per pr; executeMerges relies on
+// that and does not re-guard.)
 import type { GhResult } from '../review/gh.js';
 import type { MergeEffects } from './effects.js';
 import { headRefFor } from './effects.js';
@@ -162,9 +168,24 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
   // the plan was built on" (the plan carries no shas; it was built moments
   // before on the same live state). null marks a head already unresolvable
   // at start: such an entry is stale on its turn without any further calls.
+  // A validateRef THROW here is a wholesale run failure (CR1): the probe
+  // error escapes nothing — every planned pr is recorded `failed` with it,
+  // nothing executes, and the total report returns immediately.
   const baseline = new Map<number, string | null>();
   for (const entry of plan.order) {
-    const probe = await effects.validateRef(headRefFor(entry.pr));
+    let probe: { ok: boolean; sha?: string };
+    try {
+      probe = await effects.validateRef(headRefFor(entry.pr));
+    } catch (err) {
+      const why = errorMessage(err);
+      for (const plannedEntry of plan.order) {
+        report.failed.push({
+          pr: plannedEntry.pr,
+          error: `baseline validateRef for pr ${plannedEntry.pr} threw: ${why}`,
+        });
+      }
+      return report;
+    }
     baseline.set(entry.pr, probe.ok && probe.sha !== undefined ? probe.sha : null);
   }
 
@@ -210,35 +231,55 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     }
   };
 
-  // THE RETARGET-SELF REALIZATION: the plan carries no branch names, so the
-  // executor owns exactly one ref per PR — its head ref. The action
-  // revalidates the head (the same drift guard as a merge: a stale retarget
-  // is skipped, not pushed), prepares a worktree at the head ref, and
-  // pushRef's the head ref from there — the ref-level half of retargeting,
-  // after which the PR re-enters the NEXT plan as an ordinary root (F2's
-  // contract). The gh-side base-pointer edit is deliberately NOT in this
-  // seam: the base is forge metadata, not a git ref, and I3 keeps this
-  // executor to ref and merge-commits-only mutations. Retargeted entries
-  // are NOT withheld: their descendants are plan-ordered merges and
-  // proceed (only stale/failed ancestors block — rule c). Attempted once,
-  // never retried (rule e's budget is scoped to merge failures).
-  const retargetOnce = async (pr: number, ref: string, fromPath: string): Promise<Outcome> => {
+  // THE RETARGET-SELF REALIZATION (CR1): the plan carries no branch names,
+  // but it does carry the target — a retarget-self entry is a root-position
+  // PR whose rung closed, so its new base IS the plan's baseBranch. The
+  // whole action is the forge base edit (`retargetBase`): forge metadata,
+  // so it never prepares a worktree, never pushes a ref (the read-only
+  // refs/pull/<n>/head is unpushable — the old push-based shape is the CR1
+  // regression, pinned by test), and never merges (I3). After a successful
+  // retarget the PR re-enters the NEXT plan as an ordinary root (F2's
+  // contract). Retargeted entries are NOT withheld: their descendants are
+  // plan-ordered merges and proceed (only stale/failed ancestors block —
+  // rule c). Attempted once, never retried (rule e's budget is scoped to
+  // merge failures). The PR head's drift guard ran before dispatch (the
+  // same fetch+validate as a merge: a stale retarget is skipped, not
+  // edited).
+  const retargetOnce = async (pr: number, newBase: string): Promise<Outcome> => {
     let result: GhResult;
     try {
-      result = await effects.pushRef(ref, fromPath);
+      result = await effects.retargetBase(pr, newBase);
     } catch (err) {
-      return { kind: 'failed', error: `pushRef for pr ${pr} threw: ${errorMessage(err)}` };
+      return { kind: 'failed', error: `retargetBase for pr ${pr} threw: ${errorMessage(err)}` };
     }
     if (result.code === 0) {
       return { kind: 'retargeted' };
     }
     return {
       kind: 'failed',
-      error: `pushRef ${ref} for pr ${pr} failed (exit ${result.code})${stderrSuffix(result.stderr)}`,
+      error: `gh pr edit ${pr} --base ${newBase} failed (exit ${result.code})${stderrSuffix(result.stderr)}`,
     };
   };
 
-  // ONE action, end to end — fetch, revalidate, prepare, act, remove.
+  // File ONE decided outcome into its report bucket (exactly one; merged
+  // and retargeted leave the lineage free to proceed).
+  const fileOutcome = (pr: number, outcome: Outcome): void => {
+    if (outcome.kind === 'merged') {
+      report.merged.push(pr); // not withheld — the lineage may proceed
+    } else if (outcome.kind === 'retargeted') {
+      report.retargeted.push(pr); // not withheld — descendants proceed
+    } else if (outcome.kind === 'stale') {
+      report.stale.push({ pr, detail: outcome.detail });
+      withheld.add(pr);
+    } else {
+      report.failed.push({ pr, error: outcome.error });
+      withheld.add(pr);
+    }
+  };
+
+  // ONE action, end to end — fetch, revalidate, then the action body: the
+  // forge base edit for a retarget-self entry (no worktree), the worktree
+  // merge with its bounded retry for a merge entry.
   const runAction = async (entry: PlannedMergeEntry, expectedSha: string): Promise<void> => {
     const pr = entry.pr;
     const ref = headRefFor(pr);
@@ -284,6 +325,13 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       return;
     }
 
+    // A retarget-self action is FORGE METADATA ONLY (CR1): no worktree, no
+    // ref push, no merge — retargetOnce is its whole body.
+    if (entry.action === 'retarget-self') {
+      fileOutcome(pr, await retargetOnce(pr, plan.baseBranch));
+      return;
+    }
+
     let prepared: { path: string };
     try {
       prepared = await effects.worktreePrepare(pr, ref);
@@ -300,10 +348,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     // goes — and a cleanup failure never masks the primary outcome.
     let outcome: Outcome | undefined;
     try {
-      outcome =
-        entry.action === 'merge'
-          ? await mergeWithRetry(pr, ref, expectedSha)
-          : await retargetOnce(pr, ref, prepared.path);
+      outcome = await mergeWithRetry(pr, ref, expectedSha);
     } catch (err) {
       outcome = { kind: 'failed', error: `action for pr ${pr} threw: ${errorMessage(err)}` };
     } finally {
@@ -323,17 +368,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       }
     }
 
-    if (outcome.kind === 'merged') {
-      report.merged.push(pr); // not withheld — the lineage may proceed
-    } else if (outcome.kind === 'retargeted') {
-      report.retargeted.push(pr); // not withheld — descendants proceed
-    } else if (outcome.kind === 'stale') {
-      report.stale.push({ pr, detail: outcome.detail });
-      withheld.add(pr);
-    } else {
-      report.failed.push({ pr, error: outcome.error });
-      withheld.add(pr);
-    }
+    fileOutcome(pr, outcome);
   };
 
   // THE LOOP — plan order, strictly sequential (rule d's determinism), with

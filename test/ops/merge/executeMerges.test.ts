@@ -30,12 +30,18 @@
 //   8. WORKTREES REMOVED IN FINALLY (f): remove happens even when the
 //      merge fails; a removal failure is appended to the record, never
 //      masks the primary outcome, and never rewrites a clean merge.
-//   9. RETARGET-SELF: executed as the ref-level push (prepare → pushRef →
-//      remove), never a merge; lands in `retargeted`.
+//   9. RETARGET-SELF (CR1): executed as the FORGE BASE EDIT (retargetBase
+//      onto the plan's baseBranch) — never a merge, never a worktree, and
+//      never a ref push (the read-only refs/pull/<n>/head is unpushable —
+//      the old push-based shape is pinned as a regression); lands in
+//      `retargeted`.
 //  10. DIAGNOSE (UC §3 row 45): each bucket maps to its cause
 //      (state_drift / merge_rejected / blocked_by_ancestor), the
 //      needs-human list is the pr-sorted union, the summary line carries
 //      every count, and the function is pure.
+//  11. TOTALITY AT THE BASELINE (CR1): an effects throw during the sweep
+//      fails the run wholesale — a total report with every pr failed, no
+//      escaped exception.
 import { describe, expect, test } from 'vitest';
 import { DEFAULT_MAX_RETRIES, executeMerges } from '../../../src/ops/merge/executeMerges.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
@@ -117,8 +123,8 @@ const prOfRef = (ref: string): number | null => {
  */
 class FakeMergeEffects implements MergeEffects {
   /** Every effect call, in order: `validate:<ref>`, `fetch:<ref>`,
-   * `prepare:<pr>@<ref>`, `merge:<pr>:<method>`, `push:<ref>@<path>`,
-   * `remove:<path>`. */
+   * `prepare:<pr>@<ref>`, `merge:<pr>:<method>`,
+   * `retarget:<pr>:base=<newBase>`, `push:<ref>@<path>`, `remove:<path>`. */
   readonly calls: string[] = [];
   /** pr → live head sha (what validateRef answers). */
   readonly heads = new Map<number, string>();
@@ -126,8 +132,10 @@ class FakeMergeEffects implements MergeEffects {
   readonly mergeQueue = new Map<number, GhResult[]>();
   /** pr → fetchRef fails. */
   readonly fetchFailures = new Set<number>();
-  /** pr → pushRef fails. */
+  /** pr → pushRef fails (the hostile-forge hook for the CR1 regression). */
   readonly pushFailures = new Set<number>();
+  /** pr → retargetBase fails. */
+  readonly retargetFailures = new Set<number>();
   /** path → worktreeRemove throws. */
   readonly removeFailures = new Set<string>();
   /** validateRef call count per pr — the drift scripting hook. */
@@ -137,9 +145,13 @@ class FakeMergeEffects implements MergeEffects {
    * plan→run drift. Default 1: every validation after the first. */
   driftSha: string | null = null;
   driftFromCall = 1;
+  /** When set, validateRef THROWS with this error — the CR1 wholesale
+   * baseline-failure scripting hook. */
+  validateThrows: Error | null = null;
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
+    if (this.validateThrows !== null) throw this.validateThrows;
     const pr = prOfRef(ref);
     if (pr === null) return { ok: false };
     const seen = this.validateCalls.get(pr) ?? 0;
@@ -175,6 +187,14 @@ class FakeMergeEffects implements MergeEffects {
     this.calls.push(`merge:${String(pr)}:${opts.method}`);
     const next = this.mergeQueue.get(pr)?.shift();
     return next ?? OK;
+  }
+
+  async retargetBase(pr: number, newBase: string): Promise<GhResult> {
+    this.calls.push(`retarget:${String(pr)}:base=${newBase}`);
+    if (this.retargetFailures.has(pr)) {
+      return { code: 1, stdout: '', stderr: '! [remote] base branch not editable' };
+    }
+    return OK;
   }
 
   async pushRef(ref: string, fromPath: string): Promise<GhResult> {
@@ -468,7 +488,7 @@ describe('executeMerges — the plan is the only source of actions', () => {
     expect(JSON.stringify(report).includes('3')).toBe(false);
   });
 
-  test('a retarget-self entry executes the ref push, never a merge', async () => {
+  test('a retarget-self entry executes the forge base edit — never a merge, worktree, or push', async () => {
     const fake = new FakeMergeEffects();
     fake.heads.set(5, sha('a'));
     const plan = handPlan([entry(5, 'retarget-self')]);
@@ -477,27 +497,72 @@ describe('executeMerges — the plan is the only source of actions', () => {
 
     expect(report.retargeted).toEqual([5]);
     expect(report.merged).toEqual([]);
+    // The retarget rides the forge base edit ONLY (CR1): after the drift
+    // guard, retargetBase(pr, baseBranch) — no prepare, no push, no remove.
     expect(fake.calls).toEqual([
       'validate:refs/pull/5/head',
       'fetch:refs/pull/5/head',
       'validate:refs/pull/5/head',
-      'prepare:5@refs/pull/5/head',
-      'push:refs/pull/5/head@/wt/pr-5',
-      'remove:/wt/pr-5',
+      'retarget:5:base=main',
     ]);
     expect(fake.calls.some((call) => call.startsWith('merge:'))).toBe(false);
   });
 
-  test('a failed push lands in failed, and the worktree still goes', async () => {
+  test('a failed forge retarget lands in failed — no worktree was ever involved', async () => {
     const fake = new FakeMergeEffects();
     fake.heads.set(5, sha('a'));
-    fake.pushFailures.add(5);
+    fake.retargetFailures.add(5);
 
     const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
 
     expect(report.retargeted).toEqual([]);
-    expect(report.failed).toEqual([{ pr: 5, error: expect.stringContaining('pushRef') }]);
-    expect(fake.calls.includes('remove:/wt/pr-5')).toBe(true);
+    expect(report.failed).toEqual([
+      { pr: 5, error: expect.stringContaining('gh pr edit 5 --base main') },
+    ]);
+    expect(fake.calls.some((call) => call.startsWith('prepare:') || call.startsWith('remove:'))).toBe(
+      false,
+    );
+  });
+
+  test('CR1 regression: a forge that rejects pull-ref pushes never receives one from a retarget', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(5, sha('a'));
+    fake.pushFailures.add(5); // the hostile forge: any push would be recorded AND rejected
+
+    const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
+
+    expect(report.retargeted).toEqual([5]);
+    // The OLD shape pushed the read-only refs/pull/<n>/head — GitHub rejects
+    // that. The pin: NO pushRef call happens anywhere in the retarget flow,
+    // pull-ref or otherwise; the retarget rides the forge base edit only.
+    const pushedRefs = fake.calls
+      .filter((call) => call.startsWith('push:'))
+      .map((call) => call.slice('push:'.length).split('@')[0]);
+    expect(pushedRefs).toEqual([]);
+    expect(pushedRefs.some((ref) => ref.startsWith('refs/pull/'))).toBe(false);
+    expect(fake.calls).toContain('retarget:5:base=main');
+  });
+
+  test('CR1 totality: an effects throw at the baseline fails the run wholesale — total report, nothing executed', async () => {
+    const fake = new FakeMergeEffects();
+    fake.validateThrows = new Error('spawn boom');
+    const plan = handPlan([entry(7), entry(8)]);
+
+    const report = await executeMerges({ plan, effects: fake });
+
+    // Resolves (no unhandled rejection) with EVERY planned pr failed and
+    // nothing else executed.
+    expect(report).toEqual({
+      merged: [],
+      retargeted: [],
+      stale: [],
+      failed: [
+        { pr: 7, error: expect.stringContaining('spawn boom') },
+        { pr: 8, error: expect.stringContaining('spawn boom') },
+      ],
+      blocked: [],
+    });
+    expect(fake.calls).toEqual(['validate:refs/pull/7/head']); // first probe threw; run over
   });
 });
 
