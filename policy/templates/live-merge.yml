@@ -1,4 +1,3 @@
-# instantiated from policy/templates/live-merge.yml — edit the template, not this file
 # The F5 LIVE merge drill — the merge-prs integration acceptance's only
 # scheduled home (test/e2e/merge/live.test.ts).
 #
