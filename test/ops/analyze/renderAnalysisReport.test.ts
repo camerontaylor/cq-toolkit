@@ -8,7 +8,7 @@
 // here, mirroring the C4 registry-test precedent).
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve, sep } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { AnalyzeFileStore } from '../../../src/ops/analyze/analysisStore.js';
 import {
@@ -75,32 +75,52 @@ function fixtureReport(): ClusterErrorsReport {
 
 /**
  * An in-memory AnalyzeFileStore: files keyed by path, dirs implied by the
- * root. Records every write so tests can assert on bytes and on writes NOT
- * happening. Paths are used verbatim (the unit under test builds them).
+ * root. Records every write so tests can address bytes exactly as the real
+ * store would have landed them. Paths are RESOLVED AGAINST THE ROOT (the
+ * real store's addressing) — this is what catches store-relative path
+ * discipline regressions: an op that double-roots (dir/dir/…) writes to a
+ * key no caller-facing path points at.
  */
-function memoryStore(files: Record<string, string>): AnalyzeFileStore & {
+function memoryStore(
+  root: string,
+  files: Record<string, string>,
+): AnalyzeFileStore & {
   written: Map<string, Uint8Array>;
 } {
   const backing = new Map<string, Uint8Array>(
-    Object.entries(files).map(([path, text]) => [path, Buffer.from(text, 'utf8')]),
+    Object.entries(files).map(([path, text]) => [resolve(root, path), Buffer.from(text, 'utf8')]),
   );
   const written = new Map<string, Uint8Array>();
   return {
     written,
     readBytes: async (path) => {
-      const bytes = backing.get(path);
+      const bytes = backing.get(resolve(root, path));
       if (bytes === undefined) {
         throw new AnalysisStoreError(`analysis store: '${path}' does not resolve`);
       }
       return Uint8Array.from(bytes);
     },
-    readText: async (path) => Buffer.from(backing.get(path) as Uint8Array).toString('utf8'),
+    readText: async (path) => {
+      const bytes = backing.get(resolve(root, path));
+      if (bytes === undefined) {
+        throw new AnalysisStoreError(`analysis store: '${path}' does not resolve`);
+      }
+      return Buffer.from(bytes).toString('utf8');
+    },
     writeBytes: async (path, bytes) => {
       const copy = Uint8Array.from(bytes);
-      written.set(path, copy);
-      backing.set(path, copy);
+      const key = resolve(root, path);
+      written.set(key, copy);
+      backing.set(key, copy);
     },
-    isDirectory: async () => true,
+    isDirectory: async (path) => {
+      const abs = resolve(root, path);
+      if (abs === resolve(root, '.')) return backing.size > 0;
+      for (const key of backing.keys()) {
+        if (key.startsWith(`${abs}${sep}`)) return true;
+      }
+      return false;
+    },
   };
 }
 
@@ -249,7 +269,7 @@ describe('makeRenderAnalysisReport (op over an injected store)', () => {
 
   test('writes BOTH files under deterministic content-derived names and returns their paths', async () => {
     const files = { ...fileContents };
-    const store = memoryStore(files);
+    const store = memoryStore('/ws', files);
     const op = makeOp(store);
     const result = await op(opInput('/ws'));
     expect(result.status).toBe('ok');
@@ -298,8 +318,35 @@ describe('makeRenderAnalysisReport (op over an injected store)', () => {
     expect(again.status === 'ok' && again.value).toEqual(result.value);
   });
 
+  test('a RELATIVE dir is store-root discipline-safe: no double-rooted reads or writes (M1 regression)', async () => {
+    // With the store rooted AT the relative dir, the op must check '.',
+    // read the dir-relative targets, and write the BARE file names — the
+    // pre-M1 code doubled the root (isDirectory('ws') on root 'ws') and
+    // joined input.dir onto store-relative writes.
+    const store = memoryStore('ws', { ...fileContents });
+    const op = makeOp(store);
+    const result = await op(opInput('ws'));
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    const fp = reportFingerprint(fixtureReport());
+    // The returned paths are caller-facing (joined with the caller's dir)…
+    expect(result.value).toEqual({
+      markdownPath: `ws/analysis-${fp}.md`,
+      sidecarPath: `ws/analysis-${fp}.sidecar.json`,
+      reportFingerprint: fp,
+    });
+    // …and the bytes landed at exactly those paths in the rooted store
+    // (resolve anchors relative roots at the process cwd, exactly like the
+    // real store) — a double-rooted write would have produced
+    // '…/ws/ws/analysis-…' keys instead.
+    expect(store.written.get(resolve('ws', `analysis-${fp}.md`))).toBeDefined();
+    expect(store.written.get(resolve('ws', `analysis-${fp}.sidecar.json`))).toBeDefined();
+    const doubleRoot = `${sep}ws${sep}ws${sep}`;
+    expect([...store.written.keys()].every((key) => !key.includes(doubleRoot))).toBe(true);
+  });
+
   test('a missing directory is refused (the op wraps an existing dir, never mkdir -p)', async () => {
-    const store = memoryStore({});
+    const store = memoryStore('/missing', {});
     store.isDirectory = async () => false;
     const op = makeOp(store);
     const result = await op(opInput('/missing'));
@@ -312,7 +359,7 @@ describe('makeRenderAnalysisReport (op over an injected store)', () => {
   });
 
   test('an unreadable target file fails the op naming the file — no sidecar with unverifiable targets', async () => {
-    const store = memoryStore({ 'src/a.ts': 'x\n' }); // src/b.ts missing
+    const store = memoryStore('/ws', { 'src/a.ts': 'x\n' }); // src/b.ts missing
     const op = makeOp(store);
     const result = await op(opInput('/ws'));
     expect(result.status).toBe('failed');

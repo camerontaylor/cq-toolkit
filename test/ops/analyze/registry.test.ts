@@ -492,6 +492,9 @@ describe('the agentic importer resolves (the subprocess floor lane, composed at 
       clusterId: '0deadbe0',
       cluster,
       modelSpec: { model: 'definitely-not-a-model', provider: 'definitely-not-a-provider' },
+      // A wall-clock cap rides the invocation: the resolved SubprocessDriver
+      // must not be able to hang this test even if a binary matched.
+      budget: { wallClockMs: 5_000 },
     });
     // The real driver runs (no binary/spawn succeeds in the sandbox) — the
     // op must surface that honestly, never as an ok with a fabricated

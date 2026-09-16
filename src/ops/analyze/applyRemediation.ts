@@ -46,7 +46,7 @@
 // this module itself never imports node:fs. The store's containment keeps
 // every read and write inside `dir` (default: the sidecar's directory —
 // where the render op wrote it).
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import type { RunCheck } from '../gates/checkRunner.js';
 import type { AnalyzeFileStore } from './analysisStore.js';
@@ -132,9 +132,22 @@ export function makeApplyRemediation(
     } catch (err) {
       return { status: 'failed', error: `remediation failed closed — ${messageOf(err)}` };
     }
+    // STORE-RELATIVE PATH DISCIPLINE: the store is rooted at the
+    // sidecar's directory (or the explicit input.dir), so the sidecar must
+    // be addressed RELATIVE TO THAT ROOT — the full input.sidecarPath would
+    // double-root (root/root/…) for relative paths. sidecarPath is
+    // expressible relative to the root whenever it lives inside it
+    // (lexically, no fs needed); anything else is passed through verbatim
+    // so the store's containment check faults it by its real name.
+    const storeRoot = storeRootOf(input);
+    const relativeSidecar = relative(storeRoot, input.sidecarPath);
+    const sidecarStorePath =
+      relativeSidecar === '' || relativeSidecar.startsWith('..') || isAbsolute(relativeSidecar)
+        ? input.sidecarPath
+        : relativeSidecar;
     let sidecar: AnalysisSidecar;
     try {
-      sidecar = parseAnalysisSidecar(await store.readText(input.sidecarPath));
+      sidecar = parseAnalysisSidecar(await store.readText(sidecarStorePath));
     } catch (err) {
       return {
         status: 'failed',
@@ -185,6 +198,23 @@ export function makeApplyRemediation(
           .filter((file): file is string => file !== null),
       ),
     ].sort();
+    // SHORT-CIRCUIT: a cluster whose members attributed NO file has nothing
+    // to scan — return the honest empty result without invoking the runner
+    // (the scan would be an unscoped or pointless subprocess).
+    if (targets.length === 0) {
+      return {
+        status: 'ok',
+        value: {
+          mode: input.dryRun ? 'dry-run' : 'applied',
+          clusterId: cluster.id,
+          targets,
+          plannedEdits: 0,
+          unfixedMatches: 0,
+          files: [],
+          note: 'the cluster carries no target files (no member failure attributed a file) — there is nothing to remediate mechanically',
+        },
+      };
+    }
     const current = new Map<string, Uint8Array>();
     for (const file of targets) {
       try {

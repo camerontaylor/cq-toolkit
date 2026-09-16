@@ -352,7 +352,13 @@ export function makeRenderAnalysisReport(
     } catch (err) {
       return { status: 'failed', error: messageOf(err) };
     }
-    if (!(await store.isDirectory(input.dir))) {
+    // STORE-RELATIVE PATH DISCIPLINE: the store is ROOTED AT input.dir (the
+    // registry binds pathAnalysisFileStore(input.dir)), so every path handed
+    // to the store must be relative to that root — the root check is '.'
+    // (not input.dir, which would double-root to dir/dir) and the writes
+    // carry the bare file names. The RETURNED paths stay joined with
+    // input.dir: they are caller-facing, not store-relative.
+    if (!(await store.isDirectory('.'))) {
       return {
         status: 'failed',
         error: `analysis report: directory does not exist: '${input.dir}' — the op wraps an existing directory, it never creates one`,
@@ -383,14 +389,20 @@ export function makeRenderAnalysisReport(
       };
     }
     const rendered = renderAnalysisReport(input.report, { evidence });
+    // Caller-facing output paths (an op OUTPUT, never a convention): joined
+    // with the caller's dir. The bytes land through the store under the BARE
+    // names (store-relative — see the discipline note above).
     const sidecarPath = join(input.dir, sidecarFileName(rendered.sidecar.reportFingerprint));
     const markdownPath = join(input.dir, markdownFileName(rendered.sidecar.reportFingerprint));
     try {
       await store.writeBytes(
-        sidecarPath,
+        sidecarFileName(rendered.sidecar.reportFingerprint),
         Buffer.from(serializeAnalysisSidecar(rendered.sidecar), 'utf8'),
       );
-      await store.writeBytes(markdownPath, Buffer.from(rendered.markdown, 'utf8'));
+      await store.writeBytes(
+        markdownFileName(rendered.sidecar.reportFingerprint),
+        Buffer.from(rendered.markdown, 'utf8'),
+      );
     } catch (err) {
       return {
         status: 'failed',
