@@ -878,11 +878,11 @@ const reportSummary = (report: ExecutionReport): string =>
         // must have provably run somewhere in the collected outcomes — and it
         // must be a DESCENDANT rung (pr 2 or pr 3), not merely any drill pr:
         // the root's base is the trunk itself, so a retargeted root would be
-        // meaningless. Stronger than size ≥ 1: the intersection with
-        // {pr 2, pr 3} must be non-empty.
-        const [, pr2, pr3] = drillPrNumbers;
+        // meaningless. Stronger than size ≥ 1: the intersection with the
+        // non-root rungs must be non-empty.
+        const descendantRungs = drillPrNumbers.slice(1);
         expect(
-          collectedRetargeted.has(pr2) || collectedRetargeted.has(pr3),
+          descendantRungs.some((pr) => collectedRetargeted.has(pr)),
           `a descendant rung (pr 2 or pr 3) must have been retargeted; got ${[...collectedRetargeted].sort((a, b) => a - b).map(String).join(', ')}`,
         ).toBe(true);
         for (const pr of collectedRetargeted) {
