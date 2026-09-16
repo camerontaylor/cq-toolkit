@@ -413,6 +413,50 @@ describe('sweep.worktreeFor path safety', () => {
 });
 
 // ---------------------------------------------------------------------------
+// 6b. The mutex config boundary (the op never leaks the factory's RangeError)
+// ---------------------------------------------------------------------------
+
+describe('sweep.worktreeFor mutex config boundary', () => {
+  test('a staleMs below the clamp floor is a failed result naming staleMs', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      mutex: { lockPath: '/repo/.cq/git-mutex.lock', staleMs: 100 },
+    });
+    expect(error).toMatch(/mutex\.staleMs \(100\)/);
+    expect(error).toMatch(/≥ 2000/);
+    expect(repo.addCalls).toHaveLength(0);
+  });
+
+  test('a negative retries value is a failed result naming retries', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      mutex: { lockPath: '/repo/.cq/git-mutex.lock', retries: -1 },
+    });
+    expect(error).toMatch(/mutex\.retries \(-1\)/);
+    expect(repo.addCalls).toHaveLength(0);
+  });
+
+  test('a well-formed mutex config passes the boundary and the create still plans', async () => {
+    // The well-formed config reaches the REAL makeGitMutex — whose acquire
+    // mkdir -p's the lock's parent — so the lockPath needs a real tmpdir.
+    const dir = mkdtempSync(join(tmpdir(), 'worktree-mutex-ok-'));
+    try {
+      const repo = fakeRepo();
+      const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), {
+        ...INPUT,
+        mutex: { lockPath: join(dir, 'git-mutex.lock'), staleMs: 30_000 },
+      });
+      expect(workspace.reused).toBe(false);
+      expect(repo.addCalls).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 7. The subprocess adapter: parsers (fixtures) + one real-git smoke
 // ---------------------------------------------------------------------------
 

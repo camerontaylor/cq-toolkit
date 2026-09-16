@@ -29,7 +29,7 @@ import { execFile } from 'node:child_process';
 import { rm, stat } from 'node:fs/promises';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from './gitMutex.js';
-import type { GitMutexConfig } from './gitMutex.js';
+import type { GitMutex, GitMutexConfig } from './gitMutex.js';
 
 /** JSON-serializable input of the `sweep.worktreeFor` op. */
 export interface WorktreeForInput {
@@ -153,7 +153,19 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
     const branch = `${input.runPrefix}/${input.kind}/${input.slug}`;
     const worktreesDir = input.worktreesDir.replace(/\/+$/, '');
     const path = `${worktreesDir}/${input.kind}/${input.slug}`;
-    const guard = input.mutex === undefined ? undefined : makeGitMutex(mutexConfigOf(input.mutex));
+    // Belt-and-braces around inputFaultOf's mutex-bound validation: a
+    // makeGitMutex construction throw is a LIBRARY precondition violation,
+    // and across the op seam it maps to `failed` — never an escaping
+    // rejected promise, never a fabricated ok.
+    let guard: GitMutex | undefined;
+    try {
+      guard = input.mutex === undefined ? undefined : makeGitMutex(mutexConfigOf(input.mutex));
+    } catch (err) {
+      return {
+        status: 'failed',
+        error: `sweep: could not build the git mutex — ${messageOf(err)}`,
+      };
+    }
     const inGuard = <T>(fn: () => T | Promise<T>): Promise<T> =>
       guard === undefined ? Promise.resolve().then(fn) : guard.withLock(fn);
 
@@ -341,11 +353,32 @@ function inputFaultOf(input: WorktreeForInput): string | null {
   if (input.worktreesDir.startsWith('-')) {
     return `sweep: worktreesDir '${input.worktreesDir}' must not start with '-' — the derived path is a positional git argument, never a flag`;
   }
-  if (
-    input.mutex !== undefined &&
-    (typeof input.mutex.lockPath !== 'string' || input.mutex.lockPath === '')
-  ) {
-    return 'sweep: mutex.lockPath must be a non-empty string';
+  if (input.mutex !== undefined) {
+    if (typeof input.mutex.lockPath !== 'string' || input.mutex.lockPath === '') {
+      return 'sweep: mutex.lockPath must be a non-empty string';
+    }
+    // Mutex timing bounds mirror makeGitMutex's construction preconditions
+    // (staleMs ≥ 2000 is proper-lockfile's real clamp floor): a malformed
+    // timing is caught HERE as a `failed` result, at the op boundary — the
+    // op never lets the factory's RangeError escape as a rejected promise.
+    if (
+      input.mutex.staleMs !== undefined &&
+      (!Number.isInteger(input.mutex.staleMs) || input.mutex.staleMs < 2000)
+    ) {
+      return `sweep: mutex.staleMs (${String(input.mutex.staleMs)}) must be an integer ≥ 2000 — proper-lockfile clamps the stale window to that floor`;
+    }
+    if (
+      input.mutex.retries !== undefined &&
+      (!Number.isInteger(input.mutex.retries) || input.mutex.retries < 0)
+    ) {
+      return `sweep: mutex.retries (${String(input.mutex.retries)}) must be an integer ≥ 0`;
+    }
+    if (
+      input.mutex.retryBaseMs !== undefined &&
+      (!Number.isInteger(input.mutex.retryBaseMs) || input.mutex.retryBaseMs < 1)
+    ) {
+      return `sweep: mutex.retryBaseMs (${String(input.mutex.retryBaseMs)}) must be an integer ≥ 1`;
+    }
   }
   return null;
 }

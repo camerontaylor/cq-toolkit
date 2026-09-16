@@ -397,6 +397,12 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     if (typeof input.selector.base !== 'string' || input.selector.base === '') {
       return 'sweep: changed-vs-base requires a non-empty base ref';
     }
+    // The base lands verbatim in `git diff --name-only -z <base>` — a
+    // dash-leading ref would be parsed as a flag (see the
+    // makeSubprocessSweepPlannerDeps JSDoc for why `--` is NOT the fix).
+    if (input.selector.base.startsWith('-')) {
+      return `sweep: changed-vs-base base '${input.selector.base}' must not start with '-' — it is a positional git argument, never a flag`;
+    }
   }
   if (input.selector.mode === 'explicit') {
     if (!Array.isArray(input.selector.packages)) {
@@ -543,6 +549,17 @@ function runSweepGit(args: string[], cwd: string): Promise<string> {
  * storePath crossing the plain-JSON boundary from the query input. Both
  * effects are lazy per call; a library consumer injects fakes instead
  * (every decision test does exactly that).
+ *
+ * FLAG-INJECTION BOUNDARY, and why there is deliberately NO `--`: the base
+ * is a REV argument — appending `--` would switch `git diff` to pathspec
+ * mode, and a base arriving after `--` would be read as a PATH (silently
+ * diffing nothing, or the wrong thing). The mechanism here is instead
+ * (1) the op boundary rejecting a dash-leading base as a `failed` result
+ * (inputFaultOf), and (2) execFile with an ARGS ARRAY — no shell parsing,
+ * so no value can become shell syntax. A caller bypassing both reaches the
+ * library-level contract the same way it reaches every other malformed
+ * input: this adapter trusts the seam the way the ledger ops trust the
+ * store contract.
  */
 export function makeSubprocessSweepPlannerDeps(repoRoot: string): PlanSweepDeps {
   return {

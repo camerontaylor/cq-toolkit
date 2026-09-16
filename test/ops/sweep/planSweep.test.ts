@@ -171,6 +171,15 @@ describe('planSweep selector contract (UC §1 row 16: no default selector)', () 
     const input = baseInput({ selector: { mode: 'changed-vs-base', base: '' } });
     await expect(failedPlan(makePlanner(), input)).resolves.toMatch(/non-empty base ref/);
   });
+
+  test('a flag-impersonating changed-vs-base base is refused — the diff arg is positional', async () => {
+    const input = baseInput({
+      selector: { mode: 'changed-vs-base', base: '--output=/tmp/x' },
+    });
+    const error = await failedPlan(makePlanner(), input);
+    expect(error).toMatch(/changed-vs-base base/);
+    expect(error).toMatch(/never a flag/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -484,7 +493,12 @@ describe('planSweep ledger suppression (UC §1 row 8 / R2 D6)', () => {
 describe('planSweep jobs are dispatch-ready', () => {
   test('the report is JSON-serializable; every job references SWEEP_UNIT_OP with empty dependsOn', async () => {
     const report = await okPlan(
-      makePlanner(),
+      makePlanSweep({
+        // The changed-vs-base selector needs a changed file that actually
+        // maps — the default empty listing would plan ZERO jobs and the
+        // dispatch-behavior loop below would pass vacuously.
+        changedFiles: async () => ['packages/core/src/a.ts'],
+      }),
       baseInput({
         fixers: ['lint'],
         selector: { mode: 'changed-vs-base', base: 'main' },
@@ -492,6 +506,7 @@ describe('planSweep jobs are dispatch-ready', () => {
       }),
     );
     expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+    expect(report.jobs.length).toBeGreaterThanOrEqual(1);
     for (const job of report.jobs) {
       expect(job.op).toBe(SWEEP_UNIT_OP);
       expect(job.dependsOn).toEqual([]);
