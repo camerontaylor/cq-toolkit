@@ -15,17 +15,20 @@
 //     The tradeoff, accepted and documented: callers aggregate per-tool; a
 //     cross-tool report is a caller-side composition of aggregates, never
 //     one dishonest set.
-//   - I5 (non-passing evidence): aggregating ZERO sets throws — an empty
+//   - I5/I9 (non-passing evidence): aggregating ZERO sets throws — an empty
 //     aggregate behind exit code 0 would certify a clean run that never
-//     happened. Exit-code aggregation is null-contagious once a run's exit
-//     was unobservable: 0 ONLY when every input exit code is 0; any non-zero
-//     code → 1 (the pinned non-zero pick); otherwise ANY null → null. A
-//     mixed [0, null] aggregate must not read 0 (that certifies clean over a
-//     run whose exit was never observed — the unparsable-conflates-with-
-//     clean trap in aggregate costume) and must not fabricate a non-zero
-//     code either (no run failed); null is the honest encoding of "not
-//     observed". A definitive non-zero beats null: [1, null] → 1 — a real
-//     failure was observed and is reported.
+//     happened. Exit-code aggregation is NULL-CONTAGIOUS over everything:
+//     if ANY input exit code is null, the aggregate is null; else any
+//     non-zero code → 1; else 0. The interplay that forces this: the
+//     regression gate's completeness check (untrustedEvidence) treats ONLY
+//     a null exit code as partial evidence — a numeric non-zero with
+//     non-empty failures is the trusted "normal failing-run shape". An
+//     aggregate [1, null] → 1 would dress a lost run's possibly-INCOMPLETE
+//     failure list (timeout, lost worker) as a COMPLETE failing run, and
+//     the gate would set-compare that partial evidence — certifying
+//     no-regression while the lost run's novel failures were never parsed.
+//     The aggregate stays null so the gate's untrustworthy-evidence guard
+//     sees exactly what happened: some constituent run was never observed.
 //   - Exact duplicate collapse (the fingerprint.ts exactness doctrine): the
 //     identity of one failure is the FULL JSON tuple of its seven fields
 //     (tool folded in from the sets) — the same exactness approach as the
@@ -118,18 +121,19 @@ export function collectFailures(sets: readonly FailureSet[]): FailureSet {
 }
 
 /**
- * The aggregate exit code, in decision order: any observed non-zero → 1
- * (a definitive failure is reported as one); else ANY null → null (some
- * run's exit was unobservable — the aggregate is not clean and not
- * definitively failed); else 0 (every input was 0).
+ * The aggregate exit code, in decision order: ANY null → null — the
+ * aggregate must not out-trust its least-trusted constituent (see the
+ * module header's untrustedEvidence interplay); else any observed non-zero
+ * → 1; else 0 (every input was 0).
  */
 function aggregateExitCode(exitCodes: ReadonlyArray<number | null>): number | null {
   let sawNull = false;
+  let sawNonZero = false;
   for (const code of exitCodes) {
-    if (code !== null && code !== 0) return 1;
     if (code === null) sawNull = true;
+    else if (code !== 0) sawNonZero = true;
   }
-  return sawNull ? null : 0;
+  return sawNull ? null : sawNonZero ? 1 : 0;
 }
 
 /** JSON-serializable input of the `analyze.collectFailures` op. */

@@ -65,6 +65,7 @@ describe('collectFailures decision table', () => {
   test.each([
     { label: 'all zero → 0', codes: [0, 0], expected: 0 },
     { label: 'a definitive non-zero → 1', codes: [0, 1], expected: 1 },
+    { label: 'non-zero in any position → 1 (no null present)', codes: [1, 0], expected: 1 },
     { label: 'every non-zero → still 1', codes: [2, 1], expected: 1 },
     { label: 'a negative exit is non-zero → 1', codes: [0, -1], expected: 1 },
     { label: 'all null → null', codes: [null, null], expected: null },
@@ -73,7 +74,15 @@ describe('collectFailures decision table', () => {
       codes: [0, null],
       expected: null,
     },
-    { label: 'a definitive non-zero beats null: [1, null] → 1', codes: [1, null], expected: 1 },
+    // FLIPPED from the earlier pin ([1, null] → 1): the lost run's failure
+    // list is possibly incomplete, and the regression gate treats a numeric
+    // non-zero as TRUSTED evidence — a 1 here would let the gate compare
+    // partial data as a complete failing run. Null keeps it untrusted.
+    {
+      label: 'null is CONTAGIOUS: [1, null] → null, never a complete-looking failure',
+      codes: [1, null],
+      expected: null,
+    },
     { label: 'single null → null', codes: [null], expected: null },
   ])('exitCode aggregation: $label', ({ codes, expected }) => {
     const result = collectFailures(codes.map((code) => setOf([], 'eslint', code)));

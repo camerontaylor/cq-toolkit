@@ -9,11 +9,12 @@
 // the ops may not.
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
-// Reused from the gates family's shared spot: CheckFailure/FailureSet cross
-// the boundary exactly as `gates.checkRunner` produced them, so the analyze
-// input schemas can never drift from the upstream shape (the same one-source
+// Reused from the gates family's shared spot: CheckFailure crosses the
+// boundary exactly as `gates.checkRunner` produced it, so the analyze input
+// schemas can never drift from the upstream shape (the same one-source
 // argument the gates registry makes for its own consumers).
-import { FailureSetSchema } from '../gates/registry.js';
+import { CheckFailureSchema } from '../gates/registry.js';
+import type { FailureSet } from '../gates/checkRunner.js';
 // Runtime import of the ledger's field-bound constants — pulled from ONE
 // definition (the ledger record boundary) so a parse here rejects exactly
 // what a record could produce. Safe at module scope: the pure ledger
@@ -28,6 +29,51 @@ import type { ClusterErrorsInput } from './clusterErrors.js';
 import type { CollectFailuresInput } from './collectFailures.js';
 
 /**
+ * LOCAL tightening of the reused gates FailureSet shape for the analyze ops:
+ * `tool` is bounded to the ledger's COMPONENT_MAX_CHARS — ledger-domain
+ * alignment, so the fixed JSON overhead of a canonical cluster signature
+ * (tool + ruleId + template) always fits SIGNATURE_MAX_CHARS and
+ * clusterSignature's template-truncation loop always converges for
+ * op-dispatched input; the over-bound residual is unreachable through the
+ * op boundary. The gates' shared schema itself stays untouched, and the
+ * failure shape is still the gates' ONE definition (CheckFailureSchema).
+ */
+const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
+  .object({
+    tool: z.string().max(COMPONENT_MAX_CHARS),
+    failures: z.array(CheckFailureSchema),
+    exitCode: z.number().nullable(),
+  })
+  .strict();
+
+/**
+ * The clusterErrors variant additionally bounds EACH failure's ruleId to
+ * the ledger component bound (ruleId is part of the cluster signature's
+ * fixed overhead). Mirrors the gates' shared CheckFailureSchema shape with
+ * that one bound added; the z.ZodType<FailureSet> annotation pins the
+ * mirror to the frozen type at compile time, so a shape drift fails
+ * typecheck.
+ */
+const ClusterFailureSetSchema: z.ZodType<FailureSet> = z
+  .object({
+    tool: z.string().max(COMPONENT_MAX_CHARS),
+    failures: z.array(
+      z
+        .object({
+          file: z.string().nullable(),
+          line: z.number().nullable(),
+          column: z.number().nullable(),
+          ruleId: z.string().max(COMPONENT_MAX_CHARS).nullable(),
+          message: z.string(),
+          severity: z.enum(['error', 'warning']),
+        })
+        .strict(),
+    ),
+    exitCode: z.number().nullable(),
+  })
+  .strict();
+
+/**
  * Registry-time mirror of {@link CollectFailuresInput}: the full input, and
  * only it. Deliberately a PURE mirror — an empty `sets` array validates
  * here, because "no runs to aggregate" is the op's POLICY failure (mapped to
@@ -36,7 +82,7 @@ import type { CollectFailuresInput } from './collectFailures.js';
  */
 export const CollectFailuresInputSchema: z.ZodType<CollectFailuresInput> = z
   .object({
-    sets: z.array(FailureSetSchema),
+    sets: z.array(AnalyzeFailureSetSchema),
   })
   .strict();
 
@@ -78,7 +124,7 @@ export const LedgerViewSchema: z.ZodType<LedgerView> = z
  */
 export const ClusterErrorsInputSchema: z.ZodType<ClusterErrorsInput> = z
   .object({
-    set: FailureSetSchema,
+    set: ClusterFailureSetSchema,
     ledger: LedgerViewSchema.exactOptional(),
   })
   .strict();
