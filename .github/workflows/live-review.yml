@@ -1,0 +1,70 @@
+# The LIVE review-loop drill — goal E5 (ws-e): end-to-end against a scratch
+# GitHub repo. MANUAL DISPATCH ONLY, never on push, never on pull_request:
+# the run seeds a real scratch repo, opens a real PR, and posts real review
+# replies/resolutions with the caller's GH_TOKEN — nothing automatic may
+# fire it. (Mirrors .github/workflows/live-drivers.yml's discipline.)
+#
+# SECRETS: this file carries NAMES only. GH_TOKEN must be a repo Actions
+# secret with repo scope on the dispatching user's account (it creates
+# cq-scratch-e5-<run_id>, pushes, and posts). The scratch repo is LEFT
+# BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
+# run_id per drill so the seeded fixtures are unambiguous.
+#
+# The vitest leg runs from source (no build): the live describe skips
+# cleanly unless LIVE_GH=1, and the precondition step below asserts the gate
+# is armed so a misconfigured dispatch can never report a green-skipped run.
+name: live-review
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Scratch-repo run id (repo cq-scratch-e5-<run_id>; fresh id per drill)
+        required: false
+        default: 'e5-live'
+
+# One live drill at a time: a second dispatch queues behind the in-flight
+# one (cancel-in-progress: false — cancelling mid-loop could strand a
+# half-dispatched review). Fixed group, not per-ref: this workflow never
+# fires on PRs, so there is nothing per-ref to isolate.
+concurrency:
+  group: live-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Names only — the values live in the repo's Actions secrets / the
+      # dispatch input.
+      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      LIVE_GH: '1'
+      E5_RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false); gh rides
+          # GH_TOKEN, not the checkout credential.
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # A misconfigured dispatch would otherwise be a green-skipped run (the
+      # live describe skips without LIVE_GH) or a mid-run credential failure
+      # (gh without GH_TOKEN) — refuse both loudly before any live call.
+      - name: Preconditions — the live gate is armed and the token is present
+        run: |
+          test -n "$LIVE_GH" || { echo 'LIVE_GH is not set — the live test would silently skip; refusing a green-skipped run' >&2; exit 1; }
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }
+      - name: Live review-loop e2e (test/e2e/review/live.test.ts)
+        run: npx vitest run test/e2e/review/live.test.ts

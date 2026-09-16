@@ -125,6 +125,8 @@ interface LoopWorld {
    * boundary — 2 models "a commit landed during the fix stage").
    */
   worktreeAdvancesAt?: number;
+  /** The sha the ADVANCED worktree HEAD reports (default: the 4444 filler). */
+  worktreeAdvancesTo?: string;
   /** When true, `status --porcelain` reports a dirty worktree. */
   dirty?: boolean;
   /** GraphQL thread nodes served to fetchReviewState. */
@@ -346,7 +348,7 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         worktreeHeadReads += 1;
         const advanced =
           world.worktreeAdvancesAt !== undefined && worktreeHeadReads > world.worktreeAdvancesAt;
-        return ok(`${advanced ? '4444'.repeat(10) : SHA}\n`);
+        return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : SHA}\n`);
       }
       return ok(`${SHA}\n`);
     }
@@ -1198,8 +1200,12 @@ describe('attribution under promptOverride (slice 9 item 1)', () => {
   });
 });
 
-describe('observed worktree movement (slice 9 item 2)', () => {
+describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => {
   test('a worker claiming no change while the worktree advanced → unreported-commit reason, no publish', async () => {
+    // THE LYING-WORKER PIN (drill 6 revision): the worker claims
+    // changed:false and claims NO commit, so the advanced tip is UNCLAIMED —
+    // under HEAD-accountability the tip itself is the unreported commit and
+    // publication stays blocked.
     const world = defaultWorld();
     world.worktreeAdvancesAt = 2; // a commit lands during the fix stage
     const ghLog: string[][] = [];
@@ -1209,13 +1215,46 @@ describe('observed worktree movement (slice 9 item 2)', () => {
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
-      'unreported-commit: worktree advanced but the worker reported no commit',
+      `unreported-commit: worktree tip ${'4444'.repeat(10)} is not a claimed fix — a worker committed without reporting it`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // no publish
     // The reply still posts and NOTES the observed commit.
     expect(outcome.actionsPosted).toBe(1);
     const post = ghLog.find((args) => args.includes('-X'));
     expect(post?.some((arg) => arg.includes('unreported commit'))).toBe(true);
+  });
+
+  test('HEAD-accountability (drill 6): item A commits+claims, sibling B honest no-change → publishable, A resolves, B reply-only', async () => {
+    // The false-positive that motivated the fix (found live, drill 6): one
+    // real fix plus an honest no-op must NOT read as "unreported" under the
+    // run-level head delta. The tip IS A's verified, claimed commit.
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/b.ts', 8, 102),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T1 in src/a.ts' };
+    world.worktreeAdvancesAt = 2; // job 1's commit lands during the fix stage...
+    world.worktreeAdvancesTo = NEW_SHA; // ...and IS the claimed tip
+    const gitLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(true, 'Fixed A.', [NEW_SHA])),
+        completeWorker(fixLine(false, 'Nothing to change for B.', [])),
+      ],
+      gitLog,
+    });
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.status).toBe('ok');
+    // The publish push AND replyAndResolve's push-before-post.
+    expect(gitLogPushes(gitLog)).toBe(2);
+    // A: reply + resolve; B: reply-only (an honest no-change never resolves).
+    expect(outcome.actionsPosted).toBe(3);
+    expect(outcome.reply?.posted.map((record) => record.kind)).toEqual([
+      'review_reply',
+      'review_reply',
+      'resolve_thread',
+    ]);
   });
 
   test('a dirty worktree at publish time → dirty-worktree reason, no push, no resolve', async () => {
@@ -1231,6 +1270,69 @@ describe('observed worktree movement (slice 9 item 2)', () => {
     expect(gitLog.some((args) => args[2] === 'push')).toBe(false);
     expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
     expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Auto-generated sticky comment skip (drill 6) — the loop DEFAULT gains the
+// pattern (defaultLoopClassifyConfig); config-as-data, no code branch. The
+// author is deliberately a plain reviewer identity: only the BODY pattern
+// may classify this skip.
+// ---------------------------------------------------------------------------
+
+describe('auto-generated sticky comment skip + self-reply marker (drills 6-8)', () => {
+  test('housekeeping comments skip under the loop DEFAULT; a real human comment stays actionable; the reply carries the loop signature', async () => {
+    // ALL THREE live-observed housekeeping shapes (drill 6: the GitHub
+    // HTML-marker sticky; drill 7: the markerless checks summary, comment id
+    // 5705054746; drill 8: the Codex review bot's sticky PR summary) plus
+    // one REAL human comment. Authors are deliberately plain reviewer/bot
+    // identities — only the BODY patterns may classify the skips, and the
+    // human comment must stay actionable.
+    const world = defaultWorld();
+    world.threads = []; // ONLY the four issue comments ride the fetched state
+    world.issueComments = [
+      restComment(
+        301,
+        'reviewer',
+        '<!-- This is an auto-generated comment -->\nThis comment shows the latest checks and updates itself.',
+        iso(ROOT_AGE),
+        null,
+      ),
+      restComment(
+        302,
+        'reviewer',
+        'This comment shows the latest checks and was posted automatically.',
+        iso(ROOT_AGE),
+        null,
+      ),
+      restComment(
+        303,
+        'reviewer',
+        '<!-- codex-pull-request-review-summary -->\n## Codex Review Summary\nThis comment shows the latest Codex review activity.',
+        iso(ROOT_AGE),
+        null,
+      ),
+      restComment(304, 'reviewer', 'Please also fix the typo in src/a.ts.', iso(ROOT_AGE), null),
+    ];
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, 'Noted; nothing to change in code.', []))],
+      ghLog,
+    });
+    // ONLY the human comment plans a job — the three sticky shapes skip.
+    expect(outcome.plan.jobs).toHaveLength(1);
+    expect((outcome.plan.jobs[0] as { input: { item: { id: string } } }).input.item.id).toBe('304');
+    expect(outcome.skipped).toEqual([]);
+    expect(outcome.status).toBe('ok');
+    expect(outcome.actionsPosted).toBe(1);
+    // SELF-REPLY MARKER (drill 8): the reply body ends with the loop's
+    // signature line — a re-run must recognize its own words, never answer
+    // them again.
+    const post = ghLog.find((args) => args.includes('-X'));
+    expect(
+      post?.some((arg) => arg.includes('<!-- cq-review-loop:octo/widget#7 -->')),
+      `posted argv ${JSON.stringify(post)}`,
+    ).toBe(true);
   });
 });
 

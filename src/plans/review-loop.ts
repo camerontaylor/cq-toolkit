@@ -71,6 +71,7 @@
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
 import type { Budget, ModelSpec } from '../driver/types.js';
+import { deepFreeze } from '../harness/config.js';
 import type { HarnessConfig } from '../harness/config.js';
 import {
   BudgetGovernor,
@@ -112,6 +113,73 @@ import { snapshotPrState, verifyPrOutcome } from '../ops/review/verifyReviewOutc
 
 /** Cap for the composed push-failure reason — a push can spew pages of output. */
 const PUSH_REASON_MAX = 500;
+
+/**
+ * The loop's SELF-REPLY SIGNATURE (drill 8): every reply body the loop
+ * composes — a thread's review_reply and a top-level issue_comment alike —
+ * ends with this exact line, and {@link defaultLoopClassifyConfig} skips
+ * bodies that OPEN with its prefix. Issue comments do not thread, so
+ * without the signature each reply the loop posts re-fetches as NEW
+ * feedback and the loop answers itself forever. Content-keyed on purpose:
+ * the classify vocabulary's 'responder's own words' class made
+ * deterministic under the single-identity deviation (authorship-based
+ * skipping is blind when the drill holds exactly one identity — see
+ * defaultLoopClassifyConfig).
+ */
+const replySignature = (owner: string, repo: string, pr: number): string =>
+  `<!-- cq-review-loop:${owner}/${repo}#${String(pr)} -->`;
+
+/** The content key recognizing the signature (the composed line's prefix). */
+const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
+
+/**
+ * The loop's shipped classify DEFAULT: defaultClassifyConfig plus the
+ * auto-generated PR sticky-comment patterns — platform/bot tooling
+ * housekeeping, never review feedback. FOUND LIVE, growing AS DATA (R3's
+ * designated mechanism: the patterns ride the frozen ClassifyConfig shape,
+ * never a code branch):
+ *   - drill 6: the GitHub housekeeping shape, body opens
+ *     `<!-- This is an auto-generated comment …`;
+ *   - drill 7 (comment id 5705054746, a top-level summary): the SAME
+ *     housekeeping WITHOUT the marker — body opens
+ *     `This comment shows the latest checks …`;
+ *   - drill 8: the Codex review bot's sticky PR summary, body opens
+ *     `<!-- codex-pull-request-review-summary …` (then "## Codex Review
+ *     Summary / This comment shows the latest Codex review activity…").
+ * Without the suppression every real-PR run fixer-runs on the platform's
+ * own comments.
+ *
+ * And the loop's OWN reply signature (drill 8, {@link REPLY_SIGNATURE}):
+ * `/^<!-- cq-review-loop</`. Issue comments do not thread, so every reply
+ * the loop posts would otherwise re-fetch as a NEW actionable item and the
+ * loop would consume its own words forever. This is the classify
+ * vocabulary's 'responder's own words' class made DETERMINISTIC under the
+ * single-identity deviation: `skipResponderAuthoredThreads` keys on author
+ * identity, but when the drill holds exactly one identity every comment
+ * shares that author — the marker makes "already said by us" readable from
+ * CONTENT, independent of the authorship knob.
+ *
+ * Line-START anchored without `m` ON PURPOSE — these markers ARE the body's
+ * first bytes on the real comments, and a human comment that merely quotes
+ * or mentions them mid-body must never skip (conservative bias: ambiguous
+ * cases fail toward actionable, a human looks at them). The set grows as
+ * data: a new live-observed housekeeping shape appends one anchored
+ * pattern here, documented with its drill. Callers may still replace the
+ * config WHOLESALE (ReviewLoopOpts.classifyConfig) — a replacement
+ * replaces this default INCLUDING the suppression, so a custom config that
+ * wants it re-adds the patterns. Frozen: config data the loop reads, never
+ * a caller-mutable surface.
+ */
+export const defaultLoopClassifyConfig: ClassifyConfig = deepFreeze({
+  ...defaultClassifyConfig,
+  skipPatterns: [
+    ...defaultClassifyConfig.skipPatterns,
+    /^<!-- This is an auto-generated comment/,
+    /^This comment shows the latest checks/,
+    /^<!-- codex-pull-request-review-summary/,
+    REPLY_SIGNATURE_PATTERN,
+  ],
+});
 
 /** Everything runReviewLoop needs — plain data plus the injected seams. */
 export interface ReviewLoopOpts {
@@ -503,7 +571,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const classification = classifyThreads(
     state,
     opts.nowMs,
-    opts.classifyConfig ?? defaultClassifyConfig,
+    opts.classifyConfig ?? defaultLoopClassifyConfig,
   );
   if (classification.truncated) {
     return {
@@ -591,12 +659,49 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     headBefore.code === 0 &&
     headAfter.code === 0 &&
     headBefore.stdout.trim() !== headAfter.stdout.trim();
-  const claimedNoChange = fixReport.jobs.some(
-    (row) => row.result.status === 'ok' && !(row.result.value as FixReviewItemResult).changed,
-  );
-  const unreportedCommit = headMoved && claimedNoChange;
+  // HEAD-ACCOUNTABILITY VERIFICATION (drill 6; revises slice 9 item 2's
+  // run-level delta): every ok row's claimed commits are verified HERE,
+  // through the SAME per-item gate the resolve uses (commitInPushedHead —
+  // 40-hex, strict descendant of the before-head, ancestor of the worktree
+  // HEAD, message names the item). The pass runs BEFORE the publish
+  // decision because publication keys on the TIP, not on per-row claims:
+  //   - the tip may sit past the before-head only when some item's VERIFIED
+  //     commit accounts for it — a worker that commits while claiming
+  //     changed:false still blocks (its commit IS the tip and unclaimed);
+  //   - an honestly-no-change sibling NEVER false-positives on another
+  //     item's legitimate commit (found live, drill 6: one real fix plus
+  //     two honest no-ops read as "unreported" under the old per-row delta
+  //     and wrongly withheld publication).
+  // Rows claiming changed:true whose commits fail verification keep the
+  // unverified-commits path in the action stage; changed:false rows fire
+  // nothing once the tip is accounted for.
+  const verifiedClaimed = new Set<string>();
+  const rowVerified = new Map<string, boolean>();
+  for (const row of fixReport.jobs) {
+    let verified = false;
+    if (row.result.status === 'ok') {
+      const source = sources.get(row.jobId);
+      for (const sha of (row.result.value as FixReviewItemResult).commits) {
+        if (
+          source !== undefined &&
+          (await commitInPushedHead(opts.git, worktree.path, sha, before.headSha, source.itemId))
+        ) {
+          verified = true;
+          // The tip compare below runs over rev-parse's output; claimed
+          // shas are normalized the same way.
+          verifiedClaimed.add(sha.toLowerCase());
+        }
+      }
+    }
+    rowVerified.set(row.jobId, verified);
+  }
+  const unreportedCommit =
+    headMoved &&
+    !verifiedClaimed.has(headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : '');
   if (unreportedCommit) {
-    reasons.push('unreported-commit: worktree advanced but the worker reported no commit');
+    reasons.push(
+      `unreported-commit: worktree tip ${headAfter.stdout.trim()} is not a claimed fix — a worker committed without reporting it`,
+    );
   }
 
   // (5) Publish, then verify. The fix commits are LOCAL until pushed, so the
@@ -692,10 +797,13 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       (unreportedCommit
         ? `\n\nNote: the worktree advanced during the run — an unreported commit (${headAfter.stdout.trim()}) was observed; a human should check it.`
         : '');
+    // The SELF-REPLY SIGNATURE is the single trailing line of EVERY reply
+    // body (drill 8 — see replySignature): a re-run must recognize its own
+    // words as skip-class content, never as new feedback.
     const body =
-      value.changed && value.commits.length > 0
+      (value.changed && value.commits.length > 0
         ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${notes}`
-        : `${value.summary}${notes}`;
+        : `${value.summary}${notes}`) + `\n\n${replySignature(opts.owner, opts.repo, opts.pr)}`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
       // root is unanchorable (null rootDatabaseId) is recorded as a failure
@@ -733,16 +841,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           `thread ${source.itemId}: truncated-context — the worker saw a clipped prompt; resolve withheld, reply posted`,
         );
       } else if (value.changed && value.commits.length > 0) {
-        let verified = false;
-        for (const sha of value.commits) {
-          if (
-            await commitInPushedHead(opts.git, worktree.path, sha, before.headSha, source.itemId)
-          ) {
-            verified = true;
-            break;
-          }
-        }
-        if (verified) {
+        // Already verified in the HEAD-accountability pass above — the SAME
+        // gate (commitInPushedHead incl. attribution) over the SAME inputs
+        // (the publish push moves no worktree ref), never re-run.
+        if (rowVerified.get(row.jobId) === true) {
           actions.push({
             kind: 'resolve_thread',
             actionId: `review-loop:${String(opts.pr)}:resolve:${source.itemId}-${source.roundFingerprint}`,
