@@ -1,0 +1,374 @@
+// Analyze lane G1 — error clustering with honest confidence: group one
+// tool's typed failures by SIGNATURE — tool + ruleId + normalized message
+// TEMPLATE — so a burst of the same rule firing the same shape across many
+// files becomes one remediation unit instead of a flat wall of failures.
+// Pure decision core: zero I/O, no clocks, no randomness.
+//
+// Invariants honored here:
+//   - Determinism (the acceptance property): cluster ids are STABLE and
+//     content-derived — FNV-1a 32-bit (the gates family's fnv1a32Hex) over
+//     the canonical signature JSON — so the same failure set yields the
+//     same ids in any presentation order (property-tested with seeded
+//     shuffles). Clusters sort by id, signature breaking the (astronomically
+//     rare) 32-bit id tie; members and noise sort by exact failure identity
+//     (collectFailures' identity), making the whole report
+//     order-invariant. As in fingerprint.ts, the full signature string is
+//     the comparison unit carried on each cluster; the 8-hex id is its
+//     compact stable handle.
+//   - Template normalization is EXACTLY this pipeline, in this order:
+//       1. quoted spans ('…', "…", `…`)          → <str> — found by a
+//          single-pass LINEAR scanner (no regex rescan of the tail):
+//          bodies are ESCAPE-AWARE (a backslash consumes the character
+//          after it, so an escaped delimiter cannot close a span), an
+//          OPENING delimiter must not be preceded by a Unicode letter,
+//          number, or underscore (so a contraction ("doesn't") or a
+//          possessive ("Users'") can never open a span), and a FAILED
+//          opener (no closer in the tail) makes its style literal for the
+//          rest of the message — a later delimiter of that style would
+//          have closed the span, so no later span of it can exist
+//     Case is PRESERVED (distinct identifiers that differ in case stay
+//     distinct). Later rules see earlier placeholders: a quoted path is
+//     <str>, a number inside a path is already inside <path>. The coarseness
+//     is documented, like the fingerprint buckets: 'and/or' also abstracts
+//     to <path>, and a message LITERALLY containing '<num>' could collide
+//     with an abstracted digit — an accepted placeholder-collision class,
+//     harmless to grouping-by-shape and impossible to hit without a same-rule
+//     near-twin message. A <path> token includes adjacent non-space
+//     punctuation, so trailing separators are abstracted with the path. A
+//     backslash immediately before a closing quote is consumed as an escape
+//     and extends the span (the Windows-path-in-quotes tradeoff) — accepted,
+//     deterministic. A quote abutting Unicode word chars on BOTH sides
+//     (said'foo') can never open a span, so such content stays literal —
+//     an accepted over-split class; an UNPAIRED quote also passes through
+//     conservatively.
+//   - Confidence honesty: a cluster of ≥ 2 members agreeing on the exact
+//     signature is 'high'; a singleton is 'low' — one sample cannot
+//     distinguish signal from noise, and v1 NEVER merges clusters (so a
+//     singleton is never silently absorbed by a look-alike). 'medium' exists
+//     in the contract for a future similarity-merge path (a merged cluster
+//     must drop to 'medium' and carry the merge explicitly); v1 never emits
+//     it — cross-signature similarity merging is deliberately not in v1
+//     (adopt-vs-build verdict: src/ops/analyze/NOTES.md).
+//   - Ledger interplay (R2 D6): failures whose cluster signature is in
+//     `ledger.knownNoise` do NOT cluster as signal — they are excluded from
+//     clusters and reported in `noise`, so re-fixing known noise stays
+//     suppressed (the ledger view semantics: knownNoise is exactly the list
+//     dispatch must skip). Matching seam, DEFINED here because the frozen
+//     ledger surface takes its signatures as caller-supplied opaque strings
+//     and has no canonical CheckFailure→signature construction: the ledger
+//     signature of a failure is exactly {@link clusterSignature}(failure,
+//     tool) — the same canonical string this module clusters by. Record that
+//     string through the ledger record op and the suppression matches;
+//     anything else recorded simply never matches — no guessing, no fuzzy
+//     matching. Two view invariants are ENFORCED at this boundary, not
+//     assumed from the ledger lane: knownNoise must be GROUNDED in entries
+//     (every known-noise signature has a recorded entry — a stale or
+//     hand-built view cannot suppress without evidence of recurrence), and
+//     needsHuman ⊆ knownNoise (an escalated signature its view does not
+//     suppress must not silently cluster as signal). Either violated view
+//     throws (the op maps it to `failed`). The canonical signature is
+//     BOUNDED to the ledger's SIGNATURE_MAX_CHARS by deterministic
+//     template truncation (a prefix-collision coarseness, the same
+//     doctrine as the fingerprint buckets), so the record seam stays
+//     usable for verbose diagnostics.
+//   - All plain JSON-serializable data; the input is a FailureSet (one tool
+//     — the family's unit, consistent with collectFailures' single-tool
+//     policy; the signature needs the tool and a bare failure list has
+//     none). An EMPTY set clusters to an empty report — clustering nothing
+//     is honest and asserts nothing about cleanliness.
+import type { LedgerView } from '../ledger/ledger.js';
+// Runtime import of the ledger bound — ONE definition (the record boundary)
+// decides what fits a ledger entry. Safe eagerly: the pure ledger decision
+// module has zero runtime imports of its own.
+import { SIGNATURE_MAX_CHARS } from '../ledger/ledger.js';
+import type { Op } from '../../kernel/types.js';
+import type { CheckFailure, FailureSet } from '../gates/checkRunner.js';
+import { fnv1a32Hex } from '../gates/fingerprint.js';
+import { sortByIdentity } from './collectFailures.js';
+
+/**
+ * The normalized message TEMPLATE: the volatile fragments above replaced by
+ * fixed placeholders, whitespace collapsed. Exported because the template
+ * pipeline is the documented contract of the signature scheme (and is
+ * pinned by tests, like the fingerprint vectors).
+ */
+export function messageTemplate(message: string): string {
+  // Stage 1 — quoted spans, via a single-pass LINEAR scanner (the regex it
+  // replaced rescanned the remaining tail at every candidate opener,
+  // O(k·n) on many-opener messages). The per-style dead flags are what
+  // keep the scan linear: each style can fail by TAIL EXHAUSTION at most
+  // once (after that it is literal for the rest of the message), and a
+  // barrier-aborted span only rescans up to its barrier. Every other step
+  // advances. Differential-fuzzed against the regex it replaced.
+  let out = '';
+  let literalStart = 0;
+  let i = 0;
+  const dead = [false, false, false];
+  scan: while (i < message.length) {
+    const style = DELIMITERS.indexOf(message[i] as string);
+    if (style !== -1 && !dead[style] && !isAfterUnicodeWordChar(message, i)) {
+      let j = i + 1;
+      let barrier = false;
+      while (j < message.length) {
+        const c = message[j] as string;
+        if (c === '\\') {
+          if (j + 1 >= message.length || LINE_TERMINATOR.test(message[j + 1] as string)) {
+            // Escape-pair barrier: the regex dot refuses a line terminator
+            // (or the string ends), so this span fails — but unlike tail
+            // exhaustion the style stays ALIVE: a later opener after the
+            // barrier can still succeed. The failed span emits nothing and
+            // the backslash stays literal.
+            barrier = true;
+            break;
+          }
+          j += 2;
+          continue;
+        }
+        if (c === DELIMITERS[style]) {
+          out += `${message.slice(literalStart, i)}<str>`;
+          i = j + 1;
+          literalStart = i;
+          continue scan;
+        }
+        j += 1;
+      }
+      // Tail exhaustion only (no barrier): a later delimiter of this style
+      // would have closed the span, so no later span of it can exist — the
+      // style goes literal for the rest of the message.
+      if (!barrier) dead[style] = true;
+    }
+    i += 1;
+  }
+  const spanReplaced = out + message.slice(literalStart);
+  return spanReplaced
+    .replace(/\S+/g, (token) => (token.includes('/') || token.includes('\\') ? '<path>' : token))
+    .replace(NUMBER_LIKE, '<num>')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** The three quoted-span delimiter styles, indexed by the per-style dead flags. */
+const DELIMITERS: readonly string[] = ["'", '"', '`'];
+
+/** A character that blocks an opener: Unicode letter, number, or underscore. */
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
+/**
+ * Characters the escape pair \X refuses to consume (the regex dot's
+ * exclusion — without the s flag a backslash cannot cross a line
+ * terminator, and the span fails there exactly as the regex body did).
+ */
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+/** True when the character before `index` is a Unicode letter, number, or underscore. */
+function isAfterUnicodeWordChar(message: string, index: number): boolean {
+  return index > 0 && WORD_CHAR.test(message[index - 1] as string);
+}
+
+/** Numbers with an optional decimal part (codes, counts, line:col refs). */
+const NUMBER_LIKE = /\d+(?:\.\d+)?/g;
+
+/**
+ * The canonical signature string of one failure within a tool namespace —
+ * the ledger-matching form (record THIS through the ledger record op to
+ * suppress the failure cluster-wide) and the pre-hash unit of the cluster
+ * id. JSON tuple, like the gates' canonical keys, so no delimiter in a
+ * component can forge a collision. A null ruleId is encoded as null, never
+ * coerced to '' — the two stay distinct signatures, so a cluster's reported
+ * ruleId is deterministic regardless of input order. BOUNDED to the
+ * ledger's SIGNATURE_MAX_CHARS: an overflowing message template is
+ * deterministically prefix-truncated with a marker, so the record seam
+ * stays usable for verbose diagnostics — at the accepted coarseness that
+ * two very long messages sharing a truncation prefix sign ONE signature
+ * (fingerprint-bucket doctrine).
+ */
+export function clusterSignature(failure: CheckFailure, tool: string): string {
+  const template = messageTemplate(failure.message);
+  const canonical = JSON.stringify([tool, failure.ruleId, template]);
+  if (canonical.length <= SIGNATURE_MAX_CHARS) {
+    return canonical;
+  }
+  // The template is the only unbounded component: cut it until the
+  // canonical form fits. The budget starts at the fixed overhead's share
+  // and shrinks by the observed overage — an escaped character (a double
+  // quote or backslash, say) costs more than one code unit, so a raw cut
+  // of exactly the overage can still overflow; the loop terminates because
+  // every removed character contributes at least one code unit.
+  // Honest residual — unreachable through the op: the analyze registry
+  // bounds tool and ruleId to 120 ENCODED JSON units (escape-proof — the
+  // encoded form is exactly what raw caps cannot see), so the fixed
+  // overhead is at most 120 + 120 encoded units plus ~10 of tuple
+  // punctuation and ~3 for the marker — strictly under SIGNATURE_MAX_CHARS
+  // — and this loop provably converges under the bound for EVERY
+  // schema-valid op input. Over-bound signatures are only possible for
+  // DIRECT LIBRARY CALLS that bypass the registry bound: such a signature
+  // is returned deterministically, the ledger record boundary rejects it,
+  // and the fail direction is safe — no suppression, never wrong
+  // suppression.
+  let budget =
+    SIGNATURE_MAX_CHARS -
+    JSON.stringify([tool, failure.ruleId, '']).length -
+    TRUNCATED_TEMPLATE_MARKER.length;
+  let signature = '';
+  for (;;) {
+    signature = JSON.stringify([
+      tool,
+      failure.ruleId,
+      template.slice(0, Math.max(budget, 0)) + TRUNCATED_TEMPLATE_MARKER,
+    ]);
+    if (signature.length <= SIGNATURE_MAX_CHARS || budget <= 0) {
+      return signature;
+    }
+    budget -= signature.length - SIGNATURE_MAX_CHARS;
+  }
+}
+
+/** Appended to a template cut for the ledger bound — visually distinct, one code unit. */
+const TRUNCATED_TEMPLATE_MARKER = '…';
+
+/** Confidence vocabulary. v1 emits only 'high' and 'low' (see module header). */
+export type ClusterConfidence = 'high' | 'medium' | 'low';
+
+/** One signature cluster — plain data, stable id, honest confidence. */
+export interface Cluster {
+  /** FNV-1a 32-bit over the canonical signature JSON — content-derived, stable. */
+  id: string;
+  /** The full canonical signature — the comparison unit; the id is its handle. */
+  signature: string;
+  /** The cluster's tool (every member's set tool — one set, one tool). */
+  tool: string;
+  /** The members' shared rule id (null when the tool attributed none). */
+  ruleId: string | null;
+  /** 'high' for ≥ 2 agreeing members; 'low' for a singleton; never merged in v1. */
+  confidence: ClusterConfidence;
+  /** The member failures, sorted by exact identity (duplicates preserved — occurrence count is signal). */
+  failures: CheckFailure[];
+  /** Member count. */
+  size: number;
+}
+
+/** The clustering report: signal clusters plus the separately-reported ledger noise. */
+export interface ClusterErrorsReport {
+  /** Clusters sorted by id. */
+  clusters: Cluster[];
+  /** Failures suppressed as known noise, sorted by exact identity — never inside `clusters`. */
+  noise: CheckFailure[];
+}
+
+/** JSON-serializable input of the `analyze.clusterErrors` op. */
+export interface ClusterErrorsInput {
+  /** The failure set to cluster (one tool). */
+  set: FailureSet;
+  /**
+   * The dispatch-facing ledger view: `knownNoise` is the suppression list.
+   * Both view invariants are ENFORCED here (a violating view is a policy
+   * throw): knownNoise must be grounded in `entries`, and needsHuman ⊆
+   * knownNoise. Omit for no suppression.
+   */
+  ledger?: LedgerView;
+}
+
+/**
+ * The `analyze.clusterErrors` clustering: group one FailureSet's failures by
+ * canonical signature, exclude ledger noise, order everything
+ * deterministically. An empty set yields an empty report; the policy throws
+ * are the ledger-view invariant violations (knownNoise ungrounded in
+ * entries; needsHuman not suppressed by knownNoise).
+ */
+export function clusterErrors(set: FailureSet, ledger?: LedgerView): ClusterErrorsReport {
+  // BOTH view invariants are ENFORCED at this boundary, not assumed from
+  // the ledger lane. Same policy-throw pattern as collectFailures' tool
+  // policy; the op maps them to `failed`.
+  if (ledger !== undefined) {
+    // Grounding: knownNoise must be backed by RECORDED entries — a stale
+    // or hand-built view that suppresses a signature with no entry would
+    // skip re-fixing without any evidence the signature ever recurred
+    // (the real ledger derives knownNoise FROM entries, so every
+    // ledger-built view satisfies this trivially).
+    const entrySignatures = new Set(ledger.entries.map((entry) => entry.signature));
+    for (const noise of ledger.knownNoise) {
+      if (!entrySignatures.has(noise)) {
+        throw new RangeError(
+          `clusterErrors: invalid ledger view — knownNoise signature '${noise}' has no ledger entry (knownNoise must be grounded in recorded recurrence; the ledger derives it from entries)`,
+        );
+      }
+    }
+    // Subset: a hand-built view that escalates a signature it does not
+    // suppress would silently cluster ESCALATED noise as signal — the
+    // exact re-fixing the ledger exists to prevent.
+    const known = new Set(ledger.knownNoise);
+    for (const escalated of ledger.needsHuman) {
+      if (!known.has(escalated)) {
+        throw new RangeError(
+          `clusterErrors: invalid ledger view — needsHuman signature '${escalated}' is not in knownNoise (needsHuman ⊆ knownNoise; escalated noise must stay suppressed)`,
+        );
+      }
+    }
+  }
+  const noiseSignatures = new Set(ledger?.knownNoise ?? []);
+  const noise: CheckFailure[] = [];
+  const groups = new Map<string, CheckFailure[]>();
+  for (const failure of set.failures) {
+    const signature = clusterSignature(failure, set.tool);
+    if (noiseSignatures.has(signature)) {
+      noise.push(failure);
+      continue;
+    }
+    const members = groups.get(signature);
+    if (members === undefined) {
+      groups.set(signature, [failure]);
+    } else {
+      members.push(failure);
+    }
+  }
+  const clusters: Cluster[] = [...groups.entries()].map(([signature, members]) => {
+    // Signature equality implies an IDENTICAL ruleId (null is encoded, not
+    // coerced), so any member yields the same value — the first is fine.
+    const ruleId = (members[0] as CheckFailure).ruleId;
+    return {
+      id: fnv1a32Hex(signature),
+      signature,
+      tool: set.tool,
+      ruleId,
+      confidence: members.length >= 2 ? 'high' : 'low',
+      failures: sortByIdentity(members, set.tool),
+      size: members.length,
+    };
+  });
+  // Ids are 32-bit FNV, so two DISTINCT signatures can collide on one id;
+  // the signature breaks the tie so ordering never depends on map insertion
+  // order (determinism acceptance check). A genuine pinned collision
+  // executes this tiebreak — see the id-collision test.
+  clusters.sort((a, b) =>
+    a.id < b.id
+      ? -1
+      : a.id > b.id
+        ? 1
+        : a.signature < b.signature
+          ? -1
+          : a.signature > b.signature
+            ? 1
+            : 0,
+  );
+  return { clusters, noise: sortByIdentity(noise, set.tool) };
+}
+
+/**
+ * The `analyze.clusterErrors` op: `ok` with the report, or `failed` when a
+ * ledger-view policy throw fires (knownNoise ungrounded in entries, or
+ * needsHuman not suppressed by knownNoise — the op ran and definitively
+ * could not honor the suppression contract), the same
+ * policy-to-`failed` mapping as {@link collectFailuresOp}.
+ */
+export const clusterErrorsOp: Op<ClusterErrorsInput, ClusterErrorsReport> = async (input) => {
+  try {
+    return { status: 'ok', value: clusterErrors(input.set, input.ledger) };
+  } catch (err) {
+    return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+  }
+};
+
+// The family-registry seam (src/ops/README.md): the op function DEFAULT-
+// exported for the importer's `.default` resolution; the named export above
+// stays for library, barrel, and test consumers.
+export default clusterErrorsOp;
