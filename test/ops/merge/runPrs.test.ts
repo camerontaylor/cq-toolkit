@@ -251,7 +251,7 @@ describe('runMergePrs', () => {
     expect(calls).toEqual([]);
   });
 
-  test('happy path, no conflicts: both eligible prs merge in pass 1; the agent never runs', async () => {
+  test('no acted resolution: the pass-2 refresh seam is never invoked even when wired', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(acted(999));
     const { refetch, callCount } = fakeRefetch([]);
