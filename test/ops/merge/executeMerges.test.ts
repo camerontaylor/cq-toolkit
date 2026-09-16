@@ -1080,9 +1080,15 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
   });
 
   test('VB2F batch gate: trailing tokens on an otherwise-legal gh shape are refused — --admin/--squash/--delete-branch cannot ride the merge, --add-label cannot ride the retarget', () => {
-    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--admin'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--squash'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--delete-branch'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--admin'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--squash'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--delete-branch'])).toThrow(
+      UnsafeMergeArgsError,
+    );
     expect(() => safeArgs(['pr', 'edit', '7', '--base', 'main', '--add-label', 'x'])).toThrow(
       UnsafeMergeArgsError,
     );
