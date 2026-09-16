@@ -319,6 +319,13 @@ function isInside(path: string, dir: string): boolean {
 
 /** Library-level input contract; the registry schema mirrors it for JSON dispatch. */
 function inputFaultOf(input: CleanupInput): string | null {
+  // The WHOLE input is reachable null/undefined/primitive from an untyped
+  // caller past any schema — guard the top level BEFORE the first field
+  // read, or this boundary itself would throw the TypeError it exists to
+  // prevent.
+  if (input === null || typeof input !== 'object') {
+    return 'sweep: input must be an object with non-empty repoRoot, worktreesDir and runPrefix, and an integer ≥ 0 olderThanMs';
+  }
   for (const [field, value] of [
     ['repoRoot', input.repoRoot],
     ['worktreesDir', input.worktreesDir],

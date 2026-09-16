@@ -3,10 +3,12 @@
 //
 // Pinned here, on injected fake effects unless stated:
 //   1. THE CLASS TABLE (R2 D8): clean-done → reuse; half-done (strictly
-//      clean, partial journal progress) → resume; dirty → preserve;
-//      absent path → an absent ROW, not an error; a FAILED liveness or
-//      clean probe → indeterminate NAMING the fault — never discard, never
-//      a silent skip.
+//      clean, partial journal progress — an EXPLICIT allTerminal:false
+//      with or without a lastStep, or a recorded lastStep) → resume;
+//      dirty → preserve; absent path → an absent ROW, not an error; a
+//      FAILED liveness or clean probe → indeterminate NAMING the fault —
+//      never discard, never a silent skip. reuse ONLY when the journal
+//      tail is absent/evidence-free or allTerminal is true.
 //   2. THE DIRTY LADDER IS EXPLICIT-ONLY: salvage NEVER classifies a dirty
 //      tree `discard` without the explicit discardDirty flag; with the flag
 //      the row only MARKS discard-eligibility (stash-first) — the seam has
@@ -133,6 +135,35 @@ describe('sweep.salvage classification (UC row 7, R2 D8)', () => {
     expect(row.reason).toMatch(/no journal tail/);
   });
 
+  test('EXPLICIT allTerminal:false with NO lastStep is positive evidence — resume, reason names no step', async () => {
+    const world = fakeWorld();
+    world.dirs.add(ENTRY);
+    world.clean.add(ENTRY);
+    const plan = await okPlan(
+      makeSalvage(effectsOf(world)),
+      inputOf([{ path: ENTRY, journal: { allTerminal: false } }]),
+    );
+    const row = plan.rows[0] as SalvageRow;
+    expect(row.class).toBe('resume');
+    // The explicit non-terminal marker is the evidence; no step was
+    // recorded, so the reason must not interpolate one.
+    expect(row.reason).toMatch(/explicitly records steps NOT all terminal/);
+    expect(row.reason).not.toMatch(/last terminal step/);
+  });
+
+  test('a journal tail with neither an explicit marker nor a lastStep carries no positive evidence — reuse', async () => {
+    const world = fakeWorld();
+    world.dirs.add(ENTRY);
+    world.clean.add(ENTRY);
+    const plan = await okPlan(
+      makeSalvage(effectsOf(world)),
+      inputOf([{ path: ENTRY, journal: {} }]),
+    );
+    const row = plan.rows[0] as SalvageRow;
+    expect(row.class).toBe('reuse');
+    expect(row.reason).toMatch(/no positive evidence/);
+  });
+
   test('a DIRTY tree is preserve — REQUIRED: never discard without the explicit flag', async () => {
     const world = fakeWorld();
     world.dirs.add(ENTRY);
@@ -152,7 +183,11 @@ describe('sweep.salvage classification (UC row 7, R2 D8)', () => {
       makeSalvage(effectsOf(world)),
       inputOf([{ path: ENTRY, journal: { lastStep: 's1', allTerminal: false } }]),
     );
-    expect((resumed.rows[0] as SalvageRow).class).toBe('resume');
+    const row = resumed.rows[0] as SalvageRow;
+    expect(row.class).toBe('resume');
+    // The step IS recorded here, so the reason names it.
+    expect(row.reason).toMatch(/NOT all terminal/);
+    expect(row.reason).toContain("last terminal step 's1'");
 
     world.dirs.add('/runs/wt/fix/cli');
     const dirty = await okPlan(
@@ -366,6 +401,16 @@ describe('sweep.salvage canonical paths and counts', () => {
 // ---------------------------------------------------------------------------
 
 describe('sweep.salvage boundary', () => {
+  test('REQUIRED: a null or primitive input is a failed result — the boundary guards the top level before any field read', async () => {
+    const op = makeSalvage(effectsOf(fakeWorld()));
+    const nullError = await failedAt(op, null as unknown as SalvageInput);
+    expect(nullError).toMatch(/input must be an object/);
+    const numberError = await failedAt(op, 42 as unknown as SalvageInput);
+    expect(numberError).toMatch(/input must be an object/);
+    const undefinedError = await failedAt(op, undefined as unknown as SalvageInput);
+    expect(undefinedError).toMatch(/input must be an object/);
+  });
+
   test('a non-array entries field is a failed result — the char-wise iteration corruption class', async () => {
     const error = await failedAt(
       makeSalvage(effectsOf(fakeWorld())),

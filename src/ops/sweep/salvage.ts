@@ -67,12 +67,15 @@ export interface SalvageInput {
 
 /**
  * The conservative classification of one entry (R2 D8). Exactly one of:
- *   - `reuse`         — exists, strictly clean, and no journal evidence of
- *                       pending steps (allTerminal, or no journal tail at
- *                       all): a clean-done tree, safe to skip.
+ *   - `reuse`         — exists, strictly clean, and the journal tail is
+ *                       ABSENT or records allTerminal true: a clean-done
+ *                       tree, safe to skip.
  *   - `resume`        — exists, strictly clean, and the journal shows
- *                       PARTIAL progress (allTerminal false/absent with a
- *                       lastStep): nothing on disk to lose, work to finish.
+ *                       PARTIAL progress — allTerminal EXPLICITLY false
+ *                       (with or without a lastStep: an explicit
+ *                       non-terminal marker is positive evidence of a
+ *                       pending step) or a lastStep present: nothing on
+ *                       disk to lose, work to finish.
  *   - `preserve`      — exists and DIRTY (default): never auto-cleaned.
  *   - `discard`       — exists and DIRTY and the input set `discardDirty`:
  *                       discard-ELIGIBLE only (stash-first); no deletion.
@@ -188,15 +191,31 @@ export function makeSalvage(git: SalvageEffects): Op<SalvageInput, SalvagePlan> 
         continue;
       }
       if (clean) {
-        const allTerminal = entry.journal?.allTerminal === true;
+        const allTerminal = entry.journal?.allTerminal;
         const lastStep = entry.journal?.lastStep;
-        if (allTerminal) {
+        if (allTerminal === true) {
           rows.push(
             rowOf(
               entry,
               real,
               'reuse',
               'strictly clean and the journal records all steps terminal — clean-done, safe to skip',
+            ),
+          );
+        } else if (allTerminal === false) {
+          // An EXPLICIT non-terminal marker is positive evidence of a
+          // pending step — resume even when no lastStep is recorded, and
+          // the reason names the lastStep only when one exists.
+          const total = entry.journal?.stepsTotal;
+          const ofTotal = total === undefined ? '' : ` of ${String(total)}`;
+          const step =
+            lastStep === undefined ? '' : ` — last terminal step '${lastStep}'${ofTotal}`;
+          rows.push(
+            rowOf(
+              entry,
+              real,
+              'resume',
+              `strictly clean with PARTIAL journal progress — the journal explicitly records steps NOT all terminal${step}`,
             ),
           );
         } else if (lastStep !== undefined) {
@@ -207,7 +226,7 @@ export function makeSalvage(git: SalvageEffects): Op<SalvageInput, SalvagePlan> 
               entry,
               real,
               'resume',
-              `strictly clean with PARTIAL journal progress — last terminal step '${lastStep}'${ofTotal}, steps not all terminal`,
+              `strictly clean with PARTIAL journal progress — last terminal step '${lastStep}'${ofTotal}, allTerminal not recorded`,
             ),
           );
         } else {
@@ -216,7 +235,9 @@ export function makeSalvage(git: SalvageEffects): Op<SalvageInput, SalvagePlan> 
               entry,
               real,
               'reuse',
-              'strictly clean with no journal tail at all — a clean tree is by definition not mid-write, and resume requires positive journal evidence of a pending step',
+              entry.journal === undefined
+                ? 'strictly clean with no journal tail at all — a clean tree is by definition not mid-write, and resume requires positive journal evidence of a pending step'
+                : 'strictly clean with a journal tail recording neither an explicit non-terminal marker nor a pending step — no positive evidence of pending work',
             ),
           );
         }
@@ -274,6 +295,13 @@ function faultReason(probe: string, err: unknown): string {
  * never an escaping TypeError.
  */
 function inputFaultOf(input: SalvageInput): string | null {
+  // The WHOLE input is reachable null/undefined/primitive from an untyped
+  // caller past any schema — guard the top level BEFORE the first field
+  // read, or this boundary itself would throw the TypeError it exists to
+  // prevent.
+  if (input === null || typeof input !== 'object') {
+    return 'sweep: input must be an object with a non-empty repoRoot and an entries array';
+  }
   if (typeof input.repoRoot !== 'string' || input.repoRoot === '') {
     return 'sweep: repoRoot must be a non-empty string';
   }

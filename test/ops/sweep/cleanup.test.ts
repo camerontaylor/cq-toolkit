@@ -507,6 +507,16 @@ describe('sweep.cleanup fault paths', () => {
 // ---------------------------------------------------------------------------
 
 describe('sweep.cleanup boundary', () => {
+  test('REQUIRED: a null or primitive input is a failed result — the boundary guards the top level before any field read', async () => {
+    const op = makeCleanup(effectsOf(fakeRepo()));
+    const nullError = await failedAt(op, null as unknown as CleanupInput);
+    expect(nullError).toMatch(/input must be an object/);
+    const numberError = await failedAt(op, 42 as unknown as CleanupInput);
+    expect(numberError).toMatch(/input must be an object/);
+    const undefinedError = await failedAt(op, undefined as unknown as CleanupInput);
+    expect(undefinedError).toMatch(/input must be an object/);
+  });
+
   test('blank fields are refused', async () => {
     const effects = effectsOf(fakeRepo());
     await expect(failedAt(makeCleanup(effects), { ...INPUT, repoRoot: '' })).resolves.toMatch(
