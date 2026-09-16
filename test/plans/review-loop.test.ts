@@ -1281,15 +1281,18 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
 // ---------------------------------------------------------------------------
 
 describe('auto-generated sticky comment skip + self-reply marker (drills 6-8)', () => {
-  test('housekeeping comments skip under the loop DEFAULT; a real human comment stays actionable; the reply carries the loop signature', async () => {
+  test('housekeeping comments skip under the loop DEFAULT; a real human comment stays actionable; a marker-led loop reply plans no job; the posted reply LEADS with the signature', async () => {
     // ALL THREE live-observed housekeeping shapes (drill 6: the GitHub
     // HTML-marker sticky; drill 7: the markerless checks summary, comment id
-    // 5705054746; drill 8: the Codex review bot's sticky PR summary) plus
-    // one REAL human comment. Authors are deliberately plain reviewer/bot
-    // identities — only the BODY patterns may classify the skips, and the
-    // human comment must stay actionable.
+    // 5705054746; drill 8: the Codex review bot's sticky PR summary), one
+    // REAL human comment, and ONE previously posted loop reply (marker-led,
+    // exactly the body the loop composes). Authors are deliberately plain
+    // reviewer identities — NEVER the responder — so ONLY the BODY patterns
+    // can classify the skips: the signature mechanism must hold on content
+    // alone, independent of the authorship knob (the single-identity
+    // scenario flips that knob off).
     const world = defaultWorld();
-    world.threads = []; // ONLY the four issue comments ride the fetched state
+    world.threads = []; // ONLY the five issue comments ride the fetched state
     world.issueComments = [
       restComment(
         301,
@@ -1313,24 +1316,35 @@ describe('auto-generated sticky comment skip + self-reply marker (drills 6-8)', 
         null,
       ),
       restComment(304, 'reviewer', 'Please also fix the typo in src/a.ts.', iso(ROOT_AGE), null),
+      // A PRIOR LOOP REPLY re-fetched as feedback (cycle-1 major): the
+      // signature LEADS the composed body, so the START-anchored pattern
+      // must match it — this comment plans no job.
+      restComment(
+        305,
+        'reviewer',
+        '<!-- cq-review-loop:octo/widget#7 -->\n\nNoted; nothing to change in code.',
+        iso(ROOT_AGE),
+        null,
+      ),
     ];
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(false, 'Noted; nothing to change in code.', []))],
       ghLog,
     });
-    // ONLY the human comment plans a job — the three sticky shapes skip.
+    // ONLY the human comment plans a job — the three sticky shapes AND the
+    // marker-led loop reply skip.
     expect(outcome.plan.jobs).toHaveLength(1);
     expect((outcome.plan.jobs[0] as { input: { item: { id: string } } }).input.item.id).toBe('304');
     expect(outcome.skipped).toEqual([]);
     expect(outcome.status).toBe('ok');
     expect(outcome.actionsPosted).toBe(1);
-    // SELF-REPLY MARKER (drill 8): the reply body ends with the loop's
-    // signature line — a re-run must recognize its own words, never answer
-    // them again.
+    // SELF-REPLY MARKER (drill 8, cycle-1 major): the reply body OPENS with
+    // the loop's signature line — the skip pattern is START-anchored, so a
+    // trailing marker would never match the reply it was posted on.
     const post = ghLog.find((args) => args.includes('-X'));
     expect(
-      post?.some((arg) => arg.includes('<!-- cq-review-loop:octo/widget#7 -->')),
+      post?.some((arg) => arg.startsWith('body=<!-- cq-review-loop:octo/widget#7 -->')),
       `posted argv ${JSON.stringify(post)}`,
     ).toBe(true);
   });

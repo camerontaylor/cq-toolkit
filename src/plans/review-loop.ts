@@ -117,8 +117,12 @@ const PUSH_REASON_MAX = 500;
 /**
  * The loop's SELF-REPLY SIGNATURE (drill 8): every reply body the loop
  * composes — a thread's review_reply and a top-level issue_comment alike —
- * ends with this exact line, and {@link defaultLoopClassifyConfig} skips
- * bodies that OPEN with its prefix. Issue comments do not thread, so
+ * OPENS with this exact line, and {@link defaultLoopClassifyConfig} skips
+ * bodies that open with its prefix. The marker must LEAD: the skip pattern
+ * is START-anchored, and the case the signature exists for is a previously
+ * posted loop reply re-fetched as feedback — its body starts with whatever
+ * the loop said, so only a leading marker can match (cycle-1 major: a
+ * trailing marker matched nothing). Issue comments do not thread, so
  * without the signature each reply the loop posts re-fetches as NEW
  * feedback and the loop answers itself forever. Content-keyed on purpose:
  * the classify vocabulary's 'responder's own words' class made
@@ -797,13 +801,16 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       (unreportedCommit
         ? `\n\nNote: the worktree advanced during the run — an unreported commit (${headAfter.stdout.trim()}) was observed; a human should check it.`
         : '');
-    // The SELF-REPLY SIGNATURE is the single trailing line of EVERY reply
-    // body (drill 8 — see replySignature): a re-run must recognize its own
-    // words as skip-class content, never as new feedback.
-    const body =
-      (value.changed && value.commits.length > 0
+    // The SELF-REPLY SIGNATURE LEADS every reply body (drill 8, cycle-1
+    // major — see replySignature): REPLY_SIGNATURE_PATTERN is
+    // START-anchored, so the marker must be the body's FIRST line for a
+    // re-run to recognize its own words as skip-class content.
+    const signature = replySignature(opts.owner, opts.repo, opts.pr);
+    const body = `${signature}\n\n${
+      value.changed && value.commits.length > 0
         ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${notes}`
-        : `${value.summary}${notes}`) + `\n\n${replySignature(opts.owner, opts.repo, opts.pr)}`;
+        : `${value.summary}${notes}`
+    }`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
       // root is unanchorable (null rootDatabaseId) is recorded as a failure
