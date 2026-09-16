@@ -17,15 +17,30 @@
 //      never reads a real clock).
 //   4. THE ALL-CLEAR is STRICTLY AFTER the last commit, top-level,
 //      non-author, and timestamped — at-or-before, replies, the author's
-//      own words, and null timestamps all fall through.
+//      own words, and null timestamps all fall through. It bypasses ONLY
+//      the settle wait: with zero reviews it never fires (row 6 first),
+//      and a bot skip notice is never all-clear evidence even when
+//      phrased "No further changes".
 //   5. WHAT COUNTS AS A REVIEW (row 6): author self-reviews, bot
 //      skip/failure notices, and DISMISSED reviews never count; non-author
 //      bot reviews and null-authorLogin reviews DO (no reviewer privileged;
 //      fail toward accepting evidence).
+//   6. THE TEMPORAL QUALIFIER (DOCTRINE §I2, canonical): an acceptable
+//      review must postdate the LAST COMMIT — evidence covering an
+//      earlier commit never qualifies, no matter how long the settle, and
+//      no matter when it was resubmitted; a null/unparseable submittedAt
+//      never qualifies. The row-7 comment all-clear cannot stand in for
+//      the review-of-head requirement.
+//   7. THE SHIPPED allClearPattern is line-start anchored and negation-
+//      proof: a leading "not" kills the match, mid-sentence mentions
+//      cannot match, and "looks good" must end its line.
 //
 // Pure data tests: no I/O, no clocks — instant by construction.
 import { describe, expect, test } from 'vitest';
-import { REVIEW_ACCEPT_SETTLE_MS } from '../../../src/ops/merge/classify.config.js';
+import {
+  REVIEW_ACCEPT_SETTLE_MS,
+  defaultClassifyPrConfig,
+} from '../../../src/ops/merge/classify.config.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import type { PrCandidate } from '../../../src/ops/merge/classifyPrs.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../../../src/ops/review/threads.js';
@@ -332,14 +347,157 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     expect(result.reason).toBe('settle_window_pending');
   });
 
-  test('a caveat sentence ("looks good. but …") is not an all-clear (pattern data)', () => {
+  test('a caveat sentence ("looks good, but …") is not an all-clear (must END its line)', () => {
     const result = classifyPr(
       settleCandidate({
-        reviews: [approved({ body: 'looks good. but fix the retry loop first' })],
+        reviews: [approved({ body: 'looks good, but fix the retry loop first' })],
       }),
       PENDING_MS,
     );
     expect(result.reason).toBe('settle_window_pending');
+  });
+
+  test('a bot skip notice is never all-clear evidence, even with "No further changes" on its own line', () => {
+    // The skip guard in isAllClearAfter fires BEFORE the pattern: without
+    // it, line 2 ("No further changes will be made.") is a line-start
+    // pattern match and a punted review would read as approval.
+    const result = classifyPr(
+      settleCandidate({
+        issueComments: [
+          comment({
+            body: 'CodeRabbit skipped this run due to a configuration error.\nNo further changes will be made.',
+          }),
+        ],
+      }),
+      PENDING_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('settle_window_pending');
+  });
+
+  test('a comment all-clear with ZERO reviews → awaiting (row 6 precedes row 7)', () => {
+    // The all-clear bypasses ONLY the settle wait — it never stands in
+    // for the review-of-head requirement.
+    const result = classifyPr(candidate({ issueComments: [comment()] }), SETTLED_MS);
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The temporal qualifier (DOCTRINE §I2) — evidence must cover the LAST commit
+// ---------------------------------------------------------------------------
+
+describe('classifyPr — an acceptable review must postdate the last commit (DOCTRINE §I2)', () => {
+  test('a pre-commit acceptable review does NOT satisfy row 6', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ submittedAt: BEFORE_COMMIT })] }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('pre-commit review + post-commit comment all-clear → STILL awaiting (no post-commit review evidence)', () => {
+    const result = classifyPr(
+      candidate({
+        reviews: [approved({ submittedAt: BEFORE_COMMIT })],
+        issueComments: [comment()],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('pre-commit review + settle fully elapsed → STILL awaiting (settle never cures stale evidence)', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ submittedAt: BEFORE_COMMIT })] }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a review with a null or unparseable submittedAt never qualifies (fail toward awaiting)', () => {
+    for (const submittedAt of [null, 'not-a-timestamp'] as Array<string | null>) {
+      const result = classifyPr(
+        candidate({ reviews: [approved({ submittedAt })] }),
+        SETTLED_MS,
+      );
+      expect(result.reason).toBe('no_acceptable_review');
+    }
+  });
+
+  test('CONTROL: adding a post-commit review flips the same candidate to eligible (settle elapsed)', () => {
+    const result = classifyPr(
+      candidate({
+        reviews: [approved({ submittedAt: BEFORE_COMMIT }), approved({ id: 'PRR_2' })],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('eligible');
+    expect(result.reason).toBe('settle_window_elapsed');
+  });
+
+  test('CONTROL: a post-commit all-clear review flips it to eligible via row 7', () => {
+    const result = classifyPr(
+      candidate({
+        reviews: [
+          approved({ submittedAt: BEFORE_COMMIT }),
+          approved({ id: 'PRR_2', body: 'LGTM' }),
+        ],
+      }),
+      PENDING_MS,
+    );
+    expect(result.verdict).toBe('eligible');
+    expect(result.reason).toBe('explicit_all_clear');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shipped allClearPattern — line-start anchored, negation-proof
+// ---------------------------------------------------------------------------
+
+describe('defaultClassifyPrConfig.allClearPattern — shipped data', () => {
+  test.each([
+    {
+      name: 'a line-leading "Not LGTM" is killed by the not-lookahead',
+      body: 'Not LGTM — the retry loop is broken',
+      matches: false,
+    },
+    {
+      name: 'a mid-sentence "not all clear yet" cannot match (line-start anchor)',
+      body: 'This is not all clear yet',
+      matches: false,
+    },
+    {
+      name: 'a line-leading "not lgtm-worthy" is killed by the not-lookahead',
+      body: 'not lgtm-worthy',
+      matches: false,
+    },
+    {
+      name: 'a line-leading "LGTM — ship it" matches',
+      body: 'LGTM — ship it',
+      matches: true,
+    },
+    {
+      name: 'a line-leading "all clear, thanks" matches (trailing comma is fine)',
+      body: 'all clear, thanks',
+      matches: true,
+    },
+    {
+      name: 'a bare "looks good" ending its line matches',
+      body: 'looks good',
+      matches: true,
+    },
+    {
+      name: '"looks good, but fix the retry loop first" does not match (caveat continues the line)',
+      body: 'looks good, but fix the retry loop first',
+      matches: false,
+    },
+  ])('$name', ({ body, matches }) => {
+    expect(defaultClassifyPrConfig.allClearPattern.test(body)).toBe(matches);
   });
 });
 

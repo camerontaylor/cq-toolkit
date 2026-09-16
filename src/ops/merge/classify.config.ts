@@ -41,14 +41,25 @@ export interface ClassifyPrConfig {
    * A review or top-level conversation comment body matching this pattern,
    * authored by a NON-author and timestamped STRICTLY AFTER the PR's last
    * commit, is an explicit all-clear (row 7) — the reviewer looked at the
-   * final code and said so, so the settle wait is unnecessary. Conservative
-   * default: only unambiguous approval phrasing matches ("all clear",
-   * "lgtm", "looks good …" not followed by a period — so a caveat sentence
-   * like "looks good. but fix the retry loop first" does NOT count — and
-   * "no further issues/changes"). A null or unparseable timestamp never
-   * qualifies: an un-timestamped all-clear cannot be shown to postdate the
-   * commit, so it fails closed (falls through to the settle rows). R3 tunes
-   * this AS DATA (structure frozen).
+   * final code and said so, so the settle wait is unnecessary. The
+   * all-clear bypasses ONLY the settle wait; it never substitutes for
+   * row 6's review-of-the-last-commit requirement. Conservative default,
+   * built to be negation-proof:
+   *   - EVERY alternative is anchored at LINE START (`m` flag): a
+   *     mid-sentence mention can never match — "this is not all clear
+   *     yet" and "… so it's not lgtm-worthy" carry the phrase mid-line,
+   *     and the anchor refuses them without needing to understand the
+   *     sentence;
+   *   - a `not` IMMEDIATELY BEFORE the phrase kills the match ((?!not\b)
+   *     right after the anchor) — "Not LGTM …" at line start is a
+   *     rejection, not an approval;
+   *   - "looks good" must END its line (one optional trailing !/,/.):
+   *     "looks good, but fix the retry loop first" is a caveat sentence,
+   *     not an all-clear.
+   * A null or unparseable timestamp never qualifies: an un-timestamped
+   * all-clear cannot be shown to postdate the commit, so it fails closed
+   * (falls through to the settle rows). R3 tunes this AS DATA (structure
+   * frozen).
    */
   allClearPattern: RegExp;
   /**
@@ -78,10 +89,12 @@ export const defaultClassifyPrConfig: ClassifyPrConfig = {
   // The I2 doctrine number: a clean PR merges once ten quiet minutes have
   // passed since its last commit. R3 tunes AS DATA.
   settleWindowMs: REVIEW_ACCEPT_SETTLE_MS,
-  // Only unambiguous approval phrasing, case-insensitive. "looks good" is
-  // negative-lookahead-guarded against an immediately following period so a
-  // caveat sentence does not read as an all-clear. R3 tunes AS DATA.
-  allClearPattern: /(?:all\s*clear|lgtm|looks\s+good[^.]|no\s+further\s+(?:issues|changes))/i,
+  // Line-start-anchored, negation-proof approval phrasing,
+  // case-insensitive — the three anchoring rules (line-start alternatives,
+  // the not-lookahead, the looks-good end-of-line requirement) are
+  // documented on the interface field. R3 tunes AS DATA.
+  allClearPattern:
+    /^\s*(?:(?!not\b)(?:all\s*clear|lgtm\b|no\s+further\s+(?:issues|changes)|looks\s+good[!,.]?\s*$))/im,
   // Bot skip/failure notices are not reviews (I2) — deliberate duplicate of
   // ws-e's list, kept under ws-e's anchoring rule; see the file header.
   // R3 refines AS DATA.

@@ -13,9 +13,12 @@
 //   3. truncated review data                  → `awaiting`    (review_data_truncated)
 //   4. last-commit-time unknown               → `awaiting`    (last_commit_unknown)
 //   5. unresolved external threads > 0        → `has-issues`  (unresolved_external_threads)
-//   6. no acceptable review                   → `awaiting`    (no_acceptable_review)
+//   6. no acceptable review OF THE LAST
+//      COMMIT's head state                     → `awaiting`    (no_acceptable_review)
 //   7. explicit all-clear postdating the
-//      last commit                            → `eligible`    (explicit_all_clear)
+//      last commit — bypasses ONLY the settle
+//      wait; the review-of-head requirement
+//      holds regardless                        → `eligible`    (explicit_all_clear)
 //   8. last commit ≥ settle window ago
 //      (with an acceptable review)            → `eligible`    (settle_window_elapsed)
 //      else (settle not reached)              → `awaiting`    (settle_window_pending)
@@ -29,10 +32,22 @@
 //     author ≠ the PR author (bots count, humans count — no identity is
 //     special), whose body is not a bot skip/failure notice (skipPatterns),
 //     and whose state is not DISMISSED. Author self-reviews never count.
-//   - "Explicit all-clear": a review or TOP-LEVEL conversation comment
-//     whose body matches config.allClearPattern, authored by a non-author,
-//     submitted STRICTLY AFTER the last commit. At-or-before does not
-//     count — the all-clear must speak about the final code.
+//   - THE TEMPORAL QUALIFIER (DOCTRINE §I2, canonical): an acceptable
+//     review is a review of the LAST COMMIT's exact head state — submitted
+//     STRICTLY AFTER the last commit. Evidence covering an earlier commit
+//     never qualifies, no matter how long the settle, and no matter when
+//     it was resubmitted; a null/unparseable submittedAt never qualifies
+//     (fail toward awaiting). The lane brief's simplified row table
+//     omitted this qualifier; the implementation aligns to canonical
+//     doctrine — that alignment is recorded in the PR body, NOT a
+//     deviation from I2. The row-7 all-clear (review body or top-level
+//     conversation comment) bypasses ONLY the settle wait — it can never
+//     stand in for the review-of-head requirement.
+//   - Row 5's externality is ROOT-only, inherited deliberately from the
+//     shared countUnresolvedThreads (the ws-f single-shared-module
+//     constraint): an author-rooted thread carrying an external reply does
+//     not block — recorded as the intended I2 reading for the shared
+//     vocabulary.
 //   - Null/absent authorLogin on reviews and comments is NOT the author
 //     (external — counts, fail toward accepting evidence), per the
 //     established house rule and mirroring countUnresolvedThreads.
@@ -92,8 +107,12 @@ export interface PrCandidate {
   authorLogin: string | null;
   /** Whether the PR is a draft (row 1 — never offered to merge). */
   draft: boolean;
-  /** GitHub's mergeable_state (DIRTY = merge conflicts; others pass row 2). */
-  mergeState: 'DIRTY' | 'BEHIND' | 'CLEAN' | 'UNKNOWN' | 'HAS_HOOKS' | 'BLOCKED' | string;
+  /**
+   * GraphQL mergeState enum (uppercase); a future REST-fed boundary must
+   * normalize case to this union before calling. DIRTY = merge conflicts
+   * (row 2); every other value passes row 2.
+   */
+  mergeState: 'DIRTY' | 'BEHIND' | 'CLEAN' | 'UNKNOWN' | 'HAS_HOOKS' | 'BLOCKED';
   /** The fail-closed truncation flag from the fetch layer (row 3). */
   truncated: boolean;
   /** The PR's review threads (row 5 counts the unresolved external ones). */
@@ -119,17 +138,25 @@ const parseMs = (iso: string | null): number | null => {
 };
 
 /**
- * An ACCEPTABLE review for row 6: a real reviewer's look at the PR. The
- * author must not be the PR author (self-reviews never count; a null
- * reviewer login is not the author — external, counts), the state must not
- * be DISMISSED (a voided verdict is not acceptance evidence), and the body
- * must not be a bot skip/failure notice (skipPatterns — "CodeRabbit
- * skipped this run" carries no judgement). No reviewer is privileged:
- * bots and humans count identically.
+ * An ACCEPTABLE review for row 6: a real reviewer's look at the PR AS IT
+ * STANDS — the last commit's exact head state. The author must not be the
+ * PR author (self-reviews never count; a null reviewer login is not the
+ * author — external, counts), the state must not be DISMISSED (a voided
+ * verdict is not acceptance evidence), and the body must not be a bot
+ * skip/failure notice (skipPatterns — "CodeRabbit skipped this run"
+ * carries no judgement). THE TEMPORAL QUALIFIER: the review must have been
+ * submitted STRICTLY AFTER the last commit — evidence covering an earlier
+ * commit never qualifies, no matter how long the settle, and no matter
+ * when it was resubmitted; a null/unparseable submittedAt never qualifies
+ * (fail toward awaiting). `lastCommitMs` is typed nullable only so this
+ * helper stays total — the table has already failed closed on an unknown
+ * commit by row 4, before row 6 can call. No reviewer is privileged: bots
+ * and humans count identically.
  */
 const isAcceptableReview = (
   review: ReviewSummary,
   authorLogin: string | null,
+  lastCommitMs: number | null,
   config: ClassifyPrConfig,
 ): boolean => {
   // Mirror countUnresolvedThreads' external-author comparison exactly: the
@@ -138,16 +165,22 @@ const isAcceptableReview = (
   if (authorLogin !== null && review.authorLogin === authorLogin) return false;
   if (review.state === 'DISMISSED') return false;
   if (config.skipPatterns.some((pattern) => pattern.test(review.body))) return false;
-  return true;
+  const submittedMs = parseMs(review.submittedAt);
+  return submittedMs !== null && lastCommitMs !== null && submittedMs > lastCommitMs;
 };
 
 /**
  * Whether one piece of evidence (a review, or a top-level conversation
- * comment) is an explicit all-clear for row 7: body matches
+ * comment) is an explicit all-clear for row 7. A BOT SKIP/FAILURE NOTICE
+ * is never all-clear evidence, however it is phrased (skipPatterns fire
+ * first — "… No further changes will be made." appended to a bot's skip
+ * line must not read as approval). Otherwise: body matches
  * config.allClearPattern, authored by a non-author (null counts as
  * non-author, per the house rule), and timestamped STRICTLY AFTER
- * lastCommitMs. Evidence with an absent/unparseable timestamp cannot be
- * shown to postdate the commit and never qualifies — fail closed.
+ * lastCommitMs. The all-clear bypasses ONLY the settle wait — it can
+ * never substitute for row 6's review-of-head requirement. Evidence with
+ * an absent/unparseable timestamp cannot be shown to postdate the commit
+ * and never qualifies — fail closed.
  */
 const isAllClearAfter = (
   body: string,
@@ -157,6 +190,7 @@ const isAllClearAfter = (
   lastCommitMs: number,
   config: ClassifyPrConfig,
 ): boolean => {
+  if (config.skipPatterns.some((pattern) => pattern.test(body))) return false;
   if (prAuthorLogin !== null && evidenceAuthorLogin === prAuthorLogin) return false;
   if (!config.allClearPattern.test(body)) return false;
   const atMs = parseMs(createdAt);
@@ -212,19 +246,24 @@ export function classifyPr(
   if (unresolvedExternalThreads > 0) {
     return { verdict: 'has-issues', reason: 'unresolved_external_threads', unresolvedExternalThreads };
   }
-  // Row 6 — nobody has looked: no acceptable (non-author, non-dismissed,
-  // non-skip-notice) review exists. Quiet is not acceptance until someone
-  // qualified has spoken at least once.
+  // Row 6 — nobody has looked AT THIS CODE: no acceptable review of the
+  // last commit's exact head state exists (non-author, non-dismissed,
+  // non-skip-notice, submitted STRICTLY AFTER the last commit). Quiet is
+  // not acceptance until someone qualified has spoken about the head
+  // state at least once — and no amount of settle time cures evidence
+  // that predates the commit.
   const hasAcceptableReview = candidate.reviews.some((review) =>
-    isAcceptableReview(review, candidate.authorLogin, config),
+    isAcceptableReview(review, candidate.authorLogin, lastCommitMs, config),
   );
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };
   }
   // Row 7 — an explicit all-clear STRICTLY AFTER the last commit: a
   // non-author said the final code is fine (review body or top-level
-  // conversation comment), so the settle wait is unnecessary. An all-clear
-  // at-or-before the commit speaks about earlier code and falls through.
+  // conversation comment), so the settle wait is unnecessary. This
+  // bypasses ONLY the settle wait — row 6's review-of-head requirement
+  // already held before we got here. An all-clear at-or-before the commit
+  // speaks about earlier code and falls through.
   const allClearAfterLastCommit =
     candidate.reviews.some((review) =>
       isAllClearAfter(
