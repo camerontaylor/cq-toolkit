@@ -589,6 +589,48 @@ describe('runMergePrs', () => {
     ]);
   });
 
+  test('duplicate rows count over the COMPLETE candidate set: a conflicting+eligible pair is refused', async () => {
+    const effects = new FakeMergeEffects();
+    // pr 45: one CONFLICTING row + one ELIGIBLE row — the ambiguity is in
+    // the FETCH, not the classification, so a mixed pair is refused
+    // exactly like a double-conflicting pair (counting conflicting rows
+    // alone would miss it and dispatch a write-capable resolver anyway).
+    // pr 46 appears once and still dispatches.
+    const candidates = [
+      conflicting(45, { headRefName: 'feat/45' }),
+      eligible(45, { headRefName: 'feat/45-other' }),
+      conflicting(46),
+    ];
+    const { resolve, calls } = fakeResolve(acted(46, 'pushed 46'), (input) => {
+      const target = candidates.find((candidate) => candidate.pr === input.pr);
+      if (target !== undefined) target.mergeState = 'CLEAN';
+    });
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    // Zero dispatches for the ambiguous pr; the once-listed pr dispatched.
+    expect(calls).toEqual([
+      {
+        pr: 46,
+        repoRoot: '/repo',
+        headBranch: 'feat/46',
+        baseBranch: 'main',
+        modelSpec: MODEL_SPEC,
+      },
+    ]);
+    expect(outcome.resolutions).toEqual([{ pr: 46, decision: 'acted', summary: 'pushed 46' }]);
+    // Pass 2 (no refetch): 46 flipped CLEAN and merges; the duplicate 45
+    // rows are withheld duplicate_pr by the planner. The refusal row wins
+    // (escalation priority, first reason).
+    expect(outcome.secondPass?.merged).toEqual([46]);
+    expect(outcome.needsHuman).toEqual([
+      {
+        pr: 45,
+        reason: 'duplicate candidate rows for pr 45 — refusing to dispatch the conflict agent',
+      },
+    ]);
+  });
+
   test('a hostile candidate refname is refused at the composition boundary (library path)', async () => {
     const effects = new FakeMergeEffects();
     // The LIBRARY path has no schema gate (deps.resolve is injected

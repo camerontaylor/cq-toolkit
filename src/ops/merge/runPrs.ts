@@ -264,31 +264,36 @@ export async function runMergePrs(
   // 'conflicting' (exactly the ones the planner withheld as conflicting;
   // derived from the classification, never from a reason string), pr-sorted
   // so the resolutions order is deterministic. DUPLICATE candidate rows are
-  // refused ENTIRELY — all rows: the fetch layer cannot say which row is
-  // real, and dispatching a write-capable resolver on arbitrary metadata is
-  // worse than withholding it (the planner's duplicate_pr gate refuses the
-  // merge for the same reason).
+  // refused ENTIRELY: the ambiguity is in the FETCH, not in the
+  // classification — a pr number whose row count over the COMPLETE
+  // candidate set (any state, any classification) exceeds one has no real
+  // row, and dispatching a write-capable resolver on arbitrary metadata is
+  // worse than withholding it (the planner's duplicate_pr gate counts the
+  // same complete set when it refuses the merge).
   const resolutions: Array<{ pr: number; decision: 'acted' | 'escalate'; summary: string }> = [];
   const undispatched: Array<{ pr: number; reason: string }> = [];
   let secondPass: ExecutionReport | null = null;
   let finalPlan = plan1;
   let finalReport = firstPass;
 
+  const candidateRowCount = new Map<number, number>();
+  for (const planned of planned1) {
+    candidateRowCount.set(planned.pr, (candidateRowCount.get(planned.pr) ?? 0) + 1);
+  }
   const conflictingRows = planned1.filter(
     (planned) => planned.state === 'open' && planned.classification?.verdict === 'conflicting',
   );
-  const conflictingRowCount = new Map<number, number>();
-  for (const planned of conflictingRows) {
-    conflictingRowCount.set(planned.pr, (conflictingRowCount.get(planned.pr) ?? 0) + 1);
-  }
   const conflictSet = conflictingRows
-    .filter((planned) => conflictingRowCount.get(planned.pr) === 1)
+    .filter((planned) => candidateRowCount.get(planned.pr) === 1)
     .sort((a, b) => a.pr - b.pr);
-  for (const [duplicatePr, count] of conflictingRowCount) {
-    if (count > 1) {
+  const refusedDuplicates = new Set<number>();
+  for (const planned of conflictingRows) {
+    const count = candidateRowCount.get(planned.pr) ?? 0;
+    if (count > 1 && !refusedDuplicates.has(planned.pr)) {
+      refusedDuplicates.add(planned.pr);
       undispatched.push({
-        pr: duplicatePr,
-        reason: `duplicate candidate rows for pr ${duplicatePr} — refusing to dispatch the conflict agent`,
+        pr: planned.pr,
+        reason: `duplicate candidate rows for pr ${planned.pr} — refusing to dispatch the conflict agent`,
       });
     }
   }
