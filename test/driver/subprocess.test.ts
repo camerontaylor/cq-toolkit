@@ -26,7 +26,7 @@ import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, onTestFinished, test } from 'vitest';
 import { z } from 'zod';
 import {
   SubprocessDriver,
@@ -48,7 +48,7 @@ import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
-import { runLadder } from '../../src/kernel/governor.js';
+import { realClock, runLadder } from '../../src/kernel/governor.js';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
 
 // The fake CLI: node + the fixture script, spawned through the driver's
@@ -343,18 +343,44 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   test('grace ladder: a SIGTERM-ignoring child escalates to SIGKILL — both rungs observed in order', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
+      let deadline: (() => void) | undefined;
+      const deadlineHandle = Symbol('readiness-gated deadline');
+      const spawn = recordingSpawn(calls, { FAKE_AGENT_MODE: 'ignore-sigterm' });
       const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ignore-sigterm' }, calls),
+        ...baseOptions(scratchDir, {}, calls),
+        spawn: (options) => {
+          const child = spawn(options);
+          onTestFinished(() => {
+            child.kill('SIGKILL');
+          });
+          child.onStdoutLine((line) => {
+            // Init is emitted only after the fixture installs its SIGTERM handler.
+            if (line.includes('"subtype":"init"')) queueMicrotask(() => deadline?.());
+          });
+          return child;
+        },
         termGraceMs: 200,
         killGraceMs: 200,
       });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'stubborn run' })),
-        // > node startup: the fixture's ignore handler is installed before
-        // the SIGTERM arrives (a 100ms budget raced node boot and killed the
-        // child by default disposition)
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-ladder', attempt: 1 },
+        {
+          clock: {
+            now: realClock.now,
+            setTimeout: (fn, ms) => {
+              if (deadline === undefined) {
+                deadline = fn;
+                return deadlineHandle;
+              }
+              return realClock.setTimeout(fn, ms);
+            },
+            clearTimeout: (handle) => {
+              if (handle !== deadlineHandle) realClock.clearTimeout(handle);
+            },
+          },
+        },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;

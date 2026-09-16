@@ -173,7 +173,18 @@ function assertJsonLossless(value: unknown): void {
             );
           }
           const index = Number(key);
-          if (Number.isInteger(index) && index >= 0 && String(index) === key) continue;
+          // A real array index is 0..2^32-2 (PR #114 review, CodeRabbit
+          // Major + Codex P2): "4294967295" is a plain property — length
+          // never grows, JSON.stringify drops it — so it must NOT pass as
+          // an index here.
+          if (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index <= 2 ** 32 - 2 &&
+            String(index) === key
+          ) {
+            continue;
+          }
           throw new Error(
             key === 'toJSON'
               ? "own 'toJSON' on an array — JSON.stringify invokes the hook, so the serialized shape diverges from the walked one"

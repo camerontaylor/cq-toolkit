@@ -49,7 +49,9 @@ jobs:
   # through the subprocess driver and the fake agent CLI fixture) and the
   # script asserts the report shape, the journal evidence, and the I1 output
   # contract. A companion job, not a required check: REQUIRED_WORKFLOW_CHECKS
-  # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static},
+  # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static,
+  # ratchet.yml: ratchet} (review-debt #120: the enumeration was stale
+  # before the ratchet became a required check),
   # so this job's presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: ubuntu-latest

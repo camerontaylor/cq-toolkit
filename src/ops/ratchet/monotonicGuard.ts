@@ -119,9 +119,28 @@ const VALUE_RE = /"value"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=
 // `scale\\` — the unit identity check read a REAL SCALE CHANGE as
 // unchanged and the same-value shortcut waved it through (review-debt
 // #79/#80).
+// KEY presence (PR #108 review, Codex P1 + CodeRabbit Major): the value
+// regexes capture only WELL-FORMED complete escaped strings — an
+// UNTERMINATED body (a stray backslash before the closing quote) matches
+// nothing, so the field read as absent. Key presence is tracked
+// separately: a key the side carries whose value cannot be captured is
+// malformed committed evidence — fail closed, never a lucky pass.
+// ANCHORED to property positions (PR #123/#126 reviews, Codex P2): a key
+// matches at a line's leading-whitespace position (rendered baselines put
+// one property per line) OR after a JSON object delimiter (`{` or `,`) —
+// a hand-edited MINIFIED baseline places properties on one line, and the
+// line-start-only anchor missed them (PR #126 review). Key-like text
+// inside STRING values stays excluded: rendered files escape their quotes
+// (\" defeats any spelling), and the delimiter forms require the sequence
+// to follow a structural boundary — a `,`/`{` INSIDE a string value
+// remains a theoretical residual, documented here rather than guessed at
+// (parse-level validation is parseBaseline's business; the guard judges
+// diff text).
+const DIRECTION_KEY_RE = /(?:^|[,{])\s*"direction"\s*:/g;
 const DIRECTION_RE = /"direction"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const METRIC_RE = /"metric"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const TARGET_RE = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+const UNIT_KEY_RE = /(?:^|[,{])\s*"unit"\s*:/g;
 const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 
 /**
@@ -239,6 +258,32 @@ function contentLines(lines: string[]): { minus: string[]; plus: string[]; conte
   return { minus, plus, context };
 }
 
+/**
+ * True when any line set carries the direction or unit KEY whose value is
+ * malformed — uncapturable (an unterminated escape: the value regex
+ * matches nothing) or undecodable (an invalid escape sequence) — PR #108
+ * review (Codex P1 + CodeRabbit Major). Checked BEFORE the
+ * whitespace-only reformat skip: a rewrite whose two sides are IDENTICALLY
+ * malformed is not a reformat, it is committed evidence the file could not
+ * parse back — fail closed wherever it appears.
+ */
+function carriesMalformedStringField(minus: string[], plus: string[], context: string[]): boolean {
+  const fields: Array<[RegExp, RegExp]> = [
+    [DIRECTION_KEY_RE, DIRECTION_RE],
+    [UNIT_KEY_RE, UNIT_RE],
+  ];
+  for (const [keyRe, valueRe] of fields) {
+    for (const lines of [minus, plus, context]) {
+      const keys = scanSide(lines, keyRe).count;
+      if (keys === 0) continue;
+      const values = scanSide(lines, valueRe);
+      if (values.count === 0) return true; // key present, nothing capturable
+      if (values.last !== undefined && decodeJsonString(values.last) === undefined) return true;
+    }
+  }
+  return false;
+}
+
 /** True when the two sides carry the same lines modulo whitespace, IN ORDER — a reformat, not a movement. */
 function whitespaceOnly(minus: string[], plus: string[]): boolean {
   // No sort: a reorder of duplicate `"value"` keys presents the same line
@@ -341,10 +386,25 @@ function judgeModified(
   // fail-closed below via the undefined direction path; metric/target are
   // labels on violations and decode leniently (raw fallback keeps the
   // evidence named).
+  // Key-presence fail-closed (PR #108 review, Codex P1 + CodeRabbit
+  // Major): a side whose section CARRIES the direction key but yields no
+  // decodable value — the value regex could not capture a complete
+  // escaped body (unterminated escape) or the capture does not decode
+  // (malformed escape) — is committed evidence the file could not parse
+  // back. Unparsable, never a lucky pass and never a silent absence.
+  const oldDirKeyPresent =
+    preferDiffLines(scanSide(minus, DIRECTION_KEY_RE), scanSide(context, DIRECTION_KEY_RE)).count >
+    0;
+  const newDirKeyPresent =
+    preferDiffLines(scanSide(plus, DIRECTION_KEY_RE), scanSide(context, DIRECTION_KEY_RE)).count >
+    0;
   const newDir =
     newSide.direction.last === undefined ? undefined : decodeJsonString(newSide.direction.last);
   const oldDir =
     oldSide.direction.last === undefined ? undefined : decodeJsonString(oldSide.direction.last);
+  if ((oldDirKeyPresent && oldDir === undefined) || (newDirKeyPresent && newDir === undefined)) {
+    return [unparsable()];
+  }
   const direction = newDir ?? oldDir;
   const oldValue: number | undefined = valuesMoved ? Number(oldSide.value.last) : undefined;
   const newValue: number | undefined = valuesMoved ? Number(newSide.value.last) : undefined;
@@ -396,17 +456,23 @@ function judgeModified(
   // units, and a flip is moot once the scale itself moved.
   // Units compare DECODED (review-debt #79/#80): `scale\"old` → `scale\"new`
   // is a real scale change — the old raw capture truncated both to
-  // `scale\\` and the same-value shortcut waved the change through. A
-  // present-but-undecodable unit is malformed escapes — the committed file
-  // could not parse back — fail-closed, never a lucky pass.
+  // `scale\\` and the same-value shortcut waved the change through. The
+  // key-presence rule applies here too (PR #108 review, Codex P1): a side
+  // CARRYING the unit key whose value cannot be captured (unterminated
+  // escape — the value regex matches nothing) or decoded (malformed
+  // escape) is unparsable — the committed file could not parse back.
+  const oldUnitKeyPresent =
+    preferDiffLines(scanSide(minus, UNIT_KEY_RE), scanSide(context, UNIT_KEY_RE)).count > 0;
+  const newUnitKeyPresent =
+    preferDiffLines(scanSide(plus, UNIT_KEY_RE), scanSide(context, UNIT_KEY_RE)).count > 0;
   const oldUnitRaw = oldSide.unit.last;
   const newUnitRaw = newSide.unit.last;
   const oldUnit = oldUnitRaw === undefined ? undefined : decodeJsonString(oldUnitRaw);
   const newUnit = newUnitRaw === undefined ? undefined : decodeJsonString(newUnitRaw);
-  if (oldUnitRaw !== undefined && oldUnit === undefined) {
-    return [unparsable()];
-  }
-  if (newUnitRaw !== undefined && newUnit === undefined) {
+  if (
+    (oldUnitKeyPresent && oldUnit === undefined) ||
+    (newUnitKeyPresent && newUnit === undefined)
+  ) {
     return [unparsable()];
   }
   if (oldUnit !== newUnit) {
@@ -511,6 +577,14 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
     // removed line whose own content was `-- /dev/null`) is evidence
     // movement, not file lifecycle.
     const header = headerRegion(section);
+    // BELT-AND-BRACES COMPOSITION (review-debt #120 item 2, pinned here):
+    // these lifecycle skips are per-DIFF by design — the two-PR
+    // delete-then-re-add-LOOSER composition (PR 1 deletes the baseline, PR
+    // 2 re-adds it looser) crosses TWO diffs and is invisible to any
+    // single-diff guard. The LIVE checkRatchet leg catches it: PR 2's run
+    // finds the baseline MISSING (PR 1 deleted it) and fails closed (I5 —
+    // missing evidence is never passing evidence). Both legs are
+    // load-bearing; neither alone is the whole defense.
     if (hasMarker(header, 'new file mode') || hasMarker(header, '--- /dev/null')) {
       continue; // added baseline: capture committing data, not a loosening
     }
@@ -523,6 +597,10 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       // cannot confidently judge — a plus-only duplicate-"value" insertion
       // (the later duplicate wins JSON.parse and silently raises the
       // threshold), a pure insertion, or a truncated hunk — fail closed.
+      violations.push({ path, why: 'unparsable baseline diff' });
+      continue;
+    }
+    if (carriesMalformedStringField(minus, plus, context)) {
       violations.push({ path, why: 'unparsable baseline diff' });
       continue;
     }

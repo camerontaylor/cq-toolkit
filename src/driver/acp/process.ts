@@ -74,13 +74,41 @@ export function argvForShimSpawn(
   platform: NodeJS.Platform = process.platform,
 ): { command: string; args: string[]; windowsVerbatimArguments: boolean } {
   if (platform === 'win32' && /\.(cmd|bat)$/i.test(command)) {
+    // ONE OUTER QUOTE PAIR around the whole /c string (PR #119 review,
+    // Codex P1): with /s and verbatim args, cmd strips the FIRST and LAST
+    // quote of the string after /c — without the outer pair it strips the
+    // element-level quotes this translation exists to preserve (a
+    // space-bearing shim path still parsed as its first token). The outer
+    // pair is the documented sacrifice; the element quotes survive.
+    const inner = [cmdQuote(command), ...args.map(cmdQuote)].join(' ');
     return {
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', [command, ...args].join(' ')],
+      args: ['/d', '/s', '/c', `"${inner}"`],
       windowsVerbatimArguments: true,
     };
   }
   return { command, args: [...args], windowsVerbatimArguments: false };
+}
+
+/**
+ * Quote ONE argv element for the cmd.exe /s /c command string (PR #111
+ * review, Codex P1): a bare join(' ') destroys every element boundary —
+ * a path like `C:\Program Files\nodejs\z.cmd` parses as `C:\Program`,
+ * and a two-word argument splits in two. An element containing whitespace,
+ * a quote, or a cmd metacharacter is wrapped in double quotes with
+ * internal quotes doubled (the MSVCRT-at-the-callee convention); with /s,
+ * cmd applies its full quoting rules to the string after /c. Residual,
+ * documented: %-expansion cannot be escaped in cmd — argv elements are
+ * DRIVER CONFIGURATION (trusted input), not untrusted data, so the
+ * boundary-preservation goal is met without pretending to full cmd
+ * escaping.
+ */
+function cmdQuote(element: string): string {
+  if (element === '') return '""';
+  if (/[\s"&|<>^()%!]/.test(element)) {
+    return `"${element.replace(/"/g, '""')}"`;
+  }
+  return element;
 }
 
 /**

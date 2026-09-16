@@ -944,7 +944,23 @@ export class AcpDriver implements Driver {
         );
         void wire
           .failRequest(id, 'session/request_permission rejected: not the active session')
-          .catch(() => undefined);
+          .catch((sendErr: unknown) => {
+            // A failed REJECTION write is the same BROKEN ENFORCEMENT
+            // CHANNEL as a failed answer write (PR #97 review, Codex P1):
+            // the vendor would wait forever for a response that can never
+            // be delivered, leaving the pending prompt — and the run —
+            // unsettled (the driver has no timeouts, I8). The verdict pins
+            // to 'error' and the child is terminated via the settle ladder
+            // so the prompt rejects on the wire's exit path.
+            answerWriteFailed = true;
+            observation.narration.push(
+              JSON.stringify({
+                cq: 'permission-rejection-send-failed',
+                message: messageOf(sendErr),
+              }),
+            );
+            void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
+          });
         return;
       }
       const toolCallId = request.toolCall.toolCallId;
@@ -1547,6 +1563,21 @@ export class AcpDriver implements Driver {
       observation.narration.push(JSON.stringify({ cq: 'prompt-failure', message: promptFailure }));
     }
 
+    // Malformed REPORTED usage marker — BEFORE persistence so the record
+    // carries the evidence (PR #97 review, Codex P1).
+    if (
+      promptResponse !== undefined &&
+      promptResponse.usage !== null &&
+      promptResponse.usage !== undefined &&
+      mapWireUsage(promptResponse.usage) === undefined
+    ) {
+      observation.narration.push(
+        JSON.stringify({
+          cq: 'malformed-reported-usage',
+          note: 'the prompt response carried a usage the wire gate rejected (invalid token counts) — never zeros-that-look-measured, never a green run',
+        }),
+      );
+    }
     // --- Session persistence (post-settle, OUR vocabulary). A store error
     // here is swallowed: once spawned, the verdict must reach the caller.
     try {
@@ -1557,6 +1588,17 @@ export class AcpDriver implements Driver {
 
     const measuredUsage =
       promptResponse === undefined ? undefined : mapWireUsage(promptResponse.usage);
+    // PR #97 review (Codex P1): a response that CARRIES a usage the wire
+    // gate rejects (negative/fractional/non-finite counts) is MALFORMED
+    // REPORTED usage — not absent usage. Without the distinction, verdict()
+    // substitutes zeros and classifies the run 'complete', erasing token
+    // accounting and bypassing the unpriced-usage check under maxUsd; a
+    // broken or malicious harness must not be able to buy a free run.
+    const malformedUsage =
+      promptResponse !== undefined &&
+      promptResponse.usage !== null &&
+      promptResponse.usage !== undefined &&
+      measuredUsage === undefined;
     return this.verdict(modelSpec, budget, observation, record.sessionId, {
       structured,
       signalFired,
@@ -1567,6 +1609,7 @@ export class AcpDriver implements Driver {
       promptStopReason: promptResponse?.stopReason,
       responded: promptResponse !== undefined,
       measuredUsage,
+      malformedUsage,
       ungated: ungatedToolCallIds.length > 0,
     });
   }
@@ -1596,6 +1639,8 @@ export class AcpDriver implements Driver {
       promptStopReason: string | undefined;
       responded: boolean;
       measuredUsage: Usage | undefined;
+      /** True when the response CARRIED a usage the wire gate rejected — malformed REPORTED usage, never zeros (PR #97 review, Codex P1). */
+      malformedUsage: boolean;
       ungated: boolean;
     },
   ): WorkerResult {
@@ -1605,6 +1650,7 @@ export class AcpDriver implements Driver {
       answerWriteFailed: inputs.answerWriteFailed,
       permissionAnswerFailed: inputs.permissionAnswerFailed,
       connectionFailed: inputs.connectionFailed,
+      malformedUsage: inputs.malformedUsage,
       deniedRan: inputs.deniedRan,
       ungated: inputs.ungated,
       maxTokens: budget.maxTokens,
@@ -2014,6 +2060,8 @@ export interface StopReasonInputs {
   deniedRan?: boolean;
   /** The wire failed (the oversized-frame connection failure) — integrity broke mid-run; fails even when a response had arrived. */
   connectionFailed?: boolean;
+  /** The response CARRIED a usage the wire gate rejected — malformed reported usage erases accounting if trusted; fail loud, never a free run (PR #97 review, Codex P1). */
+  malformedUsage?: boolean;
   /** Never-asks evidence at settle (ungated execution — a policy void is an error, never green). */
   ungated: boolean;
   maxTokens: number | undefined;
@@ -2030,6 +2078,7 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
   if (inputs.permissionAnswerFailed === true) return 'error'; // the unanswerable ask — failed enforcement even if the vendor settles end_turn anyway
   if (inputs.answerWriteFailed === true) return 'error'; // the broken enforcement channel — fail loud even if a response arrived
   if (inputs.connectionFailed === true) return 'error'; // the wire failed mid-run (oversized frame) — fail loud even if a response arrived
+  if (inputs.malformedUsage === true) return 'error'; // reported usage failed the wire gate — zeros would erase accounting and bypass the budget (PR #97 review, Codex P1)
   if (inputs.deniedRan === true) return 'error'; // a denied tool ran anyway — ungated through the answer channel (review-debt #45)
   if (inputs.ungated) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)

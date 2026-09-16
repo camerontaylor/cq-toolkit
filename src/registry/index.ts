@@ -177,6 +177,30 @@ function unwrapToObjectSchema(schema: unknown): unknown {
   return current;
 }
 
+/**
+ * True when the walk to the object passes through a `.catch()` wrapper
+ * (PR #112 review, Codex P2): zod's catch replaces ANY inner parse
+ * failure — including the `unrecognized_keys` failure a typo'd CLI flag
+ * produces against a strict object — with its fallback, so unknown keys
+ * would reach the op as fallback data instead of the required exit 2.
+ * A catch wrapper is incompatible with the unknown-key-rejection
+ * convention, whatever the inner object's own strictness marker says.
+ */
+function hasCatchWrapper(schema: unknown): boolean {
+  let current = schema;
+  for (let depth = 0; depth < 10; depth++) {
+    const def = (
+      current as { def?: { type?: unknown; innerType?: unknown; in?: unknown } } | undefined
+    )?.def;
+    if (def === undefined) return false;
+    if (def.type === 'catch') return true;
+    const inner = def.innerType ?? def.in;
+    if (inner === undefined) return false;
+    current = inner;
+  }
+  return false;
+}
+
 /** One directory scan + lazy family-registry imports, per resolved root. */
 async function scanOps(
   root: string,
@@ -313,6 +337,15 @@ async function scanOps(
       // in, object out) cannot be statically judged and stays unjudged,
       // like every other shape-less schema.
       const unwrapped = unwrapToObjectSchema(e.inputSchema);
+      // A catch wrapper on the way to the object would swallow the
+      // unknown-key rejection the convention is about (PR #112 review) —
+      // reject before the strictness marker is even consulted.
+      if (hasCatchWrapper(e.inputSchema)) {
+        throw new Error(
+          `op family '${family}': op '${e.name}' input schema wraps its object in .catch() — ` +
+            "the fallback would swallow the unknown-key rejection the .strict() convention exists to enforce (a typo'd flag must exit 2, not reach the op as fallback data)",
+        );
+      }
       const shape = (unwrapped as { shape?: unknown }).shape;
       if (typeof shape === 'object' && shape !== null && !Array.isArray(shape)) {
         for (const key of Object.keys(shape)) {

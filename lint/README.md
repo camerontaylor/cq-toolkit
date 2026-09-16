@@ -66,7 +66,9 @@ proves the wrapper catches projected sources, imported files, the TS config
 module, and included files outside traversal. This is why integrated
 `--type-check` is not the authoritative compiler. Suppressions cannot remove
 compiler evidence. Fake process failures and real module/configuration errors
-also fail closed, including under `--update`.
+also fail closed. The queue's self-hosted ratchet now owns the zero baseline
+through `createCheckRatchet`; the removed placeholder's `--update` argument is
+rejected. Baseline persistence belongs to the engine's capture operation.
 
 The standalone compiler is TypeScript 7.0.2 (package gitHead
 `2bd066d87f5bafd315be9f40889d0a60b9e58e0b`). The typed linter is
@@ -188,7 +190,8 @@ Knip 6.35.1 checks files, dependencies, unlisted dependencies and unresolved
 imports; export analysis is intentionally not gated. The SDK barrel and CLI are
 entries, as are the documented registry type seam, discovered operation
 registries, operator scripts and dynamically loaded CLI test fixtures. The
-selection helper's companion declaration is an explicit entry. Knip's built-in
+selection helper's companion declaration and the spawned ratchet self-host fixture
+are explicit entries. Knip's built-in
 Vitest and Oxlint integrations discover test/config entries and the lint plugin;
 we avoid redundant patterns that could hide an unwired source file.
 
@@ -218,26 +221,30 @@ running. Times are seconds; the first run is not a controlled cold-cache result.
 | Before: ESLint on `src/kernel/schema.ts`         |  1.046 |             0.760 |
 | After: fast-lint script on the same file         |  0.249 |             0.256 |
 
+These samples predate the queue's engine-based ratchet integration.
 The full gate now checks a broader policy, so these are workflow measurements,
 not an engine-only benchmark or a general performance guarantee. Build, tests,
 formatting and Knip are excluded from this static-gate comparison.
 
 ## Final validation (2026-09-16)
 
-After a fresh `npm ci`: static gate (zero type baseline), formatting and Knip
-passed. The full suite with `--maxWorkers 1` passed 1,389 tests in 55 files
-(four skipped, one todo); build, the external strict NodeNext declaration
-consumer and the governed from-source smoke also passed. The instantiated CI
-matches the canonical template byte-for-byte after token substitution.
+A fresh `npm ci` validated the pinned toolchain before queue integration.
+After integrating the queue's self-hosted ratchet and newer operations,
+`npm run check` passed formatting, the zero-baseline static gate, all 1,591
+tests in 59 files (four skipped, one todo), and Knip. Build and the governed
+from-source smoke passed; the external strict NodeNext declaration consumer
+passed before integration. The instantiated CI matches the canonical template
+byte-for-byte after token substitution.
 
-The default-concurrency `npm run check` did not pass on this machine: five
-existing timing-sensitive tests failed (ACP timeout, subprocess session timeout,
-SIGTERM/SIGKILL startup race, missing grandchild PID after the one-second startup
-budget, and review pagination timeout). The serial run passes those same
-assertions. No timeout, assertion or type baseline was weakened to mask them.
+The original parallel-file run exposed timing-sensitive failures in process
+fixtures. Vitest now runs test files serially. The SIGTERM escalation fixture
+also waits for its child's init event before firing the injected governor
+deadline, so it observes the installed signal handler instead of racing Node
+startup. Both termination-rung assertions remain intact. No timeout, assertion
+or type baseline was weakened.
 
 The tracked candidate passes the nine-class denylist and all 13 self-tests.
-The 157-file package tarball passes its path allowlist and denylist scan with
+The pre-integration 157-file package tarball passed its path allowlist and denylist scan with
 build-output exemptions disabled.
 The working-tree scan still rejects the pre-existing ignored ACP sandbox file
 under the agent scratch directory. That local state was not deleted or

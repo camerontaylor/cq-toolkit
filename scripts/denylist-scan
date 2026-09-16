@@ -152,6 +152,11 @@ function treeAllowlistPaths(noDist) {
 const REQUIRED_WORKFLOW_CHECKS = [
   { workflow: 'denylist.yml', check: 'denylist' },
   { workflow: 'ci.yml', check: 'static' },
+  // H4 (PR-105 round-2): the ratchet is a required check — the I4 leg now
+  // polices ratchet.yml the same way (both triggers top-level, zero filter
+  // keys, a job named exactly 'ratchet'), and merge-queue-gate.yml waits for
+  // it before promoting.
+  { workflow: 'ratchet.yml', check: 'ratchet' },
 ];
 // Trigger-filter keys banned by invariant I4 inside a REQUIRED workflow's
 // `on:` block. Matched MID-LINE (word-bounded) on comment-stripped lines of

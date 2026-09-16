@@ -901,13 +901,6 @@ describe('proposeBaselineUpdate', () => {
       'ratchet/.hidden',
       'has..dots',
       'has space',
-      // review-debt #87 round-3: git check-ref-format rejects trailing-dot
-      // components and *.lock components (reflock-reserved).
-      'main.',
-      'ratchet/nightly.',
-      'release.lock',
-      'ratchet.lock/nightly',
-      'has space',
     ]) {
       await expect(propose(proposeInput({ headPrefix: bad }))).resolves.toEqual({
         status: 'failed',
@@ -939,6 +932,48 @@ describe('proposeBaselineUpdate', () => {
     });
   });
 
+  test('git-accurate scoping, VERIFIED against check-ref-format: whole-ref dots, per-component .lock (PR #110/#118 reviews)', async () => {
+    await seedBaseline(TARGET, METRIC, 10);
+    const effects = makeFakeEffects();
+    // Verified 2026-09-16 with `git check-ref-format --branch`: the
+    // trailing-DOT rule binds the complete ref's END only ('release./main'
+    // VALID, 'main.' invalid) — but *.lock binds EVERY component
+    // ('ratchet.lock/nightly' INVALID per git's own docs). A prefix ending
+    // '.lock' or '.' composes with the digest into a legal head.
+    for (const headPrefix of ['release.lock', 'main.']) {
+      const result = await createProposeBaselineUpdate(effects)(
+        proposeInput({ headPrefix, improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      );
+      expect(result.status, headPrefix).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.head, headPrefix).toMatch(
+          new RegExp(`^${headPrefix.replace(/[.]/g, '\\.')}-[0-9a-f]{12}$`),
+        );
+      }
+    }
+    const midDot = await createProposeBaselineUpdate(effects)(
+      proposeInput({
+        base: 'release./main',
+        improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
+      }),
+    );
+    expect(midDot.status).toBe('ok');
+    // A .lock COMPONENT anywhere is invalid — prefix or base.
+    for (const bad of ['ratchet.lock/nightly', 'a/b.lock/c']) {
+      const asPrefix = await createProposeBaselineUpdate(effects)(
+        proposeInput({
+          headPrefix: bad,
+          improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
+        }),
+      );
+      expect(asPrefix.status, bad).toBe('failed');
+      const asBase = await createProposeBaselineUpdate(effects)(
+        proposeInput({ base: bad, improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+      );
+      expect(asBase.status, bad).toBe('failed');
+    }
+  });
+
   test('an UNDERSCORE-bearing headPrefix is accepted (review-debt #87: git allows _ in ref segments)', async () => {
     // The old character class excluded '_' — stricter than git. A prefix
     // like 'ratchet/nightly_lock' is a perfectly legal branch name.
@@ -968,10 +1003,12 @@ describe('proposeBaselineUpdate', () => {
       'seg/.hidden',
       '.dot',
       'has space',
-      // review-debt #87 round-3: trailing-dot and *.lock components.
+      // PR #110 review: the trailing-dot and *.lock restrictions bind the
+      // END of the COMPLETE ref (git's own scoping) — 'main.' and
+      // 'release.lock' reject as bases; a MID-ref '.lock' component
+      // ('ratchet.lock/nightly') is legal and moved to the positive rows.
       'main.',
       'release.lock',
-      'ratchet.lock/nightly',
     ]) {
       await expect(propose(proposeInput({ base: bad }))).resolves.toEqual({
         status: 'failed',

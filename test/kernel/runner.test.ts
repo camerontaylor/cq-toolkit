@@ -643,6 +643,14 @@ describe('runPlan — execution semantics', () => {
         (withExtra as unknown as { extra: string }).extra = 'gone';
         return { status: 'ok', value: withExtra } as { status: 'ok'; value: unknown };
       }),
+      entry('arr-hugeindex-op', jobInputSchema, async () => {
+        // "4294967295" is NOT an array index (indices end at 2^32-2): it
+        // is a plain property length never counts and stringify drops
+        // (PR #114 review, CodeRabbit Major + Codex P2).
+        const withHuge = [1];
+        (withHuge as unknown as Record<string, string>)['4294967295'] = 'dropped';
+        return { status: 'ok', value: withHuge } as { status: 'ok'; value: unknown };
+      }),
       entry('fake', jobInputSchema, op),
     );
     const plan: Plan = {
@@ -657,6 +665,7 @@ describe('runPlan — execution semantics', () => {
         { id: 'n', op: 'hidden-op', input: { jobId: 'n' } },
         { id: 'at', op: 'arr-tojson-op', input: { jobId: 'at' } },
         { id: 'ax', op: 'arr-extra-op', input: { jobId: 'ax' } },
+        { id: 'ah', op: 'arr-hugeindex-op', input: { jobId: 'ah' } },
         { id: 'ok1', op: 'fake', input: { jobId: 'ok1' } },
       ],
     };
@@ -683,7 +692,10 @@ describe('runPlan — execution semantics', () => {
     expect(failureOf('n')).toMatch(/non-serializable.*non-enumerable own member 'secret'/s);
     expect(failureOf('at')).toMatch(/non-serializable.*own 'toJSON' on an array/s);
     expect(failureOf('ax')).toMatch(/non-serializable.*non-index own member 'extra' on an array/s);
-    expect(report.counts.failed).toBe(9);
+    expect(failureOf('ah')).toMatch(
+      /non-serializable.*non-index own member '4294967295' on an array/s,
+    );
+    expect(report.counts.failed).toBe(10);
     expect(report.counts.done).toBe(1); // the run continues
   });
 

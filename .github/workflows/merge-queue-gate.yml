@@ -48,7 +48,10 @@ jobs:
           GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
         run: |
           set -euo pipefail
-          checks="$(echo 'static,denylist' | tr -d ' ' | tr ',' ' ')"
+          # 'ratchet' IS on this list (ws-k stage-1 wiring): the required
+          # ratchet check must gate promotion like static/denylist, or the
+          # queue could fast-forward main while ratchet is pending/failed.
+          checks="$(echo 'static,denylist,ratchet' | tr -d ' ' | tr ',' ' ')"
           # Fail closed on an empty gate wait list: an empty list would run
           # the wait loop zero times and promote with NO check validated.
           if [ -z "${checks// /}" ]; then

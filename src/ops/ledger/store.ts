@@ -318,7 +318,19 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
       // does not exist yet; stage-B containment runs after the mkdir.
       mkdirSync(dirname(targetAbs), { recursive: true });
       verifyParentUnderRoot();
-      return lock(targetAbs, LOCK_OPTIONS).then((release) =>
+      // Lock-compromise containment (PR #109 review, Codex P1): proper-
+      // lockfile's DEFAULT onCompromised throws asynchronously from its
+      // mtime-refresh timer — outside every try here, process-killing.
+      // The handler records the compromise; the release path surfaces it
+      // as a `failed`-mapping fault instead (the write may have raced a
+      // thief — never a silent ok).
+      let compromised: Error | undefined;
+      return lock(targetAbs, {
+        ...LOCK_OPTIONS,
+        onCompromised: (err) => {
+          compromised = err;
+        },
+      }).then((release) =>
         Promise.resolve()
           .then(fn)
           .then(
@@ -327,7 +339,14 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
               // op must report `failed` (naming the release failure)
               // rather than report ok while the lock is compromised.
               release()
-                .then(() => value)
+                .then(() => {
+                  if (compromised !== undefined) {
+                    throw new Error(`lock compromised — ${messageOf(compromised)}`, {
+                      cause: compromised,
+                    });
+                  }
+                  return value;
+                })
                 .catch((releaseErr: unknown) => {
                   throw new Error(`lock release failed — ${messageOf(releaseErr)}`, {
                     cause: releaseErr,

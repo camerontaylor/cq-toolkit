@@ -1,68 +1,72 @@
-// THROWAWAY: replaced by ops/ratchet in phase 2 (H4)
-// Placeholder typecheck ratchet: counts `error TS\d+:` lines from the pinned
-// compiler and compares them to baselines/typecheck.json. Thresholds only
-// tighten — never raise a baseline to go green (that is not a ratchet). A
-// missing baseline, or a nonzero exit whose output has NO parsable error
-// lines (missing node_modules, compiler panic, rejected flag), is
-// non-passing evidence, never a pass (invariant I5): the tool's output is
-// echoed and we exit 1 before counting. A counted run — including an
-// errored typecheck with parsable lines — may be persisted with --update.
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+// ratchet-typecheck — the ci.yml 'Typecheck ratchet' step (self-host swap:
+// lane H slice 1, goal H4). Same path, same CLI contract as the placeholder
+// it replaces — exit 0 pass / 1 fail, human narration on stderr — but ALL
+// the ratchet logic now lives in the BUILT engine (dist/ops/ratchet): this
+// script runs the repo typecheck, hands the raw evidence to
+// createCheckRatchet through a SourceCatalog, and reports the verdict as
+// data. No counting, no comparing, no baseline writing here — thresholds
+// only tighten, and the engine (loosens + the committed baseline file) owns
+// that law.
+//
+// I5, carried over from the placeholder: a typecheck that exits nonzero with
+// NO parsable error lines (missing node_modules, compiler panic, rejected
+// flag) is non-passing evidence, never a pass — the tool output is echoed
+// and we exit 1 BEFORE the engine ever sees a reading. A clean run (status
+// 0) is fed as the adapter's authoritative object form ({count: 0}), where a
+// structured zero is a real zero; an errored-but-parsable run is fed as the
+// raw text the adapter counts. See scripts/ratchet-lib.mjs.
+//
+// The placeholder's --update flag is gone on purpose: baseline persistence
+// is captureBaseline's job now (the engine), not this script's — a runner
+// that could rewrite its own baseline would judge its own evidence.
+import { fail, loadEngine, runTypecheckRaw, typecheckEvidence, ROOT } from './ratchet-lib.mjs';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BASELINE = resolve(ROOT, 'baselines/typecheck.json');
-const fail = (message) => {
-  console.error(`ratchet-typecheck: ${message}`);
-  process.exit(1);
-};
+// Build dist fresh, import the engine, register the metric. The registry is
+// runtime-only composition wiring — the op input below carries ids only
+// (CODEX P1), so this registration is exactly how the kernel would wire it.
+if (process.argv.length > 2)
+  fail('unsupported arguments; baseline changes belong to captureBaseline');
+const engine = await loadEngine();
+engine.registerAdapter(engine.adapters.typecheckCount);
 
-// The compiler fallback is intentional: integrated Oxlint typeCheck omits
-// tsconfig inputs excluded from lint traversal. TS7 owns the compiler ratchet;
-// Oxlint owns syntactic and typed lint. See lint/README.md and conformance tests.
-const TSC_BIN = resolve(
-  ROOT,
-  'node_modules',
-  '.bin',
-  process.platform === 'win32' ? 'tsc.cmd' : 'tsc',
-);
-const res = spawnSync(TSC_BIN, ['--noEmit', '-p', 'tsconfig.json', '--pretty', 'false'], {
-  cwd: ROOT,
-  encoding: 'utf8',
-  shell: process.platform === 'win32',
-});
-if (res.error || res.status === null) {
-  fail(`cannot run tsc: ${res.error ? res.error.message : `signal ${res.signal}`}`);
+const run = runTypecheckRaw();
+if (run.error) {
+  fail(`cannot run typecheck: ${run.error.message}`);
 }
-const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
-const errorLines = output.split(/\r?\n/).filter((line) => /error TS\d+:/.test(line));
-const count = errorLines.length;
-if (![0, 1, 2].includes(res.status)) fail(`compiler exited abnormally (${res.status}):\n${output}`);
-if (res.status === 0 && output.trim() !== '')
-  fail(`unexpected compiler success output:\n${output}`);
-if (
-  errorLines.some(
-    (line) => /^error TS\d+:/.test(line) || /\.json\(\d+,\d+\): error TS\d+:/.test(line),
-  )
-) {
-  fail(`compiler configuration or project-loading failure:\n${output}`);
-}
-// Only a run whose errors are parsable may be counted (I5): a nonzero exit
-// with NO `error TS` lines (npx missing-package text, a compiler panic, a
-// rejected flag) must never certify 0 errors — echo the tool output and
-// fail. A nonzero exit WITH error lines is a normal errored typecheck; it
-// is counted and judged against the baseline below.
-if (res.status !== 0 && count === 0) {
+const { evidence, rawText } = typecheckEvidence(engine.adapters.typecheckCount, run);
+if (evidence === null) {
   fail(
-    `tsc exited ${res.status} with no parsable error lines — tool output follows:\n${output.trim()}`,
+    `typecheck exited ${run.status} with no parsable error lines — ` +
+      'non-passing evidence, never a pass (I5) — tool output follows:\n' +
+      rawText.trim(),
   );
 }
 
-// Lint failures must never be hidden by --update, even when a compiler count
-// can tighten. Full mode explicitly opts into type analysis; the root config
-// defaults to syntactic mode so lint:fast need not negate unsupported flags.
+// The op reads ONE live reading through the catalog and compares it against
+// the committed baseline; every failure mode below lands on verdict 'fail'
+// with a reason naming what failed — never a throw, never a fabricated pass.
+const checkRatchet = engine.createCheckRatchet(new Map([['tsc', async () => evidence]]));
+const result = await checkRatchet({
+  ws: ROOT,
+  target: 'typecheck',
+  metric: 'typecheck-count',
+  sourceId: 'tsc',
+});
+const outcome = result.value;
+
+if (outcome.verdict !== 'pass') {
+  console.error(`ratchet-typecheck: FAIL (${outcome.path})`);
+  if (outcome.reason) console.error(outcome.reason);
+  if (rawText.trim()) console.error(rawText.trim());
+  process.exit(1);
+}
+console.error(
+  `ratchet-typecheck: pass — ${outcome.currentValue} error(s) <= baseline ` +
+    `${outcome.baselineValue} (${outcome.path})`,
+);
+
 const lint = spawnSync(
   resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'oxlint.cmd' : 'oxlint'),
   [
@@ -87,52 +91,3 @@ if (lint.error || lint.status !== 0) {
     `lint failed: ${lint.error?.message ?? (lint.signal ? `signal ${lint.signal}` : `exit ${lint.status}`)}`,
   );
 }
-
-if (process.argv.includes('--update')) {
-  // Safe on any counted run (the unparsable-nonzero guard above already
-  // failed those): tsc exits 1 whenever errors remain, so refusing nonzero
-  // exits would make a lowered-but-nonzero baseline impossible to persist.
-  // Read the existing baseline FIRST: thresholds only tighten, so --update
-  // must never silently raise count past the current baseline (a 0 -> 1
-  // "update" is a regression, not a ratchet turn). A missing or unparsable
-  // baseline is the creation case --update exists for.
-  let previous = null;
-  try {
-    const parsed = JSON.parse(readFileSync(BASELINE, 'utf8'));
-    if (parsed !== null && typeof parsed === 'object' && typeof parsed.count === 'number') {
-      previous = parsed.count;
-    }
-  } catch {
-    // no parsable baseline yet — writing it is the creation case
-  }
-  if (previous !== null && count > previous) {
-    fail(
-      `--update refuses to raise the baseline: ${count} error TS line(s) exceed the current baseline ${previous} — fix the errors; thresholds only tighten`,
-    );
-  }
-  mkdirSync(dirname(BASELINE), { recursive: true });
-  writeFileSync(BASELINE, `{"count": ${count}}\n`);
-  console.log(
-    `ratchet-typecheck: baseline ${previous === null ? 'created' : 'updated'} to ${count}`,
-  );
-  process.exit(0);
-}
-
-let baseline;
-try {
-  ({ count: baseline } = JSON.parse(readFileSync(BASELINE, 'utf8')));
-} catch (e) {
-  fail(
-    `missing baseline ${BASELINE} (invariant I5: a missing metrics summary is non-passing evidence, never a pass; create it with --update) [${e.code ?? e.message}]`,
-  );
-}
-if (!Number.isSafeInteger(baseline) || baseline < 0)
-  fail('baseline typecheck.json needs a nonnegative integer count');
-if (count > baseline) {
-  fail(
-    `${count} error TS line(s) exceed baseline ${baseline}; thresholds only tighten — fix the errors, do not raise the baseline. Errors:\n${errorLines.join('\n')}`,
-  );
-}
-console.log(
-  `ratchet-typecheck: ${count} <= baseline ${baseline}${count < baseline ? ' (tighten with --update)' : ''}`,
-);

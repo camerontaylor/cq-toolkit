@@ -12,9 +12,11 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const roots: string[] = [];
+const BASELINE = 'baselines/typecheck--typecheck-count--7caef1e76077.json';
 function fixture(): string {
   const root = mkdtempSync(join(tmpdir(), 'cq-static-conformance-'));
   roots.push(root);
@@ -27,6 +29,8 @@ function fixture(): string {
     'lint/rules/no-cli-beyond-registry-kernel.mjs',
     'lint/rules/no-vendor-sdk-in-kernel.mjs',
     'scripts/ratchet-typecheck.mjs',
+    'scripts/ratchet-lib.mjs',
+    BASELINE,
   ]) {
     cpSync(join(ROOT, file), join(root, file));
   }
@@ -36,7 +40,6 @@ function fixture(): string {
     process.platform === 'win32' ? 'junction' : 'dir',
   );
   writeFileSync(join(root, 'package.json'), '{"type":"module"}');
-  writeFileSync(join(root, 'baselines/typecheck.json'), '{"count":0}\n');
   writeFileSync(
     join(root, 'tsconfig.json'),
     JSON.stringify({
@@ -57,6 +60,7 @@ function fixture(): string {
   return root;
 }
 function gate(root: string, args: string[] = []) {
+  copyRatchetEngine(ROOT, root);
   return spawnSync(process.execPath, ['scripts/ratchet-typecheck.mjs', ...args], {
     cwd: root,
     encoding: 'utf8',
@@ -80,7 +84,7 @@ describe('real pinned compiler and lint conformance', () => {
     const result = gate(root);
     expect(result.error).toBeUndefined();
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain('4 error TS line(s) exceed baseline 0');
+    expect(result.stderr).toContain('baseline 0 → current 4');
     for (const file of [
       'src/main.ts',
       'src/dependency.ts',
@@ -98,17 +102,21 @@ describe('real pinned compiler and lint conformance', () => {
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('TS2307');
   });
-  it('fails project configuration errors even when updating a larger baseline', () => {
+  it('fails project configuration errors even with a larger baseline', () => {
     const root = fixture();
-    writeFileSync(join(root, 'baselines/typecheck.json'), '{"count":10}\n');
+    const original = readFileSync(join(root, BASELINE), 'utf8').replace(
+      '"value": 0',
+      '"value": 10',
+    );
+    writeFileSync(join(root, BASELINE), original);
     writeFileSync(
       join(root, 'tsconfig.json'),
       '{"compilerOptions":{"notAnOption":true},"include":["src"]}',
     );
-    const result = gate(root, ['--update']);
+    const result = gate(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('configuration or project-loading failure');
-    expect(readFileSync(join(root, 'baselines/typecheck.json'), 'utf8')).toBe('{"count":10}\n');
+    expect(readFileSync(join(root, BASELINE), 'utf8')).toBe(original);
   });
   it('reproduces the integrated checker omission that requires the compiler fallback', () => {
     const root = fixture();
@@ -132,12 +140,16 @@ describe('real pinned compiler and lint conformance', () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain('unvisited/extra.ts');
   });
-  it('does not let --update hide a lint failure', () => {
+  it('rejects lint failures and never lets --update rewrite the baseline', () => {
     const root = fixture();
     writeFileSync(join(root, 'src/main.ts'), 'debugger; export {};\n');
-    const result = gate(root, ['--update']);
+    const original = readFileSync(join(root, BASELINE), 'utf8');
+    const result = gate(root);
     expect(result.status).toBe(1);
     expect(result.stdout + result.stderr).toContain('no-debugger');
-    expect(readFileSync(join(root, 'baselines/typecheck.json'), 'utf8')).toBe('{"count":0}\n');
+    const update = gate(root, ['--update']);
+    expect(update.status).toBe(1);
+    expect(update.stderr).toContain('unsupported arguments');
+    expect(readFileSync(join(root, BASELINE), 'utf8')).toBe(original);
   });
 });

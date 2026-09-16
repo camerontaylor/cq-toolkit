@@ -54,10 +54,10 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
 
 // Mirror of the script's cell table (same lane/provider/model quadruple).
 const CELLS = [
-  { lane: 'ai-sdk', provider: 'zai', model: 'glm-4.6' },
+  { lane: 'ai-sdk', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
   { lane: 'ai-sdk', provider: 'deepseek', model: 'deepseek-chat' },
-  { lane: 'claude-agent', provider: 'zai', model: 'glm-4.6' },
-  { lane: 'subprocess', provider: 'zai', model: 'glm-4.6' },
+  { lane: 'claude-agent', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
+  { lane: 'subprocess', provider: 'zai', model: 'ai-sdk/glm-5.3-flash' },
 ];
 
 describe('eval-axes-select module: --only selection and the credential gate (pure, dist-free)', () => {
@@ -66,7 +66,7 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 
   it('selectCells filters by substring', () => {
-    expect(selectCells(CELLS, ['node', 'x', '--only', 'glm-4.6'])).toHaveLength(3);
+    expect(selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash'])).toHaveLength(3);
     expect(selectCells(CELLS, ['node', 'x', '--only', 'deepseek'])).toHaveLength(1);
   });
 
@@ -79,7 +79,7 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 
   it('requiredKeys: a zai-only selection with ZAI_API_KEY set needs nothing', () => {
-    const selected = selectCells(CELLS, ['node', 'x', '--only', 'glm-4.6']);
+    const selected = selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash']);
     expect(requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, { ZAI_API_KEY: 'x' })).toEqual({
       missing: [],
       unmapped: null,
@@ -95,7 +95,7 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 
   it('requiredKeys: nothing set + a zai selection demands ZAI_API_KEY', () => {
-    const selected = selectCells(CELLS, ['node', 'x', '--only', 'glm-4.6']);
+    const selected = selectCells(CELLS, ['node', 'x', '--only', 'ai-sdk/glm-5.3-flash']);
     expect(requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, {})).toEqual({
       missing: ['ZAI_API_KEY'],
       unmapped: null,
@@ -126,7 +126,7 @@ describe.skipIf(!existsSync(join(ROOT, 'dist', 'index.js')))(
       // No keys in env at all: the OLD unconditional gate listed BOTH key vars
       // here; the selective gate must name ZAI_API_KEY only (the glm cells
       // never contact DeepSeek).
-      const res = runDemo(['--only', 'glm-4.6']);
+      const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
       expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
       expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');

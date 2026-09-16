@@ -14,7 +14,11 @@
 //     silently returns page 1 only; and --paginate alone does NOT merge —
 //     --slurp, gh >= 2.51, is what yields ONE outer array of page arrays).
 //     Pages are fetched at the explicit `?per_page=100`, so the restPages
-//     cap is a true PAGE cap, applied client-side before flattening.
+//     cap is a true PAGE cap, applied client-side before flattening. The
+//     payload is normalized by gh.ts's shared slurpedComments guard: the
+//     --slurp shape is used as-is, an already-FLAT payload (older gh
+//     variants) is tolerated as ONE retained page, and a mixed/non-array
+//     payload throws.
 // Any cap hit does NOT error: the result carries truncated=true plus a
 // truncatedBecause reason per cause, and the data fetched so far still
 // comes back — the caller decides (fail closed downstream). So does the
@@ -25,8 +29,9 @@
 // GraphQL thread comments are ROOT-ONLY (comments(first: 1)) AND stale —
 // reply chains are reconstructed from REST by attachRestReplies, never from
 // GraphQL, anchored on the thread root comment's databaseId ↔ REST id.
-import { ghJson, makeGhRunner } from './gh.js';
+import { ghJson, ghNameOk, makeGhRunner, slurpedComments } from './gh.js';
 import type { GhFn } from './gh.js';
+import { GH_NAME_OK } from './gh.js';
 import { attachRestReplies } from './threads.js';
 import type { RestComment, ReviewSummary, ReviewThread, TruncationFlag } from './threads.js';
 
@@ -217,8 +222,9 @@ const REVIEW_STATES: readonly string[] = [
   'DISMISSED',
 ];
 
-/** The only owner/repo spellings allowed near a gh REST path. */
-const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
+// Owner/repo spellings are validated by gh.ts's shared ghNameOk (GH_NAME_OK
+// charset + the dot-segment rule); this module keeps only its own
+// module-prefixed fail-loud error message.
 
 const isKnownReviewState = (state: string | null): state is Exclude<ReviewSummary['state'], null> =>
   state !== null && REVIEW_STATES.includes(state);
@@ -286,7 +292,11 @@ const toRestComment = (raw: RawRestComment): RestComment => ({
  * cap. The path pins `?per_page=100`, so `restPages` is a true PAGE cap: it
  * is applied client-side on the outer array of page arrays that `--slurp`
  * (gh >= 2.51) produces, BEFORE flattening — an oversized fetch keeps its
- * first `restPages` pages and is reported truncated with `reason`.
+ * first `restPages` pages and is reported truncated with `reason`. The
+ * payload normalization is gh.ts's shared slurpedComments guard: the
+ * --slurp shape is used as-is; an already-FLAT payload (an older gh
+ * variant, or pages merged without --slurp) is tolerated as ONE retained
+ * page; mixed/non-array payloads throw.
  */
 async function fetchRestPages<T>(
   run: GhFn,
@@ -295,14 +305,11 @@ async function fetchRestPages<T>(
   reason: string,
   truncatedBecause: string[],
 ): Promise<T[][]> {
-  const raw = await ghJson<T[][]>(run, ['api', path, '--paginate', '--slurp']);
-  if (!Array.isArray(raw) || raw.some((page) => !Array.isArray(page))) {
-    throw new Error(`gh api ${path} --paginate --slurp returned a non-page-array payload`);
-  }
-  let pages = raw;
+  const raw = await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']);
+  const pages = slurpedComments<T>(raw, path);
   if (pages.length > restPages) {
     truncatedBecause.push(reason);
-    pages = pages.slice(0, restPages);
+    return pages.slice(0, restPages);
   }
   return pages;
 }
@@ -355,9 +362,9 @@ export async function fetchReviewState(
   // owner/repo land inside gh REST paths and pr into both REST paths and
   // GraphQL variables; anything injection-adjacent is rejected before a
   // single argv is built.
-  if (!GH_NAME_OK.test(input.owner) || !GH_NAME_OK.test(input.repo)) {
+  if (!ghNameOk(input.owner) || !ghNameOk(input.repo)) {
     throw new Error(
-      `fetchReviewState: owner/repo must match ${String(GH_NAME_OK)} — got owner ${JSON.stringify(input.owner)}, repo ${JSON.stringify(input.repo)}`,
+      `fetchReviewState: owner/repo must match ${String(GH_NAME_OK)} (never "." or "..") — got owner ${JSON.stringify(input.owner)}, repo ${JSON.stringify(input.repo)}`,
     );
   }
   if (!Number.isSafeInteger(input.pr) || input.pr <= 0) {
@@ -523,13 +530,20 @@ export async function fetchReviewState(
   // Reviews lag, mirroring the thread-lag pattern: any REST review whose
   // node_id is absent from the GraphQL review id set means the snapshot
   // predates that review — fail closed. (A REST review with no node_id
-  // cannot be cross-checked and is not evidence of lag.)
-  const graphqlReviewIds = new Set(reviews.map((review) => review.id));
-  const reviewsLag = restReviewPages
-    .flat()
-    .some((rest) => typeof rest.node_id === 'string' && !graphqlReviewIds.has(rest.node_id));
-  if (reviewsLag) {
-    truncatedBecause.push('reviews.lag');
+  // cannot be cross-checked and is not evidence of lag.) SKIPPED when the
+  // GraphQL reviews loop hit its page cap: `reviews.pageCap` is already
+  // recorded, and a capped loop PROVABLY under-saw GraphQL reviews — an
+  // unseen node_id is then the cap's known failure mode, not fresh-lag
+  // evidence, so misattributing it as reviews.lag would double-flag with
+  // the wrong cause.
+  if (!truncatedBecause.includes('reviews.pageCap')) {
+    const graphqlReviewIds = new Set(reviews.map((review) => review.id));
+    const reviewsLag = restReviewPages
+      .flat()
+      .some((rest) => typeof rest.node_id === 'string' && !graphqlReviewIds.has(rest.node_id));
+    if (reviewsLag) {
+      truncatedBecause.push('reviews.lag');
+    }
   }
 
   // The loop body ran at least once (it exits only via its own break, after

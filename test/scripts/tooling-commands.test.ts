@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const roots: string[] = [];
@@ -29,11 +30,12 @@ function fixture(realTools = true): string {
     'scripts/lint-fast.mjs',
     'scripts/lib/owned-files.mjs',
     'scripts/ratchet-typecheck.mjs',
+    'scripts/ratchet-lib.mjs',
+    'baselines/typecheck--typecheck-count--7caef1e76077.json',
   ])
     cpSync(join(ROOT, file), join(root, file));
   cpSync(join(ROOT, 'lint'), join(root, 'lint'), { recursive: true });
   writeFileSync(join(root, 'package.json'), '{"type":"module"}');
-  writeFileSync(join(root, 'baselines/typecheck.json'), '{"count":0}\n');
   writeFileSync(
     join(root, 'tsconfig.json'),
     JSON.stringify({
@@ -63,6 +65,7 @@ function command(
   args: string[] = [],
   env: NodeJS.ProcessEnv = process.env,
 ) {
+  if (script === 'ratchet-typecheck' || script === 'fix') copyRatchetEngine(ROOT, root);
   return spawnSync(process.execPath, [`scripts/${script}.mjs`, ...args], {
     cwd: root,
     env,

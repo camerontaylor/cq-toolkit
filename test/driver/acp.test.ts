@@ -210,17 +210,29 @@ describe('win32 .cmd/.bat shim spawn translation (review-debt #54/#55)', () => {
     // keyed on the injected platform so it is testable everywhere.
     expect(argvForShimSpawn('C:\\tools\\zcode-acp-server.cmd', ['--flag', 'v'], 'win32')).toEqual({
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', 'C:\\tools\\zcode-acp-server.cmd --flag v'],
+      args: ['/d', '/s', '/c', '"C:\\tools\\zcode-acp-server.cmd --flag v"'],
       windowsVerbatimArguments: true,
     });
     expect(argvForShimSpawn('C:\\tools\\dsh.BAT', [], 'win32')).toEqual({
       command: 'cmd.exe',
-      args: ['/d', '/s', '/c', 'C:\\tools\\dsh.BAT'],
+      args: ['/d', '/s', '/c', '"C:\\tools\\dsh.BAT"'],
       windowsVerbatimArguments: true,
     });
     // Case-insensitive extension match (PATHEXT is uppercase by default,
     // but a lowercase-suffixed shim is the same file).
     expect(argvForShimSpawn('C:\\x\\tool.CMD', ['a'], 'win32')?.command).toBe('cmd.exe');
+    // Element boundaries survive: a space-bearing path and a two-word
+    // argument each stay ONE element, inside the ONE outer quote pair
+    // that /s strips (PR #111 + PR #119 reviews).
+    const quoted = argvForShimSpawn(
+      'C:\\Program Files\\nodejs\\zcode-acp-server.cmd',
+      ['--prompt', 'two words'],
+      'win32',
+    );
+    expect(quoted.command).toBe('cmd.exe');
+    expect(quoted.args[3]).toBe(
+      `""C:\\Program Files\\nodejs\\zcode-acp-server.cmd" --prompt "two words""`,
+    );
   });
 
   test('everything else passes through verbatim: exes, scripts, and any non-win32 platform', () => {
@@ -787,6 +799,53 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(result.costBasis).toBeUndefined();
     });
   });
+
+  test('a response CARRYING usage the wire gate rejects is an ERROR run — never zeros-that-look-measured (PR #97 review, Codex P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FAKE_ACP_MALFORMED_USAGE: the turn settles end_turn with
+      // inputTokens: -1. The verdict must pin to 'error' — the old code
+      // treated the unshapeable usage as ABSENT, substituted zeros, and
+      // classified the run 'complete', erasing accounting and bypassing
+      // the unpriced check under a USD cap.
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_MALFORMED_USAGE: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'malformed-usage run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never trusted numbers
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"malformed-reported-usage"'))).toBe(true);
+    });
+  });
+
+  test('a foreign-session ask whose REJECTION write fails settles error — never a hung run (PR #97 review, Codex P1)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // FOREIGN ask + stdin destroyed: the failRequest write EPIPEs, and
+      // the vendor would otherwise wait forever for an answer that can
+      // never be delivered. The broken-channel posture applies: verdict
+      // 'error', the child terminated via the settle ladder, the run
+      // settles.
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: '{"path":"a.txt"}',
+            FAKE_ACP_FOREIGN_PERMISSION_SESSION: '1',
+            FAKE_ACP_CLOSE_STDIN_ON_PERMISSION: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'foreign-ask-dead-stdin run' }));
+      expect(result.stopReason).toBe('error');
+      const narration = await narrationOf(store, result.sessionId as string);
+      expect(narration.some((line) => line.includes('"permission-rejection-send-failed"'))).toBe(
+        true,
+      );
+    });
+  }, 20_000);
 
   test('a session/request_permission naming a FOREIGN session is rejected: no answer, no evidence — the ungated tool card fails the run (PR #37 review, Codex P2)', async () => {
     await withScratch(async (scratchDir, store) => {

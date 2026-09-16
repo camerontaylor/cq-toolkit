@@ -7,6 +7,7 @@
     "src/ops/*/registry.ts",
     "scripts/*.mjs",
     "scripts/lib/eval-axes-select.d.mts",
+    "test/fixtures/ratchet-lib-selfhost.mjs",
     "test/fixtures/cli-ops/fixture/*.js",
     "test/fixtures/cli-smoke-ops/smoke/*.js"
   ],

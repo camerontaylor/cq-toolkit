@@ -148,7 +148,9 @@ describe('trap: REST silent pagination loss', () => {
     expect(capped.truncated).toBe(true);
     expect(capped.truncatedBecause).toContain('restComments.pageCap');
     expect(capped.restReviewComments).toHaveLength(0);
-  }, 20_000);
+    // 60s headroom: this two-pass fake-gh spawn test runs the harness TWICE
+    // under full-suite parallel load — 20s was observed flaking.
+  }, 60_000);
 });
 
 // ---------------------------------------------------------------------------
