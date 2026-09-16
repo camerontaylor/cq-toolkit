@@ -380,6 +380,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
+        if (run1.sessionId === undefined) throw new Error('first run must create a session');
         const run2 = await driver2.run(
           invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
         );

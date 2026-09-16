@@ -96,3 +96,19 @@ Before strictness repairs, disposable TS7 probes found:
 | both                         |         137 |             40 |
 
 Each high-volume flag is its own implementation commit. Baselines remain zero.
+
+## Exact optional properties
+
+The indexed-access and exact-optional stages preserve the zero baseline. Optional
+values are now omitted when absent instead of constructing present `undefined`
+properties. Schemas annotated with SDK interfaces use Zod `exactOptional()` to
+match those interfaces: omission is accepted, explicit `undefined` is rejected.
+This tightens the JavaScript schema boundary; JSON inputs are unchanged because
+JSON has no undefined value. The intentionally unknown structured output retains
+its original optional semantics. Budget and plan tests pin omission, undefined
+and valid falsy values. Malformed ledger fixtures cross the JavaScript boundary
+with Reflect.apply instead of pretending invalid input satisfies the interface.
+
+Validation: 1,378 tests passed (four skipped, one todo), using one Vitest worker;
+static gate, formatting, declaration emit and an external strict NodeNext consumer
+passed. Published declarations are compared with the native-compiler snapshot.

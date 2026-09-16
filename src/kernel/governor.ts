@@ -755,7 +755,9 @@ export class BudgetGovernor {
   /** The ladder spec this run enforces (grace defaults applied). */
   get ladderSpec(): LadderSpec {
     return {
-      wallClockMs: this.config.perJobWallClockMs,
+      ...(this.config.perJobWallClockMs === undefined
+        ? {}
+        : { wallClockMs: this.config.perJobWallClockMs }),
       abortGraceMs: this.config.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS,
       killGraceMs: this.config.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
     };
@@ -1106,7 +1108,7 @@ export async function seedFromRunLog(
     }
     events.push(...runEvents);
   }
-  governor.seedFromJournal(events, { usdOf: opts?.usdOf });
+  governor.seedFromJournal(events, opts?.usdOf === undefined ? {} : { usdOf: opts.usdOf });
   return governor;
 }
 

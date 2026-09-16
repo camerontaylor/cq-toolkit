@@ -684,7 +684,7 @@ export function rawOutputToText(value: unknown): string {
  * Resource/image/audio/resource_link blocks carry no text and contribute
  * nothing; an absent or empty array yields ''.
  */
-function textOfContentBlocks(blocks: readonly { type: string; text?: string }[]): string {
+function textOfContentBlocks(blocks: readonly z.infer<typeof ContentBlockSchema>[]): string {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);

@@ -366,7 +366,9 @@ async function dispatchCli(
   // Global help: --help/-h as the leading argument (lenient about what
   // follows — help wins).
   if (sub === '--help' || sub === '-h') {
-    io.stdout(renderGlobalHelp(subcommandNames(await list({ opsRoot }))));
+    io.stdout(
+      renderGlobalHelp(subcommandNames(await list(opsRoot === undefined ? {} : { opsRoot }))),
+    );
     return EXIT_CODES.ok;
   }
 
@@ -428,7 +430,7 @@ async function dispatchCli(
   }
 
   // --- Op subcommands -------------------------------------------------------
-  const entry = await get(sub, { opsRoot });
+  const entry = await get(sub, opsRoot === undefined ? {} : { opsRoot });
   if (entry === undefined) {
     // Unknown subcommand: narrate to stderr, NOTHING on stdout, exit 2.
     narrate(io, `unknown subcommand '${sub}' (try --help)`);

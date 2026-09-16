@@ -151,7 +151,7 @@ async function seedBaseline(
       metric,
       direction,
       value,
-      unit,
+      ...(unit === undefined ? {} : { unit }),
       capturedAt: BASELINE_CAPTURED_AT,
     }),
     'utf8',

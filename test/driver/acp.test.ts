@@ -932,6 +932,7 @@ describe('acp driver specifics (fake ACP server)', () => {
       const second = new AcpDriver(
         driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo' }, calls2),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(
         invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
       );
@@ -974,6 +975,7 @@ describe('acp driver specifics (fake ACP server)', () => {
           calls2,
         ),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(
         invocation({ prompt: 'rung2 run two', sessionRef: run1.sessionId }),
       );
@@ -1010,6 +1012,7 @@ describe('acp driver specifics (fake ACP server)', () => {
           calls2,
         ),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(
         invocation({ prompt: 'rung3 run two', sessionRef: run1.sessionId }),
       );
@@ -1055,6 +1058,7 @@ describe('acp driver specifics (fake ACP server)', () => {
       const second = new AcpDriver(
         driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_REPLAY: '1' }, calls2),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(
         invocation({ prompt: 'replay run two', sessionRef: run1.sessionId }),
       );
@@ -1100,6 +1104,7 @@ describe('acp driver specifics (fake ACP server)', () => {
           calls2,
         ),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(
         invocation({ prompt: 'tail run two', sessionRef: run1.sessionId }),
       );

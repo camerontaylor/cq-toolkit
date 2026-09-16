@@ -141,7 +141,7 @@ beforeAll(() => {
     extract: (raw) => {
       const record = raw as { count?: unknown; unit?: string };
       if (typeof record.count !== 'number') return null;
-      return { value: record.count, unit: record.unit };
+      return { value: record.count, ...(record.unit === undefined ? {} : { unit: record.unit }) };
     },
   });
   registerAdapter({
@@ -272,7 +272,9 @@ describe('captureBaseline', () => {
 
   test('capturedAt defaults to the clock when not injected (parses as ISO-8601)', async () => {
     sourceRaw = { count: 1 };
-    const result = await capture(captureInput({ capturedAt: undefined }));
+    const input = captureInput();
+    delete input.capturedAt;
+    const result = await capture(input);
     expect(result.status).toBe('ok');
     const onDisk = parseBaseline(await readFile(join(ws, REL), 'utf8'));
     expect(Number.isNaN(Date.parse(onDisk.capturedAt))).toBe(false);

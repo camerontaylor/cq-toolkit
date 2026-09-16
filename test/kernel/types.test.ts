@@ -908,3 +908,15 @@ describe('WorkerResultSchema costUSD/costBasis pairing (DD-9 wire coupling)', ()
     );
   });
 });
+
+describe('exact optional schema boundaries', () => {
+  test('absence survives parsing while explicit undefined cannot satisfy a typed optional field', () => {
+    expect(kernelSchema.BudgetSchema.parse({})).toEqual({});
+    expect(kernelSchema.BudgetSchema.safeParse({ maxUsd: undefined }).success).toBe(false);
+    expect(kernelSchema.BudgetSchema.parse({ maxUsd: 0 })).toEqual({ maxUsd: 0 });
+    const plan = { id: 'optional-boundary', jobs: [] };
+    expect(kernelSchema.PlanSchema.parse(plan)).toEqual(plan);
+    expect(kernelSchema.PlanSchema.safeParse({ ...plan, label: undefined }).success).toBe(false);
+    expect(kernelSchema.PlanSchema.parse({ ...plan, label: '' }).label).toBe('');
+  });
+});

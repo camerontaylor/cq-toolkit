@@ -318,10 +318,11 @@ export function attemptsFromJournal(
     if (event.type === 'job-finished' && event.jobId === jobId) {
       const last = attempts[attempts.length - 1];
       if (last !== undefined) {
+        const detail = detailOf(event.result);
         attempts[attempts.length - 1] = {
           ...last,
           outcome: event.result.status,
-          ...(detailOf(event.result) !== undefined ? { detail: detailOf(event.result) } : {}),
+          ...(detail !== undefined ? { detail } : {}),
         };
       }
     }

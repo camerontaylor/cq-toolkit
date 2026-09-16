@@ -92,8 +92,8 @@ const LedgerEntrySchema: z.ZodType<LedgerEntry> = z
   .object({
     signature: z.string().min(1).max(SIGNATURE_MAX_CHARS),
     count: z.number().int().min(1),
-    component: z.string().min(1).max(COMPONENT_MAX_CHARS).optional(),
-    note: z.string().min(1).max(NOTE_MAX_CHARS).optional(),
+    component: z.string().min(1).max(COMPONENT_MAX_CHARS).exactOptional(),
+    note: z.string().min(1).max(NOTE_MAX_CHARS).exactOptional(),
   })
   .strict();
 

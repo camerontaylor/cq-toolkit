@@ -26,7 +26,10 @@ async function findingsOf(
   diff: string,
   suppressionPatterns?: readonly SuppressionPattern[],
 ): Promise<TamperFinding[]> {
-  const result = await hackDetector({ diff, suppressionPatterns });
+  const result = await hackDetector({
+    diff,
+    ...(suppressionPatterns === undefined ? {} : { suppressionPatterns }),
+  });
   expect(result.status).toBe('ok');
   return result.status === 'ok' ? result.value : [];
 }

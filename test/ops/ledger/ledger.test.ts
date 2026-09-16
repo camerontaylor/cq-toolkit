@@ -438,16 +438,21 @@ describe('ledger.record — component/note bounds (mirroring the registry schema
 
   test('a non-string component or note is failed without touching the store (no TypeError across the seam)', async () => {
     const store = memoryStore();
-    const untyped = (value: unknown) => value as string | undefined; // an untyped caller past any schema
-    await expect(record(store, { signature: 'sig-a', component: untyped(42) })).resolves.toEqual({
+    await expect(
+      Reflect.apply(record, undefined, [store, { signature: 'sig-a', component: 42 }]),
+    ).resolves.toEqual({
       status: 'failed',
       error: 'ledger: component must be a string (got number)',
     });
-    await expect(record(store, { signature: 'sig-a', component: untyped(null) })).resolves.toEqual({
+    await expect(
+      Reflect.apply(record, undefined, [store, { signature: 'sig-a', component: null }]),
+    ).resolves.toEqual({
       status: 'failed',
       error: 'ledger: component must be a string (got null)',
     });
-    await expect(record(store, { signature: 'sig-a', note: untyped(false) })).resolves.toEqual({
+    await expect(
+      Reflect.apply(record, undefined, [store, { signature: 'sig-a', note: false }]),
+    ).resolves.toEqual({
       status: 'failed',
       error: 'ledger: note must be a string (got boolean)',
     });

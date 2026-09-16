@@ -300,7 +300,9 @@ function conformanceEndpointTable(): EndpointTable {
 }
 
 /** Conformance harness config: the conformance write permitted via an anchored re: pattern (token patterns deny redirects by design); workspaces inside scratchDir. */
-function conformanceHarnessConfig(scratchDir: string): ClaudeAgentDriverOptions['harnessConfig'] {
+function conformanceHarnessConfig(
+  scratchDir: string,
+): NonNullable<ClaudeAgentDriverOptions['harnessConfig']> {
   return {
     ...defaultHarnessConfig,
     workspaceRoot: join(scratchDir, 'workspaces'),
@@ -321,7 +323,11 @@ function conformanceHarnessConfig(scratchDir: string): ClaudeAgentDriverOptions[
 /** Fresh mock-backed ClaudeAgentDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): ClaudeAgentDriver {
   return new ClaudeAgentDriver({
-    sdkLoader: async () => mockSdkModule({ directive: spec.directive, calls: [] }),
+    sdkLoader: async () =>
+      mockSdkModule({
+        ...(spec.directive === undefined ? {} : { directive: spec.directive }),
+        calls: [],
+      }),
     endpointTable: conformanceEndpointTable(),
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
@@ -591,6 +597,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         expect(files.filter((f) => f.endsWith(AGENT_SESSION_FILE))).toEqual([]);
       };
       await noSidecarInWorkspace();
+      if (run1.sessionId === undefined) throw new Error('Expected a resumable session');
       const run2 = await driver.run(
         invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
       );

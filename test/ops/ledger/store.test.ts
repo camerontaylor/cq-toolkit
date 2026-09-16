@@ -110,10 +110,13 @@ describe('serializeLedger / parseLedger round trip', () => {
 
   test('optional fields absent vs undefined serialize identically', () => {
     const absent = serializeLedger({ version: 1, entries: [{ signature: 's', count: 1 }] });
-    const undef = serializeLedger({
-      version: 1,
-      entries: [{ signature: 's', count: 1, component: undefined, note: undefined }],
-    });
+    // A JavaScript caller can still supply explicit undefined despite the typed contract.
+    const undef: unknown = Reflect.apply(serializeLedger, undefined, [
+      {
+        version: 1,
+        entries: [{ signature: 's', count: 1, component: undefined, note: undefined }],
+      },
+    ]);
     expect(undef).toBe(absent);
   });
 

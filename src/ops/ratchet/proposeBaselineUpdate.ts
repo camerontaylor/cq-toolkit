@@ -488,7 +488,7 @@ export function createProposeBaselineUpdate(
           metric: baseline.metric,
           direction: baseline.direction,
           value: imp.value,
-          unit: baseline.unit,
+          ...(baseline.unit === undefined ? {} : { unit: baseline.unit }),
           capturedAt: imp.capturedAt ?? new Date().toISOString(),
         });
         applied.push({

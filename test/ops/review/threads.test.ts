@@ -112,7 +112,9 @@ describe('countUnresolvedThreads', () => {
       expected: 2,
     },
   ])('$name', ({ threads, exclude, expected }) => {
-    expect(countUnresolvedThreads(threads, { excludeAuthorLogin: exclude })).toBe(expected);
+    expect(
+      countUnresolvedThreads(threads, exclude === undefined ? {} : { excludeAuthorLogin: exclude }),
+    ).toBe(expected);
   });
 });
 

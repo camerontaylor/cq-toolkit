@@ -167,7 +167,7 @@ beforeAll(() => {
     extract: (raw) => {
       const record = raw as { count?: unknown; unit?: string };
       if (typeof record.count !== 'number') return null;
-      return { value: record.count, unit: record.unit };
+      return { value: record.count, ...(record.unit === undefined ? {} : { unit: record.unit }) };
     },
   });
   registerAdapter({
@@ -240,7 +240,7 @@ async function plantBaseline(
     metric: dir.metric,
     direction: dir.label,
     value,
-    unit: dir.unit,
+    ...(dir.unit === undefined ? {} : { unit: dir.unit }),
     capturedAt: CAPTURED_AT,
     ...overrides,
   });
@@ -728,7 +728,11 @@ describe('checkRatchet', () => {
     async ({ plantUnit, raw, pattern }) => {
       raws[UNIT_SHIFTING_METRIC] = raw;
       await plantBaseline(
-        { label: 'lower-is-better', metric: UNIT_SHIFTING_METRIC, unit: plantUnit },
+        {
+          label: 'lower-is-better',
+          metric: UNIT_SHIFTING_METRIC,
+          ...(plantUnit === undefined ? {} : { unit: plantUnit }),
+        },
         3,
       );
       await expect(

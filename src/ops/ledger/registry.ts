@@ -23,8 +23,8 @@ import type { LedgerQueryInput, LedgerRecordInput } from './ledger.js';
  */
 export const LedgerThresholdsOverrideSchema = z
   .object({
-    suppressAt: z.number().int().min(1).optional(),
-    escalateAt: z.number().int().min(2).optional(),
+    suppressAt: z.number().int().min(1).exactOptional(),
+    escalateAt: z.number().int().min(2).exactOptional(),
   })
   .strict()
   .refine(
@@ -50,9 +50,9 @@ export const LedgerRecordInputSchema: z.ZodType<LedgerRecordInput> = z
     root: z.string().min(1),
     storePath: z.string().min(1),
     signature: z.string().min(1).max(500),
-    component: z.string().min(1).max(200).optional(),
-    note: z.string().min(1).max(500).optional(),
-    thresholds: LedgerThresholdsOverrideSchema.optional(),
+    component: z.string().min(1).max(200).exactOptional(),
+    note: z.string().min(1).max(500).exactOptional(),
+    thresholds: LedgerThresholdsOverrideSchema.exactOptional(),
   })
   .strict();
 
@@ -61,7 +61,7 @@ export const LedgerQueryInputSchema: z.ZodType<LedgerQueryInput> = z
   .object({
     root: z.string().min(1),
     storePath: z.string().min(1),
-    thresholds: LedgerThresholdsOverrideSchema.optional(),
+    thresholds: LedgerThresholdsOverrideSchema.exactOptional(),
   })
   .strict();
 

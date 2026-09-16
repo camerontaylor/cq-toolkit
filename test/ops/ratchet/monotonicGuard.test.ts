@@ -78,16 +78,21 @@ const COV_METRIC = 'coverage';
 const REL_COV = baselineRelPath(COV_TARGET, COV_METRIC);
 
 /** A real baseline body, rendered by the production serializer. */
-function body(direction: Direction, value: number, overrides: Partial<BaselineFile> = {}): string {
+function body(
+  direction: Direction,
+  value: number,
+  overrides: Omit<Partial<BaselineFile>, 'unit'> & { unit?: string | null } = {},
+): string {
+  const { unit = 'errors', ...rest } = overrides;
   return renderBaseline({
     schemaVersion: 1,
     target: TARGET,
     metric: METRIC,
     direction,
     value,
-    unit: 'errors',
+    ...(unit === null ? {} : { unit }),
     capturedAt: CAPTURED_AT,
-    ...overrides,
+    ...rest,
   });
 }
 
@@ -366,7 +371,7 @@ describe('checkDiffMonotonicity', () => {
   test.each([
     {
       label: 'a unit ADDED between the sides (undefined → errors)',
-      oldOverrides: { unit: undefined },
+      oldOverrides: { unit: null },
       newOverrides: {},
       oldUnit: undefined,
       newUnit: 'errors',
@@ -374,7 +379,7 @@ describe('checkDiffMonotonicity', () => {
     {
       label: 'a unit REMOVED between the sides (errors → undefined)',
       oldOverrides: {},
-      newOverrides: { unit: undefined },
+      newOverrides: { unit: null },
       oldUnit: 'errors',
       newUnit: undefined,
     },
@@ -1180,7 +1185,7 @@ describe('formatViolations', () => {
       `${REL}: unit changed errors → failures — incomparable scale`,
     ]);
     const added = checkDiffMonotonicity(
-      fullRewrite(REL, body('lower-is-better', 3, { unit: undefined }), body('lower-is-better', 3)),
+      fullRewrite(REL, body('lower-is-better', 3, { unit: null }), body('lower-is-better', 3)),
     );
     expect(added.ok).toBe(false);
     if (added.ok) throw new Error('unreachable');

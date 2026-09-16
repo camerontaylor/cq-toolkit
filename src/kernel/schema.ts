@@ -65,7 +65,7 @@ export const UsageSchema: z.ZodType<Usage> = z
     output: z.number().int().nonnegative(),
     cacheRead: z.number().int().nonnegative(),
     cacheWrite: z.number().int().nonnegative(),
-    reasoning: z.number().int().nonnegative().optional(),
+    reasoning: z.number().int().nonnegative().exactOptional(),
   })
   .strict();
 
@@ -92,7 +92,7 @@ export const ToolPolicyModeSchema: z.ZodType<ToolPolicyMode> = z.enum([
 export const ToolPolicySchema: z.ZodType<ToolPolicy> = z
   .object({
     allow: z.array(z.string()),
-    mode: ToolPolicyModeSchema.optional(),
+    mode: ToolPolicyModeSchema.exactOptional(),
   })
   .strict();
 
@@ -112,10 +112,10 @@ export const BudgetSchema: z.ZodType<Budget> = z
   .object({
     // Mirror-only tightening (review-debt #17): a negative USD cap is
     // malformed — the frozen RunOptions type is untouched.
-    maxUsd: z.number().nonnegative().optional(),
-    maxTokens: z.number().optional(),
-    wallClockMs: z.number().optional(),
-    maxAttempts: z.number().optional(),
+    maxUsd: z.number().nonnegative().exactOptional(),
+    maxTokens: z.number().exactOptional(),
+    wallClockMs: z.number().exactOptional(),
+    maxAttempts: z.number().exactOptional(),
   })
   .strict();
 
@@ -132,19 +132,19 @@ export const OpInvocationSchema: z.ZodType<OpInvocation> = z
     modelSpec: ModelSpecSchema,
     toolPolicy: ToolPolicySchema,
     sandboxPolicy: SandboxPolicySchema,
-    sessionRef: z.string().optional(),
+    sessionRef: z.string().exactOptional(),
     budget: BudgetSchema,
   })
   .strict();
 
 export const WorkerResultSchema: z.ZodType<WorkerResult> = z
   .object({
-    model: z.string().optional(),
+    model: z.string().exactOptional(),
     structuredOutput: z.unknown().optional(),
     usage: UsageSchema,
-    costUSD: z.number().optional(),
-    costBasis: z.enum(['modeled', 'billed']).optional(),
-    sessionId: z.string().optional(),
+    costUSD: z.number().exactOptional(),
+    costBasis: z.enum(['modeled', 'billed']).exactOptional(),
+    sessionId: z.string().exactOptional(),
     denials: z.array(ToolDenialSchema),
     stopReason: DriverStopReasonSchema,
   })
@@ -217,14 +217,14 @@ export const JobSchema: z.ZodType<Job> = z
     id: z.string(),
     op: z.string(),
     input: z.unknown(),
-    dependsOn: z.array(z.string()).optional(),
+    dependsOn: z.array(z.string()).exactOptional(),
   })
   .strict();
 
 export const PlanSchema: z.ZodType<Plan> = z
   .object({
     id: z.string(),
-    label: z.string().optional(),
+    label: z.string().exactOptional(),
     jobs: z.array(JobSchema),
   })
   .strict();
@@ -238,18 +238,18 @@ export const RunOptionsSchema: z.ZodType<RunOptions> = z
     // untouched. The runner enforces the same bound at runtime.
     concurrency: z.number().int().min(1),
     stopOnError: z.boolean(),
-    journalDir: z.string().optional(),
+    journalDir: z.string().exactOptional(),
     // Mirror-only tightening (review-debt #17): a negative USD cap is
     // malformed — the frozen RunOptions type is untouched.
-    maxUsd: z.number().nonnegative().optional(),
+    maxUsd: z.number().nonnegative().exactOptional(),
     // maxTokens (DD-9's token rollup cap) mirrors the frozen RunOptions field
     // with the same mirror-tightening precedent as `concurrency` above
     // (recorded pattern: mirror-only tightening, the frozen RunOptions type is
     // untouched; the governor validates finite > 0 at construction). Optional
     // in the frozen type, so the mirror stays optional — the .positive() bound
     // is the tightening.
-    maxTokens: z.number().positive().optional(),
-    resume: z.boolean().optional(),
+    maxTokens: z.number().positive().exactOptional(),
+    resume: z.boolean().exactOptional(),
   })
   .strict();
 
@@ -258,14 +258,14 @@ export const LimitsSchema: z.ZodType<Limits> = z
     // Mirror-only tightenings (review-debt #17, PR #7 Major/P2): USD caps and
     // wall-clock durations are non-negative quantities; attempts are positive
     // integers — the frozen Limits type is untouched.
-    maxUsd: z.number().nonnegative().optional(),
-    perJobWallClockMs: z.number().nonnegative().optional(),
-    maxAttemptsPerJob: z.number().int().positive().optional(),
+    maxUsd: z.number().nonnegative().exactOptional(),
+    perJobWallClockMs: z.number().nonnegative().exactOptional(),
+    maxAttemptsPerJob: z.number().int().positive().exactOptional(),
     // Mirror-only tightening (review-debt #17, PR #7 P2): a pool ceiling
     // below 1 is meaningless, exactly like `concurrency` above — the frozen
     // type is untouched; the runner enforces the same bound at runtime.
-    inFlightCeiling: z.number().int().min(1).optional(),
-    runDispatchQuota: z.number().optional(),
+    inFlightCeiling: z.number().int().min(1).exactOptional(),
+    runDispatchQuota: z.number().exactOptional(),
   })
   .strict();
 
@@ -291,8 +291,8 @@ export const JobOutcomeSchema: z.ZodType<JobOutcome> = z
     jobId: z.string(),
     op: z.string(),
     result: OpResultSchema,
-    usage: UsageSchema.optional(),
-    costUSD: z.number().optional(),
+    usage: UsageSchema.exactOptional(),
+    costUSD: z.number().exactOptional(),
   })
   .strict();
 
@@ -300,11 +300,11 @@ export const RunReportSchema: z.ZodType<RunReport> = z
   .object({
     runId: z.string(),
     stoppedEarly: z.boolean(),
-    earlyStopReason: RunEarlyStopReasonSchema.optional(),
+    earlyStopReason: RunEarlyStopReasonSchema.exactOptional(),
     counts: RunCountsSchema,
     jobs: z.array(JobOutcomeSchema),
-    usage: UsageSchema.optional(),
-    costUSD: z.number().optional(),
+    usage: UsageSchema.exactOptional(),
+    costUSD: z.number().exactOptional(),
   })
   .strict()
   // Honest-stop coupling (frozen): `earlyStopReason` is present exactly when
@@ -369,7 +369,7 @@ export const JobFinishedJournalEventSchema = z
     inputsHash: z.string(),
     result: OpResultSchema,
     // Per-job usage rollup for resumed runs (USD stays derived-only downstream).
-    usage: UsageSchema.optional(),
+    usage: UsageSchema.exactOptional(),
   })
   .strict();
 
@@ -379,7 +379,7 @@ export const RunFinishedJournalEventSchema = z
     runId: z.string(),
     at: z.iso.datetime(),
     stoppedEarly: z.boolean(),
-    earlyStopReason: RunEarlyStopReasonSchema.optional(),
+    earlyStopReason: RunEarlyStopReasonSchema.exactOptional(),
   })
   .strict()
   // Honest-stop coupling (frozen), mirroring RunReportSchema:

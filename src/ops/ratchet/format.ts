@@ -84,7 +84,7 @@ const BaselineFileSchema: z.ZodType<BaselineFile> = z
     metric: z.string(),
     direction: z.enum(['lower-is-better', 'higher-is-better']),
     value: z.number().finite(),
-    unit: z.string().optional(),
+    unit: z.string().exactOptional(),
     capturedAt: z.string().refine(isIso8601Instant, {
       message: 'capturedAt must be a strict ISO-8601 instant (e.g. 2026-09-15T12:00:00Z)',
     }),

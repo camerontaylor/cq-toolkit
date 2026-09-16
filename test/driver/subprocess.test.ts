@@ -454,6 +454,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const second = new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'resume-echo' }, calls2),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(
         invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
       );
@@ -607,6 +608,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           [],
         ),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(invocation({ prompt: 'echo run', sessionRef: run1.sessionId }));
       expect(run2.stopReason).toBe('complete');
       expect(run2.denials).toEqual([]); // the file is really there

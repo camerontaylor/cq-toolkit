@@ -219,7 +219,8 @@ export async function runPlanCommand(
 
   // Registry view over the resolved ops root: the explicit --ops-root flag
   // (input.opsRoot) wins over the runCli-level DI override (opts.opsRoot).
-  const entries = await list({ opsRoot: input.opsRoot ?? opts?.opsRoot });
+  const opsRoot = input.opsRoot ?? opts?.opsRoot;
+  const entries = await list(opsRoot === undefined ? {} : { opsRoot });
   const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
   // Variance adapter (kernel runner.ts OpRegistryView note): the view returns
   // OpRegistryEntry<never, never> — the bottom instantiation — while the

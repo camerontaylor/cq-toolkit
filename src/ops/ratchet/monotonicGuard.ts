@@ -267,7 +267,7 @@ function scanSide(lines: string[], re: RegExp): SideScan {
       last = m[1];
     }
   }
-  return { count, last };
+  return { count, ...(last === undefined ? {} : { last }) };
 }
 
 /**
@@ -378,13 +378,13 @@ function judgeModified(
     return [
       {
         path,
-        target,
-        metric,
-        oldValue,
-        newValue,
+        ...(target === undefined ? {} : { target }),
+        ...(metric === undefined ? {} : { metric }),
+        ...(oldValue === undefined ? {} : { oldValue }),
+        ...(newValue === undefined ? {} : { newValue }),
         why: 'direction changed',
-        oldDirection: oldDir,
-        newDirection: newDir,
+        ...(oldDir === undefined ? {} : { oldDirection: oldDir }),
+        ...(newDir === undefined ? {} : { newDirection: newDir }),
       },
     ];
   }
@@ -413,13 +413,13 @@ function judgeModified(
     return [
       {
         path,
-        target,
-        metric,
-        oldValue,
-        newValue,
+        ...(target === undefined ? {} : { target }),
+        ...(metric === undefined ? {} : { metric }),
+        ...(oldValue === undefined ? {} : { oldValue }),
+        ...(newValue === undefined ? {} : { newValue }),
         why: 'unit changed',
-        oldUnit,
-        newUnit,
+        ...(oldUnit === undefined ? {} : { oldUnit }),
+        ...(newUnit === undefined ? {} : { newUnit }),
       },
     ];
   }
@@ -442,19 +442,26 @@ function judgeModified(
       return [unparsable()];
     }
     if (loosens(oldValue, newValue, direction)) {
-      violations.push({ path, target, metric, oldValue, newValue, why: 'loosened' });
+      violations.push({
+        path,
+        ...(target === undefined ? {} : { target }),
+        ...(metric === undefined ? {} : { metric }),
+        oldValue,
+        newValue,
+        why: 'loosened',
+      });
     }
   }
   if (flip) {
     violations.push({
       path,
-      target,
-      metric,
-      oldValue,
-      newValue,
+      ...(target === undefined ? {} : { target }),
+      ...(metric === undefined ? {} : { metric }),
+      ...(oldValue === undefined ? {} : { oldValue }),
+      ...(newValue === undefined ? {} : { newValue }),
       why: 'direction changed',
-      oldDirection: oldDir,
-      newDirection: newDir,
+      ...(oldDir === undefined ? {} : { oldDirection: oldDir }),
+      ...(newDir === undefined ? {} : { newDirection: newDir }),
     });
   }
   return violations;

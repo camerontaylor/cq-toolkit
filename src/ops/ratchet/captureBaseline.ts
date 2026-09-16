@@ -267,7 +267,7 @@ export function createCaptureBaseline(
         metric: input.metric,
         direction: direction,
         value: value,
-        unit: unit,
+        ...(unit === undefined ? {} : { unit }),
         capturedAt: input.capturedAt ?? new Date().toISOString(),
       });
       parseBaseline(bytes);

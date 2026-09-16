@@ -145,7 +145,7 @@ function modelFor(
       const abortError = (): Error =>
         Object.assign(new Error('run aborted by the governed signal'), { name: 'AbortError' });
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: async (options) => {
           const signal = options.abortSignal;
           if (signal?.aborted) throw abortError();
@@ -158,26 +158,28 @@ function modelFor(
     case 'fail':
       // A plain non-abort failure: the driver must return stopReason 'error'.
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: async () => {
           throw new Error('scripted model failure');
         },
       });
     case 'tool-then-reply':
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: [toolCallResult(directive.tool, directive.input), textResult(directive.reply)],
       });
     default:
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: textResult(directive?.text ?? 'ok'),
       });
   }
 }
 
 /** Conformance harness config: the conformance write permitted via an anchored re: pattern (token patterns deny redirects by design); workspaces inside scratchDir. */
-function conformanceHarnessConfig(scratchDir: string): AiSdkDriverOptions['harnessConfig'] {
+function conformanceHarnessConfig(
+  scratchDir: string,
+): NonNullable<AiSdkDriverOptions['harnessConfig']> {
   return {
     ...defaultHarnessConfig,
     workspaceRoot: join(scratchDir, 'workspaces'),
