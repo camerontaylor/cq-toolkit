@@ -59,14 +59,17 @@
 //     tool) — the same canonical string this module clusters by. Record that
 //     string through the ledger record op and the suppression matches;
 //     anything else recorded simply never matches — no guessing, no fuzzy
-//     matching. The view's needsHuman ⊆ knownNoise invariant is ENFORCED at
-//     this boundary, not assumed from the ledger lane: a needsHuman
-//     signature absent from knownNoise throws (the op maps it to `failed`)
-//     — a hand-built view must not silently cluster escalated noise as
-//     signal. The canonical signature is BOUNDED to the ledger's
-//     SIGNATURE_MAX_CHARS by deterministic template truncation (a
-//     prefix-collision coarseness, the same doctrine as the fingerprint
-//     buckets), so the record seam stays usable for verbose diagnostics.
+//     matching. Two view invariants are ENFORCED at this boundary, not
+//     assumed from the ledger lane: knownNoise must be GROUNDED in entries
+//     (every known-noise signature has a recorded entry — a stale or
+//     hand-built view cannot suppress without evidence of recurrence), and
+//     needsHuman ⊆ knownNoise (an escalated signature its view does not
+//     suppress must not silently cluster as signal). Either violated view
+//     throws (the op maps it to `failed`). The canonical signature is
+//     BOUNDED to the ledger's SIGNATURE_MAX_CHARS by deterministic
+//     template truncation (a prefix-collision coarseness, the same
+//     doctrine as the fingerprint buckets), so the record seam stays
+//     usable for verbose diagnostics.
 //   - All plain JSON-serializable data; the input is a FailureSet (one tool
 //     — the family's unit, consistent with collectFailures' single-tool
 //     policy; the signature needs the tool and a bare failure list has
@@ -142,15 +145,16 @@ export function clusterSignature(failure: CheckFailure, tool: string): string {
   // of exactly the overage can still overflow; the loop terminates because
   // every removed character contributes at least one code unit.
   // Honest residual — unreachable through the op: the analyze registry
-  // bounds tool and ruleId to 40 RAW characters; worst-case JSON escape
-  // inflation is 6 units per character (\uXXXX for a lone surrogate), so
-  // the fixed overhead is at most 6×(40+40) = 480 units plus ~10 of tuple
-  // punctuation — strictly under SIGNATURE_MAX_CHARS — and this loop
-  // provably converges under the bound for EVERY schema-valid op input.
-  // Over-bound signatures are only possible for DIRECT LIBRARY CALLS that
-  // bypass the registry bound: such a signature is returned
-  // deterministically, the ledger record boundary rejects it, and the fail
-  // direction is safe — no suppression, never wrong suppression.
+  // bounds tool and ruleId to 120 ENCODED JSON units (escape-proof — the
+  // encoded form is exactly what raw caps cannot see), so the fixed
+  // overhead is at most 120 + 120 encoded units plus ~10 of tuple
+  // punctuation and ~3 for the marker — strictly under SIGNATURE_MAX_CHARS
+  // — and this loop provably converges under the bound for EVERY
+  // schema-valid op input. Over-bound signatures are only possible for
+  // DIRECT LIBRARY CALLS that bypass the registry bound: such a signature
+  // is returned deterministically, the ledger record boundary rejects it,
+  // and the fail direction is safe — no suppression, never wrong
+  // suppression.
   let budget =
     SIGNATURE_MAX_CHARS -
     JSON.stringify([tool, failure.ruleId, '']).length -
@@ -206,9 +210,10 @@ export interface ClusterErrorsInput {
   /** The failure set to cluster (one tool). */
   set: FailureSet;
   /**
-   * The dispatch-facing ledger view: `knownNoise` is the suppression list;
-   * its needsHuman ⊆ knownNoise invariant is ENFORCED here (a violating
-   * view is a policy throw). Omit for no suppression.
+   * The dispatch-facing ledger view: `knownNoise` is the suppression list.
+   * Both view invariants are ENFORCED here (a violating view is a policy
+   * throw): knownNoise must be grounded in `entries`, and needsHuman ⊆
+   * knownNoise. Omit for no suppression.
    */
   ledger?: LedgerView;
 }
@@ -216,16 +221,31 @@ export interface ClusterErrorsInput {
 /**
  * The `analyze.clusterErrors` clustering: group one FailureSet's failures by
  * canonical signature, exclude ledger noise, order everything
- * deterministically. An empty set yields an empty report; the ONE policy
- * throw is a ledger view violating needsHuman ⊆ knownNoise.
+ * deterministically. An empty set yields an empty report; the policy throws
+ * are the ledger-view invariant violations (knownNoise ungrounded in
+ * entries; needsHuman not suppressed by knownNoise).
  */
 export function clusterErrors(set: FailureSet, ledger?: LedgerView): ClusterErrorsReport {
-  // The subset invariant is ENFORCED at this boundary, not assumed from the
-  // ledger lane: a hand-built view that escalates a signature it does not
-  // suppress would silently cluster ESCALATED noise as signal — the exact
-  // re-fixing the ledger exists to prevent. Same policy-throw pattern as
-  // collectFailures' tool policy; the op maps it to `failed`.
+  // BOTH view invariants are ENFORCED at this boundary, not assumed from
+  // the ledger lane. Same policy-throw pattern as collectFailures' tool
+  // policy; the op maps them to `failed`.
   if (ledger !== undefined) {
+    // Grounding: knownNoise must be backed by RECORDED entries — a stale
+    // or hand-built view that suppresses a signature with no entry would
+    // skip re-fixing without any evidence the signature ever recurred
+    // (the real ledger derives knownNoise FROM entries, so every
+    // ledger-built view satisfies this trivially).
+    const entrySignatures = new Set(ledger.entries.map((entry) => entry.signature));
+    for (const noise of ledger.knownNoise) {
+      if (!entrySignatures.has(noise)) {
+        throw new RangeError(
+          `clusterErrors: invalid ledger view — knownNoise signature '${noise}' has no ledger entry (knownNoise must be grounded in recorded recurrence; the ledger derives it from entries)`,
+        );
+      }
+    }
+    // Subset: a hand-built view that escalates a signature it does not
+    // suppress would silently cluster ESCALATED noise as signal — the
+    // exact re-fixing the ledger exists to prevent.
     const known = new Set(ledger.knownNoise);
     for (const escalated of ledger.needsHuman) {
       if (!known.has(escalated)) {
@@ -284,11 +304,11 @@ export function clusterErrors(set: FailureSet, ledger?: LedgerView): ClusterErro
 }
 
 /**
- * The `analyze.clusterErrors` op: `ok` with the report, or `failed` when
- * the one policy throw fires (a ledger view violating needsHuman ⊆
- * knownNoise — the op ran and definitively could not honor the suppression
- * contract), the same policy-to-`failed` mapping as
- * {@link collectFailuresOp}.
+ * The `analyze.clusterErrors` op: `ok` with the report, or `failed` when a
+ * ledger-view policy throw fires (knownNoise ungrounded in entries, or
+ * needsHuman not suppressed by knownNoise — the op ran and definitively
+ * could not honor the suppression contract), the same
+ * policy-to-`failed` mapping as {@link collectFailuresOp}.
  */
 export const clusterErrorsOp: Op<ClusterErrorsInput, ClusterErrorsReport> = async (input) => {
   try {

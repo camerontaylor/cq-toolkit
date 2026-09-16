@@ -37,13 +37,10 @@ function setOf(failures: CheckFailure[], tool = 'eslint', exitCode: number | nul
   return { tool, failures, exitCode };
 }
 
-/** An in-memory ledger view whose knownNoise carries the given signature strings. */
+/** An in-memory ledger view: every knownNoise signature is GROUNDED in a recorded entry (as the real ledger derives it). */
 function ledgerOf(knownNoise: string[]): LedgerView {
   return {
-    entries:
-      knownNoise.length > 0
-        ? [{ signature: knownNoise[0] as string, count: 2, component: 'src/ops/analyze' }]
-        : [],
+    entries: knownNoise.map((signature) => ({ signature, count: 2, component: 'src/ops/analyze' })),
     knownNoise,
     needsHuman: [],
   };
@@ -222,13 +219,14 @@ describe('clusterSignature (the ledger-matching form)', () => {
   });
 
   test('escape-inflated overhead: the LIBRARY-only over-bound residual, deterministic and terminating', () => {
-    // Direct clusterSignature calls bypass the registry's 40-raw bounds, so
-    // 200 double-quote characters in tool and ruleId are constructible
-    // here: their JSON escaping inflates the fixed overhead past
-    // SIGNATURE_MAX_CHARS, the budget bottoms out, and the loop returns the
-    // over-bound signature deterministically. Through the op this input
-    // cannot pass the registry; the ledger record boundary would reject the
-    // over-bound result — no suppression, never wrong suppression.
+    // Direct clusterSignature calls bypass the registry's ENCODED-size
+    // bounds, so 200 double-quote characters in tool and ruleId are
+    // constructible here: each encodes to 402 JSON units (> 120), the
+    // fixed overhead inflates past SIGNATURE_MAX_CHARS, the budget bottoms
+    // out, and the loop returns the over-bound signature deterministically.
+    // Through the op this input cannot pass the registry; the ledger record
+    // boundary would reject the over-bound result — no suppression, never
+    // wrong suppression.
     const quoted = '"'.repeat(200);
     const failure = failureOf({ ruleId: quoted, message: 'x'.repeat(5000) });
     const signature = clusterSignature(failure, quoted);
@@ -491,6 +489,15 @@ describe('clusterErrors × ledger (known noise never clusters as signal)', () =>
     expect(report.clusters).toEqual([]);
   });
 
+  test('knownNoise with NO grounding entry throws (stale or hand-built view)', () => {
+    const signature = clusterSignature(noisy, 'eslint');
+    const stale: LedgerView = { entries: [], knownNoise: [signature], needsHuman: [] };
+    expect(() => clusterErrors(setOf([noisy]), stale)).toThrow(/knownNoise.*entry/);
+    // A view whose entries DO contain the signature still suppresses.
+    const grounded = clusterErrors(setOf([noisy]), ledgerOf([signature]));
+    expect(grounded.noise).toEqual([noisy]);
+  });
+
   test('a hand-built view violating needsHuman ⊆ knownNoise throws (enforced, not assumed)', () => {
     const signature = clusterSignature(noisy, 'eslint');
     const badView: LedgerView = {
@@ -636,6 +643,19 @@ describe('clusterErrorsOp', () => {
     expect(result.status).toBe('failed');
     if (result.status !== 'failed') return;
     expect(result.error).toContain('needsHuman');
+    expect(result.error).toContain(signature);
+  });
+
+  test('an ungrounded knownNoise view maps the policy throw to failed', async () => {
+    const neverRecorded = failureOf({ message: 'never recorded anywhere' });
+    const signature = clusterSignature(neverRecorded, 'eslint');
+    const result = await clusterErrorsOp({
+      set: setOf([neverRecorded]),
+      ledger: { entries: [], knownNoise: [signature], needsHuman: [] },
+    });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    expect(result.error).toContain('knownNoise');
     expect(result.error).toContain(signature);
   });
 });

@@ -28,21 +28,37 @@ import type { ClusterErrorsInput } from './clusterErrors.js';
 import type { CollectFailuresInput } from './collectFailures.js';
 
 /**
- * Raw component cap for the analyze boundary. The arithmetic it pins: the
- * worst-case JSON escape inflation is 6 units per character (\uXXXX for a
- * lone surrogate), so with tool and ruleId each at most 40 RAW characters
- * the canonical signature's fixed overhead is at most 6×(40+40) = 480 units
- * plus ~10 of tuple punctuation — strictly under SIGNATURE_MAX_CHARS — and
- * clusterSignature's truncation loop provably converges for EVERY
- * schema-valid op input. 40 characters is generous for real tool names and
- * rule ids. Exported so the boundary tests pin the SAME number.
+ * ENCODED-size cap for the identifiers that flow into the cluster
+ * signature. The arithmetic it pins: JSON.stringify escapes to at most 6
+ * units per raw character (\uXXXX for a lone surrogate), so bounding the
+ * ENCODED size is the escape-proof form of the serialized-size bound — a
+ * raw-length cap cannot see quote/backslash inflation (Codex's own
+ * suggestion). Worst-case fixed overhead of a canonical signature = 120
+ * (tool) + 120 (ruleId) encoded units + ~10 of tuple punctuation + ~3 for
+ * the truncation marker < SIGNATURE_MAX_CHARS, so clusterSignature's
+ * truncation loop provably converges for EVERY schema-valid op input.
+ * Real rule ids pass untouched: the repo's longest enabled lint rule id
+ * (46 raw chars) encodes to ~48 units. Exported so the boundary tests pin
+ * the SAME number.
  */
-export const ANALYZE_COMPONENT_RAW_MAX = 40;
+export const ANALYZE_IDENTIFIER_ENCODED_MAX = 120;
+
+/** Loose raw cap ahead of the encoded check: cheap rejection first; the encoded check does the real work. */
+const ANALYZE_IDENTIFIER_RAW_LOOSE_MAX = 500;
+
+/** tool/ruleId string schema: loosely raw-capped, then bounded on the JSON-ENCODED size. */
+const EncodedBoundedIdentifier = z
+  .string()
+  .max(ANALYZE_IDENTIFIER_RAW_LOOSE_MAX)
+  .refine(
+    (value) => JSON.stringify(value).length <= ANALYZE_IDENTIFIER_ENCODED_MAX,
+    `identifier JSON encoding exceeds ${ANALYZE_IDENTIFIER_ENCODED_MAX} units (the analyze signature bound)`,
+  );
 
 /**
  * The gates' shared CheckFailureSchema shape with ONE local bound added:
- * ruleId is capped at the analyze raw component bound (it is part of the
- * cluster signature's fixed overhead). Shared by BOTH analyze ops so a
+ * ruleId is bounded on its JSON-ENCODED size (it is part of the cluster
+ * signature's fixed overhead). Shared by BOTH analyze ops so a
  * collect→cluster chain can never pass a ruleId the cluster boundary would
  * reject; the gates' schema itself stays untouched, and the
  * z.ZodType<CheckFailure> annotation pins the mirror to the frozen type at
@@ -53,7 +69,7 @@ const AnalyzeCheckFailureSchema: z.ZodType<CheckFailure> = z
     file: z.string().nullable(),
     line: z.number().nullable(),
     column: z.number().nullable(),
-    ruleId: z.string().max(ANALYZE_COMPONENT_RAW_MAX).nullable(),
+    ruleId: EncodedBoundedIdentifier.nullable(),
     message: z.string(),
     severity: z.enum(['error', 'warning']),
   })
@@ -61,16 +77,16 @@ const AnalyzeCheckFailureSchema: z.ZodType<CheckFailure> = z
 
 /**
  * LOCAL tightening of the reused gates FailureSet shape for the analyze
- * ops: `tool` is bounded to the analyze raw component bound. With tool and
- * ruleId both at that bound, the signature's fixed JSON overhead provably
- * fits SIGNATURE_MAX_CHARS (see {@link ANALYZE_COMPONENT_RAW_MAX}), so the
+ * ops: `tool` is bounded on its JSON-ENCODED size. With tool and ruleId
+ * both at that bound, the signature's fixed JSON overhead provably fits
+ * SIGNATURE_MAX_CHARS (see {@link ANALYZE_IDENTIFIER_ENCODED_MAX}), so the
  * over-bound residual is LIBRARY-CALL-ONLY — direct clusterSignature calls
  * that bypass this boundary. The gates' shared schema itself stays
  * untouched.
  */
 const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
-    tool: z.string().max(ANALYZE_COMPONENT_RAW_MAX),
+    tool: EncodedBoundedIdentifier,
     failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
   })
@@ -78,12 +94,12 @@ const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
 
 /**
  * The clusterErrors variant: the same tightening (tool and each failure's
- * ruleId bounded — ruleId is part of the cluster signature's fixed
- * overhead), pinned to the frozen FailureSet type.
+ * ruleId bounded on their encoded size — ruleId is part of the cluster
+ * signature's fixed overhead), pinned to the frozen FailureSet type.
  */
 const ClusterFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
-    tool: z.string().max(ANALYZE_COMPONENT_RAW_MAX),
+    tool: EncodedBoundedIdentifier,
     failures: z.array(AnalyzeCheckFailureSchema),
     exitCode: z.number().nullable(),
   })
