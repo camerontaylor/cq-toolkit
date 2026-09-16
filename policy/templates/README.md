@@ -15,6 +15,8 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | `sync-merge-queue.yml` | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate                 |
 | `required-check.md`    | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                         |
 | `affected-tests.md`    | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay                                                                                         |
+| `ratchet.yml`          | required type and coverage baseline checks on pushes and pull requests                                                                                                             |
+| `ratchet-propose.yml`  | post-merge baseline tightening proposals using the automation token                                                                                                                |
 | `README.md`            | this guide                                                                                                                                                                         |
 
 ## Placeholder tokens
@@ -77,6 +79,7 @@ engine-based runners `scripts/ratchet-typecheck.mjs` and
 (one schemaVersion-1 file per (target, metric), written by
 `createCaptureBaseline`). Concretely, in this repo: `.github/workflows/ci.yml`
 is `required-check.md` instantiated, the three queue workflows are the three
+`.yml` templates instantiated, the two ratchet workflows are their matching
 `.yml` templates instantiated, and `denylist.yml` (which predates the
 templates) carries the required-check trigger shape with the denylist job
 body and a provenance comment pointing back at `required-check.md`. If you

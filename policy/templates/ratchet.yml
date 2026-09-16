@@ -1,4 +1,3 @@
-# instantiated from policy/templates/ratchet.yml — edit the template, not this file
 # ratchet — lane H slice 2 (goal H4): the REQUIRED ratchet check workflow.
 #
 # Runs the check-mode ratchet on EVERY pull request (queue PRs AND the

@@ -347,10 +347,10 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
  * Progress needs ANY ONE signal; no signal → progress=false and the exact
  * literal summary "NO PROGRESS" (the anti-hallucination contract: an
  * explicit, greppable refusal — never a guessed "done"). The reply signal
- * is AUTHOR-BLIND id-novelty (any new comment is evidence the PR moved;
- * see module doc); responderLogin, when known, is recorded in the detail
- * but never filters. Same inputs → deep-equal output; inputs are read,
- * never mutated.
+ * counts new comments by the responder when responderLogin is known;
+ * comments with unknown authors do not qualify. With no known responder,
+ * id-novelty is author-blind. Same inputs → deep-equal output; inputs are
+ * read, never mutated.
  */
 export function verifyPrOutcome(
   before: PrSnapshot,

@@ -10,7 +10,7 @@ Make incorrect assumptions cheap to detect and style cheap to normalize. Use a s
 
 | Concern                            | Decision                                                                                         | Why                                                              |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
-| Type checking (gate)               | Oxlint integrated typeCheck (tsgolint / typescript-go), pinned                                   | One static invocation; reuse the Go type-analysis path           |
+| Type checking (gate)               | Direct pinned TS7 compiler ratchet plus typed Oxlint (preflight fallback)                        | One authoritative static wrapper; compiler coverage preserved    |
 | JS/declaration emit (build)        | Stable TypeScript 7 from the released `typescript` package, not a native-preview nightly, pinned | Retain declaration and build validation                          |
 | Lint                               | Oxlint plus the matching oxlint-tsgolint, pinned                                                 | Fast native syntactic and typed rules                            |
 | Architecture rules                 | Oxlint JavaScript plugin with conformance tests                                                  | Keep the two custom policies; drop the ESLint toolchain entirely |

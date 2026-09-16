@@ -205,6 +205,10 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXFMT_EXIT: '8' }).status,
     ).toBe(1);
     expect(readFileSync(log, 'utf8')).not.toContain('static');
+    writeFileSync(join(root, 'scripts/ratchet-typecheck.mjs'), 'process.exit(0);');
+    expect(
+      command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXLINT_EXIT: '1' }).status,
+    ).toBe(1);
     rmSync(join(root, 'node_modules/oxlint/bin/oxlint'));
     expect(command(root, 'lint-fast', ['src/owned space.ts']).status).not.toBe(0);
   });

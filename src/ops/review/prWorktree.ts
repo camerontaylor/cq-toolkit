@@ -120,10 +120,8 @@ export interface WorktreeRegistry {
    * sections (a resolution's registry-consult → scan → create) MUST hold
    * this for the whole section — serialized mutations alone cannot stop
    * two jobs from interleaving the steps BETWEEN their writes (both scan,
-   * both create, one wedges). save/update are themselves locked, and
-   * withLock is REENTRANT for the owning call flow (the held flag is
-   * instance-local), so a critical section calls the locked mutators
-   * freely.
+   * both create, one wedges). save/update are unlocked primitives to call
+   * inside this section. withLock is not reentrant; do not nest it.
    */
   withLock<T>(fn: () => Promise<T>): Promise<T>;
 }

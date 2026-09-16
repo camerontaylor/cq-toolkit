@@ -339,6 +339,11 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
               // op must report `failed` (naming the release failure)
               // rather than report ok while the lock is compromised.
               release()
+                .catch((releaseErr: unknown) => {
+                  throw new Error(`lock release failed — ${messageOf(releaseErr)}`, {
+                    cause: releaseErr,
+                  });
+                })
                 .then(() => {
                   if (compromised !== undefined) {
                     throw new Error(`lock compromised — ${messageOf(compromised)}`, {
@@ -346,11 +351,6 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
                     });
                   }
                   return value;
-                })
-                .catch((releaseErr: unknown) => {
-                  throw new Error(`lock release failed — ${messageOf(releaseErr)}`, {
-                    cause: releaseErr,
-                  });
                 }),
             (err) =>
               // fn already failed: its fault is primary; release is best-effort.

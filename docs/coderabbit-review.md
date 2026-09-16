@@ -124,7 +124,7 @@ never block indefinitely, never treat a long silence as completion.
 
 Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
-`npm run check:static`, `npm run format:check`, `npm run test`, and
+`npm run check:static`, `npm run format:check`, `npm run test`, `npm run knip`, and
 the three whitespace/conflict-marker checks below. Use the immutable `BASE`
 from §3 and stage your own new files before these checks so they are covered:
 
@@ -193,9 +193,10 @@ table: <https://docs.coderabbit.ai/management/plans#rate-limits>.
 The third gate run (§5, after cycle-2 addressing) is the final one; record
 its actual exits in the PR body:
 
-- `node scripts/ratchet-typecheck.mjs`
-- `npm run lint`
+- `npm run check:static`
+- `npm run format:check`
 - `npm run test`
+- `npm run knip`
 - `git diff --check "$BASE" HEAD` (committed PR changes)
 - `git diff --check --cached` (staged changes)
 - `git diff --check` (unstaged tracked changes)

@@ -1266,17 +1266,9 @@ function governOp(
         {
           clock: governor.clock,
           onRung: (marker) => {
-            governor.record({
-              kind: 'ladder-rung',
-              op: marker.op,
-              jobKey: marker.jobKey,
-              rung: marker.rung,
-              delayMs: marker.delayMs,
-              sinceStartMs: marker.sinceStartMs,
-              delivered: marker.delivered,
-              ...(marker.error !== undefined ? { error: marker.error } : {}),
-              atMs: marker.atMs,
-            });
+            // Keep the marker identity: async delivery failures arrive after
+            // onRung and must remain visible in the recorded event.
+            governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
           },
           onUsage: (usage) => {
             reportedUsage = true;

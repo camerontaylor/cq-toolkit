@@ -475,6 +475,52 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('governRegistry — the ladder through runPlan (ws-a item 1)', () => {
+  test('recorded rung events retain late async cancellation errors', async () => {
+    const clock = virtualClock();
+    let rejectHard: (reason: Error) => void = () => {};
+    let rejectKill: (reason: Error) => void = () => {};
+    const hard = new Promise<void>((_resolve, reject) => {
+      rejectHard = reject;
+    });
+    const kill = new Promise<void>((_resolve, reject) => {
+      rejectKill = reject;
+    });
+    const hangOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.setCancelPort({
+        hardCancel: () => hard,
+        kill: () => kill,
+      });
+      return new Promise<never>(() => {});
+    };
+    const governor = new BudgetGovernor(
+      governorConfig(
+        { concurrency: 1, stopOnError: false },
+        { perJobWallClockMs: 100 },
+        { abortGraceMs: 10, killGraceMs: 20 },
+      ),
+      clock,
+    );
+    await pumped(
+      runPlan(
+        independentPlan('async-errors', 1, 'hang'),
+        { concurrency: 1, stopOnError: false },
+        governRegistry(viewWith(entry('hang', hangOp)), governor),
+      ),
+      clock,
+    );
+    rejectHard(new Error('hard failure'));
+    rejectKill(new Error('kill failure'));
+    await tick();
+    const rungs = governor.events.filter(
+      (event): event is LadderRungEvent => event.kind === 'ladder-rung',
+    );
+    expect(rungs.map(({ rung, delivered, error }) => [rung, delivered, error])).toEqual([
+      ['signal', true, undefined],
+      ['timeout', true, 'async: hard failure'],
+      ['kill', true, 'async: kill failure'],
+    ]);
+  });
+
   test('a hanging op that ignores the signal is killed at the final rung; the run completes', async () => {
     const clock = virtualClock();
     const calls: string[] = [];
