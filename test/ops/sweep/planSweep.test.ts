@@ -386,6 +386,36 @@ describe('planSweep selection', () => {
     expect(report.orphans).toBeUndefined();
   });
 
+  test("a './'-prefixed manifest path is normalized and matches git's repo-relative paths", async () => {
+    const report = await okPlan(
+      makePlanner({
+        changedFiles: async () => ['packages/core/x.ts'],
+      }),
+      baseInput({
+        packages: [{ name: 'core', path: './packages/core' }],
+        selector: { mode: 'changed-vs-base', base: 'origin/main' },
+      }),
+    );
+    expect(report.units).toEqual([
+      { package: 'core', fixer: 'lint', files: ['packages/core/x.ts'] },
+    ]);
+    expect(report.orphans).toBeUndefined();
+  });
+
+  test("a trailing-slash or '..'-carrying manifest path is a failed result", async () => {
+    const trailing = await failedPlan(
+      makePlanner(),
+      baseInput({ packages: [{ name: 'core', path: 'packages/core/' }] }),
+    );
+    expect(trailing).toMatch(/packages\[0\] path/);
+    expect(trailing).toMatch(/normalized repo-root-relative posix path/);
+    const escaping = await failedPlan(
+      makePlanner(),
+      baseInput({ packages: [{ name: 'esc', path: '../esc' }] }),
+    );
+    expect(escaping).toMatch(/packages\[0\] path/);
+  });
+
   test('explicit selects exactly the named manifest packages (deduplicated)', async () => {
     const report = await okPlan(
       makePlanner(),

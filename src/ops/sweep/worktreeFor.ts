@@ -64,13 +64,15 @@ export interface WorktreeForInput {
    * REUSED tree — I7: the baseline is never cached on reuse; the caller
    * re-probes. Each entry must be a NORMALIZED non-empty RELATIVE path
    * ('' / '.' / absolute / any '..' segment refused), and its resolution
-   * against the worktree path must land STRICTLY INSIDE the tree. ANY
-   * refused entry FAILS the reuse — a tree with stale, still-readable
-   * baseline cache is never certified reusable (I7); the error names every
-   * refused entry and the manual-cleanup path. Only ignored/untracked tool
-   * state should live here: a TRACKED file under one of these paths would
-   * make the tree dirty long before eviction, and dirty reuse is refused
-   * (UC row 20).
+   * against the worktree path must land STRICTLY INSIDE the tree. A
+   * BACKSLASH is refused outright — portable cache paths use posix
+   * separators; a backslash is never reinterpreted as a separator or as a
+   * literal. ANY refused entry FAILS the reuse — a tree with stale,
+   * still-readable baseline cache is never certified reusable (I7); the
+   * error names every refused entry and the manual-cleanup path. Only
+   * ignored/untracked tool state should live here: a TRACKED file under one
+   * of these paths would make the tree dirty long before eviction, and
+   * dirty reuse is refused (UC row 20).
    */
   baselineCacheDirs?: string[];
 }
@@ -285,10 +287,12 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
       // certified reusable; the error names every refused entry and the
       // manual-cleanup path. PASS TWO evicts the clearable entries.
       const refusedBaselineCaches: string[] = [];
+      const refusals: string[] = [];
       for (const rel of input.baselineCacheDirs ?? []) {
         const containmentFault = baselineCacheContainmentFault(rel, candidate.real);
         if (containmentFault !== null) {
           refusedBaselineCaches.push(rel);
+          refusals.push(`'${rel}' (${containmentFault})`);
           continue;
         }
         let symlinkFault: string | null;
@@ -302,12 +306,13 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
         }
         if (symlinkFault !== null) {
           refusedBaselineCaches.push(rel);
+          refusals.push(`'${rel}' (${symlinkFault})`);
         }
       }
       if (refusedBaselineCaches.length > 0) {
         return {
           status: 'failed',
-          error: `sweep: worktree '${candidate.real}' keeps refused baseline cache entries (${refusedBaselineCaches.join(', ')}) — a reused tree with stale baseline state must never be certified reusable (I7); clean them up manually (the cleanup op or explicit removal) and re-invoke`,
+          error: `sweep: worktree '${candidate.real}' keeps refused baseline cache entries: ${refusals.join('; ')} — a reused tree with stale baseline state must never be certified reusable (I7); clean them up manually (the cleanup op or explicit removal) and re-invoke`,
         };
       }
       const clearedBaselineCaches: string[] = [];
@@ -473,6 +478,14 @@ function baselineCacheContainmentFault(entry: string, worktreePath: string): str
   }
   if (entry === '.') {
     return "'.' is not a cache path";
+  }
+  // A backslash is REFUSED, not converted: on posix it is a legal filename
+  // character (converting would corrupt a literal), and on win32 it is a
+  // separator (interpreting it as a literal would hide a path component
+  // from the intermediate-symlink guard). Portable cache paths use posix
+  // separators, full stop.
+  if (entry.includes('\\')) {
+    return 'portable cache paths use posix separators; a backslash cannot be safely interpreted as a separator on posix or as a literal on win32';
   }
   if (isAbsolute(entry)) {
     return 'absolute paths are refused';

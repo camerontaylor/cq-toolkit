@@ -44,7 +44,12 @@ export const SWEEP_UNIT_OP = 'sweep.unit';
 /** One manifest entry of the workspace — config-grade input, not discovery output. */
 export interface PlanSweepPackage {
   name: string;
-  /** Repo-root-relative directory prefix (posix separators, as git reports paths). */
+  /**
+   * Repo-root-relative directory prefix (posix separators, as git reports
+   * paths); '.' names the repo root. A single leading './' is accepted and
+   * normalized; other non-normalized forms ('..' segments, trailing '/',
+   * '././') are refused.
+   */
   path: string;
 }
 
@@ -196,14 +201,23 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
 
-    const byName = new Map(input.packages.map((p): [string, PlanSweepPackage] => [p.name, p]));
+    // Manifest paths are normalized once ('./x' → 'x', '.' = the repo root)
+    // so changed-vs-base comparisons meet git's repo-root-relative paths on
+    // equal terms; validation has already refused every other non-normalized
+    // form.
+    const manifest: PlanSweepPackage[] = input.packages.map((pkg) => ({
+      ...pkg,
+      path: normalizedManifestPath(pkg.path) as string,
+    }));
+
+    const byName = new Map(manifest.map((p): [string, PlanSweepPackage] => [p.name, p]));
     const fixers = [...new Set(input.fixers)];
     let selected: Array<{ pkg: PlanSweepPackage; files: string[] }>;
     let orphans: string[] = [];
 
     switch (input.selector.mode) {
       case 'workspace-all': {
-        selected = input.packages.map((pkg) => ({
+        selected = manifest.map((pkg) => ({
           pkg,
           files: fileSetOf(pkg.name, input.packageFiles),
         }));
@@ -221,7 +235,7 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
         }
         const mapped = new Map<string, string[]>();
         for (const file of changed) {
-          const pkg = longestPrefixPackage(file, input.packages);
+          const pkg = longestPrefixPackage(file, manifest);
           if (pkg === undefined) {
             orphans.push(file);
             continue;
@@ -230,7 +244,7 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
           if (bucket === undefined) mapped.set(pkg.name, [file]);
           else bucket.push(file);
         }
-        selected = input.packages.flatMap((pkg) => {
+        selected = manifest.flatMap((pkg) => {
           const files = mapped.get(pkg.name);
           return files === undefined ? [] : [{ pkg, files }];
         });
@@ -395,6 +409,9 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     ) {
       return `sweep: packages[${String(index)}] must have a non-empty name and path`;
     }
+    if (normalizedManifestPath(pkg.path) === null) {
+      return `sweep: packages[${String(index)}] path '${pkg.path}' must be a normalized repo-root-relative posix path — an optional leading './' is normalized; '..' segments, empty segments, and trailing '/' are refused`;
+    }
     if (seen.includes(pkg.name)) {
       return `sweep: duplicate package name in the manifest: ${pkg.name}`;
     }
@@ -489,6 +506,28 @@ function inputFaultOf(input: PlanSweepInput): string | null {
 /** The known file-set for a package name; an absent entry is an empty file-set. */
 function fileSetOf(name: string, packageFiles?: Record<string, string[]>): string[] {
   return packageFiles?.[name] ?? [];
+}
+
+/**
+ * Manifest paths are REPO-ROOT-RELATIVE posix — matching how git reports
+ * changed-file paths. A single leading './' is semantically identical and
+ * is normalized honestly ('./packages/core' → 'packages/core'), and '.'
+ * names the repo root (the round-1 root-package rule); anything else
+ * non-normalized — '..' segments, empty segments, a trailing '/', '././' —
+ * returns null (the caller refuses).
+ */
+function normalizedManifestPath(path: string): string | null {
+  if (path === '.') return '.';
+  let candidate = path;
+  if (candidate.startsWith('./')) candidate = candidate.slice(2);
+  if (
+    candidate === '' ||
+    candidate.endsWith('/') ||
+    candidate.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    return null;
+  }
+  return candidate;
 }
 
 /**

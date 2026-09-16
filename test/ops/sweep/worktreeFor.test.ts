@@ -391,6 +391,24 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     expect(repo.calls.some((call) => call.startsWith('pathExists:'))).toBe(false);
   });
 
+  test('a backslash-carrying cache entry is refused — posix separators only, never reinterpreted (jEXRZ)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      baselineCacheDirs: ['link\\cache'],
+    });
+    // The backslash is refused AS A BACKSLASH: on posix it is a legal
+    // filename literal (converting would corrupt it) and on win32 a
+    // separator (interpreting it as a literal would hide the 'link'
+    // component from the intermediate-symlink guard).
+    expect(error).toMatch(/refused baseline cache entries/);
+    expect(error).toContain('link\\cache');
+    expect(error).toMatch(/posix separators/);
+    expect(repo.removed).toHaveLength(0);
+  });
+
   test('a mixed set (legit subdir + hostile entry) also fails — partial eviction cannot precede certification', async () => {
     const repo = fakeRepo();
     repo.worktrees = [{ path: PATH, branch: BRANCH }];
