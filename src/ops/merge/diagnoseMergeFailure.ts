@@ -8,7 +8,7 @@
 //   stale   → `state_drift`        the PR's head moved (or vanished)
 //                                  between plan and run; nothing merged;
 //                                  re-plan to recover.
-//   failed  → `merge_rejected`     the merge (or its fetch/push) was
+//   failed  → `merge_rejected`     the merge (or its fetch) was
 //                                  refused by the forge or the transport.
 //   blocked → `blocked_by_ancestor` not this PR's fault — a stack ancestor
 //                                  did not merge, so this rung was held.

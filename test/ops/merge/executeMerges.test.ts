@@ -1079,6 +1079,17 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['rev-parse'])).toThrow(/refused: unknown argv shape/);
   });
 
+  test('VB2F batch gate: trailing tokens on an otherwise-legal gh shape are refused — --admin/--squash/--delete-branch cannot ride the merge, --add-label cannot ride the retarget', () => {
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--admin'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--squash'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--delete-branch'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'edit', '7', '--base', 'main', '--add-label', 'x'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // The exact shapes still pass.
+    expect(safeArgs(['pr', 'merge', '7', '--merge'])).toEqual(['pr', 'merge', '7', '--merge']);
+  });
+
   test('round-3: push FLAGS are refused — the discarded-flag blind spot is closed', () => {
     // Each would otherwise be a legal explicit src:dst push — refused
     // BECAUSE of the force token riding the tail.
@@ -1328,7 +1339,7 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
 
 describe('diagnoseMergeFailure', () => {
   const mixed: ExecutionReport = {
-    merged: [1, 2],
+    merged: [1, 4],
     retargeted: [3],
     stale: [{ pr: 9, detail: 'head moved between plan and run (plan saw aa, live is bb)' }],
     failed: [{ pr: 2, error: 'gh pr merge 2 --merge failed (exit 1): protected branch' }],

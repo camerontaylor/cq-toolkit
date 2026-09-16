@@ -218,9 +218,13 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     case 'pr': {
       // The two gh shapes: the merge (I3's only method) and the retarget.
       // rest[0] is 'pr' itself — the gh runner's argv starts at the
-      // subcommand (the binary is the runner), so skip it.
+      // subcommand (the binary is the runner), so skip it. EXACT ARITY:
+      // trailing tokens are how --admin/--squash/--delete-branch would ride
+      // an otherwise-legal shape past the guard (VB2F batch gate).
+      if (rest.length !== 4 && rest.length !== 5) throw unknown();
       const [, verb, prNum, flag, base] = rest;
       if (
+        rest.length === 4 &&
         verb === 'merge' &&
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
