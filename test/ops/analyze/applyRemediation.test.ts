@@ -220,6 +220,23 @@ describe('applyRemediation acceptance: fail-closed sidecar contract', () => {
     }
   });
 
+  test('an EVIDENCE-FREE sidecar is an apply fault naming the uncovered cluster (M2: absence never disables staleness)', async () => {
+    // A hand-built or pure-core sidecar with evidence: [] must fail closed —
+    // with no coverage contract it would silently skip ALL staleness
+    // checking while targets derive from cluster.failures.
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: serializeAnalysisSidecar(renderAnalysisReport(fixtureReport()).sidecar),
+    });
+    const result = await makeOp(store)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('failed closed');
+      expect(result.error).toContain('evidence does not cover cluster');
+      expect(result.error).toContain(fixtureReport().clusters[0]?.id ?? '');
+    }
+  });
+
   test('a DELETED target is stale too (nothing to re-digest is still drift)', async () => {
     const store = memoryStore('/ws', {
       [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
@@ -255,6 +272,41 @@ describe('applyRemediation acceptance: fail-closed sidecar contract', () => {
     void _clusterId;
     const noCluster = await op(noClusterInput);
     expect(noCluster.status).toBe('needs-human');
+  });
+
+  test('stale is WHOLE-SIDECAR: a NON-remediated cluster’s target drift fails the apply (L5 cross-cluster pin)', async () => {
+    // Two single-member clusters on different files; only cluster A is
+    // requested, but cluster B's target drifted — the apply must refuse:
+    // trusting the un-drifted parts of a drifted snapshot is exactly how
+    // wrong edits slip past.
+    const first = failureOf({ file: 'src/a.ts', line: 5, column: 1, message: 'alpha one' });
+    const second = failureOf({ file: 'src/b.ts', line: 9, column: 3, message: 'beta two' });
+    const report = clusterErrors({
+      tool: 'eslint',
+      exitCode: 1,
+      failures: [first, second],
+    });
+    expect(report.clusters).toHaveLength(2);
+    const driftedFiles = { ...FIXTURE_FILES, 'src/b.ts': 'export const foo_bar = 99;\n' };
+    const store = memoryStore('/ws', {
+      ...driftedFiles,
+      [SIDECAR_PATH]: sidecarTextFor(report, FIXTURE_FILES),
+    });
+    const clusterA = report.clusters.find(
+      (cluster) => (cluster.failures[0] as CheckFailure).file === 'src/a.ts',
+    );
+    const result = await makeOp(
+      store,
+      codemodRunner(driftedFiles),
+    )({
+      ...baseInput(),
+      clusterId: (clusterA as NonNullable<typeof clusterA>).id,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('stale sidecar');
+      expect(result.error).toContain("'src/b.ts'");
+    }
   });
 
   test('the pinned order: staleness is checked BEFORE approval, and approval BEFORE any scan', async () => {

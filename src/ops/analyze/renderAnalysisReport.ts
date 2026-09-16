@@ -37,13 +37,25 @@
 //     only lands where the consumer's ast-grep rule still matches the
 //     CURRENT bytes) and by the collision check — the digest guards gross
 //     drift, never fine identity.
-//   - Strict sidecar parse: {@link parseAnalysisSidecar} accepts only a
-//     valid version-1 sidecar and re-derives the report fingerprint from
-//     the embedded report, so a hand-edited or truncated sidecar (wrong
-//     version, drifted report, evidence naming an unknown cluster) is a
-//     format error — never silently normalized. This mirrors the ledger
-//     store's parseLedger discipline: the deterministic format is
-//     load-bearing.
+//   - Strict sidecar parse with the COVERAGE CONTRACT: {@link
+//     parseAnalysisSidecar} accepts only a valid version-1 sidecar, re-derives
+//     the report fingerprint from the embedded report, and requires FULL
+//     evidence coverage — every report cluster must carry an evidence entry
+//     whose target set EQUALS its derived deduplicated-sorted member-file set
+//     (all-null-file members → an empty evidence entry is valid) — so a
+//     hand-edited, truncated, or partial sidecar (wrong version, drifted
+//     report, missing or mismatched evidence) is a format error, never a
+//     silent disabling of staleness checking. The deliberate consequence:
+//     the PURE CORE's meta-less output (renderAnalysisReport(report) →
+//     evidence: []) is NOT appliable as-is — it needs the op (which derives
+//     full coverage) or an explicit coverage validation before it can drive
+//     applyRemediation. Evidence CONTENT is trusted because it is anchored by
+//     this check (the target set is provably the report's, and the report is
+//     pinned by the fingerprint — evidence is deliberately NOT in the
+//     fingerprint); the analysis-time digests are the one trusted observation,
+//     and the codemod shape-match bounds the harm of a forged pair. This
+//     mirrors the ledger store's parseLedger discipline: the deterministic
+//     format is load-bearing.
 //   - The op performs I/O only through the injected
 //     {@link AnalyzeFileStore}; the pure core stays importable without it.
 //     Unlike the ledger family's separate pure format module, the sidecar
@@ -284,7 +296,49 @@ const AnalysisSidecarSchema: z.ZodType<AnalysisSidecar> = z
       return sidecar.evidence.every((cluster) => ids.has(cluster.clusterId));
     },
     { message: 'evidence names a cluster id absent from the report' },
-  );
+  )
+  // COVERAGE CONTRACT: absence of evidence is a FORMAT ERROR, never a silent
+  // disabling of staleness checking. Every report cluster must carry an
+  // evidence entry whose target set EQUALS the cluster's derived
+  // deduplicated, sorted member-file set (a cluster whose members all lack
+  // files is legitimately covered by an empty entry). The digests themselves
+  // are analysis-time observations and cannot be re-derived, so they are
+  // trusted ANCHORED by this check: the target SET is provably the report's,
+  // and the report is pinned by the fingerprint — a forged digest pair can
+  // only change what counts as "unchanged", and the codemod shape-match
+  // bounds that harm.
+  .superRefine((sidecar, ctx) => {
+    const byCluster = new Map(sidecar.evidence.map((entry) => [entry.clusterId, entry.targets]));
+    for (const cluster of sidecar.report.clusters) {
+      const expected = [
+        ...new Set(
+          cluster.failures
+            .map((failure) => failure.file)
+            .filter((file): file is string => file !== null),
+        ),
+      ].sort();
+      const actual = byCluster.get(cluster.id);
+      if (actual === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['evidence'],
+          message: `evidence does not cover cluster ${cluster.id} (absence never silently disables staleness checking)`,
+        });
+        continue;
+      }
+      const actualFiles = actual.map((target) => target.file);
+      const matches =
+        expected.length === actualFiles.length &&
+        expected.every((file, index) => file === actualFiles[index]);
+      if (!matches) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['evidence'],
+          message: `evidence targets for cluster ${cluster.id} do not equal its member files (expected: ${expected.join(', ') || '(none)'}; got: ${actualFiles.join(', ') || '(none)'})`,
+        });
+      }
+    }
+  });
 
 /**
  * Parse and validate sidecar text; throws {@link SidecarFormatError} on any

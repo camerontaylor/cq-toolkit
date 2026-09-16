@@ -168,6 +168,18 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     }
   });
 
+  test('a clusterId that does not match cluster.id is a failed result (L3: the id names ITS cluster)', async () => {
+    const result = await makeAgenticRemediation(fakeDriver(COMPLETE))({
+      ...baseInput(),
+      clusterId: '00000000',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("clusterId '00000000' does not match cluster.id");
+      expect(result.error).toContain(fixtureCluster().cluster.id);
+    }
+  });
+
   test('a MISSING driver is a failed result naming the wiring — never a fabricated run', async () => {
     const result = await makeAgenticRemediation(undefined)(baseInput());
     expect(result.status).toBe('failed');

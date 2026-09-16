@@ -294,6 +294,29 @@ describe('renderUnifiedDiff (synthesized hunks, exact at the edit sites)', () =>
     expect(diff).toContain('+export const bazQux = 2;\n\\ No newline at end of file\n');
   });
 
+  test('a pure insertion at offset == file length (EOF) renders a diff and applies (L1)', async () => {
+    for (const content of ['const a = 1;\n', 'const a = 1;']) {
+      const bytes = Buffer.from(content, 'utf8');
+      const insertion = {
+        file: 'src/eof.ts',
+        startByte: bytes.length,
+        endByte: bytes.length,
+        replacement: 'const b = 2;',
+      };
+      // The pre-L1 renderer threw out-of-bounds on the zero-width EOF block.
+      const diff = renderUnifiedDiff('src/eof.ts', bytes, [insertion]);
+      expect(diff).toContain('@@');
+      // After a trailing newline the insertion is its own added line; in a
+      // file WITHOUT one it appends to the last line — either way the added
+      // content is in the diff with a '+' marker.
+      expect(diff).toMatch(/\+.*const b = 2;/);
+      // And the plan applies cleanly.
+      const applied = applyEditsToBytes(bytes, [insertion]);
+      expect(Buffer.from(applied).toString('utf8').startsWith(content)).toBe(true);
+      expect(Buffer.from(applied).toString('utf8')).toContain('const b = 2;');
+    }
+  });
+
   test('an empty plan renders an empty diff', () => {
     expect(renderUnifiedDiff('src/a.ts', Buffer.from(A, 'utf8'), [])).toBe('');
   });
@@ -434,6 +457,58 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     if (applied.status === 'ok' && applied.value.mode === 'applied') {
       expect(applied.value.plannedEdits).toBe(0);
       expect(applied.value.note).toContain('nothing was written');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a scan reporting DECORATED paths (./src/a.ts) still matches the requested targets and applies (L2)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    const decoratedRunner = fakeRunner({
+      stdout: JSON.stringify([
+        matchOf('./src/a.ts', 6, 13, 'fooBar'),
+        matchOf('./src/b.ts', 13, 20, 'bazQux'),
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const op = makeOp(store, decoratedRunner);
+    const result = await op({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts', 'src/b.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    // Pre-L2 the decorated spellings dropped every edit in the per-file
+    // filters while plannedEdits still counted them.
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok' || result.value.mode !== 'applied') return;
+    expect(result.value.plannedEdits).toBe(2);
+    expect(result.value.files.map((file) => file.edits)).toEqual([1, 1]);
+    expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
+      'const fooBar = 1;\nconst other = foo_bar;\n',
+    );
+  });
+
+  test('a scan reporting a file OUTSIDE the requested set is a fault, never an edit (L2)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    const outsideRunner = fakeRunner({
+      stdout: JSON.stringify([matchOf('src/elsewhere.ts', 0, 5, 'x')]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const result = await makeOp(
+      store,
+      outsideRunner,
+    )({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts'],
+      dryRun: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('outside the requested file set');
     }
     expect(store.written.size).toBe(0);
   });

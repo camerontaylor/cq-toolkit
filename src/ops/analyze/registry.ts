@@ -4,11 +4,15 @@
 // `analyze.applyRemediation` op entries,
 // typed against the FROZEN OpRegistryEntry (src/kernel/types.ts). All
 // importers resolve through DYNAMIC imports, so loading the registry never
-// loads an op module: module scope imports only zod, the ledger bound
-// constants, and types (the type-only imports are erased at compile time) —
-// the gates registry's lazy-import pattern. The zod schemas are registry-
-// time mirrors of the lane's inputs and live HERE because `inputSchema`
-// must exist eagerly while the ops may not.
+// loads an op module: module scope imports only zod, `dirname` from
+// node:path (the applyRemediation store binding's `dir` default), the
+// ledger's bound constants, the kernel's PURE zod mirrors of the frozen
+// driver-seam types (kernel/schema.js — zod + types only, the same
+// eager-import class as the ledger constants), and types (the type-only
+// imports are erased at compile time) — the gates registry's lazy-import
+// pattern. The zod schemas are registry-time mirrors of the lane's inputs
+// and live HERE because `inputSchema` must exist eagerly while the ops may
+// not.
 import { dirname } from 'node:path';
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';

@@ -49,7 +49,12 @@ import type { Cluster } from './clusterErrors.js';
 
 /** JSON-serializable input of the `analyze.agenticRemediation` op. */
 export interface AgenticRemediationInput {
-  /** The cluster's stable id — carried into the invocation context verbatim. */
+  /**
+   * The cluster's stable id. Must EQUAL `cluster.id` (validated at the op
+   * boundary — a mismatch is a `failed` result, the same fail-closed shape
+   * as applyRemediation's unknown-cluster fault): the id only ever RIDES THE
+   * DETERMINISTIC PROMPT, not a separate invocation field.
+   */
   clusterId: string;
   /** The cluster to remediate (the sidecar/report's cluster, members in report order). */
   cluster: Cluster;
@@ -116,6 +121,14 @@ export function makeAgenticRemediation(
   driver: Driver | undefined,
 ): Op<AgenticRemediationInput, WorkerResult> {
   return async (input) => {
+    // The id must name THE cluster it travels with — a mismatch would put
+    // one cluster's evidence under another cluster's identity in the prompt.
+    if (input.clusterId !== input.cluster.id) {
+      return {
+        status: 'failed',
+        error: `agentic remediation: clusterId '${input.clusterId}' does not match cluster.id '${input.cluster.id}' — pass the cluster's own id`,
+      };
+    }
     if (driver === undefined) {
       return {
         status: 'failed',

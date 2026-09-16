@@ -31,11 +31,17 @@
 //     are never silently dropped and never partially applied.
 //   - Dry-run writes NOTHING: the diff path reads current bytes and renders
 //     unified diffs; the write seam is not touched.
-//   - Approval gate (UC §1 row 9): the apply mode REQUIRES `approved: true`
-//     in the input — without it the op refuses with `needs-human` before
-//     any I/O. The dry-run mode writes nothing and needs no approval. The
-//     plan runner's autonomous path (G3) therefore can never rewrite a file
-//     through this op.
+//   - Approval gate: the apply mode REQUIRES `approved: true` in the input —
+//     without it the op refuses with `needs-human` before any I/O. The
+//     dry-run mode writes nothing and needs no approval. SCOPE OF THE GATE,
+//     stated precisely: this op is the RULE-SCOPED ENGINE PRIMITIVE, gated by
+//     `approved: true` alone (it carries no cluster id — it has no sidecar
+//     and no cluster). The cluster-scoped, sidecar-contracted remediation
+//     path is `analyze.applyRemediation`, the ONLY surface satisfying the UC
+//     row-9 shape { clusterId, approved: true }; that op (and the playbooks
+//     that own their codemods) drive this engine underneath. The plan
+//     runner's autonomous path (G3) can never rewrite a file through either
+//     surface.
 //   - Determinism: edits are applied per file in ascending byte order,
 //     files in ascending path order; the diff renderer is a pure function
 //     of (old bytes, edits). The same plan against the same bytes always
@@ -49,6 +55,7 @@
 // renderAnalysisReport.ts); and the unified diff is synthesized from the
 // edit spans (no general LCS) — hunks are exact at the edit sites with
 // three lines of context, which is precisely the assurance a dry-run needs.
+import { resolve } from 'node:path';
 import type { Op } from '../../../kernel/types.js';
 import type { RawCheckOutput, RunCheck } from '../../gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
@@ -181,15 +188,45 @@ export function makeAstGrepScan(
       };
     }
     const result = parseAstGrepJson(raw.stdout);
-    if (result.ok) return result;
-    const exitNote =
-      raw.exitCode === null
-        ? 'the exit code was unobservable (is the ast-grep binary installed and on PATH?)'
-        : `exit code ${raw.exitCode}`;
-    const stderrExcerpt = raw.stderr.trim().slice(0, 200);
+    if (!result.ok) {
+      const exitNote =
+        raw.exitCode === null
+          ? 'the exit code was unobservable (is the ast-grep binary installed and on PATH?)'
+          : `exit code ${raw.exitCode}`;
+      const stderrExcerpt = raw.stderr.trim().slice(0, 200);
+      return {
+        ok: false,
+        fault: `ast-grep codemod: ${result.fault} — ${exitNote}${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
+      };
+    }
+    // FILE-MATCH CANONICALIZATION (both sides, before any filtering or
+    // grouping): ast-grep reports the walked path, which may carry a leading
+    // `./` (or be absolute) for a target the caller requested in plain
+    // relative form. Left alone, the decorated form would silently drop the
+    // edit in every per-file filter while plannedEdits still counted it
+    // (and could hide a collision across the two spellings). Each reported
+    // path is matched back to the REQUESTED spelling — verbatim, `./`-
+    // stripped, or resolved against the scan cwd — and rewritten to it; a
+    // reported path outside the requested set is a fault, never an edit.
+    const canonical: PlannedEdit[] = [];
+    for (const edit of result.outcome.plannedEdits) {
+      const requested = request.files.find(
+        (file) =>
+          file === edit.file ||
+          stripDotSlash(file) === stripDotSlash(edit.file) ||
+          resolve(request.dir, file) === resolve(request.dir, edit.file),
+      );
+      if (requested === undefined) {
+        return {
+          ok: false,
+          fault: `ast-grep codemod: scan reported a match outside the requested file set: '${edit.file}'`,
+        };
+      }
+      canonical.push({ ...edit, file: requested });
+    }
     return {
-      ok: false,
-      fault: `ast-grep codemod: ${result.fault} — ${exitNote}${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
+      ok: true,
+      outcome: { plannedEdits: canonical, unfixedMatches: result.outcome.unfixedMatches },
     };
   };
 }
@@ -314,8 +351,19 @@ function diffSegments(currentBytes: Uint8Array, edits: readonly PlannedEdit[]): 
       const lineEnd = nextStart - (lineHasNewline ? 1 : 0);
       const midLine =
         edit.startByte > lineStart && edit.startByte < nextStart && edit.startByte < lineEnd;
-      startLine = line;
-      endLine = midLine ? line + 1 : line;
+      const totalBytes = lineStarts[oldLines.length] as number;
+      if (!midLine && edit.startByte >= totalBytes && oldLines.length > 0) {
+        // EOF INSERTION CLAMP: a zero-width block AT end-of-file has no byte
+        // range to splice into (its relative offsets fall out of bounds), so
+        // clamp it to cover the LAST line ([lastLineStart, fileEnd]) — the
+        // insertion point is that line's end, the block splice appends there,
+        // and the diff shows the last line rewritten with the inserted text.
+        startLine = oldLines.length - 1;
+        endLine = oldLines.length;
+      } else {
+        startLine = line;
+        endLine = midLine ? line + 1 : line;
+      }
     }
     const last = blocks[blocks.length - 1];
     if (last !== undefined && startLine <= last.endLine) {
@@ -459,7 +507,14 @@ export interface AstGrepCodemodInput {
   files: string[];
   /** When true: render diffs, write nothing. When false: REQUIRES `approved: true`. */
   dryRun: boolean;
-  /** Explicit human approval for the apply mode; anything but true refuses the apply. */
+  /**
+   * Explicit human approval for the apply mode; anything but true refuses
+   * the apply. This op is the RULE-SCOPED ENGINE PRIMITIVE, so `approved`
+   * alone is its whole gate (it has no cluster id to name — no sidecar, no
+   * cluster); the UC row-9 shape { clusterId, approved: true } is satisfied
+   * by `analyze.applyRemediation`, the cluster-scoped path that drives this
+   * engine underneath.
+   */
   approved?: boolean;
   /** Wall-clock cap for the scan subprocess; the registry boundary defaults it to 600_000ms. */
   timeoutMs?: number;
@@ -628,6 +683,15 @@ export function makeAstGrepCodemod(
 // ops, the registry importer COMPOSES this op from the named factory plus
 // the dynamically-imported subprocess runner and path store (the gates
 // runner seam + the registry-bound store seam).
+
+/**
+ * The `./` decoration stripped — one half of the file-match canonicalization
+ * in {@link makeAstGrepScan} (the other half resolves both sides against the
+ * scan cwd, which also folds absolute reported paths into the comparison).
+ */
+function stripDotSlash(file: string): string {
+  return file.startsWith('./') ? file.slice(2) : file;
+}
 
 /** Error message of an unknown throwable, for `failed` results. */
 function messageOf(err: unknown): string {

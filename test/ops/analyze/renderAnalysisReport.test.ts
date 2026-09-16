@@ -6,7 +6,7 @@
 // target failed, deterministic names), and the registry importer resolving
 // end-to-end over a real mkdtemp dir (the one place real fs is allowed
 // here, mirroring the C4 registry-test precedent).
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -193,20 +193,76 @@ describe('renderAnalysisReport (pure core): determinism is the contract', () => 
   });
 });
 
-describe('the sidecar format: strict parse, re-derived fingerprint', () => {
-  test('serialize ∘ parse is the identity', () => {
+describe('the sidecar format: strict parse, re-derived fingerprint, coverage contract', () => {
+  test('serialize ∘ parse is the identity (full coverage)', () => {
     const report = fixtureReport();
     const { sidecar } = renderAnalysisReport(report, {
       evidence: [
         {
           clusterId: report.clusters[0]?.id ?? '',
-          targets: [{ file: 'src/a.ts', digest: contentDigest('const x = 1;\n') }],
+          targets: [
+            { file: 'src/a.ts', digest: contentDigest('const x = 1;\n') },
+            { file: 'src/b.ts', digest: contentDigest('export const y = 2;\n') },
+          ],
         },
       ],
     });
     const parsed = parseAnalysisSidecar(serializeAnalysisSidecar(sidecar));
     expect(parsed).toEqual(sidecar);
     expect(parsed.schemaVersion).toBe(ANALYSIS_SIDECAR_SCHEMA_VERSION);
+    // A cluster whose members all lack files is legitimately covered by an
+    // EMPTY evidence entry.
+    const nullFileReport: ClusterErrorsReport = {
+      clusters: [
+        {
+          id: '0deadbe0',
+          signature: '["t","r","m"]',
+          tool: 't',
+          ruleId: 'r',
+          confidence: 'low',
+          failures: [failureOf({ file: null })],
+          size: 1,
+        },
+      ],
+      noise: [],
+    };
+    const nullFileSidecar = renderAnalysisReport(nullFileReport, {
+      evidence: [{ clusterId: '0deadbe0', targets: [] }],
+    }).sidecar;
+    expect(parseAnalysisSidecar(serializeAnalysisSidecar(nullFileSidecar))).toEqual(
+      nullFileSidecar,
+    );
+  });
+
+  test('an EVIDENCE-FREE (or partial) sidecar is a format fault naming the uncovered cluster — absence never silently disables staleness', () => {
+    const report = fixtureReport();
+    // The PURE CORE's meta-less output: evidence [] — not appliable as-is
+    // (the deliberate consequence documented in the module header).
+    const bare = serializeAnalysisSidecar(renderAnalysisReport(report).sidecar);
+    expect(() => parseAnalysisSidecar(bare)).toThrow(/evidence does not cover cluster /);
+    expect(() => parseAnalysisSidecar(bare)).toThrow(new RegExp(report.clusters[0]?.id ?? ''));
+    // A PARTIAL sidecar (evidence for a different cluster) faults the same way.
+    const other = report.clusters[0]?.id ?? '';
+    const partial = serializeAnalysisSidecar(
+      renderAnalysisReport(report, { evidence: [{ clusterId: '0deadbe0', targets: [] }] }).sidecar,
+    );
+    if (other === '0deadbe0') return; // fixture-dependent guard
+    expect(() => parseAnalysisSidecar(partial)).toThrow(/does not cover cluster/);
+  });
+
+  test('evidence with a WRONG target set for a cluster is a format fault', () => {
+    const report = fixtureReport();
+    const sidecar = renderAnalysisReport(report, {
+      evidence: [
+        {
+          clusterId: report.clusters[0]?.id ?? '',
+          targets: [{ file: 'src/a.ts', digest: '0deadbe0' }],
+        },
+      ],
+    }).sidecar;
+    expect(() => parseAnalysisSidecar(serializeAnalysisSidecar(sidecar))).toThrow(
+      /evidence targets for cluster .* do not equal its member files/,
+    );
   });
 
   test('missing/garbage/wrong-version sidecars fail with clear errors', () => {
@@ -429,6 +485,54 @@ describe('the render op importer resolves end-to-end (real fs over a mkdtemp dir
       /strict descendant/,
     );
     await rm(outside, { force: true });
+  });
+
+  test('a pre-planted LEAF SYMLINK at the write target is refused, the link target untouched (M1)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'analyze-render-'));
+    // The attack: a PR author plants a symlink at the deterministic output
+    // name BEFORE the render op runs; writeFileSync would follow it outside
+    // the root. The store must lstat the exact write target and refuse.
+    const sentinelPath = join(scratchDir, '..', 'analyze-render-sentinel.md');
+    await writeFile(sentinelPath, 'sentinel bytes\n', 'utf8');
+    scratchDir = await mkdtemp(join(tmpdir(), 'analyze-render-leaf-'));
+    const planted = join(scratchDir, 'analysis-00000000.md');
+    await symlink(sentinelPath, planted);
+    const store = pathAnalysisFileStore(scratchDir);
+    await expect(store.writeBytes('analysis-00000000.md', Buffer.from('owned\n'))).rejects.toThrow(
+      /symlink at the write target/,
+    );
+    // The link target is untouched and the link itself still stands.
+    expect(await readFile(sentinelPath, 'utf8')).toBe('sentinel bytes\n');
+    expect((await lstat(planted)).isSymbolicLink()).toBe(true);
+    await rm(sentinelPath, { force: true });
+  });
+
+  test('the render op fails closed when a leaf symlink sits at a deterministic OUTPUT name (M1, op level)', async () => {
+    scratchDir = await mkdtemp(join(tmpdir(), 'analyze-render-'));
+    await mkdir(join(scratchDir, 'src'), { recursive: true });
+    await writeFile(join(scratchDir, 'src', 'a.ts'), 'const x = 1;\nexport { x };\n', 'utf8');
+    await writeFile(
+      join(scratchDir, 'src', 'b.ts'),
+      'export const y = 2;\nexport { y };\n',
+      'utf8',
+    );
+    const fp = reportFingerprint(fixtureReport());
+    const sentinelPath = join(scratchDir, '..', 'analyze-render-op-sentinel.json');
+    await writeFile(sentinelPath, 'sentinel\n', 'utf8');
+    // Planted at the FIRST write (the sidecar), so the op faults before any
+    // byte lands anywhere.
+    await symlink(sentinelPath, join(scratchDir, sidecarFileName(fp)));
+    const entry = registry.find((candidate) => candidate.name === 'analyze.renderAnalysisReport');
+    if (!entry) throw new Error('analyze.renderAnalysisReport missing from the registry');
+    const op = await entry.importer();
+    const result = await op({ report: fixtureReport(), dir: scratchDir });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('symlink at the write target');
+    }
+    // The planted link's target is untouched.
+    expect(await readFile(sentinelPath, 'utf8')).toBe('sentinel\n');
+    await rm(sentinelPath, { force: true });
   });
 });
 

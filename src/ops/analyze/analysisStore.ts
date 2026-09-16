@@ -24,11 +24,16 @@
 //     existing sources — this seam cannot create directory trees.
 //   - Reads go through the target's REAL path, so a file-level symlink that
 //     points outside the root is refused before a byte is returned. Writes
-//     land on (realParent + basename); the remediation path only ever writes
-//     a file it first read through this same store (read-through-realpath
-//     refused the escape before the write), and a time-of-read-to-time-of-
-//     write symlink swap remains an accepted residual of the same class the
-//     ledger store documents for its own window.
+//     land on (realParent + basename) ONLY after an lstat of that exact
+//     target REFUSES a leaf symlink (writeFileSync would follow it, so a
+//     pre-planted link at the target basename — e.g. at the render op's
+//     deterministic output names, which are never read first — could
+//     otherwise redirect the write outside the root); a plain existing file
+//     truncates normally, which is the remediation rewrite. The residual is
+//     a symlink swapped in AFTER the lstat (a time-of-check-to-time-of-use
+//     window of the same accepted class the ledger store documents); the
+//     remediation path narrows it further by only ever writing a file it
+//     first read through this same store.
 //
 // Residual limitations, documented: all fs work is sync under async
 // signatures (the ledger store's v1 tradeoff — the touched files are small,
@@ -37,7 +42,7 @@
 // window above); and the store has no locking — the sidecar contract's
 // staleness re-digest, not mutual exclusion, is what keeps concurrent
 // remediation honest.
-import { readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 
 /**
@@ -139,14 +144,38 @@ export function pathAnalysisFileStore(root: string): AnalyzeFileStore {
           `analysis store: parent directory of '${path}' does not exist — this store never mkdir -p (${messageOf(err)})`,
         );
       }
-      const fault = strictDescendantFault(rootReal, join(realParent, basename(targetAbs)));
+      // LEAF-SYMLINK DISCIPLINE (the write-side twin of read-through-
+      // realpath): realParent + basename is where the bytes would land, and
+      // writeFileSync FOLLOWS a symlink sitting there — so a pre-planted
+      // leaf link at the target name pointing outside the root would be a
+      // write escape (the render op writes never-read deterministic names a
+      // CI author can plant). lstat the exact target: a symlink is refused
+      // by name, before any byte moves. A plain existing file truncates
+      // normally (that is the remediation rewrite).
+      const target = join(realParent, basename(targetAbs));
+      let targetStat;
+      try {
+        targetStat = lstatSync(target);
+      } catch (err) {
+        if (!isEnoent(err)) {
+          throw new AnalysisStoreError(
+            `analysis store: could not inspect the write target for '${path}' — ${messageOf(err)}`,
+          );
+        }
+      }
+      if (targetStat?.isSymbolicLink()) {
+        throw new AnalysisStoreError(
+          `analysis store: '${path}' resolves to a symlink at the write target — refusing to write through it (planting a link here cannot redirect the write outside root '${root}')`,
+        );
+      }
+      const fault = strictDescendantFault(rootReal, target);
       if (fault !== null) {
         throw new AnalysisStoreError(
           `${fault} — an intermediate symlink escapes the root; refusing to write it`,
         );
       }
       try {
-        writeFileSync(join(realParent, basename(targetAbs)), bytes);
+        writeFileSync(target, bytes);
       } catch (err) {
         throw new AnalysisStoreError(
           `analysis store: could not write '${path}' — ${messageOf(err)}`,
@@ -184,6 +213,16 @@ function strictDescendantFault(rootReal: string, candidate: string): string | nu
     return `'${candidate}' does not resolve to a strict descendant of root '${rootReal}'`;
   }
   return null;
+}
+
+/** True when a thrown value is a node:fs ENOENT (the no-target-yet case). */
+function isEnoent(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ENOENT'
+  );
 }
 
 /** Error message of an unknown throwable, for fault messages. */

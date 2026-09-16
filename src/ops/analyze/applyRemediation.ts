@@ -18,10 +18,14 @@
 //      `failed`, naming the file and both digests, with the re-render
 //      remedy. Strict-on-any is deliberate: the analysis is a snapshot, and
 //      trusting the un-drifted parts of a drifted snapshot is exactly how
-//      wrong edits slip past. The digest is a STALENESS CHECK, not an
-//      identity proof (32-bit fnv coarseness) — residual collision risk is
-//      bounded by the codemod path's shape-match: an edit only lands where
-//      the consumer's ast-grep rule still matches the CURRENT bytes.
+//      wrong edits slip past. The loop's COMPLETENESS rides the parse-time
+//      coverage contract (every report cluster's evidence must equal its
+//      derived member-file set — a missing entry is a parse fault, so the
+//      staleness loop cannot be silently skipped by a partial sidecar). The
+//      digest is a STALENESS CHECK, not an identity proof (32-bit fnv
+//      coarseness) — residual collision risk is bounded by the codemod
+//      path's shape-match: an edit only lands where the consumer's ast-grep
+//      rule still matches the CURRENT bytes.
 //   3. Approval — `approved !== true` OR a missing clusterId REFUSES the op
 //      as `needs-human`: a human decision is precisely the missing input,
 //      and the reason names the required shape { clusterId, approved: true }
