@@ -16,13 +16,19 @@
 //
 // Invariants honored here:
 //   - Dry-run is the DEFAULT: a bare invocation mutates nothing and reports
-//     the would-be outcome (removed/skippedDirty rows are the WOULD-BE lists
-//     when `dryRun` is true — the flag is what makes them honest).
+//     the would-be outcome (removed/pruned/skippedDirty rows are the
+//     WOULD-BE lists when `dryRun` is true — the flag is what makes them
+//     honest).
 //   - Dirty requires explicit force: a dirty aged tree lands in
-//     skippedDirty unless `force` is set; clean trees never need it.
-//   - R2 D8 posture: a fault is a `failed` result naming the tree — a
-//     candidate is never silently skipped, an aged tree is never left behind
-//     on an unreadable probe without the report saying so.
+//     skippedDirty unless `force` is set; clean trees never need it. The
+//     removal revalidates existence, age and cleanliness INSIDE the mutex,
+//     immediately before mutating — never removed on stale evidence.
+//   - A registered-but-missing worktree dir is residue, not a failure: the
+//     stale registration is pruned and reported, its branch left to the
+//     branch-only sweep.
+//   - R2 D8 posture: a fault is a `failed` result naming the tree AND the
+//     removals already completed — a candidate is never silently skipped,
+//     completed work is never invisible.
 //   - Canonicalized path comparisons throughout (the worktreeFor realpath
 //     idiom), so porcelain-reported realpaths and caller-supplied dirs meet
 //     on equal terms.
@@ -32,7 +38,7 @@ import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex, GitMutexConfig } from './gitMutex.js';
-import { makeSubprocessWorktreeEffects } from './worktreeFor.js';
+import { makeSubprocessWorktreeEffects, mapWorktreeGitFault } from './worktreeFor.js';
 import type { WorktreeMutexConfig } from './worktreeFor.js';
 
 /** JSON-serializable input of the `sweep.cleanup` op. */
@@ -93,11 +99,19 @@ export interface CleanupEffects {
   /** Hard-delete a local branch (`git branch -D <branch>`); prefix-guarded by the op. */
   branchDelete(repoRoot: string, branch: string): Promise<void>;
   /**
+   * Drop stale worktree registrations (`git worktree prune`) — the residue
+   * path for a REGISTERED worktree whose dir is already gone (rm -rf'd
+   * without `git worktree remove`).
+   */
+  worktreePrune(repoRoot: string): Promise<void>;
+  /**
    * The age basis (ms) of a BRANCH with no worktree — its tip's committer
    * date. The mandate's `modifiedTimeMs(path)` has no honest branch form
    * (stating a ref file path would fabricate repo internals into the seam),
    * so this is the one seam member beyond the listed set: smallest deviation,
-   * flagged in the D2 notes.
+   * flagged in the D2 notes. Also the branch-activity half of a worktree
+   * candidate's age basis (an old dir with a fresh tip commit is kept —
+   * the branch delete would destroy unpushed work).
    */
   branchTimeMs(repoRoot: string, branch: string): Promise<number>;
 }
@@ -108,6 +122,12 @@ export interface CleanupReport {
   dryRun: boolean;
   /** Removed (or would-be removed) worktrees, with the branch deleted alongside each. */
   removed: Array<{ path: string; branch: string }>;
+  /**
+   * Registered-but-missing worktree dirs (the residue class): the stale
+   * registration pruned; the branch is NOT deleted here — it remains
+   * branch-only-sweep eligible.
+   */
+  pruned: Array<{ path: string; branch: string }>;
   /** Aged-but-DIRTY trees not removed (no force) — the explicit --force surface. */
   skippedDirty: Array<{ path: string; reason: string }>;
   /** Every other enumerated worktree: younger than the cutoff, or outside the prefix/dir — untouchable. */
@@ -122,20 +142,26 @@ export interface CleanupReport {
  * worktrees dir, and partition the enumerated worktrees into CANDIDATES
  * (branch starts `<runPrefix>/` AND path canonically inside worktreesDir)
  * and kept rows (detached, outside the prefix, or outside the dir — each
- * accounted for, never silently dropped); (b) age + cleanliness probes per
- * candidate — strictly older than the cutoff and strictly clean is a removal
- * candidate; dirty is one unless `force` is set (then it is a forced removal
- * candidate); younger is kept; (c) a branch-only sweep — prefix branches
- * with NO registered worktree whose tip age strictly exceeds the cutoff are
- * branch-delete candidates (their tree is already gone; the shape has no
- * branch-kept rows, so a YOUNG branch-only branch is simply left in place);
- * (d) the mutation section — only when `dryRun` is false and candidates
- * exist, ONE git-mutating section inside the mutex when configured:
- * `worktreeRemove` then `branchDelete` per tree candidate (the branch only
- * under the prefix — re-checked), `branchDelete` per branch-only candidate.
- * In dry-run the removed/skippedDirty/branchesRemoved lists are the WOULD-BE
- * outcome and zero mutators run. Every effects fault is a `failed` result
- * naming the tree — never a throw across the op seam, never a fabricated ok.
+ * accounted for, never silently dropped); (b) classify per candidate — the
+ * AGE BASIS is the LATEST of the dir mtime and the branch tip commit (an
+ * old dir with a recent commit is KEPT: the branch delete would destroy
+ * unpushed work); a REGISTERED candidate whose dir is ABSENT is residue —
+ * pruned (`git worktree prune`) and reported as pruned, its branch left to
+ * the branch-only sweep, never a whole-op failure; strictly older than the
+ * cutoff AND strictly clean is a removal candidate, dirty is one only under
+ * `force`, younger is kept; (c) the mutation phase — only when `dryRun` is
+ * false — is probe-then-remove PER CANDIDATE within ONE mutex acquisition:
+ * existence, age (dir AND tip) and strict cleanliness are REVALIDATED while
+ * holding the lock, and a candidate whose state changed (now dirty / now
+ * young / now missing) moves to skippedDirty/kept with a "revalidated
+ * inside the mutex" reason — never removed on stale evidence; (d) a
+ * branch-only sweep — prefix branches with NO registered worktree whose tip
+ * age strictly exceeds the cutoff are branch-deleted (tip age re-probed
+ * under the lock; their tree is already gone). In dry-run every list is the
+ * WOULD-BE outcome and zero mutators run. Every effects fault is a `failed`
+ * result naming the tree AND appending the removals already completed —
+ * completed work is never invisible — never a throw across the op seam,
+ * never a fabricated ok.
  */
 export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport> {
   return async (input) => {
@@ -184,9 +210,24 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
     const prefix = `${input.runPrefix}/`;
 
     const removed: Array<{ path: string; branch: string }> = [];
+    const pruned: Array<{ path: string; branch: string }> = [];
     const skippedDirty: Array<{ path: string; reason: string }> = [];
     const kept: Array<{ path: string; reason: string }> = [];
     const branchOnly: string[] = [];
+
+    // Completed work is never invisible: every `failed` return after the
+    // loop begins appends what already mutated.
+    const progressNote = (): string => {
+      const parts = [
+        ...pruned.map(
+          (r) =>
+            `pruned the stale registration for '${r.path}' (branch '${r.branch}' left to the branch-only sweep)`,
+        ),
+        ...removed.map((r) => `removed worktree '${r.path}' on branch '${r.branch}'`),
+        ...branchOnly.map((b) => `deleted branch '${b}'`),
+      ];
+      return parts.length === 0 ? '' : ` — completed before the fault: ${parts.join('; ')}`;
+    };
 
     for (const worktree of worktrees) {
       const real = await realpathOf(worktree.path);
@@ -204,20 +245,58 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
         kept.push({ path: real, reason: whys.join('; ') });
         continue;
       }
+
+      // FIRST-PASS PROBE (outside the lock) — classifies the row set. The
+      // age basis includes BRANCH ACTIVITY: the effective reference is the
+      // LATEST of dir mtime and branch tip commit, so an old dir whose tip
+      // commit is recent is YOUNG (branch -D would destroy the unpushed
+      // commits).
       let mtimeMs: number;
       try {
         mtimeMs = await git.modifiedTimeMs(real);
       } catch (err) {
+        if (isAbsence(err)) {
+          // REGISTERED-but-missing dir (rm -rf'd without `git worktree
+          // remove` — the residue class this op exists for): prune the
+          // stale registration on the removal path and report the row as
+          // pruned. The branch is NOT deleted here — it stays
+          // branch-only-sweep eligible. Never a whole-op failure.
+          if (!dryRun) {
+            try {
+              await inGuard(() => git.worktreePrune(input.repoRoot));
+            } catch (pruneErr) {
+              return {
+                status: 'failed',
+                error: `sweep: could not prune the stale registration for missing worktree '${real}' — ${messageOf(pruneErr)}${progressNote()}`,
+              };
+            }
+          }
+          pruned.push({ path: real, branch });
+          continue;
+        }
         return {
           status: 'failed',
-          error: `sweep: could not read the age of worktree '${real}' — ${messageOf(err)}`,
+          error: `sweep: could not read the age of worktree '${real}' — ${messageOf(err)}${progressNote()}`,
         };
       }
-      const ageMs = Date.now() - mtimeMs;
+      let tipMs: number;
+      try {
+        tipMs = await git.branchTimeMs(input.repoRoot, branch);
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `sweep: could not read the age of branch '${branch}' — ${messageOf(err)}${progressNote()}`,
+        };
+      }
+      const basisMs = Math.max(mtimeMs, tipMs);
+      const ageMs = Date.now() - basisMs;
       if (ageMs <= input.olderThanMs) {
         kept.push({
           path: real,
-          reason: `younger than the cutoff (age ${String(ageMs)} ms ≤ ${String(input.olderThanMs)} ms)`,
+          reason:
+            tipMs > mtimeMs
+              ? `younger than the cutoff (age ${String(ageMs)} ms ≤ ${String(input.olderThanMs)} ms) — branch '${branch}' carries a recent commit (${String(Date.now() - tipMs)} ms old); deleting it could destroy unpushed work`
+              : `younger than the cutoff (age ${String(ageMs)} ms ≤ ${String(input.olderThanMs)} ms)`,
         });
         continue;
       }
@@ -227,7 +306,7 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
       } catch (err) {
         return {
           status: 'failed',
-          error: `sweep: could not check '${real}' for a strictly clean tree — ${messageOf(err)}`,
+          error: `sweep: could not check '${real}' for a strictly clean tree — ${messageOf(err)}${progressNote()}`,
         };
       }
       if (!clean && input.force !== true) {
@@ -240,33 +319,81 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
         });
         continue;
       }
-      // `clean` → plain removal (git itself backstops a raced dirty tree);
-      // `!clean` here ⇒ force was set → the one explicit dirty path.
-      removed.push({ path: real, branch: branch });
-      if (!dryRun) {
-        try {
-          await inGuard(async () => {
-            if (clean) await git.worktreeRemove(input.repoRoot, real);
-            else await git.worktreeRemove(input.repoRoot, real, { force: true });
-            // Prefix re-check before the delete: the branch namespace guard
-            // is load-bearing even here, against a raced relisting.
-            if (branch.startsWith(prefix)) await git.branchDelete(input.repoRoot, branch);
-          });
-        } catch (err) {
-          return {
-            status: 'failed',
-            error: `sweep: could not remove worktree '${real}' on branch '${branch}' — ${messageOf(err)}`,
-          };
-        }
+
+      // REMOVAL — probe-then-remove PER CANDIDATE within one guard
+      // acquisition. In dry-run the would-be row is recorded and no effect
+      // runs at all.
+      if (dryRun) {
+        removed.push({ path: real, branch });
+        continue;
+      }
+      try {
+        await inGuard(async () => {
+          // REVALIDATION under the lock: existence, age (dir AND tip) and
+          // strict cleanliness, from scratch. A candidate whose state
+          // changed since the first probe moves to kept/skippedDirty —
+          // never removed on stale evidence.
+          let reMtimeMs: number;
+          try {
+            reMtimeMs = await git.modifiedTimeMs(real);
+          } catch (rerr) {
+            if (isAbsence(rerr)) {
+              kept.push({
+                path: real,
+                reason:
+                  'revalidated inside the mutex: the worktree dir is gone (stale registration residue) — never removed on stale evidence; a follow-up run prunes the registration',
+              });
+              return;
+            }
+            throw rerr;
+          }
+          const reTipMs = await git.branchTimeMs(input.repoRoot, branch);
+          const reAgeMs = Date.now() - Math.max(reMtimeMs, reTipMs);
+          if (reAgeMs <= input.olderThanMs) {
+            kept.push({
+              path: real,
+              reason: `revalidated inside the mutex: younger than the cutoff on the re-check (age ${String(reAgeMs)} ms ≤ ${String(input.olderThanMs)} ms) — never removed on stale evidence`,
+            });
+            return;
+          }
+          const reClean = await git.isStrictClean(real);
+          if (!reClean && input.force !== true) {
+            skippedDirty.push({
+              path: real,
+              reason:
+                'revalidated inside the mutex: the tree went dirty before the removal — a dirty worktree is never removed without explicit --force',
+            });
+            return;
+          }
+          // The state held: plain removal for a clean tree (git itself
+          // backstops a raced dirty tree); the explicit force path
+          // otherwise. The row records only after BOTH mutations succeed.
+          if (reClean) await git.worktreeRemove(input.repoRoot, real);
+          else await git.worktreeRemove(input.repoRoot, real, { force: true });
+          // Prefix re-check before the delete: the branch namespace guard
+          // is load-bearing even here, against a raced relisting.
+          if (branch.startsWith(prefix)) await git.branchDelete(input.repoRoot, branch);
+          removed.push({ path: real, branch });
+        });
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `sweep: could not remove worktree '${real}' on branch '${branch}' — ${messageOf(err)}${progressNote()}`,
+        };
       }
     }
 
     // Branch-only sweep: a prefix branch with NO registered worktree is
-    // residue whose tree is already gone. Aged by its tip's committer date;
-    // a YOUNG one is left in place (the report shape has no branch-kept
-    // rows; nothing under the prefix is ever touched without age evidence).
+    // residue whose tree is already gone (a pruned residue row's branch
+    // counts as worktree-less from here on — it stays sweep-eligible).
+    // Aged by its tip's committer date, RE-PROBED under the lock; a YOUNG
+    // one is left in place (the report shape has no branch-kept rows;
+    // nothing under the prefix is ever touched without age evidence).
+    const prunedBranches = new Set(pruned.map((r) => r.branch));
     const worktreeBranches = new Set(
-      worktrees.flatMap((w) => (w.branch === undefined ? [] : [w.branch])),
+      worktrees.flatMap((w) =>
+        w.branch !== undefined && !prunedBranches.has(w.branch) ? [w.branch] : [],
+      ),
     );
     for (const branch of branches) {
       if (!branch.startsWith(prefix) || worktreeBranches.has(branch)) continue;
@@ -276,20 +403,28 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
       } catch (err) {
         return {
           status: 'failed',
-          error: `sweep: could not read the age of branch '${branch}' — ${messageOf(err)}`,
+          error: `sweep: could not read the age of branch '${branch}' — ${messageOf(err)}${progressNote()}`,
         };
       }
       if (Date.now() - tipMs <= input.olderThanMs) continue;
-      branchOnly.push(branch);
-      if (!dryRun) {
-        try {
-          await inGuard(() => git.branchDelete(input.repoRoot, branch));
-        } catch (err) {
-          return {
-            status: 'failed',
-            error: `sweep: could not delete branch '${branch}' — ${messageOf(err)}`,
-          };
-        }
+      if (dryRun) {
+        branchOnly.push(branch);
+        continue;
+      }
+      try {
+        await inGuard(async () => {
+          // Light revalidation under the lock: a branch that gained a
+          // recent commit between the probe and the guard is left alone.
+          const reTipMs = await git.branchTimeMs(input.repoRoot, branch);
+          if (Date.now() - reTipMs <= input.olderThanMs) return;
+          await git.branchDelete(input.repoRoot, branch);
+          branchOnly.push(branch);
+        });
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `sweep: could not delete branch '${branch}' — ${messageOf(err)}${progressNote()}`,
+        };
       }
     }
 
@@ -298,12 +433,28 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
       value: {
         dryRun,
         removed,
+        pruned,
         skippedDirty,
         kept,
         branchesRemoved: [...removed.map((row) => row.branch), ...branchOnly],
       },
     };
   };
+}
+
+/**
+ * The ABSENCE class of node:fs faults — ENOENT and ENOTDIR (a path walking
+ * through a file) both mean "nothing there". ANY OTHER fault is a real
+ * failure, never read as absence (the worktreeFor I7 idiom).
+ */
+function isAbsence(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    ((err as { code?: unknown }).code === 'ENOENT' ||
+      (err as { code?: unknown }).code === 'ENOTDIR')
+  );
 }
 
 /**
@@ -485,13 +636,11 @@ function runCleanupGit(args: string[], cwd: string, timeoutMs: number): Promise<
       },
       (error, stdout, stderr) => {
         if (error !== null) {
-          const exit = typeof error.code === 'number' ? ` (exit ${String(error.code)})` : '';
-          reject(
-            new Error(
-              `git ${String(args[0] ?? 'git')}${exit} failed — ${stderr.trim() !== '' ? stderr.trim() : error.message}`,
-              { cause: error },
-            ),
-          );
+          // The SHARED family fault mapping (worktreeFor's): distinguishes
+          // the maxBuffer-overflow class (which also sets `killed`) from a
+          // timeout SIGKILL, and names the mechanism — a weakened local
+          // branch would misreport an output limit as a timeout.
+          reject(mapWorktreeGitFault(args, error, stderr, timeoutMs));
           return;
         }
         resolve(stdout);
@@ -545,6 +694,9 @@ export function makeSubprocessCleanupEffects(
     },
     branchDelete: async (root, branch) => {
       await runCleanupGit(['branch', '-D', branch], root, timeoutMs);
+    },
+    worktreePrune: async (root) => {
+      await runCleanupGit(['worktree', 'prune'], root, timeoutMs);
     },
     branchTimeMs: async (root, branch) => {
       const out = await runCleanupGit(

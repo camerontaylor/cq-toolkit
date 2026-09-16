@@ -26,9 +26,11 @@ import type { OpRegistryEntry, OpResult } from '../../../src/kernel/types.js';
 import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
 import type { LedgerStore } from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery } from '../../../src/ops/ledger/ledger.js';
+import { get } from '../../../src/registry/index.js';
 import { SWEEP_UNIT_OP, makePlanSweep } from '../../../src/ops/sweep/planSweep.js';
 import type { PlanSweepInput } from '../../../src/ops/sweep/planSweep.js';
 import { registry } from '../../../src/ops/sweep/registry.js';
+import type { SalvagePlan } from '../../../src/ops/sweep/salvage.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures — the planner-contract store fake and ledger state
@@ -177,6 +179,92 @@ describe('sweep registry surface', () => {
         },
       }).success,
     ).toBe(true);
+  });
+
+  test('the salvage schema accepts the plain JSON a caller sends and rejects inventory faults (PR156 r1 E)', () => {
+    const entry = sweepEntry('sweep.salvage');
+    const input = {
+      repoRoot: '/repo',
+      entries: [
+        {
+          path: '/runs/wt/fix/core',
+          branch: 'cq/09-16a/fix/core',
+          runPrefix: 'cq/09-16a',
+          journal: { lastStep: 'fix.core.lint', stepsTotal: 4, allTerminal: false },
+        },
+        { path: '/runs/wt/fix/cli' },
+      ],
+      discardDirty: true,
+    };
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+    // The selector-class faults: a missing required field dies at this
+    // boundary (exit 2), never mid-op.
+    const { entries: _omitted, ...entriesLess } = input;
+    expect(entry.inputSchema.safeParse(entriesLess).success).toBe(false);
+    // Shape faults on the inventory and its metadata.
+    expect(entry.inputSchema.safeParse({ ...input, entries: 'build' }).success).toBe(false);
+    expect(entry.inputSchema.safeParse({ ...input, entries: [{}] }).success).toBe(false);
+    expect(
+      entry.inputSchema.safeParse({ ...input, entries: [{ path: '/x', journal: 'done' }] }).success,
+    ).toBe(false);
+    expect(
+      entry.inputSchema.safeParse({
+        ...input,
+        entries: [{ path: '/x', journal: { stepsTotal: -1 } }],
+      }).success,
+    ).toBe(false);
+    expect(entry.inputSchema.safeParse({ ...input, discardDirty: 'yes' }).success).toBe(false);
+    // Strict: an unknown key is rejected, not stripped.
+    expect(entry.inputSchema.safeParse({ ...input, extra: 1 }).success).toBe(false);
+  });
+
+  test('the cleanup schema accepts plain JSON and bounds olderThanMs + the SHARED mutex schema (PR156 r1 E)', () => {
+    const entry = sweepEntry('sweep.cleanup');
+    const input = {
+      repoRoot: '/repo',
+      worktreesDir: '/runs/wt',
+      runPrefix: 'cq/09-16a',
+      olderThanMs: 0,
+      dryRun: false,
+      force: true,
+      mutex: { lockPath: '/repo/.cq/git-mutex.lock', staleMs: 2000, retries: 9, retryBaseMs: 100 },
+    };
+    expect(entry.inputSchema.safeParse(input).success).toBe(true);
+    // olderThanMs is REQUIRED and bounds-checked at the schema.
+    const { olderThanMs: _omitted, ...cutoffLess } = input;
+    expect(entry.inputSchema.safeParse(cutoffLess).success).toBe(false);
+    expect(entry.inputSchema.safeParse({ ...input, olderThanMs: -1 }).success).toBe(false);
+    expect(entry.inputSchema.safeParse({ ...input, olderThanMs: 1.5 }).success).toBe(false);
+    // Mutex bounds via the SHARED GitMutexBindingSchema: the clamp floor…
+    expect(
+      entry.inputSchema.safeParse({
+        ...input,
+        mutex: { lockPath: '/l', staleMs: 1999 },
+      }).success,
+    ).toBe(false);
+    // …and the jFLDD cross-field invariant, one definition for the family.
+    expect(
+      entry.inputSchema.safeParse({
+        ...input,
+        mutex: { lockPath: '/l', staleMs: 2000, retries: 0, retryBaseMs: 1 },
+      }).success,
+    ).toBe(false);
+    expect(entry.inputSchema.safeParse({ ...input, dryRun: 'yes' }).success).toBe(false);
+    expect(entry.inputSchema.safeParse({ ...input, force: 1 }).success).toBe(false);
+  });
+
+  test('the salvage importer dispatches through the registry get/importer path — empty entries, ok, zero rows', async () => {
+    const entry = await get('sweep.salvage');
+    expect(entry).toBeDefined();
+    if (entry === undefined) return;
+    const op = await entry.importer();
+    const result = await op({ repoRoot: '/repo', entries: [] });
+    expect(result.status).toBe('ok');
+    if (result.status === 'ok') {
+      const plan = result.value as SalvagePlan;
+      expect(plan.rows).toEqual([]);
+      expect(Object.values(plan.counts).every((n) => n === 0)).toBe(true);
+    }
   });
 });
 

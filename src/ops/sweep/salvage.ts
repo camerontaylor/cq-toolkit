@@ -20,7 +20,9 @@
 //     per-row classification — one entry's fault never fails the report.
 import { execFile } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import type { Op } from '../../kernel/types.js';
+import { mapWorktreeGitFault } from './worktreeFor.js';
 
 /**
  * One interrupted-tree inventory entry the CALLER scanned — plain JSON, as
@@ -67,15 +69,18 @@ export interface SalvageInput {
 
 /**
  * The conservative classification of one entry (R2 D8). Exactly one of:
- *   - `reuse`         — exists, strictly clean, and the journal tail is
- *                       ABSENT or records allTerminal true: a clean-done
- *                       tree, safe to skip.
- *   - `resume`        — exists, strictly clean, and the journal shows
- *                       PARTIAL progress — allTerminal EXPLICITLY false
- *                       (with or without a lastStep: an explicit
- *                       non-terminal marker is positive evidence of a
- *                       pending step) or a lastStep present: nothing on
- *                       disk to lose, work to finish.
+ *   - `reuse`         — exists, strictly clean, and the journal records
+ *                       allTerminal true (the ONLY done evidence trusted):
+ *                       a clean-done tree, safe to skip.
+ *   - `resume`        — exists, strictly clean, and done-ness is NOT
+ *                       proven: allTerminal EXPLICITLY false (with or
+ *                       without a lastStep — an explicit non-terminal
+ *                       marker is positive evidence of a pending step), a
+ *                       lastStep present, or the journal tail ABSENT or
+ *                       evidence-free (an interrupted-before-first-write
+ *                       run carries no done evidence — re-running on a
+ *                       clean tree is safe; concluding done-ness from no
+ *                       evidence is not, I9).
  *   - `preserve`      — exists and DIRTY (default): never auto-cleaned.
  *   - `discard`       — exists and DIRTY and the input set `discardDirty`:
  *                       discard-ELIGIBLE only (stash-first); no deletion.
@@ -230,14 +235,20 @@ export function makeSalvage(git: SalvageEffects): Op<SalvageInput, SalvagePlan> 
             ),
           );
         } else {
+          // NO positive evidence either way — the journal tail is ABSENT
+          // (the run may have been interrupted before its first journal
+          // write: zero steps ran) or records nothing at all. Conservative
+          // per I9's no-fabrication rule: resume, naming the absent
+          // evidence — re-running on a strictly clean tree is safe, and
+          // concluding done-ness from NO evidence is not.
           rows.push(
             rowOf(
               entry,
               real,
-              'reuse',
+              'resume',
               entry.journal === undefined
-                ? 'strictly clean with no journal tail at all — a clean tree is by definition not mid-write, and resume requires positive journal evidence of a pending step'
-                : 'strictly clean with a journal tail recording neither an explicit non-terminal marker nor a pending step — no positive evidence of pending work',
+                ? 'strictly clean but the journal tail is ABSENT — the run may have been interrupted before its first journal write; re-running on a clean tree is safe, and concluding done-ness from no evidence is not (I9)'
+                : 'strictly clean but the journal tail records neither a terminal marker nor a pending step — no positive evidence of done-ness; re-running on a clean tree is safe (I9)',
             ),
           );
         }
@@ -334,6 +345,13 @@ function inputFaultOf(input: SalvageInput): string | null {
     }
     if (entry.path.startsWith('-')) {
       return `sweep: entries[${String(index)}] path '${entry.path}' must not start with '-' — it is a positional git argument wherever it feeds git, never a flag`;
+    }
+    // The field doc promises an ABSOLUTE worktree path (as the porcelain
+    // list reports it): a RELATIVE path would canonicalize against the
+    // process CWD and classify — and report — a tree the caller never
+    // meant.
+    if (!isAbsolute(entry.path)) {
+      return `sweep: entries[${String(index)}] path '${entry.path}' must be an ABSOLUTE path — a relative path canonicalizes against the process CWD and would classify the wrong tree`;
     }
     if (entry.branch !== undefined) {
       if (typeof entry.branch !== 'string' || entry.branch === '') {
@@ -445,13 +463,11 @@ function runSalvageGit(args: string[], cwd: string, timeoutMs: number): Promise<
       },
       (error, stdout, stderr) => {
         if (error !== null) {
-          const exit = typeof error.code === 'number' ? ` (exit ${String(error.code)})` : '';
-          reject(
-            new Error(
-              `git ${String(args[0] ?? 'git')}${exit} failed — ${stderr.trim() !== '' ? stderr.trim() : error.message}`,
-              { cause: error },
-            ),
-          );
+          // The SHARED family fault mapping (worktreeFor's): distinguishes
+          // the maxBuffer-overflow class (which also sets `killed`) from a
+          // timeout SIGKILL, and names the mechanism — a weakened local
+          // branch would misreport an output limit as a timeout.
+          reject(mapWorktreeGitFault(args, error, stderr, timeoutMs));
           return;
         }
         resolve(stdout);

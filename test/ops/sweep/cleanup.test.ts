@@ -22,7 +22,8 @@
 //      never a throw across the op seam, never a fabricated ok.
 //   7. THE BOUNDARY CONTRACT: every input defect is a single `failed`
 //      result naming the field.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -88,6 +89,7 @@ interface FakeRepo {
   calls: string[];
   removes: Array<{ repoRoot: string; path: string; force: boolean }>;
   branchDeletes: Array<{ repoRoot: string; branch: string }>;
+  prunes: string[];
 }
 
 function fakeRepo(): FakeRepo {
@@ -100,6 +102,7 @@ function fakeRepo(): FakeRepo {
     calls: [],
     removes: [],
     branchDeletes: [],
+    prunes: [],
   };
 }
 
@@ -116,7 +119,14 @@ function effectsOf(repo: FakeRepo): CleanupEffects {
     modifiedTimeMs: async (path) => {
       repo.calls.push(`modifiedTimeMs:${path}`);
       const mtime = repo.mtimes.get(path);
-      if (mtime === undefined) throw new Error(`ENOENT: no mtime seeded for '${path}'`);
+      if (mtime === undefined) {
+        // The ABSENCE class carries the code, exactly like a real stat.
+        const err = new Error(`ENOENT: no mtime seeded for '${path}'`) as Error & {
+          code?: string;
+        };
+        err.code = 'ENOENT';
+        throw err;
+      }
       return mtime;
     },
     isStrictClean: async (path) => {
@@ -131,6 +141,10 @@ function effectsOf(repo: FakeRepo): CleanupEffects {
       repo.calls.push(`branchDelete:${branch}`);
       repo.branchDeletes.push({ repoRoot, branch });
     },
+    worktreePrune: async (repoRoot) => {
+      repo.calls.push(`worktreePrune:${repoRoot}`);
+      repo.prunes.push(repoRoot);
+    },
     branchTimeMs: async (repoRoot, branch) => {
       repo.calls.push(`branchTimeMs:${branch}`);
       const tip = repo.branchTimes.get(branch);
@@ -140,11 +154,12 @@ function effectsOf(repo: FakeRepo): CleanupEffects {
   };
 }
 
-/** Seed one aged clean candidate (the common fixture). */
+/** Seed one aged clean candidate (the common fixture; old dir, old tip). */
 function seedAgedClean(repo: FakeRepo, path = WT_PATH, branch = WT_BRANCH): void {
   repo.worktrees.push({ path, branch });
   repo.branches.push(branch);
   repo.mtimes.set(path, NOW - 60_000);
+  repo.branchTimes.set(branch, NOW - 60_000);
   repo.clean.add(path);
 }
 
@@ -173,6 +188,7 @@ describe('sweep.cleanup dry-run default (UC row 13)', () => {
     repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
     repo.branches.push(WT_BRANCH);
     repo.mtimes.set(WT_PATH, NOW - 60_000);
+    repo.branchTimes.set(WT_BRANCH, NOW - 60_000);
     const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, force: true });
     expect(report.dryRun).toBe(true);
     expect(report.removed).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
@@ -200,6 +216,7 @@ describe('sweep.cleanup the dirty ladder is explicit-only', () => {
     repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
     repo.branches.push(WT_BRANCH);
     repo.mtimes.set(WT_PATH, NOW - 60_000);
+    repo.branchTimes.set(WT_BRANCH, NOW - 60_000);
     // Not in `clean`: porcelain non-empty semantics.
     const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
     expect(report.removed).toEqual([]);
@@ -219,6 +236,7 @@ describe('sweep.cleanup the dirty ladder is explicit-only', () => {
     repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
     repo.branches.push(WT_BRANCH);
     repo.mtimes.set(WT_PATH, NOW - 60_000);
+    repo.branchTimes.set(WT_BRANCH, NOW - 60_000);
     const report = await okReport(makeCleanup(effectsOf(repo)), {
       ...INPUT,
       dryRun: false,
@@ -234,6 +252,7 @@ describe('sweep.cleanup the dirty ladder is explicit-only', () => {
     repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
     repo.branches.push(WT_BRANCH);
     repo.mtimes.set(WT_PATH, NOW - 1_000); // younger than the 5s cutoff
+    repo.branchTimes.set(WT_BRANCH, NOW - 60_000); // the tip is older than the dir
     const report = await okReport(makeCleanup(effectsOf(repo)), {
       ...INPUT,
       dryRun: false,
@@ -312,6 +331,7 @@ describe('sweep.cleanup removal ordering and kept accounting', () => {
     repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
     repo.branches.push(WT_BRANCH);
     repo.mtimes.set(WT_PATH, NOW - 60_000); // aged…
+    repo.branchTimes.set(WT_BRANCH, NOW - 60_000); // …and the tip is old too
     // …but dirty → skipped; the branch must survive with its tree.
     const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
     expect(report.skippedDirty).toHaveLength(1);
@@ -327,6 +347,166 @@ describe('sweep.cleanup removal ordering and kept accounting', () => {
     const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
     expect(report.branchesRemoved).toEqual([]);
     expect(repo.branchDeletes).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Registered-but-missing residue, branch-aware age, in-lock revalidation
+//     (PR 156 r1: A, H, I)
+// ---------------------------------------------------------------------------
+
+describe('sweep.cleanup residue, branch-aware age, in-lock revalidation', () => {
+  test('A: a REGISTERED-but-missing dir is pruned residue — ok result, other candidates still processed', async () => {
+    const repo = fakeRepo();
+    // The residue: registered with a branch, but NO dir and NO mtime — the
+    // age probe hits the absence class. Its stale branch tip is YOUNG, so
+    // the branch-only sweep probes it and leaves it in place.
+    repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
+    repo.branches.push(WT_BRANCH);
+    repo.branchTimes.set(WT_BRANCH, NOW - 1_000);
+    // A healthy aged clean candidate that must still be processed.
+    seedAgedClean(repo, '/runs/wt/fix/cli', 'cq/09-16a/fix/cli');
+    const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
+    expect(report.pruned).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
+    expect(repo.prunes).toEqual([REPO_ROOT]);
+    // The healthy candidate was still removed.
+    expect(report.removed).toEqual([{ path: '/runs/wt/fix/cli', branch: 'cq/09-16a/fix/cli' }]);
+    // The residue's branch was NOT deleted here — it stays branch-only-
+    // sweep eligible (below).
+    expect(repo.branchDeletes.some((d) => d.branch === WT_BRANCH)).toBe(false);
+  });
+
+  test('A: the pruned residue branch stays branch-only-sweep eligible and is aged out in the same run', async () => {
+    const repo = fakeRepo();
+    repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
+    repo.branches.push(WT_BRANCH);
+    repo.branchTimes.set(WT_BRANCH, NOW - 60_000); // the stale branch is old
+    const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
+    expect(report.pruned).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
+    // After the prune the branch has no worktree → the branch-only sweep
+    // (which now sees it as worktree-less) deletes it.
+    expect(report.branchesRemoved).toEqual([WT_BRANCH]);
+    expect(repo.branchDeletes).toEqual([{ repoRoot: REPO_ROOT, branch: WT_BRANCH }]);
+  });
+
+  test('A: dry-run lists the pruned row as would-be and calls no mutator (prune included)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
+    repo.branches.push(WT_BRANCH);
+    repo.branchTimes.set(WT_BRANCH, NOW - 1_000); // young stale branch — probed, left alone
+    const report = await okReport(makeCleanup(effectsOf(repo)), INPUT);
+    expect(report.dryRun).toBe(true);
+    expect(report.pruned).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
+    expect(repo.prunes).toHaveLength(0);
+    expect(repo.removes).toHaveLength(0);
+    expect(repo.branchDeletes).toHaveLength(0);
+  });
+
+  test('A: a NON-absence stat fault on the age probe still fails the whole op', async () => {
+    const repo = fakeRepo();
+    repo.worktrees.push({ path: WT_PATH, branch: WT_BRANCH });
+    repo.branches.push(WT_BRANCH);
+    const effects: CleanupEffects = {
+      ...effectsOf(repo),
+      modifiedTimeMs: async () => {
+        const err = new Error('EACCES: permission denied, stat') as Error & { code?: string };
+        err.code = 'EACCES';
+        throw err;
+      },
+    };
+    const error = await failedAt(makeCleanup(effects), INPUT);
+    expect(error).toMatch(/could not read the age of worktree/);
+    expect(repo.prunes).toHaveLength(0);
+  });
+
+  test('H: an OLD dir with a FRESH tip commit is KEPT — the age basis includes branch activity', async () => {
+    const repo = fakeRepo();
+    seedAgedClean(repo);
+    repo.mtimes.set(WT_PATH, NOW - 60_000); // the dir is old…
+    repo.branchTimes.set(WT_BRANCH, NOW - 1_000); // …but the tip commit is fresh
+    const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
+    expect(report.removed).toEqual([]);
+    expect(repo.removes).toHaveLength(0);
+    expect(repo.branchDeletes).toHaveLength(0);
+    const keptRow = report.kept.find((k) => k.path === WT_PATH);
+    expect(keptRow).toBeDefined();
+    // The reason NAMES the recent commit activity — the thing branch -D
+    // would have destroyed.
+    expect(keptRow?.reason).toMatch(/recent commit/);
+    expect(keptRow?.reason).toContain(WT_BRANCH);
+  });
+
+  test('I: a tree that goes DIRTY between probe and guard is not removed — the row names the revalidation', async () => {
+    const repo = fakeRepo();
+    seedAgedClean(repo);
+    let cleanProbes = 0;
+    const effects: CleanupEffects = {
+      ...effectsOf(repo),
+      isStrictClean: async (path) => {
+        cleanProbes += 1;
+        repo.calls.push(`isStrictClean:${path}`);
+        // First probe (classification): clean. Revalidation (inside the
+        // guard): dirty — the state flipped.
+        return cleanProbes === 1;
+      },
+    };
+    const report = await okReport(makeCleanup(effects), { ...INPUT, dryRun: false });
+    expect(report.removed).toEqual([]);
+    expect(repo.removes).toHaveLength(0);
+    expect(repo.branchDeletes).toHaveLength(0);
+    expect(report.skippedDirty).toEqual([
+      {
+        path: WT_PATH,
+        reason: match.stringMatching(/revalidated inside the mutex.*went dirty/s),
+      },
+    ]);
+    // Both probes ran: classification + in-lock revalidation.
+    expect(cleanProbes).toBe(2);
+  });
+
+  test('I: a dir that goes MISSING between probe and guard is not removed — kept, never stale-evidence removal', async () => {
+    const repo = fakeRepo();
+    seedAgedClean(repo);
+    let mtimeProbes = 0;
+    const effects: CleanupEffects = {
+      ...effectsOf(repo),
+      modifiedTimeMs: async (path) => {
+        mtimeProbes += 1;
+        repo.calls.push(`modifiedTimeMs:${path}`);
+        if (mtimeProbes === 1) return NOW - 60_000; // the classification probe: old
+        const err = new Error(`ENOENT: gone before the guard '${path}'`) as Error & {
+          code?: string;
+        };
+        err.code = 'ENOENT';
+        throw err; // the revalidation probe: missing
+      },
+    };
+    const report = await okReport(makeCleanup(effects), { ...INPUT, dryRun: false });
+    expect(report.removed).toEqual([]);
+    expect(repo.prunes).toHaveLength(0); // no prune inside revalidation either
+    expect(repo.removes).toHaveLength(0);
+    const keptRow = report.kept.find((k) => k.path === WT_PATH);
+    expect(keptRow?.reason).toMatch(/revalidated inside the mutex/);
+  });
+
+  test('I: a tree that goes YOUNG between probe and guard is not removed', async () => {
+    const repo = fakeRepo();
+    seedAgedClean(repo);
+    let mtimeProbes = 0;
+    const effects: CleanupEffects = {
+      ...effectsOf(repo),
+      modifiedTimeMs: async (path) => {
+        mtimeProbes += 1;
+        repo.calls.push(`modifiedTimeMs:${path}`);
+        // First probe: old. Revalidation: touched — young again.
+        return mtimeProbes === 1 ? NOW - 60_000 : NOW - 1_000;
+      },
+    };
+    const report = await okReport(makeCleanup(effects), { ...INPUT, dryRun: false });
+    expect(report.removed).toEqual([]);
+    expect(repo.removes).toHaveLength(0);
+    const keptRow = report.kept.find((k) => k.path === WT_PATH);
+    expect(keptRow?.reason).toMatch(/revalidated inside the mutex.*younger than the cutoff/s);
   });
 });
 
@@ -457,18 +637,28 @@ describe('sweep.cleanup fault paths', () => {
     expect(repo.removes).toHaveLength(0);
   });
 
-  test('a worktreeRemove fault (real run) is a failed result naming the tree', async () => {
+  test('a worktreeRemove fault (real run) is a failed result naming the tree AND the removals already completed', async () => {
     const repo = fakeRepo();
-    seedAgedClean(repo);
+    seedAgedClean(repo); // the FIRST candidate — removed successfully
+    seedAgedClean(repo, '/runs/wt/fix/cli', 'cq/09-16a/fix/cli'); // the SECOND — faults
     const effects: CleanupEffects = {
       ...effectsOf(repo),
-      worktreeRemove: async () => {
-        throw new Error('git worktree remove failed — contains modified files');
+      worktreeRemove: async (repoRoot, path, opts) => {
+        if (path === '/runs/wt/fix/cli') {
+          throw new Error('git worktree remove failed — contains modified files');
+        }
+        repo.calls.push(`worktreeRemove:${path}`);
+        repo.removes.push({ repoRoot, path, force: opts?.force === true });
       },
     };
     const error = await failedAt(makeCleanup(effects), { ...INPUT, dryRun: false });
     expect(error).toMatch(/could not remove worktree/);
+    expect(error).toContain('/runs/wt/fix/cli');
+    // B: the already-completed removal is appended to the error — completed
+    // work is never invisible.
+    expect(error).toMatch(/completed before the fault/);
     expect(error).toContain(WT_PATH);
+    expect(error).toContain(WT_BRANCH);
   });
 
   test('a branch-age fault is a failed result naming the branch', async () => {
@@ -626,7 +816,83 @@ describe('sweep.cleanup boundary', () => {
       'listBranches',
       'listWorktrees',
       'modifiedTimeMs',
+      'worktreePrune',
       'worktreeRemove',
     ]);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 8. The subprocess adapter against REAL git (the dirty-refusal backstop,
+//    PR 156 r1 D)
+// ---------------------------------------------------------------------------
+
+describe('subprocess cleanup effects (real git smoke)', () => {
+  // Same auto-maintenance suppression and BOUNDED RETRY as the
+  // worktreeFor.test.ts real-git idiom: the assertions are never relaxed,
+  // a stalled spawn retries instead.
+  const GIT_CALL_TIMEOUT_MS = 6_000;
+  const GIT_CALL_ATTEMPTS = 4;
+  const run = (args: string[], cwd: string): Promise<string> =>
+    new Promise((resolve, reject) => {
+      execFile(
+        'git',
+        ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
+        { cwd, timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
+        (error, stdout, stderr) => {
+          if (error !== null) {
+            reject(new Error(stderr.trim() || error.message));
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    });
+  const resilient = async <T>(step: () => Promise<T>): Promise<T> => {
+    let last: unknown;
+    for (let attempt = 1; attempt <= GIT_CALL_ATTEMPTS; attempt++) {
+      try {
+        return await step();
+      } catch (err) {
+        last = err;
+      }
+    }
+    throw last;
+  };
+
+  test('init → worktree add → dirty: plain remove REJECTED by git → --force succeeds → branchTimeMs parses → branch -D works', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cleanup-smoke-'));
+    try {
+      await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.name', 'T'], dir));
+      mkdirSync(join(dir, 'seed'), { recursive: true });
+      writeFileSync(join(dir, 'seed', 'data.txt'), 'tracked');
+      await resilient(() => run(['-C', dir, 'add', '.'], dir));
+      await resilient(() => run(['-C', dir, 'commit', '-m', 'seed tracked content'], dir));
+      const wtPath = join(dir, 'wt', 'fix', 'core');
+      await resilient(() =>
+        run(['-C', dir, 'worktree', 'add', '-b', 'cq/x/fix/core', wtPath, 'main'], dir),
+      );
+      // Dirty the tree (untracked file: porcelain non-empty).
+      writeFileSync(join(wtPath, 'dirty.txt'), 'dirty');
+
+      const effects = makeSubprocessCleanupEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
+      // THE BACKSTOP: git itself refuses a dirty plain removal — the
+      // adapter builds NO --flag unless the op's explicit force reached it.
+      await expect(resilient(() => effects.worktreeRemove(dir, wtPath))).rejects.toThrow(
+        /contains modified or untracked/,
+      );
+      // --force is the explicit dirty path and succeeds.
+      await resilient(() => effects.worktreeRemove(dir, wtPath, { force: true }));
+      // The branch age parses as an integer ms (the H age-basis half).
+      const tipMs = await resilient(() => effects.branchTimeMs(dir, 'cq/x/fix/core'));
+      expect(Number.isInteger(tipMs)).toBe(true);
+      expect(tipMs).toBeGreaterThan(0);
+      // branch -D works AFTER the removal — no worktree holds the branch.
+      await resilient(() => effects.branchDelete(dir, 'cq/x/fix/core'));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
 });

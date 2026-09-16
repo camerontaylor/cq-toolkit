@@ -2,13 +2,15 @@
 // (src/ops/sweep/salvage.ts; UC §1 row 7; R2 D8).
 //
 // Pinned here, on injected fake effects unless stated:
-//   1. THE CLASS TABLE (R2 D8): clean-done → reuse; half-done (strictly
-//      clean, partial journal progress — an EXPLICIT allTerminal:false
-//      with or without a lastStep, or a recorded lastStep) → resume;
-//      dirty → preserve; absent path → an absent ROW, not an error; a
-//      FAILED liveness or clean probe → indeterminate NAMING the fault —
-//      never discard, never a silent skip. reuse ONLY when the journal
-//      tail is absent/evidence-free or allTerminal is true.
+//   1. THE CLASS TABLE (R2 D8 + I9): reuse ONLY when the journal records
+//      allTerminal true — the one trusted done evidence; resume for every
+//      other strictly-clean tree (an EXPLICIT allTerminal:false with or
+//      without a lastStep, a recorded lastStep, or a journal tail ABSENT/
+//      evidence-free — interrupted-before-first-write carries no done
+//      evidence, and done-ness is never concluded from nothing); dirty →
+//      preserve; absent path → an absent ROW, not an error; a FAILED
+//      liveness or clean probe → indeterminate NAMING the fault — never
+//      discard, never a silent skip.
 //   2. THE DIRTY LADDER IS EXPLICIT-ONLY: salvage NEVER classifies a dirty
 //      tree `discard` without the explicit discardDirty flag; with the flag
 //      the row only MARKS discard-eligibility (stash-first) — the seam has
@@ -125,14 +127,17 @@ describe('sweep.salvage classification (UC row 7, R2 D8)', () => {
     expect(row.reason).toContain('4');
   });
 
-  test('resume requires POSITIVE journal evidence: strictly clean with no journal tail is reuse, not resume', async () => {
+  test('journal-ABSENT clean trees classify resume — interrupted-before-first-write carries NO done evidence', async () => {
     const world = fakeWorld();
     world.dirs.add(ENTRY);
     world.clean.add(ENTRY);
     const plan = await okPlan(makeSalvage(effectsOf(world)), inputOf([{ path: ENTRY }]));
     const row = plan.rows[0] as SalvageRow;
-    expect(row.class).toBe('reuse');
-    expect(row.reason).toMatch(/no journal tail/);
+    expect(row.class).toBe('resume');
+    // The reason NAMES the absent evidence: done-ness is never concluded
+    // from nothing (I9); re-running on a clean tree is safe.
+    expect(row.reason).toMatch(/journal tail is ABSENT/);
+    expect(row.reason).toMatch(/concluding done-ness from no evidence is not/);
   });
 
   test('EXPLICIT allTerminal:false with NO lastStep is positive evidence — resume, reason names no step', async () => {
@@ -151,7 +156,7 @@ describe('sweep.salvage classification (UC row 7, R2 D8)', () => {
     expect(row.reason).not.toMatch(/last terminal step/);
   });
 
-  test('a journal tail with neither an explicit marker nor a lastStep carries no positive evidence — reuse', async () => {
+  test('a journal tail with neither an explicit marker nor a lastStep carries no done evidence — resume (I9)', async () => {
     const world = fakeWorld();
     world.dirs.add(ENTRY);
     world.clean.add(ENTRY);
@@ -160,8 +165,8 @@ describe('sweep.salvage classification (UC row 7, R2 D8)', () => {
       inputOf([{ path: ENTRY, journal: {} }]),
     );
     const row = plan.rows[0] as SalvageRow;
-    expect(row.class).toBe('reuse');
-    expect(row.reason).toMatch(/no positive evidence/);
+    expect(row.class).toBe('resume');
+    expect(row.reason).toMatch(/no positive evidence of done-ness/);
   });
 
   test('a DIRTY tree is preserve — REQUIRED: never discard without the explicit flag', async () => {
@@ -452,6 +457,15 @@ describe('sweep.salvage boundary', () => {
       inputOf([{ path: '--upstream=x' }]),
     );
     expect(error).toMatch(/must not start with '-'/);
+  });
+
+  test('a RELATIVE path is refused — it would canonicalize against the process CWD and lie', async () => {
+    const error = await failedAt(
+      makeSalvage(effectsOf(fakeWorld())),
+      inputOf([{ path: 'runs/wt/fix/core' }]),
+    );
+    expect(error).toMatch(/must be an ABSOLUTE path/);
+    expect(error).toMatch(/process CWD/);
   });
 
   test('branch and runPrefix metadata are shape-guarded', async () => {
