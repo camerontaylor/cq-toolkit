@@ -135,7 +135,10 @@ function effectsOf(repo: FakeRepo): WorktreeEffects {
       repo.calls.push(`pathExists:${p}`);
       return repo.dirs.has(p);
     },
-    trackedFilesUnder: async (p) => repo.tracked.get(p) ?? [],
+    trackedFilesUnder: async (worktreePath, relTarget) => {
+      repo.calls.push(`trackedFilesUnder:${worktreePath}|${relTarget}`);
+      return repo.tracked.get(relTarget) ?? [];
+    },
     isStrictClean: async (p) => {
       repo.calls.push(`isStrictClean:${p}`);
       return repo.clean.has(p);
@@ -399,7 +402,7 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     const repo = fakeRepo();
     repo.worktrees = [{ path: PATH, branch: BRANCH }];
     repo.clean.add(PATH); // files unmodified, so strict-clean PASSES…
-    repo.tracked.set(`${PATH}/.cq/baseline`, ['.cq/baseline/committed.data']);
+    repo.tracked.set('.cq/baseline', ['.cq/baseline/committed.data']);
     const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
       ...INPUT,
       baselineCacheDirs: ['.cq/baseline'],
@@ -407,6 +410,11 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     expect(error).toMatch(/refused baseline cache entries/);
     expect(error).toMatch(/tracked file/);
     expect(error).toContain('.cq/baseline');
+    // The query ran against the CANDIDATE worktree (jGSnx) — its index,
+    // not the primary's.
+    expect(
+      repo.calls.some((call) => call.startsWith(`trackedFilesUnder:${PATH}|.cq/baseline`)),
+    ).toBe(true);
     // Refusal is total: the tracked contents were never touched.
     expect(repo.removed).toHaveLength(0);
   });
@@ -880,7 +888,10 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
       await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));
       await resilient(() => run(['-C', dir, 'config', 'user.name', 'T'], dir));
-      await resilient(() => run(['-C', dir, 'commit', '--allow-empty', '-m', 'init'], dir));
+      mkdirSync(join(dir, 'cache'), { recursive: true });
+      writeFileSync(join(dir, 'cache', 'data.txt'), 'tracked seed');
+      await resilient(() => run(['-C', dir, 'add', '.'], dir));
+      await resilient(() => run(['-C', dir, 'commit', '-m', 'seed tracked cache content'], dir));
       const effects = makeSubprocessWorktreeEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
 
       expect(await resilient(() => effects.listBranches())).toEqual(['main']);
@@ -897,9 +908,12 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       );
       expect(await resilient(() => effects.pathExists(wtPath))).toBe(true);
       expect(await resilient(() => effects.isStrictClean(wtPath))).toBe(true);
-      // The commit is EMPTY, so ls-files under the worktree reports nothing —
-      // the tracked-content refusal (jFhPh) keys on exactly this effect.
-      expect(await resilient(() => effects.trackedFilesUnder(wtPath))).toEqual([]);
+      // jGSnx: the tracked-content query runs against the CANDIDATE
+      // worktree (cwd = its root) and reads THAT index — the tracked seed
+      // under the cache dir is visible from the linked worktree.
+      expect(await resilient(() => effects.trackedFilesUnder(wtPath, 'cache'))).toEqual([
+        'cache/data.txt',
+      ]);
       const worktrees = await resilient(() => effects.listWorktrees());
       const onBranch = worktrees.find((w) => w.branch === 'cq/x/fix/core');
       expect(onBranch?.path).toMatch(/wt\/fix\/core$/);
@@ -934,7 +948,13 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
       await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));
       await resilient(() => run(['-C', dir, 'config', 'user.name', 'T'], dir));
-      await resilient(() => run(['-C', dir, 'commit', '--allow-empty', '-m', 'init'], dir));
+      // Seed TRACKED content under a cache dir: the linked worktree will
+      // carry it after checkout, so the eviction refusal (jFhPh) can be
+      // exercised against a REAL candidate index.
+      mkdirSync(join(dir, 'cache-dir'), { recursive: true });
+      writeFileSync(join(dir, 'cache-dir', 'committed.data'), 'tracked');
+      await resilient(() => run(['-C', dir, 'add', '.'], dir));
+      await resilient(() => run(['-C', dir, 'commit', '-m', 'seed tracked cache content'], dir));
 
       let adds = 0;
       const subprocess = makeSubprocessWorktreeEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
@@ -974,6 +994,19 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       expect(viaLink.path).toBe(canonicalFirst);
       expect(viaLink.requestedBase).toBe('main');
       expect(adds).toBe(1); // the second call did NOT create
+
+      // jGSnx end-to-end: the eviction of a cache dir holding TRACKED files
+      // refuses the reuse — the candidate index is queried through the
+      // candidate worktree, and the tracked contents were never deleted.
+      const refused = await resilient(() =>
+        op({ ...input, worktreesDir: join(dir, 'wt-link'), baselineCacheDirs: ['cache-dir'] }),
+      );
+      expect(refused.status).toBe('failed');
+      if (refused.status === 'failed') {
+        expect(refused.error).toMatch(/tracked file/);
+        expect(refused.error).toContain('cache-dir');
+      }
+      expect(adds).toBe(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

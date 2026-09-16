@@ -145,12 +145,15 @@ export interface WorktreeEffects {
    */
   pathExists(p: string): Promise<boolean>;
   /**
-   * The tracked files under `targetAbsPath` (`git ls-files -- <target>`),
-   * empty when none. The op only tests the COUNT: a non-empty result marks
-   * a baselineCacheDirs entry as holding tracked content, which must never
-   * be deleted (deleting would dirty the certified tree — I7/UC row 20).
+   * The tracked files under `relTarget` (worktree-relative) INSIDE the
+   * worktree at `worktreePath` — the query MUST run against that worktree
+   * (its cwd, its index): a sibling worktree's files live outside the
+   * primary's index scope (jGSnx). Empty when none. The op only tests the
+   * COUNT: a non-empty result marks a baselineCacheDirs entry as holding
+   * tracked content, which must never be deleted (deleting would dirty the
+   * certified tree — I7/UC row 20).
    */
-  trackedFilesUnder(targetAbsPath: string): Promise<string[]>;
+  trackedFilesUnder(worktreePath: string, relTarget: string): Promise<string[]>;
   /**
    * STRICT clean: `git status --porcelain` EMPTY semantics — untracked files count as dirty.
    */
@@ -318,14 +321,13 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
           refusals.push(`'${rel}' (${symlinkFault})`);
           continue;
         }
-        const inTree = resolve(candidate.real, rel);
         let tracked: string[];
         try {
-          tracked = await git.trackedFilesUnder(inTree);
+          tracked = await git.trackedFilesUnder(candidate.real, rel);
         } catch (err) {
           return {
             status: 'failed',
-            error: `sweep: could not check '${inTree}' for tracked files — ${messageOf(err)}`,
+            error: `sweep: could not check '${rel}' in '${candidate.real}' for tracked files — ${messageOf(err)}`,
           };
         }
         if (tracked.length > 0) {
@@ -880,10 +882,13 @@ export function makeSubprocessWorktreeEffects(
         throw err;
       }
     },
-    trackedFilesUnder: async (targetAbsPath) =>
-      // One repo-relative path per line — the same non-empty-line shape the
-      // branch-ref parser handles; only the COUNT matters to the op.
-      parseBranchRefs(await runGit(['ls-files', '--', targetAbsPath], repoRoot, timeoutMs)),
+    trackedFilesUnder: async (worktreePath, relTarget) =>
+      // Runs against the CANDIDATE worktree (cwd = its root, so it reads
+      // THAT worktree's index): a sibling worktree's files are outside the
+      // primary's index scope (jGSnx). One path per line — the same
+      // non-empty-line shape the branch-ref parser handles; only the COUNT
+      // matters to the op.
+      parseBranchRefs(await runGit(['ls-files', '--', relTarget], worktreePath, timeoutMs)),
     isStrictClean: async (worktreePath) =>
       (await runGit(['status', '--porcelain'], worktreePath, timeoutMs)).trim() === '',
     worktreeAdd: async (add) => {
