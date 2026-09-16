@@ -17,7 +17,7 @@
     "cq": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && mkdir -p dist/ops/merge/prompts && cp src/ops/merge/prompts/*.md dist/ops/merge/prompts/",
     "typecheck": "npm run check:static",
     "lint": "npm run check:static",
     "test": "vitest run",

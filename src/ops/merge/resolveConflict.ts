@@ -12,12 +12,15 @@
 // invocation): the frozen SandboxPolicy carries an isolation LEVEL and no
 // network field, and a workspace-write sandbox blocks network egress — but
 // this agent MUST push the resolved branch over the network. Level 'none'
-// is therefore the ONLY correct request here. It is not a grant of anarchy:
-// write-capability is bounded by the worktree cwd (the driver runs the CLI
-// with cwd = the prepared worktree), the allowlisted tool surface
-// ({read, edit, run} in allowlist mode), and the prompt's hard constraints
-// (no force, no squash, no rebase, no amend, no protected-branch
-// destination) — NOT by a sandbox level.
+// is therefore the ONLY correct request here. It is not a grant of anarchy
+// — but neither is it confinement: there is NO OS-level confinement on
+// this seam. The worktree cwd (the driver runs the CLI with cwd = the
+// prepared worktree) is a CONVENTION the prompt enforces, not an OS bound;
+// the bounds that remain are the allowlisted tool surface ({read, edit,
+// run} in allowlist mode), the prompt's hard constraints (no force, no
+// squash, no rebase, no amend, no protected-branch destination), and the
+// wall-clock budget request (Budget.wallClockMs) — not a sandbox level. A
+// future sandbox that does carry network semantics must re-derive this.
 //
 // THE DECISION CONTRACT (the op's output vocabulary, UC row 44): the agent
 // ends with EXACTLY ONE JSON line {"decision":"acted|escalate","summary":
@@ -36,8 +39,13 @@
 //      only the RUNTIME requirement — reaching dispatch without
 //      input.modelSpec is 'failed', never a fabricated vendor default
 //      (the plan may bind the spec late; dispatch may not).
-//   b. fetchRef(headRefFor(pr)) — a nonzero exit means the head's truth is
-//      unavailable → 'failed', fail closed before any worktree exists.
+//   b. fetchRef(headRefFor(pr)) then validateRef(headRefFor(pr)) — the
+//      fetch makes the head's truth local, the validate captures the
+//      PRE-dispatch BASELINE sha the acted verification (h) compares
+//      against. A nonzero fetch or a throwing validate → 'failed', fail
+//      closed before any worktree exists; an UNRESOLVABLE head (validate
+//      !ok) is unverifiable, not failed — the flow proceeds and the
+//      verification is skipped.
 //   c. withPreparedWorktree (effects.js) owns prepare → fn →
 //      remove-in-finally; the op never calls worktreePrepare/Remove
 //      itself. A throw out of it (spawn-level worktree failure, or a
@@ -57,9 +65,15 @@
 //   g. parse(structuredOutput) — object or raw-text tolerant path; a
 //      MergeConflictContractError → 'failed' (fail closed — silence is
 //      never success).
-//   h. decision 'acted' → 'ok' {pr, decision:'acted', summary};
-//      'escalate' → 'needs-human' with the summary as the reason ('' →
-//      the default reason). Escalation NEVER lands in a value.
+//   h. decision 'escalate' → 'needs-human' with the summary as the reason
+//      ('' → the default reason), short-circuiting BEFORE the verification.
+//      decision 'acted' is a SELF-REPORT, so it is verified: fetch and
+//      validate the head again — a moved sha → 'ok' {pr, decision:'acted',
+//      summary}; an unchanged sha or an unresolvable-after head →
+//      'indeterminate' (callers assume neither success nor failure); a
+//      fetch/validate THROW in the verification → 'failed' (totality).
+//      Escalation NEVER lands in a value, and an unverified acted is
+//      never 'ok'.
 //
 // SESSIONS-DIR COUPLING: DEFAULT_RESOLVE_SESSIONS_DIR below MUST mirror
 // the subprocess driver's internal defaultSessionsDir (module-private) —
@@ -409,6 +423,19 @@ export function makeResolveConflictOp(
         error: `resolveConflict: fetch ${ref} failed (exit ${fetched.code})${stderrSuffix(fetched.stderr)} — the head's truth is unavailable`,
       };
     }
+    // (b, cont.) The PRE-dispatch baseline sha: what the acted verification
+    // (h) compares against. Unresolvable here is UNVERIFIABLE, not failed —
+    // the flow proceeds and the verification is skipped.
+    let baselineSha: string | undefined;
+    try {
+      const baseline = await effects.validateRef(ref);
+      if (baseline.ok && baseline.sha !== undefined) baselineSha = baseline.sha;
+    } catch (err) {
+      return {
+        status: 'failed',
+        error: `resolveConflict: validateRef ${ref} for pr ${input.pr} threw: ${errorMessage(err)}`,
+      };
+    }
 
     // (c) The worktree lifecycle (prepare → fn → remove-in-finally) is
     // withPreparedWorktree's; the op never calls worktreePrepare/Remove
@@ -438,9 +465,10 @@ export function makeResolveConflictOp(
           // (e) THE INVOCATION — the write-capable surface. sandboxPolicy
           // level 'none' is the ONLY correct request (the sandbox trap in
           // the module doc): the agent must push over the network, and the
-          // frozen policy has no network field — write-capability is
-          // bounded by the worktree cwd, this allowlist, and the prompt's
-          // constraints, NOT by a sandbox level.
+          // frozen policy has no network field. The worktree cwd is a
+          // prompt-enforced convention, NOT an OS bound — the bounds that
+          // remain are this allowlist, the prompt's constraints, and the
+          // wall-clock budget request.
           let result: WorkerResult;
           try {
             result = await driver.run({
@@ -494,22 +522,62 @@ export function makeResolveConflictOp(
             throw err;
           }
 
-          // (h) 'acted' → ok; 'escalate' → needs-human with the summary as
-          // the reason. NEVER ok for an escalation; and an unparseable
-          // output NEVER becomes needs-human — that status is for a DECIDED
-          // escalation only.
-          if (decision.decision === 'acted') {
+          // (h) 'escalate' → needs-human, short-circuiting BEFORE the
+          // verification (a decided escalation needs no head check).
+          // NEVER ok for an escalation; and an unparseable output NEVER
+          // becomes needs-human — that status is for a DECIDED escalation
+          // only.
+          if (decision.decision === 'escalate') {
             return {
-              status: 'ok',
-              value: { pr: input.pr, decision: 'acted', summary: decision.summary },
+              status: 'needs-human',
+              reason:
+                decision.summary === ''
+                  ? 'conflict agent escalated; no summary given'
+                  : decision.summary,
             };
           }
+          // (h, cont.) ACTED IS A SELF-REPORT — verify the head actually
+          // moved before believing it: fetch the truth again, then
+          // validate. Unchanged sha or an unresolvable-after head →
+          // 'indeterminate' (the resolution may or may not have landed —
+          // callers assume neither success nor failure; never ok, never
+          // needs-human). A fetch/validate THROW here is a 'failed'
+          // outcome (totality). An unresolvable PRE baseline skipped the
+          // check entirely — unverifiable is not unproven.
+          if (baselineSha !== undefined) {
+            let verifyFetch: GhResult;
+            try {
+              verifyFetch = await effects.fetchRef(ref);
+            } catch (err) {
+              return {
+                status: 'failed',
+                error: `resolveConflict: verification fetch ${ref} for pr ${input.pr} threw: ${errorMessage(err)}`,
+              };
+            }
+            let moved: { ok: boolean; sha?: string };
+            try {
+              moved = await effects.validateRef(ref);
+            } catch (err) {
+              return {
+                status: 'failed',
+                error: `resolveConflict: verification validateRef ${ref} for pr ${input.pr} threw: ${errorMessage(err)}`,
+              };
+            }
+            if (
+              verifyFetch.code !== 0 ||
+              !moved.ok ||
+              moved.sha === undefined ||
+              moved.sha === baselineSha
+            ) {
+              return {
+                status: 'indeterminate',
+                detail: `conflict agent reported acted but the head ref ${ref} did not move (baseline ${baselineSha})`,
+              };
+            }
+          }
           return {
-            status: 'needs-human',
-            reason:
-              decision.summary === ''
-                ? 'conflict agent escalated; no summary given'
-                : decision.summary,
+            status: 'ok',
+            value: { pr: input.pr, decision: 'acted', summary: decision.summary },
           };
         },
       );

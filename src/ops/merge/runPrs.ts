@@ -20,20 +20,27 @@
 // therefore classifies `deps.refetch()` when the caller supplies the seam.
 // The refreshed set carries the same MergePrsCandidate shape; closed/merged
 // prs MAY be omitted — classifyStage nulls closed classifications and
-// absent prs simply do not re-plan, which is the honest live view. A
-// refetch THROW fails closed: no re-plan, secondPass stays null, and every
-// acted pr gets a needsHuman row 'pass-2 refresh failed: …' — the
-// resolution happened, but re-entry is unproven; never a silent success.
+// absent prs simply do not re-plan, which is the honest live view. In BOTH
+// branches the prs already merged or retargeted in pass 1 are EXCLUDED
+// from pass 2 (see the guarded-pass-2 doc below). A refetch THROW fails
+// closed: no re-plan, secondPass stays null, and every acted pr gets a
+// needsHuman row 'pass-2 refresh failed: …' — the resolution happened, but
+// re-entry is unproven; never a silent success.
 //
-// WHY THE NO-REFETCH PASS 2 IS STILL SAFE: without the seam, pass 2
-// classifies the in-memory candidates — and executeMerges revalidates LIVE
-// state per action (F3 rule a: fetch, then validate; a head that moved or
-// vanished is skipped with a reason — stale — never merged), so stale
-// candidates can only produce skipped-with-reason outcomes, never bad
-// merges. The cost is honesty about waste: pass 2 may re-withhold what a
-// live fetch would have merged. Callers wanting a live second pass pass
-// refetch; the function-valued seam (not an input field) keeps the op's
-// JSON input boundary plain data.
+// WHY THE NO-REFETCH PASS 2 IS GUARDED (not merely "safe"): plain staleness
+// is NOT self-correcting on the in-memory branch. A server-side merge does
+// NOT delete refs/pull/N/head, so executeMerges' per-action revalidation
+// cannot withhold an already-merged pr — an unguarded pass 2 would merge it
+// AGAIN and fail it into a false needsHuman row (the earlier
+// "revalidation withholds stale rows" reading was refuted in review). The
+// guard is therefore structural: every pr in firstPass.merged ∪
+// firstPass.retargeted is EXCLUDED from the pass-2 candidate set, on the
+// in-memory branch AND on the refreshed branch (a fetch that raced a merge
+// must not resurrect a merged pr). What staleness remains is bounded: a
+// conflict still DIRTY in memory can only re-withhold — never re-merge,
+// never fabricate. Callers wanting a live second pass pass refetch; the
+// function-valued seam (not an input field) keeps the op's JSON input
+// boundary plain data.
 //
 // WHY THE needsHuman ROWS ARE DATA: every row is plain { pr, reason } —
 // the CLI layer owns any exit-code mapping (I1: the op never sees exit
@@ -330,9 +337,9 @@ export async function runMergePrs(
   // (only a pushed resolution can change what the next plan sees); the
   // LAST pass — pass cap 2. The candidate set: deps.refetch()'s refreshed
   // view when the seam is present (the resolution is on the remote; the
-  // in-memory snapshot is stale), else the in-memory candidates (safe —
-  // executeMerges revalidates live state per action; see the module doc).
-  // A refetch THROW fails closed: no re-plan, secondPass stays null, and
+  // in-memory snapshot is stale), else the in-memory candidates — GUARDED
+  // by the pass-1 exclusion below either way (see the module doc). A
+  // refetch THROW fails closed: no re-plan, secondPass stays null, and
   // every acted pr is owed a needsHuman row — the resolution happened but
   // re-entry is unproven, never a silent success. Anything still
   // conflicting after pass 2 is the final plan's 'not_eligible', and the
@@ -356,7 +363,16 @@ export async function runMergePrs(
       }
     }
     if (!refreshFailed) {
-      const planned2 = classifyStage(pass2Candidates, nowMs);
+      // Pass-1 outcomes are FINAL for this run: a server-side merge does
+      // not delete refs/pull/N/head, so re-planning a merged pr would
+      // merge it AGAIN (per-action revalidation cannot withhold it) and
+      // fail it into a false needsHuman row. Merged and retargeted prs are
+      // excluded from pass 2 — on the in-memory branch and on the
+      // refreshed branch alike (a fetch that raced a merge must not
+      // resurrect a merged pr).
+      const doneInPass1 = new Set<number>([...firstPass.merged, ...firstPass.retargeted]);
+      const pass2Set = pass2Candidates.filter((candidate) => !doneInPass1.has(candidate.pr));
+      const planned2 = classifyStage(pass2Set, nowMs);
       const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
       const second = await execute(plan2);
       secondPass = second;
@@ -411,8 +427,8 @@ export interface MakeRunMergePrsOpDeps {
 }
 
 /**
- * The `merge.prs` op (the merge.runPrs registry entry binds this default
- * export): the composition with its defaults wired. The effects and the
+ * The `merge.runPrs` op (the registry entry binds this default export):
+ * the composition with its defaults wired. The effects and the
  * conflict-agent op are built LAZILY PER CALL — the effects target THIS
  * run's repoRoot, and the resolve op binds the SAME effects instance (the
  * executor's mutations and the agent's worktree lifecycle share one seam),
@@ -420,9 +436,16 @@ export interface MakeRunMergePrsOpDeps {
  * (exactOptionalPropertyTypes); an absent driver means the resolve op's
  * own default SubprocessDriver. The wrapper passes NO refetch seam — the
  * frozen MergeEffects has no candidate re-fetch capability — so the
- * default op's pass 2 classifies the in-memory candidates (safe, never
- * unsound; see the module doc); SDK callers wanting a live second pass
- * call runMergePrs with a refetch of their own.
+ * default op's pass 2 classifies the in-memory candidates (guarded by the
+ * pass-1 exclusion; see the module doc); SDK callers wanting a live second
+ * pass call runMergePrs with a refetch of their own.
+ *
+ * DEFERRED (review-debt #137 —
+ * https://github.com/camerontaylor/cq-toolkit/issues/137, owned by T4.2
+ * self-hosting wiring): the wall-clock budget forwarded to the resolve op
+ * is a REQUEST on the driver seam, not an enforcement — I8 puts the
+ * governor ladder in charge via Limits.perJobWallClockMs, and shipped
+ * callers do not arm it yet.
  */
 export function makeRunMergePrsOp(
   deps?: MakeRunMergePrsOpDeps,

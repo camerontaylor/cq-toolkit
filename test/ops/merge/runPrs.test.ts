@@ -315,6 +315,49 @@ describe('runMergePrs', () => {
     expect(calls).toHaveLength(1);
   });
 
+  test('no-refetch pass 2 EXCLUDES pass-1 merged prs: 44 never re-merged, 45 still processes', async () => {
+    const candidates = [eligible(44), conflicting(45)];
+    const effects = new FakeMergeEffects();
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'), (input) => {
+      const target = candidates.find((candidate) => candidate.pr === input.pr);
+      if (target !== undefined) target.mergeState = 'CLEAN';
+    });
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    // mergePr(44) EXACTLY once — pass 1 only. A server-side merge does not
+    // delete refs/pull/44/head, so an unguarded pass 2 would re-attempt it
+    // (per-action revalidation cannot withhold a merged pr) and fail it
+    // into a false needsHuman row.
+    const mergeCalls = effects.calls.filter((call) => call.startsWith('merge:'));
+    expect(mergeCalls).toEqual(['merge:44:merge', 'merge:45:merge']);
+    // Pass 2 processed ONLY the flipped pr: 45 merges there; 44 — merged
+    // in pass 1 — is excluded from the pass-2 report entirely.
+    expect(outcome.firstPass.merged).toEqual([44]);
+    expect(outcome.secondPass?.merged).toEqual([45]);
+    expect(outcome.needsHuman).toEqual([]);
+  });
+
+  test('refetch pass 2 also EXCLUDES pass-1 merged prs (a racing fetch cannot resurrect one)', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
+    // The refreshed set still lists pr 44 — as if the fetch raced the
+    // server-side merge: the exclusion must filter it anyway.
+    const { refetch } = fakeRefetch([eligible(44), eligible(45)]);
+
+    const outcome = await runMergePrs(baseInput([eligible(44), conflicting(45)], MODEL_SPEC), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    const mergeCalls = effects.calls.filter((call) => call.startsWith('merge:'));
+    expect(mergeCalls).toEqual(['merge:44:merge', 'merge:45:merge']);
+    expect(outcome.firstPass.merged).toEqual([44]);
+    expect(outcome.secondPass?.merged).toEqual([45]);
+    expect(outcome.needsHuman).toEqual([]);
+  });
+
   test('conflict → acted WITH refetch: pass 2 classifies the REFRESHED set and merges there', async () => {
     const effects = new FakeMergeEffects();
     // The resolve fake does NOT touch the candidates: the in-memory
@@ -600,11 +643,13 @@ describe('runMergePrs', () => {
     const second = await run();
     expect(second).toEqual(first);
     // And the shape is the honest one for a claimed-but-unobserved flip:
-    // the agent acted, the second pass ran, the data still says DIRTY, so
-    // the final plan withholds the pr and the union carries it.
+    // the agent acted, the second pass ran on the guarded set (the
+    // pass-1-merged pr 44 is excluded, so it is not re-merged), the data
+    // still says DIRTY for 45, so the final plan withholds the pr and the
+    // union carries it.
     const outcome = (await run()) as Awaited<ReturnType<typeof runMergePrs>>;
     expect(outcome.secondPass).not.toBeNull();
-    expect(outcome.secondPass?.merged).toEqual([44]);
+    expect(outcome.secondPass?.merged).toEqual([]);
     expect(outcome.needsHuman).toEqual([{ pr: 45, reason: 'not_eligible' }]);
   });
 

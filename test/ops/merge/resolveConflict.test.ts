@@ -25,6 +25,20 @@
 //      trap; wall-clock default and override), and the failure surfaces:
 //      nonzero fetch, throwing worktreePrepare, a driver pre-dispatch
 //      throw.
+//   5. THE ACTED VERIFICATION: 'acted' is a self-report — the op captures
+//      a PRE-dispatch baseline sha (step b) and, only after an acted
+//      parse, re-fetches and re-validates: a moved sha → ok; an unchanged
+//      sha or an unresolvable-after head → indeterminate; a fetch/validate
+//      THROW in the verification → failed; an unresolvable BASELINE skips
+//      the check (unverifiable is not unproven); an escalation
+//      short-circuits BEFORE the verification (no extra validate call).
+//   6. THE SHIPPED PROMPT (the real asset): the actual
+//      prompts/conflict.default.md renders with no placeholder left, the
+//      fetch-before-merge instruction, and the JSON-line contract — and
+//      the op's DEFAULT loader reads that same file (the source-side half
+//      of the dist-shipping regression guard).
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 import type {
   Driver,
@@ -97,27 +111,54 @@ const lateBoundInput = (): ResolveConflictInput => ({
 
 /**
  * THE FAKE EFFECTS — an in-memory MergeEffects, zero real git/gh. Every
- * call lands in `calls` (the exact-sequence log); the two failure surfaces
- * the op can hit are scriptable (nonzero fetchRef, throwing
- * worktreePrepare). The methods the conflict op never calls record too, so
- * an unexpected call is visible in the log.
+ * call lands in `calls` (the exact-sequence log); the failure surfaces the
+ * op can hit are scriptable (nonzero fetchRef, throwing worktreePrepare,
+ * a throwing or unmoved verification). validateRef models a MOVABLE head:
+ * the FIRST call answers `baselineSha` (the op's pre-dispatch capture),
+ * later calls answer `postSha` (the post-acted verification) — postSha
+ * defaults to a MOVED sha, i.e. the acted self-report is true unless a
+ * test says otherwise.
  */
 class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
   fetchCode = 0;
   fetchStderr = '';
   fetchThrows: Error | null = null;
+  /** Nonzero exit for a VERIFICATION fetch (any fetch after the first). */
+  verifyFetchCode = 0;
+  /** Thrown by a VERIFICATION fetch (any fetch after the first). */
+  verifyFetchThrows: Error | null = null;
   prepareThrows: Error | null = null;
+  validateThrows: Error | null = null;
+  /** Thrown by a VERIFICATION validateRef (any validate after the first). */
+  verifyValidateThrows: Error | null = null;
+  /** The pre-dispatch head sha; null = unresolvable (verification skipped). */
+  baselineSha: string | null = 'b'.repeat(40);
+  /** The post-run head sha; null = unresolvable after. Default MOVED. */
+  postSha: string | null = 'c'.repeat(40);
+  private validateCalls = 0;
+  private fetchCalls = 0;
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
-    return { ok: true, sha: 'b'.repeat(40) };
+    this.validateCalls += 1;
+    if (this.validateCalls === 1) {
+      if (this.validateThrows !== null) throw this.validateThrows;
+      return this.baselineSha === null ? { ok: false } : { ok: true, sha: this.baselineSha };
+    }
+    if (this.verifyValidateThrows !== null) throw this.verifyValidateThrows;
+    return this.postSha === null ? { ok: false } : { ok: true, sha: this.postSha };
   }
 
   async fetchRef(ref: string): Promise<GhResult> {
     this.calls.push(`fetch:${ref}`);
-    if (this.fetchThrows !== null) throw this.fetchThrows;
-    return { code: this.fetchCode, stdout: '', stderr: this.fetchStderr };
+    this.fetchCalls += 1;
+    if (this.fetchCalls === 1) {
+      if (this.fetchThrows !== null) throw this.fetchThrows;
+      return { code: this.fetchCode, stdout: '', stderr: this.fetchStderr };
+    }
+    if (this.verifyFetchThrows !== null) throw this.verifyFetchThrows;
+    return { code: this.verifyFetchCode, stdout: '', stderr: '' };
   }
 
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {
@@ -376,13 +417,18 @@ describe('resolveConflict op', () => {
       status: 'ok',
       value: { pr: 44, decision: 'acted', summary: 'merged origin/main and pushed feat/topic' },
     });
-    // The exact sequence: fetch (truth first), prepare, the fn (session
-    // created INSIDE the worktree), then remove-in-finally — prepare and
-    // remove each exactly once, remove after fn.
+    // The exact sequence: fetch + baseline validate (truth first), prepare,
+    // the fn (session created INSIDE the worktree; after the acted parse
+    // the verification re-fetches and re-validates), then
+    // remove-in-finally — prepare and remove each exactly once, remove
+    // after fn.
     expect(effects.calls).toEqual([
       `fetch:${headRefFor(44)}`,
+      `validate:${headRefFor(44)}`,
       `prepare:44@${headRefFor(44)}`,
       'session:/wt/pr-44',
+      `fetch:${headRefFor(44)}`,
+      `validate:${headRefFor(44)}`,
       'remove:/wt/pr-44',
     ]);
     // The session was created with the worktree path as its workspace.
@@ -401,8 +447,10 @@ describe('resolveConflict op', () => {
     // THE SANDBOX TRAP (module doc): level 'none' is the ONLY correct
     // request — a workspace-write sandbox would block the network the
     // push needs, and the frozen SandboxPolicy has no network field to
-    // request it with. Write-capability is bounded by the worktree cwd,
-    // the allowlist above, and the prompt's constraints.
+    // request it with. There is no OS-level confinement on this seam: the
+    // worktree cwd is a prompt-enforced convention, and the bounds that
+    // remain are the allowlist above, the prompt's constraints, and the
+    // wall-clock budget.
     expect(invocation.sandboxPolicy).toEqual({ level: 'none' });
     // Default wall clock (UC row 44's 20 minutes).
     expect(DEFAULT_RESOLVE_WALL_CLOCK_MS).toBe(1_200_000);
@@ -447,11 +495,12 @@ describe('resolveConflict op', () => {
   });
 
   test('escalate path: needs-human with the summary as reason (alias normalized)', async () => {
+    const effects = new FakeMergeEffects();
     const driver = new FakeDriver(
       completed({ decision: 'escalated', summary: 'semantics cannot be reconciled' }),
     );
     const op = makeResolveConflictOp({
-      effects: new FakeMergeEffects(),
+      effects,
       driver,
       createSession: fakeCreateSession().createSession,
       loadPrompt: fakeLoadPrompt,
@@ -461,6 +510,10 @@ describe('resolveConflict op', () => {
       status: 'needs-human',
       reason: 'semantics cannot be reconciled',
     });
+    // The escalation short-circuits BEFORE the acted verification: the
+    // only validateRef is the step-b baseline capture — no extra call.
+    const validateCalls = effects.calls.filter((call) => call.startsWith('validate:'));
+    expect(validateCalls).toEqual([`validate:${headRefFor(44)}`]);
   });
 
   test('escalate without a summary gets the default reason', async () => {
@@ -601,7 +654,11 @@ describe('resolveConflict op', () => {
     // withPreparedWorktree's contract, pinned from the op's side: the
     // prepare throw propagates untouched — fn never ran, so nothing was
     // prepared and there is nothing to remove.
-    expect(effects.calls).toEqual([`fetch:${headRefFor(44)}`, `prepare:44@${headRefFor(44)}`]);
+    expect(effects.calls).toEqual([
+      `fetch:${headRefFor(44)}`,
+      `validate:${headRefFor(44)}`,
+      `prepare:44@${headRefFor(44)}`,
+    ]);
     expect(driver.invocations).toHaveLength(0);
   });
 
@@ -658,5 +715,186 @@ describe('resolveConflict op', () => {
     expect(() => makeResolveConflictOp()).not.toThrow();
     expect(typeof makeResolveConflictOp()).toBe('function');
     expect(typeof resolveConflictOp).toBe('function');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The acted verification ('acted' is a self-report)
+// ---------------------------------------------------------------------------
+
+describe('the acted verification', () => {
+  test('acted + the head MOVED → ok (the happy default)', async () => {
+    const effects = new FakeMergeEffects(); // default: postSha ≠ baselineSha
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    await expect(op(baseInput())).resolves.toEqual({
+      status: 'ok',
+      value: { pr: 44, decision: 'acted', summary: 'pushed' },
+    });
+  });
+
+  test('acted + sha UNCHANGED → indeterminate with the did-not-move detail', async () => {
+    const effects = new FakeMergeEffects();
+    effects.postSha = effects.baselineSha; // the self-report lies
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('indeterminate');
+    if (result.status === 'indeterminate') {
+      expect(result.detail).toContain('did not move');
+      expect(result.detail).toContain(`baseline ${String(effects.baselineSha)}`);
+      expect(result.detail).toContain(headRefFor(44));
+    }
+  });
+
+  test('acted + head UNRESOLVABLE after the run → indeterminate', async () => {
+    const effects = new FakeMergeEffects();
+    effects.postSha = null;
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('indeterminate');
+    if (result.status === 'indeterminate') {
+      expect(result.detail).toContain('did not move');
+    }
+  });
+
+  test('a NONZERO verification fetch → indeterminate (unproven, not failed)', async () => {
+    const effects = new FakeMergeEffects();
+    effects.verifyFetchCode = 1;
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('indeterminate');
+    if (result.status === 'indeterminate') {
+      expect(result.detail).toContain('did not move');
+    }
+  });
+
+  test('a THROWING verification fetch → failed (totality)', async () => {
+    const effects = new FakeMergeEffects();
+    effects.verifyFetchThrows = new Error('verify fetch lost');
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('failed');
+    expect(failedError(result)).toContain('verify fetch lost');
+  });
+
+  test('a THROWING verification validateRef → failed (totality)', async () => {
+    const effects = new FakeMergeEffects();
+    effects.verifyValidateThrows = new Error('verify validate lost');
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('failed');
+    expect(failedError(result)).toContain('verify validate lost');
+  });
+
+  test('an UNRESOLVABLE baseline skips the check: unverifiable is not unproven', async () => {
+    const effects = new FakeMergeEffects();
+    effects.baselineSha = null; // the head did not resolve pre-dispatch
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    await expect(op(baseInput())).resolves.toEqual({
+      status: 'ok',
+      value: { pr: 44, decision: 'acted', summary: 'pushed' },
+    });
+    // The check was skipped: the only validate is the baseline attempt.
+    const validateCalls = effects.calls.filter((call) => call.startsWith('validate:'));
+    expect(validateCalls).toEqual([`validate:${headRefFor(44)}`]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The shipped prompt (the real asset — the dist-shipping guard's source half)
+// ---------------------------------------------------------------------------
+
+describe('the shipped conflict prompt', () => {
+  const promptPath = fileURLToPath(
+    new URL('../../../src/ops/merge/prompts/conflict.default.md', import.meta.url),
+  );
+  const vars = {
+    pr: '44',
+    headBranch: 'feat/topic',
+    baseBranch: 'main',
+    baseRef: 'origin/main',
+    conflictFiles: '- src/a.ts',
+    protectedBranch: 'main',
+    worktree: '/wt/pr-44',
+  };
+
+  test('renders clean: no placeholder left, fetch-before-merge present, contract present', async () => {
+    const real = await readFile(promptPath, 'utf8');
+    expect(real.trim().length).toBeGreaterThan(0);
+
+    const rendered = renderConflictPrompt(real, vars);
+    // Every placeholder the op renders is consumed by the real template.
+    expect(rendered).not.toContain('{{');
+    // The base is refreshed BEFORE the merge — FETCH_HEAD, not a stale
+    // origin/<base> ref.
+    expect(rendered).toContain('git fetch origin main');
+    expect(rendered).toContain('git merge FETCH_HEAD');
+    // The output contract sentence, verbatim.
+    expect(rendered).toContain('{"decision":"acted|escalate","summary":"…"}');
+  });
+
+  test('the DEFAULT loader reads the same file: the default op renders it verbatim', async () => {
+    const real = await readFile(promptPath, 'utf8');
+    const effects = new FakeMergeEffects();
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
+    // NO loadPrompt dep — the op's default loader resolves the asset
+    // beside the module and renders it with exactly these vars.
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+    });
+
+    const result = await op({ ...baseInput(), conflictFiles: ['src/a.ts'] });
+    expect(result.status).toBe('ok');
+    expect(firstInvocation(driver).prompt).toBe(renderConflictPrompt(real, vars));
   });
 });

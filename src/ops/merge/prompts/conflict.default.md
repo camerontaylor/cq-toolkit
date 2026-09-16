@@ -18,7 +18,13 @@ You are the merge-conflict resolver for PR {{pr}}.
 
 ## How to resolve
 
-1. Run `git merge {{baseRef}}` inside `{{worktree}}`.
+1. First refresh the base: run `git fetch origin {{baseBranch}}` inside
+   `{{worktree}}`, then merge `FETCH_HEAD` — the base as it stands RIGHT
+   NOW — never a stale `{{baseRef}}` ref that may predate the base
+   branch's latest state:
+
+       git merge FETCH_HEAD
+
 2. Honor BOTH sides of every conflict. Where the two sides do not
    contradict each other, keep the UNION of both. Where they do,
    reconcile them explicitly; never silently drop either side.
