@@ -515,6 +515,31 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     ).toBe('const fooBar = 1;\n');
   });
 
+  test('a target mutated between read and scan fails the apply — the offsets are stale, nothing written (R2-5)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // The runner performs the drift ITSELF at scan time (ast-grep re-reads
+    // the file then): the analysis-time digest no longer matches.
+    const driftOnScan: RunCheck = async () => {
+      const raw: RawCheckOutput = { stdout: '[]', stderr: '', exitCode: 0 };
+      await store.writeBytes('src/a.ts', Buffer.from('mutated mid-flight;\n', 'utf8'));
+      return raw;
+    };
+    const result = await makeOp(store, driftOnScan)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('file changed during remediation planning');
+      expect(result.error).toContain("'src/a.ts'");
+      expect(result.error).toContain('nothing was written');
+    }
+    // The only write is the drift itself — never a remediation splice.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('mutated mid-flight;\n');
+  });
+
   test('an EMPTY planned-edit set is the honest ok: zero counts plus the note — not a silent success', async () => {
     const store = memoryStore('/ws', {
       ...FIXTURE_FILES,

@@ -167,10 +167,13 @@ export function parseAstGrepJson(stdout: string): AstGrepScanResult {
  * overflow) is a fault BEFORE parse acceptance, even when the captured
  * stdout prefix parses — a killed scan's partial JSON is an incomplete plan,
  * and partial evidence is never passing evidence (I9). Behind a NUMERIC
- * exit, parsable JSON output IS a completed scan — `scan` legitimately exits
- * non-zero when the consumer rule declares error severity and matched —
- * while unparsable output (crash text, truncation) is a fault naming the
- * exit, so a missing binary is an honest `failed`, never an empty match set.
+ * exit, parsable JSON output with EMPTY stderr is a completed scan — the
+ * legit error-severity-matched path keeps stderr empty — while ANY stderr
+ * line is a fault naming it, because `scan` still exits 0 when a REQUESTED
+ * file errors (missing/unreadable) and simply omits it from the matches:
+ * a plan silently missing a requested target is never accepted. Unparsable
+ * output (crash text, truncation) is likewise a fault naming the exit, so a
+ * missing binary is an honest `failed`, never an empty match set.
  */
 export function makeAstGrepScan(
   run: RunCheck,
@@ -199,6 +202,19 @@ export function makeAstGrepScan(
       return {
         ok: false,
         fault: `ast-grep codemod: the scan's exit code was unobservable (timeout kill, signal, or output overflow) — the captured output may be an INCOMPLETE plan and is never accepted; re-run the scan${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
+      };
+    }
+    // STILL before parse acceptance (exit-0 partial results): scan exits 0
+    // even when a REQUESTED file could not be read, reporting it only on
+    // stderr (`ERROR: <file>: No such file…`) and silently omitting it from
+    // the matches — a plan that silently misses a requested target is never
+    // accepted. The severity-matched path keeps stderr empty (verified
+    // against ast-grep 0.45.3), so this never breaks that contract.
+    if (raw.stderr.trim() !== '') {
+      const stderrExcerpt = raw.stderr.trim().slice(0, 200);
+      return {
+        ok: false,
+        fault: `ast-grep codemod: the scan reported errors on stderr (exit code ${raw.exitCode}) — a requested file may be missing or unreadable and silently absent from the plan; re-run with the file present; stderr: ${stderrExcerpt}`,
       };
     }
     const result = parseAstGrepJson(raw.stdout);
@@ -606,6 +622,17 @@ export function makeAstGrepCodemod(
         };
       }
     }
+    // OFFSET-FRESHNESS ANCHOR: ast-grep re-reads the files at SCAN time while
+    // the plan's byte offsets were computed against THIS read — drift in
+    // between would splice a stale plan silently. Digest now, re-verify
+    // after the scan and BEFORE anything is written (dry-run included: a
+    // diff of drifted bytes would mislead the same way).
+    const digestBeforeScan = new Map(
+      files.map((file) => [
+        file,
+        contentDigest(Buffer.from(current.get(file) as Uint8Array).toString('utf8')),
+      ]),
+    );
     const scan = await makeAstGrepScan(run)({
       dir: input.dir,
       rule: input.rule,
@@ -615,6 +642,25 @@ export function makeAstGrepCodemod(
     if (!scan.ok) return { status: 'failed', error: scan.fault };
     const collision = findCollision(scan.outcome.plannedEdits);
     if (collision !== null) return { status: 'failed', error: collision };
+    for (const file of files) {
+      let fresh: Uint8Array;
+      try {
+        fresh = await store.readBytes(file);
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `ast-grep codemod: file changed during remediation planning — '${file}' is no longer readable after the scan; nothing was written; re-run (${messageOf(err)})`,
+        };
+      }
+      const freshDigest = contentDigest(Buffer.from(fresh).toString('utf8'));
+      if (freshDigest !== digestBeforeScan.get(file)) {
+        return {
+          status: 'failed',
+          error: `ast-grep codemod: file changed during remediation planning: '${file}' (digest before scan ${digestBeforeScan.get(file)}, after ${freshDigest}) — the scan re-reads at scan time, so the planned offsets may be stale; nothing was written; re-run`,
+        };
+      }
+      current.set(file, fresh);
+    }
     const plannedEdits = scan.outcome.plannedEdits;
     const note =
       plannedEdits.length === 0

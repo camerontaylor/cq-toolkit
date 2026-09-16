@@ -106,13 +106,14 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     expect(invocation.prompt).toContain(`cluster id: ${fixtureCluster().cluster.id}`);
   });
 
-  test('a caller MAY widen the tool policy and set a budget — an explicit, logged decision', async () => {
+  test('a caller MAY widen the tool policy and set a budget — an explicit, approval-gated decision (R2-2)', async () => {
     const driver = fakeDriver(COMPLETE);
     await makeAgenticRemediation(driver)({
       ...baseInput(),
       toolPolicy: { allow: ['read'], mode: 'allowlist' },
       budget: { maxTokens: 1000 },
       sessionRef: 'session-1',
+      approved: true, // widening beyond read-only is approval-gated
     });
     const invocation = driver.invocations[0] as OpInvocation;
     expect(invocation.toolPolicy).toEqual({ allow: ['read'], mode: 'allowlist' });
@@ -166,6 +167,42 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     if (result.status === 'indeterminate') {
       expect(result.detail).toContain('connection reset');
     }
+  });
+
+  test('a WRITE-CAPABLE policy without approval is refused as needs-human (R2-2)', async () => {
+    const driver = fakeDriver(COMPLETE);
+    const op = makeAgenticRemediation(driver);
+    for (const widening of [
+      { toolPolicy: { allow: ['edit'], mode: 'unrestricted' as const } },
+      { sandboxPolicy: { level: 'workspace-write' as const } },
+      { sandboxPolicy: { level: 'none' as const } },
+      {
+        toolPolicy: { allow: [], mode: 'unrestricted' as const },
+        sandboxPolicy: { level: 'none' as const },
+      },
+    ]) {
+      const result = await op({ ...baseInput(), ...widening });
+      expect(result.status).toBe('needs-human');
+      if (result.status === 'needs-human') {
+        expect(result.reason).toContain('approval-gated decision');
+        expect(result.reason).toContain('approved: true');
+      }
+    }
+    // The widened invocation never reached the driver.
+    expect(driver.invocations).toHaveLength(0);
+  });
+
+  test('a write-capable policy WITH approved: true proceeds to the driver (R2-2)', async () => {
+    const driver = fakeDriver(COMPLETE);
+    const result = await makeAgenticRemediation(driver)({
+      ...baseInput(),
+      toolPolicy: { allow: [], mode: 'unrestricted' },
+      approved: true,
+    });
+    expect(result.status).toBe('ok');
+    expect(driver.invocations).toHaveLength(1);
+    const invocation = driver.invocations[0] as OpInvocation;
+    expect(invocation.toolPolicy).toEqual({ allow: [], mode: 'unrestricted' });
   });
 
   test('a clusterId that does not match cluster.id is a failed result (L3: the id names ITS cluster)', async () => {

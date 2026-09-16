@@ -174,14 +174,43 @@ describe('makeAstGrepScan (the injected-runner verdict policy)', () => {
     expect(result.ok).toBe(true);
   });
 
-  test('unparsable output behind a non-zero exit is a fault naming the exit and the stderr', async () => {
+  test('exit 0 with STDERR errors (a requested file the scan could not read) is a fault naming it — never a partial plan (R2-1)', async () => {
+    // Verified against ast-grep 0.45.3: a missing requested file yields
+    // matches for the others + `ERROR: <file>: ...` on stderr, exit 0.
+    const run = fakeRunner({
+      stdout: JSON.stringify([matchOf('src/a.ts', 6, 13, 'fooBar')]),
+      stderr: 'ERROR: src/nope.ts: No such file or directory (os error 2)',
+      exitCode: 0,
+    });
+    const result = await makeAstGrepScan(run)({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts', 'src/nope.ts'],
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.fault).toContain('errors on stderr');
+    expect(result.fault).toContain('src/nope.ts');
+    expect(result.fault).toContain('silently absent');
+  });
+
+  test('crash text (stderr + non-zero exit) is a fault naming the exit and the stderr (the stderr rule fires first)', async () => {
     const run = fakeRunner({ stdout: '', stderr: 'error: unrecognized flag', exitCode: 2 });
     const result = await makeAstGrepScan(run)({ dir: '/ws', rule: 'r', files: ['src/a.ts'] });
     expect(result.ok).toBe(false);
     if (result.ok) return;
-    expect(result.fault).toContain('not valid JSON');
+    expect(result.fault).toContain('errors on stderr');
     expect(result.fault).toContain('exit code 2');
     expect(result.fault).toContain('unrecognized flag');
+  });
+
+  test('unparsable output behind a non-zero exit with EMPTY stderr is a fault naming the exit', async () => {
+    const run = fakeRunner({ stdout: 'binary \udcf0 garbage', stderr: '', exitCode: 3 });
+    const result = await makeAstGrepScan(run)({ dir: '/ws', rule: 'r', files: ['src/a.ts'] });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.fault).toContain('not valid JSON');
+    expect(result.fault).toContain('exit code 3');
   });
 
   test('an unobservable exit (the missing-binary shape) is a fault saying so — never an empty match set', async () => {
@@ -520,6 +549,42 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     // applied — the runner derives offsets from the full fixture).
     expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
       'const fooBar = 1;\nconst other = fooBar;\n',
+    );
+  });
+
+  test('a file mutated between read and scan fails the apply — the offsets are stale, nothing written (R2-5)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    // The fake runner performs the drift ITSELF at scan time (ast-grep
+    // re-reads the file then): the pre-scan digest no longer matches.
+    const driftOnScan: RunCheck = async () => {
+      const raw: RawCheckOutput = {
+        stdout: JSON.stringify([matchOf('src/a.ts', 6, 13, 'fooBar')]),
+        stderr: '',
+        exitCode: 0,
+      };
+      await store.writeBytes('src/a.ts', Buffer.from('mutated mid-flight;\n', 'utf8'));
+      return raw;
+    };
+    const result = await makeOp(
+      store,
+      driftOnScan,
+    )({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('file changed during remediation planning');
+      expect(result.error).toContain("'src/a.ts'");
+      expect(result.error).toContain('nothing was written');
+    }
+    // The ONLY write to the file is the drift itself — the op never spliced
+    // its (now stale) plan over the drifted bytes.
+    expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
+      'mutated mid-flight;\n',
     );
   });
 

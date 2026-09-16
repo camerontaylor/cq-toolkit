@@ -13,8 +13,12 @@
 //     runner's autonomous path — G3 never dispatches remediation). The
 //     invocation DEFAULTS to toolPolicy mode 'none' and sandbox
 //     'read-only', so even a misbehaving consumer prompt cannot mutate the
-//     workspace through this seam unless a caller explicitly widens the
-//     policy — that widening is the caller's decision to own and log.
+//     workspace through this seam. WIDENING beyond read-only is an
+//     APPROVAL-GATED decision like every other write path in this family:
+//     a write-capable policy (tool mode ≠ 'none' OR sandbox level ≠
+//     'read-only') is refused as `needs-human` unless the input carries
+//     approved: true — "the caller widened it" is the decision, and the
+//     decision carries a human flag.
 //   - Determinism where the op owns it: the prompt is a pure function of
 //     the cluster (members in report order, the canonical signature, the
 //     confidence), with no clocks and no randomness. The MODEL's answer is
@@ -62,16 +66,24 @@ export interface AgenticRemediationInput {
   modelSpec: ModelSpec;
   /**
    * Tool policy for the worker. DEFAULTS to mode 'none' — the worker
-   * proposes; it cannot touch the workspace unless a caller explicitly
-   * widens this (the caller owns that decision).
+   * proposes; it cannot touch the workspace. WIDENING beyond mode 'none' is
+   * an APPROVAL-GATED decision like every other write path in this family:
+   * a write-capable policy (tool mode ≠ 'none' OR sandbox level ≠
+   * 'read-only') is refused as `needs-human` unless {@link approved} is true.
    */
   toolPolicy?: ToolPolicy;
-  /** Sandbox preference. DEFAULTS to 'read-only'. */
+  /** Sandbox preference. DEFAULTS to 'read-only'; widening is approval-gated (see {@link toolPolicy}). */
   sandboxPolicy?: SandboxPolicy;
   /** Budget caps for the one invocation; the driver enforces what it can locally. */
   budget?: Budget;
   /** Opaque driver session handle for multi-turn continuation, when supported. */
   sessionRef?: string;
+  /**
+   * Explicit human approval for a WRITE-CAPABLE policy (tool mode ≠ 'none'
+   * OR sandbox level ≠ 'read-only'). Irrelevant for the read-only defaults,
+   * which need no approval.
+   */
+  approved?: boolean;
 }
 
 /**
@@ -127,6 +139,21 @@ export function makeAgenticRemediation(
       return {
         status: 'failed',
         error: `agentic remediation: clusterId '${input.clusterId}' does not match cluster.id '${input.cluster.id}' — pass the cluster's own id`,
+      };
+    }
+    // WRITE-POLICY APPROVAL GATE: the read-only, tool-less defaults propose
+    // freely, but a caller WIDENING the invocation past them is a write-cap
+    // decision on this family's one budget — refused as `needs-human` unless
+    // the explicit approval flag rides the input (the same defense this
+    // family applies to the codemod path; "the caller widened it" is the
+    // decision, and the decision needs a human flag).
+    const effectiveToolMode = input.toolPolicy?.mode ?? 'none';
+    const effectiveSandbox = input.sandboxPolicy?.level ?? 'read-only';
+    const writeCapable = effectiveToolMode !== 'none' || effectiveSandbox !== 'read-only';
+    if (writeCapable && input.approved !== true) {
+      return {
+        status: 'needs-human',
+        reason: `agentic remediation with a write-capable policy (tool mode '${effectiveToolMode}', sandbox '${effectiveSandbox}') is an approval-gated decision — pass approved: true, or keep the read-only defaults (tool mode 'none', sandbox 'read-only')`,
       };
     }
     if (driver === undefined) {

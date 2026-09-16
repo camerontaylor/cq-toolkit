@@ -448,19 +448,26 @@ export function makeRenderAnalysisReport(
     // names (store-relative — see the discipline note above).
     const sidecarPath = join(input.dir, sidecarFileName(rendered.sidecar.reportFingerprint));
     const markdownPath = join(input.dir, markdownFileName(rendered.sidecar.reportFingerprint));
+    // Partial pair writes are never silent: a markdown fault after the
+    // sidecar landed names the already-landed path(s) (the same discipline
+    // as the codemod path's partial-apply reporting).
+    const landed: string[] = [];
     try {
       await store.writeBytes(
         sidecarFileName(rendered.sidecar.reportFingerprint),
         Buffer.from(serializeAnalysisSidecar(rendered.sidecar), 'utf8'),
       );
+      landed.push(sidecarPath);
       await store.writeBytes(
         markdownFileName(rendered.sidecar.reportFingerprint),
         Buffer.from(rendered.markdown, 'utf8'),
       );
+      landed.push(markdownPath);
     } catch (err) {
+      const alreadyWritten = landed.length === 0 ? '' : `; already written: ${landed.join(', ')}`;
       return {
         status: 'failed',
-        error: `analysis report: could not write the report pair — ${messageOf(err)}`,
+        error: `analysis report: could not write the report pair — ${messageOf(err)}${alreadyWritten}`,
       };
     }
     return {

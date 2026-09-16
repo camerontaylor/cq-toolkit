@@ -414,6 +414,31 @@ describe('makeRenderAnalysisReport (op over an injected store)', () => {
     expect(store.written.size).toBe(0);
   });
 
+  test('a markdown write fault after the sidecar landed names the already-written path (R2-4)', async () => {
+    const store = memoryStore('/ws', { ...fileContents });
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        if (path.startsWith('analysis-') && path.endsWith('.md')) {
+          throw new AnalysisStoreError('analysis store: disk full on the markdown write');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)(opInput('/ws'));
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain('could not write the report pair');
+      expect(result.error).toContain('already written:');
+      expect(result.error).toContain(sidecarFileName(reportFingerprint(fixtureReport())));
+    }
+  });
+
   test('an unreadable target file fails the op naming the file — no sidecar with unverifiable targets', async () => {
     const store = memoryStore('/ws', { 'src/a.ts': 'x\n' }); // src/b.ts missing
     const op = makeOp(store);

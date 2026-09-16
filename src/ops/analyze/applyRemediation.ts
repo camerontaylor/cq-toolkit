@@ -230,6 +230,18 @@ export function makeApplyRemediation(
         };
       }
     }
+    // OFFSET-FRESHNESS ANCHOR: the plan's byte offsets were computed against
+    // THIS read, but ast-grep re-reads the files at SCAN time — drift in
+    // between would splice a stale plan silently. The expected digests are
+    // the SIDECAR EVIDENCE digests (the analysis-time anchor, already
+    // verified pre-scan); after the scan and BEFORE anything is written,
+    // each target is re-digested against them (dry-run included — a diff of
+    // drifted bytes would mislead the same way).
+    const expectedDigest = new Map(
+      sidecar.evidence.flatMap((clusterEvidence) =>
+        clusterEvidence.targets.map((target) => [target.file, target.digest] as const),
+      ),
+    );
     const scan = await makeAstGrepScan(run)({
       dir: storeRootOf(input),
       rule: input.rule,
@@ -239,6 +251,25 @@ export function makeApplyRemediation(
     if (!scan.ok) return { status: 'failed', error: scan.fault };
     const collision = findCollision(scan.outcome.plannedEdits);
     if (collision !== null) return { status: 'failed', error: collision };
+    for (const file of targets) {
+      let fresh: Uint8Array;
+      try {
+        fresh = await store.readBytes(file);
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `remediation: file changed during remediation planning — '${file}' is no longer readable after the scan; nothing was written; re-run analyze.renderAnalysisReport (${messageOf(err)})`,
+        };
+      }
+      const freshDigest = contentDigest(Buffer.from(fresh).toString('utf8'));
+      if (freshDigest !== expectedDigest.get(file)) {
+        return {
+          status: 'failed',
+          error: `remediation: file changed during remediation planning: '${file}' (analysis digest ${expectedDigest.get(file)}, after scan ${freshDigest}) — the scan re-reads at scan time, so the planned offsets may be stale; nothing was written; re-run analyze.renderAnalysisReport`,
+        };
+      }
+      current.set(file, fresh);
+    }
     const plannedEdits = scan.outcome.plannedEdits;
     const note =
       plannedEdits.length === 0

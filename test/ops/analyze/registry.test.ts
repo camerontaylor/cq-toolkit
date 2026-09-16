@@ -492,13 +492,15 @@ describe('the agentic importer resolves (the subprocess floor lane, composed at 
       clusterId: '0deadbe0',
       cluster,
       modelSpec: { model: 'definitely-not-a-model', provider: 'definitely-not-a-provider' },
-      // A wall-clock cap rides the invocation: the resolved SubprocessDriver
-      // must not be able to hang this test even if a binary matched.
+      // Invocation data only: SubprocessDriver IGNORES Budget.wallClockMs
+      // (the governor owns wall clock — I8). The no-hang protection here is
+      // the unroutable model (routing throws PRE-dispatch, before any spawn)
+      // plus this test's own explicit vitest timeout below.
       budget: { wallClockMs: 5_000 },
     });
     // The real driver runs (no binary/spawn succeeds in the sandbox) — the
     // op must surface that honestly, never as an ok with a fabricated
     // WorkerResult and never as a throw across the seam.
     expect(['failed', 'indeterminate']).toContain(result.status);
-  });
+  }, 20_000);
 });
