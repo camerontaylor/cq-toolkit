@@ -106,13 +106,15 @@
 //                    merge commits, run count, retargeted set, seeded
 //                    conflict) for the drill doc to consume.
 //
-// DISCIPLINE: every spawn is execFile (no shell interpolation); the only
-// test-level sleep is the mergeability poll (plus the scripted AGENT's own
-// bounded wait for the forge to propagate refs/pull/<n>/head to the sha it
-// just pushed — a worker reporting acted owes the caller an observable
-// push, and an instantaneous verification read a stale ref live);
-// GH_TOKEN is asserted, never logged; `git push --force` appears nowhere;
-// cleanup removes the LOCAL tmp tree only — never the remote scratch repo.
+// DISCIPLINE: every spawn is execFile (no shell interpolation); the
+// test-level sleeps are exactly three — the mergeability poll, the
+// work-free inter-iteration settle wait (MERGE_RECOMPUTE_SETTLE_MS), and
+// the scripted AGENT's own bounded wait for the forge to propagate
+// refs/pull/<n>/head to the sha it just pushed (a worker reporting acted
+// owes the caller an observable push, and an instantaneous verification
+// read a stale ref live); GH_TOKEN is asserted, never logged; `git push
+// --force` appears nowhere; cleanup removes the LOCAL tmp tree only —
+// never the remote scratch repo.
 // TOKEN NOTE: the run token needs the scopes `gh pr merge/edit` demand —
 // on classic tokens `gh pr edit`'s GraphQL lookup wants read:org (a token
 // without it fails every retarget-self action; found live).
@@ -161,9 +163,20 @@ const seedWith = (firstLine: string): string => `${firstLine}\nbeta\n`;
 const DRILL_TIMEOUT_MS = 20 * 60_000;
 
 /** The mergeability poll: mergeability computes asynchronously on the
- * forge; ~30s is generous for a fresh 4-commit repo. The ONLY sleep. */
+ * forge; ~30s is generous for a fresh 4-commit repo. */
 const MERGEABILITY_POLL_ATTEMPTS = 30;
 const MERGEABILITY_POLL_INTERVAL_MS = 1_000;
+
+/** The inter-iteration settle wait for the convergence loop: GitHub
+ * recomputes mergeability ASYNCHRONOUSLY, and an iteration whose whole
+ * candidate view read the forge's stale `unknown` classifies everything
+ * ineligible and dispatches nothing — rapid back-to-back API polls would
+ * burn the 8-iteration cap against a forge that never got the chance to
+ * update. A work-free iteration waits this out once before the next poll
+ * (~15s, far inside the per-test budget); an iteration that dispatched
+ * work (merges, retargets, resolutions) already changed live state and
+ * never waits. */
+const MERGE_RECOMPUTE_SETTLE_MS = 15_000;
 
 const log = (line: string): void => {
   console.error(`[f5-live-drill] ${line}`);
@@ -690,9 +703,7 @@ const reportSummary = (report: ExecutionReport): string =>
         // disconnect an observed tip from the final history (the 7b
         // seed-exclusion and content checks stay as the second net).
         const observeMainTip = async (): Promise<void> => {
-          const tip = asString(
-            (await ghApiObject(`repos/${repo}/commits/main`))['sha'],
-          );
+          const tip = asString((await ghApiObject(`repos/${repo}/commits/main`))['sha']);
           observeHead('main', tip);
         };
         const fetchCandidates = makeCandidateFetcher(repo, drillPrs, observeHead);
@@ -767,6 +778,21 @@ const reportSummary = (report: ExecutionReport): string =>
             : [outcome.firstPass, outcome.secondPass]) {
             for (const pr of report.retargeted) collectedRetargeted.add(pr);
           }
+          // The mergeability-stall guard: an iteration whose whole candidate
+          // view read the forge's stale `unknown` classifies everything
+          // ineligible and dispatches NOTHING — back-to-back rapid API polls
+          // would burn the iteration cap against a forge that never got the
+          // chance to recompute. A work-free iteration therefore waits out
+          // one bounded settle before the next poll; an iteration that
+          // dispatched work (merges, retargets, resolutions) already changed
+          // live state and never waits.
+          const dispatched =
+            outcome.resolutions.length > 0 ||
+            outcome.firstPass.merged.length > 0 ||
+            outcome.firstPass.retargeted.length > 0 ||
+            (outcome.secondPass !== null &&
+              (outcome.secondPass.merged.length > 0 || outcome.secondPass.retargeted.length > 0));
+          if (!dispatched) await sleep(MERGE_RECOMPUTE_SETTLE_MS);
         }
         log(
           `step 6 ${converged ? 'converged' : 'DID NOT converge (step 7a fails below)'} after ${String(runs)} run(s)`,
@@ -908,7 +934,12 @@ const reportSummary = (report: ExecutionReport): string =>
         const descendantRungs = drillPrNumbers.slice(1);
         expect(
           descendantRungs.some((pr) => collectedRetargeted.has(pr)),
-          `a descendant rung (pr 2 or pr 3) must have been retargeted; got ${[...collectedRetargeted].sort((a, b) => a - b).map(String).join(', ')}`,
+          `a descendant rung (pr 2 or pr 3) must have been retargeted; got ${[
+            ...collectedRetargeted,
+          ]
+            .sort((a, b) => a - b)
+            .map(String)
+            .join(', ')}`,
         ).toBe(true);
         for (const pr of collectedRetargeted) {
           expect(

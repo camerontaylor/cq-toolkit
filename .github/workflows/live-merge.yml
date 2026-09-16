@@ -73,16 +73,20 @@ jobs:
         run: |
           git config --global user.email 'f5-live-drill@example.invalid'
           git config --global user.name 'F5 Live Drill'
-      # Env indirection end to end — the filter and the token are NEVER
-      # textually interpolated into the script. The filter reaches vitest's
-      # -t flag quoted; an empty filter runs the whole drill. The token is
-      # read by `gh` and the drill's git credential helper directly from the
-      # environment and is never printed.
+      # Env indirection end to end — the filter, the token, and the scratch
+      # owner are NEVER textually interpolated into the script. The filter
+      # reaches vitest's -t flag quoted; an empty filter runs the whole
+      # drill. The token is read by `gh` and the drill's git credential
+      # helper directly from the environment and is never printed. The
+      # scratch repo is created under CQ_DRILL_OWNER — the DISPATCHING
+      # owner by default (github.repository_owner), so a fork dispatch
+      # never writes upstream; the CQ_DRILL_OWNER repo variable overrides.
       - name: Run the live merge drill
         env:
           LIVE_GH: '1'
           GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
           TEST_FILTER: ${{ inputs.testFilter || '' }}
+          CQ_DRILL_OWNER: ${{ vars.CQ_DRILL_OWNER || github.repository_owner }}
         run: |
           set -euo pipefail
           if [ -n "${TEST_FILTER}" ]; then
