@@ -402,9 +402,9 @@ const SALVAGE_GIT_TIMEOUT_MS = 600_000;
 /**
  * Run git with an execFile ARGS ARRAY — never a shell string (the repo's
  * tooling convention). A non-zero exit, a spawn failure, or a run exceeding
- * the timeout (SIGKILL) rejects with the captured stderr text.
+ * {@link timeoutMs} (SIGKILL) rejects with the captured stderr text.
  */
-function runSalvageGit(args: string[], cwd: string): Promise<string> {
+function runSalvageGit(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
@@ -412,7 +412,7 @@ function runSalvageGit(args: string[], cwd: string): Promise<string> {
       {
         cwd,
         maxBuffer: SALVAGE_GIT_MAX_BUFFER_BYTES,
-        timeout: SALVAGE_GIT_TIMEOUT_MS,
+        timeout: timeoutMs,
         killSignal: 'SIGKILL',
       },
       (error, stdout, stderr) => {
@@ -433,16 +433,30 @@ function runSalvageGit(args: string[], cwd: string): Promise<string> {
 }
 
 /**
+ * Per-call timeout options of {@link makeSubprocessSalvageEffects}; absent
+ * fields fall back to the shipped default (10 minutes, the family default).
+ */
+export interface SubprocessSalvageEffectsOptions {
+  timeoutMs?: number;
+}
+
+/**
  * The REAL effects binding of the salvage op (the registry importer's
  * input-driven binding; constructed fresh per dispatch): liveness is a stat
  * with the absence-class contract, strict-clean is `git status --porcelain`
  * EMPTY run against the TREE (its cwd, so it reads that worktree's status),
  * and canonicalize is the realpath-with-lexical-fallback idiom. Every effect
- * is a fresh lazy call — no git state is cached between calls. A library
- * consumer injects fakes instead (every classification test does exactly
- * that).
+ * is a fresh lazy call — no git state is cached between calls — and the one
+ * git call (the strict-clean probe) is bounded by
+ * {@link SubprocessSalvageEffectsOptions.timeoutMs} (the shipped
+ * {@link SALVAGE_GIT_TIMEOUT_MS} default when absent): a hung git is
+ * SIGKILLed and reported, never awaited forever. A library consumer injects
+ * fakes instead (every classification test does exactly that).
  */
-export function makeSubprocessSalvageEffects(): SalvageEffects {
+export function makeSubprocessSalvageEffects(
+  timeouts?: SubprocessSalvageEffectsOptions,
+): SalvageEffects {
+  const timeoutMs = timeouts?.timeoutMs ?? SALVAGE_GIT_TIMEOUT_MS;
   return {
     pathExists: async (p) => {
       try {
@@ -457,7 +471,7 @@ export function makeSubprocessSalvageEffects(): SalvageEffects {
       }
     },
     isStrictClean: async (treePath) =>
-      (await runSalvageGit(['status', '--porcelain'], treePath)).trim() === '',
+      (await runSalvageGit(['status', '--porcelain'], treePath, timeoutMs)).trim() === '',
     canonicalize: realpathOf,
   };
 }

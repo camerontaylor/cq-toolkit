@@ -462,10 +462,10 @@ const CLEANUP_GIT_TIMEOUT_MS = 600_000;
 /**
  * Run git with an execFile ARGS ARRAY — never a shell string, so no value
  * can be re-parsed as shell syntax (the repo's tooling convention). A
- * non-zero exit, a spawn failure, or a run exceeding the timeout (SIGKILL)
- * rejects with the captured stderr text.
+ * non-zero exit, a spawn failure, or a run exceeding {@link timeoutMs}
+ * (SIGKILL) rejects with the captured stderr text.
  */
-function runCleanupGit(args: string[], cwd: string): Promise<string> {
+function runCleanupGit(args: string[], cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
@@ -473,7 +473,7 @@ function runCleanupGit(args: string[], cwd: string): Promise<string> {
       {
         cwd,
         maxBuffer: CLEANUP_GIT_MAX_BUFFER_BYTES,
-        timeout: CLEANUP_GIT_TIMEOUT_MS,
+        timeout: timeoutMs,
         killSignal: 'SIGKILL',
       },
       (error, stdout, stderr) => {
@@ -511,7 +511,11 @@ export interface SubprocessCleanupEffectsOptions {
  * removal is `git worktree remove [<path>]` — WITHOUT `opts.force` git
  * itself refuses a dirty tree, the adapter-level backstop under the op's
  * clean-check; `--force` is built ONLY when the op's explicit force reached
- * the effect. Every effect is a fresh lazy call. A library consumer injects
+ * the effect. Every effect is a fresh lazy call, and every git call — the
+ * reused listings and strict-clean probe INCLUDED — is bounded by
+ * {@link SubprocessCleanupEffectsOptions.timeoutMs} (the shipped
+ * {@link CLEANUP_GIT_TIMEOUT_MS} default when absent): a hung git is
+ * SIGKILLed and reported, never awaited forever. A library consumer injects
  * fakes instead (every decision test does exactly that).
  */
 export function makeSubprocessCleanupEffects(
@@ -530,15 +534,16 @@ export function makeSubprocessCleanupEffects(
         opts?.force === true
           ? ['worktree', 'remove', '--force', path]
           : ['worktree', 'remove', path];
-      await runCleanupGit(args, root);
+      await runCleanupGit(args, root, timeoutMs);
     },
     branchDelete: async (root, branch) => {
-      await runCleanupGit(['branch', '-D', branch], root);
+      await runCleanupGit(['branch', '-D', branch], root, timeoutMs);
     },
     branchTimeMs: async (root, branch) => {
       const out = await runCleanupGit(
         ['for-each-ref', '--format=%(committerdate:unix)', `refs/heads/${branch}`],
         root,
+        timeoutMs,
       );
       const seconds = Number(out.trim());
       if (out.trim() === '' || !Number.isFinite(seconds)) {

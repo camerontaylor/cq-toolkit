@@ -63,6 +63,7 @@ export type {
   SalvageJournal,
   SalvagePlan,
   SalvageRow,
+  SubprocessSalvageEffectsOptions,
 } from './salvage.js';
 export { makeSalvage, makeSubprocessSalvageEffects } from './salvage.js';
 export {
