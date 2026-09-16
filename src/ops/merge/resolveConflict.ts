@@ -450,8 +450,15 @@ export function makeResolveConflictOp(
     // (a, cont.) STRUCTURAL, before ANY effect: the head branch must never
     // BE the protected branch — dispatching a push-capable agent whose
     // destination IS the protected branch is refused outright (a
-    // cross-field rule the schema cannot express).
-    if (input.headBranch === (input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH)) {
+    // cross-field rule the schema cannot express). BOTH spellings count
+    // (codex review): a bare name and its refs/heads/<name> form name the
+    // same ref, and the prompt's push refspec takes the headBranch
+    // verbatim — `HEAD:refs/heads/main` would target the protected branch
+    // through a bare-name-only comparison.
+    const bareBranch = (ref: string): string => ref.replace(/^refs\/heads\//, '');
+    if (
+      bareBranch(input.headBranch) === bareBranch(input.protectedBranch ?? DEFAULT_PROTECTED_BRANCH)
+    ) {
       return {
         status: 'failed',
         error: 'headBranch equals the protected branch — refusing to dispatch a push-capable agent',

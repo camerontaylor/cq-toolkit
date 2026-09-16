@@ -769,6 +769,20 @@ describe('resolveConflict op', () => {
     );
     expect(effects.calls).toEqual([]);
     expect(driver.invocations).toHaveLength(0);
+
+    // Both spellings count: the refs/heads/-prefixed form names the same
+    // ref, and the prompt's push refspec takes the headBranch verbatim —
+    // HEAD:refs/heads/main would target the protected branch through a
+    // bare-name-only comparison (codex review wave 2).
+    const fullRef = await op({ ...baseInput(), headBranch: 'refs/heads/main' });
+    expect(fullRef.status).toBe('failed');
+    expect(failedError(fullRef)).toBe(
+      'headBranch equals the protected branch — refusing to dispatch a push-capable agent',
+    );
+    // The prefixed form of a DIFFERENT branch is untouched by the
+    // normalization: it is not the protected branch and dispatch proceeds.
+    const fullRefOther = await op({ ...baseInput(), headBranch: 'refs/heads/feature' });
+    expect(fullRefOther.status).not.toBe('failed');
   });
 
   test('a driver pre-dispatch throw is an op outcome: failed, not a crash', async () => {
