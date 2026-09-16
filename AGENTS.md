@@ -25,6 +25,16 @@ static gate. Lists must be explicit; never format the repository per turn.
 `npm run check` runs formatting checks, the static gate once, tests and Knip.
 Changed-file lint does not establish correctness of dependents.
 
+## GLM peak-hour blackout
+
+No work on the `claude-zai` or `zcode` (Z.ai GLM) harnesses between
+14:00–18:00 Asia/Singapore (UTC+8), Monday–Friday. That is Z.ai's GLM
+Coding Plan peak-hour window, where quota consumption multiplies (~3×)
+for flagship models. Paseo schedules `glm-peak-pause`/`glm-peak-resume`
+stop GLM toolkit workers 5 minutes before the window and resume them
+after it ends — don't manually restart GLM work during the blackout;
+use a non-GLM provider or wait.
+
 ## Code review — mandatory before every PR
 
 Exactly TWO completed CodeRabbit CLI review-and-address cycles over the
