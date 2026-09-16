@@ -73,6 +73,10 @@
 //      ancestor cascades transitively (grandchildren blocked, never
 //      executed); a RETARGETED ancestor does not withhold its merge
 //      descendant.
+//  19. POST-CAP GUARD TIGHTENING (round 3): push tails carry NO flags
+//      (the discarded-flag blind spot is closed), push refspecs need both
+//      halves non-empty (`:dst` is a remote-branch deletion), and
+//      worktree list/remove are flag-free — `--force` is refused.
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -1037,6 +1041,53 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['rev-parse'])).toThrow(/refused: unknown argv shape/);
   });
 
+  test('round-3: push FLAGS are refused — the discarded-flag blind spot is closed', () => {
+    // Each would otherwise be a legal explicit src:dst push — refused
+    // BECAUSE of the force token riding the tail.
+    expect(() => safeArgs(['push', 'origin', '--force', 'feat:refs/heads/feat'])).toThrow(
+      /flags are not part of the documented push shape/,
+    );
+    expect(() => safeArgs(['push', 'origin', '--force-with-lease', 'feat:refs/heads/feat'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['push', 'origin', '-qf', 'feat:refs/heads/feat'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    // The flag-free explicit push stays legal.
+    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+      'push',
+      'origin',
+      'feat:refs/heads/feat',
+    ]);
+  });
+
+  test('round-3: an empty-src deletion refspec is refused (remote-branch deletion)', () => {
+    expect(() => safeArgs(['push', 'origin', ':refs/heads/feat'])).toThrow(UnsafeMergeArgsError);
+    expect(safeArgs(['push', 'origin', 'feat:refs/heads/feat'])).toEqual([
+      'push',
+      'origin',
+      'feat:refs/heads/feat',
+    ]);
+  });
+
+  test('round-3: worktree list/remove are flag-free — --force is refused', () => {
+    expect(() => safeArgs(['worktree', 'remove', '--force', '/wt/pr-7'])).toThrow(
+      /flags are not part of the documented worktree remove shape/,
+    );
+    expect(() => safeArgs(['worktree', 'list', '--porcelain'])).toThrow(UnsafeMergeArgsError);
+    // The documented flag-free shapes stay legal (the real impl's
+    // worktreeRemove builds exactly the -C form below; it deliberately
+    // omits --force).
+    expect(safeArgs(['worktree', 'remove', '/wt/pr-7'])).toEqual(['worktree', 'remove', '/wt/pr-7']);
+    expect(safeArgs(['-C', '/repo', 'worktree', 'remove', '/wt/pr-7'])).toEqual([
+      '-C',
+      '/repo',
+      'worktree',
+      'remove',
+      '/wt/pr-7',
+    ]);
+  });
+
   test('realMergeEffects routes the gh argv through the guard (injected runner — zero processes)', async () => {
     const ghCalls: string[][] = [];
     const effects = realMergeEffects({
@@ -1201,6 +1252,28 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
     expect(report.retargeted).toEqual([5]);
     expect(report.merged).toEqual([6]);
     expect(report.blocked).toEqual([]);
+  });
+
+  test('round-3 finding 4: a FAILED retarget blocks its merge descendant', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(5, sha('a'));
+    fake.heads.set(6, sha('b'));
+    fake.retargetFailures.add(5);
+    const plan = handPlan([entry(5, 'retarget-self'), entry(6, 'merge', 5, 1)]);
+
+    const report = await executeMerges({ plan, effects: fake });
+
+    expect(report.failed).toEqual([
+      { pr: 5, error: expect.stringContaining('gh pr edit 5 --base main') },
+    ]);
+    expect(report.blocked).toEqual([{ pr: 6, reason: 'blocked_by_ancestor' }]);
+    expect(report.retargeted).toEqual([]);
+    expect(report.merged).toEqual([]);
+    // Zero effect calls on 6 beyond the mandatory baseline sweep (one
+    // fetch + one validate): the withheld cascade fired before any action.
+    expect(fake.calls.filter((call) => call.includes('pull/6')).length).toBe(2);
+    expect(fake.calls.includes('merge:6:merge')).toBe(false);
+    expect(fake.calls.some((call) => call.startsWith('retarget:6'))).toBe(false);
   });
 });
 

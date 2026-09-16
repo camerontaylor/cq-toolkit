@@ -95,11 +95,17 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       refused; colon-less refspecs land in FETCH_HEAD only and cannot
  *       move a branch, so they need no destination check
  *   worktree add -B <label> <path> <ref>      — the exact prepare shape
- *   worktree list|remove <arg>…               — rough arity
+ *   worktree list|remove <arg>…               — rough arity, FLAG-FREE
+ *       (round 3: the documented shapes carry no flags, so `worktree
+ *       remove --force <path>` is refused — the real impl deliberately
+ *       omits --force)
  *   push <remote> <src:dst>                   — an EXPLICIT src:dst refspec
- *       is required (bare HEAD/@/upstream shorthands refused, round 2), a
- *       '+' force marker is refused OUTRIGHT (round 2 — I3 forbids force,
- *       period), and the destination must not be the protected branch
+ *       is required with BOTH halves non-empty (round 3: `:dst` deletes a
+ *       remote branch — refused), no '+' force marker (round 2 — I3
+ *       forbids force, period), NO flags anywhere in the tail (round 3:
+ *       the documented shape carries none, so `push origin --force
+ *       feat:x` cannot ride a discarded-flag blind spot), and the
+ *       destination must not be the protected branch
  *   gh pr merge <n> --merge                   — the ONLY merge method (I3)
  *   gh pr edit <n> --base <base>              — the retarget
  * opts.protectedBranch (default 'main') names the branch pushes may never
@@ -143,16 +149,41 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       if (verb === 'add') {
         // The exact prepare shape the family builds: -B <label> <path> <ref>.
         if (rest.length !== 6 || rest[2] !== '-B') throw unknown();
-      } else if (rest.length < 3) {
-        throw unknown();
+      } else {
+        if (rest.length < 3) throw unknown();
+        // list/remove are FLAG-FREE (round 3): the documented shapes carry
+        // no flags, so `worktree remove --force <path>` (silent destruction
+        // the real impl deliberately omits) is refused like any other
+        // undocumented token.
+        for (const arg of rest.slice(2)) {
+          if (arg.startsWith('-')) {
+            throw new UnsafeMergeArgsError(
+              args,
+              `flags are not part of the documented worktree ${verb} shape — refused ${JSON.stringify(arg)}`,
+            );
+          }
+        }
       }
       return args;
     }
     case 'push': {
-      const tail = rest.slice(1).filter((arg) => !arg.startsWith('-'));
+      const tail = rest.slice(1);
+      // NO FLAGS IN THE TAIL (round 3 — the bypass is closed): the
+      // documented push shape carries none, and the previous filter
+      // silently DISCARDED flags before the checks — `push origin --force
+      // feat:refs/heads/feat` rode straight through. Any `-`-prefixed
+      // token (the remote slot included) is refused on sight.
+      for (const arg of tail) {
+        if (arg.startsWith('-')) {
+          throw new UnsafeMergeArgsError(
+            args,
+            `flags are not part of the documented push shape — refused ${JSON.stringify(arg)}`,
+          );
+        }
+      }
       // tail[0] is the REMOTE; the rest are the refspecs. Fewer than two
-      // non-flag tokens means NO explicit refspec (round 1): push.default
-      // would choose the destination — possibly the protected branch.
+      // tokens means NO explicit refspec (round 1): push.default would
+      // choose the destination — possibly the protected branch.
       if (tail.length < 2) throw unknown();
       for (const refspec of tail.slice(1)) {
         if (refspec.startsWith('+')) {
@@ -164,10 +195,15 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
             `force-marked push refspec ${JSON.stringify(refspec)} — I3 forbids force pushes outright`,
           );
         }
-        if (!refspec.includes(':')) {
+        const colon = refspec.indexOf(':');
+        if (colon <= 0 || colon === refspec.length - 1) {
+          // Round 2 + round 3: an explicit src:dst is required with BOTH
+          // halves non-empty — bare/symbolic sources (HEAD, @, upstream
+          // shorthand) name no destination, and an EMPTY source (`:dst`)
+          // is a REMOTE BRANCH DELETION.
           throw new UnsafeMergeArgsError(
             args,
-            `push refspec ${JSON.stringify(refspec)} is not an explicit src:dst — bare or symbolic refspecs (HEAD, @, upstream shorthand) are refused`,
+            `push refspec ${JSON.stringify(refspec)} is not an explicit non-empty src:dst — bare or symbolic refspecs and remote-branch deletions are refused`,
           );
         }
         if (isProtectedRef(pushDestination(refspec), protectedBranch)) {

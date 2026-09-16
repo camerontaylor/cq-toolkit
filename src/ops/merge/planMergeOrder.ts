@@ -333,7 +333,9 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
   // descendants depth-first, children in PR-number order, a PR never
   // before its base. Roots merge or retarget-self; every deeper entry is
   // an ordinary merge (a child of a retarget-self root merges normally
-  // once the root's base is retargeted and the root merged).
+  // once the root's base is retargeted — its commits land only on the
+  // root's branch, never on the base branch; the I2-safe reading, which is
+  // the executor's tested behavior).
   const order: PlannedMergeEntry[] = [];
   const retargetSet = new Set(retargetRoots);
   const roots = [...mergeRoots, ...retargetRoots].sort((a, b) => a - b);
