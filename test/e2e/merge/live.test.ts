@@ -388,7 +388,7 @@ git show :2:seed.txt > .f5-ours || fail 'conflict stage :2: (ours) missing — t
 git show :3:seed.txt > .f5-theirs || fail 'conflict stage :3: (theirs) missing'
 git show :1:seed.txt > .f5-base || fail 'conflict stage :1: (base) missing'
 git merge-file --union .f5-ours .f5-base .f5-theirs || fail 'git merge-file --union failed'
-cp .f5-ours seed.txt
+cp .f5-ours seed.txt || fail 'cp union result failed'
 rm -f .f5-ours .f5-base .f5-theirs
 git add seed.txt || fail 'git add seed.txt failed'
 git commit -m 'merge: union resolution of ${baseBranch} into ${headBranch}' || fail 'git commit failed'
@@ -438,15 +438,30 @@ const reportSummary = (report: ExecutionReport): string =>
   () => {
     let scratchDir: string | undefined;
 
+    // Env vars this suite mutates, snapshotted for the afterAll restore:
+    // under LIVE_GH=1 npm run test the SAME vitest worker runs the rest of
+    // the suite — a leaked GH_REPO would silently aim every later test's gh
+    // spawn at the long-gone scratch repo (r2 review).
+    let savedEnv: Record<string, string | undefined>;
+
     beforeAll(() => {
       // The fake route's key (name-only in the table; the driver reads this
       // value at dispatch and the script ignores it). Also forbid git's
       // terminal prompt: a credential failure must fail loudly, never hang.
+      savedEnv = {
+        F5_FAKE_KEY: process.env.F5_FAKE_KEY,
+        GIT_TERMINAL_PROMPT: process.env.GIT_TERMINAL_PROMPT,
+        GH_REPO: process.env.GH_REPO,
+      };
       process.env.F5_FAKE_KEY = 'dummy';
       process.env.GIT_TERMINAL_PROMPT = '0';
     });
 
     afterAll(async () => {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
       // LOCAL cleanup only — the remote scratch repo is LEFT IN PLACE (the
       // run token has no delete_repo scope and the drill never attempts it).
       if (scratchDir !== undefined) {
@@ -753,10 +768,12 @@ const reportSummary = (report: ExecutionReport): string =>
             for (const pr of report.retargeted) collectedRetargeted.add(pr);
           }
         }
-        log(`step 6 convergence after ${String(runs)} run(s)`);
+        log(
+          `step 6 ${converged ? 'converged' : 'DID NOT converge (step 7a fails below)'} after ${String(runs)} run(s)`,
+        );
 
         // --- STEP 7: THE ASSERTIONS ---------------------------------------------
-        const fetched = await gitOk('git fetch --prune origin', ['fetch', '--prune', 'origin']);
+        await gitOk('git fetch --prune origin', ['fetch', '--prune', 'origin']);
 
         // (a) ALL THREE PRS MERGED — re-read the final live state once for the
         // rest of the assertions.
@@ -815,6 +832,18 @@ const reportSummary = (report: ExecutionReport): string =>
           allDrillCommits.length,
           'main must carry the root merge and the stacked rung merge (the tail rung merges below main in the expected flow)',
         ).toBeGreaterThanOrEqual(2);
+        // Each PR's forge merge commit must be ON main's first-parent drill
+        // range — the acceptance is not merely that a merge exists somewhere,
+        // but that EVERY rung landed ON the trunk (r2 review: a landing where
+        // pr 2 merged onto the closed parent branch and only pr 3 reached
+        // main otherwise passed every assertion).
+        for (const pr of drillPrNumbers) {
+          const mergeSha = asString(finalPull(pr)['merge_commit_sha']);
+          expect(
+            allDrillCommits,
+            `pr ${String(pr)} merge commit ${mergeSha} must be on main's first-parent drill chain`,
+          ).toContain(mergeSha);
+        }
         for (const sha of allDrillCommits) {
           const parents = (
             await gitOk(`rev-list --parents ${sha}`, ['rev-list', '--parents', '-n', '1', sha])
@@ -855,10 +884,6 @@ const reportSummary = (report: ExecutionReport): string =>
           ).toBe(0);
         }
         log('step 7c no squash: every PR head is an ancestor of its merge commit');
-        expect(
-          fetched,
-          'git fetch --prune origin must succeed before the tip checks',
-        ).toBeDefined();
         for (const branch of [...DRILL_BRANCHES, 'main'] as const) {
           const tip = await revParse(`origin/${branch}`);
           const seen = observedHeads.get(branch);
