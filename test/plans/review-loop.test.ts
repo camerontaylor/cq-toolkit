@@ -76,6 +76,8 @@ const REPLY_AGE = 5 * 60_000;
 const iso = (ageMs: number): string => new Date(NOW - ageMs).toISOString();
 /** The review worktree's branch label (reviewBranchFor(7)) and its checked-out sha. */
 const LABEL = 'cq-review/pr-7';
+/** The PR's real head branch — the push refspec target (finding 1). */
+const HEAD_REF = 'pr-7-fix';
 const SHA = 'b7e5f1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8';
 
 interface LoopWorld {
@@ -83,6 +85,15 @@ interface LoopWorld {
   sha: string;
   /** When true, a recorded git push moves the served head sha (the fix landed). */
   advanceOnPush: boolean;
+  /**
+   * Shas the fake git world knows: `rev-parse --verify <sha>^{commit}`
+   * succeeds and `merge-base --is-ancestor <sha> HEAD` exits 0 exactly for
+   * these — the per-item resolve gate (finding 2) sees a hallucinated sha
+   * as unverifiable.
+   */
+  knownShas: string[];
+  /** When set, the Nth and every later git push FAILS (1-based). */
+  pushFailAt?: number;
   /** GraphQL thread nodes served to fetchReviewState. */
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
@@ -113,6 +124,7 @@ const actionableThread = (id: string, path: string, line: number, databaseId: nu
 const defaultWorld = (): LoopWorld => ({
   sha: 'sha-before',
   advanceOnPush: true,
+  knownShas: [SHA, 'cafe123'],
   threads: [
     actionableThread('T1', 'src/a.ts', 3, 101),
     {
@@ -208,7 +220,7 @@ const fakeGh =
             repository: {
               pullRequest: {
                 author: { login: 'prauthor' },
-                headRefName: 'pr-7-fix',
+                headRefName: HEAD_REF,
                 headRefOid: world.sha,
                 reviewThreads: {
                   pageInfo: { hasNextPage: false, endCursor: null },
@@ -240,9 +252,9 @@ const fakeGh =
   };
 
 /** The routed git fake: prWorktree's model (a reusable on-label tree) + pushes. */
-const fakeGit =
-  (world: LoopWorld, log: string[][], worktreePath: string): GhFn =>
-  async (args) => {
+const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn => {
+  let pushCount = 0;
+  return async (args) => {
     log.push(args);
     // prWorktree composes every git argv with a leading '-C <path>' — the
     // subcommand starts at index 2 in that form, at 0 without it.
@@ -256,6 +268,21 @@ const fakeGit =
     if (rest[0] === 'rev-parse' && (rest[1] ?? '').startsWith('refs/cq-review/pr-')) {
       return ok(`${SHA}\n`);
     }
+    // The per-item resolve gate's mechanical checks (finding 2): a sha is
+    // verifiable exactly when the world knows it.
+    if (rest[0] === 'rev-parse' && rest[1] === '--verify') {
+      const sha = (rest[2] ?? '').replace(/\^\{commit\}$/, '');
+      if (world.knownShas.includes(sha)) {
+        return ok(`${sha}\n`);
+      }
+      return { code: 128, stdout: '', stderr: `fatal: Needed a single revision: ${sha}` };
+    }
+    if (rest[0] === 'merge-base' && rest[1] === '--is-ancestor') {
+      if (world.knownShas.includes(rest[2] ?? '')) {
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 128, stdout: '', stderr: 'fatal: not an ancestor of HEAD' };
+    }
     if (rest[0] === 'worktree' && rest[1] === 'list') {
       return ok(`worktree ${worktreePath}\nHEAD ${SHA}\nbranch refs/heads/${LABEL}\n\n`);
     }
@@ -266,13 +293,21 @@ const fakeGit =
       return ok(`${SHA}\n`);
     }
     if (rest[0] === 'push') {
-      if (world.advanceOnPush) {
+      pushCount += 1;
+      if (world.pushFailAt !== undefined && pushCount >= world.pushFailAt) {
+        return { code: 1, stdout: '', stderr: 'fatal: remote rejected the push\n' };
+      }
+      // KEYED (finding 1): only a push of the PR's REAL head moves the
+      // served origin state — a push of the internal cq-review label must
+      // NOT (a stray label branch and a phantom progress signal).
+      if (world.advanceOnPush && rest[2] === `HEAD:${HEAD_REF}`) {
         world.sha = 'sha-after';
       }
       return ok('');
     }
     return { code: 1, stdout: '', stderr: `unexpected git argv: ${args.join(' ')}` };
   };
+};
 
 /** An unsynchronized in-memory WorktreeRegistry (single-threaded tests). */
 const memoryRegistry = (): WorktreeRegistry => {
@@ -296,11 +331,12 @@ const memoryRegistry = (): WorktreeRegistry => {
 };
 
 /** A 'complete' WorkerResult whose structuredOutput is a single JSON line. */
-const completeWorker = (line: string): WorkerResult => ({
+const completeWorker = (line: string, extra?: Partial<WorkerResult>): WorkerResult => ({
   structuredOutput: line,
   usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
   denials: [],
   stopReason: 'complete',
+  ...extra,
 });
 
 /** The single-line JSON contract a compliant worker answers with. */
@@ -367,7 +403,7 @@ const runLoop = async (
     owner: COORDS.owner,
     repo: COORDS.repo,
     pr: COORDS.pr,
-    headRefName: 'pr-7-fix',
+    headRefName: HEAD_REF,
     repoRoot: '/fake/repo',
     gh: fakeGh(world, ghLog),
     git: fakeGit(world, gitLog, worktreePath),
@@ -409,7 +445,7 @@ const expectedPushArgs = (worktreePath: string): string[] => [
   worktreePath,
   'push',
   'origin',
-  `HEAD:${LABEL}`,
+  `HEAD:${HEAD_REF}`,
 ];
 
 // ---------------------------------------------------------------------------
@@ -493,11 +529,13 @@ describe('review-loop failure handling', () => {
   test('a claimed fix the snapshots cannot confirm → needs-human, resolve withheld, reply posted', async () => {
     const world = defaultWorld();
     world.advanceOnPush = false; // the push lands but origin never moves
+    world.knownShas = [SHA]; // the claimed sha is NOT in the world (unverifiable)
     const { outcome } = await runLoop(world, {
       driverResults: [completeWorker(fixLine(true, 'Claims the fix.', ['cafe123']))],
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons.some((reason) => reason.includes('NO PROGRESS'))).toBe(true);
+    expect(outcome.reasons.some((reason) => reason.includes('unverified-commits'))).toBe(true);
     expect(outcome.verify?.summary).toBe('NO PROGRESS');
     // The resolve is withheld; the honest reply still posts — picked and
     // asserted: exactly one action, and it is not a resolve.
@@ -512,6 +550,7 @@ describe('review-loop failure handling', () => {
       actionableThread('T1', 'src/a.ts', 3, 101),
       actionableThread('T2', 'src/b.ts', 8, 102),
     ];
+    world.knownShas = [SHA, 'beef456']; // T2's commit is real; T1's answer is malformed
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
@@ -668,5 +707,135 @@ describe('enrichBatches batch abandonment (CodeRabbit cycle 1)', () => {
     const { items, skipped } = enrichBatches([batch], state);
     expect(skipped).toEqual([{ id: 'T-ghost', reason: 'item-vanished' }]);
     expect(items).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-1 reviewer fixes — keyed push refspec, per-item resolve gate,
+// fail-toward-human paths
+// ---------------------------------------------------------------------------
+
+describe('push refspec targets the PR head (finding 1)', () => {
+  test('the fake advances the served head ONLY for HEAD:<headRefName> pushes', async () => {
+    const world = defaultWorld();
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-loop-'));
+    scratchDirs.push(scratch);
+    const worktreePath = join(scratch, 'pr-7-pr-7-fix');
+    const git = fakeGit(world, [], worktreePath);
+    // The internal worktree label must NOT move origin's PR head — the
+    // pre-fix refspec would have pushed a stray branch and a phantom signal.
+    await git(['-C', worktreePath, 'push', 'origin', `HEAD:${LABEL}`]);
+    expect(world.sha).toBe('sha-before');
+    await git(['-C', worktreePath, 'push', 'origin', `HEAD:${HEAD_REF}`]);
+    expect(world.sha).toBe('sha-after');
+  });
+
+  test('every composed push argv in a run targets HEAD:<headRefName>', async () => {
+    const { gitLog, worktreePath } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 's', ['cafe123']))],
+    });
+    const pushes = gitLog.filter((args) => args[2] === 'push');
+    expect(pushes.length).toBeGreaterThanOrEqual(1);
+    for (const args of pushes) {
+      expect(args).toEqual(expectedPushArgs(worktreePath));
+    }
+  });
+});
+
+describe('per-item resolve gate (finding 2)', () => {
+  test('a hallucinated sha → reply posts, resolve withheld with the unverified-commits reason', async () => {
+    const world = defaultWorld();
+    world.knownShas = [SHA]; // the claimed sha does not exist in the world
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', ['cafe123']))],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.includes('unverified-commits'))).toBe(true);
+    // Fail toward visible: the reply reports the claim; the thread stays open.
+    expect(outcome.actionsPosted).toBe(1);
+    expect(outcome.reply?.posted[0]?.kind).toBe('review_reply');
+    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+  });
+});
+
+describe('fail-toward-human paths (finding 6 + Codex P1)', () => {
+  test('a truncated classification refuses before the fix stage — no report, needs-human with the causes, zero mutations', async () => {
+    const world = defaultWorld();
+    // An orphan REST chain root = reviewThreads lag → the fail-closed flag.
+    world.pullsComments = [restComment(999, 'reviewer', 'orphan chain root', iso(ROOT_AGE), null)];
+    const ghLog: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, { driverResults: [], invocations, ghLog });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toEqual(['reviewThreads.lag']);
+    expect(outcome.fixReport).toBeUndefined();
+    expect(outcome.plan.jobs).toEqual([]);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(invocations).toHaveLength(0);
+    expect(ghLog.some((args) => isGhMutation(args))).toBe(false);
+  });
+
+  test('a push failing at the stage-5 publish → needs-human with the push reason, nothing posts', async () => {
+    const world = defaultWorld();
+    world.pushFailAt = 1;
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 's', ['cafe123']))],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.startsWith('push failed (exit 1)'))).toBe(true);
+    expect(outcome.reasons.some((reason) => reason.startsWith('dispatch push failed:'))).toBe(true);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply?.pushed).toBe(false);
+  });
+
+  test('a push failing only at the reply stage → needs-human with the dispatch push reason, nothing posts', async () => {
+    const world = defaultWorld();
+    world.pushFailAt = 2; // the stage-5 publish lands; the reply-stage push fails
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 's', ['cafe123']))],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.startsWith('dispatch push failed:'))).toBe(true);
+    expect(outcome.reasons.some((reason) => reason.startsWith('push failed (exit'))).toBe(false);
+    expect(outcome.verify?.progress).toBe(true);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply?.pushed).toBe(false);
+    expect(outcome.reply?.posted).toEqual([]);
+  });
+
+  test('a budget-exhausted fix row feeds hasFailures and posts nothing for its thread', async () => {
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 's', ['cafe123']), { stopReason: 'budget' })],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(
+      outcome.reasons.some((reason) => reason.includes('fix job fix-1 ended budget-exhausted')),
+    ).toBe(true);
+    expect(outcome.reasons.some((reason) => reason.includes('budget cap hit'))).toBe(true);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
+  });
+
+  test('a thread with no REST root id → recorded reason, no actions for it', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      // Deleted root: no databaseId, no anchor — but the thread classifies
+      // actionable (null author is never the responder).
+      {
+        id: 'T-noanchor',
+        isResolved: false,
+        isOutdated: false,
+        path: 'src/a.ts',
+        line: null,
+        comments: { nodes: [] },
+      },
+    ];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Did it.', ['cafe123']))],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.includes('no root REST id'))).toBe(true);
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 });

@@ -468,14 +468,20 @@ export const registry: OpRegistryEntry[] = [
     // The dispatch seam re-validates input through inputSchema.parseAsync
     // before invoking the op, so the erased op typing is safe here (gates
     // precedent). The importer resolves BOTH the op module and the
-    // subprocess driver and binds the driver there — the SubprocessDriver
+    // subprocess driver and binds the seam there — the SubprocessDriver
     // constructor is env-free and spawns nothing (env reads and processes
-    // are run()-time), so resolving this entry is inert.
+    // are run()-time), so resolving this entry is inert. The DISPATCHED
+    // seam is the perHarness factory (Codex P1): toolPolicyFor reduces the
+    // input's harness to tool NAMES, so command/path restrictions can only
+    // reach the worker through a driver constructed with that harness; the
+    // default-config path keeps one shared instance (no per-call churn).
     importer: () =>
       Promise.all([import('./fixReviewItem.js'), import('../../driver/subprocess/index.js')]).then(
         ([m, subprocess]) =>
           m.makeFixReviewItem({
-            driver: new subprocess.SubprocessDriver(),
+            driver: {
+              perHarness: (harness) => new subprocess.SubprocessDriver({ harnessConfig: harness }),
+            },
           }) as Op<unknown, unknown>,
       ),
   },

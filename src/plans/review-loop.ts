@@ -24,10 +24,13 @@
 //      asserts), op 'review.fixItem', ids fix-<n>, stopOnError false (one
 //      bad item must not orphan the others' replies)
 //   5. publish + verify        — when any fix produced commits, the loop
-//      PUSHES the worktree branch first (git argv composed exactly the way
-//      prWorktree composes argv: leading '-C', worktree path), THEN takes
-//      the after-snapshot and runs verifyPrOutcome — the push must precede
-//      the snapshot or the verifier could never see the fix's own commit.
+//      PUSHES `HEAD:<headRefName>` from the worktree first (git argv
+//      composed exactly the way prWorktree composes argv: leading '-C',
+//      worktree path; the refspec targets the PR'S REAL HEAD — the
+//      worktree branch sits at the fetched origin sha, so the push is a
+//      fast-forward), THEN takes the after-snapshot and runs
+//      verifyPrOutcome — the push must precede the snapshot or the
+//      verifier could never see the fix's own commit.
 //      VERIFY STILL PRECEDES ANY POST: no gh mutation (reply/resolve) may
 //      run before the after-snapshot argv (asserted by the smoke test's gh
 //      call log). Skipped entirely when zero fix jobs ran (a re-run no-op
@@ -36,9 +39,11 @@
 //      review_reply on its thread (summary + commit refs) + resolve_thread;
 //      ok+unchanged → review_reply only (the honest "no change made"
 //      answer), never a resolve; failed/needs-human/indeterminate rows →
-//      no action, they feed hasFailures. RESOLVES ARE WITHHELD when verify
-//      ran and found NO PROGRESS — a claimed fix without observable
-//      movement never hides its thread (fail toward open + visible).
+//      no action, they feed hasFailures. The resolve rides a PER-ITEM gate:
+//      at least one reported commit must verify in the pushed worktree
+//      (rev-parse --verify + merge-base --is-ancestor via the git seam) —
+//      a hallucinated sha never hides its thread ('unverified-commits'
+//      reason, reply still posts).
 //   7. replyAndResolve         — push-before-post (its push argv is the
 //      same composed worktree push: an idempotent re-assertion against
 //      origin races between the two moments), dispatch-log deduped.
@@ -323,20 +328,48 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
 };
 
 /**
- * The composed worktree push — the git argv that publishes the fix branch,
+ * The composed worktree push — the git argv that publishes the fix,
  * mirroring prWorktree's argv composition exactly: a leading `-C <path>`
  * (the runner spawns with the process cwd; effect comes only from the
- * explicit prefix), then `push origin HEAD:<branch>`. Used BOTH for the
- * fix-stage publish (so the verifier can see the fix's own commit) and as
- * replyAndResolve's push-before-post args (an idempotent re-assertion).
+ * explicit prefix), then `push origin HEAD:<headRefName>` — the PR'S REAL
+ * HEAD (finding: the internal `cq-review/pr-<n>` worktree label would leave
+ * origin's PR untouched, so the verifier could never see the fix, and a
+ * stray branch accumulates on origin). The worktree branch sits AT the
+ * fetched origin sha, so the push is a fast-forward; a raced origin refuses
+ * it — the push failure feeds the existing push-before-post retriable path.
+ * Used BOTH for the fix-stage publish (so the verifier can see the fix's
+ * own commit) and as replyAndResolve's push-before-post args (an idempotent
+ * re-assertion).
  */
-const worktreePushArgs = (worktree: { path: string; branch: string }): string[] => [
+const worktreePushArgs = (worktreePath: string, headRefName: string): string[] => [
   '-C',
-  worktree.path,
+  worktreePath,
   'push',
   'origin',
-  `HEAD:${worktree.branch}`,
+  `HEAD:${headRefName}`,
 ];
+
+/**
+ * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
+ * strictly mechanically (exit codes only): the sha must resolve to a commit
+ * (`rev-parse --verify <sha>^{commit}`) AND be an ancestor of the worktree
+ * HEAD (`merge-base --is-ancestor <sha> HEAD`) — the worktree HEAD is the
+ * exact tree the stage-5 publish pushed. The per-item resolve gate rides
+ * THIS check, never the global snapshot: a hallucinated sha must not hide
+ * its thread, and a real one must not wait on a lagging origin read.
+ */
+const commitInPushedHead = async (
+  git: GhFn,
+  worktreePath: string,
+  sha: string,
+): Promise<boolean> => {
+  const verify = await git(['-C', worktreePath, 'rev-parse', '--verify', `${sha}^{commit}`]);
+  if (verify.code !== 0) {
+    return false;
+  }
+  const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
+  return ancestor.code === 0;
+};
 
 /**
  * Run the full review loop (module doc, stage table). Sequential and
@@ -404,7 +437,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   for (const entry of correlated) {
     sources.set(`fix-${fixInputs.length + 1}`, entry.source);
     fixInputs.push({
-      ...(opts.repo !== undefined ? { repo: `${opts.owner}/${opts.repo}` } : {}),
+      repo: `${opts.owner}/${opts.repo}`,
       pr: opts.pr,
       item: entry.item,
       worktree: { path: worktree.path, branch: worktree.branch },
@@ -448,7 +481,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     row.result.status === 'ok' ? (row.result.value as FixReviewItemResult).commits : [],
   );
   if (commits.length > 0) {
-    const push = await opts.git(worktreePushArgs(worktree));
+    const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName));
     if (push.code !== 0) {
       const stderr = push.stderr.trim();
       reasons.push(
@@ -519,13 +552,31 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
         body,
       });
       // Only a THREAD can resolve (a review summary / top-level comment has
-      // no resolvable thread node), and only when the fix verifiably landed.
-      if (value.changed && value.commits.length > 0 && verify !== undefined && verify.progress) {
-        actions.push({
-          kind: 'resolve_thread',
-          actionId: `review-loop:${String(opts.pr)}:resolve:${source.itemId}`,
-          threadId: source.itemId,
-        });
+      // no resolvable thread node) — and only through the PER-ITEM gate:
+      // at least one reported commit must be verifiable in the pushed
+      // worktree (commitInPushedHead). The resolve never rides the global
+      // snapshot alone: a hallucinated sha must not hide its thread (the
+      // reply still posts — the summary reports what the worker claimed),
+      // and the withheld resolve is recorded as a per-item failure reason.
+      if (value.changed && value.commits.length > 0) {
+        let verified = false;
+        for (const sha of value.commits) {
+          if (await commitInPushedHead(opts.git, worktree.path, sha)) {
+            verified = true;
+            break;
+          }
+        }
+        if (verified) {
+          actions.push({
+            kind: 'resolve_thread',
+            actionId: `review-loop:${String(opts.pr)}:resolve:${source.itemId}`,
+            threadId: source.itemId,
+          });
+        } else {
+          reasons.push(
+            `thread ${source.itemId}: unverified-commits — no reported commit resolves in the pushed worktree HEAD; resolve withheld, reply posted`,
+          );
+        }
       }
     } else {
       // Whole-PR feedback (review summary / top-level comment): the honest
@@ -550,7 +601,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       repo: opts.repo,
       pr: opts.pr,
       run: opts.gh,
-      push: commits.length > 0 ? { run: opts.git, args: worktreePushArgs(worktree) } : null,
+      push:
+        commits.length > 0
+          ? { run: opts.git, args: worktreePushArgs(worktree.path, opts.headRefName) }
+          : null,
       dispatchLog: fileDispatchLog(opts.dispatchLogPath),
       nowMs: opts.nowMs,
     });
@@ -563,6 +617,12 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       reasons.push(
         `dispatch withheld ${String(reply.withheld)} resolve(s) — a sibling reply failed; they retry once the reply lands`,
       );
+    }
+    // A failed reply-stage push means NOTHING posted (push-before-post) —
+    // silently returning ok here would report a dispatched loop that
+    // answered nobody (Codex P1): needs-human, retriable on the next run.
+    if (reply.pushed === false) {
+      reasons.push(`dispatch push failed: ${reply.pushError ?? 'unknown error'}`);
     }
   }
 
