@@ -118,6 +118,8 @@ export type PlanBlockReason =
   | 'duplicate_pr'
   | 'review_data_truncated'
   | 'unclassified'
+  // Round-1 recorded deviation (PR131 r1): the verdict gate's addition to
+  // this frozen vocabulary.
   | 'not_eligible'
   | 'unresolved_base'
   | 'stack_cycle'
