@@ -35,6 +35,7 @@ import type { LedgerQueryInput, LedgerStore, LedgerView } from '../../../src/ops
 import { makeLedgerQuery } from '../../../src/ops/ledger/ledger.js';
 import {
   SWEEP_UNIT_OP,
+  changedFilesArgs,
   ledgerSignature,
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
@@ -554,6 +555,29 @@ describe('planSweep ledger suppression (UC §1 row 8 / R2 D6)', () => {
     expect(report.units.map((u) => u.package)).toEqual(['cli']);
   });
 
+  test('needsHuman routing is bounded by the MANIFEST: a ghost-package baseline routes nothing', async () => {
+    const planner = makePlanSweep({
+      changedFiles: async () => ['packages/cli/main.ts'],
+      queryLedger: makeLedgerQuery(() => memoryStore(LEDGER)),
+    });
+    const report = await okPlan(
+      planner,
+      baseInput({
+        selector: { mode: 'changed-vs-base', base: 'origin/main' },
+        ledger: LEDGER_CONFIG,
+        baselineSignatures: [
+          { package: 'ghost', signature: 'sig-human' }, // non-manifest → NO row
+          { package: 'core', signature: 'sig-human' }, // manifest, NOT selected → row
+        ],
+      }),
+    );
+    // A human is never routed to a package the manifest does not define,
+    // while the round-1 selector-independence contract still holds for the
+    // real (manifest) package nothing selected.
+    expect(report.needsHuman).toEqual([{ package: 'core', signature: 'sig-human' }]);
+    expect(report.units.map((u) => u.package)).toEqual(['cli']);
+  });
+
   test('the query receives exactly the configured root, storePath and thresholds', async () => {
     const seen: LedgerQueryInput[] = [];
     const planner = makePlanSweep({
@@ -729,5 +753,18 @@ describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
     const deps = makeSubprocessSweepPlannerDeps('/repo');
     expect(typeof deps.changedFiles).toBe('function');
     expect(typeof deps.queryLedger).toBe('function');
+  });
+
+  test('the changed-files argv terminates the rev list AFTER the base', () => {
+    const args = changedFilesArgs('origin/main');
+    expect(args).toEqual(['diff', '--name-only', '-z', 'origin/main', '--']);
+    // The base is a REVISION (before the terminator); the trailing `--`
+    // ends the rev list with an empty pathspec — never `-- <base>`, which
+    // would read the base as a PATH.
+    expect(args.indexOf('origin/main')).toBeLessThan(args.indexOf('--'));
+    expect(args[args.length - 1]).toBe('--');
+    // A ref spelled exactly like a tracked file can no longer die with
+    // "ambiguous argument: both revision and filename" — the terminator
+    // disambiguates without reclassifying the base.
   });
 });

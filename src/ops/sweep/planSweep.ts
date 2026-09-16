@@ -90,7 +90,8 @@ export interface PlanSweepInput {
   /**
    * Per-package baseline signatures the caller derived from probes via
    * {@link ledgerSignature}. Inert unless `ledger` is set. Baselines naming
-   * non-manifest packages never match a selected package and are ignored.
+   * non-manifest packages are ignored ENTIRELY — no suppression role and no
+   * human-routing rows.
    */
   baselineSignatures?: PlanSweepBaseline[];
   /** Known file-set per package name; a package absent here carries an empty file-set. */
@@ -308,13 +309,17 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
     }
 
     // needsHuman routing is SELECTOR-INDEPENDENT (fresh#3): every
-    // view.needsHuman signature some package baselines routes to the
-    // report's rows, whether or not the selector selected that package —
-    // a changed-vs-base sweep must not silently drop an escalated package
-    // just because no changed file touches it. Suppression is unchanged.
+    // view.needsHuman signature some MANIFEST package baselines routes to
+    // the report's rows, whether or not the selector selected that package
+    // — a changed-vs-base sweep must not silently drop an escalated package
+    // just because no changed file touches it. Baselines naming
+    // non-manifest packages are ignored ENTIRELY (no suppression role, no
+    // human-routing rows): a human must never be routed to a package the
+    // manifest does not define. Suppression is unchanged.
     const needsHuman: Array<{ package: string; signature: string }> = [];
     if (input.ledger !== undefined) {
       for (const [pkgName, signatures] of baselinesByPackage) {
+        if (!byName.has(pkgName)) continue;
         for (const signature of signatures) {
           if (humanSignatures.includes(signature)) {
             needsHuman.push({ package: pkgName, signature });
@@ -433,9 +438,11 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     if (typeof input.selector.base !== 'string' || input.selector.base === '') {
       return 'sweep: changed-vs-base requires a non-empty base ref';
     }
-    // The base lands verbatim in `git diff --name-only -z <base>` — a
-    // dash-leading ref would be parsed as a flag (see the
-    // makeSubprocessSweepPlannerDeps JSDoc for why `--` is NOT the fix).
+    // The base lands verbatim in `git diff --name-only -z <base> --` — a
+    // dash-leading ref would be parsed as an OPTION before the trailing
+    // `--` terminator ever applies (see the
+    // makeSubprocessSweepPlannerDeps JSDoc for the two different `--`
+    // traps).
     if (input.selector.base.startsWith('-')) {
       return `sweep: changed-vs-base base '${input.selector.base}' must not start with '-' — it is a positional git argument, never a flag`;
     }
@@ -552,14 +559,29 @@ const SWEEP_GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const SWEEP_GIT_TIMEOUT_MS = 600_000;
 
 /**
+ * The argv of the changed-file listing: `git diff --name-only -z <base> --`.
+ * The TRAILING `--` is a REV-LIST terminator — `base` stays a REVISION and
+ * the empty tail means "all paths" — and it exists because a tracked file
+ * spelled exactly like the base ref would otherwise die with "ambiguous
+ * argument: both revision and filename" (exit 128). It is NOT the pathspec
+ * form `-- <base>`: there the base would land AFTER the terminator and be
+ * silently read as a PATH — the two traps are different, and both are why
+ * the op boundary additionally rejects a dash-leading base outright (a
+ * dash-leading value is parsed as an OPTION before any terminator applies).
+ */
+export function changedFilesArgs(base: string): string[] {
+  return ['diff', '--name-only', '-z', base, '--'];
+}
+
+/**
  * The changed-file listing of the shipped planner deps: the NAMES of the
  * working-tree files that differ from `base` (--name-only), as
- * repo-root-relative paths (`git diff --name-only -z <base>`). Name-ONLY is
- * load-bearing: the status-letter variant (`--name-status`) would put
- * `M\tpath`-style rows into {@link parseNullDelimitedPaths}'s output and
- * corrupt its path contract. NUL-delimited (`-z`) so filenames with spaces,
- * quotes, or newlines survive intact; empty entries from the trailing NUL
- * are dropped by {@link parseNullDelimitedPaths}.
+ * repo-root-relative paths (argv built by {@link changedFilesArgs}).
+ * Name-ONLY is load-bearing: the status-letter variant (`--name-status`)
+ * would put `M\tpath`-style rows into {@link parseNullDelimitedPaths}'s
+ * output and corrupt its path contract. NUL-delimited (`-z`) so filenames
+ * with spaces, quotes, or newlines survive intact; empty entries from the
+ * trailing NUL are dropped by {@link parseNullDelimitedPaths}.
  */
 export function parseNullDelimitedPaths(text: string): string[] {
   return text.split('\0').filter((path) => path !== '');
@@ -612,29 +634,30 @@ function runSweepGit(args: string[], cwd: string): Promise<string> {
 
 /**
  * The REAL effects binding of the sweep planner (the registry importer's
- * input-driven binding): the changed-file listing runs `git diff
- * --name-only -z <base>` bound to the DISPATCHED input's repoRoot, and the
+ * input-driven binding): the changed-file listing runs the
+ * {@link changedFilesArgs} argv — `git diff --name-only -z <base> --`,
+ * the trailing `--` a REV-LIST terminator (see that JSDoc for the two
+ * different `--` traps) — bound to the DISPATCHED input's repoRoot, and the
  * ledger view consults the ledger family's own store — `makeLedgerQuery`
  * over the containment-checked {@link pathLedgerStore}, with root +
  * storePath crossing the plain-JSON boundary from the query input. Both
  * effects are lazy per call; a library consumer injects fakes instead
  * (every decision test does exactly that).
  *
- * FLAG-INJECTION BOUNDARY, and why there is deliberately NO `--`: the base
- * is a REV argument — appending `--` would switch `git diff` to pathspec
- * mode, and a base arriving after `--` would be read as a PATH (silently
- * diffing nothing, or the wrong thing). The mechanism here is instead
- * (1) the op boundary rejecting a dash-leading base as a `failed` result
- * (inputFaultOf), and (2) execFile with an ARGS ARRAY — no shell parsing,
- * so no value can become shell syntax. A caller bypassing both reaches the
- * library-level contract the same way it reaches every other malformed
- * input: this adapter trusts the seam the way the ledger ops trust the
- * store contract.
+ * FLAG-INJECTION BOUNDARY: the trailing `--` terminator cannot protect a
+ * dash-leading base — git parses OPTION-class arguments before it, so
+ * `-X`-shaped values would still be consumed as options. The mechanism for
+ * that class is (1) the op boundary rejecting a dash-leading base as a
+ * `failed` result (inputFaultOf), and (2) execFile with an ARGS ARRAY — no
+ * shell parsing, so no value can become shell syntax. A caller bypassing
+ * both reaches the library-level contract the same way it reaches every
+ * other malformed input: this adapter trusts the seam the way the ledger
+ * ops trust the store contract.
  */
 export function makeSubprocessSweepPlannerDeps(repoRoot: string): PlanSweepDeps {
   return {
     changedFiles: (base: string) =>
-      runSweepGit(['diff', '--name-only', '-z', base], repoRoot).then(parseNullDelimitedPaths),
+      runSweepGit(changedFilesArgs(base), repoRoot).then(parseNullDelimitedPaths),
     queryLedger: (input: LedgerQueryInput) =>
       makeLedgerQuery((i) => pathLedgerStore(i.root, i.storePath))(input),
   };
