@@ -80,7 +80,12 @@ describe('gitMutex mutual exclusion (UC §1 row 32)', () => {
         order.push('b-out');
       }),
     ]);
-    expect(order).toEqual(['a-in', 'a-out', 'b-in', 'b-out']);
+    // WHO acquires first is a race; that one runs to EXCLUSION (no
+    // interleaving) is the contract.
+    const serialized =
+      JSON.stringify(order) === JSON.stringify(['a-in', 'a-out', 'b-in', 'b-out']) ||
+      JSON.stringify(order) === JSON.stringify(['b-in', 'b-out', 'a-in', 'a-out']);
+    expect(serialized).toBe(true);
   });
 });
 

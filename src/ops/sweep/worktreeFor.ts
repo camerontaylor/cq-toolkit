@@ -8,7 +8,10 @@
 // child_process here — every git touch arrives through the injected
 // {@link WorktreeEffects}, and every git-MUTATING section (prune, add,
 // baseline-cache eviction) runs inside {@link makeGitMutex} when the input
-// configures one (UC row 32). The shipped effects adapter is
+// configures one (UC row 32). The op path touches node:fs for exactly two
+// fs-safety duties on ITS OWN inputs: realpath canonicalization of path
+// comparisons ({@link realpathOf}) and the intermediate-symlink eviction
+// guard ({@link intermediateSymlinkFault}). The shipped effects adapter is
 // {@link makeSubprocessWorktreeEffects}, the registry importer's binding.
 //
 // Invariants honored here:
@@ -26,7 +29,7 @@
 //     safe path segments (no separators, no '..', no leading dash — which
 //     also keeps them out of git's flag namespace in the args array).
 import { execFile } from 'node:child_process';
-import { rm, stat } from 'node:fs/promises';
+import { lstat, realpath, rm, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from './gitMutex.js';
@@ -84,8 +87,8 @@ export interface Workspace {
   path: string;
   /** The derived branch `<runPrefix>/<kind>/<slug>`. */
   branch: string;
-  /** The base the tree checks out (verbatim input). */
-  base: string;
+  /** The base the tree checks out. REQUESTED, verbatim input: on reuse the op never re-checks-out — the tree's actual HEAD is whatever the reused worktree carries (a rev-verify is a later salvage/D2-class surface). */
+  requestedBase: string;
   /** true when an existing strictly-clean tree was reused; false when freshly created. */
   reused: boolean;
   /** I7: baseline cache dirs evicted from a reused tree (input-relative names). Empty on create. */
@@ -193,12 +196,22 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
         error: `sweep: could not list local worktrees — ${messageOf(err)}`,
       };
     }
-    const candidate = worktrees.find((w) => w.branch === branch);
+    // CANONICALIZED comparison (PR138 r2): porcelain reports REALPATH'd
+    // paths (macOS /tmp → /private/tmp), so both sides of every path
+    // comparison go through realpathOf — an absent target falls back to its
+    // lexical form, so the not-yet-created derived path compares lexically
+    // until it exists.
+    const derivedReal = await realpathOf(path);
+    const registered: Array<{ path: string; branch?: string; real: string }> = [];
+    for (const entry of worktrees) {
+      registered.push({ ...entry, real: await realpathOf(entry.path) });
+    }
+    const candidate = registered.find((w) => w.branch === branch);
     if (candidate !== undefined) {
       // REUSE requires the tree at the DERIVED path: a branch checked out
       // elsewhere is an anomaly, and returning a Workspace pointing at a
       // path the caller did not derive would be a silent lie.
-      if (candidate.path !== path) {
+      if (candidate.real !== derivedReal) {
         return {
           status: 'failed',
           error: `sweep: branch '${branch}' is checked out at '${candidate.path}', not the derived worktree path '${path}' — path namespace collision (UC row 23)`,
@@ -206,32 +219,47 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
       }
       let clean: boolean;
       try {
-        clean = await git.isStrictClean(candidate.path);
+        clean = await git.isStrictClean(candidate.real);
       } catch (err) {
         return {
           status: 'failed',
-          error: `sweep: could not check '${candidate.path}' for a strictly clean tree — ${messageOf(err)}`,
+          error: `sweep: could not check '${candidate.real}' for a strictly clean tree — ${messageOf(err)}`,
         };
       }
       if (!clean) {
         return {
           status: 'failed',
-          error: `sweep: worktree '${candidate.path}' on branch '${branch}' is dirty (git status --porcelain non-empty, untracked files included) — refusing reuse; salvage is the caller's next step, never auto-clean (UC row 20)`,
+          error: `sweep: worktree '${candidate.real}' on branch '${branch}' is dirty (git status --porcelain non-empty, untracked files included) — refusing reuse; salvage is the caller's next step, never auto-clean (UC row 20)`,
         };
       }
       // I7: the baseline is never cached on reuse — evict, list, and hand
       // the caller a tree it must re-probe. Every entry passes the
-      // containment check FIRST: a refused entry is never touched on disk
-      // (no stat, no rm) and only listed.
+      // containment check and the intermediate-symlink guard FIRST: a
+      // refused entry is never touched on disk (no stat, no rm) and only
+      // listed. The eviction base is the CANONICAL tree path, so a
+      // symlinked component above it cannot bend the containment math.
       const clearedBaselineCaches: string[] = [];
       const refusedBaselineCaches: string[] = [];
       for (const rel of input.baselineCacheDirs ?? []) {
-        const containmentFault = baselineCacheContainmentFault(rel, candidate.path);
+        const containmentFault = baselineCacheContainmentFault(rel, candidate.real);
         if (containmentFault !== null) {
           refusedBaselineCaches.push(rel);
           continue;
         }
-        const inTree = resolve(candidate.path, rel);
+        let symlinkFault: string | null;
+        try {
+          symlinkFault = await intermediateSymlinkFault(candidate.real, rel);
+        } catch (err) {
+          return {
+            status: 'failed',
+            error: `sweep: could not inspect baseline cache path '${rel}' — ${messageOf(err)}`,
+          };
+        }
+        if (symlinkFault !== null) {
+          refusedBaselineCaches.push(rel);
+          continue;
+        }
+        const inTree = resolve(candidate.real, rel);
         let exists: boolean;
         try {
           exists = await git.pathExists(inTree);
@@ -255,9 +283,9 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
       return {
         status: 'ok',
         value: {
-          path: candidate.path,
+          path: candidate.real,
           branch,
-          base: input.base,
+          requestedBase: input.base,
           reused: true,
           clearedBaselineCaches,
           refusedBaselineCaches,
@@ -267,7 +295,7 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
 
     // RESERVATION (UC row 23): no reuse candidate — every namespace must be
     // empty, and each collision is refused naming its namespace.
-    const occupant = worktrees.find((w) => w.path === path);
+    const occupant = registered.find((w) => w.real === derivedReal);
     if (occupant !== undefined) {
       return {
         status: 'failed',
@@ -293,10 +321,23 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
     try {
       remoteBranches = await git.listRemoteBranches();
     } catch (err) {
-      return {
-        status: 'failed',
-        error: `sweep: could not list remote branches — ${messageOf(err)}`,
-      };
+      // A MISSING `origin` is a vacuously empty remote namespace — a repo
+      // with no upstream cannot collide remotely. git words the missing
+      // remote two ways ('No such remote'; ls-remote's "'origin' does not
+      // appear to be a git repository"); exactly that class is tolerated as
+      // empty. Anything else — a broken repo surface, a network fault — is
+      // a `failed` result.
+      const text = messageOf(err);
+      const missingRemote =
+        /No such remote/i.test(text) || /does not appear to be a git repository/i.test(text);
+      if (missingRemote) {
+        remoteBranches = [];
+      } else {
+        return {
+          status: 'failed',
+          error: `sweep: could not list remote branches — ${text}`,
+        };
+      }
     }
     if (remoteBranches.includes(branch)) {
       return {
@@ -336,9 +377,12 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
     return {
       status: 'ok',
       value: {
-        path,
+        // The canonical form of the created tree: git records the realpath,
+        // so the reported path matches what the next call's porcelain list
+        // will show (lexical fallback when the fs cannot resolve).
+        path: await realpathOf(path),
         branch,
-        base: input.base,
+        requestedBase: input.base,
         reused: false,
         clearedBaselineCaches: [],
         refusedBaselineCaches: [],
@@ -379,6 +423,61 @@ function baselineCacheContainmentFault(entry: string, worktreePath: string): str
   return null;
 }
 
+/**
+ * CANONICALIZED path comparison (PR138 r2): `git worktree list
+ * --porcelain` reports REALPATH'd paths (macOS /tmp → /private/tmp), so
+ * lexical comparisons break under symlinked components and a create→reuse
+ * round trip collides with itself. Resolves through realpath; an ABSENT
+ * target falls back to the lexical path — only existing symlinks are
+ * canonicalized.
+ */
+async function realpathOf(p: string): Promise<string> {
+  try {
+    return await realpath(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * Intermediate-symlink guard for an eviction target (PR138 r2): fs.rm
+ * FOLLOWS symlinked INTERMEDIATE directories, so every segment from the
+ * worktree root down to the target's PARENT is lstat-checked — any symlink
+ * (or non-directory) among them refuses the entry, and it is never deleted
+ * through a link. A symlink AT THE FINAL SEGMENT is safe: rm unlinks the
+ * link itself, never a recursive delete through it. An ABSENT intermediate
+ * is no refusal (the target cannot exist either; the existence probe
+ * settles that). Returns the refusal reason, or null when clear.
+ */
+async function intermediateSymlinkFault(worktreePath: string, rel: string): Promise<string | null> {
+  const segments = rel.split('/');
+  let current = worktreePath;
+  for (const segment of segments.slice(0, -1)) {
+    current = `${current}/${segment}`;
+    let info;
+    try {
+      info = await lstat(current);
+    } catch (err) {
+      if (isEnoent(err)) return null;
+      throw err;
+    }
+    if (!info.isDirectory()) {
+      return `intermediate '${current}' is not a real directory (symlinks are never deleted through)`;
+    }
+  }
+  return null;
+}
+
+/** True when a thrown value is a node:fs ENOENT (the missing-file case). */
+function isEnoent(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ENOENT'
+  );
+}
+
 /** Library-level input contract; the registry schema (next slice) mirrors it for JSON dispatch. */
 function inputFaultOf(input: WorktreeForInput): string | null {
   for (const [field, value] of [
@@ -415,6 +514,11 @@ function inputFaultOf(input: WorktreeForInput): string | null {
   // worktreesDir starting with '-' would inject it as a flag.
   if (input.worktreesDir.startsWith('-')) {
     return `sweep: worktreesDir '${input.worktreesDir}' must not start with '-' — the derived path is a positional git argument, never a flag`;
+  }
+  if (input.baselineCacheDirs !== undefined && !Array.isArray(input.baselineCacheDirs)) {
+    // The char-wise iteration corruption class: a string value would iterate
+    // as characters and a number would throw at the eviction loop.
+    return 'sweep: baselineCacheDirs must be an array of relative cache paths';
   }
   if (input.mutex !== undefined) {
     // A null/non-object mutex is reachable from an untyped caller past any

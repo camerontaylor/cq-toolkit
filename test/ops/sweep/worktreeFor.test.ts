@@ -24,7 +24,16 @@
 //      (init → worktree add → strict-clean → prune) — the adapters' only
 //      process touch.
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -172,6 +181,35 @@ describe('sweep.worktreeFor reservation (UC row 23)', () => {
     expect(error).toMatch(/remote branch namespace collision/);
   });
 
+  test('a missing origin remote is a vacuously empty namespace — the create proceeds', async () => {
+    const repo = fakeRepo();
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      listRemoteBranches: async () => {
+        throw new Error('git ls-remote failed — error: No such remote origin');
+      },
+    };
+    const workspace = await okWorkspace(makeWorktreeFor(effects), INPUT);
+    expect(workspace.reused).toBe(false);
+    expect(repo.addCalls).toHaveLength(1);
+  });
+
+  test('a broken repo surface in the remote listing is a failed result, not an empty namespace', async () => {
+    const repo = fakeRepo();
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      listRemoteBranches: async () => {
+        throw new Error(
+          'git ls-remote failed — fatal: not a git repository (or any of the parent directories): .git',
+        );
+      },
+    };
+    const error = await failedAt(makeWorktreeFor(effects), INPUT);
+    expect(error).toMatch(/could not list remote branches/);
+    expect(error).toMatch(/not a git repository/);
+    expect(repo.addCalls).toHaveLength(0);
+  });
+
   test('an existing plain directory at the derived path collides — path namespace named', async () => {
     const repo = fakeRepo();
     repo.dirs.add(PATH);
@@ -199,7 +237,7 @@ describe('sweep.worktreeFor reuse (UC row 20)', () => {
     expect(workspace).toEqual({
       path: PATH,
       branch: BRANCH,
-      base: 'origin/main',
+      requestedBase: 'origin/main',
       reused: true,
       clearedBaselineCaches: [],
       refusedBaselineCaches: [],
@@ -229,7 +267,7 @@ describe('sweep.worktreeFor create', () => {
     expect(workspace).toEqual({
       path: PATH,
       branch: BRANCH,
-      base: 'origin/main',
+      requestedBase: 'origin/main',
       reused: false,
       clearedBaselineCaches: [],
       refusedBaselineCaches: [],
@@ -329,6 +367,51 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     expect(workspace.clearedBaselineCaches).toEqual(['.cq/baseline']);
     expect(workspace.refusedBaselineCaches).toEqual(['../outside']);
     expect(repo.removed).toEqual([`${PATH}/.cq/baseline`]);
+  });
+
+  test('an intermediate SYMLINK refuses the entry; a FINAL-segment symlink is unlinked, not followed', async () => {
+    // REAL fs: the intermediate-symlink guard lstats actual segments and the
+    // rmDir effect below performs real deletions.
+    const dir = mkdtempSync(join(tmpdir(), 'worktree-evict-'));
+    try {
+      const wt = join(dir, 'wt', 'fix', 'core'); // the derived path for this input
+      mkdirSync(wt, { recursive: true });
+      mkdirSync(join(dir, 'outside'));
+      writeFileSync(join(dir, 'outside', 'keep.txt'), 'keep');
+      symlinkSync(join(dir, 'outside'), join(wt, '.cq')); // intermediate symlink
+      symlinkSync(join(dir, 'outside'), join(wt, 'cache-link')); // FINAL-segment symlink
+      // The op evicts under the CANONICAL tree path (realpath'd prefix), so
+      // the fake existence probe must know that form too.
+      const canonicalWt = realpathSync(wt);
+      const repo = fakeRepo();
+      repo.worktrees = [{ path: wt, branch: BRANCH }];
+      repo.clean.add(wt);
+      repo.dirs.add(join(canonicalWt, 'cache-link'));
+      const effects: WorktreeEffects = {
+        ...effectsOf(repo),
+        rmDir: async (p) => {
+          repo.calls.push(`rmDir:${p}`);
+          repo.removed.push(p);
+          await rm(p, { recursive: true, force: true });
+        },
+      };
+      const workspace = await okWorkspace(makeWorktreeFor(effects), {
+        ...INPUT,
+        repoRoot: dir,
+        worktreesDir: join(dir, 'wt'),
+        baselineCacheDirs: ['.cq/baseline', 'cache-link'],
+      });
+      // The symlinked intermediate refuses the entry — nothing deleted through it.
+      expect(workspace.refusedBaselineCaches).toEqual(['.cq/baseline']);
+      expect(repo.removed.some((p) => p.includes('.cq'))).toBe(false);
+      // The final-segment symlink is unlinked ITSELF; the target survives.
+      expect(workspace.clearedBaselineCaches).toEqual(['cache-link']);
+      expect(repo.removed).toEqual([join(canonicalWt, 'cache-link')]);
+      expect(existsSync(join(dir, 'outside', 'keep.txt'))).toBe(true);
+      expect(existsSync(join(wt, 'cache-link'))).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
@@ -442,6 +525,15 @@ describe('sweep.worktreeFor path safety', () => {
     expect(error).toMatch(/worktreesDir/);
     expect(error).toMatch(/never a flag/);
     expect(repo.addCalls).toHaveLength(0);
+  });
+
+  test('a non-array baselineCacheDirs is a failed result — the char-wise iteration corruption class', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      baselineCacheDirs: 'build' as unknown as NonNullable<WorktreeForInput['baselineCacheDirs']>,
+    });
+    expect(error).toMatch(/baselineCacheDirs must be an array/);
   });
 });
 
@@ -651,6 +743,57 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       await expect(
         resilient(() => effects.isStrictClean(join(dir, 'nope')).then(() => 'ran' as const)),
       ).rejects.toThrow(/git status/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 120_000);
+
+  test('REAL-git create→reuse round trip through makeWorktreeFor: second call REUSES (canonicalized paths)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'worktree-roundtrip-'));
+    try {
+      await resilient(() => run(['init', '-q', '-b', 'main', dir], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.email', 't@example.invalid'], dir));
+      await resilient(() => run(['-C', dir, 'config', 'user.name', 'T'], dir));
+      await resilient(() => run(['-C', dir, 'commit', '--allow-empty', '-m', 'init'], dir));
+
+      let adds = 0;
+      const subprocess = makeSubprocessWorktreeEffects(dir, { timeoutMs: GIT_CALL_TIMEOUT_MS });
+      const effects: WorktreeEffects = {
+        ...subprocess,
+        worktreeAdd: async (req) => {
+          adds += 1;
+          await subprocess.worktreeAdd(req);
+        },
+      };
+      const op = makeWorktreeFor(effects);
+      const input: WorktreeForInput = {
+        repoRoot: dir,
+        worktreesDir: join(dir, 'wt'),
+        runPrefix: 'cq/x',
+        kind: 'fix',
+        slug: 'core',
+        base: 'main',
+      };
+      // No origin remote exists here — the remote namespace is vacuously
+      // empty (the missing-origin tolerance under test in this round).
+      const first = await resilient(() => okWorkspace(op, input));
+      expect(first.reused).toBe(false);
+      expect(adds).toBe(1);
+      // mkdtemp prefixes often carry a symlink (macOS /var → /private/var):
+      // the canonical tree path is what a later comparison must match.
+      const canonicalFirst = realpathSync(first.path);
+
+      // A symlinked worktreesDir component must resolve to the SAME tree —
+      // the create→reuse round trip would self-collide under lexical
+      // comparison.
+      symlinkSync(join(dir, 'wt'), join(dir, 'wt-link'));
+      const viaLink = await resilient(() =>
+        okWorkspace(op, { ...input, worktreesDir: join(dir, 'wt-link') }),
+      );
+      expect(viaLink.reused).toBe(true);
+      expect(viaLink.path).toBe(canonicalFirst);
+      expect(viaLink.requestedBase).toBe('main');
+      expect(adds).toBe(1); // the second call did NOT create
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

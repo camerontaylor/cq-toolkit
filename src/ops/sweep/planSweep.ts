@@ -401,8 +401,26 @@ function inputFaultOf(input: PlanSweepInput): string | null {
   if (input.fixers.some((fixer) => typeof fixer !== 'string' || fixer === '')) {
     return 'sweep: every requested fixer label must be a non-empty string';
   }
-  if (input.baselineSignatures !== undefined && !Array.isArray(input.baselineSignatures)) {
-    return 'sweep: baselineSignatures must be an array of {package, signature} entries';
+  if (input.baselineSignatures !== undefined) {
+    if (!Array.isArray(input.baselineSignatures)) {
+      return 'sweep: baselineSignatures must be an array of {package, signature} entries';
+    }
+    for (const [index, baseline] of input.baselineSignatures.entries()) {
+      // Element shape, mirroring the packages guard: a null/garbage entry
+      // reachable from an untyped caller is a `failed` result naming the
+      // index, never a TypeError at the package/signature reads.
+      if (baseline === null || typeof baseline !== 'object') {
+        return `sweep: baselineSignatures[${String(index)}] must be a {package, signature} entry with non-empty strings`;
+      }
+      if (
+        typeof baseline.package !== 'string' ||
+        baseline.package === '' ||
+        typeof baseline.signature !== 'string' ||
+        baseline.signature === ''
+      ) {
+        return `sweep: baselineSignatures[${String(index)}] must carry a non-empty package and signature`;
+      }
+    }
   }
   if (
     input.selector === undefined ||
@@ -426,8 +444,23 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     if (!Array.isArray(input.selector.packages)) {
       return 'sweep: explicit selector requires a packages array';
     }
+    // Aligned with the registry schema's min(1): an empty explicit scope is
+    // a misconfiguration, not an honest empty sweep.
+    if (input.selector.packages.length === 0) {
+      return 'sweep: explicit selector requires at least one package — an empty explicit scope plans nothing and hides the misconfiguration';
+    }
     if (input.selector.packages.some((name) => typeof name !== 'string' || name === '')) {
       return 'sweep: explicit selector package names must be non-empty strings';
+    }
+  }
+  if (input.packageFiles !== undefined) {
+    if (input.packageFiles === null || typeof input.packageFiles !== 'object') {
+      return 'sweep: packageFiles must be an object mapping package names to file arrays';
+    }
+    for (const [name, files] of Object.entries(input.packageFiles)) {
+      if (!Array.isArray(files) || files.some((file) => typeof file !== 'string' || file === '')) {
+        return `sweep: packageFiles['${name}'] must be an array of non-empty path strings`;
+      }
     }
   }
   if (input.ledger !== undefined) {
@@ -519,11 +552,14 @@ const SWEEP_GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const SWEEP_GIT_TIMEOUT_MS = 600_000;
 
 /**
- * The changed-file listing of the shipped planner deps: the name-status
- * diff of the working tree against `base`, as repo-root-relative paths
- * (`git diff --name-only -z <base>`). NUL-delimited (`-z`) so filenames
- * with spaces, quotes, or newlines survive intact; empty entries from the
- * trailing NUL are dropped by {@link parseNullDelimitedPaths}.
+ * The changed-file listing of the shipped planner deps: the NAMES of the
+ * working-tree files that differ from `base` (--name-only), as
+ * repo-root-relative paths (`git diff --name-only -z <base>`). Name-ONLY is
+ * load-bearing: the status-letter variant (`--name-status`) would put
+ * `M\tpath`-style rows into {@link parseNullDelimitedPaths}'s output and
+ * corrupt its path contract. NUL-delimited (`-z`) so filenames with spaces,
+ * quotes, or newlines survive intact; empty entries from the trailing NUL
+ * are dropped by {@link parseNullDelimitedPaths}.
  */
 export function parseNullDelimitedPaths(text: string): string[] {
   return text.split('\0').filter((path) => path !== '');

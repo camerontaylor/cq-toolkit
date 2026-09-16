@@ -228,6 +228,38 @@ describe('planSweep library input boundary (reachable past any schema)', () => {
     const error = await failedPlan(makePlanner(), input);
     expect(error).toMatch(/ledger must be an object/);
   });
+
+  test('a null/garbage baselineSignatures ELEMENT is a failed result naming the index', async () => {
+    type Entries = NonNullable<PlanSweepInput['baselineSignatures']>;
+    const nullEntry = baseInput({
+      baselineSignatures: [null] as unknown as Entries,
+    });
+    await expect(failedPlan(makePlanner(), nullEntry)).resolves.toMatch(/baselineSignatures\[0\]/);
+    const garbage = baseInput({
+      baselineSignatures: [42] as unknown as Entries,
+    });
+    await expect(failedPlan(makePlanner(), garbage)).resolves.toMatch(/baselineSignatures\[0\]/);
+    const blank = baseInput({
+      baselineSignatures: [{ package: 'core', signature: '' }] as unknown as Entries,
+    });
+    await expect(failedPlan(makePlanner(), blank)).resolves.toMatch(/baselineSignatures\[0\]/);
+  });
+
+  test('an empty explicit selector is a failed result — aligned with the registry min(1)', async () => {
+    const error = await failedPlan(
+      makePlanner(),
+      baseInput({ selector: { mode: 'explicit', packages: [] } }),
+    );
+    expect(error).toMatch(/at least one package/);
+  });
+
+  test('a packageFiles value that is not an array of strings is a failed result naming the key', async () => {
+    const input = baseInput({
+      packageFiles: { core: 'build' } as unknown as NonNullable<PlanSweepInput['packageFiles']>,
+    });
+    const error = await failedPlan(makePlanner(), input);
+    expect(error).toMatch(/packageFiles\['core'\]/);
+  });
 });
 
 // ---------------------------------------------------------------------------
