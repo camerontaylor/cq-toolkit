@@ -596,6 +596,40 @@ export function parseNullDelimitedPaths(text: string): string[] {
 const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
 
 /**
+ * Map an execFile failure onto the planner's git fault taxonomy. execFile
+ * sets `killed` for BOTH the timeout SIGKILL and a maxBuffer overflow — and
+ * the overflow's message names 'maxBuffer' — so that signature branches
+ * FIRST and the failure names the right mechanism (an output limit is not a
+ * timeout). Exported for the fault-mapping pins; runSweepGit is the only
+ * production call site.
+ */
+export function mapSweepGitFault(
+  args: string[],
+  error: { message: string; killed?: boolean | null; code?: unknown },
+  stderr: string,
+  timeoutMs: number,
+): Error {
+  const name = `git ${args[0] ?? 'git'}`;
+  if (error.message.includes('maxBuffer')) {
+    return new Error(
+      `${name} exceeded the output limit (maxBuffer ${String(SWEEP_GIT_MAX_BUFFER_BYTES)} bytes) — the listing is too large to map; narrow the diff base`,
+      { cause: error },
+    );
+  }
+  if (error.killed === true) {
+    return new Error(
+      `${name} timed out after ${String(timeoutMs)}ms and was SIGKILLed — the git call never produced evidence`,
+      { cause: error },
+    );
+  }
+  const exit = typeof error.code === 'number' ? ` (exit ${String(error.code)})` : '';
+  return new Error(
+    `${name}${exit} failed — ${stderr.trim() !== '' ? stderr.trim() : error.message}`,
+    { cause: error },
+  );
+}
+
+/**
  * Run git with an execFile ARGS ARRAY — never a shell string, so no config
  * value can be re-parsed as shell syntax (the repo's tooling convention).
  * A non-zero exit, a spawn failure, or a run exceeding the timeout
@@ -614,16 +648,7 @@ function runSweepGit(args: string[], cwd: string): Promise<string> {
       },
       (error, stdout, stderr) => {
         if (error !== null) {
-          const exit = typeof error.code === 'number' ? ` (exit ${String(error.code)})` : '';
-          const timedOut = error.killed === true;
-          reject(
-            new Error(
-              timedOut
-                ? `git ${args[0] ?? 'git'} timed out after ${String(SWEEP_GIT_TIMEOUT_MS)}ms and was SIGKILLed — the git call never produced evidence`
-                : `git ${args[0] ?? 'git'}${exit} failed — ${stderr.trim() !== '' ? stderr.trim() : error.message}`,
-              { cause: error },
-            ),
-          );
+          reject(mapSweepGitFault(args, error, stderr, SWEEP_GIT_TIMEOUT_MS));
           return;
         }
         resolve(stdout);

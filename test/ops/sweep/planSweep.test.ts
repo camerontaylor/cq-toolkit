@@ -39,6 +39,7 @@ import {
   ledgerSignature,
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
+  mapSweepGitFault,
   parseNullDelimitedPaths,
 } from '../../../src/ops/sweep/planSweep.js';
 import type {
@@ -766,5 +767,39 @@ describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
     // A ref spelled exactly like a tracked file can no longer die with
     // "ambiguous argument: both revision and filename" — the terminator
     // disambiguates without reclassifying the base.
+  });
+
+  test('mapSweepGitFault names the OUTPUT LIMIT for a maxBuffer overflow (which also sets killed)', () => {
+    const error = mapSweepGitFault(
+      ['diff'],
+      { killed: true, message: 'maxBuffer length exceeded' },
+      '',
+      600_000,
+    );
+    expect(error.message).toMatch(/output limit/);
+    expect(error.message).toMatch(/maxBuffer/);
+    expect(error.message).not.toMatch(/timed out/);
+  });
+
+  test('mapSweepGitFault names the TIMEOUT for a non-overflow kill', () => {
+    const error = mapSweepGitFault(
+      ['diff'],
+      { killed: true, message: 'signal: SIGKILL' },
+      '',
+      600_000,
+    );
+    expect(error.message).toMatch(/timed out/);
+    expect(error.message).not.toMatch(/output limit/);
+  });
+
+  test('mapSweepGitFault carries the stderr text for a plain non-zero exit', () => {
+    const error = mapSweepGitFault(
+      ['status'],
+      { code: 128, killed: false, message: 'exited with code 128' },
+      'fatal: not a git repository',
+      600_000,
+    );
+    expect(error.message).toMatch(/exit 128/);
+    expect(error.message).toMatch(/fatal: not a git repository/);
   });
 });

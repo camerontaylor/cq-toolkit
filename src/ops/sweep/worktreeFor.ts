@@ -43,7 +43,7 @@ export interface WorktreeForInput {
    * Parent dir for worktree checkouts — CONFIG-GRADE: the legacy
    * `<repo>/../worktrees/cq` layout is an assumption, not a constant.
    * ABSOLUTE or REPO-ROOT-RELATIVE: a relative dir is resolved against
-   * `repoRoot`, and the derived `Workspace.path` is always ABSOLUTE —
+   * `repoRoot`, and the derived `SweepWorkspace.path` is always ABSOLUTE —
    * `git worktree list --porcelain` reports absolute paths, so the
    * resolution is what makes a re-invoke reuse its own worktree instead of
    * colliding with itself.
@@ -82,7 +82,7 @@ export interface WorktreeMutexConfig {
 }
 
 /** The provider's report: where the tree lives and how it was obtained. Plain JSON. */
-export interface Workspace {
+export interface SweepWorkspace {
   /** The checkout path — always ABSOLUTE (a relative worktreesDir is resolved against repoRoot). */
   path: string;
   /** The derived branch `<runPrefix>/<kind>/<slug>`. */
@@ -120,6 +120,14 @@ export interface WorktreeEffects {
   listBranches(): Promise<string[]>;
   /** Short names of origin's heads (`git ls-remote --heads origin`) — network-touching, still lazy per call. */
   listRemoteBranches(): Promise<string[]>;
+  /**
+   * OPTIONAL missing-remote classifier: the URL configured for `origin`, or
+   * null when NO origin is configured. When absent, the op falls back to
+   * text-classifying the listRemoteBranches fault — the weaker pre-fix
+   * behavior, since ls-remote's wording matches BOTH a missing remote and a
+   * configured-but-broken one.
+   */
+  remoteGetUrl?(): Promise<string | null>;
   pathExists(p: string): Promise<boolean>;
   /** STRICT clean: `git status --porcelain` EMPTY semantics — untracked files count as dirty. */
   isStrictClean(worktreePath: string): Promise<boolean>;
@@ -136,6 +144,16 @@ export interface WorktreeEffects {
  * as an ARRAY, and this keeps even a hostile config from trying).
  */
 const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * git-refname hardening on top of SEGMENT_RE: a '..' run walks refs
+ * (`a..b`, `a...b`) and a '.lock' suffix collides with the loose-ref lock
+ * file — kind/slug/runPrefix feed the derived branch name, so neither may
+ * appear in a segment.
+ */
+function refnameUnsafeSegment(segment: string): boolean {
+  return segment.includes('..') || segment.endsWith('.lock');
+}
 
 /**
  * Build the `sweep.worktreeFor` op over injected git effects. Derived
@@ -161,7 +179,7 @@ const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
  * list. Every effects fault is a `failed` result — never a throw across
  * the op seam.
  */
-export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Workspace> {
+export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, SweepWorkspace> {
   return async (input) => {
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
@@ -209,7 +227,7 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
     const candidate = registered.find((w) => w.branch === branch);
     if (candidate !== undefined) {
       // REUSE requires the tree at the DERIVED path: a branch checked out
-      // elsewhere is an anomaly, and returning a Workspace pointing at a
+      // elsewhere is an anomaly, and returning a SweepWorkspace pointing at a
       // path the caller did not derive would be a silent lie.
       if (candidate.real !== derivedReal) {
         return {
@@ -322,22 +340,34 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
       remoteBranches = await git.listRemoteBranches();
     } catch (err) {
       // A MISSING `origin` is a vacuously empty remote namespace — a repo
-      // with no upstream cannot collide remotely. git words the missing
-      // remote two ways ('No such remote'; ls-remote's "'origin' does not
-      // appear to be a git repository"); exactly that class is tolerated as
-      // empty. Anything else — a broken repo surface, a network fault — is
-      // a `failed` result.
+      // with no upstream cannot collide remotely. ls-remote's failure text
+      // alone CANNOT classify ("does not appear to be a git repository"
+      // matches a missing remote AND a configured-but-broken URL), so when
+      // the seam provides {@link WorktreeEffects.remoteGetUrl} the op asks
+      // IT: get-url's missing-remote error text is exactly "No such remote
+      // 'origin'". A configured-but-broken remote fails loudly; without the
+      // classifier effect the op falls back to the weaker text heuristic.
       const text = messageOf(err);
-      const missingRemote =
-        /No such remote/i.test(text) || /does not appear to be a git repository/i.test(text);
-      if (missingRemote) {
-        remoteBranches = [];
+      let originConfigured = true;
+      if (git.remoteGetUrl !== undefined) {
+        try {
+          originConfigured = (await git.remoteGetUrl()) !== null;
+        } catch (getUrlErr) {
+          return {
+            status: 'failed',
+            error: `sweep: could not check the origin remote — ${messageOf(getUrlErr)}`,
+          };
+        }
       } else {
+        originConfigured = !/No such remote/i.test(text);
+      }
+      if (originConfigured) {
         return {
           status: 'failed',
           error: `sweep: could not list remote branches — ${text}`,
         };
       }
+      remoteBranches = [];
     }
     if (remoteBranches.includes(branch)) {
       return {
@@ -494,16 +524,19 @@ function inputFaultOf(input: WorktreeForInput): string | null {
   }
   // kind/slug are single segments; runPrefix may nest, but every segment is
   // held to the same safe-segment rule, so the derived branch and path can
-  // neither escape worktreesDir nor impersonate a git flag.
-  if (!SEGMENT_RE.test(input.kind)) {
-    return `sweep: kind '${input.kind}' must be one safe path segment (${SEGMENT_RE.source}) — no separators, no '..', no leading dash`;
+  // neither escape worktreesDir nor impersonate a git flag. SEGMENT_RE
+  // alone still admits two refname-illegal shapes — '..' runs (ref-walking)
+  // and a '.lock' suffix (loose-ref-file collision) — so both are rejected
+  // explicitly.
+  if (!SEGMENT_RE.test(input.kind) || refnameUnsafeSegment(input.kind)) {
+    return `sweep: kind '${input.kind}' must be one safe path segment (${SEGMENT_RE.source}) — no separators, no '..', no leading dash, never a '..' run or a '.lock' suffix (it feeds a git refname)`;
   }
-  if (!SEGMENT_RE.test(input.slug)) {
-    return `sweep: slug '${input.slug}' must be one safe path segment (${SEGMENT_RE.source}) — path traversal out of worktreesDir is refused`;
+  if (!SEGMENT_RE.test(input.slug) || refnameUnsafeSegment(input.slug)) {
+    return `sweep: slug '${input.slug}' must be one safe path segment (${SEGMENT_RE.source}) — path traversal out of worktreesDir is refused, and it must not contain a '..' run or end with '.lock' (it feeds a git refname)`;
   }
   for (const segment of input.runPrefix.split('/')) {
-    if (!SEGMENT_RE.test(segment)) {
-      return `sweep: runPrefix '${input.runPrefix}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — path traversal is refused`;
+    if (!SEGMENT_RE.test(segment) || refnameUnsafeSegment(segment)) {
+      return `sweep: runPrefix '${input.runPrefix}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — path traversal is refused, and no segment may contain a '..' run or end with '.lock' (they feed a git refname)`;
     }
   }
   if (input.base.startsWith('-')) {
@@ -636,6 +669,40 @@ const DEFAULT_GIT_TIMEOUT_MS = 600_000;
 const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
 
 /**
+ * Map an execFile failure onto the worktree adapter's git fault taxonomy.
+ * execFile sets `killed` for BOTH the timeout SIGKILL and a maxBuffer
+ * overflow — and the overflow's message names 'maxBuffer' — so that
+ * signature branches FIRST and the failure names the right mechanism (an
+ * output limit is not a timeout). Exported for the fault-mapping pins;
+ * runGit is the only production call site.
+ */
+export function mapWorktreeGitFault(
+  args: string[],
+  error: { message: string; killed?: boolean | null; code?: unknown },
+  stderr: string,
+  timeoutMs: number,
+): Error {
+  const name = `git ${args[0] ?? 'git'}`;
+  if (error.message.includes('maxBuffer')) {
+    return new Error(
+      `${name} exceeded the output limit (maxBuffer ${String(GIT_OUTPUT_MAX_BUFFER_BYTES)} bytes) — the listing is too large to map`,
+      { cause: error },
+    );
+  }
+  if (error.killed === true) {
+    return new Error(
+      `${name} timed out after ${String(timeoutMs)}ms and was SIGKILLed — the git call never produced evidence`,
+      { cause: error },
+    );
+  }
+  const exit = typeof error.code === 'number' ? ` (exit ${String(error.code)})` : '';
+  return new Error(
+    `${name}${exit} failed — ${stderr.trim() !== '' ? stderr.trim() : error.message}`,
+    { cause: error },
+  );
+}
+
+/**
  * Run git with an execFile ARGS ARRAY — never a shell string, so no config
  * value can be re-parsed as shell syntax (the repo's tooling convention).
  * A non-zero exit, a spawn failure, or a run exceeding {@link timeoutMs}
@@ -649,16 +716,7 @@ function runGit(args: string[], cwd: string, timeoutMs: number): Promise<string>
       { cwd, maxBuffer: GIT_OUTPUT_MAX_BUFFER_BYTES, timeout: timeoutMs, killSignal: 'SIGKILL' },
       (error, stdout, stderr) => {
         if (error !== null) {
-          const exit = typeof error.code === 'number' ? ` (exit ${String(error.code)})` : '';
-          const timedOut = error.killed === true;
-          reject(
-            new Error(
-              timedOut
-                ? `git ${args[0] ?? 'git'} timed out after ${String(timeoutMs)}ms and was SIGKILLed — the git call never produced evidence`
-                : `git ${args[0] ?? 'git'}${exit} failed — ${stderr.trim() !== '' ? stderr.trim() : error.message}`,
-              { cause: error },
-            ),
-          );
+          reject(mapWorktreeGitFault(args, error, stderr, timeoutMs));
           return;
         }
         resolve(stdout);
@@ -705,6 +763,16 @@ export function makeSubprocessWorktreeEffects(
       ),
     listRemoteBranches: async () =>
       parseRemoteHeads(await runGit(['ls-remote', '--heads', 'origin'], repoRoot, timeoutMs)),
+    remoteGetUrl: async () => {
+      try {
+        return (await runGit(['remote', 'get-url', 'origin'], repoRoot, timeoutMs)).trim();
+      } catch (err) {
+        // get-url's missing-remote text is exactly "No such remote 'origin'"
+        // — the precise no-upstream classifier; any other fault propagates.
+        if (/No such remote/i.test(messageOf(err))) return null;
+        throw err;
+      }
+    },
     pathExists: async (p) => {
       try {
         await stat(p);

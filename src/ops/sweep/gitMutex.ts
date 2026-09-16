@@ -131,6 +131,16 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
   }
   const onEvent = config.onEvent;
   const budgetMs = retryBaseMs * (2 ** retries - 1);
+  // CRASH-RECOVERY CROSS-CHECK (construction-time): the retry backoff floor
+  // must OUTLIVE the stale window — a just-crashed holder's lock is not yet
+  // stale, so acquire must still be retrying when staleness passes, or a
+  // crash wedges the run forever. A caller raising staleMs above the floor
+  // breaks that property, so the misconfiguration is rejected, not absorbed.
+  if (budgetMs < staleMs) {
+    throw new RangeError(
+      `git-mutex: the retry backoff floor (${String(budgetMs)} ms = retryBaseMs ${String(retryBaseMs)} × (2^${String(retries)} − 1)) is below the stale window (${String(staleMs)} ms) — raise retries (or lower staleMs) so a crashed holder's lock goes stale while acquire is still retrying`,
+    );
+  }
   // OBSERVER ISOLATION: events are best-effort diagnostics — an observer
   // that throws is a fault in the OBSERVER, and it is swallowed here so it
   // can never alter the critical section (an 'acquired' hook throwing

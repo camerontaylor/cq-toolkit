@@ -37,7 +37,7 @@ export type {
   WorktreeEffects,
   WorktreeForInput,
   WorktreeMutexConfig,
-  Workspace,
+  SweepWorkspace,
 } from './worktreeFor.js';
 export {
   makeSubprocessWorktreeEffects,

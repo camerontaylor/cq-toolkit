@@ -40,6 +40,7 @@ import { describe, expect, test } from 'vitest';
 import {
   makeSubprocessWorktreeEffects,
   makeWorktreeFor,
+  mapWorktreeGitFault,
   parseBranchRefs,
   parseRemoteHeads,
   parseWorktreePorcelain,
@@ -207,6 +208,38 @@ describe('sweep.worktreeFor reservation (UC row 23)', () => {
     const error = await failedAt(makeWorktreeFor(effects), INPUT);
     expect(error).toMatch(/could not list remote branches/);
     expect(error).toMatch(/not a git repository/);
+    expect(repo.addCalls).toHaveLength(0);
+  });
+
+  test('the remoteGetUrl classifier: NO origin is vacuously empty even under ambiguous ls-remote wording', async () => {
+    const repo = fakeRepo();
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      remoteGetUrl: async () => null,
+      listRemoteBranches: async () => {
+        // This wording matches a missing remote AND a broken URL — the
+        // classifier effect, not the text, decides.
+        throw new Error(
+          'git ls-remote failed — fatal: origin does not appear to be a git repository',
+        );
+      },
+    };
+    const workspace = await okWorkspace(makeWorktreeFor(effects), INPUT);
+    expect(workspace.reused).toBe(false);
+    expect(repo.addCalls).toHaveLength(1);
+  });
+
+  test('a configured-but-broken origin fails loudly when the classifier reports a URL', async () => {
+    const repo = fakeRepo();
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      remoteGetUrl: async () => 'https://broken.invalid/origin.git',
+      listRemoteBranches: async () => {
+        throw new Error('git ls-remote failed — fatal: could not read from remote repository');
+      },
+    };
+    const error = await failedAt(makeWorktreeFor(effects), INPUT);
+    expect(error).toMatch(/could not list remote branches/);
     expect(repo.addCalls).toHaveLength(0);
   });
 
@@ -385,7 +418,9 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
       const canonicalWt = realpathSync(wt);
       const repo = fakeRepo();
       repo.worktrees = [{ path: wt, branch: BRANCH }];
-      repo.clean.add(wt);
+      // The op probes strict-clean at the CANONICAL tree path (realpath'd
+      // prefix) — seed the same form the comparisons will use.
+      repo.clean.add(canonicalWt);
       repo.dirs.add(join(canonicalWt, 'cache-link'));
       const effects: WorktreeEffects = {
         ...effectsOf(repo),
@@ -534,6 +569,20 @@ describe('sweep.worktreeFor path safety', () => {
       baselineCacheDirs: 'build' as unknown as NonNullable<WorktreeForInput['baselineCacheDirs']>,
     });
     expect(error).toMatch(/baselineCacheDirs must be an array/);
+  });
+
+  test("a '..' RUN inside a kind segment is refused — it feeds a git refname", async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), { ...INPUT, kind: 'a..b' });
+    expect(error).toMatch(/kind/);
+    expect(error).toMatch(/refname/);
+  });
+
+  test("a '.lock'-suffixed slug is refused — loose-ref-file collision", async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), { ...INPUT, slug: 'foo.lock' });
+    expect(error).toMatch(/slug/);
+    expect(error).toMatch(/refname/);
   });
 });
 
@@ -798,4 +847,44 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 120_000);
+});
+
+// ---------------------------------------------------------------------------
+// 8. The subprocess adapter: git fault mapping (maxBuffer vs timeout)
+// ---------------------------------------------------------------------------
+
+describe('mapWorktreeGitFault (fault mapping)', () => {
+  test('a maxBuffer overflow (which also sets killed) names the OUTPUT LIMIT, not the timeout', () => {
+    const error = mapWorktreeGitFault(
+      ['for-each-ref'],
+      { killed: true, message: 'maxBuffer length exceeded' },
+      '',
+      600_000,
+    );
+    expect(error.message).toMatch(/output limit/);
+    expect(error.message).toMatch(/maxBuffer/);
+    expect(error.message).not.toMatch(/timed out/);
+  });
+
+  test('a timeout kill names the timeout', () => {
+    const error = mapWorktreeGitFault(
+      ['status'],
+      { killed: true, message: 'sigkill' },
+      '',
+      600_000,
+    );
+    expect(error.message).toMatch(/timed out/);
+    expect(error.message).not.toMatch(/output limit/);
+  });
+
+  test('a plain non-zero exit carries the stderr text', () => {
+    const error = mapWorktreeGitFault(
+      ['status'],
+      { code: 128, killed: false, message: 'exited with code 128' },
+      'fatal: not a git repository',
+      600_000,
+    );
+    expect(error.message).toMatch(/exit 128/);
+    expect(error.message).toMatch(/fatal: not a git repository/);
+  });
 });

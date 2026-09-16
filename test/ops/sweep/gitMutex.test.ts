@@ -92,7 +92,10 @@ describe('gitMutex mutual exclusion (UC §1 row 32)', () => {
 describe('gitMutex release discipline', () => {
   test('a throwing fn still releases: its fault propagates and the next acquire succeeds', async () => {
     const lockPath = join(newDir(), 'git-mutex.lock');
-    const mutex = makeGitMutex({ lockPath, retries: 5, retryBaseMs: 10 });
+    // staleMs 2000 + retries 8/base 10 satisfies the crash-recovery
+    // cross-check (floor 2.55s ≥ stale window) while keeping a leaked-lock
+    // failure fast.
+    const mutex = makeGitMutex({ lockPath, staleMs: 2_000, retries: 8, retryBaseMs: 10 });
     await expect(
       mutex.withLock(() => {
         throw new Error('boom');
@@ -177,7 +180,9 @@ describe('gitMutex staleness (the UC row 32 wedge recovery)', () => {
     const mutex = makeGitMutex({
       lockPath,
       staleMs: 2_000,
-      retries: 5,
+      // retries 11 keeps the backoff floor (20.47s) above the stale window —
+      // the construction cross-check under test this round.
+      retries: 11,
       retryBaseMs: 10,
       onEvent: (event) => events.push(event),
     });
@@ -194,12 +199,17 @@ describe('gitMutex staleness (the UC row 32 wedge recovery)', () => {
 
   test('an un-stealable contended lock past the retry budget rejects, naming lockPath and the waiter budget', async () => {
     const lockPath = join(newDir(), 'git-mutex.lock');
-    // A REAL live holder via proper-lockfile itself: default options keep
-    // the artifact fresh (mtime refresh clamped to ≥1000ms), so within the
-    // test's lifetime it can never be classified stale.
+    // A REAL live holder via proper-lockfile itself: its artifact mtime is
+    // FORWARD-dated an hour, so the contended acquire can NEVER classify it
+    // stale — the rejection must come from retry exhaustion, deterministically.
     const holder = await lock(lockPath, { realpath: false });
+    const future = new Date(Date.now() + 3_600_000);
+    utimesSync(`${lockPath}.lock`, future, future);
     try {
-      const mutex = makeGitMutex({ lockPath, retries: 2, retryBaseMs: 10 });
+      // staleMs 2000 + retries 11/base 1 satisfies the crash-recovery
+      // cross-check (floor 2.047s ≥ stale window) while the contended
+      // rejection lands in milliseconds.
+      const mutex = makeGitMutex({ lockPath, staleMs: 2_000, retries: 11, retryBaseMs: 1 });
       const error: unknown = await mutex
         .withLock(() => 'never')
         .then(
@@ -211,13 +221,21 @@ describe('gitMutex staleness (the UC row 32 wedge recovery)', () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toContain(lockPath);
       expect((error as Error).message).toMatch(/waiter budget/);
-      expect((error as Error).message).toMatch(/2 retries/);
+      expect((error as Error).message).toMatch(/11 retries/);
     } finally {
-      await holder();
+      // Best-effort holder release: theHolder's own registration can be
+      // lost to a compromise event under contention timing (the planted
+      // lock uses proper-lockfile's default throwing onCompromised), and
+      // the release outcome is not what this test pins — the artifact
+      // cleanup below is what the recovery acquire needs.
+      await holder().catch(() => undefined);
+      rmSync(`${lockPath}.lock`, { recursive: true, force: true });
     }
-    // Once the holder lets go, the mutex acquires normally again.
+    // Once the holder is gone, the mutex acquires normally again.
     await expect(
-      makeGitMutex({ lockPath, retries: 5, retryBaseMs: 10 }).withLock(() => 'after'),
+      makeGitMutex({ lockPath, staleMs: 2_000, retries: 11, retryBaseMs: 1 }).withLock(
+        () => 'after',
+      ),
     ).resolves.toBe('after');
   });
 });
@@ -235,6 +253,29 @@ describe('gitMutex config preconditions', () => {
       /retryBaseMs/,
     );
   });
+
+  test('raising staleMs above the retry backoff floor is rejected — crash recovery must hold', () => {
+    // Default retries 9 at base 100ms → floor 100·(2^9−1) = 51.1s < 60s: a
+    // crashed holder's lock would go stale AFTER acquire gave up.
+    const error = (() => {
+      try {
+        makeGitMutex({ lockPath: join(newDir(), 'm.lock'), staleMs: 60_000 });
+        return null;
+      } catch (err) {
+        return err;
+      }
+    })();
+    expect(error).toBeInstanceOf(RangeError);
+    expect((error as Error).message).toMatch(/backoff floor \(51,?100 ms/);
+    expect((error as Error).message).toMatch(/raise retries/);
+  });
+
+  test('staleMs above the default constructs when retries raise the floor past it', async () => {
+    // retries 10 at base 100ms → floor 102.3s ≥ 60s: recovery holds.
+    const lockPath = join(newDir(), 'm.lock');
+    const mutex = makeGitMutex({ lockPath, staleMs: 60_000, retries: 10 });
+    await expect(mutex.withLock(() => 'ok')).resolves.toBe('ok');
+  });
 });
 
 describe('gitMutex compromise surfacing', () => {
@@ -243,7 +284,7 @@ describe('gitMutex compromise surfacing', () => {
     // staleMs 2000 puts the holder's mtime-refresh timer at its 1000ms
     // floor: it fires while this test is still inside the section.
     const victim = makeGitMutex({ lockPath, staleMs: 2_000 });
-    const thief = makeGitMutex({ lockPath, staleMs: 2_000, retries: 5, retryBaseMs: 10 });
+    const thief = makeGitMutex({ lockPath, staleMs: 2_000, retries: 11, retryBaseMs: 10 });
     const section = victim.withLock(async () => {
       await sleep(60);
       // The thief steals the (freshly backdated) artifact while the
