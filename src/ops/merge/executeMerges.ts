@@ -13,19 +13,23 @@
 //
 // THE SEMANTICS, each pinned by a test:
 //   a. LIVE-STATE REVALIDATION per action — before merging PR N, its head
-//      ref (refs/pull/<n>/head, the PR-number-addressable truth) is fetched
-//      fresh and validated against the BASELINE: the executor's first
-//      observation of each planned head, taken in one sweep before any
-//      action runs (the observable stand-in for "the sha the plan was
+//      ref (refs/pull/<n>/head, the PR-number-addressable truth) is
+//      validated against the BASELINE: the executor's first observation of
+//      each planned head, taken in one FETCH-THEN-VALIDATE sweep before
+//      any action runs (the observable stand-in for "the sha the plan was
 //      built on" — the executor is invoked directly after planning on the
-//      same live state, and the plan itself carries no shas). A head that
-//      moved between the baseline and the merge — or vanished — is drift
-//      between classify/plan and merge: the action is SKIPPED as `stale`,
-//      never merged, the reason recorded.
+//      same live state, and the plan itself carries no shas). The fetch
+//      comes FIRST (CR-4): a fresh clone has no local refs/pull ref until
+//      it is fetched, so a validate-before-fetch would read every pr
+//      stale. A head that moved between the baseline and the merge — or
+//      vanished, even after its fetch — is drift between classify/plan
+//      and merge: the action is SKIPPED as `stale`, never merged, the
+//      reason recorded.
 //   b. MERGE COMMITS ONLY (I3) — mergePr is called with method 'merge'
 //      exclusively; the production effects route every argv through
 //      safeArgs (./effects.js), which throws on squash/force/rebase/hard/
-//      push-to-main before any process exists.
+//      push-to-protected-branch (default 'main') before any process
+//      exists.
 //   c. FAILED ANCESTOR BLOCKS DESCENDANTS — the order is in dependency
 //      order (F2 guarantees parents before children); once an entry ends
 //      stale or failed (or was blocked itself), every LATER entry in its
@@ -163,28 +167,43 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
   const effectiveBaseKey = (entry: PlannedMergeEntry): string =>
     entry.basePr !== null ? `pr:${String(entry.basePr)}` : `branch:${plan.baseBranch}`;
 
-  // (a) THE BASELINE SWEEP: one validateRef per planned head BEFORE any
-  // action runs — the executor's first observation stands in for "the sha
-  // the plan was built on" (the plan carries no shas; it was built moments
-  // before on the same live state). null marks a head already unresolvable
-  // at start: such an entry is stale on its turn without any further calls.
-  // A validateRef THROW here is a wholesale run failure (CR1): the probe
-  // error escapes nothing — every planned pr is recorded `failed` with it,
-  // nothing executes, and the total report returns immediately.
+  // (a) THE BASELINE SWEEP — FETCH, THEN VALIDATE (CR-4). Phase 1 fetches
+  // each planned head: a fresh clone has NO local refs/pull/<n>/head until
+  // it is fetched, so validating first would read every pr stale. The
+  // fetch is best-effort — a NONZERO exit leaves the head unknown for
+  // phase 2 to decide (a locally-present ref still baselines; a missing
+  // one goes stale on its turn). A THROW in either phase is a wholesale
+  // run failure (CR-2): nothing executes, every planned pr is recorded
+  // `failed` with the error, and the total report returns immediately.
+  // Phase 2 validates each fetched head: the executor's first observation
+  // stands in for "the sha the plan was built on" (the plan carries no
+  // shas; it was built moments before on the same live state), and null
+  // marks a head unresolvable even AFTER its fetch — genuine absence (the
+  // pr was merged or closed upstream and its ref reaped) — stale on its
+  // turn without any further calls.
+  const failBaselineWholesale = (effect: string, why: string): ExecutionReport => {
+    for (const plannedEntry of plan.order) {
+      report.failed.push({
+        pr: plannedEntry.pr,
+        error: `baseline ${effect} for pr ${plannedEntry.pr} threw: ${why}`,
+      });
+    }
+    return report;
+  };
   const baseline = new Map<number, string | null>();
+  for (const entry of plan.order) {
+    try {
+      await effects.fetchRef(headRefFor(entry.pr));
+    } catch (err) {
+      return failBaselineWholesale('fetchRef', errorMessage(err));
+    }
+  }
   for (const entry of plan.order) {
     let probe: { ok: boolean; sha?: string };
     try {
       probe = await effects.validateRef(headRefFor(entry.pr));
     } catch (err) {
-      const why = errorMessage(err);
-      for (const plannedEntry of plan.order) {
-        report.failed.push({
-          pr: plannedEntry.pr,
-          error: `baseline validateRef for pr ${plannedEntry.pr} threw: ${why}`,
-        });
-      }
-      return report;
+      return failBaselineWholesale('validateRef', errorMessage(err));
     }
     baseline.set(entry.pr, probe.ok && probe.sha !== undefined ? probe.sha : null);
   }

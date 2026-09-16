@@ -10,12 +10,14 @@
 // (realMergeEffects) is just one more implementor of the same interface.
 //
 // I3 — MERGE COMMITS ONLY. The executor may never squash, force, rebase,
-// hard-reset, or push to the base branch, whatever calls it. The guard is
-// `safeArgs`: a git/gh argv that contains a squash/force/rebase/hard token,
-// or a push whose DESTINATION ref is `main`/`refs/heads/main`, THROWS
-// before any process can spawn. realMergeEffects routes EVERY argv — reads
-// included — through safeArgs via `safeRunner`, the single I3 enforcement
-// point; the negative tests prove the guard shape by shape.
+// hard-reset, or push to the protected branch, whatever calls it. The guard
+// is `safeArgs`: a git/gh argv that contains a squash/force/rebase/hard
+// token, or a push whose DESTINATION ref is the PROTECTED branch under
+// either spelling (bare, or refs/heads/<branch>; configurable via
+// `protectedBranch`, default `main`), THROWS before any process can spawn.
+// realMergeEffects routes EVERY argv — reads included — through safeArgs
+// via `safeRunner`, the single I3 enforcement point; the negative tests
+// prove the guard shape by shape.
 //
 // TRANSPORT: the same GhFn pattern as ../review/gh.js — a thin
 // `(args) => Promise<GhResult>` seam that RESOLVES with the exit code
@@ -72,21 +74,37 @@ const pushDestination = (refspec: string): string => {
   return colon === -1 ? refspec : refspec.slice(colon + 1);
 };
 
-/** True for the base branch under either spelling — the ref I3 never
- * allows a push to land on. */
-const isMainRef = (ref: string): boolean => ref === 'main' || ref === 'refs/heads/main';
+/** The branch I3 protects by default: the base branch a merge queue never
+ * pushes to. Callers queueing on a differently named trunk pass their own
+ * `protectedBranch` (CR-5). */
+export const DEFAULT_PROTECTED_BRANCH = 'main';
+
+/** Options for the I3 guard's configurable side. */
+export interface SafeArgsOpts {
+  /** The branch pushes may never land on, under either spelling; default
+   * DEFAULT_PROTECTED_BRANCH ('main'). */
+  protectedBranch?: string;
+}
+
+/** True when `ref` is the protected branch under EITHER spelling — the bare
+ * branch name or its `refs/heads/<branch>` form (the two shapes a push
+ * refspec destination takes). */
+const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
+  ref === protectedBranch || ref === `refs/heads/${protectedBranch}`;
 
 /**
  * THE I3 GUARD: validate a git/gh argv before execution. THROWS
  * UnsafeMergeArgsError on any squash/force/rebase/hard token, or any push
- * (a `push` subcommand anywhere in the argv) whose DESTINATION ref is
- * `main` or `refs/heads/main` — bare `main`, `HEAD:main`, `feat:refs/heads/
- * main`, and the remote-branch deletion `:main` all land on main, so all
+ * (a `push` subcommand anywhere in the argv) whose DESTINATION ref is the
+ * protected branch (`opts.protectedBranch`, default 'main') under either
+ * spelling — bare `main`, `HEAD:main`, `feat:refs/heads/main`, and the
+ * remote-branch deletion `:main` all land on the protected branch, so all
  * are refused. Returns the argv unchanged otherwise (the caller executes
  * exactly what went in). Flag-value awareness is deliberately absent: a
- * flag value that reads as a push-to-main refspec fails closed.
+ * flag value that reads as a push-to-protected refspec fails closed.
  */
-export function safeArgs(args: readonly string[]): readonly string[] {
+export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): readonly string[] {
+  const protectedBranch = opts.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
   for (const arg of args) {
     if (isForbiddenWord(arg.replace(/^-+/, ''))) {
       throw new UnsafeMergeArgsError(
@@ -99,10 +117,10 @@ export function safeArgs(args: readonly string[]): readonly string[] {
   if (pushAt !== -1) {
     for (const arg of args.slice(pushAt + 1)) {
       if (arg.startsWith('-')) continue; // flags are not refspecs
-      if (isMainRef(pushDestination(arg))) {
+      if (isProtectedRef(pushDestination(arg), protectedBranch)) {
         throw new UnsafeMergeArgsError(
           args,
-          `push with destination ${JSON.stringify(pushDestination(arg))} — the base branch is never pushed to`,
+          `push with destination ${JSON.stringify(pushDestination(arg))} — the protected branch ${JSON.stringify(protectedBranch)} is never pushed to`,
         );
       }
     }
@@ -115,9 +133,11 @@ export function safeArgs(args: readonly string[]): readonly string[] {
  * until safeArgs passes. realMergeEffects routes BOTH of its runners (git
  * and gh) through this — every argv, reads included — so the production
  * implementation cannot execute a forbidden mutation even if a future argv
- * builder tries.
+ * builder tries. `opts` (protectedBranch) threads straight through to the
+ * guard.
  */
-export const safeRunner = (run: GhFn): GhFn => (args) => run([...safeArgs(args)]);
+export const safeRunner = (run: GhFn, opts: SafeArgsOpts = {}): GhFn => (args) =>
+  run([...safeArgs(args, opts)]);
 
 /**
  * The effects seam (UC row 43): every git/gh mutation executeMerges can
@@ -175,6 +195,10 @@ export interface RealMergeEffectsOpts {
   gitBin?: string;
   /** The gh binary; default CQ_GH_BIN, else 'gh' (makeGhRunner's seam). */
   ghBin?: string;
+  /** The branch pushes may never land on (I3, either spelling); default
+   * 'main' — configuration at the call site, never a hardcoded trunk name
+   * (CR-5). */
+  protectedBranch?: string;
   /** Per-invocation wall-clock bound handed to makeGhRunner. */
   timeoutMs?: number;
   /** Gh-runner override (test seam) — wrapped in safeRunner like the real one. */
@@ -208,9 +232,11 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // process cwd while `-C` resolves from inside repoRoot — a relative root
   // would split one repo across two resolvers.
   const repoRoot = pathResolve(opts.repoRoot);
-  const gh = safeRunner(opts.run ?? makeGhRunner({ bin: opts.ghBin, timeoutMs: opts.timeoutMs }));
+  const guardOpts = { protectedBranch: opts.protectedBranch };
+  const gh = safeRunner(opts.run ?? makeGhRunner({ bin: opts.ghBin, timeoutMs: opts.timeoutMs }), guardOpts);
   const git = safeRunner(
     opts.gitRun ?? makeGhRunner({ bin: opts.gitBin ?? 'git', timeoutMs: opts.timeoutMs }),
+    guardOpts,
   );
 
   const validateRef = async (ref: string): Promise<{ ok: boolean; sha?: string }> => {

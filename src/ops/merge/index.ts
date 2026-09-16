@@ -19,8 +19,9 @@ export type {
   PlannedPr,
 } from './planMergeOrder.js';
 export { planMergeOrder } from './planMergeOrder.js';
-export type { MergeEffects, RealMergeEffectsOpts } from './effects.js';
+export type { MergeEffects, RealMergeEffectsOpts, SafeArgsOpts } from './effects.js';
 export {
+  DEFAULT_PROTECTED_BRANCH,
   UnsafeMergeArgsError,
   headRefFor,
   realMergeEffects,
