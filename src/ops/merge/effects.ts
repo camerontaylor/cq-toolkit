@@ -59,13 +59,19 @@ export class UnsafeMergeArgsError extends Error {
 /**
  * The forbidden-mutation word list, matched against each argv token with
  * leading dashes stripped: `squash` (and `--squash`), `f` (`-f`), `rebase`
- * (and `--rebase`), `hard` (`--hard`), and anything starting `force`
- * (`--force` and `--force-with-lease` alike). `merge`/`--merge` — the ONLY
- * allowed merge method — is not on the list; `ff-only` and friends are not
- * mutations I3 names.
+ * (and `--rebase`), `hard` (`--hard`), `amend` (`--amend` — history
+ * rewrite, round 1), and anything starting `force` (`--force` and
+ * `--force-with-lease` alike). `merge`/`--merge` — the ONLY allowed merge
+ * method — is not on the list; `ff-only` and friends are not mutations I3
+ * names.
  */
 const isForbiddenWord = (word: string): boolean =>
-  word === 'squash' || word === 'f' || word === 'rebase' || word === 'hard' || word.startsWith('force');
+  word === 'squash' ||
+  word === 'f' ||
+  word === 'rebase' ||
+  word === 'hard' ||
+  word === 'amend' ||
+  word.startsWith('force');
 
 /** The destination half of a push refspec (`[+]<src>[:<dst>]` — no colon
  * means the source doubles as the destination). */
@@ -94,14 +100,16 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
 
 /**
  * THE I3 GUARD: validate a git/gh argv before execution. THROWS
- * UnsafeMergeArgsError on any squash/force/rebase/hard token, or any push
- * (a `push` subcommand anywhere in the argv) whose DESTINATION ref is the
- * protected branch (`opts.protectedBranch`, default 'main') under either
- * spelling — bare `main`, `HEAD:main`, `feat:refs/heads/main`, and the
- * remote-branch deletion `:main` all land on the protected branch, so all
- * are refused. Returns the argv unchanged otherwise (the caller executes
- * exactly what went in). Flag-value awareness is deliberately absent: a
- * flag value that reads as a push-to-protected refspec fails closed.
+ * UnsafeMergeArgsError on any squash/force/rebase/hard/amend token, any
+ * bundled short flag carrying an `f` (`-qf` rides --force), or any push
+ * (a `push` subcommand anywhere in the argv) that lacks an explicit refspec
+ * or whose DESTINATION ref is the protected branch (`opts.protectedBranch`,
+ * default 'main') under either spelling — bare `main`, `HEAD:main`,
+ * `feat:refs/heads/main`, and the remote-branch deletion `:main` all land
+ * on the protected branch, so all are refused. Returns the argv unchanged
+ * otherwise (the caller executes exactly what went in). Flag-value
+ * awareness is deliberately absent: a flag value that reads as a
+ * push-to-protected refspec fails closed.
  */
 export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): readonly string[] {
   const protectedBranch = opts.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
@@ -109,14 +117,35 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     if (isForbiddenWord(arg.replace(/^-+/, ''))) {
       throw new UnsafeMergeArgsError(
         args,
-        `forbidden mutation token ${JSON.stringify(arg)} — squash, force (-f/--force), rebase, and hard resets never execute`,
+        `forbidden mutation token ${JSON.stringify(arg)} — squash, force (-f/--force), rebase, amend, and hard resets never execute`,
+      );
+    }
+    // BUNDLED SHORT FLAGS (round 1): a single-dash token carrying an `f`
+    // anywhere is the force flag riding a bundle (`-qf`, `-af`, …) — git
+    // expands it to --force. Refuse; no legitimate argv in this family
+    // bundles an `f`.
+    if (arg.startsWith('-') && !arg.startsWith('--') && arg.includes('f')) {
+      throw new UnsafeMergeArgsError(
+        args,
+        `bundled short flags ${JSON.stringify(arg)} carry an 'f' (force) — refuse`,
       );
     }
   }
   const pushAt = args.indexOf('push');
   if (pushAt !== -1) {
-    for (const arg of args.slice(pushAt + 1)) {
-      if (arg.startsWith('-')) continue; // flags are not refspecs
+    const pushTail = args.slice(pushAt + 1).filter((arg) => !arg.startsWith('-'));
+    // pushTail[0] is the REMOTE; the rest are the refspecs. FAIL CLOSED
+    // (round 1): with fewer than two non-flag tokens there is NO explicit
+    // refspec — push.default would choose the destination (under `simple`
+    // it lands on the CURRENT branch, possibly the protected one) — so the
+    // push is refused; name an explicit refspec.
+    if (pushTail.length < 2) {
+      throw new UnsafeMergeArgsError(
+        args,
+        'push with no explicit refspec — push.default would choose the destination (possibly the protected branch); name an explicit refspec',
+      );
+    }
+    for (const arg of pushTail.slice(1)) {
       if (isProtectedRef(pushDestination(arg), protectedBranch)) {
         throw new UnsafeMergeArgsError(
           args,
@@ -179,9 +208,62 @@ export interface MergeEffects {
    * test), and never merges (I3). Resolves with the exit code. */
   retargetBase(pr: number, newBase: string): Promise<GhResult>;
   /** Push `ref` from the worktree at `fromPath`. Resolves with the exit
-   * code; safeArgs refuses any push whose destination is the base branch
-   * before the process level is ever reached. */
+   * code; safeArgs refuses any push whose destination is the protected
+   * branch before the process level is ever reached. SEAM CONSUMER
+   * (round 1): NOT this executor — merge entries are server-side and
+   * retargets ride retargetBase — but pushRef stays in the interface as a
+   * frozen contract for the WS-I merge-prs wiring, its I3 guard pinned by
+   * the safeArgs push tests. */
   pushRef(ref: string, fromPath: string): Promise<GhResult>;
+}
+
+/**
+ * THE WORKTREE LIFECYCLE HELPER (round 1, for F4's conflict resolver): the
+ * merge EXECUTOR no longer touches worktrees (gh pr merge is server-side —
+ * see executeMerges rule f), but the resolver will need a tree. This is the
+ * seam's prepare → fn → remove-in-finally pairing, tested once HERE so the
+ * lifecycle cannot drift:
+ *   - worktreePrepare throws → the error PROPAGATES untouched; fn never
+ *     runs and worktreeRemove never runs (nothing was prepared — there is
+ *     nothing to remove).
+ *   - fn throws → worktreeRemove STILL runs (finally); the ORIGINAL error
+ *     object is rethrown — never replaced — with a removal failure APPENDED
+ *     to its message when the remove also failed (the primary failure is
+ *     never masked). A non-Error throwable is rethrown as-is.
+ *   - fn resolves → worktreeRemove runs; a removal failure never rejects
+ *     (the caller's successful result is never masked) — a wedged tree
+ *     surfaces loudly at the next prepare.
+ */
+export async function withPreparedWorktree<T>(
+  effects: MergeEffects,
+  pr: number,
+  ref: string,
+  fn: (path: string) => Promise<T>,
+): Promise<T> {
+  const prepared = await effects.worktreePrepare(pr, ref);
+  let outcome: { ok: true; value: T } | { ok: false; error: unknown } | undefined;
+  try {
+    outcome = { ok: true, value: await fn(prepared.path) };
+  } catch (err) {
+    outcome = { ok: false, error: err };
+  } finally {
+    try {
+      await effects.worktreeRemove(prepared.path);
+    } catch (removeErr) {
+      if (outcome !== undefined && !outcome.ok && outcome.error instanceof Error) {
+        const why = removeErr instanceof Error ? removeErr.message : String(removeErr);
+        outcome.error.message = `${outcome.error.message}; worktreeRemove ${prepared.path} also failed: ${why}`;
+      }
+    }
+  }
+  if (outcome !== undefined && outcome.ok) {
+    return outcome.value;
+  }
+  if (outcome !== undefined) {
+    throw outcome.error;
+  }
+  // Unreachable: the try/catch above always records an outcome.
+  throw new Error('withPreparedWorktree: no outcome recorded');
 }
 
 /** Options for realMergeEffects — the bins and repo root are configuration

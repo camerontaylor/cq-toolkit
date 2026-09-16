@@ -27,6 +27,7 @@ export {
   realMergeEffects,
   safeArgs,
   safeRunner,
+  withPreparedWorktree,
 } from './effects.js';
 export type {
   ExecuteMergeInput,

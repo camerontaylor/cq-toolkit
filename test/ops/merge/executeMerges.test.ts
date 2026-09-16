@@ -28,9 +28,12 @@
 //   7. BOUNDED RETRY (e): /base branch was modified/i failures retry with
 //      revalidation between attempts; the cap is maxRetries (+1 total
 //      attempts); any other failure is never retried.
-//   8. WORKTREES REMOVED IN FINALLY (f): remove happens even when the
-//      merge fails; a removal failure is appended to the record, never
-//      masks the primary outcome, and never rewrites a clean merge.
+//   8. WORKTREES DECOUPLED FROM THE MERGE (f, round 1): merge entries
+//      prepare and remove NOTHING (gh pr merge is server-side); the
+//      prepare → fn → remove-in-finally lifecycle is tested once against
+//      withPreparedWorktree (F4's seam helper) — remove runs even when fn
+//      throws, and a removal failure is appended to the original error,
+//      never masking it.
 //   9. RETARGET-SELF (CR1): executed as the FORGE BASE EDIT (retargetBase
 //      onto the plan's baseBranch) — never a merge, never a worktree, and
 //      never a ref push (the read-only refs/pull/<n>/head is unpushable —
@@ -50,6 +53,14 @@
 //      the configured branch (default 'main') under both spellings, and
 //      pushes to other branches pass — threaded through safeRunner and
 //      realMergeEffects.
+//  14. FETCHED RETRY REVALIDATION (round 1): between attempts the check
+//      FETCHES before validating — a remote head that moved mid-retry →
+//      stale, never a blind second attempt; a nonzero revalidation fetch →
+//      failed.
+//  15. GUARD HARDENING (round 1): a push with NO explicit refspec is
+//      refused (push.default could pick the protected branch); bundled
+//      short flags carrying an 'f' (-qf) are force; '--amend' is a
+//      forbidden token (history rewrite).
 import { describe, expect, test } from 'vitest';
 import { DEFAULT_MAX_RETRIES, executeMerges } from '../../../src/ops/merge/executeMerges.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
@@ -60,6 +71,7 @@ import {
   realMergeEffects,
   safeArgs,
   safeRunner,
+  withPreparedWorktree,
 } from '../../../src/ops/merge/effects.js';
 import type { MergeEffects } from '../../../src/ops/merge/effects.js';
 import { planMergeOrder } from '../../../src/ops/merge/planMergeOrder.js';
@@ -164,6 +176,17 @@ class FakeMergeEffects implements MergeEffects {
   /** When set, fetchRef THROWS with this error — the CR-4 wholesale
    * baseline-failure scripting hook. */
   fetchThrows: Error | null = null;
+  /** pr → queued shas the REMOTE reveals per fetchRef (shifted per call);
+   * exhausted/absent → the current head stands. The round-1 hook: the
+   * between-attempt fetch is what reveals a remote move. */
+  readonly remoteQueue = new Map<number, string[]>();
+  /** pr → fail fetchRef from this 0-based call index onward (the round-1
+   * between-attempt-fetch-failure scripting hook). */
+  readonly fetchFailFromCall = new Map<number, number>();
+  readonly fetchCallCounts = new Map<number, number>();
+  /** When set, worktreePrepare THROWS with this error (the
+   * withPreparedWorktree prepare-throw path, round 1). */
+  prepareThrows: Error | null = null;
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
@@ -185,14 +208,23 @@ class FakeMergeEffects implements MergeEffects {
     this.fetchedRefs.add(ref);
     if (this.fetchThrows !== null) throw this.fetchThrows;
     const pr = prOfRef(ref);
-    if (pr !== null && this.fetchFailures.has(pr)) {
-      return { code: 1, stdout: '', stderr: 'fatal: could not read from remote repository' };
+    if (pr !== null) {
+      const count = (this.fetchCallCounts.get(pr) ?? 0) + 1;
+      this.fetchCallCounts.set(pr, count);
+      const failFrom = this.fetchFailFromCall.get(pr);
+      if (this.fetchFailures.has(pr) || (failFrom !== undefined && count - 1 >= failFrom)) {
+        return { code: 1, stdout: '', stderr: 'fatal: could not read from remote repository' };
+      }
+      // A successful fetch delivers the remote's next queued sha.
+      const next = this.remoteQueue.get(pr)?.shift();
+      if (next !== undefined) this.heads.set(pr, next);
     }
     return OK;
   }
 
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {
     this.calls.push(`prepare:${String(pr)}@${ref}`);
+    if (this.prepareThrows !== null) throw this.prepareThrows;
     return { path: `/wt/pr-${String(pr)}` };
   }
 
@@ -246,8 +278,8 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
     expect(report).toEqual({ merged: [7, 8], retargeted: [], stale: [], failed: [], blocked: [] });
     // The EXACT sequence: baseline sweep first (one fetch + one validate
     // per planned head — fetch BEFORE validate, CR-4), then per action
-    // fetch → revalidate → prepare → merge → remove, parents strictly
-    // before children (rules a, d, f).
+    // fetch → revalidate → server-side merge, parents strictly before
+    // children. NO worktree calls anywhere (round 1, rule f).
     expect(fake.calls).toEqual([
       'fetch:refs/pull/7/head', // baseline sweep — fetch first
       'fetch:refs/pull/8/head',
@@ -255,14 +287,10 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
       'validate:refs/pull/8/head',
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head', // live-state revalidation
-      'prepare:7@refs/pull/7/head',
-      'merge:7:merge', // method 'merge' only (I3)
-      'remove:/wt/pr-7',
+      'merge:7:merge', // server-side; method 'merge' only (I3)
       'fetch:refs/pull/8/head',
       'validate:refs/pull/8/head',
-      'prepare:8@refs/pull/8/head',
       'merge:8:merge',
-      'remove:/wt/pr-8',
     ]);
   });
 
@@ -307,15 +335,13 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
     expect(report.merged).toEqual([7]);
     expect(report.stale).toEqual([]);
     // The sweep fetched BEFORE validating, so the baseline saw the cured
-    // sha and the action ran normally.
+    // sha and the action ran normally (server-side merge — no worktree).
     expect(fake.calls).toEqual([
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
-      'prepare:7@refs/pull/7/head',
       'merge:7:merge',
-      'remove:/wt/pr-7',
     ]);
   });
 
@@ -381,21 +407,22 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
     expect(report.merged).toEqual([7]);
     expect(report.failed).toEqual([]);
     expect(mergeCalls(fake).length).toBe(3);
-    // The exact retry shape: attempt → revalidate → attempt → revalidate →
-    // attempt. Baseline + pre-merge + two between-attempt revalidations = 4
-    // validations total.
+    // The exact retry shape: attempt → FETCH+revalidate → attempt →
+    // FETCH+revalidate → attempt (round 1: the between-attempt check
+    // fetches first). Baseline + pre-merge + two between-attempt
+    // revalidations = 4 validations total.
     expect(fake.calls).toEqual([
       'fetch:refs/pull/7/head', // baseline fetch (CR-4)
       'validate:refs/pull/7/head', // baseline
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head', // pre-merge
-      'prepare:7@refs/pull/7/head',
       'merge:7:merge', // attempt 1 — base modified
+      'fetch:refs/pull/7/head', // revalidation fetch FIRST (round 1)
       'validate:refs/pull/7/head', // revalidate
       'merge:7:merge', // attempt 2 — base modified
-      'validate:refs/pull/7/head', // revalidate
+      'fetch:refs/pull/7/head',
+      'validate:refs/pull/7/head',
       'merge:7:merge', // attempt 3 — merged
-      'remove:/wt/pr-7',
     ]);
   });
 
@@ -459,6 +486,46 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
     ]);
     expect(mergeCalls(fake).length).toBe(1);
   });
+
+  test('round-1 blind-retry regression: a REMOTE head that moves mid-retry → stale, never a second attempt', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.mergeQueue.set(7, [baseModified]); // attempt 1 fails retryably
+    // The remote's sha timeline: the first TWO fetches (baseline + pre-merge)
+    // still report the planned sha; the between-attempt fetch is what
+    // reveals the move — a local-only revalidation would have missed it.
+    fake.remoteQueue.set(7, [sha('a'), sha('a'), sha('f')]);
+
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.stale).toEqual([
+      { pr: 7, detail: expect.stringContaining('moved while revalidating') },
+    ]);
+    expect(mergeCalls(fake)).toEqual(['merge:7:merge']); // never a blind second attempt
+    // The between-attempt check FETCHED first — the fetch is what the
+    // validation then read the moved sha through.
+    const afterFirstMerge = fake.calls.slice(fake.calls.indexOf('merge:7:merge') + 1);
+    expect(afterFirstMerge).toEqual(['fetch:refs/pull/7/head', 'validate:refs/pull/7/head']);
+  });
+
+  test('a nonzero fetch during between-attempt revalidation → failed (never retried blind)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.mergeQueue.set(7, [baseModified]);
+    // Fetch calls 0 (baseline) and 1 (pre-merge) pass; call 2 — the
+    // between-attempt revalidation fetch — fails.
+    fake.fetchFailFromCall.set(7, 2);
+
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.stale).toEqual([]);
+    expect(report.failed).toEqual([
+      { pr: 7, error: expect.stringContaining('retry revalidation: fetch') },
+    ]);
+    expect(mergeCalls(fake)).toEqual(['merge:7:merge']);
+  });
 });
 
 describe('executeMerges — (c) failed ancestor blocks descendants, independent roots continue', () => {
@@ -485,52 +552,68 @@ describe('executeMerges — (c) failed ancestor blocks descendants, independent 
     // Pr 8 was never EXECUTED: the sweep fetched + validated its head
     // (2 calls); the blocked action added nothing.
     expect(fake.calls.filter((call) => call.includes('pull/8/head')).length).toBe(2);
-    expect(fake.calls.includes('prepare:8@refs/pull/8/head')).toBe(false);
+    expect(fake.calls.includes('merge:8:merge')).toBe(false);
     // The independent root continued after the failure, in plan order.
     expect(mergeCalls(fake)).toEqual(['merge:7:merge', 'merge:9:merge']);
   });
 });
 
-describe('executeMerges — (f) worktrees removed in finally', () => {
-  test('the removal happens even when the merge fails', async () => {
+describe('withPreparedWorktree — the worktree lifecycle seam helper (round 1, finding 3)', () => {
+  test('prepare → fn(path) → remove, in order; fn\'s value resolves', async () => {
     const fake = new FakeMergeEffects();
-    fake.heads.set(7, sha('a'));
-    fake.mergeQueue.set(7, [{ code: 1, stdout: '', stderr: 'nope' }]);
-
-    await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
-
-    const prepareAt = fake.calls.findIndex((call) => call.startsWith('prepare:'));
-    const removeAt = fake.calls.findIndex((call) => call.startsWith('remove:'));
-    expect(prepareAt).toBeGreaterThanOrEqual(0);
-    expect(removeAt).toBeGreaterThan(prepareAt); // paired, after the failed merge
+    const fnPaths: string[] = [];
+    const result = await withPreparedWorktree(fake, 7, headRefFor(7), async (path) => {
+      fnPaths.push(path);
+      return 'resolved';
+    });
+    expect(result).toBe('resolved');
+    expect(fnPaths).toEqual(['/wt/pr-7']);
+    expect(fake.calls).toEqual(['prepare:7@refs/pull/7/head', 'remove:/wt/pr-7']);
   });
 
-  test('a removal failure is appended to the record — it never masks the primary failure', async () => {
+  test('fn throws → remove still runs, and the ORIGINAL error object is rethrown (never masked)', async () => {
     const fake = new FakeMergeEffects();
-    fake.heads.set(7, sha('a'));
-    fake.mergeQueue.set(7, [{ code: 1, stdout: '', stderr: 'merge disallowed' }]);
-    fake.removeFailures.add('/wt/pr-7');
-
-    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
-
-    expect(report.failed).toEqual([
-      {
-        pr: 7,
-        error: expect.stringMatching(/merge disallowed; worktreeRemove \/wt\/pr-7 also failed/),
-      },
-    ]);
+    const original = new Error('resolver exploded');
+    await expect(
+      withPreparedWorktree(fake, 7, headRefFor(7), async () => {
+        throw original;
+      }),
+    ).rejects.toBe(original);
+    expect(fake.calls).toEqual(['prepare:7@refs/pull/7/head', 'remove:/wt/pr-7']);
   });
 
-  test('a removal failure after a clean merge never rewrites the outcome', async () => {
+  test('fn throws AND the removal fails → the removal note is APPENDED to the original error', async () => {
     const fake = new FakeMergeEffects();
-    fake.heads.set(7, sha('a'));
     fake.removeFailures.add('/wt/pr-7');
+    await expect(
+      withPreparedWorktree(fake, 7, headRefFor(7), async () => {
+        throw new Error('resolver exploded');
+      }),
+    ).rejects.toThrow(/resolver exploded; worktreeRemove \/wt\/pr-7 also failed/);
+    expect(fake.calls).toEqual(['prepare:7@refs/pull/7/head', 'remove:/wt/pr-7']);
+  });
 
-    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+  test('fn resolves but the removal fails → the caller\'s result still stands (never masked)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.removeFailures.add('/wt/pr-7');
+    const result = await withPreparedWorktree(fake, 7, headRefFor(7), async () => 'ok');
+    expect(result).toBe('ok');
+    expect(fake.calls).toEqual(['prepare:7@refs/pull/7/head', 'remove:/wt/pr-7']);
+  });
 
-    expect(report.merged).toEqual([7]);
-    expect(report.failed).toEqual([]);
-    expect(report.stale).toEqual([]);
+  test('a prepare throw propagates untouched — fn never runs, remove never runs (finding 6)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.prepareThrows = new Error('worktree add refused');
+    let fnRan = false;
+    await expect(
+      withPreparedWorktree(fake, 7, headRefFor(7), async () => {
+        fnRan = true;
+        return 'never';
+      }),
+    ).rejects.toThrow('worktree add refused');
+    expect(fnRan).toBe(false);
+    // Nothing was prepared — there is nothing to remove.
+    expect(fake.calls).toEqual(['prepare:7@refs/pull/7/head']);
   });
 });
 
@@ -551,9 +634,7 @@ describe('executeMerges — the plan is the only source of actions', () => {
       'validate:refs/pull/7/head',
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
-      'prepare:7@refs/pull/7/head',
       'merge:7:merge',
-      'remove:/wt/pr-7',
     ]);
     expect(JSON.stringify(report).includes('3')).toBe(false);
   });
@@ -594,6 +675,38 @@ describe('executeMerges — the plan is the only source of actions', () => {
     expect(fake.calls.some((call) => call.startsWith('prepare:') || call.startsWith('remove:'))).toBe(
       false,
     );
+  });
+
+  test('round-1 finding 6: an action-time fetch failure → failed with the error, never merged', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.fetchFailures.add(7); // every fetch for pr 7 fails
+
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    // The BASELINE fetch is best-effort (tolerated — the sweep validate
+    // still saw the locally-known head); the ACTION fetch failing is fatal
+    // to the action: failed, never merged.
+    expect(report.failed).toEqual([
+      { pr: 7, error: expect.stringContaining('fatal: could not read from remote repository') },
+    ]);
+    expect(report.merged).toEqual([]);
+    expect(mergeCalls(fake)).toEqual([]);
+    expect(fake.calls.filter((call) => call.startsWith('fetch:')).length).toBe(2); // baseline + action
+  });
+
+  test('round-1 finding 6: drift on a retarget-self entry → skipped stale; retargetBase never called', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(5, sha('a'));
+    fake.driftSha = sha('b'); // every validation after the baseline sees the moved head
+
+    const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
+
+    expect(report.retargeted).toEqual([]);
+    expect(report.stale).toEqual([
+      { pr: 5, detail: expect.stringContaining('moved between plan and run') },
+    ]);
+    expect(fake.calls.some((call) => call.startsWith('retarget:'))).toBe(false);
   });
 
   test('CR1 regression: a forge that rejects pull-ref pushes never receives one from a retarget', async () => {
@@ -653,7 +766,7 @@ describe('executeMerges — (d) per-effective-base serial order, recorded in cal
     const report = await executeMerges({ plan, effects: fake });
 
     expect(report.merged).toEqual([5, 6]);
-    // One action at a time, plan order, each prepare→merge→remove block
+    // One action at a time, plan order, each fetch→validate→merge block
     // complete before the next begins (the whole-run serialization;
     // per-base grouping is preserved by the same order in the report).
     expect(fake.calls).toEqual([
@@ -663,14 +776,10 @@ describe('executeMerges — (d) per-effective-base serial order, recorded in cal
       'validate:refs/pull/6/head',
       'fetch:refs/pull/5/head',
       'validate:refs/pull/5/head',
-      'prepare:5@refs/pull/5/head',
       'merge:5:merge',
-      'remove:/wt/pr-5',
       'fetch:refs/pull/6/head',
       'validate:refs/pull/6/head',
-      'prepare:6@refs/pull/6/head',
       'merge:6:merge',
-      'remove:/wt/pr-6',
     ]);
   });
 });
@@ -710,6 +819,29 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['push', 'origin', 'HEAD:main'])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/main'])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['-C', '/repo', 'push', 'origin', ':main'])).toThrow(UnsafeMergeArgsError);
+  });
+
+  test('round-1: a push with NO explicit refspec is refused (push.default could pick the protected branch)', () => {
+    expect(() => safeArgs(['push', 'origin'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['push'])).toThrow(UnsafeMergeArgsError);
+    // A refspec (even a non-protected one) keeps the push legal.
+    expect(safeArgs(['push', 'origin', 'feat'])).toEqual(['push', 'origin', 'feat']);
+  });
+
+  test('round-1: bundled short flags carrying an f are refused (-qf rides --force)', () => {
+    expect(() => safeArgs(['push', '-qf', 'origin', 'feat'])).toThrow(UnsafeMergeArgsError);
+    // An f-free bundle stays legal.
+    expect(safeArgs(['worktree', 'add', '-B', 'cq-merge/pr-7', '/wt'])).toEqual([
+      'worktree',
+      'add',
+      '-B',
+      'cq-merge/pr-7',
+      '/wt',
+    ]);
+  });
+
+  test("round-1: '--amend' is a forbidden token (history rewrite)", () => {
+    expect(() => safeArgs(['commit', '--amend'])).toThrow(UnsafeMergeArgsError);
   });
 
   test('the executor’s own argv shapes pass untouched', () => {

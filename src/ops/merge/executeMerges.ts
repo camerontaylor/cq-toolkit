@@ -1,15 +1,16 @@
 // executeMerges — the F2 plan's executor (goal F3, ws-f scope item 3;
 // UC §3 row 43). The plan is the ONLY source of actions: exactly the
-// entries in `plan.order` are acted on — 'merge' entries merge through a
-// prepared worktree, 'retarget-self' entries are retargeted onto the
-// plan's base branch by a FORGE BASE EDIT (retargetBase; a retarget never
-// touches a worktree and never pushes a ref) — and `plan.needsHuman`
-// entries are NEVER executed (I2 carries through execution: a PR a human
-// owes is not merged by a machine). The executor is pure orchestration:
-// every git/gh mutation rides the injected MergeEffects seam (see
-// ./effects.js — UC row 43's load-bearing point: the whole flow is
-// testable with ZERO real git/gh), so this module contains no transport,
-// no spawning, no fs.
+// entries in `plan.order` are acted on — 'merge' entries merge SERVER-SIDE
+// (gh pr merge; merge entries do NOT touch worktrees — round 1; worktree
+// lifecycle enters with F4's conflict resolver via withPreparedWorktree in
+// effects.js), 'retarget-self' entries are retargeted onto the plan's base
+// branch by a FORGE BASE EDIT (retargetBase; a retarget never touches a
+// worktree and never pushes a ref) — and `plan.needsHuman` entries are
+// NEVER executed (I2 carries through execution: a PR a human owes is not
+// merged by a machine). The executor is pure orchestration: every git/gh
+// mutation rides the injected MergeEffects seam (see ./effects.js — UC row
+// 43's load-bearing point: the whole flow is testable with ZERO real
+// git/gh), so this module contains no transport, no spawning, no fs.
 //
 // THE SEMANTICS, each pinned by a test:
 //   a. LIVE-STATE REVALIDATION per action — before merging PR N, its head
@@ -46,16 +47,18 @@
 //   e. BOUNDED RETRY — a merge failure whose stderr matches
 //      /base branch was modified/i is retried up to `maxRetries`
 //      (default 3, so at most maxRetries + 1 mergePr calls), with the
-//      head revalidated between attempts (a head that moved mid-retry
-//      turns the action stale, never a blind retry). ANY other failure is
-//      recorded `failed` immediately and NOT retried.
-//   f. WORKTREES REMOVED IN FINALLY — every worktreePrepare is paired with
-//      a worktreeRemove in a try/finally: the removal happens even when
-//      the merge fails. A removal failure never masks the primary outcome:
-//      it is appended to the record when the record carries a detail/error
-//      field, and dropped when the outcome is a clean merge/retarget (the
-//      merge truth stands; a wedged tree surfaces loudly at the next run's
-//      worktree add — never as a rewritten report bucket).
+//      head revalidated between attempts — FETCH FIRST (round 1): the
+//      remote may have moved without any local ref knowing, so a blind
+//      retry would merge against the drifted base; a nonzero fetch →
+//      failed, a sha that moved or vanished after the fetch → stale. ANY
+//      other failure is recorded `failed` immediately and NOT retried.
+//   f. WORKTREES ARE NOT THIS EXECUTOR'S BUSINESS (round 1) — gh pr merge
+//      is server-side, so merge entries prepare and remove NOTHING; the
+//      old per-action prepare/remove pair cost two git calls and added a
+//      spurious failure mode ahead of the merge attempt. Worktree
+//      lifecycle enters with F4's conflict resolver via
+//      withPreparedWorktree (effects.js): prepare → fn → remove-in-finally,
+//      a removal failure never masking the caller's outcome.
 //
 // TOTALITY: every PR in plan.order lands in EXACTLY ONE of merged /
 // retargeted / stale / failed / blocked. Effect methods that REJECT
@@ -84,7 +87,8 @@ export type ExecutionBlockReason = 'blocked_by_ancestor';
 export interface ExecutionReport {
   /** PRs merged with method 'merge' (I3), in execution order. */
   merged: number[];
-  /** retarget-self entries whose head ref was pushed, in execution order. */
+  /** retarget-self entries whose base was retargeted on the forge (the
+   * retargetBase edit — never a push), in execution order. */
   retargeted: number[];
   /** PRs skipped because the live state drifted from what the plan was
    * built on (or the head ref vanished) — never merged. */
@@ -233,8 +237,27 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
           error: `gh pr merge ${pr} --merge failed (exit ${result.code})${stderrSuffix(result.stderr)}`,
         };
       }
-      // (e) revalidation between attempts: a head that moved or vanished
-      // mid-retry turns the action stale — never a blind retry.
+      // (e) revalidation between attempts — FETCH FIRST (round 1): the
+      // remote head may have moved without any local ref knowing; a blind
+      // retry would merge against the drifted base. A nonzero fetch means
+      // the truth is unavailable → failed with the error; a head that
+      // moved or vanished after the fetch → stale; a validateRef throw →
+      // failed. Never a blind retry.
+      let refetched: GhResult;
+      try {
+        refetched = await effects.fetchRef(ref);
+      } catch (err) {
+        return {
+          kind: 'failed',
+          error: `retry-revalidation fetchRef for pr ${pr} threw: ${errorMessage(err)}`,
+        };
+      }
+      if (refetched.code !== 0) {
+        return {
+          kind: 'failed',
+          error: `retry revalidation: fetch ${ref} failed (exit ${refetched.code})${stderrSuffix(refetched.stderr)}`,
+        };
+      }
       let again: { ok: boolean; sha?: string };
       try {
         again = await effects.validateRef(ref);
@@ -297,8 +320,9 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
   };
 
   // ONE action, end to end — fetch, revalidate, then the action body: the
-  // forge base edit for a retarget-self entry (no worktree), the worktree
-  // merge with its bounded retry for a merge entry.
+  // forge base edit for a retarget-self entry, the server-side
+  // bounded-retry merge for a merge entry (neither touches a worktree —
+  // round 1).
   const runAction = async (entry: PlannedMergeEntry, expectedSha: string): Promise<void> => {
     const pr = entry.pr;
     const ref = headRefFor(pr);
@@ -351,43 +375,12 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       return;
     }
 
-    let prepared: { path: string };
-    try {
-      prepared = await effects.worktreePrepare(pr, ref);
-    } catch (err) {
-      report.failed.push({
-        pr,
-        error: `worktreePrepare for pr ${pr} failed: ${errorMessage(err)}`,
-      });
-      withheld.add(pr);
-      return;
-    }
-
-    // (f) the act/remove pairing: whatever the action decides, the worktree
-    // goes — and a cleanup failure never masks the primary outcome.
-    let outcome: Outcome | undefined;
-    try {
-      outcome = await mergeWithRetry(pr, ref, expectedSha);
-    } catch (err) {
-      outcome = { kind: 'failed', error: `action for pr ${pr} threw: ${errorMessage(err)}` };
-    } finally {
-      let removalNote = '';
-      try {
-        await effects.worktreeRemove(prepared.path);
-      } catch (err) {
-        removalNote = `; worktreeRemove ${prepared.path} also failed: ${errorMessage(err)}`;
-      }
-      if (removalNote !== '' && outcome !== undefined) {
-        if (outcome.kind === 'stale') {
-          outcome = { kind: 'stale', detail: `${outcome.detail}${removalNote}` };
-        } else if (outcome.kind === 'failed') {
-          outcome = { kind: 'failed', error: `${outcome.error}${removalNote}` };
-        }
-        // merged/retargeted: the clean outcome stands (module doc, rule f).
-      }
-    }
-
-    fileOutcome(pr, outcome);
+    // A merge action is SERVER-SIDE ONLY (round 1): gh pr merge needs no
+    // tree, so no worktree is prepared or removed here — the bounded-retry
+    // merge is the whole body (see rule f in the module doc; worktree
+    // lifecycle enters with F4's resolver via withPreparedWorktree).
+    // mergeWithRetry is total (never throws), so the outcome files clean.
+    fileOutcome(pr, await mergeWithRetry(pr, ref, expectedSha));
   };
 
   // THE LOOP — plan order, strictly sequential (rule d's determinism), with
