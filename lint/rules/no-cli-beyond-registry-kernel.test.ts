@@ -4,28 +4,33 @@
 // path, and the RESOLVED path must land inside src/cli/ — or, when the
 // importing file itself is under src/cli/**, inside src/registry/ or
 // src/kernel/ (node: builtins everywhere; 'zod' only in the configured
-// zodFiles). The src/cli/** scoping lives in eslint.config.js (the rule is
+// zodFiles). The src/cli/** scoping lives in .oxlintrc.json (the rule is
 // applied to src/cli/** and src/cli.ts there). Because RuleTester runs the
 // rule core without the repo config, a violation OUTSIDE src/cli is a valid
 // case of the CONFIG, not of the rule, and cannot be expressed here — it is
-// covered by the eslint.config.js files scoping.
-import { RuleTester } from 'eslint';
-import tseslint from 'typescript-eslint';
+// covered by the .oxlintrc.json files scoping.
+import { RuleTester } from 'oxlint/plugins-dev';
 import { describe, it } from 'vitest';
 import rule from './no-cli-beyond-registry-kernel.mjs';
 
 RuleTester.describe = describe;
 RuleTester.it = it;
 
-// The option shape eslint.config.js passes for src/cli/**.
+// The option shape .oxlintrc.json passes for src/cli/**.
 const OPTIONS = [{ zodFiles: ['src/cli/run-plan.ts'] }];
 
 const ruleTester = new RuleTester({
-  languageOptions: { ecmaVersion: 'latest', sourceType: 'module' },
+  languageOptions: { sourceType: 'module', parserOptions: { lang: 'ts' } },
 });
 
 ruleTester.run('no-cli-beyond-registry-kernel', rule, {
   valid: [
+    {
+      code: "import '../kernel/types.js';",
+      filename: 'C:\\repo\\src\\cli\\main.ts',
+      options: OPTIONS,
+    },
+    { code: "import 'zod';", filename: 'C:\\repo\\src\\cli\\run-plan.ts', options: OPTIONS },
     {
       code: "import { runPlanCommand } from './run-plan.js';",
       filename: 'src/cli/main.ts',
@@ -40,7 +45,7 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       code: "import type { RunOptions } from '../kernel/types.js';", // TS syntax: TS parser needed
       filename: 'src/cli/run-plan.ts',
       options: OPTIONS,
-      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
+      languageOptions: { sourceType: 'module', parserOptions: { lang: 'ts' } },
     },
     {
       // Inline import type — the source goes through the same
@@ -49,7 +54,7 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       code: "type T = import('../kernel/types.js').T;",
       filename: 'src/cli/main.ts',
       options: OPTIONS,
-      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
+      languageOptions: { sourceType: 'module', parserOptions: { lang: 'ts' } },
     },
     {
       code: "import { readFile } from 'node:fs/promises';",
@@ -81,6 +86,18 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
     },
   ],
   invalid: [
+    {
+      code: "import '../kernel/../driver/index.js';",
+      filename: 'C:\\repo\\src\\cli\\main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
+    {
+      code: "import '../cli-extra/index.js';",
+      filename: 'C:\\repo\\src\\cli\\main.ts',
+      options: OPTIONS,
+      errors: [{ messageId: 'beyondRegistryKernel' }],
+    },
     {
       code: "import { registry } from '../ops/gates/registry.js';",
       filename: 'src/cli/main.ts',
@@ -189,7 +206,7 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       code: "type D = import('../driver/types.js').Driver;",
       filename: 'src/cli/main.ts',
       options: OPTIONS,
-      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
+      languageOptions: { sourceType: 'module', parserOptions: { lang: 'ts' } },
       errors: [{ messageId: 'beyondRegistryKernel' }],
     },
     {
@@ -198,7 +215,10 @@ ruleTester.run('no-cli-beyond-registry-kernel', rule, {
       code: 'type E = import(target).E;',
       filename: 'src/cli/main.ts',
       options: OPTIONS,
-      languageOptions: { ecmaVersion: 'latest', sourceType: 'module', parser: tseslint.parser },
+      languageOptions: {
+        sourceType: 'module',
+        parserOptions: { lang: 'ts', ignoreNonFatalErrors: true },
+      },
       errors: [{ messageId: 'beyondRegistryKernel' }],
     },
   ],

@@ -488,7 +488,7 @@ describe('runPlan — execution semantics', () => {
     const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.counts.failed).toBe(1);
     expect(report.jobs[0]?.result.status).toBe('failed');
-    expect((report.jobs[0]?.result as { error: string }).error).toMatch(/number/i);
+    expect(report.jobs[0]?.result).toMatchObject({ error: expect.stringMatching(/number/i) });
   });
 
   test('a throwing op records failed with the throw message (contract violation, run survives)', async () => {
@@ -664,8 +664,11 @@ describe('runPlan — execution semantics', () => {
       { concurrency: 5, stopOnError: false, journalDir: dir },
       registry,
     );
-    const failureOf = (id: string): string =>
-      (report.jobs.find((row) => row.jobId === id)?.result as { error?: string }).error ?? '';
+    const failureOf = (id: string): string => {
+      const result = report.jobs.find((row) => row.jobId === id)?.result;
+      if (result?.status !== 'failed') throw new Error(`Expected failed job ${id}`);
+      return result.error;
+    };
     expect(failureOf('m')).toMatch(/non-serializable.*non-plain object of type 'Map'/);
     expect(failureOf('d')).toMatch(/non-serializable.*non-plain object of type 'Date'/);
     expect(failureOf('f')).toMatch(/non-serializable.*non-JSON value of type 'function'/);

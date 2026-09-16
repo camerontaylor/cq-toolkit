@@ -612,7 +612,9 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // runner's sweep honestly calls that blocked (its sweep predates the
     // governor and cannot attribute).
     expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'failed']);
-    expect((raw.jobs[3]?.result as { error: string }).error).toMatch(/blocked: dependency 'c'/);
+    expect(raw.jobs[3]?.result).toMatchObject({
+      error: expect.stringMatching(/blocked: dependency 'c'/),
+    });
 
     // The governor's voice: withBudgetStop re-marks the row whose ENTIRE
     // dependency obstruction is transitively budget-caused.
@@ -1295,7 +1297,7 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
     );
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
     expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'indeterminate']);
-    expect((raw.jobs[3]?.result as { detail: string }).detail).toMatch(/^queued:/);
+    expect(raw.jobs[3]?.result).toMatchObject({ detail: expect.stringMatching(/^queued:/) });
 
     // …yet the run stopped for budget-family reasons: withBudgetStop
     // annotates and re-marks the queued row even though no trip fired.

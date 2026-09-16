@@ -80,6 +80,7 @@ export interface SuppressionPattern {
 export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Object.freeze(
   [
     { name: 'eslint-disable', pattern: '\\beslint-disable\\b' },
+    { name: 'oxlint-disable', pattern: '\\boxlint-disable\\b' },
     { name: '@ts-ignore', pattern: '@ts-ignore\\b' },
     { name: '@ts-expect-error', pattern: '@ts-expect-error\\b', requiresReason: true },
     { name: 'istanbul ignore', pattern: '\\bistanbul\\s+ignore\\b' },

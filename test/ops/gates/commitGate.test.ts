@@ -365,9 +365,10 @@ describe('commitGate config genericity', () => {
     }).toThrow(TypeError);
     expect(DEFAULT_COMMIT_TRAILERS[0]?.required).toBe(true);
     const outcome = DEFAULT_COMMIT_TRAILERS.find((rule) => rule.name === 'Outcome');
-    expect(Object.isFrozen(outcome?.oneOf)).toBe(true);
+    if (!outcome?.oneOf) throw new Error('Outcome must enumerate allowed values');
+    expect(Object.isFrozen(outcome.oneOf)).toBe(true);
     expect(() => {
-      (outcome?.oneOf as string[]).push('shipping');
+      (outcome.oneOf as string[]).push('shipping');
     }).toThrow(TypeError);
     expect(outcome?.oneOf).toEqual(['broken-test', 'code-bug', 'todo']);
   });

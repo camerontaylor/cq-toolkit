@@ -679,7 +679,6 @@ async function scenarioCancel() {
     verdict.negotiatedProtocolVersion = initResult.protocolVersion;
     const session = await newSession(probe, cwd);
     const updatesAtCancelStart = probe.notifications.length;
-    const tPrompt0 = elapsedMs();
     const promptPromise = probe.request(
       'session/prompt',
       {

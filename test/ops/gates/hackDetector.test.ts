@@ -370,20 +370,37 @@ describe('hackDetector: suppression config', () => {
     expect(await findingsOf(diff)).toEqual([]);
   });
 
+  test.each(['oxlint-disable', 'oxlint-disable-next-line', 'oxlint-disable-line'])(
+    'detects added %s directives',
+    async (directive) => {
+      const diff = [
+        'diff --git a/src/a.ts b/src/a.ts',
+        '--- a/src/a.ts',
+        '+++ b/src/a.ts',
+        '@@ -0,0 +1 @@',
+        `+// ${directive} no-debugger -- fixture`,
+      ].join('\n');
+      expect(await findingsOf(diff)).toEqual([
+        expect.objectContaining({ pattern: 'oxlint-disable' }),
+      ]);
+    },
+  );
+
   test('the shipped defaults are DEEP-frozen: mutation attempts throw in strict mode', () => {
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS)).toBe(true);
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS[0])).toBe(true);
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS[3])).toBe(true);
     expect(DEFAULT_SUPPRESSION_PATTERNS.map((p) => p.name)).toEqual([
       'eslint-disable',
+      'oxlint-disable',
       '@ts-ignore',
       '@ts-expect-error',
       'istanbul ignore',
     ]);
     expect(() => {
-      (DEFAULT_SUPPRESSION_PATTERNS[1] as { pattern: string }).pattern = '\\bnever\\b';
+      (DEFAULT_SUPPRESSION_PATTERNS[2] as { pattern: string }).pattern = '\\bnever\\b';
     }).toThrow(TypeError);
-    expect(DEFAULT_SUPPRESSION_PATTERNS[1]?.pattern).toBe('@ts-ignore\\b');
+    expect(DEFAULT_SUPPRESSION_PATTERNS[2]?.pattern).toBe('@ts-ignore\\b');
   });
 
   test('the frozen defaults pass STRAIGHT into the readonly config fields, no casts', async () => {

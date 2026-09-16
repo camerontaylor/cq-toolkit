@@ -185,7 +185,7 @@ describe('makeManifest', () => {
     const planInput = plan.jobs[0]?.input as { n: number };
     planInput.n = 999;
 
-    expect((manifest.jobs[0]?.input as { n: number }).n).toBe(3); // snapshot untouched
+    expect(manifest.jobs[0]?.input).toEqual({ n: 3 }); // snapshot untouched
     expect(manifest.jobs[0]?.inputsHash).toBe(hashBefore); // committed hash is the hash of the committed input
   });
 

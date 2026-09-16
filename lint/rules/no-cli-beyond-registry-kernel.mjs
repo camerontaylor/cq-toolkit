@@ -1,6 +1,6 @@
 // no-cli-beyond-registry-kernel — boundary rule backing the "no-logic-in-CLI"
 // claim (I1): src/cli is a THIN dispatcher. In the files the rule is applied
-// to (the scoping lives in eslint.config.js — the rule is registered under
+// to (the scoping lives in .oxlintrc.json — the rule is registered under
 // the "cq" plugin and applied to src/cli/** and src/cli.ts), every static or
 // dynamic import source is checked by RESOLVE-THEN-CONTAIN: relative sources
 // are resolved LEXICALLY (posix join + normalize against the importing file's

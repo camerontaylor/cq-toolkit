@@ -164,8 +164,8 @@ data (run manifests, journals).
 vendor; kernel types referencing a vendor SDK make the core unportable and push its
 dependency churn onto every adopter.
 
-**Enforcement.** The boundary rule `eslint/rules/no-vendor-sdk-in-kernel.mjs` runs in
-lint today as an error scoped to two distinct surfaces (`eslint.config.js`; the
+**Enforcement.** The boundary rule `lint/rules/no-vendor-sdk-in-kernel.mjs` runs in
+lint today as an error scoped to two distinct surfaces (`.oxlintrc.json`; the
 distinction is the point — review-debt #17, PR #7 Minor): the KERNEL surface
 `src/kernel/**` (whose `src/kernel/types.ts` holds the frozen kernel types and
 `src/kernel/schema.ts` their zod mirrors) and the DRIVER SEAM surface
