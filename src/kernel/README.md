@@ -144,12 +144,12 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
      the run no longer waits on it. A fake op that ignores the abort signal
      is therefore still terminated at the final rung — that is the slice-2
      test.
-  An op that settles early disarms every pending rung. A port primitive that
-  THROWS is recorded on the rung marker (`delivered: false` plus an `error`
-  note — mirrored on the governor's `ladder-rung` event) and the ladder
-  continues: a failing port can never lose a marker, skip the later rungs,
-  or hang the job. `runLadder` is the standalone unit (no registry needed);
-  markers are also returned on the `LadderOutcome`.
+     An op that settles early disarms every pending rung. A port primitive that
+     THROWS is recorded on the rung marker (`delivered: false` plus an `error`
+     note — mirrored on the governor's `ladder-rung` event) and the ladder
+     continues: a failing port can never lose a marker, skip the later rungs,
+     or hang the job. `runLadder` is the standalone unit (no registry needed);
+     markers are also returned on the `LadderOutcome`.
 - **Why kills are `budget-exhausted`, not `indeterminate` (recorded
   decision).** The taxonomy lists "timeout" under `indeterminate` for
   op-internal losses with no attributable cause; a governor kill has a known
@@ -204,8 +204,7 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   The fold carries per-job attempt ordinals from the frozen attempt field
   (via `rescue.attemptsFromJournal`), the usage
   rollup (USD needs the optional `usdOf` price mapping), and the dispatch
-  count (`runDispatchQuota` carries across resume instead of restarting at
-  0) — so a resumed run continues the SAME budget. Under the op-name
+  count (`runDispatchQuota` carries across resume instead of restarting at 0) — so a resumed run continues the SAME budget. Under the op-name
   fallback the op key seeds the SUM of the op's journaled dispatches (the
   fallback's ordinal IS the op's dispatch count; a max would understate it
   and let a resumed run exceed the cap). A custom `config.jobKey` extractor
@@ -227,17 +226,17 @@ field is `jobKey`, a function — like the registry's importer, never
 persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
 `RunOptions`/`Limits` surfaces with the min-precedence applied.
 
-| field | meaning | default |
-| --- | --- | --- |
-| `maxUsd` | EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd) | none |
-| `maxTokens` | EFFECTIVE run token cap = `RunOptions.maxTokens` (DD-9's parallel token rollup; no Limits half in v1) — independent of `maxUsd`, same exceeds-cap trip semantics | none |
-| `perJobWallClockMs` | rung-1 delay (`Limits.perJobWallClockMs`) | none = no ladder |
-| `abortGraceMs` | rung 1 → rung 2 grace | `DEFAULT_ABORT_GRACE_MS` = 5000 (DD-1 spike result — docs/dd-1-abort-spike.md) |
-| `killGraceMs` | rung 2 → rung 3 grace | `DEFAULT_KILL_GRACE_MS` = 5000 (conservative; no spike evidence to move it) |
-| `maxAttemptsPerJob` | per-job attempt cap (effective min) | none |
-| `runDispatchQuota` | per-run dispatch/attempt cap (`Limits.runDispatchQuota`) | none |
-| `inFlightCeiling` | in-flight ceiling — enforced by queueing | none |
-| `jobKey` | job-key extractor (runtime-only) | `input.jobId` convention, else the **op name** |
+| field               | meaning                                                                                                                                                          | default                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `maxUsd`            | EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd)                                                                                                    | none                                                                           |
+| `maxTokens`         | EFFECTIVE run token cap = `RunOptions.maxTokens` (DD-9's parallel token rollup; no Limits half in v1) — independent of `maxUsd`, same exceeds-cap trip semantics | none                                                                           |
+| `perJobWallClockMs` | rung-1 delay (`Limits.perJobWallClockMs`)                                                                                                                        | none = no ladder                                                               |
+| `abortGraceMs`      | rung 1 → rung 2 grace                                                                                                                                            | `DEFAULT_ABORT_GRACE_MS` = 5000 (DD-1 spike result — docs/dd-1-abort-spike.md) |
+| `killGraceMs`       | rung 2 → rung 3 grace                                                                                                                                            | `DEFAULT_KILL_GRACE_MS` = 5000 (conservative; no spike evidence to move it)    |
+| `maxAttemptsPerJob` | per-job attempt cap (effective min)                                                                                                                              | none                                                                           |
+| `runDispatchQuota`  | per-run dispatch/attempt cap (`Limits.runDispatchQuota`)                                                                                                         | none                                                                           |
+| `inFlightCeiling`   | in-flight ceiling — enforced by queueing                                                                                                                         | none                                                                           |
+| `jobKey`            | job-key extractor (runtime-only)                                                                                                                                 | `input.jobId` convention, else the **op name**                                 |
 
 **DD-1 result: CLOSED (T1.6 spike)** — the abort spike ran LIVE on both
 governed lanes (method + numbers: `docs/dd-1-abort-spike.md`): a governed
@@ -284,7 +283,6 @@ escapes: price the model, or cap with `maxTokens`), and the seed-time trip
 covers BOTH caps, so a resumed run whose journaled rollup already overruns
 either cap stops before admitting anything. Full disposition:
 `docs/dd-9-api-equivalent-budget.md`.
-
 
 Every timer in the governor flows through the injected `Clock`
 (`new BudgetGovernor(config, clock)`; default `realClock`) — there is no

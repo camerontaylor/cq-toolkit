@@ -26,7 +26,12 @@ const fail = (message) => {
 // whatever ^6 happens to resolve to on a fresh install (an I5 violation).
 // On win32 the .cmd shim must be spawned through a shell: since Node's
 // CVE-2024-27980 fix, spawning a .cmd/.bat without shell:true throws EINVAL.
-const TSC_BIN = resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc6.cmd' : 'tsc6');
+const TSC_BIN = resolve(
+  ROOT,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'tsc6.cmd' : 'tsc6',
+);
 const res = spawnSync(TSC_BIN, ['--noEmit', '-p', 'tsconfig.json', '--pretty', 'false'], {
   cwd: ROOT,
   encoding: 'utf8',
@@ -44,7 +49,9 @@ const count = errorLines.length;
 // fail. A nonzero exit WITH error lines is a normal errored typecheck; it
 // is counted and judged against the baseline below.
 if (res.status !== 0 && count === 0) {
-  fail(`tsc exited ${res.status} with no parsable error lines — tool output follows:\n${output.trim()}`);
+  fail(
+    `tsc exited ${res.status} with no parsable error lines — tool output follows:\n${output.trim()}`,
+  );
 }
 
 if (process.argv.includes('--update')) {
@@ -65,11 +72,15 @@ if (process.argv.includes('--update')) {
     // no parsable baseline yet — writing it is the creation case
   }
   if (previous !== null && count > previous) {
-    fail(`--update refuses to raise the baseline: ${count} error TS line(s) exceed the current baseline ${previous} — fix the errors; thresholds only tighten`);
+    fail(
+      `--update refuses to raise the baseline: ${count} error TS line(s) exceed the current baseline ${previous} — fix the errors; thresholds only tighten`,
+    );
   }
   mkdirSync(dirname(BASELINE), { recursive: true });
   writeFileSync(BASELINE, `{"count": ${count}}\n`);
-  console.log(`ratchet-typecheck: baseline ${previous === null ? 'created' : 'updated'} to ${count}`);
+  console.log(
+    `ratchet-typecheck: baseline ${previous === null ? 'created' : 'updated'} to ${count}`,
+  );
   process.exit(0);
 }
 
@@ -77,10 +88,16 @@ let baseline;
 try {
   ({ count: baseline } = JSON.parse(readFileSync(BASELINE, 'utf8')));
 } catch (e) {
-  fail(`missing baseline ${BASELINE} (invariant I5: a missing metrics summary is non-passing evidence, never a pass; create it with --update) [${e.code ?? e.message}]`);
+  fail(
+    `missing baseline ${BASELINE} (invariant I5: a missing metrics summary is non-passing evidence, never a pass; create it with --update) [${e.code ?? e.message}]`,
+  );
 }
 if (typeof baseline !== 'number') fail('baseline typecheck.json has no numeric "count"');
 if (count > baseline) {
-  fail(`${count} error TS line(s) exceed baseline ${baseline}; thresholds only tighten — fix the errors, do not raise the baseline. Errors:\n${errorLines.join('\n')}`);
+  fail(
+    `${count} error TS line(s) exceed baseline ${baseline}; thresholds only tighten — fix the errors, do not raise the baseline. Errors:\n${errorLines.join('\n')}`,
+  );
 }
-console.log(`ratchet-typecheck: ${count} <= baseline ${baseline}${count < baseline ? ' (tighten with --update)' : ''}`);
+console.log(
+  `ratchet-typecheck: ${count} <= baseline ${baseline}${count < baseline ? ' (tighten with --update)' : ''}`,
+);

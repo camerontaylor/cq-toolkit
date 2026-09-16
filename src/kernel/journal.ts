@@ -239,9 +239,7 @@ async function listRuns(journalDir: string): Promise<string[]> {
     }),
   );
   // Oldest first; ties broken by id so the order is deterministic.
-  return runIds.sort(
-    (a, b) => (mtimeMs.get(a) ?? 0) - (mtimeMs.get(b) ?? 0) || (a < b ? -1 : 1),
-  );
+  return runIds.sort((a, b) => (mtimeMs.get(a) ?? 0) - (mtimeMs.get(b) ?? 0) || (a < b ? -1 : 1));
 }
 
 /**

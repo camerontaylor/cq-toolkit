@@ -153,12 +153,16 @@ class AcpProbe {
           info.spawnError !== undefined ? `spawnError=${info.spawnError}` : null,
           info.code !== undefined && info.code !== null ? `code=${info.code}` : null,
           info.signal !== undefined && info.signal !== null ? `signal=${info.signal}` : null,
-        ].filter((part) => part !== null).join(' ');
+        ]
+          .filter((part) => part !== null)
+          .join(' ');
         for (const [id, pending] of this.pending) {
           clearTimeout(pending.timer);
           this.pending.delete(id);
           pending.reject(
-            new Error(`${pending.method ?? 'rpc'} aborted: the ACP process closed (${evidence || 'no exit details'})`),
+            new Error(
+              `${pending.method ?? 'rpc'} aborted: the ACP process closed (${evidence || 'no exit details'})`,
+            ),
           );
         }
         res(info);
@@ -242,7 +246,11 @@ class AcpProbe {
           const result = await this.serverRequestHandler.handler(frame.params);
           await this.send({ jsonrpc: '2.0', id: frame.id, result });
         } catch (e) {
-          await this.send({ jsonrpc: '2.0', id: frame.id, error: { code: -32603, message: String(e.message ?? e) } });
+          await this.send({
+            jsonrpc: '2.0',
+            id: frame.id,
+            error: { code: -32603, message: String(e.message ?? e) },
+          });
         }
       } else {
         await this.send({
@@ -305,7 +313,8 @@ class AcpProbe {
   }
 
   async kill() {
-    if (!this.child || this.child.exitCode !== null || this.child.signalCode !== null) return this.exitInfo ?? null;
+    if (!this.child || this.child.exitCode !== null || this.child.signalCode !== null)
+      return this.exitInfo ?? null;
     this.child.kill('SIGTERM');
     const exited = await Promise.race([
       this.exitPromise,
@@ -396,7 +405,12 @@ async function settleAndPrint(verdict, verdictPathOverride) {
 // OQ-5 + OQ-1: initialize, then session/new with NO authenticate call.
 async function scenarioInit() {
   const { probe, cwd } = await bootProbe('init');
-  const verdict = { scenario: 'init', acpBin: ACP_BIN, zcodeBinSet: Boolean(ZCODE_BIN), secrets: secretReport() };
+  const verdict = {
+    scenario: 'init',
+    acpBin: ACP_BIN,
+    zcodeBinSet: Boolean(ZCODE_BIN),
+    secrets: secretReport(),
+  };
   try {
     const tInit0 = elapsedMs();
     const initResult = await initialize(probe);
@@ -416,7 +430,9 @@ async function scenarioInit() {
         sessionIdPrefix: String(session.sessionId ?? '').slice(0, 8),
         modes: session.modes ?? null,
         modelOption: modelOptionFrom(session.configOptions),
-        configOptionIds: Array.isArray(session.configOptions) ? session.configOptions.map((o) => o?.id) : null,
+        configOptionIds: Array.isArray(session.configOptions)
+          ? session.configOptions.map((o) => o?.id)
+          : null,
         elapsedMs: elapsedMs() - tNew0,
       };
     } catch (e) {
@@ -451,7 +467,10 @@ async function scenarioVersion() {
   try {
     try {
       const initResult = await initialize(probe, { protocolVersion: 99 });
-      verdict.agentAnswered = { protocolVersion: initResult.protocolVersion, note: 'agent answered (spec: with its latest)' };
+      verdict.agentAnswered = {
+        protocolVersion: initResult.protocolVersion,
+        note: 'agent answered (spec: with its latest)',
+      };
     } catch (e) {
       verdict.agentAnswered = {
         error: e instanceof RpcError ? e.errorObject : String(e.message ?? e),
@@ -476,12 +495,17 @@ async function scenarioPrompt() {
     verdict.sessionNew = {
       modes: session.modes ?? null,
       modelOption: modelOptionFrom(session.configOptions),
-      configOptionIds: Array.isArray(session.configOptions) ? session.configOptions.map((o) => o?.id) : null,
+      configOptionIds: Array.isArray(session.configOptions)
+        ? session.configOptions.map((o) => o?.id)
+        : null,
     };
     const tPrompt0 = elapsedMs();
     const response = await probe.request(
       'session/prompt',
-      { sessionId: session.sessionId, prompt: [{ type: 'text', text: 'Reply with exactly these two characters: OK' }] },
+      {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'Reply with exactly these two characters: OK' }],
+      },
       PROMPT_TIMEOUT_MS,
     );
     verdict.prompt = {
@@ -496,7 +520,10 @@ async function scenarioPrompt() {
     verdict.configOptionUpdates = probe
       .sessionUpdates()
       .filter((n) => n.frame.params?.update?.sessionUpdate === 'config_option_update')
-      .map((n) => ({ t: n.t, modelOption: modelOptionFrom(n.frame.params?.update?.configOptions) }));
+      .map((n) => ({
+        t: n.t,
+        modelOption: modelOptionFrom(n.frame.params?.update?.configOptions),
+      }));
     verdict.modelKeyPathsSweep = {
       note: 'key paths matching /model/i anywhere on the wire this run',
       paths: [...modelKeyPaths(probe.allInbound)],
@@ -537,8 +564,13 @@ async function scenarioTool() {
       { sessionId: session.sessionId, configId: 'mode', value: 'build' },
       SET_CONFIG_TIMEOUT_MS,
     );
-    verdict.modeSwitch = { modes: setResp.modes ?? null, modelOption: modelOptionFrom(setResp.configOptions) };
-    const modeUpdates = probe.sessionUpdates().filter((n) => n.frame.params?.update?.sessionUpdate === 'current_mode_update');
+    verdict.modeSwitch = {
+      modes: setResp.modes ?? null,
+      modelOption: modelOptionFrom(setResp.configOptions),
+    };
+    const modeUpdates = probe
+      .sessionUpdates()
+      .filter((n) => n.frame.params?.update?.sessionUpdate === 'current_mode_update');
     verdict.modeAfterSwitch = modeUpdates.at(-1)?.frame.params?.update?.currentModeId ?? 'unknown';
 
     probe.serverRequestHandler = {
@@ -566,7 +598,12 @@ async function scenarioTool() {
       'session/prompt',
       {
         sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'Create a file named probe-hello.txt in the current directory containing exactly: hello' }],
+        prompt: [
+          {
+            type: 'text',
+            text: 'Create a file named probe-hello.txt in the current directory containing exactly: hello',
+          },
+        ],
       },
       PROMPT_TIMEOUT_MS,
     );
@@ -605,12 +642,15 @@ async function scenarioTool() {
     verdict.toolCallFrames = toolCallFrames;
     verdict.neverAsksCheck = {
       note: 'a tool_call whose id NEVER appears in a request_permission (this mode should gate file writes)',
-      ungatedToolCallIds: [...seenToolCallIds.entries()].filter(([, via]) => via === 'tool_call').map(([id]) => id),
-      verdict: toolCallFrames.length === 0
-        ? 'no tool_call frames at all'
-        : [...seenToolCallIds.values()].every((via) => via === 'permission')
-          ? 'asked: every tool_call id was preceded by a permission request'
-          : 'NEVER-ASKS EVIDENCE: at least one tool_call id with no permission request',
+      ungatedToolCallIds: [...seenToolCallIds.entries()]
+        .filter(([, via]) => via === 'tool_call')
+        .map(([id]) => id),
+      verdict:
+        toolCallFrames.length === 0
+          ? 'no tool_call frames at all'
+          : [...seenToolCallIds.values()].every((via) => via === 'permission')
+            ? 'asked: every tool_call id was preceded by a permission request'
+            : 'NEVER-ASKS EVIDENCE: at least one tool_call id with no permission request',
     };
     verdict.updatesInOrder = probe.updateKinds();
     verdict.finalText = probe
@@ -629,7 +669,11 @@ async function scenarioTool() {
 // OQ-6: mid-prompt cancel; client-observable verdict only.
 async function scenarioCancel() {
   const { probe, cwd } = await bootProbe('cancel');
-  const verdict = { scenario: 'cancel', cancelAfterMs: CANCEL_AFTER_MS, postCancelObserveMs: POST_CANCEL_OBSERVE_MS };
+  const verdict = {
+    scenario: 'cancel',
+    cancelAfterMs: CANCEL_AFTER_MS,
+    postCancelObserveMs: POST_CANCEL_OBSERVE_MS,
+  };
   try {
     const initResult = await initialize(probe);
     verdict.negotiatedProtocolVersion = initResult.protocolVersion;
@@ -640,7 +684,12 @@ async function scenarioCancel() {
       'session/prompt',
       {
         sessionId: session.sessionId,
-        prompt: [{ type: 'text', text: 'Without using any tools, write a 300-word essay about tide pools.' }],
+        prompt: [
+          {
+            type: 'text',
+            text: 'Without using any tools, write a 300-word essay about tide pools.',
+          },
+        ],
       },
       PROMPT_TIMEOUT_MS,
     );
@@ -674,7 +723,9 @@ async function scenarioCancel() {
     // Count FROM THE RECORDED FRAMES: the chunk count reflects what was
     // actually observed post-cancel (chunks with empty/absent text still
     // count — a text-derived count could silently read 0 when chunks exist).
-    const postTextChunks = post.filter((n) => n.frame.params?.update?.sessionUpdate === 'agent_message_chunk');
+    const postTextChunks = post.filter(
+      (n) => n.frame.params?.update?.sessionUpdate === 'agent_message_chunk',
+    );
     const textAfter = postTextChunks
       .map((n) => n.frame.params?.update?.content?.text ?? '')
       .join('');
@@ -703,5 +754,9 @@ const runners = {
   cancel: scenarioCancel,
 };
 t0 = Date.now();
-await appendLog({ dir: 'probe', t: 0, note: `start scenario=${scenario} leg=${leg ?? '-'} acpBin=${ACP_BIN}` });
+await appendLog({
+  dir: 'probe',
+  t: 0,
+  note: `start scenario=${scenario} leg=${leg ?? '-'} acpBin=${ACP_BIN}`,
+});
 await runners[scenario]();

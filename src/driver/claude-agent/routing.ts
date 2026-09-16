@@ -43,20 +43,24 @@ import type { ModelSpec } from '../types.js';
  * human notes (`notes`). Deliberately NO `models` field — see the header's
  * no-allowlist rule.
  */
-export const EndpointEntrySchema = z.object({
-  baseUrlEnv: z.string().min(1),
-  baseUrlDefault: z.string().min(1),
-  keyEnv: z.string().min(1),
-  notes: z.string().min(1),
-}).strict();
+export const EndpointEntrySchema = z
+  .object({
+    baseUrlEnv: z.string().min(1),
+    baseUrlDefault: z.string().min(1),
+    keyEnv: z.string().min(1),
+    notes: z.string().min(1),
+  })
+  .strict();
 
 /**
  * The whole table: endpoint name (the frozen ModelSpec.provider handle) →
  * entry. Plain serializable data.
  */
-export const EndpointTableSchema = z.object({
-  endpoints: z.record(z.string(), EndpointEntrySchema),
-}).strict();
+export const EndpointTableSchema = z
+  .object({
+    endpoints: z.record(z.string(), EndpointEntrySchema),
+  })
+  .strict();
 
 export type EndpointEntry = z.infer<typeof EndpointEntrySchema>;
 export type EndpointTable = z.infer<typeof EndpointTableSchema>;
@@ -104,7 +108,7 @@ export function defaultEndpointTable(): EndpointTable {
         baseUrlDefault: 'https://api.anthropic.com',
         keyEnv: 'ANTHROPIC_API_KEY',
         notes:
-          'Native Anthropic endpoint (docs as-of 2026-09); base URL overridable via the SDK\'s own ' +
+          "Native Anthropic endpoint (docs as-of 2026-09); base URL overridable via the SDK's own " +
           'ANTHROPIC_BASE_URL convention.',
       },
     },
@@ -163,7 +167,6 @@ export function resolveEndpoint(
     );
   }
   const override = env[entry.baseUrlEnv];
-  const baseUrl =
-    override !== undefined && override !== '' ? override : entry.baseUrlDefault;
+  const baseUrl = override !== undefined && override !== '' ? override : entry.baseUrlDefault;
   return { endpoint: endpointName, baseUrl, keyEnv: entry.keyEnv };
 }

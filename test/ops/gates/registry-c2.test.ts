@@ -50,9 +50,15 @@ describe('BaselineProbeInputSchema (full input, and only it)', () => {
   });
 
   test('bounds bail values: maxBailRetries 10 accepted, 11 rejected; an empty pattern is rejected', () => {
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 10 } }).success).toBe(true);
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 11 } }).success).toBe(false);
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { bailPatterns: [''] } }).success).toBe(false);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 10 } }).success,
+    ).toBe(true);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 11 } }).success,
+    ).toBe(false);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, bail: { bailPatterns: [''] } }).success,
+    ).toBe(false);
   });
 
   test('a typo inside command (timeoutMS, wrong case) is REJECTED, not silently stripped', () => {
@@ -71,27 +77,36 @@ describe('BaselineProbeInputSchema (full input, and only it)', () => {
   });
 
   test('REJECTS a smuggled baseline or cache field (strict unknown keys, I7)', () => {
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, baseline: { fingerprints: [] } }).success).toBe(
-      false,
-    );
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, baseline: { fingerprints: [] } }).success,
+    ).toBe(false);
     expect(BaselineProbeInputSchema.safeParse({ ...VALID, cache: true }).success).toBe(false);
   });
 
   test('rejects a bad adapter, bad args, and a missing command', () => {
-    expect(BaselineProbeInputSchema.safeParse({ adapter: 'grep-json', command: VALID.command }).success).toBe(
-      false,
-    );
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, command: { command: 'tsc', args: [7] } }).success).toBe(
-      false,
-    );
+    expect(
+      BaselineProbeInputSchema.safeParse({ adapter: 'grep-json', command: VALID.command }).success,
+    ).toBe(false);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, command: { command: 'tsc', args: [7] } })
+        .success,
+    ).toBe(false);
     expect(BaselineProbeInputSchema.safeParse({ adapter: 'tsc-lines' }).success).toBe(false);
   });
 
   test('rejects invalid bail values: negative, fractional, non-string patterns, unknown keys', () => {
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: -1 } }).success).toBe(false);
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 1.5 } }).success).toBe(false);
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { bailPatterns: [7] } }).success).toBe(false);
-    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { memoize: true } }).success).toBe(false);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: -1 } }).success,
+    ).toBe(false);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, bail: { maxBailRetries: 1.5 } }).success,
+    ).toBe(false);
+    expect(
+      BaselineProbeInputSchema.safeParse({ ...VALID, bail: { bailPatterns: [7] } }).success,
+    ).toBe(false);
+    expect(BaselineProbeInputSchema.safeParse({ ...VALID, bail: { memoize: true } }).success).toBe(
+      false,
+    );
   });
 });
 
@@ -104,7 +119,14 @@ describe('RegressionGateInputSchema (full input, and only it)', () => {
         tool: 'eslint',
         exitCode: 1,
         failures: [
-          { file: 'src/a.ts', line: 5, column: 1, ruleId: 'prefer-const', message: 'm', severity: 'error' },
+          {
+            file: 'src/a.ts',
+            line: 5,
+            column: 1,
+            ruleId: 'prefer-const',
+            message: 'm',
+            severity: 'error',
+          },
         ],
       },
       final: { ...EMPTY_FAILURE_SET, exitCode: null },
@@ -117,36 +139,51 @@ describe('RegressionGateInputSchema (full input, and only it)', () => {
   test('rejects FailureSets that do not mirror the C1 type', () => {
     expect(RegressionGateInputSchema.safeParse({ final: EMPTY_FAILURE_SET }).success).toBe(false);
     expect(
-      RegressionGateInputSchema.safeParse({ ...VALID, base: { tool: 5, failures: [], exitCode: 0 } }).success,
+      RegressionGateInputSchema.safeParse({
+        ...VALID,
+        base: { tool: 5, failures: [], exitCode: 0 },
+      }).success,
     ).toBe(false);
     expect(
       RegressionGateInputSchema.safeParse({
         ...VALID,
         base: {
           tool: 'eslint',
-          failures: [{ file: null, line: null, column: null, ruleId: null, message: 'm', severity: 'fatal' }],
+          failures: [
+            { file: null, line: null, column: null, ruleId: null, message: 'm', severity: 'fatal' },
+          ],
           exitCode: 1,
         },
       }).success,
     ).toBe(false);
     expect(
-      RegressionGateInputSchema.safeParse({ ...VALID, base: { tool: 'eslint', failures: [], exitCode: '0' } })
-        .success,
+      RegressionGateInputSchema.safeParse({
+        ...VALID,
+        base: { tool: 'eslint', failures: [], exitCode: '0' },
+      }).success,
     ).toBe(false);
   });
 
   test('rejects invalid config: zero/fractional buckets and unknown keys anywhere', () => {
-    expect(RegressionGateInputSchema.safeParse({ ...VALID, config: { lineBucketSize: 0 } }).success).toBe(false);
-    expect(RegressionGateInputSchema.safeParse({ ...VALID, config: { offsetBucketSize: 2.5 } }).success).toBe(
+    expect(
+      RegressionGateInputSchema.safeParse({ ...VALID, config: { lineBucketSize: 0 } }).success,
+    ).toBe(false);
+    expect(
+      RegressionGateInputSchema.safeParse({ ...VALID, config: { offsetBucketSize: 2.5 } }).success,
+    ).toBe(false);
+    expect(
+      RegressionGateInputSchema.safeParse({ ...VALID, config: { memoize: true } }).success,
+    ).toBe(false);
+    expect(RegressionGateInputSchema.safeParse({ ...VALID, config: { rootDir: 7 } }).success).toBe(
       false,
     );
-    expect(RegressionGateInputSchema.safeParse({ ...VALID, config: { memoize: true } }).success).toBe(false);
-    expect(RegressionGateInputSchema.safeParse({ ...VALID, config: { rootDir: 7 } }).success).toBe(false);
     expect(RegressionGateInputSchema.safeParse({ ...VALID, config: {} }).success).toBe(true);
   });
 
   test('rejects a smuggled top-level field (strict unknown keys)', () => {
-    expect(RegressionGateInputSchema.safeParse({ ...VALID, verdict: 'no-regression' }).success).toBe(false);
+    expect(
+      RegressionGateInputSchema.safeParse({ ...VALID, verdict: 'no-regression' }).success,
+    ).toBe(false);
   });
 });
 
@@ -171,7 +208,12 @@ describe('the C2 importers resolve', () => {
     const result = await op({ base: EMPTY_FAILURE_SET, final: EMPTY_FAILURE_SET });
     expect(result).toEqual({
       status: 'ok',
-      value: { verdict: 'no-regression', novelFailures: [], fixedFailures: [], preExistingCount: 0 },
+      value: {
+        verdict: 'no-regression',
+        novelFailures: [],
+        fixedFailures: [],
+        preExistingCount: 0,
+      },
     });
   });
 });

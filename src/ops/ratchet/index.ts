@@ -9,11 +9,7 @@
 // `export type`; no name collides with any other family barrel (checked
 // against every star-exported module; the generic list/get rule keeps the
 // registry seam's aliases on the root barrel).
-export {
-  createCaptureBaseline,
-  pruneBaselines,
-  resolveBaselinesDir,
-} from './captureBaseline.js';
+export { createCaptureBaseline, pruneBaselines, resolveBaselinesDir } from './captureBaseline.js';
 export type {
   CaptureBaselineInput,
   CaptureBaselineOutcome,

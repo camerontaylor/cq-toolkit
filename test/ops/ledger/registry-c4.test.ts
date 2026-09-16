@@ -7,12 +7,27 @@
 // precedent): a record→query round trip over a mkdtemp root, cleaned up
 // per test. The containment surface (root → strict descendant), the async
 // retried lock, and the atomic publish are all exercised HERE.
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { registry } from '../../../src/ops/ledger/registry.js';
-import { LedgerQueryInputSchema, LedgerRecordInputSchema } from '../../../src/ops/ledger/registry.js';
+import {
+  LedgerQueryInputSchema,
+  LedgerRecordInputSchema,
+} from '../../../src/ops/ledger/registry.js';
 import { makeLedgerRecord } from '../../../src/ops/ledger/ledger.js';
 import { parseLedger, serializeLedger } from '../../../src/ops/ledger/store.js';
 import type { OpRegistryEntry } from '../../../src/kernel/types.js';
@@ -43,7 +58,11 @@ describe('ledger registry: the two C4 entries', () => {
 describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only it)', () => {
   test('accepts the plain JSON a dispatcher sends (root + storePath, optional fields included)', () => {
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'ws/ledger.json', signature: 'sig-a' }).success,
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'ws/ledger.json',
+        signature: 'sig-a',
+      }).success,
     ).toBe(true);
     expect(
       LedgerRecordInputSchema.safeParse({
@@ -54,13 +73,19 @@ describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only
         note: 'n',
       }).success,
     ).toBe(true);
-    expect(LedgerQueryInputSchema.safeParse({ root: 'ws', storePath: 'ws/ledger.json' }).success).toBe(true);
+    expect(
+      LedgerQueryInputSchema.safeParse({ root: 'ws', storePath: 'ws/ledger.json' }).success,
+    ).toBe(true);
   });
 
   test('rejects smuggled unknown keys at every level (strict)', () => {
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', memoize: true })
-        .success,
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        memoize: true,
+      }).success,
     ).toBe(false);
     expect(
       LedgerRecordInputSchema.safeParse({
@@ -70,21 +95,31 @@ describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only
         thresholds: { suppressAt: 1, escalateAt: 2, cache: true },
       }).success,
     ).toBe(false);
-    expect(LedgerQueryInputSchema.safeParse({ root: 'ws', storePath: 'l.json', store: {} }).success).toBe(false);
+    expect(
+      LedgerQueryInputSchema.safeParse({ root: 'ws', storePath: 'l.json', store: {} }).success,
+    ).toBe(false);
   });
 
   test('rejects missing/empty root and storePath and out-of-bounds signatures', () => {
-    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's' }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ root: '', storePath: 'l.json', signature: 's' }).success).toBe(
-      false,
-    );
-    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', signature: 's' }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: '', signature: 's' }).success).toBe(false);
-    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: '' }).success).toBe(
+    expect(LedgerRecordInputSchema.safeParse({ storePath: 'l.json', signature: 's' }).success).toBe(
       false,
     );
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's'.repeat(501) }).success,
+      LedgerRecordInputSchema.safeParse({ root: '', storePath: 'l.json', signature: 's' }).success,
+    ).toBe(false);
+    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', signature: 's' }).success).toBe(false);
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: '', signature: 's' }).success,
+    ).toBe(false);
+    expect(
+      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: '' }).success,
+    ).toBe(false);
+    expect(
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's'.repeat(501),
+      }).success,
     ).toBe(false);
     expect(LedgerQueryInputSchema.safeParse({}).success).toBe(false);
     expect(LedgerQueryInputSchema.safeParse({ storePath: 'l.json' }).success).toBe(false);
@@ -92,30 +127,56 @@ describe('LedgerRecordInputSchema / LedgerQueryInputSchema (full input, and only
 
   test('bounds component at 200 and note at 500 chars, mirroring the op-level validation', () => {
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', component: 'c'.repeat(200) })
-        .success,
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        component: 'c'.repeat(200),
+      }).success,
     ).toBe(true);
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', component: 'c'.repeat(201) })
-        .success,
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        component: 'c'.repeat(201),
+      }).success,
     ).toBe(false);
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: 'n'.repeat(500) })
-        .success,
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        note: 'n'.repeat(500),
+      }).success,
     ).toBe(true);
     expect(
-      LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: 'n'.repeat(501) })
-        .success,
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        note: 'n'.repeat(501),
+      }).success,
     ).toBe(false);
   });
 
   test('rejects an EMPTY component or note (an empty backfill would pin hollow metadata permanently)', () => {
-    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', component: '' }).success).toBe(
-      false,
-    );
-    expect(LedgerRecordInputSchema.safeParse({ root: 'ws', storePath: 'l.json', signature: 's', note: '' }).success).toBe(
-      false,
-    );
+    expect(
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        component: '',
+      }).success,
+    ).toBe(false);
+    expect(
+      LedgerRecordInputSchema.safeParse({
+        root: 'ws',
+        storePath: 'l.json',
+        signature: 's',
+        note: '',
+      }).success,
+    ).toBe(false);
   });
 });
 
@@ -192,7 +253,9 @@ describe('the C4 importers resolve end-to-end (real pathLedgerStore over a mkdte
     const secondPath = join(scratchDir, 'two.json');
     await op({ root: scratchDir, storePath: firstPath, signature: 'sig-a' });
     await op({ root: scratchDir, storePath: firstPath, signature: 'sig-a' });
-    await expect(op({ root: scratchDir, storePath: secondPath, signature: 'sig-a' })).resolves.toEqual({
+    await expect(
+      op({ root: scratchDir, storePath: secondPath, signature: 'sig-a' }),
+    ).resolves.toEqual({
       status: 'ok',
       value: { signature: 'sig-a', count: 1, escalated: false },
     });
@@ -253,12 +316,12 @@ describe('ledger.query is fs-READ-ONLY (the read-only pin)', () => {
     // including NESTED missing segments: clean absence under an in-root
     // ancestor stays the empty ledger (the contrast case for the
     // dangling-symlink queries, which must fault).
-    await expect(query({ root: scratchDir, storePath: join(scratchDir, 'missing', 'ledger.json') })).resolves.toEqual(
-      {
-        status: 'ok',
-        value: { entries: [], knownNoise: [], needsHuman: [] },
-      },
-    );
+    await expect(
+      query({ root: scratchDir, storePath: join(scratchDir, 'missing', 'ledger.json') }),
+    ).resolves.toEqual({
+      status: 'ok',
+      value: { entries: [], knownNoise: [], needsHuman: [] },
+    });
     await expect(
       query({ root: scratchDir, storePath: join(scratchDir, 'missing', 'deeper', 'ledger.json') }),
     ).resolves.toEqual({
@@ -345,9 +408,9 @@ describe('pathLedgerStore containment (the trust surface is checked at the seam)
       status: 'ok',
       value: { signature: 'sig-a', count: 2, escalated: false },
     });
-    expect(parseLedger(await readFile(join(realDir, 'ledgers', 'ledger.json'), 'utf8')).entries).toEqual([
-      { signature: 'sig-a', count: 2 },
-    ]);
+    expect(
+      parseLedger(await readFile(join(realDir, 'ledgers', 'ledger.json'), 'utf8')).entries,
+    ).toEqual([{ signature: 'sig-a', count: 2 }]);
   });
 
   test('an intermediate symlink UNDER the root pointing outside is refused before any write (stage A: link exists at store creation)', async () => {
@@ -645,30 +708,32 @@ describe('pathLedgerStore.save is an atomic publish (temp + rename, never a bare
   test.skipIf(process.getuid?.() === 0)(
     'an unreadable target metadata PROPAGATES from the mode probe — never a silent 0600 replacement (non-ENOENT lstat faults)',
     async () => {
-    scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
-    const root = join(scratchDir, 'ws');
-    const stateDir = join(root, 'state');
-    await mkdir(stateDir, { recursive: true });
-    const storePath = join(stateDir, 'ledger.json');
-    const record = await entryNamed('ledger.record').importer();
-    await record({ root, storePath, signature: 'sig-a' });
-    await chmod(storePath, 0o640);
-    const before = await readFile(storePath, 'utf8');
-    // Deny search on the containing dir: lstat of the target now fails
-    // EACCES. The publish must fail with THAT fault (the message names the
-    // lstat), not swallow it and swap the 0640 ledger for a 0600
-    // replacement (PR #93 review, CodeRabbit Minor).
-    await chmod(stateDir, 0o000);
-    const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
-    const store = pathLedgerStore(root, storePath);
-    try {
-      expect(() => store.save({ version: 1, entries: [{ signature: 'sig-b', count: 1 }] })).toThrow(/lstat/);
-    } finally {
-      await chmod(stateDir, 0o755);
-    }
-    // The refused publish changed nothing: same bytes, same mode.
-    expect(await readFile(storePath, 'utf8')).toBe(before);
-    expect((await stat(storePath)).mode & 0o777).toBe(0o640);
-    });
+      scratchDir = await mkdtemp(join(tmpdir(), 'ledger-'));
+      const root = join(scratchDir, 'ws');
+      const stateDir = join(root, 'state');
+      await mkdir(stateDir, { recursive: true });
+      const storePath = join(stateDir, 'ledger.json');
+      const record = await entryNamed('ledger.record').importer();
+      await record({ root, storePath, signature: 'sig-a' });
+      await chmod(storePath, 0o640);
+      const before = await readFile(storePath, 'utf8');
+      // Deny search on the containing dir: lstat of the target now fails
+      // EACCES. The publish must fail with THAT fault (the message names the
+      // lstat), not swallow it and swap the 0640 ledger for a 0600
+      // replacement (PR #93 review, CodeRabbit Minor).
+      await chmod(stateDir, 0o000);
+      const { pathLedgerStore } = await import('../../../src/ops/ledger/store.js');
+      const store = pathLedgerStore(root, storePath);
+      try {
+        expect(() =>
+          store.save({ version: 1, entries: [{ signature: 'sig-b', count: 1 }] }),
+        ).toThrow(/lstat/);
+      } finally {
+        await chmod(stateDir, 0o755);
+      }
+      // The refused publish changed nothing: same bytes, same mode.
+      expect(await readFile(storePath, 'utf8')).toBe(before);
+      expect((await stat(storePath)).mode & 0o777).toBe(0o640);
+    },
+  );
 });
-

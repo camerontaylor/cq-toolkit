@@ -3,6 +3,7 @@ Land: phases 1–2 (WS-C..G).
 
 THE FAMILY REGISTRY CONVENTION (load-bearing for phase 3 — every lane
 follows this; the central registry and the CLI discover families through it):
+
 - Every op family exports `src/ops/<family>/registry.ts` containing
   `export const registry: OpRegistryEntry[]` — one entry per op:
   `{ name, inputSchema, importer }` where `name` is globally unique across

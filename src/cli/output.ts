@@ -80,7 +80,9 @@ export function assertJsonLossless(value: unknown): void {
         for (const key of Reflect.ownKeys(value)) {
           if (key === 'length') continue;
           if (typeof key === 'symbol') {
-            throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
+            throw new Error(
+              `symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`,
+            );
           }
           const index = Number(key);
           if (Number.isInteger(index) && index >= 0 && String(index) === key) continue;
@@ -187,7 +189,10 @@ export function narrateOpResult(
   if (mode === 'json') return; // machine mode: stderr stays empty
   if (result.status === 'ok') return; // failures-only narration
   const detail = resultDetail(result);
-  narrate(io, detail === '' ? `${name}: ${result.status}` : `${name}: ${result.status} — ${detail}`);
+  narrate(
+    io,
+    detail === '' ? `${name}: ${result.status}` : `${name}: ${result.status} — ${detail}`,
+  );
 }
 
 /**

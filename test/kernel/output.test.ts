@@ -83,9 +83,7 @@ describe('renderHuman (default failures-only, deterministic)', () => {
     expect(text).toContain('j3 (op-j3): budget-exhausted — budget bound hit');
     expect(text).toContain('j4 (op-j4): needs-human — credential missing');
     expect(text).toContain('j5 (op-j5): indeterminate — worker lost');
-    expect(text).toContain(
-      'done 1, failed 2, blocked 1, queued 0, running 0, budget-exhausted 1',
-    );
+    expect(text).toContain('done 1, failed 2, blocked 1, queued 0, running 0, budget-exhausted 1');
   });
 
   test('default output is one line per non-ok row plus exactly one summary line', () => {

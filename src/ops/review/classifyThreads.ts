@@ -246,7 +246,11 @@ const lastReplyByMs = (
 // Item constructors
 // ---------------------------------------------------------------------------
 
-const threadItem = (thread: ReviewThread, verdict: ThreadVerdict, reason: string): ClassifiedItem => ({
+const threadItem = (
+  thread: ReviewThread,
+  verdict: ThreadVerdict,
+  reason: string,
+): ClassifiedItem => ({
   kind: 'thread',
   id: thread.id,
   verdict,
@@ -254,7 +258,11 @@ const threadItem = (thread: ReviewThread, verdict: ThreadVerdict, reason: string
   reason,
 });
 
-const reviewItem = (review: ReviewSummary, verdict: ThreadVerdict, reason: string): ClassifiedItem => ({
+const reviewItem = (
+  review: ReviewSummary,
+  verdict: ThreadVerdict,
+  reason: string,
+): ClassifiedItem => ({
   kind: 'review',
   id: review.id,
   verdict,
@@ -262,7 +270,11 @@ const reviewItem = (review: ReviewSummary, verdict: ThreadVerdict, reason: strin
   reason,
 });
 
-const commentItem = (comment: RestComment, verdict: ThreadVerdict, reason: string): ClassifiedItem => ({
+const commentItem = (
+  comment: RestComment,
+  verdict: ThreadVerdict,
+  reason: string,
+): ClassifiedItem => ({
   kind: 'comment',
   id: String(comment.id),
   verdict,

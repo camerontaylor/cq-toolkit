@@ -99,15 +99,47 @@ function extractPromotionScript(text: string): string {
 // The verdict matrix: @tsv rows ([name, status, conclusion]) in, exact
 // verdict string out (the string the workflow's case statement receives).
 const VERDICT_CASES: ReadonlyArray<{ name: string; rows: string; expected: string }> = [
-  { name: 'two suites, both green -> pass', rows: 'static\tcompleted\tsuccess\nstatic\tcompleted\tsuccess', expected: 'pass' },
+  {
+    name: 'two suites, both green -> pass',
+    rows: 'static\tcompleted\tsuccess\nstatic\tcompleted\tsuccess',
+    expected: 'pass',
+  },
   { name: 'no rows -> missing', rows: '', expected: 'missing' },
-  { name: 'incomplete row -> waiting in_progress', rows: 'static\tin_progress\t', expected: 'waiting in_progress' },
-  { name: 'terminal failure -> failing failure', rows: 'static\tcompleted\tfailure', expected: 'failing failure' },
-  { name: 'skipped is neither pass nor fail -> skipped skipped (I4)', rows: 'static\tcompleted\tskipped', expected: 'skipped skipped' },
-  { name: 'terminal failure outranks skipped', rows: 'static\tcompleted\tfailure\nstatic\tcompleted\tskipped', expected: 'failing failure' },
-  { name: 'terminal skipped outranks waiting', rows: 'static\tin_progress\t\nstatic\tcompleted\tskipped', expected: 'skipped skipped' },
-  { name: 'pass requires EVERY row success', rows: 'static\tcompleted\tsuccess\nstatic\tin_progress\t', expected: 'waiting in_progress' },
-  { name: 'success beside skipped -> skipped skipped', rows: 'static\tcompleted\tsuccess\nstatic\tcompleted\tskipped', expected: 'skipped skipped' },
+  {
+    name: 'incomplete row -> waiting in_progress',
+    rows: 'static\tin_progress\t',
+    expected: 'waiting in_progress',
+  },
+  {
+    name: 'terminal failure -> failing failure',
+    rows: 'static\tcompleted\tfailure',
+    expected: 'failing failure',
+  },
+  {
+    name: 'skipped is neither pass nor fail -> skipped skipped (I4)',
+    rows: 'static\tcompleted\tskipped',
+    expected: 'skipped skipped',
+  },
+  {
+    name: 'terminal failure outranks skipped',
+    rows: 'static\tcompleted\tfailure\nstatic\tcompleted\tskipped',
+    expected: 'failing failure',
+  },
+  {
+    name: 'terminal skipped outranks waiting',
+    rows: 'static\tin_progress\t\nstatic\tcompleted\tskipped',
+    expected: 'skipped skipped',
+  },
+  {
+    name: 'pass requires EVERY row success',
+    rows: 'static\tcompleted\tsuccess\nstatic\tin_progress\t',
+    expected: 'waiting in_progress',
+  },
+  {
+    name: 'success beside skipped -> skipped skipped',
+    rows: 'static\tcompleted\tsuccess\nstatic\tcompleted\tskipped',
+    expected: 'skipped skipped',
+  },
 ];
 
 describe('merge-queue-gate: fail-closed mechanics (generated file and template in lockstep)', () => {
@@ -150,17 +182,21 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
   // 18 real awk spawns (2 programs x 9 cases); a macOS awk cold start costs
   // ~0.5-1s each, so this needs a generous timeout like the ratchet sandbox
   // tests that spawn tsc.
-  it('runs the exact verdict matrix through both files\u2019 awk programs', { timeout: 120_000 }, () => {
-    for (const { label, progFile } of gates) {
-      for (const testCase of VERDICT_CASES) {
-        const verdict = execFileSync('awk', ['-F', '\t', '-v', 'c=static', '-f', progFile], {
-          input: testCase.rows,
-          encoding: 'utf8',
-        }).trim();
-        expect(verdict, `${label}: ${testCase.name}`).toBe(testCase.expected);
+  it(
+    'runs the exact verdict matrix through both files\u2019 awk programs',
+    { timeout: 120_000 },
+    () => {
+      for (const { label, progFile } of gates) {
+        for (const testCase of VERDICT_CASES) {
+          const verdict = execFileSync('awk', ['-F', '\t', '-v', 'c=static', '-f', progFile], {
+            input: testCase.rows,
+            encoding: 'utf8',
+          }).trim();
+          expect(verdict, `${label}: ${testCase.name}`).toBe(testCase.expected);
+        }
       }
-    }
-  });
+    },
+  );
 
   describe('fail-closed empty-checks guard', () => {
     for (const { label, text } of gates) {
@@ -185,13 +221,22 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
   describe('promotion guard, skipped refusal, and the immutable checkout pin', () => {
     for (const { label, text } of gates) {
       it(`carries the tip guard, the skipped case branch, and a 40-hex checkout pin (${label})`, () => {
-        expect(text, `${label}: the merge-queue-tip guard`).toContain('is not the current merge-queue tip');
+        expect(text, `${label}: the merge-queue-tip guard`).toContain(
+          'is not the current merge-queue tip',
+        );
         expect(text, `${label}: the skipped case branch`).toContain('concluded skipped');
-        const checkoutLines = text.split(/\r?\n/).filter((line) => line.includes('uses: actions/checkout@'));
-        expect(checkoutLines.length, `${label}: at least one checkout step`).toBeGreaterThanOrEqual(1);
+        const checkoutLines = text
+          .split(/\r?\n/)
+          .filter((line) => line.includes('uses: actions/checkout@'));
+        expect(checkoutLines.length, `${label}: at least one checkout step`).toBeGreaterThanOrEqual(
+          1,
+        );
         for (const line of checkoutLines) {
           const ref = /uses: actions\/checkout@([^@\s]+)/.exec(line)?.[1] ?? '';
-          expect(ref, `${label}: checkout pin must be exactly 40 lowercase hex chars: ${line.trim()}`).toMatch(/^[0-9a-f]{40}$/);
+          expect(
+            ref,
+            `${label}: checkout pin must be exactly 40 lowercase hex chars: ${line.trim()}`,
+          ).toMatch(/^[0-9a-f]{40}$/);
         }
       });
     }

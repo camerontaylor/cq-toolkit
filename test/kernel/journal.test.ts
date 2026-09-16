@@ -28,12 +28,7 @@ import {
   deriveJobStatuses,
   openRunLog,
 } from '../../src/kernel/journal.js';
-import {
-  canonicalJson,
-  hashInputs,
-  makeManifest,
-  topoOrder,
-} from '../../src/kernel/manifest.js';
+import { canonicalJson, hashInputs, makeManifest, topoOrder } from '../../src/kernel/manifest.js';
 import type { RunManifest } from '../../src/kernel/manifest.js';
 import { JournalEventSchema } from '../../src/kernel/schema.js';
 import type {
@@ -234,15 +229,16 @@ describe('topoOrder', () => {
 
   test('throws on a cycle (mutual and self-dependency)', () => {
     expect(() =>
-      topoOrder([{ id: 'a', dependsOn: ['b'] }, { id: 'b', dependsOn: ['a'] }]),
+      topoOrder([
+        { id: 'a', dependsOn: ['b'] },
+        { id: 'b', dependsOn: ['a'] },
+      ]),
     ).toThrow(/cycle/);
     expect(() => topoOrder([{ id: 's', dependsOn: ['s'] }])).toThrow(/cycle/);
   });
 
   test('throws on an unknown dependency', () => {
-    expect(() => topoOrder([{ id: 'a', dependsOn: ['ghost'] }])).toThrow(
-      /unknown job 'ghost'/,
-    );
+    expect(() => topoOrder([{ id: 'a', dependsOn: ['ghost'] }])).toThrow(/unknown job 'ghost'/);
   });
 
   test('throws on duplicate job ids', () => {
@@ -272,7 +268,10 @@ describe('openRunLog', () => {
     const events: JournalEvent[] = [
       runStarted('run-rt'),
       jobStarted('run-rt', 'a'),
-      { ...jobFinished('run-rt', 'a', { status: 'ok', value: { answer: 42 } }), usage: { input: 11, output: 7, cacheRead: 2, cacheWrite: 0 } },
+      {
+        ...jobFinished('run-rt', 'a', { status: 'ok', value: { answer: 42 } }),
+        usage: { input: 11, output: 7, cacheRead: 2, cacheWrite: 0 },
+      },
       runFinished('run-rt'),
     ];
     for (const event of events) {
@@ -444,9 +443,7 @@ describe('openRunLog', () => {
     ] as JournalEvent[]) {
       await log.append('run-retry', event);
     }
-    await expect(log.statusOf('run-retry')).resolves.toEqual([
-      { jobId: 'a', state: 'running' },
-    ]);
+    await expect(log.statusOf('run-retry')).resolves.toEqual([{ jobId: 'a', state: 'running' }]);
   });
 
   test('statusOf of an unknown run yields [] (deriveJobStatuses of no facts)', async () => {
@@ -489,9 +486,7 @@ describe('openRunLog', () => {
       log.append('run-v', { ...runStarted('run-v'), extra: true } as unknown as JournalEvent),
     ).rejects.toThrow();
     // Event's own runId does not match the target run.
-    await expect(log.append('run-v', runStarted('run-other'))).rejects.toThrow(
-      /does not match/,
-    );
+    await expect(log.append('run-v', runStarted('run-other'))).rejects.toThrow(/does not match/);
     // None of the failed appends left evidence behind.
     await expect(log.read('run-v')).resolves.toEqual([]);
   });

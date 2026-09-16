@@ -126,7 +126,9 @@ async function runPlanParent() {
   try {
     await access(join(REPO_ROOT, 'dist', 'cli.js'));
   } catch {
-    fail('dist/cli.js is missing — run `npm run build` first — from-source IS the point (the smoke spawns the BUILT CLI)');
+    fail(
+      'dist/cli.js is missing — run `npm run build` first — from-source IS the point (the smoke spawns the BUILT CLI)',
+    );
   }
   const { openRunLog, RunReportSchema } = await importDist();
 
@@ -184,7 +186,9 @@ async function runPlanParent() {
 
     // Leg 0 — the CLI's own verdict.
     if (code !== 0) {
-      fail(`the dist/cli.js run-plan child exited ${code}\n--- child stdout ---\n${stdout}--- child stderr ---\n${stderr}`);
+      fail(
+        `the dist/cli.js run-plan child exited ${code}\n--- child stdout ---\n${stdout}--- child stderr ---\n${stderr}`,
+      );
     }
 
     // Leg 1 — the run report shape, validated against the SHIPPED schema.
@@ -197,7 +201,9 @@ async function runPlanParent() {
       );
     }
     if (report.runId.startsWith('smoke-from-source--') === false) {
-      fail(`report.runId '${report.runId}' does not carry the plan id prefix 'smoke-from-source--'`);
+      fail(
+        `report.runId '${report.runId}' does not carry the plan id prefix 'smoke-from-source--'`,
+      );
     }
     if (report.stoppedEarly !== false || report.earlyStopReason !== undefined) {
       fail(`a clean two-job run claims stoppedEarly=${report.stoppedEarly} — dishonest stop (I9)`);
@@ -207,15 +213,25 @@ async function runPlanParent() {
     // in the runner's emptyCounts() would fail the smoke with a misleading
     // diff. Key presence needs no guard here — RunCountsSchema is strict
     // over all six states and the report parsed above.
-    const expectedCounts = { queued: 0, running: 0, blocked: 0, done: 2, failed: 0, 'budget-exhausted': 0 };
+    const expectedCounts = {
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 2,
+      failed: 0,
+      'budget-exhausted': 0,
+    };
     for (const state of ['queued', 'running', 'blocked', 'done', 'failed', 'budget-exhausted']) {
       if (report.counts[state] !== expectedCounts[state]) {
-        fail(`run counts: state '${state}' expected ${expectedCounts[state]}, got ${report.counts[state]} (full counts ${JSON.stringify(report.counts)})`);
+        fail(
+          `run counts: state '${state}' expected ${expectedCounts[state]}, got ${report.counts[state]} (full counts ${JSON.stringify(report.counts)})`,
+        );
       }
     }
     if (report.jobs.length !== 2) fail(`expected 2 job rows, got ${report.jobs.length}`);
     for (const row of report.jobs) {
-      if (row.op !== 'agent-run') fail(`job '${row.jobId}' ran op '${row.op}', expected 'agent-run'`);
+      if (row.op !== 'agent-run')
+        fail(`job '${row.jobId}' ran op '${row.op}', expected 'agent-run'`);
       if (row.result.status !== 'ok') {
         fail(`job '${row.jobId}' did not finish ok: ${JSON.stringify(row.result)}`);
       }
@@ -224,7 +240,9 @@ async function runPlanParent() {
       // row must pin 'smoke-1'. A driver dropping WorkerResult.model would
       // otherwise slide through the op's 'unreported' fallback green.
       if (row.result.value !== 'smoke-1') {
-        fail(`job '${row.jobId}' observable ${JSON.stringify(row.result.value ?? null)} does not pin the served model 'smoke-1' — model reporting regressed to the 'unreported' fallback`);
+        fail(
+          `job '${row.jobId}' observable ${JSON.stringify(row.result.value ?? null)} does not pin the served model 'smoke-1' — model reporting regressed to the 'unreported' fallback`,
+        );
       }
     }
 
@@ -235,14 +253,20 @@ async function runPlanParent() {
     // undefined too (the price-map layer owns cost; runPlan never
     // fabricates it — see the runner's rollup note).
     if (report.usage !== undefined) {
-      fail(`fresh-run report.usage is ${JSON.stringify(report.usage)} — RunReport usage must be replay-only on a fresh run (frozen JobOutcome contract)`);
+      fail(
+        `fresh-run report.usage is ${JSON.stringify(report.usage)} — RunReport usage must be replay-only on a fresh run (frozen JobOutcome contract)`,
+      );
     }
     for (const row of report.jobs) {
       if (row.usage !== undefined) {
-        fail(`fresh-run row '${row.jobId}'.usage is ${JSON.stringify(row.usage)} — per-job usage must be replay-only on a fresh run (frozen JobOutcome contract)`);
+        fail(
+          `fresh-run row '${row.jobId}'.usage is ${JSON.stringify(row.usage)} — per-job usage must be replay-only on a fresh run (frozen JobOutcome contract)`,
+        );
       }
       if (row.costUSD !== undefined) {
-        fail(`fresh-run row '${row.jobId}'.costUSD is ${row.costUSD} — costUSD is derived-only and runPlan never fabricates it`);
+        fail(
+          `fresh-run row '${row.jobId}'.costUSD is ${row.costUSD} — costUSD is derived-only and runPlan never fabricates it`,
+        );
       }
     }
 
@@ -254,15 +278,24 @@ async function runPlanParent() {
     const types = events.map((e) => e.type);
     const count = (type) => types.filter((t) => t === type).length;
     if (types[0] !== 'run-started') fail(`journal must open with run-started, got '${types[0]}'`);
-    if (types.at(-1) !== 'run-finished') fail(`journal must close with run-finished, got '${types.at(-1)}'`);
-    for (const [type, expected] of [['job-started', 2], ['job-finished', 2], ['run-started', 1], ['run-finished', 1]]) {
-      if (count(type) !== expected) fail(`journal carries ${count(type)} ${type} event(s), expected ${expected}`);
+    if (types.at(-1) !== 'run-finished')
+      fail(`journal must close with run-finished, got '${types.at(-1)}'`);
+    for (const [type, expected] of [
+      ['job-started', 2],
+      ['job-finished', 2],
+      ['run-started', 1],
+      ['run-finished', 1],
+    ]) {
+      if (count(type) !== expected)
+        fail(`journal carries ${count(type)} ${type} event(s), expected ${expected}`);
     }
     const started = events.filter((e) => e.type === 'job-started');
     for (const event of started) {
-      if (event.attempt !== 1) fail(`job-started for '${event.jobId}' carries attempt ${event.attempt}, expected 1`);
+      if (event.attempt !== 1)
+        fail(`job-started for '${event.jobId}' carries attempt ${event.attempt}, expected 1`);
     }
-    if (new Set(started.map((e) => e.jobId)).size !== 2) fail('the two job-started events do not cover two distinct jobs');
+    if (new Set(started.map((e) => e.jobId)).size !== 2)
+      fail('the two job-started events do not cover two distinct jobs');
 
     // Leg 3 — the I1 halves at the stream boundary: whatever the CLI said on
     // stderr must be `cq: `-prefixed narration (the stdout half was the
@@ -276,7 +309,9 @@ async function runPlanParent() {
     }
     const narrated = stderr.split('\n').filter((line) => line !== '');
     if (narrated.some((line) => line.startsWith('cq: done 2,')) === false) {
-      fail(`the child's stderr narration does not carry the counts summary line 'cq: done 2, …' (renderHuman's summary):\n${stderr}`);
+      fail(
+        `the child's stderr narration does not carry the counts summary line 'cq: done 2, …' (renderHuman's summary):\n${stderr}`,
+      );
     }
     for (const line of narrated) {
       // renderHuman's per-row form is `<jobId> (<op>): <status>`; with all

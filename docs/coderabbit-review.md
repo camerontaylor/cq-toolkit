@@ -50,12 +50,12 @@ any selected component fails the scan.
 
 ## 2. Scope: what a review sees
 
-| Command | Files reviewed |
-| --- | --- |
-| `coderabbit review` | Tracked changes: committed + staged (staged new files included) + unstaged tracked edits |
-| `coderabbit review --committed` | Committed changes only |
-| `coderabbit review --uncommitted` | Staged + unstaged tracked edits |
-| `coderabbit review --include-untracked` | Default scope plus non-ignored untracked files |
+| Command                                 | Files reviewed                                                                           |
+| --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `coderabbit review`                     | Tracked changes: committed + staged (staged new files included) + unstaged tracked edits |
+| `coderabbit review --committed`         | Committed changes only                                                                   |
+| `coderabbit review --uncommitted`       | Staged + unstaged tracked edits                                                          |
+| `coderabbit review --include-untracked` | Default scope plus non-ignored untracked files                                           |
 
 `--committed` and `--uncommitted` conflict and are rejected before a review
 starts. `--include-untracked` combines with `--uncommitted` or works alone

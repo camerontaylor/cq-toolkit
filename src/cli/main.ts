@@ -123,7 +123,10 @@ function issueMessage(error: unknown): string {
  * caller turns a non-empty array into a usage error. Duplicate flags throw
  * (the caller narrates + exits 2).
  */
-export function parseFlags(tokens: string[]): { flags: Record<string, unknown>; unknown: string[] } {
+export function parseFlags(tokens: string[]): {
+  flags: Record<string, unknown>;
+  unknown: string[];
+} {
   // Prototype-free record: a plain `{}` makes `--__proto__=...` invoke the
   // inherited `__proto__` ACCESSOR instead of creating an own property (the
   // own-property duplicate check evaded, inherited `help`/`json` truthiness
@@ -154,10 +157,20 @@ export function parseFlags(tokens: string[]): { flags: Record<string, unknown>; 
   for (const token of tokens) {
     if (token.startsWith('--')) {
       const eq = token.indexOf('=');
-      put('--', eq === -1 ? token.slice(2) : token.slice(2, eq), eq === -1 ? undefined : token.slice(eq + 1), token);
+      put(
+        '--',
+        eq === -1 ? token.slice(2) : token.slice(2, eq),
+        eq === -1 ? undefined : token.slice(eq + 1),
+        token,
+      );
     } else if (token.startsWith('-')) {
       const eq = token.indexOf('=');
-      put('-', eq === -1 ? token.slice(1) : token.slice(1, eq), eq === -1 ? undefined : token.slice(eq + 1), token);
+      put(
+        '-',
+        eq === -1 ? token.slice(1) : token.slice(1, eq),
+        eq === -1 ? undefined : token.slice(eq + 1),
+        token,
+      );
     } else {
       unknown.push(token); // positional → usage error at the call site
     }
@@ -250,7 +263,8 @@ function describeType(schema: unknown): string {
   }
 }
 
-const JSON_VALUES_NOTE = 'flag values are JSON-parsed when they parse as JSON, else kept as raw strings.';
+const JSON_VALUES_NOTE =
+  'flag values are JSON-parsed when they parse as JSON, else kept as raw strings.';
 
 function renderGlobalHelp(names: string[]): string {
   return [

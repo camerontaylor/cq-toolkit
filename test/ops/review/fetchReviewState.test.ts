@@ -50,10 +50,8 @@ interface FakeGhFixture {
 }
 
 /** Build an injected GhFn that records graphql (threadsAfter|reviewsAfter) calls. */
-const fakeGh = (
-  fixture: FakeGhFixture,
-  calls?: string[],
-): GhFn =>
+const fakeGh =
+  (fixture: FakeGhFixture, calls?: string[]): GhFn =>
   async (args: string[]): Promise<GhResult> => {
     const restPath = args.find((a) => a.startsWith('repos/'));
     if (restPath !== undefined) {
@@ -100,7 +98,12 @@ const threadNode = (
     nodes: [
       {
         databaseId: overrides?.rootDatabaseId ?? 100,
-        author: overrides?.authorLogin === undefined ? { login: 'reviewer' } : overrides.authorLogin === null ? null : { login: overrides.authorLogin },
+        author:
+          overrides?.authorLogin === undefined
+            ? { login: 'reviewer' }
+            : overrides.authorLogin === null
+              ? null
+              : { login: overrides.authorLogin },
         body: `root ${id}`,
         createdAt: '2026-01-01T00:00:00Z',
       },
@@ -109,7 +112,11 @@ const threadNode = (
 });
 
 /** One GraphQL review node. */
-const reviewNode = (id: string, state = 'CHANGES_REQUESTED', authorLogin: string | null = 'reviewer') => ({
+const reviewNode = (
+  id: string,
+  state = 'CHANGES_REQUESTED',
+  authorLogin: string | null = 'reviewer',
+) => ({
   id,
   author: authorLogin === null ? null : { login: authorLogin },
   state,
@@ -119,8 +126,16 @@ const reviewNode = (id: string, state = 'CHANGES_REQUESTED', authorLogin: string
 
 /** A full graphql payload from two page descriptors. */
 const graphqlPayload = (
-  threads: { hasNextPage: boolean; endCursor: string | null; nodes: ReturnType<typeof threadNode>[] },
-  reviews: { hasNextPage: boolean; endCursor: string | null; nodes: ReturnType<typeof reviewNode>[] },
+  threads: {
+    hasNextPage: boolean;
+    endCursor: string | null;
+    nodes: ReturnType<typeof threadNode>[];
+  },
+  reviews: {
+    hasNextPage: boolean;
+    endCursor: string | null;
+    nodes: ReturnType<typeof reviewNode>[];
+  },
   prAuthorLogin: string | null = 'pr-author',
 ) => ({
   data: {
@@ -129,18 +144,32 @@ const graphqlPayload = (
         author: prAuthorLogin === null ? null : { login: prAuthorLogin },
         headRefName: 'feature/lantern',
         headRefOid: 'abc123',
-        reviewThreads: { pageInfo: { hasNextPage: threads.hasNextPage, endCursor: threads.endCursor }, nodes: threads.nodes },
-        reviews: { pageInfo: { hasNextPage: reviews.hasNextPage, endCursor: reviews.endCursor }, nodes: reviews.nodes },
+        reviewThreads: {
+          pageInfo: { hasNextPage: threads.hasNextPage, endCursor: threads.endCursor },
+          nodes: threads.nodes,
+        },
+        reviews: {
+          pageInfo: { hasNextPage: reviews.hasNextPage, endCursor: reviews.endCursor },
+          nodes: reviews.nodes,
+        },
       },
     },
   },
 });
 
 /** A REST review-comment wire object (snake_case as gh returns it). */
-const restPullComment = (id: number, overrides?: { inReplyTo?: number; nodeId?: string | null; login?: string | null }) => ({
+const restPullComment = (
+  id: number,
+  overrides?: { inReplyTo?: number; nodeId?: string | null; login?: string | null },
+) => ({
   id,
   node_id: overrides?.nodeId ?? `N${id}`,
-  user: overrides?.login === undefined ? { login: 'reviewer' } : overrides.login === null ? null : { login: overrides.login },
+  user:
+    overrides?.login === undefined
+      ? { login: 'reviewer' }
+      : overrides.login === null
+        ? null
+        : { login: overrides.login },
   body: `rest ${id}`,
   created_at: '2026-01-01T01:00:00Z',
   ...(overrides?.inReplyTo === undefined ? {} : { in_reply_to_id: overrides.inReplyTo }),
@@ -155,18 +184,34 @@ describe('fetchReviewState', () => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
-          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          {
+            hasNextPage: false,
+            endCursor: null,
+            nodes: [threadNode('T1', { rootDatabaseId: 100 })],
+          },
           { hasNextPage: false, endCursor: null, nodes: [reviewNode('R1')] },
         ),
       pullsComments: [
         [
-          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'root', created_at: '2026-01-01T00:00:00Z' },
+          {
+            id: 100,
+            node_id: 'PRRC_100',
+            user: { login: 'reviewer' },
+            body: 'root',
+            created_at: '2026-01-01T00:00:00Z',
+          },
           restPullComment(101, { inReplyTo: 100 }),
         ],
       ],
       issuesComments: [
         [
-          { id: 500, node_id: 'IC_500', user: { login: 'bystander' }, body: 'issue comment', created_at: '2026-01-01T02:00:00Z' },
+          {
+            id: 500,
+            node_id: 'IC_500',
+            user: { login: 'bystander' },
+            body: 'issue comment',
+            created_at: '2026-01-01T02:00:00Z',
+          },
         ],
       ],
     });
@@ -195,16 +240,31 @@ describe('fetchReviewState', () => {
           {
             hasNextPage: false,
             endCursor: null,
-            nodes: [threadNode('T1', { rootDatabaseId: 100 }), threadNode('T2', { rootDatabaseId: 200 })],
+            nodes: [
+              threadNode('T1', { rootDatabaseId: 100 }),
+              threadNode('T2', { rootDatabaseId: 200 }),
+            ],
           },
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
       pullsComments: [
         [
-          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'root', created_at: '2026-01-01T00:00:00Z' },
+          {
+            id: 100,
+            node_id: 'PRRC_100',
+            user: { login: 'reviewer' },
+            body: 'root',
+            created_at: '2026-01-01T00:00:00Z',
+          },
           restPullComment(101, { inReplyTo: 100 }),
           restPullComment(102, { inReplyTo: 101, login: 'author' }),
-          { id: 200, node_id: 'PRRC_200', user: { login: 'other' }, body: 'root 2', created_at: '2026-01-01T00:00:00Z' },
+          {
+            id: 200,
+            node_id: 'PRRC_200',
+            user: { login: 'other' },
+            body: 'root 2',
+            created_at: '2026-01-01T00:00:00Z',
+          },
         ],
       ],
     });
@@ -313,7 +373,13 @@ describe('fetchReviewState', () => {
     ];
     const issuePages = [
       [
-        { id: 5000, node_id: 'IC_5000', user: { login: 'bystander' }, body: 'issue', created_at: '2026-01-01T02:00:00Z' },
+        {
+          id: 5000,
+          node_id: 'IC_5000',
+          user: { login: 'bystander' },
+          body: 'issue',
+          created_at: '2026-01-01T02:00:00Z',
+        },
       ],
     ];
     const run = fakeGh({
@@ -336,13 +402,29 @@ describe('fetchReviewState', () => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
-          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          {
+            hasNextPage: false,
+            endCursor: null,
+            nodes: [threadNode('T1', { rootDatabaseId: 100 })],
+          },
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
       pullsComments: [
         [
-          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'known root', created_at: '2026-01-01T00:00:00Z' },
-          { id: 400, node_id: 'PRRC_400', user: { login: 'late-reviewer' }, body: 'fresh thread root', created_at: '2026-01-01T05:00:00Z' },
+          {
+            id: 100,
+            node_id: 'PRRC_100',
+            user: { login: 'reviewer' },
+            body: 'known root',
+            created_at: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 400,
+            node_id: 'PRRC_400',
+            user: { login: 'late-reviewer' },
+            body: 'fresh thread root',
+            created_at: '2026-01-01T05:00:00Z',
+          },
         ],
       ],
     });
@@ -354,27 +436,27 @@ describe('fetchReviewState', () => {
 
   test('rejects an owner/repo that does not match ^[A-Za-z0-9_.-]+$', async () => {
     const run: GhFn = async () => ({ code: 0, stdout: '[]', stderr: '' });
-    await expect(fetchReviewState({ owner: 'octo/x', repo: 'widget', pr: 7 }, {}, run)).rejects.toThrow(
-      /owner\/repo must match/,
-    );
-    await expect(fetchReviewState({ owner: 'octo', repo: '../escape', pr: 7 }, {}, run)).rejects.toThrow(
-      /owner\/repo must match/,
-    );
+    await expect(
+      fetchReviewState({ owner: 'octo/x', repo: 'widget', pr: 7 }, {}, run),
+    ).rejects.toThrow(/owner\/repo must match/);
+    await expect(
+      fetchReviewState({ owner: 'octo', repo: '../escape', pr: 7 }, {}, run),
+    ).rejects.toThrow(/owner\/repo must match/);
   });
 
   test('rejects a pr that is not a positive safe integer (string-pr JS callers included)', async () => {
     const run: GhFn = async () => ({ code: 0, stdout: '[]', stderr: '' });
     // A JS caller (or JSON.parse'd data) can smuggle a string past the type.
     const stringPr = '7?per_page=1#' as unknown as number;
-    await expect(fetchReviewState({ owner: 'octo', repo: 'widget', pr: stringPr }, {}, run)).rejects.toThrow(
-      /pr must be a positive safe integer/,
-    );
-    await expect(fetchReviewState({ owner: 'octo', repo: 'widget', pr: 0 }, {}, run)).rejects.toThrow(
-      /pr must be a positive safe integer/,
-    );
-    await expect(fetchReviewState({ owner: 'octo', repo: 'widget', pr: -3 }, {}, run)).rejects.toThrow(
-      /pr must be a positive safe integer/,
-    );
+    await expect(
+      fetchReviewState({ owner: 'octo', repo: 'widget', pr: stringPr }, {}, run),
+    ).rejects.toThrow(/pr must be a positive safe integer/);
+    await expect(
+      fetchReviewState({ owner: 'octo', repo: 'widget', pr: 0 }, {}, run),
+    ).rejects.toThrow(/pr must be a positive safe integer/);
+    await expect(
+      fetchReviewState({ owner: 'octo', repo: 'widget', pr: -3 }, {}, run),
+    ).rejects.toThrow(/pr must be a positive safe integer/);
   });
 
   test('a fresh REST-only review (reviews lag) truncates with exactly reviews.lag and is not fabricated', async () => {
@@ -386,8 +468,22 @@ describe('fetchReviewState', () => {
         ),
       restReviews: [
         [
-          { id: 700, node_id: 'PRR_known', user: { login: 'reviewer' }, state: 'CHANGES_REQUESTED', body: 'known', submitted_at: '2026-01-01T00:00:00Z' },
-          { id: 701, node_id: 'PRR_fresh', user: { login: 'late-reviewer' }, state: 'APPROVED', body: 'fresh review', submitted_at: '2026-01-01T09:00:00Z' },
+          {
+            id: 700,
+            node_id: 'PRR_known',
+            user: { login: 'reviewer' },
+            state: 'CHANGES_REQUESTED',
+            body: 'known',
+            submitted_at: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 701,
+            node_id: 'PRR_fresh',
+            user: { login: 'late-reviewer' },
+            state: 'APPROVED',
+            body: 'fresh review',
+            submitted_at: '2026-01-01T09:00:00Z',
+          },
         ],
       ],
     });
@@ -401,18 +497,41 @@ describe('fetchReviewState', () => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
-          { hasNextPage: false, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          {
+            hasNextPage: false,
+            endCursor: null,
+            nodes: [threadNode('T1', { rootDatabaseId: 100 })],
+          },
           { hasNextPage: false, endCursor: null, nodes: [reviewNode('PRR_known')] },
         ),
       pullsComments: [
         [
-          { id: 100, node_id: 'PRRC_100', user: { login: 'reviewer' }, body: 'known root', created_at: '2026-01-01T00:00:00Z' },
-          { id: 400, node_id: 'PRRC_400', user: { login: 'late-reviewer' }, body: 'fresh thread root', created_at: '2026-01-01T05:00:00Z' },
+          {
+            id: 100,
+            node_id: 'PRRC_100',
+            user: { login: 'reviewer' },
+            body: 'known root',
+            created_at: '2026-01-01T00:00:00Z',
+          },
+          {
+            id: 400,
+            node_id: 'PRRC_400',
+            user: { login: 'late-reviewer' },
+            body: 'fresh thread root',
+            created_at: '2026-01-01T05:00:00Z',
+          },
         ],
       ],
       restReviews: [
         [
-          { id: 700, node_id: 'PRR_fresh', user: { login: 'late-reviewer' }, state: 'APPROVED', body: 'fresh review', submitted_at: '2026-01-01T09:00:00Z' },
+          {
+            id: 700,
+            node_id: 'PRR_fresh',
+            user: { login: 'late-reviewer' },
+            state: 'APPROVED',
+            body: 'fresh review',
+            submitted_at: '2026-01-01T09:00:00Z',
+          },
         ],
       ],
     });
@@ -469,7 +588,11 @@ describe('fetchReviewState', () => {
       graphql: ({ reviewsAfter }) =>
         reviewsAfter === ''
           ? graphqlPayload(
-              { hasNextPage: true, endCursor: 't2', nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+              {
+                hasNextPage: true,
+                endCursor: 't2',
+                nodes: [threadNode('T1', { rootDatabaseId: 100 })],
+              },
               { hasNextPage: true, endCursor: 'r2', nodes: [reviewNode('R1')] },
             )
           : reviewsAfter === 'r2'
@@ -497,13 +620,24 @@ describe('fetchReviewState', () => {
           {
             hasNextPage: false,
             endCursor: null,
-            nodes: [threadNode('T1', { authorLogin: null }), threadNode('T2', { isResolved: true })],
+            nodes: [
+              threadNode('T1', { authorLogin: null }),
+              threadNode('T2', { isResolved: true }),
+            ],
           },
-          { hasNextPage: false, endCursor: null, nodes: [reviewNode('R1', 'CHANGES_REQUESTED', null)] },
+          {
+            hasNextPage: false,
+            endCursor: null,
+            nodes: [reviewNode('R1', 'CHANGES_REQUESTED', null)],
+          },
           null,
         ),
-      pullsComments: [[{ id: 100, node_id: 'PRRC_100', user: null, body: 'anon root', created_at: null }]],
-      issuesComments: [[{ id: 500, user: undefined, body: 'anon', created_at: '2026-01-01T02:00:00Z' }]],
+      pullsComments: [
+        [{ id: 100, node_id: 'PRRC_100', user: null, body: 'anon root', created_at: null }],
+      ],
+      issuesComments: [
+        [{ id: 500, user: undefined, body: 'anon', created_at: '2026-01-01T02:00:00Z' }],
+      ],
     });
     const state = await fetchReviewState(INPUT, {}, run);
     expect(state.authorLogin).toBeNull();
@@ -531,7 +665,13 @@ describe('fetchReviewState', () => {
             created_at: '2026-01-01T03:00:00Z',
             in_reply_to_id: 41,
           },
-          { id: 43, node_id: null, user: { login: 'dave' }, body: 'bare', created_at: '2026-01-01T03:01:00Z' },
+          {
+            id: 43,
+            node_id: null,
+            user: { login: 'dave' },
+            body: 'bare',
+            created_at: '2026-01-01T03:01:00Z',
+          },
         ],
       ],
     });
@@ -565,7 +705,11 @@ describe('fetchReviewState', () => {
     const run = fakeGh({
       graphql: () =>
         graphqlPayload(
-          { hasNextPage: true, endCursor: null, nodes: [threadNode('T1', { rootDatabaseId: 100 })] },
+          {
+            hasNextPage: true,
+            endCursor: null,
+            nodes: [threadNode('T1', { rootDatabaseId: 100 })],
+          },
           { hasNextPage: false, endCursor: null, nodes: [] },
         ),
     });

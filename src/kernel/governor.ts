@@ -210,7 +210,9 @@ function validateLadderSpec(spec: LadderSpec): void {
     spec.wallClockMs !== undefined &&
     (!Number.isFinite(spec.wallClockMs) || spec.wallClockMs <= 0)
   ) {
-    throw new Error(`governor: ladder wallClockMs must be a finite number > 0, got ${spec.wallClockMs}`);
+    throw new Error(
+      `governor: ladder wallClockMs must be a finite number > 0, got ${spec.wallClockMs}`,
+    );
   }
   const graces: ReadonlyArray<[string, number | undefined]> = [
     ['abortGraceMs', spec.abortGraceMs],
@@ -302,11 +304,21 @@ export function runLadder<T>(
       settled = true;
       for (const handle of timers.splice(0)) clock.clearTimeout(handle);
       if (outcome.outcome === 'completed') {
-        resolve({ outcome: 'completed', value: outcome.value, markers: [...markers], elapsedMs: elapsed() });
+        resolve({
+          outcome: 'completed',
+          value: outcome.value,
+          markers: [...markers],
+          elapsedMs: elapsed(),
+        });
       } else if (outcome.outcome === 'killed') {
         resolve({ outcome: 'killed', markers: [...markers], elapsedMs: elapsed() });
       } else {
-        resolve({ outcome: 'threw', error: outcome.error, markers: [...markers], elapsedMs: elapsed() });
+        resolve({
+          outcome: 'threw',
+          error: outcome.error,
+          markers: [...markers],
+          elapsedMs: elapsed(),
+        });
       }
     };
     const fireRung = (rung: LadderRung, delayMs: number, deliver: () => unknown): void => {
@@ -469,8 +481,13 @@ function validateConfig(config: GovernorConfig): void {
   if (config.maxUsd !== undefined && (!Number.isFinite(config.maxUsd) || config.maxUsd < 0)) {
     throw new Error(`governor: config.maxUsd must be a finite number >= 0, got ${config.maxUsd}`);
   }
-  if (config.maxTokens !== undefined && (!Number.isFinite(config.maxTokens) || config.maxTokens <= 0)) {
-    throw new Error(`governor: config.maxTokens must be a finite number > 0, got ${config.maxTokens}`);
+  if (
+    config.maxTokens !== undefined &&
+    (!Number.isFinite(config.maxTokens) || config.maxTokens <= 0)
+  ) {
+    throw new Error(
+      `governor: config.maxTokens must be a finite number > 0, got ${config.maxTokens}`,
+    );
   }
   checkInt('perJobWallClockMs', config.perJobWallClockMs, 1);
   checkInt('abortGraceMs', config.abortGraceMs, 0);
@@ -498,8 +515,12 @@ export function governorConfig(
   return {
     ...(usdCaps.length > 0 ? { maxUsd: Math.min(...usdCaps) } : {}),
     ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
-    ...(limits.perJobWallClockMs !== undefined ? { perJobWallClockMs: limits.perJobWallClockMs } : {}),
-    ...(limits.maxAttemptsPerJob !== undefined ? { maxAttemptsPerJob: limits.maxAttemptsPerJob } : {}),
+    ...(limits.perJobWallClockMs !== undefined
+      ? { perJobWallClockMs: limits.perJobWallClockMs }
+      : {}),
+    ...(limits.maxAttemptsPerJob !== undefined
+      ? { maxAttemptsPerJob: limits.maxAttemptsPerJob }
+      : {}),
     ...(limits.runDispatchQuota !== undefined ? { runDispatchQuota: limits.runDispatchQuota } : {}),
     ...(limits.inFlightCeiling !== undefined ? { inFlightCeiling: limits.inFlightCeiling } : {}),
     ...(extra?.abortGraceMs !== undefined ? { abortGraceMs: extra.abortGraceMs } : {}),
@@ -612,7 +633,7 @@ function addUsage(a: Usage, b: Usage): Usage {
     output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
-    ...((a.reasoning !== undefined || b.reasoning !== undefined)
+    ...(a.reasoning !== undefined || b.reasoning !== undefined
       ? { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }
       : {}),
   };
@@ -828,7 +849,11 @@ export class BudgetGovernor {
     this.usageN = this.usageN === undefined ? { ...usage } : addUsage(this.usageN, usage);
     this.record({ kind: 'usage', jobKey, atMs: this.now() });
     const tokenCap = this.config.maxTokens;
-    if (tokenCap !== undefined && this.usageN !== undefined && totalTokensOf(this.usageN) > tokenCap) {
+    if (
+      tokenCap !== undefined &&
+      this.usageN !== undefined &&
+      totalTokensOf(this.usageN) > tokenCap
+    ) {
       this.trip(`token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
     }
   }
@@ -885,7 +910,9 @@ export class BudgetGovernor {
       this.config.maxUsd !== undefined &&
       counts?.costAlreadyCounted !== true
     ) {
-      this.trip('unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)');
+      this.trip(
+        'unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)',
+      );
     }
   }
 
@@ -932,7 +959,10 @@ export class BudgetGovernor {
    * re-attestation of an already-counted dispatch, and counting it again
    * would double the rollup.
    */
-  seedFromJournal(events: readonly JournalEvent[], opts?: { usdOf?: (usage: Usage) => number }): void {
+  seedFromJournal(
+    events: readonly JournalEvent[],
+    opts?: { usdOf?: (usage: Usage) => number },
+  ): void {
     const jobIds = new Set<string>();
     const opByJob = new Map<string, string>();
     for (const event of events) {
@@ -985,7 +1015,8 @@ export class BudgetGovernor {
       // resumed run — and seeding is construction time, the earliest loud
       // failure there is.
       assertValidUsage('seeded usage', event.usage);
-      this.usageN = this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
+      this.usageN =
+        this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
       if (opts?.usdOf !== undefined) {
         const usd = opts.usdOf(event.usage);
         // Seeding happens at construction: a derived cost that is not a
@@ -1024,7 +1055,11 @@ export class BudgetGovernor {
       this.trip(`seeded usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
     const tokenCap = this.config.maxTokens;
-    if (tokenCap !== undefined && this.usageN !== undefined && totalTokensOf(this.usageN) > tokenCap) {
+    if (
+      tokenCap !== undefined &&
+      this.usageN !== undefined &&
+      totalTokensOf(this.usageN) > tokenCap
+    ) {
       this.trip(`seeded token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
     }
     this.record({ kind: 'seeded', jobs: jobIds.size, attempts: totalAttempts, atMs: this.now() });
@@ -1178,7 +1213,11 @@ function workerResultOfValue(value: unknown): WorkerResult | undefined {
  * taxonomy value whose purpose is exactly this; throws pass through so the
  * RUNNER's failure semantics stay in charge.
  */
-function governOp(op: Op<never, never>, opName: string, governor: BudgetGovernor): Op<never, never> {
+function governOp(
+  op: Op<never, never>,
+  opName: string,
+  governor: BudgetGovernor,
+): Op<never, never> {
   return async (input: never): Promise<OpResult<never>> => {
     const jobKey = governor.jobKeyFor(opName, input);
     const admission = governor.admit(jobKey);
@@ -1220,30 +1259,35 @@ function governOp(op: Op<never, never>, opName: string, governor: BudgetGovernor
       // counting it twice.
       let reportedUsage = false;
       let reportedCost = false;
-      const outcome = await runLadder(() => op(input), governor.ladderSpec, { op: opName, jobKey, attempt }, {
-        clock: governor.clock,
-        onRung: (marker) => {
-          governor.record({
-            kind: 'ladder-rung',
-            op: marker.op,
-            jobKey: marker.jobKey,
-            rung: marker.rung,
-            delayMs: marker.delayMs,
-            sinceStartMs: marker.sinceStartMs,
-            delivered: marker.delivered,
-            ...(marker.error !== undefined ? { error: marker.error } : {}),
-            atMs: marker.atMs,
-          });
+      const outcome = await runLadder(
+        () => op(input),
+        governor.ladderSpec,
+        { op: opName, jobKey, attempt },
+        {
+          clock: governor.clock,
+          onRung: (marker) => {
+            governor.record({
+              kind: 'ladder-rung',
+              op: marker.op,
+              jobKey: marker.jobKey,
+              rung: marker.rung,
+              delayMs: marker.delayMs,
+              sinceStartMs: marker.sinceStartMs,
+              delivered: marker.delivered,
+              ...(marker.error !== undefined ? { error: marker.error } : {}),
+              atMs: marker.atMs,
+            });
+          },
+          onUsage: (usage) => {
+            reportedUsage = true;
+            governor.observeUsage(jobKey, usage);
+          },
+          onCost: (usd) => {
+            reportedCost = true;
+            governor.observeCost(jobKey, usd);
+          },
         },
-        onUsage: (usage) => {
-          reportedUsage = true;
-          governor.observeUsage(jobKey, usage);
-        },
-        onCost: (usd) => {
-          reportedCost = true;
-          governor.observeCost(jobKey, usd);
-        },
-      });
+      );
       if (outcome.outcome === 'completed') {
         governor.record({
           kind: 'completed',

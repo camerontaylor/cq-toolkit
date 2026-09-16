@@ -31,8 +31,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DIST = join(HERE, '..', '..', '..', '..', 'dist', 'index.js');
 const FAKE_CLI = join(HERE, '..', '..', 'fake-agent-cli.mjs');
 
-const { SubprocessDriver, RoutingTableSchema, defaultRoutingTable, defaultHarnessConfig, currentJobContext } =
-  await import(DIST); // top-level await — fine in ESM
+const {
+  SubprocessDriver,
+  RoutingTableSchema,
+  defaultRoutingTable,
+  defaultHarnessConfig,
+  currentJobContext,
+} = await import(DIST); // top-level await — fine in ESM
 
 // The input schema — the same shape registry.js declares for `agent-run`
 // (the CLI validates with the registry's copy; the op re-parses its own).
@@ -92,7 +97,8 @@ export default async function agentRun(raw) {
   if (ctx === undefined) {
     return {
       status: 'failed',
-      error: 'ungoverned: run-plan must compose runPlan through governRegistry — the usage fold has no observer',
+      error:
+        'ungoverned: run-plan must compose runPlan through governRegistry — the usage fold has no observer',
     };
   }
   let result;
@@ -114,10 +120,12 @@ export default async function agentRun(raw) {
   if (result.usage === undefined) {
     return {
       status: 'failed',
-      error: 'driver result carries no usage — WorkerResult.usage reporting regressed (the fixture always reports fixed usage)',
+      error:
+        'driver result carries no usage — WorkerResult.usage reporting regressed (the fixture always reports fixed usage)',
     };
   }
   ctx.reportUsage(result.usage);
-  if (result.stopReason === 'complete') return { status: 'ok', value: result.model ?? 'unreported' };
+  if (result.stopReason === 'complete')
+    return { status: 'ok', value: result.model ?? 'unreported' };
   return { status: 'failed', error: `agent run stopped: ${result.stopReason}` };
 }

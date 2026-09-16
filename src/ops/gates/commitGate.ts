@@ -173,7 +173,10 @@ export const commitGate: Op<CommitGateInput, CommitGateReport> = async (input) =
     });
   } catch (err) {
     if (err instanceof SyntaxError) {
-      return { status: 'failed', error: `invalid pattern config for commitGate: ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `invalid pattern config for commitGate: ${messageOf(err)}`,
+      };
     }
     throw err;
   }

@@ -87,7 +87,11 @@ function makeFake(): { state: FakeState; op: (raw: unknown) => Promise<OpResult<
 const jobInputSchema = z.object({ jobId: z.string() });
 
 /** Wrap an op as a registry entry (op-contract params cast to the bottom instantiation). */
-function entry(name: string, schema: z.ZodType<unknown>, op: (raw: unknown) => Promise<OpResult<unknown>>): OpRegistryEntry<never, never> {
+function entry(
+  name: string,
+  schema: z.ZodType<unknown>,
+  op: (raw: unknown) => Promise<OpResult<unknown>>,
+): OpRegistryEntry<never, never> {
   return {
     name,
     inputSchema: schema as unknown as z.ZodType<never>,
@@ -97,7 +101,10 @@ function entry(name: string, schema: z.ZodType<unknown>, op: (raw: unknown) => P
 
 function viewWith(...entries: OpRegistryEntry<never, never>[]): OpRegistryView {
   const map = new Map(
-    entries.map((candidate): [string, OpRegistryEntry<never, never>] => [candidate.name, candidate]),
+    entries.map((candidate): [string, OpRegistryEntry<never, never>] => [
+      candidate.name,
+      candidate,
+    ]),
   );
   return { get: (name) => map.get(name) };
 }
@@ -175,7 +182,10 @@ describe('runPlan — ws-a replay resume (the goal check)', () => {
     expect(finishes1.filter((event) => event.result.status === 'ok')).toHaveLength(4);
     expect(finishes1.filter((event) => event.result.status === 'failed')).toHaveLength(1);
     expect(events1[0]).toMatchObject({ type: 'run-started', planId: 'plan-wsa' });
-    expect(events1[events1.length - 1]).toMatchObject({ type: 'run-finished', stoppedEarly: false });
+    expect(events1[events1.length - 1]).toMatchObject({
+      type: 'run-finished',
+      stoppedEarly: false,
+    });
 
     // --- Run 2: resume with the fake fixed ---
     state.calls = [];
@@ -457,11 +467,7 @@ describe('runPlan — execution semantics', () => {
       id: 'plan-ghost-op',
       jobs: [{ id: 'a', op: 'ghost', input: { jobId: 'a' } }],
     };
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      DEFAULT_VIEW(),
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, DEFAULT_VIEW());
     expect(report.counts.failed).toBe(1);
     expect(report.jobs[0]?.result).toEqual({
       status: 'failed',
@@ -479,11 +485,7 @@ describe('runPlan — execution semantics', () => {
         throw new Error('op must never run');
       }),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.counts.failed).toBe(1);
     expect(report.jobs[0]?.result.status).toBe('failed');
     expect((report.jobs[0]?.result as { error: string }).error).toMatch(/number/i);
@@ -499,11 +501,7 @@ describe('runPlan — execution semantics', () => {
         throw new Error('kaboom');
       }),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.jobs[0]?.result).toEqual({ status: 'failed', error: 'kaboom' });
     expect(report.counts.failed).toBe(1);
   });
@@ -514,17 +512,9 @@ describe('runPlan — execution semantics', () => {
       jobs: [{ id: 'a', op: 'fake', input: { jobId: 'a' } }],
     };
     const registry = viewWith(
-      entry(
-        'fake',
-        jobInputSchema,
-        async () => 42 as unknown as OpResult<unknown>,
-      ),
+      entry('fake', jobInputSchema, async () => 42 as unknown as OpResult<unknown>),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.jobs[0]?.result).toMatchObject({
       status: 'failed',
       error: expect.stringMatching(/violated the op contract/),
@@ -700,10 +690,15 @@ describe('runPlan — execution semantics', () => {
     // per-job failure — never a journal line that cannot be replayed.
     const { op } = makeFake();
     const registry = viewWith(
-      entry('absent', jobInputSchema, async () => ({
-        status: 'ok',
-        value: undefined,
-      }) as OpResult<unknown>),
+      entry(
+        'absent',
+        jobInputSchema,
+        async () =>
+          ({
+            status: 'ok',
+            value: undefined,
+          }) as OpResult<unknown>,
+      ),
       entry('fake', jobInputSchema, op),
     );
     const plan: Plan = {
@@ -746,11 +741,7 @@ describe('runPlan — execution semantics', () => {
         { id: 'j2', op: 'ghost', input: { jobId: 'j2' } },
       ],
     };
-    const report = await runPlan(
-      plan,
-      { concurrency: 2, stopOnError: false },
-      cursedView,
-    );
+    const report = await runPlan(plan, { concurrency: 2, stopOnError: false }, cursedView);
     expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
       status: 'failed',
       error: expect.stringMatching(
@@ -795,11 +786,7 @@ describe('runPlan — execution semantics', () => {
       entry('nh', jobInputSchema, async () => ({ status: 'needs-human', reason: 'human please' })),
       entry('ind', jobInputSchema, async () => ({ status: 'indeterminate', detail: 'lost' })),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 2, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 2, stopOnError: false }, registry);
     // needs-human → blocked (waiting on a human); indeterminate → failed.
     // The ROWS keep the true taxonomy statuses.
     expect(report.counts).toEqual({

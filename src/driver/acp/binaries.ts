@@ -31,18 +31,22 @@ import { z } from 'zod';
 // The endpoint table — plain data, schema-validated (invalid tables throw loudly)
 // ---------------------------------------------------------------------------
 
-export const AcpEndpointSchema = z.object({
-  /** The DEFAULT launch argv for this endpoint (explicit constructor argv wins). */
-  command: z.array(z.string().min(1)).min(1),
-  /** The install hint the absent-binary pre-dispatch throw names. */
-  installHint: z.string().min(1),
-  /** Human notes: what the harness reads from the environment (NAMES only, never values). */
-  notes: z.string().min(1),
-}).strict();
+export const AcpEndpointSchema = z
+  .object({
+    /** The DEFAULT launch argv for this endpoint (explicit constructor argv wins). */
+    command: z.array(z.string().min(1)).min(1),
+    /** The install hint the absent-binary pre-dispatch throw names. */
+    installHint: z.string().min(1),
+    /** Human notes: what the harness reads from the environment (NAMES only, never values). */
+    notes: z.string().min(1),
+  })
+  .strict();
 
-export const AcpEndpointTableSchema = z.object({
-  endpoints: z.record(z.string(), AcpEndpointSchema),
-}).strict();
+export const AcpEndpointTableSchema = z
+  .object({
+    endpoints: z.record(z.string(), AcpEndpointSchema),
+  })
+  .strict();
 
 export type AcpEndpointEntry = z.infer<typeof AcpEndpointSchema>;
 export type AcpEndpointTable = z.infer<typeof AcpEndpointTableSchema>;
@@ -65,7 +69,7 @@ export function defaultAcpEndpointTable(): AcpEndpointTable {
         installHint: 'npm install -g zcode-acp-server',
         notes:
           'Z.AI — bridges headless ZCode over ACP (bins zcode-acp + zcode-acp-server, probed live ' +
-          'at 0.37.3; engines node >=22). Auth is agent-side (authMethod zcode-credentials, the app\'s ' +
+          "at 0.37.3; engines node >=22). Auth is agent-side (authMethod zcode-credentials, the app's " +
           'own credentials — no client key). When the zcode CLI is not on PATH, the ZCODE_BIN env var ' +
           'names the desktop-app CLI (e.g. /Applications/ZCode.app/Contents/Resources/glm/zcode.cjs).',
       },
@@ -143,7 +147,9 @@ export async function resolveAcpCommand(
   let installHint: string;
   if (explicitCommand !== undefined) {
     if (explicitCommand.length === 0) {
-      throw new Error('acp driver: the command option must carry at least the binary (non-empty argv)');
+      throw new Error(
+        'acp driver: the command option must carry at least the binary (non-empty argv)',
+      );
     }
     command = [...explicitCommand];
     endpoint = 'explicit';
@@ -168,7 +174,12 @@ export async function resolveAcpCommand(
   const binary = command[0] as string;
   const resolved = await resolveBinary(binary, env, probe);
   if (resolved !== undefined) {
-    return { endpoint, command: [resolved, ...command.slice(1)], binary: resolved, source: explicitCommand === undefined ? 'endpoint' : 'explicit' };
+    return {
+      endpoint,
+      command: [resolved, ...command.slice(1)],
+      binary: resolved,
+      source: explicitCommand === undefined ? 'endpoint' : 'explicit',
+    };
   }
   const pathValue = env['PATH'] ?? '';
   throw new Error(
@@ -180,8 +191,13 @@ export async function resolveAcpCommand(
 
 /** Install hint for an EXPLICIT argv's binary: the registry entry when the basename names one, else generic guidance. */
 function installHintFor(binary: string, table: AcpEndpointTable): string {
-  const entry = Object.values(table.endpoints).find((candidate) => basenameOf(candidate.command[0] ?? '') === basenameOf(binary));
-  return entry?.installHint ?? 'install the harness binary and ensure it is on PATH (see docs/acp-driver.md)';
+  const entry = Object.values(table.endpoints).find(
+    (candidate) => basenameOf(candidate.command[0] ?? '') === basenameOf(binary),
+  );
+  return (
+    entry?.installHint ??
+    'install the harness binary and ensure it is on PATH (see docs/acp-driver.md)'
+  );
 }
 
 /**

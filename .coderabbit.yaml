@@ -23,14 +23,14 @@ reviews:
   # entries mirror .gitignore's local-agent runtime scratch; authored agent
   # guidance (.claude skills/settings, AGENTS.md) stays visible.
   path_filters:
-    - "!dist/**"
-    - "!coverage/**"
-    - "!node_modules/**"
-    - "!.gjc/**"
-    - "!.zcode/**"
-    - "!.paseo/**"
-    - "!.claude/worktrees/**"
-    - "!package-lock.json"
+    - '!dist/**'
+    - '!coverage/**'
+    - '!node_modules/**'
+    - '!.gjc/**'
+    - '!.zcode/**'
+    - '!.paseo/**'
+    - '!.claude/worktrees/**'
+    - '!package-lock.json'
   path_instructions:
     - path: src/kernel/**
       instructions: >-
@@ -206,4 +206,4 @@ knowledge_base:
     # **/CLAUDE.md, ...): carry the doctrine as a repo-wide guideline too.
     filePatterns:
       - files: policy/DOCTRINE.md
-        applyTo: "**/*"
+        applyTo: '**/*'

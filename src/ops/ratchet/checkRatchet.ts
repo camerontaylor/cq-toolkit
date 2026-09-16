@@ -222,10 +222,17 @@ export function createCheckRatchet(
     let unit: string | undefined;
     let direction: 'lower-is-better' | 'higher-is-better';
     try {
-      const materialized = { value: reading.value, unit: reading.unit, direction: adapter.direction };
+      const materialized = {
+        value: reading.value,
+        unit: reading.unit,
+        direction: adapter.direction,
+      };
       value = materialized.value;
       unit = materialized.unit;
-      if (materialized.direction !== 'lower-is-better' && materialized.direction !== 'higher-is-better') {
+      if (
+        materialized.direction !== 'lower-is-better' &&
+        materialized.direction !== 'higher-is-better'
+      ) {
         return fail(
           `ratchet: metric '${input.metric}' adapter produced an unusable direction ` +
             `(${String(materialized.direction)}) — nothing to compare`,
@@ -322,7 +329,8 @@ export function createCheckRatchet(
     // or a unit appearing/vanishing between capture and check, would
     // otherwise compare incommensurables.
     if (baseline.unit !== unit) {
-      const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
+      const renderUnit = (u: string | undefined): string =>
+        u === undefined ? 'undefined' : `'${u}'`;
       return fail(
         `ratchet: baseline '${relPath}' for metric '${input.metric}' disagrees on ` +
           `unit ${renderUnit(baseline.unit)} → ${renderUnit(unit)} — incomparable scale`,

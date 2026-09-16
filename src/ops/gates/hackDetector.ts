@@ -230,14 +230,16 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
           }))
         : [],
       detectDeletedTests,
-      skipOnly:
-        tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
+      skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
       detectTautologies: tamper.detectTautologies ?? true,
     };
   } catch (err) {
     if (err instanceof SyntaxError) {
-      return { status: 'failed', error: `invalid pattern config for hackDetector: ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `invalid pattern config for hackDetector: ${messageOf(err)}`,
+      };
     }
     throw err;
   }

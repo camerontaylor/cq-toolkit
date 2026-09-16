@@ -7,13 +7,15 @@ declare module 'proper-lockfile' {
     /** Interval in ms at which the holder refreshes the lock's mtime (defaults to stale/2, min 1000). */
     update?: number;
     /** Acquire retries: a count or a `retry` package options object ({retries, factor, minTimeout, maxTimeout}). */
-    retries?: number | {
-      retries?: number;
-      factor?: number;
-      minTimeout?: number;
-      maxTimeout?: number;
-      randomize?: boolean;
-    };
+    retries?:
+      | number
+      | {
+          retries?: number;
+          factor?: number;
+          minTimeout?: number;
+          maxTimeout?: number;
+          randomize?: boolean;
+        };
     /** Resolve symlinks via realpath before locking; must be false when the target may not exist yet. */
     realpath?: boolean;
     /** Custom lockfile path (defaults to `<file>.lock`). */

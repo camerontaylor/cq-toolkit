@@ -23,12 +23,7 @@ export {
 export { vitestJsonAdapter } from './adapters/vitest.js';
 export { eslintJsonAdapter } from './adapters/eslint.js';
 export { tscLinesAdapter } from './adapters/tsc.js';
-export type {
-  BailConfig,
-  BaselineProbeInput,
-  ProbeReport,
-  ProbeVerdict,
-} from './baselineProbe.js';
+export type { BailConfig, BaselineProbeInput, ProbeReport, ProbeVerdict } from './baselineProbe.js';
 export { DEFAULT_BAIL_PATTERNS, makeBaselineProbe } from './baselineProbe.js';
 export type { FingerprintConfig } from './fingerprint.js';
 export {
@@ -38,11 +33,7 @@ export {
   fingerprintSet,
   fnv1a32Hex,
 } from './fingerprint.js';
-export type {
-  RegressionGateInput,
-  RegressionReport,
-  RegressionVerdict,
-} from './regressionGate.js';
+export type { RegressionGateInput, RegressionReport, RegressionVerdict } from './regressionGate.js';
 export { regressionGate } from './regressionGate.js';
 export { CheckFailureSchema, FailureSetSchema, FingerprintConfigSchema } from './registry.js';
 export type {

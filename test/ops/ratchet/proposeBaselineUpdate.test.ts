@@ -182,7 +182,9 @@ describe('proposeBaselineUpdate', () => {
     const propose = createProposeBaselineUpdate(effects);
     await expect(
       propose(
-        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }] }),
+        proposeInput({
+          improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
+        }),
       ),
     ).resolves.toEqual({
       status: 'ok',
@@ -512,7 +514,10 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toMatchObject({
       status: 'ok',
-      value: { proposal: 'none', skipped: [expect.objectContaining({ reason: expect.stringMatching(/not a tightening/) })] },
+      value: {
+        proposal: 'none',
+        skipped: [expect.objectContaining({ reason: expect.stringMatching(/not a tightening/) })],
+      },
     });
     expect(effects2.findCalls()).toBe(0);
   });
@@ -728,12 +733,16 @@ describe('proposeBaselineUpdate', () => {
             {
               target: TARGET,
               metric: METRIC,
-              reason: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+              reason: expect.stringMatching(
+                /does not resolve to a strict descendant of the workspace/,
+              ),
             },
             {
               target: 'other-target',
               metric: METRIC,
-              reason: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+              reason: expect.stringMatching(
+                /does not resolve to a strict descendant of the workspace/,
+              ),
             },
           ],
         },
@@ -810,7 +819,9 @@ describe('proposeBaselineUpdate', () => {
     expect(pr?.title).toBe('chore(ratchet): tighten baselines (2 metrics)');
     expect(pr?.files).toHaveLength(2);
     expect(pr?.files.map((f) => f.path)).toEqual([relB, relA]);
-    expect(pr?.body).toContain(`- \`${relB}\` (bundle-size / kb-total): 512 → 480 (lower-is-better)`);
+    expect(pr?.body).toContain(
+      `- \`${relB}\` (bundle-size / kb-total): 512 → 480 (lower-is-better)`,
+    );
     expect(pr?.body).toContain(`- \`${relA}\` (${TARGET} / ${METRIC}): 10 → 7 (lower-is-better)`);
   });
 
@@ -903,9 +914,7 @@ describe('proposeBaselineUpdate', () => {
       });
     }
     // Non-strings keep the plain must-be-a-string wording.
-    await expect(
-      propose(proposeInput({ headPrefix: 7 as unknown as string })),
-    ).resolves.toEqual({
+    await expect(propose(proposeInput({ headPrefix: 7 as unknown as string }))).resolves.toEqual({
       status: 'failed',
       error: "ratchet: invalid input — 'headPrefix' must be a string",
     });
@@ -1005,15 +1014,11 @@ describe('proposeBaselineUpdate', () => {
       status: 'failed',
       error: 'ratchet: invalid input — expected a non-null object',
     });
-    await expect(
-      propose(proposeInput({ ws: 42 as unknown as string })),
-    ).resolves.toEqual({
+    await expect(propose(proposeInput({ ws: 42 as unknown as string }))).resolves.toEqual({
       status: 'failed',
       error: "ratchet: invalid input — 'ws' must be a string",
     });
-    await expect(
-      propose(proposeInput({ base: undefined as unknown as string })),
-    ).resolves.toEqual({
+    await expect(propose(proposeInput({ base: undefined as unknown as string }))).resolves.toEqual({
       status: 'failed',
       error: "ratchet: invalid input — 'base' must be a string",
     });
@@ -1026,7 +1031,7 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toEqual({
       status: 'failed',
-      error: "ratchet: invalid input — improvements[0].value must be a finite number",
+      error: 'ratchet: invalid input — improvements[0].value must be a finite number',
     });
     // The remaining boundary guards, each pinned with its arg-error wording.
     await expect(
@@ -1123,9 +1128,7 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toEqual({
       status: 'indeterminate',
-      detail: expect.stringMatching(
-        /may or may not have landed.*network dropped/s,
-      ),
+      detail: expect.stringMatching(/may or may not have landed.*network dropped/s),
     });
   });
 });

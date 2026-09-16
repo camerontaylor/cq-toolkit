@@ -168,7 +168,9 @@ function assertJsonLossless(value: unknown): void {
         for (const key of Reflect.ownKeys(value)) {
           if (key === 'length') continue;
           if (typeof key === 'symbol') {
-            throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
+            throw new Error(
+              `symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`,
+            );
           }
           const index = Number(key);
           if (Number.isInteger(index) && index >= 0 && String(index) === key) continue;
@@ -386,7 +388,8 @@ export async function runPlan(
   // caller or test consumes an in-memory list). The fold over the sequence —
   // journal deriveJobStatuses over a journaled run's file — is
   // mode-independent by construction.
-  const runLog: RunLog | undefined = opts.journalDir !== undefined ? openRunLog(opts.journalDir) : undefined;
+  const runLog: RunLog | undefined =
+    opts.journalDir !== undefined ? openRunLog(opts.journalDir) : undefined;
   const emit = async (event: JournalEvent): Promise<void> => {
     if (runLog) await runLog.append(runId, event);
   };
@@ -440,9 +443,7 @@ export async function runPlan(
     changed = false;
     for (const job of manifest.jobs) {
       if (unschedulable.has(job.id)) continue;
-      const missingDep = job.dependsOn.find(
-        (dep) => !jobIds.has(dep) || unschedulable.has(dep),
-      );
+      const missingDep = job.dependsOn.find((dep) => !jobIds.has(dep) || unschedulable.has(dep));
       if (missingDep !== undefined) {
         unschedulable.add(job.id);
         changed = true;
@@ -466,9 +467,10 @@ export async function runPlan(
     entries.set(job.id, {
       result: {
         status: 'failed',
-        error: missing !== undefined
-          ? `blocked: dependency '${missing}' missing from plan`
-          : 'blocked: upstream dependency did not succeed',
+        error:
+          missing !== undefined
+            ? `blocked: dependency '${missing}' missing from plan`
+            : 'blocked: upstream dependency did not succeed',
       },
       state: 'blocked',
       origin: 'blocked',
@@ -642,7 +644,13 @@ export async function runPlan(
       cacheWrite += u.cacheWrite;
       if (u.reasoning !== undefined) reasoning = (reasoning ?? 0) + u.reasoning;
     }
-    usage = { input, output, cacheRead, cacheWrite, ...(reasoning !== undefined ? { reasoning } : {}) };
+    usage = {
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
 
   return {

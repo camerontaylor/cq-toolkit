@@ -384,7 +384,8 @@ export function createCaptureBaseline(
           disagreements.push(`direction '${existing.direction}' → '${direction}'`);
         }
         if (existing.unit !== unit) {
-          const renderUnit = (u: string | undefined): string => (u === undefined ? 'undefined' : `'${u}'`);
+          const renderUnit = (u: string | undefined): string =>
+            u === undefined ? 'undefined' : `'${u}'`;
           disagreements.push(`unit ${renderUnit(existing.unit)} → ${renderUnit(unit)}`);
         }
         if (disagreements.length > 0) {
@@ -462,7 +463,6 @@ export function createCaptureBaseline(
         };
       }
       return { status: 'ok', value: { path: relPath, value: value, previous, lifecycle } };
-
     };
     try {
       const release = await lock(absPath, CAPTURE_LOCK_OPTIONS);
@@ -474,16 +474,21 @@ export function createCaptureBaseline(
             // the lock state is unknown — report indeterminate naming it.
             release()
               .then(() => outcome)
-              .catch((releaseErr: unknown) => ({
-                status: 'indeterminate',
-                detail: `ratchet: lock release failed for baseline '${relPath}' — ${errorMessage(releaseErr)}`,
-              } as OpResult<CaptureBaselineOutcome>)),
+              .catch(
+                (releaseErr: unknown) =>
+                  ({
+                    status: 'indeterminate',
+                    detail: `ratchet: lock release failed for baseline '${relPath}' — ${errorMessage(releaseErr)}`,
+                  }) as OpResult<CaptureBaselineOutcome>,
+              ),
           (sectionErr: unknown) =>
             // The section already returned its own verdicts; a THROW here
             // is unexpected — release best-effort and surface it.
             release()
               .catch(() => undefined)
-              .then(() => { throw sectionErr; }),
+              .then(() => {
+                throw sectionErr;
+              }),
         );
     } catch (err) {
       return {

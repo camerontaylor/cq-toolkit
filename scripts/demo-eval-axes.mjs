@@ -63,7 +63,14 @@
 // network). EXIT CODE: 0 only when every selected cell passed (identity,
 // fixture, and fold checks green); any failed cell sets exit 1. Usage:
 // zsh -lic 'node scripts/demo-eval-axes.mjs'
-import { AcpDriver, AiSdkDriver, ClaudeAgentDriver, SessionStore, SubprocessDriver, runLadder } from '../dist/index.js';
+import {
+  AcpDriver,
+  AiSdkDriver,
+  ClaudeAgentDriver,
+  SessionStore,
+  SubprocessDriver,
+  runLadder,
+} from '../dist/index.js';
 import { priceOf } from '../dist/driver/pricing/index.js';
 import dns from 'node:dns';
 import net from 'node:net';
@@ -101,7 +108,8 @@ if ((process.env.ZCODE_BIN ?? '') === '' && process.platform === 'darwin') {
 }
 
 // --- The fixture (identical across every cell) --------------------------------
-const PROMPT = 'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
+const PROMPT =
+  'Reply with exactly this text and nothing else: The quick brown fox jumps over the lazy dog.';
 // The anthropic-compat lanes (claude-agent/subprocess) serve glm-4.6
 // truthfully, so their cells request glm-4.6 — MODEL_GLM stays the
 // truthfully-served id (PR #60 review, Codex P1 + CodeRabbit Major: a
@@ -308,7 +316,10 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
           break;
         }
         return {
-          lane, provider, model, elapsedMs,
+          lane,
+          provider,
+          model,
+          elapsedMs,
           ...(expectedServed !== undefined ? { expectedServed } : {}),
           governedOutcome: ladderOutcome.outcome,
           stopReason: result.stopReason,
@@ -321,7 +332,10 @@ async function runCell({ lane, provider, model, expectedServed, budget }) {
           sessionId: result.sessionId,
         };
       } catch (err) {
-        attempts.push({ attempt, error: (err instanceof Error ? err.message : String(err)).slice(0, 200) });
+        attempts.push({
+          attempt,
+          error: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+        });
       }
     }
     return { lane, provider, model, failed: true, attempts };
@@ -341,8 +355,11 @@ const cells = [
     // id (conductor decision) with the probe-recorded wire encoding as the
     // expected served id, and its own token ceiling (ACP_BUDGET — the
     // harness's fixed scaffolding dwarfs the raw-chat 2k cap).
-    lane: 'acp', provider: 'zai', model: MODEL_GLM_SERVED,
-    expectedServed: ACP_SERVED_ID, budget: ACP_BUDGET,
+    lane: 'acp',
+    provider: 'zai',
+    model: MODEL_GLM_SERVED,
+    expectedServed: ACP_SERVED_ID,
+    budget: ACP_BUDGET,
   },
 ];
 
@@ -358,11 +375,15 @@ try {
 }
 const { missing, unmapped } = requiredKeys(selected, EVAL_AXES_PROVIDER_KEYS, process.env);
 if (unmapped !== null) {
-  console.error(`demo-eval-axes: no credential mapping for provider '${unmapped}' — refusing to run`);
+  console.error(
+    `demo-eval-axes: no credential mapping for provider '${unmapped}' — refusing to run`,
+  );
   process.exit(1);
 }
 if (missing.length > 0) {
-  console.error(`demo-eval-axes: missing key env var(s) for the selected cells: ${missing.join(', ')} — refusing to run`);
+  console.error(
+    `demo-eval-axes: missing key env var(s) for the selected cells: ${missing.join(', ')} — refusing to run`,
+  );
   process.exit(1);
 }
 
@@ -378,12 +399,16 @@ if (results.some((r) => r.failed === true)) {
 }
 
 // --- Markdown output -----------------------------------------------------------
-console.log('| lane | provider | model | served model | stopReason | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |');
+console.log(
+  '| lane | provider | model | served model | stopReason | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |',
+);
 console.log('| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |');
 for (const r of results) {
   if (r.failed) {
     const last = r.attempts[r.attempts.length - 1] ?? {};
-    console.log(`| ${r.lane} | ${r.provider} | ${r.model} | — | FAILED after ${r.attempts.length} attempts | — | — | — | — | absent | — |`);
+    console.log(
+      `| ${r.lane} | ${r.provider} | ${r.model} | — | FAILED after ${r.attempts.length} attempts | — | — | — | — | absent | — |`,
+    );
     console.log(`> cell ${r.lane}/${r.model} failure evidence: ${JSON.stringify(last)}`);
     continue;
   }

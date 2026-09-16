@@ -317,7 +317,10 @@ function emitBigFrameChunk() {
     method: 'session/update',
     params: {
       sessionId: acpSessionId,
-      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: BIG_FRAME_TEXT } },
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: BIG_FRAME_TEXT },
+      },
     },
   });
   return new Promise((flushed) => {
@@ -395,7 +398,14 @@ function emitConfigOptionUpdate() {
   notifyUpdate({
     sessionUpdate: 'config_option_update',
     configOptions: [
-      { id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: materializedModel(), options: [] },
+      {
+        id: 'model',
+        name: 'Model',
+        category: 'model',
+        type: 'select',
+        currentValue: materializedModel(),
+        options: [],
+      },
     ],
   });
 }
@@ -452,7 +462,16 @@ function modesShape() {
 }
 
 function configOptionsLazy() {
-  return [{ id: 'model', name: 'Model', category: 'model', type: 'select', currentValue: lazyModel(), options: [] }];
+  return [
+    {
+      id: 'model',
+      name: 'Model',
+      category: 'model',
+      type: 'select',
+      currentValue: lazyModel(),
+      options: [],
+    },
+  ];
 }
 
 function respondPrompt(result) {
@@ -488,7 +507,9 @@ function askPermission(toolCallId, title, input, onAnswered) {
     // AFTER that, so the driver's answer write deterministically EPIPEs
     // while this process stays alive (the 'end' exit handler never fires —
     // destroy is not EOF).
-    errLine("fake-acp-server: closing stdin on the permission ask (the driver's answer write must fail)");
+    errLine(
+      "fake-acp-server: closing stdin on the permission ask (the driver's answer write must fail)",
+    );
     process.stdin.once('close', () => {
       try {
         closeSync(0);
@@ -525,28 +546,34 @@ async function executeTool(name, input) {
   if (name === 'read') {
     const path_ = typeof input?.path === 'string' ? input.path : '';
     const abs = resolveInside(path_);
-    if (abs === undefined) return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
+    if (abs === undefined)
+      return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
     try {
       const text = await readFile(abs, 'utf8');
       return { ok: true, text };
     } catch (err_) {
       return {
         ok: false,
-        text: messageOf(err_).includes('ENOENT') ? `file not found: '${path_}'` : `read failed: ${messageOf(err_)}`,
+        text: messageOf(err_).includes('ENOENT')
+          ? `file not found: '${path_}'`
+          : `read failed: ${messageOf(err_)}`,
       };
     }
   }
   if (name === 'edit') {
     const path_ = typeof input?.path === 'string' ? input.path : '';
     const abs = resolveInside(path_);
-    if (abs === undefined) return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
+    if (abs === undefined)
+      return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
     let content;
     try {
       content = await readFile(abs, 'utf8');
     } catch (err_) {
       return {
         ok: false,
-        text: messageOf(err_).includes('ENOENT') ? `file not found: '${path_}'` : `read failed: ${messageOf(err_)}`,
+        text: messageOf(err_).includes('ENOENT')
+          ? `file not found: '${path_}'`
+          : `read failed: ${messageOf(err_)}`,
       };
     }
     const { oldText, newText } = input;
@@ -555,7 +582,11 @@ async function executeTool(name, input) {
     }
     const { writeFile } = await import('node:fs/promises');
     try {
-      await writeFile(abs, content.replace(oldText, () => (typeof newText === 'string' ? newText : '')), 'utf8');
+      await writeFile(
+        abs,
+        content.replace(oldText, () => (typeof newText === 'string' ? newText : '')),
+        'utf8',
+      );
     } catch (err_) {
       return { ok: false, text: `edit failed: ${messageOf(err_)}` };
     }
@@ -563,7 +594,8 @@ async function executeTool(name, input) {
   }
   if (name === 'run') {
     const command = typeof input?.command === 'string' ? input.command : '';
-    if (command === '') return { ok: false, text: 'invalid input: command must be a non-empty string' };
+    if (command === '')
+      return { ok: false, text: 'invalid input: command must be a non-empty string' };
     return await new Promise((done) => {
       exec(command, { cwd: process.cwd() }, (err_, stdout, stderr) => {
         if (err_ && err_.code === undefined) {
@@ -827,13 +859,16 @@ function onFrame(frame) {
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             // Probe-verbatim shape (strategy §7): sessionCapabilities is a
             // member of agentCapabilities with EMPTY-object members.
-            ...(ADVERTISE_RESUME ? { sessionCapabilities: { list: {}, resume: {}, fork: {} } } : {}),
+            ...(ADVERTISE_RESUME
+              ? { sessionCapabilities: { list: {}, resume: {}, fork: {} } }
+              : {}),
           },
           authMethods: [
             {
               id: 'fake-credentials',
               name: 'Fake built-in credentials',
-              description: 'The fixture self-handles auth — mirrors the probed zcode-credentials shape (OQ-1: no gate).',
+              description:
+                'The fixture self-handles auth — mirrors the probed zcode-credentials shape (OQ-1: no gate).',
             },
           ],
         },
@@ -841,7 +876,14 @@ function onFrame(frame) {
       return;
     case 'authenticate':
       // Never expected (no gate) — the error keeps the record honest if a driver ever calls it.
-      send({ jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: 'fake-acp-server: no auth gate; authenticate is never needed (OQ-1)' } });
+      send({
+        jsonrpc: '2.0',
+        id: frame.id,
+        error: {
+          code: -32601,
+          message: 'fake-acp-server: no auth gate; authenticate is never needed (OQ-1)',
+        },
+      });
       return;
     case 'session/new': {
       acpSessionId = `fake-acp-${process.pid}-${++sessionCounter}`;
@@ -849,7 +891,11 @@ function onFrame(frame) {
       const established = {
         jsonrpc: '2.0',
         id: frame.id,
-        result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
+        result: {
+          sessionId: acpSessionId,
+          modes: modesShape(),
+          configOptions: configOptionsLazy(),
+        },
       };
       if (PRE_PIN_MODE_BUILD) {
         // The initial-mode announcement, written BEFORE the establishment
@@ -873,7 +919,11 @@ function onFrame(frame) {
     case 'session/load': {
       const sid = frame.params?.sessionId;
       if (typeof sid !== 'string' || sid === '') {
-        send({ jsonrpc: '2.0', id: frame.id, error: { code: -32602, message: 'session/load requires sessionId' } });
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          error: { code: -32602, message: 'session/load requires sessionId' },
+        });
         return;
       }
       acpSessionId = sid;
@@ -888,14 +938,21 @@ function onFrame(frame) {
         const response = {
           jsonrpc: '2.0',
           id: frame.id,
-          result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
+          result: {
+            sessionId: acpSessionId,
+            modes: modesShape(),
+            configOptions: configOptionsLazy(),
+          },
         };
         const tail = {
           jsonrpc: '2.0',
           method: 'session/update',
           params: {
             sessionId: acpSessionId,
-            update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: POST_LOAD_TAIL_TEXT } },
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: POST_LOAD_TAIL_TEXT },
+            },
           },
         };
         process.stdout.write(`${JSON.stringify(response)}\n${JSON.stringify(tail)}\n`); // ONE flush
@@ -904,7 +961,11 @@ function onFrame(frame) {
       send({
         jsonrpc: '2.0',
         id: frame.id,
-        result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
+        result: {
+          sessionId: acpSessionId,
+          modes: modesShape(),
+          configOptions: configOptionsLazy(),
+        },
       });
       return;
     }
@@ -915,7 +976,11 @@ function onFrame(frame) {
       // load (the Devin quirk generalizes), NO history replay.
       const sid = frame.params?.sessionId;
       if (typeof sid !== 'string' || sid === '') {
-        send({ jsonrpc: '2.0', id: frame.id, error: { code: -32602, message: 'unstable_resumeSession requires sessionId' } });
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          error: { code: -32602, message: 'unstable_resumeSession requires sessionId' },
+        });
         return;
       }
       acpSessionId = sid;
@@ -923,7 +988,11 @@ function onFrame(frame) {
       send({
         jsonrpc: '2.0',
         id: frame.id,
-        result: { sessionId: acpSessionId, modes: modesShape(), configOptions: configOptionsLazy() },
+        result: {
+          sessionId: acpSessionId,
+          modes: modesShape(),
+          configOptions: configOptionsLazy(),
+        },
       });
       return;
     }
@@ -969,28 +1038,35 @@ function onFrame(frame) {
         // queue forever, and the courtesy session/cancel write's callback
         // queues BEHIND it. notify() can never settle; only the
         // grace-raced ladder answers the governed abort.
-        errLine('fake-acp-server: paused stdin after the mode pin (the backpressure stall persona)');
+        errLine(
+          'fake-acp-server: paused stdin after the mode pin (the backpressure stall persona)',
+        );
         process.stdin.pause();
       }
       return;
     case 'session/prompt': {
       if (promptRequestId !== null) {
-        send({ jsonrpc: '2.0', id: frame.id, error: { code: -32603, message: 'a turn is already active' } });
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          error: { code: -32603, message: 'a turn is already active' },
+        });
         return;
       }
       promptRequestId = frame.id;
-      const script = {
-        ok: okFlow,
-        'resume-echo': resumeEchoFlow,
-        'tool-then-reply': () => toolFlow({ alwaysFail: false }),
-        'deny-tool': () => toolFlow({ alwaysFail: true }),
-        'never-asks': neverAsksFlow,
-        'block-until-abort': blockUntilAbortFlow,
-        fail: () => {
-          errLine('fake-acp-server: simulated hard failure before any prompt response');
-          process.exit(1);
-        },
-      }[MODE] ?? okFlow;
+      const script =
+        {
+          ok: okFlow,
+          'resume-echo': resumeEchoFlow,
+          'tool-then-reply': () => toolFlow({ alwaysFail: false }),
+          'deny-tool': () => toolFlow({ alwaysFail: true }),
+          'never-asks': neverAsksFlow,
+          'block-until-abort': blockUntilAbortFlow,
+          fail: () => {
+            errLine('fake-acp-server: simulated hard failure before any prompt response');
+            process.exit(1);
+          },
+        }[MODE] ?? okFlow;
       void script();
       return;
     }
@@ -1003,7 +1079,11 @@ function onFrame(frame) {
       return;
     default:
       if (frame.id !== undefined) {
-        send({ jsonrpc: '2.0', id: frame.id, error: { code: -32601, message: `fake-acp-server does not implement ${frame.method}` } });
+        send({
+          jsonrpc: '2.0',
+          id: frame.id,
+          error: { code: -32601, message: `fake-acp-server does not implement ${frame.method}` },
+        });
       }
   }
 }

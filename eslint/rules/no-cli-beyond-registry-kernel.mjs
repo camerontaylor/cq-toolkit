@@ -148,7 +148,9 @@ function checkSource(context, sourceNode, reportNode) {
     return;
   }
   if (!isAllowedSource(source, zodFiles, importerPath)) {
-    const arrow = isRelativeSpecifier(source) ? ` (resolves to '${resolveRelative(source, importerPath)}')` : '';
+    const arrow = isRelativeSpecifier(source)
+      ? ` (resolves to '${resolveRelative(source, importerPath)}')`
+      : '';
     context.report({
       node: reportNode,
       messageId: 'beyondRegistryKernel',

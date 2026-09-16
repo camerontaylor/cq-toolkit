@@ -399,7 +399,10 @@ describe('hackDetector: suppression config', () => {
   });
 
   test('a custom pattern source that does not compile is a `failed` op, never a crash', async () => {
-    const result = await hackDetector({ diff: '+anything', suppressionPatterns: [{ name: 'bad', pattern: '(' }] });
+    const result = await hackDetector({
+      diff: '+anything',
+      suppressionPatterns: [{ name: 'bad', pattern: '(' }],
+    });
     expect(result.status).toBe('failed');
   });
 
@@ -497,7 +500,9 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
       '+export const x = test.skip("later");',
     ].join('\n');
     const findings = await findingsOf(diff);
-    expect(findings.map((f) => [f.kind, f.file, f.line])).toEqual([['new-skip-only', 'src/fresh.ts', 1]]);
+    expect(findings.map((f) => [f.kind, f.file, f.line])).toEqual([
+      ['new-skip-only', 'src/fresh.ts', 1],
+    ]);
   });
 
   test('non-blank input with NO diff structure is indeterminate, never a silent clean scan (I5)', async () => {

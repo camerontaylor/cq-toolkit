@@ -38,11 +38,13 @@ import { z } from 'zod';
  * means UNCAPPED — `defaultHarnessConfig` always sets a modest value;
  * uncapped is a deliberate caller choice, never a silent default.
  */
-export const FileToolConfigSchema = z.object({
-  enabled: z.boolean(),
-  pathPatterns: z.array(z.string()),
-  maxOutputChars: z.number().int().positive().optional(),
-}).strict();
+export const FileToolConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    pathPatterns: z.array(z.string()),
+    maxOutputChars: z.number().int().positive().optional(),
+  })
+  .strict();
 
 /**
  * Config for the `run` tool: on/off, the command-pattern allowlist (an EMPTY
@@ -51,19 +53,23 @@ export const FileToolConfigSchema = z.object({
  * timeout; wall-clock POLICY above this stays with the driver/governor per
  * I8), and an optional output cap in chars.
  */
-export const RunToolConfigSchema = z.object({
-  enabled: z.boolean(),
-  commandPatterns: z.array(z.string()),
-  timeoutMs: z.number().int().positive().optional(),
-  maxOutputChars: z.number().int().positive().optional(),
-}).strict();
+export const RunToolConfigSchema = z
+  .object({
+    enabled: z.boolean(),
+    commandPatterns: z.array(z.string()),
+    timeoutMs: z.number().int().positive().optional(),
+    maxOutputChars: z.number().int().positive().optional(),
+  })
+  .strict();
 
 /** The harness tool surface: exactly read/edit/run, each configured per-op. */
-export const HarnessToolConfigSchema = z.object({
-  read: FileToolConfigSchema,
-  edit: FileToolConfigSchema,
-  run: RunToolConfigSchema,
-}).strict();
+export const HarnessToolConfigSchema = z
+  .object({
+    read: FileToolConfigSchema,
+    edit: FileToolConfigSchema,
+    run: RunToolConfigSchema,
+  })
+  .strict();
 
 /**
  * Per-op prompt budget (R4): all values are DATA applied where the prompt is
@@ -72,22 +78,26 @@ export const HarnessToolConfigSchema = z.object({
  * `buildTools` returns, `maxToolDescriptionChars` bounds each tool's
  * description text (enforced at build time, head-truncation).
  */
-export const PromptBudgetConfigSchema = z.object({
-  maxSystemPromptChars: z.number().int().positive(),
-  maxTools: z.number().int().positive(),
-  maxToolDescriptionChars: z.number().int().positive(),
-}).strict();
+export const PromptBudgetConfigSchema = z
+  .object({
+    maxSystemPromptChars: z.number().int().positive(),
+    maxTools: z.number().int().positive(),
+    maxToolDescriptionChars: z.number().int().positive(),
+  })
+  .strict();
 
 /**
  * The full harness config: tool surface + prompt budget + the root directory
  * fresh temp workspaces are created under (`workspaceRoot` omitted → the
  * harness default of `os.tmpdir()/cq-harness`, see session.tempWorkspace).
  */
-export const HarnessConfigSchema = z.object({
-  tools: HarnessToolConfigSchema,
-  promptBudget: PromptBudgetConfigSchema,
-  workspaceRoot: z.string().optional(),
-}).strict();
+export const HarnessConfigSchema = z
+  .object({
+    tools: HarnessToolConfigSchema,
+    promptBudget: PromptBudgetConfigSchema,
+    workspaceRoot: z.string().optional(),
+  })
+  .strict();
 
 export type FileToolConfig = z.infer<typeof FileToolConfigSchema>;
 export type RunToolConfig = z.infer<typeof RunToolConfigSchema>;
@@ -123,20 +133,22 @@ export function deepFreeze<T>(value: T): T {
  * prompt caps. IMMUTABLE BY CONSTRUCTION — deep-frozen, so a nested write
  * throws instead of mutating the shared baseline value.
  */
-export const defaultHarnessConfig: HarnessConfig = deepFreeze(HarnessConfigSchema.parse({
-  tools: {
-    read: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 200_000 },
-    edit: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 4_000 },
-    run: {
-      enabled: true,
-      commandPatterns: [], // deny-all until a caller configures patterns (R4)
-      timeoutMs: 30_000,
-      maxOutputChars: 100_000,
+export const defaultHarnessConfig: HarnessConfig = deepFreeze(
+  HarnessConfigSchema.parse({
+    tools: {
+      read: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 200_000 },
+      edit: { enabled: true, pathPatterns: ['**/*'], maxOutputChars: 4_000 },
+      run: {
+        enabled: true,
+        commandPatterns: [], // deny-all until a caller configures patterns (R4)
+        timeoutMs: 30_000,
+        maxOutputChars: 100_000,
+      },
     },
-  },
-  promptBudget: {
-    maxSystemPromptChars: 20_000,
-    maxTools: 3, // read/edit/run — inert at the default, enforced if tightened
-    maxToolDescriptionChars: 1_024,
-  },
-}));
+    promptBudget: {
+      maxSystemPromptChars: 20_000,
+      maxTools: 3, // read/edit/run — inert at the default, enforced if tightened
+      maxToolDescriptionChars: 1_024,
+    },
+  }),
+);

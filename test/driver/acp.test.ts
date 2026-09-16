@@ -123,7 +123,11 @@ function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {
 }
 
 /** Base driver options shared by every test: fake binary, scratch dirs, env injection. */
-function driverOptions(scratchDir: string, extraEnv: Record<string, string>, calls: SpawnCall[]): AcpDriverOptions {
+function driverOptions(
+  scratchDir: string,
+  extraEnv: Record<string, string>,
+  calls: SpawnCall[],
+): AcpDriverOptions {
   return {
     command: ['node', FAKE_ACP_SERVER],
     sessionsDir: join(scratchDir, SESSIONS_DIR),
@@ -178,7 +182,9 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 }
 
 /** Fresh scratch dir + store; cleaned up by the test's finally block. */
-async function withScratch(body: (scratchDir: string, store: SessionStore) => Promise<void>): Promise<void> {
+async function withScratch(
+  body: (scratchDir: string, store: SessionStore) => Promise<void>,
+): Promise<void> {
   const scratchDir = await mkdtemp(join(tmpdir(), 'acpdrv-'));
   const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
   try {
@@ -257,7 +263,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       // Pre-dispatch means PRE-dispatch: zero spawns — the sessions dir is
       // never even created (store.create would have mkdir'd it).
       expect(calls).toEqual([]);
-      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     });
   });
 
@@ -281,7 +289,9 @@ describe('acp driver specifics (fake ACP server)', () => {
         workspaceRoot: join(scratchDir, 'workspaces'),
         spawn: recordingSpawn(calls),
       });
-      await expect(unknown.run(invocation())).rejects.toThrow(/unknown endpoint 'nope' .*zcode-acp-server, dsh-acp/);
+      await expect(unknown.run(invocation())).rejects.toThrow(
+        /unknown endpoint 'nope' .*zcode-acp-server, dsh-acp/,
+      );
       const absent = new AcpDriver({
         endpoint: 'absent-harness',
         endpointTable: table,
@@ -289,7 +299,9 @@ describe('acp driver specifics (fake ACP server)', () => {
         workspaceRoot: join(scratchDir, 'workspaces'),
         spawn: recordingSpawn(calls),
       });
-      await expect(absent.run(invocation())).rejects.toThrow(/'cq-absent-harness-bin' was not found/);
+      await expect(absent.run(invocation())).rejects.toThrow(
+        /'cq-absent-harness-bin' was not found/,
+      );
       await expect(absent.run(invocation())).rejects.toThrow(/npm install -g some-absent-harness/);
       expect(calls).toEqual([]);
     });
@@ -303,7 +315,9 @@ describe('acp driver specifics (fake ACP server)', () => {
         /unknown sessionRef 'ses-never-created'/,
       );
       expect(calls).toEqual([]);
-      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
     });
   });
 
@@ -314,7 +328,9 @@ describe('acp driver specifics (fake ACP server)', () => {
         ...driverOptions(scratchDir, {}, calls),
         envNames: ['CQ_ACP_DEFINITELY_UNSET_VAR'],
       });
-      await expect(driver.run(invocation())).rejects.toThrow(/envNames entry 'CQ_ACP_DEFINITELY_UNSET_VAR' is not set/);
+      await expect(driver.run(invocation())).rejects.toThrow(
+        /envNames entry 'CQ_ACP_DEFINITELY_UNSET_VAR' is not set/,
+      );
       expect(calls).toEqual([]);
     });
   });
@@ -325,7 +341,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'tool-then-reply', FAKE_ACP_TOOL: 'read', FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }) },
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+          },
           calls,
         ),
       );
@@ -335,7 +355,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       // allow_once first, and the driver's ALLOW side of the answer table
       // selects exactly that vendor string.
       const record = await store.load(result.sessionId as string);
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]'))).toBe(true);
+      expect(
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]'),
+        ),
+      ).toBe(true);
       // The gate fired (a permission round-trip happened) and the read
       // executed: a real role 'tool' message for the executed read.
       expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
@@ -360,7 +384,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const result = await driver.run(invocation({ prompt: 'allow-always run' }));
       expect(result.stopReason).toBe('complete');
       const record = await store.load(result.sessionId as string);
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:a_always]'))).toBe(true);
+      expect(
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('[permission:a_always]'),
+        ),
+      ).toBe(true);
     });
   });
 
@@ -369,7 +397,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'tool-then-reply', FAKE_ACP_TOOL: 'edit', FAKE_ACP_INPUT: JSON.stringify({ path: 'x.txt', oldText: 'a', newText: 'b' }) },
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'x.txt', oldText: 'a', newText: 'b' }),
+          },
           [],
         ),
       );
@@ -387,7 +419,11 @@ describe('acp driver specifics (fake ACP server)', () => {
         { tool: 'edit', reason: 'tool policy: not allowlisted (kind unknown)' },
       ]);
       const record = await store.load(result.sessionId as string);
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:deny]'))).toBe(true);
+      expect(
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('[permission:deny]'),
+        ),
+      ).toBe(true);
       // The denied tool never executed: no role 'tool' message for it.
       expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'edit')).toBe(false);
     });
@@ -408,7 +444,10 @@ describe('acp driver specifics (fake ACP server)', () => {
         ),
       );
       const result = await driver.run(
-        invocation({ prompt: 'deny-deadlock run', toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+        invocation({
+          prompt: 'deny-deadlock run',
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        }),
       );
       expect(result.stopReason).toBe('error'); // never answered 'cancelled'; never hung
       const narration = await narrationOf(store, result.sessionId as string);
@@ -442,7 +481,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       const narration = await narrationOf(store, result.sessionId as string);
       const failed = narration.find((line) => line.includes('"permission-answer-failed"'));
       expect(failed !== undefined && failed.includes('"side":"allow"')).toBe(true);
-      expect(failed !== undefined && failed.includes('no allow option offered on the allow side')).toBe(true);
+      expect(
+        failed !== undefined && failed.includes('no allow option offered on the allow side'),
+      ).toBe(true);
       expect(failed !== undefined && failed.includes('no reject option offered')).toBe(false);
     });
   });
@@ -480,7 +521,9 @@ describe('acp driver specifics (fake ACP server)', () => {
         termGraceMs: 2000,
         killGraceMs: 500,
       });
-      const result = await driver.run(invocation({ prompt: 'tolerant-vendor selection-failure run' }));
+      const result = await driver.run(
+        invocation({ prompt: 'tolerant-vendor selection-failure run' }),
+      );
       expect(result.stopReason).toBe('error'); // pinned — never 'complete', however green the wire looks
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 }); // the end_turn measurement folds
       const narration = await narrationOf(store, result.sessionId as string);
@@ -494,7 +537,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'never-asks', FAKE_ACP_TOOL: 'run', FAKE_ACP_INPUT: JSON.stringify({ command: 'echo never-asks-marker > ungated.txt' }) },
+          {
+            FAKE_ACP_MODE: 'never-asks',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo never-asks-marker > ungated.txt' }),
+          },
           [],
         ),
       );
@@ -527,19 +574,26 @@ describe('acp driver specifics (fake ACP server)', () => {
           {
             FAKE_ACP_MODE: 'tool-then-reply',
             FAKE_ACP_TOOL: 'run',
-            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo denied-but-ran-marker > denied-ran.txt' }),
+            FAKE_ACP_INPUT: JSON.stringify({
+              command: 'echo denied-but-ran-marker > denied-ran.txt',
+            }),
             FAKE_ACP_DENY_BUT_COMPLETE: '1',
           },
           [],
         ),
       );
       const result = await driver.run(
-        invocation({ prompt: 'denied-but-completed run', toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+        invocation({
+          prompt: 'denied-but-completed run',
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        }),
       );
       expect(result.stopReason).toBe('error');
       // `kind` is ABSENT from the ask's toolCall on the recorded wire — the
       // denial reason says so honestly (the same shape as the reject test).
-      expect(result.denials).toEqual([{ tool: 'run', reason: 'tool policy: not allowlisted (kind unknown)' }]);
+      expect(result.denials).toEqual([
+        { tool: 'run', reason: 'tool policy: not allowlisted (kind unknown)' },
+      ]);
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"denied-tool-completed"'));
       expect(marker !== undefined && marker.includes('call_run_')).toBe(true);
@@ -599,7 +653,9 @@ describe('acp driver specifics (fake ACP server)', () => {
             // either (a failed read would muddy the assertion with the
             // second denial channel).
             FAKE_ACP_TOOL: 'run',
-            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo placeholder-card-ok > placeholder-card-marker.txt' }),
+            FAKE_ACP_INPUT: JSON.stringify({
+              command: 'echo placeholder-card-ok > placeholder-card-marker.txt',
+            }),
             FAKE_ACP_PLACEHOLDER_CARD: '1',
           },
           [],
@@ -614,10 +670,14 @@ describe('acp driver specifics (fake ACP server)', () => {
       // The REAL execution is what the record carries (allow-answered,
       // completed) and the turn settled the normal permission round-trip.
       expect(
-        record?.messages.some((m) => m.role === 'tool' && m.toolName === 'run' && m.content.includes('"ok":true')),
+        record?.messages.some(
+          (m) => m.role === 'tool' && m.toolName === 'run' && m.content.includes('"ok":true'),
+        ),
       ).toBe(true);
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]')),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]'),
+        ),
       ).toBe(true);
     });
   });
@@ -645,7 +705,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       // never substituted).
       const calls2: SpawnCall[] = [];
       const remapping = new AcpDriver(
-        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_SERVED_MODEL: 'builtin:bigmodel\\GLM-5.3' }, calls2),
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'ok', FAKE_ACP_SERVED_MODEL: 'builtin:bigmodel\\GLM-5.3' },
+          calls2,
+        ),
       );
       const remapped = await remapping.run(invocation({ prompt: 'remapped run' }));
       expect(remapped.model).toBe('builtin:bigmodel\\GLM-5.3'); // the honest observation
@@ -677,7 +741,13 @@ describe('acp driver specifics (fake ACP server)', () => {
     // The probed live sample folds unchanged (input INCLUSIVE of cache,
     // derived by subtraction — the committed arithmetic).
     expect(
-      mapWireUsage({ totalTokens: 15722, inputTokens: 15719, outputTokens: 3, cachedReadTokens: 11648, cachedWriteTokens: 0 }),
+      mapWireUsage({
+        totalTokens: 15722,
+        inputTokens: 15719,
+        outputTokens: 3,
+        cachedReadTokens: 11648,
+        cachedWriteTokens: 0,
+      }),
     ).toEqual({ input: 4071, output: 3, cacheRead: 11648, cacheWrite: 0 });
     // Every field rejects an invalid count by making the WHOLE usage
     // unshapeable: undefined, never zeros-that-look-measured and never a
@@ -752,14 +822,18 @@ describe('acp driver specifics (fake ACP server)', () => {
       // the old 8000-char stdout cap destroyed the partial frame mid-JSON
       // (ACP defines no line-length limit) — the transcript lost the chunk
       // and the overflow narration fired; THIS test failed on both.
-      const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_BIG_FRAME: '1' }, []));
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_BIG_FRAME: '1' }, []),
+      );
       const result = await driver.run(invocation({ prompt: 'big-frame run' }));
       expect(result.stopReason).toBe('complete');
       const record = await store.load(result.sessionId as string);
       // BOTH ends of the straddled frame folded into the transcript: the
       // line buffer held the partial bytes across the flush boundary.
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('BIGFRAME-START')),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('BIGFRAME-START'),
+        ),
       ).toBe(true);
       expect(
         record?.messages.some((m) => m.role === 'assistant' && m.content.includes('BIGFRAME-END')),
@@ -777,7 +851,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       // reading — a possibly-valid frame destroyed and the wire misframed
       // forever. The fixed wire fails the connection: the pending prompt
       // rejects naming the oversized frame and the run settles 'error'.
-      const driver = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME: '1' }, []));
+      const driver = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME: '1' }, []),
+      );
       const result = await driver.run(invocation({ prompt: 'oversized frame run' }));
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // the turn never settled protocol-side
@@ -799,7 +875,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'ok', FAKE_ACP_HUGE_FRAME_AFTER_REPLY: '1', FAKE_ACP_IGNORE_CANCEL: '1' },
+          {
+            FAKE_ACP_MODE: 'ok',
+            FAKE_ACP_HUGE_FRAME_AFTER_REPLY: '1',
+            FAKE_ACP_IGNORE_CANCEL: '1',
+          },
           [],
         ),
       );
@@ -849,17 +929,27 @@ describe('acp driver specifics (fake ACP server)', () => {
       // The resumed run loads the RECORDED session (proven by the fixture
       // echoing the loaded id) and reuses the SAME workspace.
       const calls2: SpawnCall[] = [];
-      const second = new AcpDriver(driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo' }, calls2));
-      const run2 = await second.run(invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }));
+      const second = new AcpDriver(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo' }, calls2),
+      );
+      const run2 = await second.run(
+        invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.sessionId).toBe(run1.sessionId);
       expect(run2.stopReason).toBe('complete');
       const record = await store.load(run1.sessionId as string);
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`)),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`),
+        ),
       ).toBe(true);
       // ONE session record carries both runs' turns; the sidecar is stable.
-      expect(record?.messages.some((m) => m.role === 'user' && m.content === 'resume run one')).toBe(true);
-      expect(record?.messages.some((m) => m.role === 'user' && m.content === 'resume run two')).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'user' && m.content === 'resume run one'),
+      ).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'user' && m.content === 'resume run two'),
+      ).toBe(true);
       expect((await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim()).toBe(acpId);
     });
   });
@@ -884,14 +974,18 @@ describe('acp driver specifics (fake ACP server)', () => {
           calls2,
         ),
       );
-      const run2 = await second.run(invocation({ prompt: 'rung2 run two', sessionRef: run1.sessionId }));
+      const run2 = await second.run(
+        invocation({ prompt: 'rung2 run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.stopReason).toBe('complete');
       const record = await store.load(run2.sessionId as string);
       // The resume REQUEST carried the recorded session id: the fixture
       // adopted it and the echo proves protocol-side continuity (the
       // partial rung would have session/new'd a FRESH id and echoed THAT).
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`)),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`),
+        ),
       ).toBe(true);
       // NOT the honest-partial rung: no partial narration.
       const narration = await narrationOf(store, run2.sessionId as string);
@@ -910,23 +1004,36 @@ describe('acp driver specifics (fake ACP server)', () => {
 
       const calls2: SpawnCall[] = [];
       const second = new AcpDriver(
-        driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_NO_LOADSESSION: '1' }, calls2),
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_NO_LOADSESSION: '1' },
+          calls2,
+        ),
       );
-      const run2 = await second.run(invocation({ prompt: 'rung3 run two', sessionRef: run1.sessionId }));
+      const run2 = await second.run(
+        invocation({ prompt: 'rung3 run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.stopReason).toBe('complete'); // honest partial, never a failure
       const record = await store.load(run2.sessionId as string);
       // The echo carries a FRESH session id (session/new), never the
       // recorded handle — workspace-only continuation.
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`)),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes(`resumed from acp session ${acpId}`),
+        ),
       ).toBe(false);
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('resumed from acp session'))).toBe(
-        true,
-      );
+      expect(
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('resumed from acp session'),
+        ),
+      ).toBe(true);
       const narration = await narrationOf(store, run2.sessionId as string);
       const partial = narration.find((line) => line.includes('"resume-partial"'));
       expect(partial !== undefined && partial.includes(acpId)).toBe(true);
-      expect(partial !== undefined && partial.includes('NEITHER loadSession NOR sessionCapabilities.resume')).toBe(true);
+      expect(
+        partial !== undefined &&
+          partial.includes('NEITHER loadSession NOR sessionCapabilities.resume'),
+      ).toBe(true);
     });
   });
 
@@ -948,15 +1055,21 @@ describe('acp driver specifics (fake ACP server)', () => {
       const second = new AcpDriver(
         driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_REPLAY: '1' }, calls2),
       );
-      const run2 = await second.run(invocation({ prompt: 'replay run two', sessionRef: run1.sessionId }));
+      const run2 = await second.run(
+        invocation({ prompt: 'replay run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.stopReason).toBe('complete'); // NOT the never-asks false 'error'
       expect(run2.denials).toEqual([]); // the replayed failed status synthesized no phantom denial
       const record = await store.load(run2.sessionId as string);
       // The replayed prior-turn text never joined THIS run's transcript —
       // the persisted assistant turn is this run's resume echo only.
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('REPLAYED'))).toBe(false);
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('resumed from acp session')),
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('REPLAYED')),
+      ).toBe(false);
+      expect(
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('resumed from acp session'),
+        ),
       ).toBe(true);
       // The discard sink narrates the COUNT (honest evidence, never the
       // content): all three replayed frames were counted and discarded.
@@ -981,23 +1094,35 @@ describe('acp driver specifics (fake ACP server)', () => {
       // WHOLE flush first and drops it (the round-2 chunk-boundary bug);
       // the wire-line gate folds it.
       const second = new AcpDriver(
-        driverOptions(scratchDir, { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_REPLAY_WITH_TAIL: '1' }, calls2),
+        driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'resume-echo', FAKE_ACP_REPLAY_WITH_TAIL: '1' },
+          calls2,
+        ),
       );
-      const run2 = await second.run(invocation({ prompt: 'tail run two', sessionRef: run1.sessionId }));
+      const run2 = await second.run(
+        invocation({ prompt: 'tail run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.stopReason).toBe('complete'); // the bait never false-fired the tripwire
       expect(run2.denials).toEqual([]); // the replayed failed status synthesized no phantom denial
       const record = await store.load(run2.sessionId as string);
       // THE REGRESSION: the same-flush POST-load tail chunk FOLDED into
       // this run's transcript — and the resume echo folded after it.
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('POST-LOAD tail chunk')),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('POST-LOAD tail chunk'),
+        ),
       ).toBe(true);
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('resumed from acp session')),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('resumed from acp session'),
+        ),
       ).toBe(true);
       // The PRE-response bait frames are still suppressed: no replayed
       // text, exactly the three-frame discard count, no never-asks.
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('REPLAYED'))).toBe(false);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('REPLAYED')),
+      ).toBe(false);
       const narration = await narrationOf(store, run2.sessionId as string);
       const marker = narration.find((line) => line.includes('"replayed-frames-discarded"'));
       expect(marker !== undefined && marker.includes('"count":3')).toBe(true);
@@ -1029,7 +1154,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       // The answer CORRELATED: the fixture honored it and echoed the
       // selected optionId — proof the round-trip completed.
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]')),
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes('[permission:allow_once]'),
+        ),
       ).toBe(true);
     });
   });
@@ -1037,9 +1164,11 @@ describe('acp driver specifics (fake ACP server)', () => {
   test('cancel maps to aborted: the governed signal settles via session/cancel + the cancelled response (§2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const driver = new AcpDriver(
-        { ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls), termGraceMs: 500, killGraceMs: 500 },
-      );
+      const driver = new AcpDriver({
+        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
+        termGraceMs: 500,
+        killGraceMs: 500,
+      });
       // wallClockMs lands MID-PROMPT (after the handshake): the governed
       // signal fires → session/cancel → the cancelled prompt response
       // (usage null) settles the run.
@@ -1067,7 +1196,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       // run settles 'aborted'. Without the mid-prompt kill rung (Codex P1)
       // THIS test hangs into its timeout.
       const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_IGNORE_CANCEL: '1' }, []),
+        ...driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_IGNORE_CANCEL: '1' },
+          [],
+        ),
         termGraceMs: 300,
         killGraceMs: 300,
       });
@@ -1159,7 +1292,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       // the write against cancelWriteGraceMs and runs the ladder
       // regardless of which wins.
       const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_STOP_READ_BEFORE_PROMPT: '1' }, []),
+        ...driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_STOP_READ_BEFORE_PROMPT: '1' },
+          [],
+        ),
         termGraceMs: 300,
         killGraceMs: 300,
         cancelWriteGraceMs: 100,
@@ -1218,7 +1355,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'tool-then-reply', FAKE_ACP_TOOL: 'read', FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }) },
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+          },
           [],
         ),
       );
@@ -1269,14 +1410,21 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'tool-then-reply', FAKE_ACP_TOOL: 'read', FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }), FAKE_ACP_MODE_PIN_NOTIFICATION: '1' },
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_ACP_MODE_PIN_NOTIFICATION: '1',
+          },
           [],
         ),
       );
       const result = await driver.run(invocation({ prompt: 'notification-pin run' }));
       expect(result.stopReason).toBe('complete'); // confirmed via current_mode_update — the prompt fired
       const record = await store.load(result.sessionId as string);
-      expect(record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[mode:build]'))).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'assistant' && m.content.includes('[mode:build]')),
+      ).toBe(true);
     });
   });
 
@@ -1357,7 +1505,15 @@ describe('acp driver specifics (fake ACP server)', () => {
   test('deny-tool: a vendor-side execution failure maps to the frozen {tool, reason} denial channel', async () => {
     await withScratch(async (scratchDir) => {
       const driver = new AcpDriver(
-        driverOptions(scratchDir, { FAKE_ACP_MODE: 'deny-tool', FAKE_ACP_TOOL: 'edit', FAKE_ACP_INPUT: JSON.stringify({ path: 'x.txt', oldText: 'a', newText: 'b' }) }, []),
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'deny-tool',
+            FAKE_ACP_TOOL: 'edit',
+            FAKE_ACP_INPUT: JSON.stringify({ path: 'x.txt', oldText: 'a', newText: 'b' }),
+          },
+          [],
+        ),
       );
       const result = await driver.run(invocation({ prompt: 'deny-tool run' }));
       // The tool executed (allow-answered) and FAILED vendor-side: the
@@ -1382,7 +1538,9 @@ describe('acp driver specifics (fake ACP server)', () => {
           {
             FAKE_ACP_MODE: 'tool-then-reply',
             FAKE_ACP_TOOL: 'run',
-            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo content-block-marker > run-marker.txt' }),
+            FAKE_ACP_INPUT: JSON.stringify({
+              command: 'echo content-block-marker > run-marker.txt',
+            }),
           },
           [],
         ),
@@ -1392,7 +1550,11 @@ describe('acp driver specifics (fake ACP server)', () => {
       const record = await store.load(result.sessionId as string);
       const toolMessage = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'run');
       expect(toolMessage !== undefined).toBe(true); // the execution was persisted
-      const folded = JSON.parse(toolMessage?.content as string) as { input: unknown; ok: boolean; output: string };
+      const folded = JSON.parse(toolMessage?.content as string) as {
+        input: unknown;
+        ok: boolean;
+        output: string;
+      };
       expect(folded.ok).toBe(true);
       expect(folded.output).toBe('exit 0'); // the block's text — never the empty string the old fold left
     });
@@ -1451,16 +1613,20 @@ describe('acp driver specifics (fake ACP server)', () => {
       const record = await store.load(result.sessionId as string);
       const toolMessage = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'edit');
       expect(toolMessage !== undefined).toBe(true); // the terminal status survived the fold
-      expect((JSON.parse(toolMessage?.content as string) as { ok: boolean; output: string }).output).toBe(
-        '{"error":"permission denied: edit is not allowed"}',
-      );
+      expect(
+        (JSON.parse(toolMessage?.content as string) as { ok: boolean; output: string }).output,
+      ).toBe('{"error":"permission denied: edit is not allowed"}');
     });
   });
 
   test('structured output: a non-JSON reply is dropped to narration, never trusted (strategy §4)', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'prose before json {"answer":' }, []),
+        ...driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: 'prose before json {"answer":' },
+          [],
+        ),
         outputSchema: z.object({ answer: z.string() }).strict(),
       });
       const result = await driver.run(invocation({ prompt: 'lying harness run' }));
@@ -1487,7 +1653,11 @@ describe('acp driver specifics (fake ACP server)', () => {
   test('structured output round-trip through the wire: prompt-directed JSON lands in structuredOutput', async () => {
     await withScratch(async (scratchDir) => {
       const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' }, []),
+        ...driverOptions(
+          scratchDir,
+          { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: '{"answer":"ok"}' },
+          [],
+        ),
         outputSchema: z.object({ answer: z.string() }).strict(),
       });
       const result = await driver.run(invocation({ prompt: 'structured run' }));
@@ -1501,12 +1671,18 @@ describe('acp driver specifics (fake ACP server)', () => {
       const driver = new AcpDriver(
         driverOptions(
           scratchDir,
-          { FAKE_ACP_MODE: 'tool-then-reply', FAKE_ACP_TOOL: 'read', FAKE_ACP_INPUT: JSON.stringify({ path: '../../outside-secret.txt' }) },
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'read',
+            FAKE_ACP_INPUT: JSON.stringify({ path: '../../outside-secret.txt' }),
+          },
           [],
         ),
       );
       const result = await driver.run(invocation({ prompt: 'escape attempt' }));
-      expect(result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape'))).toBe(true);
+      expect(
+        result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape')),
+      ).toBe(true);
     });
   });
 
@@ -1523,8 +1699,12 @@ describe('acp driver specifics (fake ACP server)', () => {
       const record2 = await store.load(run2.sessionId as string);
       expect(record1?.workspace).not.toBe(record2?.workspace);
       // Each run created a FRESH ACP session (never resumed the other's).
-      const id1 = (await readFile(join(record1?.workspace as string, ACP_SESSION_FILE), 'utf8')).trim();
-      const id2 = (await readFile(join(record2?.workspace as string, ACP_SESSION_FILE), 'utf8')).trim();
+      const id1 = (
+        await readFile(join(record1?.workspace as string, ACP_SESSION_FILE), 'utf8')
+      ).trim();
+      const id2 = (
+        await readFile(join(record2?.workspace as string, ACP_SESSION_FILE), 'utf8')
+      ).trim();
       expect(id1).not.toBe(id2);
       // Run 1's prompt never leaked into run 2's record.
       expect(record2?.messages.some((m) => m.content === 'isolation run one')).toBe(false);
@@ -1544,7 +1724,13 @@ describe('acp binary resolution (the §3 which-like fold)', () => {
       seen.push(candidate);
       return true; // every candidate "exists" — the SHAPE of the resolution is what binds
     };
-    const resolved = await resolveAcpCommand(['./bin/acp-server', '--flag'], 'explicit', defaultAcpEndpointTable(), env, probe);
+    const resolved = await resolveAcpCommand(
+      ['./bin/acp-server', '--flag'],
+      'explicit',
+      defaultAcpEndpointTable(),
+      env,
+      probe,
+    );
     // Exactly ONE probe — the caller-cwd-resolved candidate. A driver that
     // misses the path-carrying branch would walk the PATH instead
     // (/cq-tools/./bin/acp-server, /usr/bin/./bin/acp-server, ...).
@@ -1562,7 +1748,13 @@ describe('acp binary resolution (the §3 which-like fold)', () => {
       seen.push(candidate);
       return candidate === join('/usr/bin', 'acp-server');
     };
-    const resolved = await resolveAcpCommand(['acp-server'], 'explicit', defaultAcpEndpointTable(), env, probe);
+    const resolved = await resolveAcpCommand(
+      ['acp-server'],
+      'explicit',
+      defaultAcpEndpointTable(),
+      env,
+      probe,
+    );
     // The extensionless candidates must appear IN PATH ORDER — past the
     // miss, onto the hit — and the hit must win. Asserted as an ordered
     // SUBSEQUENCE of `seen`, not the whole array: on win32 the walk also
@@ -1595,7 +1787,13 @@ describe('acp binary resolution (the §3 which-like fold)', () => {
       seen.push(candidate);
       return candidate === join(resolve('./tools'), 'acp-server');
     };
-    const resolved = await resolveAcpCommand(['acp-server'], 'explicit', defaultAcpEndpointTable(), { PATH: './tools' }, probe);
+    const resolved = await resolveAcpCommand(
+      ['acp-server'],
+      'explicit',
+      defaultAcpEndpointTable(),
+      { PATH: './tools' },
+      probe,
+    );
     // The probe saw the ABSOLUTE candidate (caller-cwd-resolved), never
     // the raw './tools/acp-server' the old walk probed — a relative
     // resolution result would break the moment the spawn switched cwd to

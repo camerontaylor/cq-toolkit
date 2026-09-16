@@ -15,7 +15,15 @@
 // POSIX only: the script's win32 branch wants a .cmd shim; CI is linux.
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncReturns } from 'node:child_process';
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,7 +39,10 @@ let sandbox: string | undefined;
 function makeSandbox(): string {
   const sbx = mkdtempSync(join(tmpdir(), 'ratchet-sandbox-'));
   mkdirSync(join(sbx, 'scripts'), { recursive: true });
-  copyFileSync(join(ROOT, 'scripts/ratchet-typecheck.mjs'), join(sbx, 'scripts/ratchet-typecheck.mjs'));
+  copyFileSync(
+    join(ROOT, 'scripts/ratchet-typecheck.mjs'),
+    join(sbx, 'scripts/ratchet-typecheck.mjs'),
+  );
   mkdirSync(join(sbx, 'baselines'), { recursive: true });
   writeFileSync(
     join(sbx, 'tsconfig.json'),
@@ -52,11 +63,16 @@ function makeSandbox(): string {
 }
 
 function runUpdate(sbx: string): SpawnSyncReturns<string> {
-  return spawnSync(process.execPath, ['scripts/ratchet-typecheck.mjs', '--update'], { cwd: sbx, encoding: 'utf8' });
+  return spawnSync(process.execPath, ['scripts/ratchet-typecheck.mjs', '--update'], {
+    cwd: sbx,
+    encoding: 'utf8',
+  });
 }
 
 function baselineOf(sbx: string): { count: number } {
-  return JSON.parse(readFileSync(join(sbx, 'baselines/typecheck.json'), 'utf8')) as { count: number };
+  return JSON.parse(readFileSync(join(sbx, 'baselines/typecheck.json'), 'utf8')) as {
+    count: number;
+  };
 }
 
 function outputOf(res: SpawnSyncReturns<string>): string {
@@ -78,7 +94,9 @@ describe('ratchet-typecheck --update: the baseline can only tighten', () => {
     const res = runUpdate(sbx);
     expect(res.status, outputOf(res)).toBe(1);
     expect(outputOf(res)).toContain('refuses to raise the baseline');
-    expect(baselineOf(sbx), 'the baseline must survive a refused raise untouched').toEqual({ count: 0 });
+    expect(baselineOf(sbx), 'the baseline must survive a refused raise untouched').toEqual({
+      count: 0,
+    });
   });
 
   it('allows tightening', { timeout: 30_000 }, () => {

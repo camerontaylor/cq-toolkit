@@ -27,9 +27,12 @@ export const LedgerThresholdsOverrideSchema = z
     escalateAt: z.number().int().min(2).optional(),
   })
   .strict()
-  .refine((t) => t.suppressAt === undefined || t.escalateAt === undefined || t.suppressAt < t.escalateAt, {
-    message: 'escalateAt must be greater than suppressAt',
-  });
+  .refine(
+    (t) => t.suppressAt === undefined || t.escalateAt === undefined || t.suppressAt < t.escalateAt,
+    {
+      message: 'escalateAt must be greater than suppressAt',
+    },
+  );
 
 /**
  * Registry-time mirror of {@link LedgerRecordInput}: the full input, and
@@ -76,9 +79,10 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([import('./ledger.js'), import('./store.js')]).then(
         ([m, s]) =>
-          m.makeLedgerRecord((input) =>
-            s.pathLedgerStore(input.root, input.storePath),
-          ) as Op<unknown, unknown>,
+          m.makeLedgerRecord((input) => s.pathLedgerStore(input.root, input.storePath)) as Op<
+            unknown,
+            unknown
+          >,
       ),
   },
   {
@@ -87,9 +91,10 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([import('./ledger.js'), import('./store.js')]).then(
         ([m, s]) =>
-          m.makeLedgerQuery((input) =>
-            s.pathLedgerStore(input.root, input.storePath),
-          ) as Op<unknown, unknown>,
+          m.makeLedgerQuery((input) => s.pathLedgerStore(input.root, input.storePath)) as Op<
+            unknown,
+            unknown
+          >,
       ),
   },
 ];

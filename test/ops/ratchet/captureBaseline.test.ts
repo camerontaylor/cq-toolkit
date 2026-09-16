@@ -37,7 +37,18 @@
 // typecheck-count adapter is used so capture is exercised end-to-end with a
 // production adapter.
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -167,30 +178,28 @@ beforeAll(() => {
     direction: 'lower-is-better',
     // Adapter-owned FIELD ACCESS can also throw: the value getter explodes
     // on access, after the reading passed the typeof guard.
-    extract: () =>
-      {
-        const reading = { unit: 'errors' };
-        Object.defineProperty(reading, 'value', {
-          get() {
-            throw new Error('value getter exploded');
-          },
-        });
-        return reading as unknown as MetricReading;
-      },
+    extract: () => {
+      const reading = { unit: 'errors' };
+      Object.defineProperty(reading, 'value', {
+        get() {
+          throw new Error('value getter exploded');
+        },
+      });
+      return reading as unknown as MetricReading;
+    },
   });
   registerAdapter({
     id: THROWING_UNIT_GETTER_METRIC,
     direction: 'lower-is-better',
-    extract: () =>
-      {
-        const reading = { value: 2 };
-        Object.defineProperty(reading, 'unit', {
-          get() {
-            throw new Error('unit getter exploded');
-          },
-        });
-        return reading as unknown as MetricReading;
-      },
+    extract: () => {
+      const reading = { value: 2 };
+      Object.defineProperty(reading, 'unit', {
+        get() {
+          throw new Error('unit getter exploded');
+        },
+      });
+      return reading as unknown as MetricReading;
+    },
   });
 });
 
@@ -273,9 +282,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3 };
     await capture(captureInput());
     sourceRaw = { count: 5 };
-    await expect(
-      capture(captureInput({ capturedAt: CAPTURED_AT_2 })),
-    ).resolves.toEqual({
+    await expect(capture(captureInput({ capturedAt: CAPTURED_AT_2 }))).resolves.toEqual({
       status: 'ok',
       value: { path: REL, value: 5, previous: 3, lifecycle: 'updated' },
     });
@@ -356,7 +363,12 @@ describe('captureBaseline', () => {
 
   test('a THROWING direction getter fails the capture inside the snapshot containment (review-debt #72)', async () => {
     await expect(
-      capture(captureInput({ metric: THROWING_DIRECTION_GETTER_METRIC, sourceId: THROWING_DIRECTION_GETTER_METRIC })),
+      capture(
+        captureInput({
+          metric: THROWING_DIRECTION_GETTER_METRIC,
+          sourceId: THROWING_DIRECTION_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'failed',
       error: expect.stringMatching(
@@ -368,7 +380,12 @@ describe('captureBaseline', () => {
 
   test('a thrown value whose MESSAGE getter throws maps to unknown error (review-debt #72)', async () => {
     await expect(
-      capture(captureInput({ metric: THROWING_MESSAGE_GETTER_METRIC, sourceId: THROWING_MESSAGE_GETTER_METRIC })),
+      capture(
+        captureInput({
+          metric: THROWING_MESSAGE_GETTER_METRIC,
+          sourceId: THROWING_MESSAGE_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'failed',
       error: expect.stringMatching(
@@ -390,7 +407,9 @@ describe('captureBaseline', () => {
 
   test('a type-violating adapter returning undefined fails as no-summary (no throw)', async () => {
     await expect(
-      capture(captureInput({ metric: UNDEFINED_READING_METRIC, sourceId: UNDEFINED_READING_METRIC })),
+      capture(
+        captureInput({ metric: UNDEFINED_READING_METRIC, sourceId: UNDEFINED_READING_METRIC }),
+      ),
     ).resolves.toEqual({
       status: 'failed',
       error: expect.stringMatching(
@@ -404,7 +423,10 @@ describe('captureBaseline', () => {
   test('a throwing value getter fails as an unusable reading (no rejection, no file)', async () => {
     await expect(
       capture(
-        captureInput({ metric: THROWING_VALUE_GETTER_METRIC, sourceId: THROWING_VALUE_GETTER_METRIC }),
+        captureInput({
+          metric: THROWING_VALUE_GETTER_METRIC,
+          sourceId: THROWING_VALUE_GETTER_METRIC,
+        }),
       ),
     ).resolves.toEqual({
       status: 'failed',
@@ -418,7 +440,10 @@ describe('captureBaseline', () => {
   test('a throwing unit getter fails as an unusable reading (no rejection, no file)', async () => {
     await expect(
       capture(
-        captureInput({ metric: THROWING_UNIT_GETTER_METRIC, sourceId: THROWING_UNIT_GETTER_METRIC }),
+        captureInput({
+          metric: THROWING_UNIT_GETTER_METRIC,
+          sourceId: THROWING_UNIT_GETTER_METRIC,
+        }),
       ),
     ).resolves.toEqual({
       status: 'failed',
@@ -529,7 +554,9 @@ describe('captureBaseline', () => {
     ).resolves.toMatchObject({ status: 'ok' });
     sourceRaw = { count: 2 };
     await expect(
-      capture(captureInput({ target: 'typecheck-nanos', capturedAt: '2026-09-15T10:00:00.123456789Z' })),
+      capture(
+        captureInput({ target: 'typecheck-nanos', capturedAt: '2026-09-15T10:00:00.123456789Z' }),
+      ),
     ).resolves.toMatchObject({ status: 'ok' });
   });
 
@@ -640,7 +667,10 @@ describe('captureBaseline', () => {
         // give up as indeterminate, and the colliding entries stay untouched
         // (cleanup only removes a temp this invocation created).
         for (let c = 3; c <= 7; c++) {
-          await symlink(outsideFile, join(ws, 'baselines', `.${basename(REL)}.${process.pid}.${c}.tmp`));
+          await symlink(
+            outsideFile,
+            join(ws, 'baselines', `.${basename(REL)}.${process.pid}.${c}.tmp`),
+          );
         }
         sourceRaw = { count: 9 };
         await expect(captureFresh(captureInput({ capturedAt: CAPTURED_AT_2 }))).resolves.toEqual({
@@ -747,7 +777,11 @@ describe('captureBaseline', () => {
         /for metric 'unit-shifting' disagrees on unit 'errors' → undefined — incomparable scale — refusing to overwrite/,
       ),
     });
-    expect(parseBaseline(await readFile(join(ws, baselineRelPath('unit-a', UNIT_SHIFTING_METRIC)), 'utf8')).unit).toBe('errors');
+    expect(
+      parseBaseline(
+        await readFile(join(ws, baselineRelPath('unit-a', UNIT_SHIFTING_METRIC)), 'utf8'),
+      ).unit,
+    ).toBe('errors');
   });
 
   test('the unit mismatch is symmetric (none → defined also fails)', async () => {
@@ -835,7 +869,9 @@ describe('captureBaseline', () => {
       sourceRaw = { count: 3 };
       await expect(capture(captureInput())).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\) — refusing/s),
+        error: expect.stringMatching(
+          /does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\) — refusing/s,
+        ),
       });
       await expect(readdir(outside)).resolves.toEqual([]); // nothing written outside
     } finally {
@@ -883,7 +919,9 @@ describe('captureBaseline', () => {
         kept: 0,
         skipped: [],
         unreadable: [],
-        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\)/),
+        error: expect.stringMatching(
+          /does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\)/,
+        ),
       });
       expect(await readFile(join(outside, 'stale.json'), 'utf8')).toBe('precious');
     } finally {
@@ -927,7 +965,9 @@ describe('captureBaseline', () => {
       capture(captureInput({ capturedAt: CAPTURED_AT })),
       capture(captureInput({ capturedAt: CAPTURED_AT })),
     ]);
-    const lifecycles = results.map((r) => (r.status === 'ok' ? r.value.lifecycle : `not-ok:${r.status}`)).sort();
+    const lifecycles = results
+      .map((r) => (r.status === 'ok' ? r.value.lifecycle : `not-ok:${r.status}`))
+      .sort();
     expect(lifecycles).toEqual(['created', 'unchanged']);
     // The persisted evidence parses and matches BOTH reports' value; the
     // 'unchanged' one carried the first's value as `previous`.
@@ -979,7 +1019,9 @@ describe('pruneBaselines', () => {
       skipped: [],
       unreadable: [],
     });
-    await expect(readFile(join(ws, baselineRelPath('old-target', METRIC)), 'utf8')).rejects.toThrow();
+    await expect(
+      readFile(join(ws, baselineRelPath('old-target', METRIC)), 'utf8'),
+    ).rejects.toThrow();
     await expect(readFile(join(ws, REL), 'utf8')).resolves.toBeTruthy();
   });
 
@@ -1133,7 +1175,9 @@ describe('pruneBaselines', () => {
       unreadable: [],
     });
     await expect(readFile(join(ws, REL), 'utf8')).rejects.toThrow();
-    await expect(readFile(join(ws, baselineRelPath('typecheck-v2', METRIC)), 'utf8')).resolves.toBeTruthy();
+    await expect(
+      readFile(join(ws, baselineRelPath('typecheck-v2', METRIC)), 'utf8'),
+    ).resolves.toBeTruthy();
   });
 
   test('delete drill: an empty live list removes every classifiable baseline', async () => {

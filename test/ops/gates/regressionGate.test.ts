@@ -109,7 +109,12 @@ describe('regressionGate decision table', () => {
     const result = await regressionGate({ base: setOf([]), final: setOf([]) });
     expect(result).toEqual({
       status: 'ok',
-      value: { verdict: 'no-regression', novelFailures: [], fixedFailures: [], preExistingCount: 0 },
+      value: {
+        verdict: 'no-regression',
+        novelFailures: [],
+        fixedFailures: [],
+        preExistingCount: 0,
+      },
     });
   });
 
@@ -145,12 +150,40 @@ describe('regressionGate decision table', () => {
 
   test('identical location-less failures (same normalized messages) → no-regression', async () => {
     const failures: CheckFailure[] = [
-      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite > is  ok', severity: 'error' },
-      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite > handles edge cases', severity: 'error' },
+      {
+        file: '/repo/src/a.test.ts',
+        line: null,
+        column: null,
+        ruleId: null,
+        message: 'suite > is  ok',
+        severity: 'error',
+      },
+      {
+        file: '/repo/src/a.test.ts',
+        line: null,
+        column: null,
+        ruleId: null,
+        message: 'suite > handles edge cases',
+        severity: 'error',
+      },
     ];
     const driftedMessages: CheckFailure[] = [
-      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite >   is   ok', severity: 'error' },
-      { file: '/repo/src/a.test.ts', line: null, column: null, ruleId: null, message: 'suite > handles edge cases', severity: 'error' },
+      {
+        file: '/repo/src/a.test.ts',
+        line: null,
+        column: null,
+        ruleId: null,
+        message: 'suite >   is   ok',
+        severity: 'error',
+      },
+      {
+        file: '/repo/src/a.test.ts',
+        line: null,
+        column: null,
+        ruleId: null,
+        message: 'suite > handles edge cases',
+        severity: 'error',
+      },
     ];
     const result = await regressionGate({
       base: { tool: 'vitest', failures, exitCode: 1 },
@@ -378,8 +411,15 @@ describe('regressionGate × real vitest fixture (adapter → gate integration)',
   // pins adapter→gate shape compatibility against drift. The fixture's
   // failure is location-less (line null), so the content-matching regime is
   // exercised end to end.
-  const stdout = readFileSync(new URL('../../fixtures/check-outputs/vitest.json', import.meta.url), 'utf8');
-  const parsed = parseCheckOutput(adapterByName('vitest-json'), { stdout, stderr: '', exitCode: 1 });
+  const stdout = readFileSync(
+    new URL('../../fixtures/check-outputs/vitest.json', import.meta.url),
+    'utf8',
+  );
+  const parsed = parseCheckOutput(adapterByName('vitest-json'), {
+    stdout,
+    stderr: '',
+    exitCode: 1,
+  });
   if (parsed.verdict !== 'parsed') {
     throw new Error('the committed vitest fixture must parse');
   }

@@ -32,14 +32,41 @@ describe('coverage', () => {
 
   const cases: Array<[string, unknown, MetricReading | null]> = [
     // [label, raw, expected reading (null = extract returns null)]
-    ['full summary carries detail', { total: { lines: { pct: 85.5 }, branches: { pct: 70 }, functions: { pct: 90 }, statements: { pct: 84 } } }, { value: 85.5, unit: 'pct', detail: { branches: 70, functions: 90, statements: 84 } }],
+    [
+      'full summary carries detail',
+      {
+        total: {
+          lines: { pct: 85.5 },
+          branches: { pct: 70 },
+          functions: { pct: 90 },
+          statements: { pct: 84 },
+        },
+      },
+      { value: 85.5, unit: 'pct', detail: { branches: 70, functions: 90, statements: 84 } },
+    ],
     ['lines only → no detail key', { total: { lines: { pct: 42 } } }, { value: 42, unit: 'pct' }],
     ['boundary 0 is valid', { total: { lines: { pct: 0 } } }, { value: 0, unit: 'pct' }],
     ['boundary 100 is valid', { total: { lines: { pct: 100 } } }, { value: 100, unit: 'pct' }],
-    ['non-numeric detail pct is dropped, not fatal', { total: { lines: { pct: 50 }, branches: { pct: 'many' } } }, { value: 50, unit: 'pct' }],
-    ['detail pct above 100 is dropped, not fatal', { total: { lines: { pct: 50 }, branches: { pct: 150 } } }, { value: 50, unit: 'pct' }],
-    ['negative detail pct is dropped, not fatal', { total: { lines: { pct: 50 }, functions: { pct: -5 } } }, { value: 50, unit: 'pct' }],
-    ['partial detail: numeric siblings only', { total: { lines: { pct: 60 }, functions: { pct: 77.7 } } }, { value: 60, unit: 'pct', detail: { functions: 77.7 } }],
+    [
+      'non-numeric detail pct is dropped, not fatal',
+      { total: { lines: { pct: 50 }, branches: { pct: 'many' } } },
+      { value: 50, unit: 'pct' },
+    ],
+    [
+      'detail pct above 100 is dropped, not fatal',
+      { total: { lines: { pct: 50 }, branches: { pct: 150 } } },
+      { value: 50, unit: 'pct' },
+    ],
+    [
+      'negative detail pct is dropped, not fatal',
+      { total: { lines: { pct: 50 }, functions: { pct: -5 } } },
+      { value: 50, unit: 'pct' },
+    ],
+    [
+      'partial detail: numeric siblings only',
+      { total: { lines: { pct: 60 }, functions: { pct: 77.7 } } },
+      { value: 60, unit: 'pct', detail: { functions: 77.7 } },
+    ],
     ['above 100', { total: { lines: { pct: 100.5 } } }, null],
     ['negative', { total: { lines: { pct: -1 } } }, null],
     ['pct non-numeric', { total: { lines: { pct: '85' } } }, null],
@@ -73,25 +100,69 @@ describe('complexity', () => {
 
   const cases: Array<[string, unknown, MetricReading | null]> = [
     // [label, raw, expected reading (null = extract returns null)]
-    ['pre-averaged summary rounds half-up to 2 decimals', { averageComplexity: 3.7 }, { value: 3.7, unit: 'avg-cx' }],
-    ['direct: binary-unrepresentable half 1.005 rounds half-up', { averageComplexity: 1.005 }, { value: 1.01, unit: 'avg-cx' }],
-    ['direct: classic 2.675 rounds half-up', { averageComplexity: 2.675 }, { value: 2.68, unit: 'avg-cx' }],
+    [
+      'pre-averaged summary rounds half-up to 2 decimals',
+      { averageComplexity: 3.7 },
+      { value: 3.7, unit: 'avg-cx' },
+    ],
+    [
+      'direct: binary-unrepresentable half 1.005 rounds half-up',
+      { averageComplexity: 1.005 },
+      { value: 1.01, unit: 'avg-cx' },
+    ],
+    [
+      'direct: classic 2.675 rounds half-up',
+      { averageComplexity: 2.675 },
+      { value: 2.68, unit: 'avg-cx' },
+    ],
     ['pre-averaged zero', { averageComplexity: 0 }, { value: 0, unit: 'avg-cx' }],
     ['pre-averaged negative', { averageComplexity: -1 }, null],
-    ['direct: genuinely-below-half at large magnitude stays down', { averageComplexity: 1000000.004999999 }, { value: 1000000, unit: 'avg-cx' }],
+    [
+      'direct: genuinely-below-half at large magnitude stays down',
+      { averageComplexity: 1000000.004999999 },
+      { value: 1000000, unit: 'avg-cx' },
+    ],
     ['pre-averaged Infinity', { averageComplexity: Number.POSITIVE_INFINITY }, null],
     ['pre-averaged NaN', { averageComplexity: Number.NaN }, null],
     ['direct: 1e307 overflows the *100 scaling to non-finite', { averageComplexity: 1e307 }, null],
     ['records: clean mean', [{ Complexity: 1 }, { Complexity: 2 }], { value: 1.5, unit: 'avg-cx' }],
-    ['records: repeating decimal rounds down', [{ Complexity: 1 }, { Complexity: 1 }, { Complexity: 2 }], { value: 1.33, unit: 'avg-cx' }],
-    ['records: repeating decimal rounds up', [{ Complexity: 1 }, { Complexity: 2 }, { Complexity: 2 }], { value: 1.67, unit: 'avg-cx' }],
-    ['records: exact-binary half rounds half-up', [{ Complexity: 0.125 }], { value: 0.13, unit: 'avg-cx' }],
+    [
+      'records: repeating decimal rounds down',
+      [{ Complexity: 1 }, { Complexity: 1 }, { Complexity: 2 }],
+      { value: 1.33, unit: 'avg-cx' },
+    ],
+    [
+      'records: repeating decimal rounds up',
+      [{ Complexity: 1 }, { Complexity: 2 }, { Complexity: 2 }],
+      { value: 1.67, unit: 'avg-cx' },
+    ],
+    [
+      'records: exact-binary half rounds half-up',
+      [{ Complexity: 0.125 }],
+      { value: 0.13, unit: 'avg-cx' },
+    ],
     ['records: 201/200 integer-domain half-up', records201of200, { value: 1.01, unit: 'avg-cx' }],
-    ['records: decimal half rounds half-up through the ratio', [{ Complexity: 1.005 }], { value: 1.01, unit: 'avg-cx' }],
-    ['records: true just-below-half stays down', [{ Complexity: 1.00499 }], { value: 1, unit: 'avg-cx' }],
-    ['records: mixed decimals (2.675 + 1.005, mean 1.84)', [{ Complexity: 2.675 }, { Complexity: 1.005 }], { value: 1.84, unit: 'avg-cx' }],
+    [
+      'records: decimal half rounds half-up through the ratio',
+      [{ Complexity: 1.005 }],
+      { value: 1.01, unit: 'avg-cx' },
+    ],
+    [
+      'records: true just-below-half stays down',
+      [{ Complexity: 1.00499 }],
+      { value: 1, unit: 'avg-cx' },
+    ],
+    [
+      'records: mixed decimals (2.675 + 1.005, mean 1.84)',
+      [{ Complexity: 2.675 }, { Complexity: 1.005 }],
+      { value: 1.84, unit: 'avg-cx' },
+    ],
     ['records: single value', [{ Complexity: 4 }], { value: 4, unit: 'avg-cx' }],
-    ['records: negative record rejected before aggregation', [{ Complexity: -1 }, { Complexity: 2 }], null],
+    [
+      'records: negative record rejected before aggregation',
+      [{ Complexity: -1 }, { Complexity: 2 }],
+      null,
+    ],
     ['empty array', [], null],
     ['record missing Complexity', [{ Complexity: 1 }, {}], null],
     ['record with non-numeric Complexity', [{ Complexity: 'high' }], null],

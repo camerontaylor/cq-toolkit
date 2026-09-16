@@ -111,11 +111,13 @@ const execAsync = promisify(exec);
 
 export const ReadToolInputSchema = z.object({ path: z.string().min(1) }).strict();
 
-export const EditToolInputSchema = z.object({
-  path: z.string().min(1),
-  oldText: z.string().min(1),
-  newText: z.string(),
-}).strict();
+export const EditToolInputSchema = z
+  .object({
+    path: z.string().min(1),
+    oldText: z.string().min(1),
+    newText: z.string(),
+  })
+  .strict();
 
 export const RunToolInputSchema = z.object({ command: z.string().min(1) }).strict();
 
@@ -232,9 +234,14 @@ export function compileCommandPatterns(patterns: readonly string[]): CommandPatt
     if (raw.startsWith('re:')) {
       return { kind: 'regex', re: new RegExp(raw.slice('re:'.length)) };
     }
-    const tokens = raw.trim().split(/\s+/).filter((token) => token !== '');
+    const tokens = raw
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token !== '');
     if (tokens.length === 0) {
-      throw new Error(`harness: empty run command pattern '${raw}' (empty patterns would allow every command)`);
+      throw new Error(
+        `harness: empty run command pattern '${raw}' (empty patterns would allow every command)`,
+      );
     }
     return { kind: 'tokens', tokens };
   });
@@ -299,7 +306,10 @@ function errorCode(err: unknown): string | undefined {
 }
 
 /** Head-truncate to the configured cap; omitted cap = uncapped (explicit config choice). */
-function capOutput(text: string, maxChars: number | undefined): { output: string; truncated: boolean } {
+function capOutput(
+  text: string,
+  maxChars: number | undefined,
+): { output: string; truncated: boolean } {
   if (maxChars === undefined || text.length <= maxChars) {
     return { output: text, truncated: false };
   }
@@ -437,7 +447,10 @@ export function buildTools(
         }
         const effective = await resolveRealInside(abs);
         if (effective === undefined) {
-          return deny('read', `path escape: '${parsed.data.path}' escapes the workspace through a symlink`);
+          return deny(
+            'read',
+            `path escape: '${parsed.data.path}' escapes the workspace through a symlink`,
+          );
         }
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
@@ -507,7 +520,10 @@ export function buildTools(
         } catch (err) {
           return deny('edit', `edit failed: ${messageOf(err)}`);
         }
-        const capped = capOutput(`edited '${relOf(abs)}': replaced 1 occurrence`, fileCfg.maxOutputChars);
+        const capped = capOutput(
+          `edited '${relOf(abs)}': replaced 1 occurrence`,
+          fileCfg.maxOutputChars,
+        );
         return { ok: true, ...capped };
       },
     });
@@ -584,11 +600,17 @@ export function buildTools(
           const stdout = e.stdout ?? '';
           const stderr = e.stderr ?? '';
           if (typeof e.code === 'number') {
-            const capped = capOutput(formatOutcome(e.code, false, stdout, stderr), runCfg.maxOutputChars);
+            const capped = capOutput(
+              formatOutcome(e.code, false, stdout, stderr),
+              runCfg.maxOutputChars,
+            );
             return { ok: true, exitCode: e.code, killed: false, ...capped };
           }
           if (e.killed === true) {
-            const capped = capOutput(formatOutcome(null, true, stdout, stderr), runCfg.maxOutputChars);
+            const capped = capOutput(
+              formatOutcome(null, true, stdout, stderr),
+              runCfg.maxOutputChars,
+            );
             return { ok: true, exitCode: null, killed: true, ...capped };
           }
           return deny('run', `run failed: ${messageOf(err)}`);

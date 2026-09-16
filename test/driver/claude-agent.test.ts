@@ -47,8 +47,15 @@ import {
   stopReasonOf,
   usageFromAgent,
 } from '../../src/driver/claude-agent/index.js';
-import type { ClaudeAgentDriverOptions, StopReasonInputs } from '../../src/driver/claude-agent/index.js';
-import { EndpointTableSchema, defaultEndpointTable, resolveEndpoint } from '../../src/driver/claude-agent/routing.js';
+import type {
+  ClaudeAgentDriverOptions,
+  StopReasonInputs,
+} from '../../src/driver/claude-agent/index.js';
+import {
+  EndpointTableSchema,
+  defaultEndpointTable,
+  resolveEndpoint,
+} from '../../src/driver/claude-agent/routing.js';
 import type { EndpointTable } from '../../src/driver/claude-agent/routing.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
@@ -72,7 +79,10 @@ interface MockSdkTool {
   name: string;
   description: string;
   inputSchema: unknown;
-  handler: (args: unknown, extra: unknown) => Promise<{ content?: Array<{ type: string; text?: string }>; isError?: boolean }>;
+  handler: (
+    args: unknown,
+    extra: unknown,
+  ) => Promise<{ content?: Array<{ type: string; text?: string }>; isError?: boolean }>;
 }
 
 /** One recorded query call: the exact prompt + options the driver handed over. */
@@ -94,7 +104,10 @@ function abortError(): Error {
 }
 
 /** The structured_output the mock reports when the driver sent an outputFormat. */
-function structuredOutputOf(options: Record<string, unknown>, text: string): { structured_output?: unknown } {
+function structuredOutputOf(
+  options: Record<string, unknown>,
+  text: string,
+): { structured_output?: unknown } {
   if (options['outputFormat'] === undefined) return {};
   try {
     return { structured_output: JSON.parse(text) as unknown };
@@ -142,13 +155,16 @@ async function* runScriptedQuery(
     });
     return; // unreachable: the abort rejection settles the query
   }
-  const permissionDenials: Array<{ tool_name: string; tool_use_id: string; tool_input: unknown }> = [];
+  const permissionDenials: Array<{ tool_name: string; tool_use_id: string; tool_input: unknown }> =
+    [];
   if (directive?.kind === 'tool-then-reply') {
     // The governed-surface gate, agent-style: an un-registered tool is
     // refused by the permission gate (never executed) and recorded on the
     // result's permission_denials — exactly what the real permissionMode
     // 'default' headless posture produces.
-    const server = (options['mcpServers'] as Record<string, { tools?: MockSdkTool[] }> | undefined)?.['cq-harness'];
+    const server = (
+      options['mcpServers'] as Record<string, { tools?: MockSdkTool[] }> | undefined
+    )?.['cq-harness'];
     const toolRecord = server?.tools?.find((t) => t.name === directive.tool);
     if (toolRecord === undefined) {
       permissionDenials.push({
@@ -162,7 +178,14 @@ async function* runScriptedQuery(
         session_id: sessionId,
         message: {
           model,
-          content: [{ type: 'tool_use', id: 'mock-use-1', name: `mcp__cq-harness__${directive.tool}`, input: directive.input }],
+          content: [
+            {
+              type: 'tool_use',
+              id: 'mock-use-1',
+              name: `mcp__cq-harness__${directive.tool}`,
+              input: directive.input,
+            },
+          ],
           usage: AGENT_USAGE,
         },
       };
@@ -206,13 +229,22 @@ async function* runScriptedQuery(
 
 /** The adapter half of the mock module (tool + server), shared by inline modules. */
 const mockAdapters = {
-  tool: (name: string, description: string, inputSchema: unknown, handler: MockSdkTool['handler']): MockSdkTool => ({
+  tool: (
+    name: string,
+    description: string,
+    inputSchema: unknown,
+    handler: MockSdkTool['handler'],
+  ): MockSdkTool => ({
     name,
     description,
     inputSchema,
     handler,
   }),
-  createSdkMcpServer: (opts: { name: string; version?: string; tools?: MockSdkTool[] }): Record<string, unknown> => ({
+  createSdkMcpServer: (opts: {
+    name: string;
+    version?: string;
+    tools?: MockSdkTool[];
+  }): Record<string, unknown> => ({
     type: 'sdk-mcp',
     ...opts,
   }),
@@ -227,8 +259,13 @@ function mockSdkModule(script: {
 }): Record<string, unknown> {
   return {
     ...mockAdapters,
-    query: ({ prompt, options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
-      runScriptedQuery(script, prompt, options),
+    query: ({
+      prompt,
+      options,
+    }: {
+      prompt: string;
+      options: Record<string, unknown>;
+    }): AsyncGenerator<unknown, void> => runScriptedQuery(script, prompt, options),
   };
 }
 
@@ -292,7 +329,9 @@ function makeDriver(spec: ConformanceSpec): ClaudeAgentDriver {
     ...(spec.pricedModel !== undefined
       ? {
           pricing: (modelSpec: { provider: string; model: string }) =>
-            modelSpec.provider === spec.pricedModel?.provider ? { input: 3, output: 15 } : undefined,
+            modelSpec.provider === spec.pricedModel?.provider
+              ? { input: 3, output: 15 }
+              : undefined,
         }
       : {}),
     sessionsDir: join(spec.scratchDir, SESSIONS_DIR),
@@ -375,7 +414,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         sessionsDir,
       });
       await expect(driver.run(invocation())).rejects.toThrow(/missing the driven surface/);
-      await expect(readdir(sessionsDir).catch((err: NodeJS.ErrnoException) => err)).resolves.toMatchObject({
+      await expect(
+        readdir(sessionsDir).catch((err: NodeJS.ErrnoException) => err),
+      ).resolves.toMatchObject({
         code: 'ENOENT',
       });
     } finally {
@@ -390,7 +431,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       await expect(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'm' } })),
       ).rejects.toThrow(/unknown provider 'nope'/);
-      await expect(readdir(join(scratchDir, SESSIONS_DIR)).catch((err: NodeJS.ErrnoException) => err)).resolves.toMatchObject({
+      await expect(
+        readdir(join(scratchDir, SESSIONS_DIR)).catch((err: NodeJS.ErrnoException) => err),
+      ).resolves.toMatchObject({
         code: 'ENOENT',
       });
     } finally {
@@ -432,7 +475,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         directive: { kind: 'reply', text: 'ok' },
       });
       const result = await driver.run(
-        invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: 'any-gateway-id-at-all' } }),
+        invocation({
+          modelSpec: { provider: CONFORMANCE_PROVIDER, model: 'any-gateway-id-at-all' },
+        }),
       );
       expect(result.stopReason).toBe('complete');
       expect(optionsOf(calls)['model']).toBe('any-gateway-id-at-all');
@@ -467,7 +512,10 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         directive: { kind: 'reply', text: 'ok' },
       });
       await driver.run(
-        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' }, sandboxPolicy: { level: 'workspace-write' } }),
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          sandboxPolicy: { level: 'workspace-write' },
+        }),
       );
       const options = optionsOf(calls);
       const env = options['env'] as Record<string, string | undefined>;
@@ -478,7 +526,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       expect(options['tools']).toEqual([]);
       expect(options['allowedTools']).toEqual(['mcp__cq-harness__read']);
       expect(options['permissionMode']).toBe('default');
-      const server = (options['mcpServers'] as Record<string, { tools: Array<{ name: string }> }>)['cq-harness'];
+      const server = (options['mcpServers'] as Record<string, { tools: Array<{ name: string }> }>)[
+        'cq-harness'
+      ];
       expect(server.tools.map((t) => t.name)).toEqual(['read']);
       // workspace-write sandbox → the defense-in-depth option.
       expect(options['sandbox']).toEqual({ enabled: true, failIfUnavailable: false });
@@ -491,7 +541,12 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const { driver, calls } = driverWithCalls(scratchDir, {
-        directive: { kind: 'tool-then-reply', tool: 'run', input: { command: 'echo x' }, reply: 'unused' },
+        directive: {
+          kind: 'tool-then-reply',
+          tool: 'run',
+          input: { command: 'echo x' },
+          reply: 'unused',
+        },
       });
       const result = await driver.run(
         invocation({ toolPolicy: { allow: [], mode: 'none' }, sandboxPolicy: { level: 'none' } }),
@@ -510,14 +565,22 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('resume: the STORE sidecar agent session id rides Options.resume; the same workspace continues (#26)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
-      const { driver, calls } = driverWithCalls(scratchDir, { directive: { kind: 'reply', text: 'run one' } });
+      const { driver, calls } = driverWithCalls(scratchDir, {
+        directive: { kind: 'reply', text: 'run one' },
+      });
       const run1 = await driver.run(invocation({ prompt: 'resume run one' }));
-      const record1 = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(run1.sessionId as string);
+      const record1 = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(
+        run1.sessionId as string,
+      );
       expect(record1).toBeDefined();
       // The agent's session id, sidecar-written BESIDE the session records
       // keyed by sessionId (issue #26 design (b)) — NOT in the model-visible
       // workspace, where the earlier placement was a tamper vector.
-      const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${AGENT_SESSION_FILE}`);
+      const sidecarPath = join(
+        scratchDir,
+        SESSIONS_DIR,
+        `${run1.sessionId as string}${AGENT_SESSION_FILE}`,
+      );
       await expect(readFile(sidecarPath, 'utf8')).resolves.toBe('agent-cli-1\n');
       // 0o600 — the sidecar is evidence like the records it sits beside,
       // never world-readable (review thread: mode was umask-default 0o666).
@@ -527,7 +590,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         expect(files.filter((f) => f.endsWith(AGENT_SESSION_FILE))).toEqual([]);
       };
       await noSidecarInWorkspace();
-      const run2 = await driver.run(invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }));
+      const run2 = await driver.run(
+        invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.sessionId).toBe(run1.sessionId);
       expect(optionsOf(calls, 1)['resume']).toBe('agent-cli-1');
       expect(optionsOf(calls, 1)['cwd']).toBe(optionsOf(calls, 0)['cwd']); // the SAME workspace
@@ -552,9 +617,13 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // First run: a schema-valid payload — the happy path lands it.
       const ok = await new ClaudeAgentDriver({
         ...base,
-        sdkLoader: async () => mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
       }).run(invocation({ prompt: 'structured ok' }));
-      const sent = optionsOf(calls, 0)['outputFormat'] as { type: string; schema: Record<string, unknown> };
+      const sent = optionsOf(calls, 0)['outputFormat'] as {
+        type: string;
+        schema: Record<string, unknown>;
+      };
       expect(sent.type).toBe('json_schema');
       expect(sent.schema).toEqual(z.toJSONSchema(schema));
       expect(ok.structuredOutput).toEqual({ answer: 'ok' });
@@ -562,7 +631,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // Second run: a payload that fails the schema is dropped, never trusted.
       const bad = await new ClaudeAgentDriver({
         ...base,
-        sdkLoader: async () => mockSdkModule({ directive: { kind: 'reply', text: '{"nope":true}' }, calls }),
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: '{"nope":true}' }, calls }),
       }).run(invocation({ prompt: 'structured bad' }));
       expect(bad.structuredOutput).toBeUndefined();
       expect(bad.stopReason).toBe('complete');
@@ -575,7 +645,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const priced = new ClaudeAgentDriver({
-        sdkLoader: async () => mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
         endpointTable: conformanceEndpointTable(),
         pricing: () => ({ input: 3, output: 15 }),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
@@ -587,7 +658,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       expect(result.costBasis).toBe('modeled');
 
       const unpriced = new ClaudeAgentDriver({
-        sdkLoader: async () => mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
         endpointTable: conformanceEndpointTable(),
         pricing: () => undefined, // the map does not know the model
         sessionsDir: join(scratchDir, SESSIONS_DIR),
@@ -630,7 +702,12 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
               calls.push({ prompt: 'n/a', options });
               yield {
@@ -662,9 +739,15 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const { driver, calls } = driverWithCalls(scratchDir);
-      await expect(driver.run(invocation({ budget: { maxTokens: 0 } }))).rejects.toThrow(/maxTokens/);
-      await expect(driver.run(invocation({ budget: { maxTokens: -5 } }))).rejects.toThrow(/maxTokens/);
-      await expect(driver.run(invocation({ budget: { maxTokens: Number.NaN } }))).rejects.toThrow(/maxTokens/);
+      await expect(driver.run(invocation({ budget: { maxTokens: 0 } }))).rejects.toThrow(
+        /maxTokens/,
+      );
+      await expect(driver.run(invocation({ budget: { maxTokens: -5 } }))).rejects.toThrow(
+        /maxTokens/,
+      );
+      await expect(driver.run(invocation({ budget: { maxTokens: Number.NaN } }))).rejects.toThrow(
+        /maxTokens/,
+      );
       expect(calls).toEqual([]); // never dispatched
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
@@ -683,9 +766,15 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
-              const signal = (options['abortController'] as { signal?: AbortSignal } | undefined)?.signal;
+              const signal = (options['abortController'] as { signal?: AbortSignal } | undefined)
+                ?.signal;
               if (signal !== undefined) {
                 await new Promise<void>((resolve) => {
                   if (signal.aborted) resolve();
@@ -693,11 +782,20 @@ describe('claude-agent driver specifics (mock sdk)', () => {
                 });
                 await new Promise((resolve) => setTimeout(resolve, 10)); // a tick past the abort
               }
-              yield { type: 'system', subtype: 'init', session_id: 'agent-cli-clean', model: options['model'] };
+              yield {
+                type: 'system',
+                subtype: 'init',
+                session_id: 'agent-cli-clean',
+                model: options['model'],
+              };
               yield {
                 type: 'assistant',
                 session_id: 'agent-cli-clean',
-                message: { model: options['model'], content: [{ type: 'text', text: 'settled cleanly' }], usage: AGENT_USAGE },
+                message: {
+                  model: options['model'],
+                  content: [{ type: 'text', text: 'settled cleanly' }],
+                  usage: AGENT_USAGE,
+                },
               };
               yield {
                 type: 'result',
@@ -742,7 +840,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         // The price map knows ONLY the served id — pricing the REQUESTED id
         // would return undefined and the verdict would carry no cost.
         pricing: (modelSpec) =>
-          modelSpec.model === 'gateway-default-served-instead' ? { input: 3, output: 15 } : undefined,
+          modelSpec.model === 'gateway-default-served-instead'
+            ? { input: 3, output: 15 }
+            : undefined,
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
@@ -768,19 +868,43 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
               const sessionId = 'agent-cli-userframe';
               const model = options['model'] as string;
               yield { type: 'system', subtype: 'init', session_id: sessionId, model };
-              const server = (options['mcpServers'] as Record<string, { tools?: Array<{ name: string; handler: (args: unknown, extra: unknown) => Promise<unknown> }> }> | undefined)?.['cq-harness'];
+              const server = (
+                options['mcpServers'] as
+                  | Record<
+                      string,
+                      {
+                        tools?: Array<{
+                          name: string;
+                          handler: (args: unknown, extra: unknown) => Promise<unknown>;
+                        }>;
+                      }
+                    >
+                  | undefined
+              )?.['cq-harness'];
               const toolRecord = server?.tools?.find((t) => t.name === 'read');
               yield {
                 type: 'assistant',
                 session_id: sessionId,
                 message: {
                   model,
-                  content: [{ type: 'tool_use', id: 'u1', name: 'mcp__cq-harness__read', input: { path: 'absent.txt' } }],
+                  content: [
+                    {
+                      type: 'tool_use',
+                      id: 'u1',
+                      name: 'mcp__cq-harness__read',
+                      input: { path: 'absent.txt' },
+                    },
+                  ],
                   usage: AGENT_USAGE,
                 },
               };
@@ -791,7 +915,13 @@ describe('claude-agent driver specifics (mock sdk)', () => {
                 session_id: sessionId,
                 message: {
                   role: 'user',
-                  content: [{ type: 'tool_result', tool_use_id: 'u1', content: [{ type: 'text', text: 'file body' }] }],
+                  content: [
+                    {
+                      type: 'tool_result',
+                      tool_use_id: 'u1',
+                      content: [{ type: 'text', text: 'file body' }],
+                    },
+                  ],
                 },
               };
               yield {
@@ -824,13 +954,13 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       expect(record).toBeDefined();
       // The tool outcome IS recorded — in OUR vocabulary, at the execute
       // boundary (the read executed and was denied on the merits).
-      expect(
-        record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read'),
-      ).toBe(true);
+      expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
       // The user frame did NOT become narration: no narration message at
       // all (every frame in this stream is folded), hence no raw
       // vendor 'tool_result' JSON in persisted session data.
-      const narration = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'agent-narration');
+      const narration = record?.messages.find(
+        (m) => m.role === 'tool' && m.toolName === 'agent-narration',
+      );
       expect(narration).toBeUndefined();
       expect(
         record?.messages.some((m) => m.role === 'tool' && m.content.includes('tool_result')),
@@ -847,7 +977,12 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
               const sessionId = 'agent-cli-usertext';
               const model = options['model'] as string;
@@ -884,7 +1019,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
       const record = await store.load(result.sessionId as string);
       expect(record).toBeDefined();
-      const narration = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'agent-narration');
+      const narration = record?.messages.find(
+        (m) => m.role === 'tool' && m.toolName === 'agent-narration',
+      );
       expect(narration).toBeDefined(); // the unusual frame is preserved as evidence
       expect(narration?.content).toContain(unusualText); // our vocabulary: the text is IN the narration
     } finally {
@@ -898,7 +1035,12 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: ({ options }: { prompt: string; options: Record<string, unknown> }): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
               const sessionId = 'agent-cli-userjunk';
               const model = options['model'] as string;
@@ -939,15 +1081,16 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   });
 
   test('endpoint lookup rejects prototype keys — constructor/toString are not providers', () => {
-    expect(() => resolveEndpoint({ provider: 'constructor', model: 'm' }, defaultEndpointTable())).toThrow(
-      /unknown provider 'constructor'/,
-    );
-    expect(() => resolveEndpoint({ provider: 'toString', model: 'm' }, defaultEndpointTable())).toThrow(
-      /unknown provider 'toString'/,
-    );
+    expect(() =>
+      resolveEndpoint({ provider: 'constructor', model: 'm' }, defaultEndpointTable()),
+    ).toThrow(/unknown provider 'constructor'/);
+    expect(() =>
+      resolveEndpoint({ provider: 'toString', model: 'm' }, defaultEndpointTable()),
+    ).toThrow(/unknown provider 'toString'/);
   });
 
-  test('unknown sessionRef throws pre-dispatch — never a fake resume', async () => {    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+  test('unknown sessionRef throws pre-dispatch — never a fake resume', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
       const { driver, calls } = driverWithCalls(scratchDir);
       await expect(driver.run(invocation({ sessionRef: 'ses-does-not-exist' }))).rejects.toThrow(
@@ -968,10 +1111,35 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       ...over,
     });
     // 1. abort dominates every other condition.
-    expect(stopReasonOf(inputs({ aborted: true, maxTokens: 1, usage: { input: 9, output: 0, cacheRead: 0, cacheWrite: 0 }, resultStatus: 'error' }))).toBe('aborted');
+    expect(
+      stopReasonOf(
+        inputs({
+          aborted: true,
+          maxTokens: 1,
+          usage: { input: 9, output: 0, cacheRead: 0, cacheWrite: 0 },
+          resultStatus: 'error',
+        }),
+      ),
+    ).toBe('aborted');
     // 2. the token budget (folded usage >= maxTokens) trips before statuses.
-    expect(stopReasonOf(inputs({ maxTokens: 10, usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 }, resultStatus: 'success' }))).toBe('budget');
-    expect(stopReasonOf(inputs({ maxTokens: 10, usage: { input: 4, output: 4, cacheRead: 1, cacheWrite: 1, reasoning: 2 }, resultStatus: 'error' }))).toBe('budget');
+    expect(
+      stopReasonOf(
+        inputs({
+          maxTokens: 10,
+          usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0 },
+          resultStatus: 'success',
+        }),
+      ),
+    ).toBe('budget');
+    expect(
+      stopReasonOf(
+        inputs({
+          maxTokens: 10,
+          usage: { input: 4, output: 4, cacheRead: 1, cacheWrite: 1, reasoning: 2 },
+          resultStatus: 'error',
+        }),
+      ),
+    ).toBe('budget');
     // 3. the SDK's own caps are budget stops (error_max_turns / error_max_budget_usd).
     expect(stopReasonOf(inputs({ resultStatus: 'cap' }))).toBe('budget');
     // 4. success (is_error ≠ true) is the only complete.
@@ -988,7 +1156,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     expect(resultStatusOf({ subtype: 'error_max_turns', is_error: true })).toBe('cap');
     expect(resultStatusOf({ subtype: 'error_max_budget_usd', is_error: true })).toBe('cap');
     expect(resultStatusOf({ subtype: 'error_during_execution', is_error: true })).toBe('error');
-    expect(resultStatusOf({ subtype: 'error_max_structured_output_retries', is_error: true })).toBe('error');
+    expect(resultStatusOf({ subtype: 'error_max_structured_output_retries', is_error: true })).toBe(
+      'error',
+    );
     expect(resultStatusOf({ subtype: 'something-new' })).toBe('error'); // unknown → not a success
   });
 
@@ -1057,7 +1227,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
       });
-      const result = await driver.run(invocation({ prompt: 'lying usage run', budget: { maxTokens: 1000 } }));
+      const result = await driver.run(
+        invocation({ prompt: 'lying usage run', budget: { maxTokens: 1000 } }),
+      );
       // The tightened fold: the negative field → 0, so the total is 150,000
       // ≥ 1000 — the budget verdict, not a silent bypass.
       expect(result.stopReason).toBe('budget');
@@ -1074,7 +1246,8 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       // reports thinkingTokens: 2. With the old double-count (152 + 2 = 154)
       // a cap of 153 would misclassify 'budget'; the true total is below it.
       const driver = new ClaudeAgentDriver({
-        sdkLoader: async () => mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: 'ok' }, calls: [] }),
         endpointTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
@@ -1093,8 +1266,14 @@ describe('claude-agent driver specifics (mock sdk)', () => {
   test('pure helpers: allowedToolNames and sandboxOption', () => {
     expect(allowedToolNames(['read', 'edit', 'run'], { allow: [], mode: 'none' })).toEqual([]);
     expect(allowedToolNames(['read', 'edit', 'run'], { allow: [] })).toEqual([]); // default reading: allowlist
-    expect(allowedToolNames(['read', 'edit', 'run'], { allow: ['run'], mode: 'allowlist' })).toEqual(['run']);
-    expect(allowedToolNames(['read', 'edit', 'run'], { allow: [], mode: 'unrestricted' })).toEqual(['read', 'edit', 'run']);
+    expect(
+      allowedToolNames(['read', 'edit', 'run'], { allow: ['run'], mode: 'allowlist' }),
+    ).toEqual(['run']);
+    expect(allowedToolNames(['read', 'edit', 'run'], { allow: [], mode: 'unrestricted' })).toEqual([
+      'read',
+      'edit',
+      'run',
+    ]);
     expect(sandboxOption('none')).toBeUndefined();
     expect(sandboxOption('workspace-write')).toEqual({ enabled: true, failIfUnavailable: false });
     expect(sandboxOption('read-only')).toEqual({ enabled: true, failIfUnavailable: false });
@@ -1116,15 +1295,30 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     foldMessage(observation, {
       type: 'assistant',
       session_id: 's1',
-      message: { model: 'm-2', content: [{ type: 'text', text: 'hi' }], usage: { input_tokens: 1, output_tokens: 2 } },
+      message: {
+        model: 'm-2',
+        content: [{ type: 'text', text: 'hi' }],
+        usage: { input_tokens: 1, output_tokens: 2 },
+      },
     });
     foldMessage(observation, { type: 'system', subtype: 'something-new', payload: 'evidence' });
-    foldMessage(observation, { type: 'result', session_id: 's1', subtype: 'success', is_error: false, usage: { input_tokens: 3 } });
+    foldMessage(observation, {
+      type: 'result',
+      session_id: 's1',
+      subtype: 'success',
+      is_error: false,
+      usage: { input_tokens: 3 },
+    });
     expect(observation.agentSessionId).toBe('s1');
     // The RESPONSE-reported id (m-2) wins over the init-reported one (m-1).
     expect(observation.servedModel).toBe('m-2');
     expect(observation.transcript).toEqual(['hi']);
-    expect(observation.assistantUsage).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
+    expect(observation.assistantUsage).toEqual({
+      input: 1,
+      output: 2,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
     expect(observation.narration).toHaveLength(2); // the string + the unknown subtype
     expect(observation.result?.['subtype']).toBe('success');
   });

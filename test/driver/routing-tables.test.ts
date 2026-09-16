@@ -23,12 +23,15 @@ describe('routing tables — the two lanes ship ONE endpoint truth', () => {
     expect(Object.keys(claudeEndpoints).sort()).toEqual(Object.keys(subprocessEndpoints).sort());
   });
 
-  test.each(Object.keys(subprocessEndpoints).sort())('%s: baseUrlEnv/baseUrlDefault/keyEnv agree across lanes', (provider) => {
-    const subprocess = subprocessEndpoints[provider];
-    const claude = claudeEndpoints[provider];
-    expect(claude).toBeDefined(); // implied by the set pin above; kept for a clear failure message
-    expect(claude.baseUrlEnv).toBe(subprocess.baseUrlEnv);
-    expect(claude.baseUrlDefault).toBe(subprocess.baseUrlDefault);
-    expect(claude.keyEnv).toBe(subprocess.keyEnv);
-  });
+  test.each(Object.keys(subprocessEndpoints).sort())(
+    '%s: baseUrlEnv/baseUrlDefault/keyEnv agree across lanes',
+    (provider) => {
+      const subprocess = subprocessEndpoints[provider];
+      const claude = claudeEndpoints[provider];
+      expect(claude).toBeDefined(); // implied by the set pin above; kept for a clear failure message
+      expect(claude.baseUrlEnv).toBe(subprocess.baseUrlEnv);
+      expect(claude.baseUrlDefault).toBe(subprocess.baseUrlDefault);
+      expect(claude.keyEnv).toBe(subprocess.keyEnv);
+    },
+  );
 });

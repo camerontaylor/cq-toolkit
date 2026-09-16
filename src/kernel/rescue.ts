@@ -236,7 +236,9 @@ export function decideRescue(
   // the effective-cap arithmetic below into either an unbounded or a
   // silent never-retry decision. Reject the row loudly instead.
   if (!Number.isInteger(rowMax) || rowMax < 1) {
-    throw new Error(`rescue: policy row '${row.id}' maxAttempts must be an integer >= 1, got ${rowMax}`);
+    throw new Error(
+      `rescue: policy row '${row.id}' maxAttempts must be an integer >= 1, got ${rowMax}`,
+    );
   }
   const jobCap = caps?.maxAttemptsPerJob;
   // The LIMITS half gets the identical validation (review round 3): a NaN/
@@ -258,9 +260,7 @@ export function decideRescue(
     kind: 'retry',
     attempt: attemptsSoFar + 1,
     rowId: row.id,
-    ...(row.action.escalate !== undefined
-      ? { escalate: { ...row.action.escalate } }
-      : {}),
+    ...(row.action.escalate !== undefined ? { escalate: { ...row.action.escalate } } : {}),
     ...(row.action.carrySessionRef === true && latest.sessionRef !== undefined
       ? { sessionRef: latest.sessionRef }
       : {}),

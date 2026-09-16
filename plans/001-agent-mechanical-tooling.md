@@ -8,16 +8,16 @@ Make incorrect assumptions cheap to detect and style cheap to normalize. Use a s
 
 ## Target toolchain
 
-| Concern | Decision | Why |
-| --- | --- | --- |
-| Type checking (gate) | Oxlint integrated typeCheck (tsgolint / typescript-go), pinned | One static invocation; reuse the Go type-analysis path |
-| JS/declaration emit (build) | Stable TypeScript 7 from the released `typescript` package, not a native-preview nightly, pinned | Retain declaration and build validation |
-| Lint | Oxlint plus the matching oxlint-tsgolint, pinned | Fast native syntactic and typed rules |
-| Architecture rules | Oxlint JavaScript plugin with conformance tests | Keep the two custom policies; drop the ESLint toolchain entirely |
-| Formatting | Oxfmt, pinned | Mechanical normalization, no model-driven style edits |
-| Dead files/dependencies | Knip, calibrated before gating | Catch forgotten wiring without misclassifying SDK exports |
-| Workflow lint (separate follow-up) | actionlint, pinned binary | Not a prerequisite for the core migration |
-| Tests | Existing Vitest | Lint cannot establish runtime correctness |
+| Concern                            | Decision                                                                                         | Why                                                              |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------- |
+| Type checking (gate)               | Oxlint integrated typeCheck (tsgolint / typescript-go), pinned                                   | One static invocation; reuse the Go type-analysis path           |
+| JS/declaration emit (build)        | Stable TypeScript 7 from the released `typescript` package, not a native-preview nightly, pinned | Retain declaration and build validation                          |
+| Lint                               | Oxlint plus the matching oxlint-tsgolint, pinned                                                 | Fast native syntactic and typed rules                            |
+| Architecture rules                 | Oxlint JavaScript plugin with conformance tests                                                  | Keep the two custom policies; drop the ESLint toolchain entirely |
+| Formatting                         | Oxfmt, pinned                                                                                    | Mechanical normalization, no model-driven style edits            |
+| Dead files/dependencies            | Knip, calibrated before gating                                                                   | Catch forgotten wiring without misclassifying SDK exports        |
+| Workflow lint (separate follow-up) | actionlint, pinned binary                                                                        | Not a prerequisite for the core migration                        |
+| Tests                              | Existing Vitest                                                                                  | Lint cannot establish runtime correctness                        |
 
 Non-goals: Biome, an ESLint fallback lane, another package manager, a task orchestrator, a monorepo affected-project graph, React configuration, and a public Oxlint diagnostic adapter (a follow-up). Keep `npm ci` and the existing lockfile. Upstream speed reports are motivation, not a measured claim about this repo.
 

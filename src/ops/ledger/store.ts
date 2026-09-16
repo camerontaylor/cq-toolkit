@@ -22,7 +22,16 @@
 // is the sync node:fs adapter the registry importer binds — the only
 // node:fs touch in the lane's storage (sync for v1: ledger entries are one
 // small JSON file, and the ops are async at the Op boundary regardless).
-import { chmodSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { lock } from 'proper-lockfile';
 import type { LockOptions } from 'proper-lockfile';
@@ -223,7 +232,9 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
     try {
       realParent = realpathSync(dirname(targetAbs));
     } catch (err) {
-      throw new Error(`ledger parent for '${target}' does not resolve — ${messageOf(err)}`, { cause: err });
+      throw new Error(`ledger parent for '${target}' does not resolve — ${messageOf(err)}`, {
+        cause: err,
+      });
     }
     const fault = strictDescendantFault(rootReal, join(realParent, base));
     if (fault !== null) {
@@ -273,9 +284,12 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
         try {
           realAncestor = realpathSync(existing);
         } catch (ancestorErr) {
-          throw new Error(`ledger path for '${target}' does not resolve — ${messageOf(ancestorErr)}`, {
-            cause: ancestorErr,
-          });
+          throw new Error(
+            `ledger path for '${target}' does not resolve — ${messageOf(ancestorErr)}`,
+            {
+              cause: ancestorErr,
+            },
+          );
         }
         const rel = relative(rootReal, realAncestor);
         if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
@@ -315,10 +329,9 @@ export function pathLedgerStore(root: string, target: string): LedgerStore {
               release()
                 .then(() => value)
                 .catch((releaseErr: unknown) => {
-                  throw new Error(
-                    `lock release failed — ${messageOf(releaseErr)}`,
-                    { cause: releaseErr },
-                  );
+                  throw new Error(`lock release failed — ${messageOf(releaseErr)}`, {
+                    cause: releaseErr,
+                  });
                 }),
             (err) =>
               // fn already failed: its fault is primary; release is best-effort.
@@ -376,12 +389,16 @@ const LOCK_OPTIONS: LockOptions = {
  * closes the remaining gap: intermediate symlinks created below that
  * prefix.
  */
-function containLedgerTarget(root: string, target: string): { rootReal: string; targetAbs: string } {
+function containLedgerTarget(
+  root: string,
+  target: string,
+): { rootReal: string; targetAbs: string } {
   let rootReal: string;
   try {
     rootReal = realpathSync(root);
   } catch (err) {
-    if (isEnoent(err)) throw new Error(`root does not resolve: '${root}' does not exist`, { cause: err });
+    if (isEnoent(err))
+      throw new Error(`root does not resolve: '${root}' does not exist`, { cause: err });
     throw err;
   }
   const targetAbs = resolve(target);
@@ -505,13 +522,19 @@ function publishAtomic(targetPath: string, bytes: string): void {
 /** True when a thrown value is a node:fs ENOENT (the missing-file case). */
 function isEnoent(err: unknown): boolean {
   return (
-    typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'ENOENT'
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'ENOENT'
   );
 }
 
 /** True when a thrown value is a node:fs EEXIST (temp-name collision). */
 function isEexist(err: unknown): boolean {
   return (
-    typeof err === 'object' && err !== null && 'code' in err && (err as { code?: unknown }).code === 'EEXIST'
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: unknown }).code === 'EEXIST'
   );
 }

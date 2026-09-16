@@ -128,7 +128,12 @@ describe('attachRestReplies', () => {
       [
         rootComment(),
         reply({ id: 101, createdAt: '2026-01-01T01:00:00Z', inReplyToId: 100 }),
-        reply({ id: 102, createdAt: '2026-01-01T02:00:00Z', authorLogin: 'carol', inReplyToId: 101 }),
+        reply({
+          id: 102,
+          createdAt: '2026-01-01T02:00:00Z',
+          authorLogin: 'carol',
+          inReplyToId: 101,
+        }),
       ],
     );
     expect(report).toEqual({ attached: 2, unmatchedRoots: [] });
@@ -164,10 +169,7 @@ describe('attachRestReplies', () => {
   test('a REST-only fresh thread (root unknown to any thread) is reported as an unmatched root', () => {
     const t = thread();
     const freshRoot = rootComment({ id: 400, nodeId: 'PRRC_400' });
-    const report = attachRestReplies(
-      [t],
-      [freshRoot, reply({ id: 401, inReplyToId: 400 })],
-    );
+    const report = attachRestReplies([t], [freshRoot, reply({ id: 401, inReplyToId: 400 })]);
     expect(report.attached).toBe(0); // nothing anchors
     expect(report.unmatchedRoots).toEqual([freshRoot]); // reviewThreads lag signal
     expect(t.replies).toEqual([]);
@@ -176,10 +178,7 @@ describe('attachRestReplies', () => {
   test.each([
     {
       name: 'a chain whose REST root id matches no thread rootDatabaseId is not attached; its root is reported',
-      comments: [
-        rootComment({ id: 999, nodeId: 'PRRC_999' }),
-        reply({ inReplyToId: 999 }),
-      ],
+      comments: [rootComment({ id: 999, nodeId: 'PRRC_999' }), reply({ inReplyToId: 999 })],
       anchorless: false,
       unmatched: [999],
     },
@@ -230,10 +229,10 @@ describe('attachRestReplies', () => {
       replies: [{ authorLogin: 'dave', body: 'pre-existing', createdAt: null }],
     });
     const threads = [alreadyThere];
-    const report = attachRestReplies(
-      threads,
-      [rootComment(), reply({ createdAt: '2026-01-01T01:00:00Z' })],
-    );
+    const report = attachRestReplies(threads, [
+      rootComment(),
+      reply({ createdAt: '2026-01-01T01:00:00Z' }),
+    ]);
     expect(report.attached).toBe(1);
     expect(threads[0]).toBe(alreadyThere);
     expect(repliesOf(alreadyThere)).toEqual([

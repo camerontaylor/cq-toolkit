@@ -42,9 +42,7 @@ beforeAll(() => {
 });
 
 let ws: string;
-const sources: SourceCatalog = new Map([
-  [METRIC, async () => ({ count: 7 })],
-]);
+const sources: SourceCatalog = new Map([[METRIC, async () => ({ count: 7 })]]);
 const capture = createCaptureBaseline(sources);
 
 beforeEach(async () => {

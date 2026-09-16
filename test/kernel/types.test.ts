@@ -664,7 +664,8 @@ describe('mirror-only domain tightenings (review-debt #17, PR #7 non-frozen item
       'negative maxUsd',
     );
     expect(
-      kernelSchema.RunOptionsSchema.safeParse({ concurrency: 2, stopOnError: false, maxUsd: 0 }).success,
+      kernelSchema.RunOptionsSchema.safeParse({ concurrency: 2, stopOnError: false, maxUsd: 0 })
+        .success,
     ).toBe(true);
     // inFlightCeiling is a LIMITS field (the issue's schema.ts:200 drifted
     // into the Limits block): the ceiling bound lives on LimitsSchema.
@@ -868,7 +869,11 @@ describe('RunOptionsSchema maxTokens mirror (DD-9 cap, mirror-only tightening)',
       { concurrency: 1, stopOnError: false, maxTokens: -5 },
       'negative maxTokens',
     );
-    roundTripsThrough(kernelSchema.RunOptionsSchema, { concurrency: 1, stopOnError: false, maxTokens: 100 });
+    roundTripsThrough(kernelSchema.RunOptionsSchema, {
+      concurrency: 1,
+      stopOnError: false,
+      maxTokens: 100,
+    });
   });
 });
 
@@ -881,7 +886,11 @@ describe('WorkerResultSchema costUSD/costBasis pairing (DD-9 wire coupling)', ()
 
   test('both fields parse; either field ALONE fails; neither parses', () => {
     // Priced: costUSD and its basis together.
-    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base, costUSD: 0.5, costBasis: 'modeled' });
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      ...base,
+      costUSD: 0.5,
+      costBasis: 'modeled',
+    });
     // Unpriced: neither field.
     roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base });
     // Half a pairing is a fabrication either way.

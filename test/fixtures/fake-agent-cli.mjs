@@ -172,7 +172,8 @@ function structuredOutputFor(replyText) {
 // Event helpers
 // ---------------------------------------------------------------------------
 
-const emitInit = () => out({ type: 'system', subtype: 'init', session_id: sessionId, model: servedModel });
+const emitInit = () =>
+  out({ type: 'system', subtype: 'init', session_id: sessionId, model: servedModel });
 const emitAssistantText = (text, usage = USAGE) =>
   out({ type: 'assistant', message: { content: [{ type: 'text', text }], usage } });
 const emitToolUse = (id, name, input, usage = USAGE) =>
@@ -183,7 +184,9 @@ const emitToolUse = (id, name, input, usage = USAGE) =>
 const emitToolResult = (toolUseId, isError, content) =>
   out({
     type: 'user',
-    message: { content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: isError, content }] },
+    message: {
+      content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: isError, content }],
+    },
   });
 const emitResult = (overrides = {}) =>
   out({
@@ -194,7 +197,8 @@ const emitResult = (overrides = {}) =>
     usage: USAGE,
     model: servedModel,
     ...overrides,
-  });const emitJunk = () => {
+  });
+const emitJunk = () => {
   process.stdout.write('fake-agent-cli: transient bootstrapping noise (not json)\n');
   out({ type: 'system', subtype: 'status', message: 'worthless non-contract event' });
   process.stdout.write('{broken json at line level\n');
@@ -218,7 +222,8 @@ async function executeTool(name, input) {
   if (name === 'read') {
     const path_ = typeof input?.path === 'string' ? input.path : '';
     const abs = resolveInside(path_);
-    if (abs === undefined) return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
+    if (abs === undefined)
+      return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
     // Symlink re-check ONLY when the path actually resolves (the harness's
     // posture): a missing path must fall through to the fs op for its
     // honest 'file not found' denial, never a symlink escape.
@@ -227,7 +232,10 @@ async function executeTool(name, input) {
       target = await realpath(abs);
       const realRoot = await realpath(resolve(process.cwd()));
       if (target !== realRoot && !target.startsWith(realRoot + sep)) {
-        return { ok: false, text: `path escape: '${path_}' escapes the workspace through a symlink` };
+        return {
+          ok: false,
+          text: `path escape: '${path_}' escapes the workspace through a symlink`,
+        };
       }
     } catch {
       // unresolvable (missing …) — the read below produces the real denial
@@ -236,25 +244,40 @@ async function executeTool(name, input) {
       const text = await readFile(target, 'utf8');
       return { ok: true, text };
     } catch (err_) {
-      return { ok: false, text: messageOf(err_).includes('ENOENT') ? `file not found: '${path_}'` : `read failed: ${messageOf(err_)}` };
+      return {
+        ok: false,
+        text: messageOf(err_).includes('ENOENT')
+          ? `file not found: '${path_}'`
+          : `read failed: ${messageOf(err_)}`,
+      };
     }
   }
   if (name === 'edit') {
     const path_ = typeof input?.path === 'string' ? input.path : '';
     const abs = resolveInside(path_);
-    if (abs === undefined) return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
+    if (abs === undefined)
+      return { ok: false, text: `path escape: '${path_}' resolves outside the workspace` };
     let content;
     try {
       content = await readFile(abs, 'utf8');
     } catch (err_) {
-      return { ok: false, text: messageOf(err_).includes('ENOENT') ? `file not found: '${path_}'` : `read failed: ${messageOf(err_)}` };
+      return {
+        ok: false,
+        text: messageOf(err_).includes('ENOENT')
+          ? `file not found: '${path_}'`
+          : `read failed: ${messageOf(err_)}`,
+      };
     }
     const { oldText, newText } = input;
     if (typeof oldText !== 'string' || !content.includes(oldText)) {
       return { ok: false, text: `edit refused: target text not found in '${path_}'` };
     }
     try {
-      await writeFile(abs, content.replace(oldText, () => (typeof newText === 'string' ? newText : '')), 'utf8');
+      await writeFile(
+        abs,
+        content.replace(oldText, () => (typeof newText === 'string' ? newText : '')),
+        'utf8',
+      );
     } catch (err_) {
       return { ok: false, text: `edit failed: ${messageOf(err_)}` };
     }
@@ -262,7 +285,8 @@ async function executeTool(name, input) {
   }
   if (name === 'run') {
     const command = typeof input?.command === 'string' ? input.command : '';
-    if (command === '') return { ok: false, text: 'invalid input: command must be a non-empty string' };
+    if (command === '')
+      return { ok: false, text: 'invalid input: command must be a non-empty string' };
     return await new Promise((done) => {
       exec(command, { cwd: process.cwd() }, (err_, stdout, stderr) => {
         if (err_ && err_.code === undefined) {
@@ -282,7 +306,9 @@ async function executeTool(name, input) {
 /** The --permission-prompts none simulation: only --allowedTools names run. */
 function permissionDenied(name) {
   if (ALLOWED === undefined) return false; // standalone fixture run — permissive
-  return !ALLOWED.split(/\s+/).filter((token) => token !== '').includes(name);
+  return !ALLOWED.split(/\s+/)
+    .filter((token) => token !== '')
+    .includes(name);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,7 +357,9 @@ async function main() {
   }
 
   if (MODE === 'unknown-model') {
-    err(`fake-agent-cli: model '${model}' is not served by this endpoint; serving the endpoint default instead`);
+    err(
+      `fake-agent-cli: model '${model}' is not served by this endpoint; serving the endpoint default instead`,
+    );
     // exitCode, not exit(): stdout/stderr flush before the process reaps.
     process.exitCode = 1;
     return;

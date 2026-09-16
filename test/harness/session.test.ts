@@ -136,30 +136,30 @@ describe('SessionStore torn-tail recovery (fix 2)', () => {
     });
   });
 
-    test('evidence corruption is not healed: a corrupt middle line still throws on load', async () => {
-      await withScratch(async (scratchDir) => {
-        const store = new SessionStore(scratchDir);
-        const record = await store.create(scratchDir);
-        await store.appendMessage(record.sessionId, {
-          role: 'user',
-          content: 'intact',
-          at: '2026-09-14T00:00:00.000Z',
-        });
-        // A corrupt line that ENDS with a newline is a completed write; a
-        // further complete append makes it a MIDDLE line — evidence
-        // corruption, which recovery must NOT heal.
-        await appendFile(
-          join(scratchDir, `${record.sessionId}.jsonl`),
-          '{"type":"message","message":{"role":"user"}}\n',
-        );
-        await store.appendMessage(record.sessionId, {
-          role: 'assistant',
-          content: 'after the corruption',
-          at: '2026-09-14T00:00:01.000Z',
-        });
-        await expect(store.load(record.sessionId)).rejects.toThrow(/corrupt line/);
+  test('evidence corruption is not healed: a corrupt middle line still throws on load', async () => {
+    await withScratch(async (scratchDir) => {
+      const store = new SessionStore(scratchDir);
+      const record = await store.create(scratchDir);
+      await store.appendMessage(record.sessionId, {
+        role: 'user',
+        content: 'intact',
+        at: '2026-09-14T00:00:00.000Z',
       });
+      // A corrupt line that ENDS with a newline is a completed write; a
+      // further complete append makes it a MIDDLE line — evidence
+      // corruption, which recovery must NOT heal.
+      await appendFile(
+        join(scratchDir, `${record.sessionId}.jsonl`),
+        '{"type":"message","message":{"role":"user"}}\n',
+      );
+      await store.appendMessage(record.sessionId, {
+        role: 'assistant',
+        content: 'after the corruption',
+        at: '2026-09-14T00:00:01.000Z',
+      });
+      await expect(store.load(record.sessionId)).rejects.toThrow(/corrupt line/);
     });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -250,26 +250,26 @@ describe('appendMessage recovery is serialized inside the write chain (issue #18
         content: 'second line',
         at: '2026-09-14T00:00:01.000Z',
       });
-        // Yield macrotask turns so a PRE-FIX B recovery (running outside the
-        // chain) would land here, while A's append is still parked.
-        await new Promise((resolve) => setImmediate(resolve));
-        await new Promise((resolve) => setImmediate(resolve));
-        release();
-        await Promise.all([a, b]);
-        // THE COMPLETED ORDER (review round 2 — the parked-phase assertion
-        // was vacuous: with A parked the log held only ['read'], so
-        // indexOf('append:A') === -1 passed against any shape). After
-        // release, the serialized chain reads exactly:
-        //   A's recovery read → A's append → B's recovery read → B's append,
-        // whereas the PRE-FIX shape recorded B's recovery read while A was
-        // still parked: ['read', 'read', 'append:A', 'append:B'] — this
-        // assertion discriminates the two.
-        expect(events).toEqual(['read', 'append:A', 'read', 'append:B']);
-        expect(events.indexOf('append:A')).toBeLessThan(events.indexOf('append:B'));
-        expect(events.lastIndexOf('read')).toBeGreaterThan(events.indexOf('append:A'));
-        // Nothing was lost: both messages load.
-        const loaded = await store.load(record.sessionId);
-        expect(loaded?.messages.map((m) => m.content)).toEqual(['in-flight line', 'second line']);
+      // Yield macrotask turns so a PRE-FIX B recovery (running outside the
+      // chain) would land here, while A's append is still parked.
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+      release();
+      await Promise.all([a, b]);
+      // THE COMPLETED ORDER (review round 2 — the parked-phase assertion
+      // was vacuous: with A parked the log held only ['read'], so
+      // indexOf('append:A') === -1 passed against any shape). After
+      // release, the serialized chain reads exactly:
+      //   A's recovery read → A's append → B's recovery read → B's append,
+      // whereas the PRE-FIX shape recorded B's recovery read while A was
+      // still parked: ['read', 'read', 'append:A', 'append:B'] — this
+      // assertion discriminates the two.
+      expect(events).toEqual(['read', 'append:A', 'read', 'append:B']);
+      expect(events.indexOf('append:A')).toBeLessThan(events.indexOf('append:B'));
+      expect(events.lastIndexOf('read')).toBeGreaterThan(events.indexOf('append:A'));
+      // Nothing was lost: both messages load.
+      const loaded = await store.load(record.sessionId);
+      expect(loaded?.messages.map((m) => m.content)).toEqual(['in-flight line', 'second line']);
     });
   });
 });

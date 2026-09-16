@@ -2,6 +2,7 @@ Secondary interface: one subcommand per op + per shipped plan.
 Land: phase 3 (WS-I).
 
 THE I1 CLI CONTRACT (landed):
+
 - bin = dist/cli.js — the src/cli.ts shim; all behavior lives in src/cli/.
 - One subcommand per registry entry, plus the built-in 'run-plan'.
 - stdout = exactly ONE JSON artifact per invocation (an OpResult, or a

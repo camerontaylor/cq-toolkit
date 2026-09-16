@@ -71,22 +71,11 @@ export {
 // Kernel runtime surface (T1.2) — re-export only, no logic: the plan runner,
 // the NDJSON journal, the run manifest, and the I1 output helpers. Pure
 // types ride along as `export type`.
-export type {
-  ManifestJob,
-  RunManifest,
-} from './kernel/manifest.js';
+export type { ManifestJob, RunManifest } from './kernel/manifest.js';
 export type { OpRegistryView } from './kernel/runner.js';
 export type { RunLog } from './kernel/journal.js';
-export {
-  canonicalJson,
-  hashInputs,
-  makeManifest,
-  topoOrder,
-} from './kernel/manifest.js';
-export {
-  deriveJobStatuses,
-  openRunLog,
-} from './kernel/journal.js';
+export { canonicalJson, hashInputs, makeManifest, topoOrder } from './kernel/manifest.js';
+export { deriveJobStatuses, openRunLog } from './kernel/journal.js';
 export { runPlan } from './kernel/runner.js';
 export { emitReport, narrate, renderHuman } from './kernel/output.js';
 // Budget governor + rescue lane (T1.3) — re-export only, no logic: the
@@ -188,19 +177,10 @@ export {
 // First-party driver + price map (T1.4) — re-export only, no logic: the
 // in-process ai-sdk driver on the frozen seam, and the models.dev-derived
 // price map behind the derived-only costUSD rule.
-export type {
-  AiSdkDriverOptions,
-  ProviderFactory,
-} from './driver/ai-sdk/index.js';
+export type { AiSdkDriverOptions, ProviderFactory } from './driver/ai-sdk/index.js';
 export { AiSdkDriver } from './driver/ai-sdk/index.js';
-export type {
-  PerMillionRates,
-  PriceTable,
-} from './driver/pricing/index.js';
-export {
-  computeCostUSD,
-  priceOf,
-} from './driver/pricing/index.js';
+export type { PerMillionRates, PriceTable } from './driver/pricing/index.js';
+export { computeCostUSD, priceOf } from './driver/pricing/index.js';
 export { PRICE_TABLE } from './driver/pricing/data.js';
 // Subprocess driver (T1.5) — re-export only, no logic: the out-of-process
 // driver that runs an existing agent CLI headless on the frozen seam, its
@@ -226,11 +206,7 @@ export {
   SubprocessDriver,
   usageFromCli,
 } from './driver/subprocess/index.js';
-export type {
-  Route,
-  RoutingEndpoint,
-  RoutingTable,
-} from './driver/subprocess/routing.js';
+export type { Route, RoutingEndpoint, RoutingTable } from './driver/subprocess/routing.js';
 export {
   defaultRoutingTable,
   routeFor,

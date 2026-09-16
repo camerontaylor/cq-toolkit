@@ -65,7 +65,16 @@ const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url
 const tmpParent = fileURLToPath(new URL('../../node_modules/', import.meta.url));
 
 /** Every planned op family dir (phase-4 T4.2 completes this closure). */
-const PLANNED_FAMILIES = ['gates', 'ledger', 'review', 'merge', 'ratchet', 'sweep', 'pr', 'analyze'];
+const PLANNED_FAMILIES = [
+  'gates',
+  'ledger',
+  'review',
+  'merge',
+  'ratchet',
+  'sweep',
+  'pr',
+  'analyze',
+];
 
 const tmpDirs: string[] = [];
 
@@ -156,7 +165,9 @@ describe('registry family scan (src/ops)', () => {
             !dirent.name.endsWith('.test.ts'),
         )
         .map((dirent) => dirent.name.replace(/\.ts$/, ''));
-      const hasRegistry = dirents.some((dirent) => dirent.isFile() && dirent.name === 'registry.ts');
+      const hasRegistry = dirents.some(
+        (dirent) => dirent.isFile() && dirent.name === 'registry.ts',
+      );
       if (!hasRegistry) {
         // No registry module to scan against. A bare family (no candidates)
         // has nothing to cover; a module-bearing family (e.g. review's
@@ -436,7 +447,7 @@ describe('absent vs broken family registries (the narrow tolerance)', () => {
     await mkdir(join(tmp, 'interim'), { recursive: true });
     await writeFile(
       join(tmp, 'interim', 'registry.js'),
-      "export const adapters = new Map();\nexport function listAdapters() {\n  return [];\n}\n",
+      'export const adapters = new Map();\nexport function listAdapters() {\n  return [];\n}\n',
     );
     const { entries, skippedFamilies } = await listWithDiagnostics({ opsRoot: tmp });
     expect(entries).toEqual([]);

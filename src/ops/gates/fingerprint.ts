@@ -140,7 +140,15 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
     return [cfg.tool, file, ruleId, f.severity, 'position', String(lineBucket), String(colBucket)];
   }
   const offsetBucket = Math.floor((f.column ?? 0) / cfg.offsetBucketSize);
-  return [cfg.tool, file, ruleId, f.severity, 'content', normalizeMessage(f.message), String(offsetBucket)];
+  return [
+    cfg.tool,
+    file,
+    ruleId,
+    f.severity,
+    'content',
+    normalizeMessage(f.message),
+    String(offsetBucket),
+  ];
 }
 
 /**

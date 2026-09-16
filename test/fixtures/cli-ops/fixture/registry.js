@@ -5,7 +5,11 @@
 import { z } from 'zod';
 const lazy = (file) => async () => (await import(file)).default;
 export const registry = [
-  { name: 'echo', inputSchema: z.object({ msg: z.string() }).strict(), importer: lazy('./echo.js') },
+  {
+    name: 'echo',
+    inputSchema: z.object({ msg: z.string() }).strict(),
+    importer: lazy('./echo.js'),
+  },
   { name: 'boom', inputSchema: z.object({}).strict(), importer: lazy('./boom.js') },
   { name: 'needshuman', inputSchema: z.object({}).strict(), importer: lazy('./needshuman.js') },
   { name: 'budget', inputSchema: z.object({}).strict(), importer: lazy('./budget.js') },
