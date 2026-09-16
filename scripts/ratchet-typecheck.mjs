@@ -68,8 +68,9 @@ console.error(
 );
 
 const lint = spawnSync(
-  resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'oxlint.cmd' : 'oxlint'),
+  process.execPath,
   [
+    resolve(ROOT, 'node_modules', 'oxlint', 'bin', 'oxlint'),
     '--config',
     resolve(ROOT, '.oxlintrc.json'),
     '--disable-nested-config',
@@ -82,7 +83,7 @@ const lint = spawnSync(
     'scripts',
     'vitest.config.ts',
   ],
-  { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32' },
+  { cwd: ROOT, encoding: 'utf8' },
 );
 if (lint.stdout) process.stdout.write(lint.stdout);
 if (lint.stderr) process.stderr.write(lint.stderr);

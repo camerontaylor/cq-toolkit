@@ -37,8 +37,8 @@ export function fail(message) {
 }
 
 // npm/npx are .cmd shims on win32; since Node's CVE-2024-27980 fix a .cmd
-// must be spawned through a shell (the same reasoning the old typecheck
-// compiler wrapper applies to tsc.cmd). POSIX takes the direct binary, no shell.
+// must be spawned through a shell. Package JS entrypoints run directly with
+// Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
 
 /**
@@ -194,13 +194,19 @@ export async function loadEngine() {
  */
 export function runTypecheckRaw() {
   const res = spawnSync(
-    resolve(ROOT, 'node_modules', '.bin', SHELL_ON_WINDOWS ? 'tsc.cmd' : 'tsc'),
-    ['--noEmit', '-p', 'tsconfig.json', '--pretty', 'false'],
+    process.execPath,
+    [
+      resolve(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
+      '--noEmit',
+      '-p',
+      'tsconfig.json',
+      '--pretty',
+      'false',
+    ],
     {
       cwd: ROOT,
       encoding: 'utf8',
       maxBuffer: MAX_BUFFER,
-      shell: SHELL_ON_WINDOWS,
     },
   );
   return {

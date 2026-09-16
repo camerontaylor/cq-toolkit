@@ -17,8 +17,8 @@ import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const roots: string[] = [];
 const BASELINE = 'baselines/typecheck--typecheck-count--7caef1e76077.json';
-function fixture(): string {
-  const root = mkdtempSync(join(tmpdir(), 'cq-static-conformance-'));
+function fixture(prefix = 'cq-static-conformance-'): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
   roots.push(root);
   for (const directory of ['src', 'test', 'lint/rules', 'scripts', 'baselines', 'unvisited']) {
     mkdirSync(join(root, directory), { recursive: true });
@@ -93,8 +93,8 @@ describe('real pinned compiler and lint conformance', () => {
     ])
       expect(result.stderr).toContain(file);
   });
-  it('passes the repaired project and rejects a missing module', () => {
-    const root = fixture();
+  it('handles tool paths with spaces and shell metacharacters and rejects a missing module', () => {
+    const root = fixture('cq static & conformance-');
     const clean = gate(root);
     expect(clean.status, clean.stdout + clean.stderr).toBe(0);
     writeFileSync(join(root, 'src/main.ts'), 'export { absent } from "./does-not-exist.js";\n');
