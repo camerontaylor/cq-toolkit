@@ -290,9 +290,16 @@ export function makeApplyRemediation(
       try {
         await store.writeBytes(file, after);
       } catch (err) {
+        // Partial multi-file apply is never silent: the fault names the
+        // files ALREADY on disk in their remediated form, so the caller
+        // knows the exact on-disk state this failure leaves behind.
+        const alreadyWritten =
+          appliedFiles.length === 0
+            ? ''
+            : `; already written: ${appliedFiles.map((applied) => applied.file).join(', ')}`;
         return {
           status: 'failed',
-          error: `remediation: could not write '${file}' — ${messageOf(err)}`,
+          error: `remediation: could not write '${file}' — ${messageOf(err)}${alreadyWritten}`,
         };
       }
       appliedFiles.push({

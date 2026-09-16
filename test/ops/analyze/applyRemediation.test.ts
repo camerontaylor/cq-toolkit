@@ -375,11 +375,15 @@ describe('applyRemediation store-relative path discipline (M1 regressions)', () 
     expect(result.status).toBe('ok');
     if (result.status !== 'ok' || result.value.mode !== 'applied') return;
     expect(result.value.plannedEdits).toBe(2);
-    // The writes landed inside the nested root — never root/root/….
+    // The writes landed inside the nested root, anchored on the RESOLVED
+    // root: every key is under it, and NONE of them re-enters a 'ws'
+    // segment below it (the double-root signature '…/ws/reports/ws/…' that
+    // a root-joined write path would produce).
+    const rootAbs = resolve(root);
     expect(store.written.get(resolve(root, 'src/a.ts'))).toBeDefined();
     expect(
       [...store.written.keys()].every(
-        (key) => !key.includes(`${sep}ws${sep}ws${sep}`) && !key.startsWith('ws/ws/'),
+        (key) => key.startsWith(`${rootAbs}${sep}`) && !key.includes(`${rootAbs}${sep}ws${sep}`),
       ),
     ).toBe(true);
   });
@@ -476,6 +480,39 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     ).toBe('const fooBar = 1;\n');
     expect(byFile.get('src/b.ts')?.digestAfter).toBe(contentDigest('export const fooBar = 2;\n'));
     expect(store.written.size).toBe(2);
+  });
+
+  test('a write fault mid-apply names the files ALREADY written in their remediated form (T2)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // The store faults on the SECOND target, after the first is on disk
+    // (a delegating wrapper — the underlying store keeps the real writes).
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        if (path === 'src/b.ts') {
+          throw new AnalysisStoreError('analysis store: disk full on second write');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/b.ts'");
+      expect(result.error).toContain('already written: src/a.ts');
+    }
+    // The first target really is remediated on disk.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('const fooBar = 1;\n');
   });
 
   test('an EMPTY planned-edit set is the honest ok: zero counts plus the note — not a silent success', async () => {

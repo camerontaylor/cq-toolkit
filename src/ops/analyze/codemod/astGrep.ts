@@ -162,12 +162,15 @@ export function parseAstGrepJson(stdout: string): AstGrepScanResult {
  * Run one scan through the injected runner. The command is the documented
  * ast-grep surface: `scan --json=compact --inline-rules <rule> -- <files>`,
  * cwd = dir, so the reported file paths are dir-relative and re-resolve
- * through the store's containment. Verdict policy: parsable JSON output IS
- * a completed scan regardless of exit code — `scan` legitimately exits
+ * through the store's containment. Verdict policy, in decision order: an
+ * UNOBSERVABLE exit (null — timeout kill, signal, spawn failure, output
+ * overflow) is a fault BEFORE parse acceptance, even when the captured
+ * stdout prefix parses — a killed scan's partial JSON is an incomplete plan,
+ * and partial evidence is never passing evidence (I9). Behind a NUMERIC
+ * exit, parsable JSON output IS a completed scan — `scan` legitimately exits
  * non-zero when the consumer rule declares error severity and matched —
- * while unparsable output (spawn failure, timeout, crash text) is a fault
- * naming the unobservable exit, so a missing binary is an honest `failed`,
- * never an empty match set.
+ * while unparsable output (crash text, truncation) is a fault naming the
+ * exit, so a missing binary is an honest `failed`, never an empty match set.
  */
 export function makeAstGrepScan(
   run: RunCheck,
@@ -187,16 +190,23 @@ export function makeAstGrepScan(
         fault: `ast-grep codemod: the runner crashed before a scan could complete — ${messageOf(err)}`,
       };
     }
-    const result = parseAstGrepJson(raw.stdout);
-    if (!result.ok) {
-      const exitNote =
-        raw.exitCode === null
-          ? 'the exit code was unobservable (is the ast-grep binary installed and on PATH?)'
-          : `exit code ${raw.exitCode}`;
+    if (raw.exitCode === null) {
+      // BEFORE parse acceptance: a scan killed by timeout/signal/overflow can
+      // still leave a parseable JSON PREFIX in stdout — accepting it would
+      // apply edits from an incomplete plan (or read a truncated `[]` as a
+      // false clean no-op). Unobservable exit → honest `failed`, always.
       const stderrExcerpt = raw.stderr.trim().slice(0, 200);
       return {
         ok: false,
-        fault: `ast-grep codemod: ${result.fault} — ${exitNote}${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
+        fault: `ast-grep codemod: the scan's exit code was unobservable (timeout kill, signal, or output overflow) — the captured output may be an INCOMPLETE plan and is never accepted; re-run the scan${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
+      };
+    }
+    const result = parseAstGrepJson(raw.stdout);
+    if (!result.ok) {
+      const stderrExcerpt = raw.stderr.trim().slice(0, 200);
+      return {
+        ok: false,
+        fault: `ast-grep codemod: ${result.fault} — exit code ${raw.exitCode}${stderrExcerpt === '' ? '' : `; stderr: ${stderrExcerpt}`}`,
       };
     }
     // FILE-MATCH CANONICALIZATION (both sides, before any filtering or
@@ -654,9 +664,16 @@ export function makeAstGrepCodemod(
       try {
         await store.writeBytes(file, after);
       } catch (err) {
+        // Partial multi-file apply is never silent: the fault names the
+        // files ALREADY on disk in their new form, so the caller knows the
+        // exact on-disk state this failure leaves behind.
+        const alreadyWritten =
+          appliedFiles.length === 0
+            ? ''
+            : `; already written: ${appliedFiles.map((applied) => applied.file).join(', ')}`;
         return {
           status: 'failed',
-          error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}`,
+          error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}${alreadyWritten}`,
         };
       }
       appliedFiles.push({

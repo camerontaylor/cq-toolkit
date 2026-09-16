@@ -190,7 +190,7 @@ describe('makeAstGrepScan (the injected-runner verdict policy)', () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.fault).toContain('unobservable');
-    expect(result.fault).toContain('ast-grep binary installed');
+    expect(result.fault).toContain('INCOMPLETE plan');
   });
 });
 
@@ -459,6 +459,68 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
       expect(applied.value.note).toContain('nothing was written');
     }
     expect(store.written.size).toBe(0);
+  });
+
+  test('an UNOBSERVABLE exit behind PARSEABLE stdout is rejected before acceptance — never applied (T1)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    const killedMidScan = fakeRunner({
+      // A killed scan (timeout/signal/overflow) can leave a parseable JSON
+      // prefix — accepting it would apply edits from an incomplete plan.
+      stdout: JSON.stringify([matchOf('src/a.ts', 6, 13, 'fooBar')]),
+      stderr: '',
+      exitCode: null,
+    });
+    const op = makeOp(store, killedMidScan);
+    const applied = await op({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(applied.status).toBe('failed');
+    if (applied.status === 'failed') {
+      expect(applied.error).toContain('unobservable');
+      expect(applied.error).toContain('INCOMPLETE plan');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a write fault mid-apply names the files ALREADY written (T2)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    // The store faults on the SECOND file, after the first is on disk
+    // (a delegating wrapper — the underlying store keeps the real writes).
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        if (path === 'src/b.ts') {
+          throw new AnalysisStoreError('analysis store: disk full on second write');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts', 'src/b.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/b.ts'");
+      expect(result.error).toContain('already written: src/a.ts');
+    }
+    // The first file really is on disk in its new form (both its matches
+    // applied — the runner derives offsets from the full fixture).
+    expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
+      'const fooBar = 1;\nconst other = fooBar;\n',
+    );
   });
 
   test('a scan reporting DECORATED paths (./src/a.ts) still matches the requested targets and applies (L2)', async () => {
