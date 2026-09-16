@@ -29,15 +29,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      # The typecheck gate IS this ratchet step: it runs the full
-      # `tsc6 --noEmit` over the whole repo config and then enforces the
-      # error-count baseline, so no separate Typecheck step is needed.
-      - name: Typecheck ratchet
-        run: node scripts/ratchet-typecheck.mjs
+      # One compiler ratchet plus typed lint; aliases must not duplicate it.
+      - name: Static gate
+        run: npm run check:static
       - name: Check formatting
         run: npm run format:check
-      - name: Lint
-        run: npm run lint
       - name: Test
         run: npm run test
       # Emit gate: the ratchet step above is the typecheck gate; this step

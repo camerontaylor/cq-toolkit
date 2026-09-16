@@ -17,12 +17,13 @@
     "cq": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc6 -p tsconfig.build.json",
-    "typecheck": "tsc6 -p tsconfig.json",
-    "lint": "oxlint src test lint scripts vitest.config.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "npm run check:static",
+    "lint": "npm run check:static",
     "test": "vitest run",
     "denylist": "./scripts/denylist-scan",
-    "format:check": "oxfmt --check ."
+    "format:check": "oxfmt --check .",
+    "check:static": "node scripts/ratchet-typecheck.mjs"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.53",
@@ -47,7 +48,8 @@
     "@types/node": "24.13.5",
     "oxfmt": "0.68.0",
     "oxlint": "1.83.0",
-    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "oxlint-tsgolint": "7.0.2001",
+    "typescript": "7.0.2",
     "vitest": "5.0.0"
   }
 }

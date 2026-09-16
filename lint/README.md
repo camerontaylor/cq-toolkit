@@ -52,3 +52,47 @@ literal fixtures or documentation. The hack detector recognizes both directive
 families. Public ESLint JSON and tsc-output adapters and their exports remain
 supported. No local lint consumer depends on ESLint JSON: the self-hosted gate
 uses exit status, and normalized Oxlint ingestion remains a separate feature.
+
+## Compiler fallback and upgrade evidence
+
+`check:static` runs the pinned TS7 `tsc --noEmit` ratchet and then Oxlint
+`--type-aware`, once each. `lint` and `typecheck` are aliases. CI invokes only
+`check:static`; checked declaration emit remains `build`.
+
+On 2026-09-16, Oxlint 1.83.0 with oxlint-tsgolint 7.0.2001 reported green when
+an erroneous `tsconfig` input was excluded from lint traversal, while TS7 7.0.2
+reported TS2322. `static-conformance.test.ts` retains that counterexample and
+proves the wrapper catches projected sources, imported files, the TS config
+module, and included files outside traversal. This is why integrated
+`--type-check` is not the authoritative compiler. Suppressions cannot remove
+compiler evidence. Fake process failures and real module/configuration errors
+also fail closed, including under `--update`.
+
+The standalone compiler is TypeScript 7.0.2 (package gitHead
+`2bd066d87f5bafd315be9f40889d0a60b9e58e0b`). The typed linter is
+oxlint-tsgolint 7.0.2001; its [release go.mod](https://github.com/oxc-project/tsgolint/blob/v7.0.2001/go.mod)
+references typescript-go `v0.0.0-20260708042240-2bd066d87f5b` and uses local
+shim replacements. Matching source revisions do not establish identical
+file discovery or configuration behavior. Repeat conformance on upgrades.
+The gate exercises strict, NodeNext module/resolution, ES2023, noEmit and
+skipLibCheck; build exercises checked JS and declaration emit. A type-grounded
+build failure after a green gate is a divergence to minimize, never a reason
+to disable build checking.
+
+Compatibility preflight used Node 24.21.0 on macOS. TS7 checked the existing
+project and emitted the complete package. Comparing its emit with TS6 found
+identical JavaScript and three declaration files differing only in quote
+style/member order. Vitest and its config work without a legacy compiler API;
+no repository source, test or maintained script imports that API. A fresh `npm ci` confirmed the `tsc` executable belongs to TypeScript 7.0.2; the emitted SDK compiled in an external strict NodeNext consumer fixture. Runtime types
+are pinned to Node 24.13.5. The public ESLint and tsc adapters retain their
+formats and exports.
+
+Before strictness repairs, disposable TS7 probes found:
+
+| Flag                         | Diagnostics | Affected files |
+| ---------------------------- | ----------: | -------------: |
+| `noUncheckedIndexedAccess`   |          58 |             19 |
+| `exactOptionalPropertyTypes` |          80 |             26 |
+| both                         |         137 |             40 |
+
+Each high-volume flag is its own implementation commit. Baselines remain zero.

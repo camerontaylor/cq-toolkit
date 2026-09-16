@@ -124,7 +124,7 @@ never block indefinitely, never treat a long silence as completion.
 
 Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
-`node scripts/ratchet-typecheck.mjs`, `npm run lint`, `npm run test`, and
+`npm run check:static`, `npm run format:check`, `npm run test`, and
 the three whitespace/conflict-marker checks below. Use the immutable `BASE`
 from §3 and stage your own new files before these checks so they are covered:
 

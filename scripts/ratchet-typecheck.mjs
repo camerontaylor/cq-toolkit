@@ -19,18 +19,14 @@ const fail = (message) => {
   process.exit(1);
 };
 
-// Invoke tsc6 — the bin OWNED by the pinned alias (typescript =
-// npm:@typescript/typescript6, which declares exactly tsc6). The sibling
-// .bin/tsc belongs to the floating `@typescript/old: npm:typescript@^6`
-// transitive INSIDE that alias, so invoking it would certify evidence with
-// whatever ^6 happens to resolve to on a fresh install (an I5 violation).
-// On win32 the .cmd shim must be spawned through a shell: since Node's
-// CVE-2024-27980 fix, spawning a .cmd/.bat without shell:true throws EINVAL.
+// The compiler fallback is intentional: integrated Oxlint typeCheck omits
+// tsconfig inputs excluded from lint traversal. TS7 owns the compiler ratchet;
+// Oxlint owns syntactic and typed lint. See lint/README.md and conformance tests.
 const TSC_BIN = resolve(
   ROOT,
   'node_modules',
   '.bin',
-  process.platform === 'win32' ? 'tsc6.cmd' : 'tsc6',
+  process.platform === 'win32' ? 'tsc.cmd' : 'tsc',
 );
 const res = spawnSync(TSC_BIN, ['--noEmit', '-p', 'tsconfig.json', '--pretty', 'false'], {
   cwd: ROOT,
@@ -43,6 +39,16 @@ if (res.error || res.status === null) {
 const output = `${res.stdout ?? ''}${res.stderr ?? ''}`;
 const errorLines = output.split(/\r?\n/).filter((line) => /error TS\d+:/.test(line));
 const count = errorLines.length;
+if (![0, 1, 2].includes(res.status)) fail(`compiler exited abnormally (${res.status}):\n${output}`);
+if (res.status === 0 && output.trim() !== '')
+  fail(`unexpected compiler success output:\n${output}`);
+if (
+  errorLines.some(
+    (line) => /^error TS\d+:/.test(line) || /\.json\(\d+,\d+\): error TS\d+:/.test(line),
+  )
+) {
+  fail(`compiler configuration or project-loading failure:\n${output}`);
+}
 // Only a run whose errors are parsable may be counted (I5): a nonzero exit
 // with NO `error TS` lines (npx missing-package text, a compiler panic, a
 // rejected flag) must never certify 0 errors — echo the tool output and
@@ -51,6 +57,22 @@ const count = errorLines.length;
 if (res.status !== 0 && count === 0) {
   fail(
     `tsc exited ${res.status} with no parsable error lines — tool output follows:\n${output.trim()}`,
+  );
+}
+
+// Lint failures must never be hidden by --update, even when a compiler count
+// can tighten. Full mode explicitly opts into type analysis; the root config
+// defaults to syntactic mode so lint:fast need not negate unsupported flags.
+const lint = spawnSync(
+  resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'oxlint.cmd' : 'oxlint'),
+  ['--type-aware', 'src', 'test', 'lint', 'scripts', 'vitest.config.ts'],
+  { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32' },
+);
+if (lint.stdout) process.stdout.write(lint.stdout);
+if (lint.stderr) process.stderr.write(lint.stderr);
+if (lint.error || lint.status !== 0) {
+  fail(
+    `lint failed: ${lint.error?.message ?? (lint.signal ? `signal ${lint.signal}` : `exit ${lint.status}`)}`,
   );
 }
 
@@ -92,7 +114,8 @@ try {
     `missing baseline ${BASELINE} (invariant I5: a missing metrics summary is non-passing evidence, never a pass; create it with --update) [${e.code ?? e.message}]`,
   );
 }
-if (typeof baseline !== 'number') fail('baseline typecheck.json has no numeric "count"');
+if (!Number.isSafeInteger(baseline) || baseline < 0)
+  fail('baseline typecheck.json needs a nonnegative integer count');
 if (count > baseline) {
   fail(
     `${count} error TS line(s) exceed baseline ${baseline}; thresholds only tighten — fix the errors, do not raise the baseline. Errors:\n${errorLines.join('\n')}`,

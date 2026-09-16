@@ -5,7 +5,7 @@
 //
 // The sandbox is a minimal throwaway repo OUTSIDE this repo: a copy of
 // scripts/ratchet-typecheck.mjs, a tsconfig whose only input is a bad.ts
-// carrying exactly one type error, and a node_modules whose .bin/tsc6 is a
+// carrying exactly one type error, and a node_modules whose .bin/tsc is a
 // STUB — a fixed-output compiler stand-in emitting exactly one parsable
 // `error TS2322:` line and exiting 1. The script derives its own ROOT from
 // its location, so the sandbox isolates the baseline while the stub keeps
@@ -49,16 +49,19 @@ function makeSandbox(): string {
     `${JSON.stringify({ compilerOptions: { strict: true, skipLibCheck: true }, include: ['bad.ts'] })}\n`,
   );
   writeFileSync(join(sbx, 'bad.ts'), `const n: number = 'not a number';\n`);
-  // The stub toolchain: TSC_BIN is <sandbox>/node_modules/.bin/tsc6; it must
+  // The stub toolchain: TSC_BIN is <sandbox>/node_modules/.bin/tsc; it must
   // behave like an errored-but-parsable tsc run (one `error TS\d+:` line,
   // exit 1) or the script's I5 guard would fail before the baseline logic.
   mkdirSync(join(sbx, 'node_modules', '.bin'), { recursive: true });
-  const stub = join(sbx, 'node_modules', '.bin', 'tsc6');
+  const stub = join(sbx, 'node_modules', '.bin', 'tsc');
   writeFileSync(
     stub,
     `#!/bin/sh\nprintf '%s\\n' "bad.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'. (stubbed toolchain)"\nexit 1\n`,
   );
   chmodSync(stub, 0o755);
+  const lintStub = join(sbx, 'node_modules', '.bin', 'oxlint');
+  writeFileSync(lintStub, '#!/bin/sh\nexit 0\n');
+  chmodSync(lintStub, 0o755);
   return sbx;
 }
 
@@ -114,5 +117,27 @@ describe('ratchet-typecheck --update: the baseline can only tighten', () => {
     const res = runUpdate(sbx);
     expect(res.status, outputOf(res)).toBe(0);
     expect(baselineOf(sbx)).toEqual({ count: 1 });
+  });
+  it.each([
+    ['missing compiler', null],
+    ['unparsable failure', '#!/bin/sh\necho compiler-crash\nexit 1\n'],
+    [
+      'abnormal exit with a diagnostic',
+      '#!/bin/sh\necho "bad.ts(1,1): error TS2322: bad"\nexit 3\n',
+    ],
+    ['unexpected success output', '#!/bin/sh\necho truncated-output\nexit 0\n'],
+    [
+      'configuration diagnostic',
+      '#!/bin/sh\necho "error TS5023: Unknown compiler option"\nexit 1\n',
+    ],
+  ])('cannot update after %s', (_name, script) => {
+    const sbx = makeSandbox();
+    sandbox = sbx;
+    writeFileSync(join(sbx, 'baselines/typecheck.json'), '{"count":2}\n');
+    const compiler = join(sbx, 'node_modules/.bin/tsc');
+    if (script === null) rmSync(compiler);
+    else writeFileSync(compiler, script);
+    expect(runUpdate(sbx).status).toBe(1);
+    expect(baselineOf(sbx)).toEqual({ count: 2 });
   });
 });

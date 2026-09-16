@@ -31,10 +31,9 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job, plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the five command steps below are this repo's
-`{{COMMANDS...}}` slot — typecheck ratchet first (that step IS the
-typecheck gate: full `tsc6 --noEmit` plus the error-count baseline), then
-format check, lint, test, build. This repo's `.github/workflows/ci.yml` IS this template
+instantiation tokens; the four command steps below are this repo's
+`{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
+format check, test, build. This repo's `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
 The `from-source` companion job below mirrors ci.yml's second job exactly
@@ -72,15 +71,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: {{INSTALL_CMD}}
-      # The typecheck gate IS this ratchet step: it runs the full
-      # `tsc6 --noEmit` over the whole repo config and then enforces the
-      # error-count baseline, so no separate Typecheck step is needed.
-      - name: Typecheck ratchet
-        run: node scripts/ratchet-typecheck.mjs
+      # One compiler ratchet plus typed lint; aliases must not duplicate it.
+      - name: Static gate
+        run: npm run check:static
       - name: Check formatting
         run: npm run format:check
-      - name: Lint
-        run: npm run lint
       - name: Test
         run: npm run test
       # Emit gate: the ratchet step above is the typecheck gate; this step
