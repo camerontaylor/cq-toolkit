@@ -1,8 +1,10 @@
-// Sweep lane (WS-D, goal D1) — public surface. Re-export only, no logic:
+// Sweep lane (WS-D, goals D1+D2) — public surface. Re-export only, no logic:
 // the planner (decision factory + subprocess effects binding + THE
 // gates→ledger signature recipe), the git-mutation mutex (library utility —
 // deliberately NOT a registry op), the worktree provider (decision factory
-// + subprocess effects binding + its wire-format parsers), and the family
+// + subprocess effects binding + its wire-format parsers), the salvage
+// classifier for interrupted sweep worktrees, and the age-based cleanup op
+// (both D2: decision factory + subprocess effects binding), plus the family
 // registry with its registry-time input schemas. Names stay sweep-prefixed
 // or domain-specific: star exports are COLLISION-SILENT across the root
 // barrel (src/ops/README.md), so no generic `list`/`get`-class names leave
@@ -46,9 +48,28 @@ export {
   parseRemoteHeads,
   parseWorktreePorcelain,
 } from './worktreeFor.js';
+export type {
+  CleanupEffects,
+  CleanupInput,
+  CleanupReport,
+  SubprocessCleanupEffectsOptions,
+} from './cleanup.js';
+export { makeCleanup, makeSubprocessCleanupEffects } from './cleanup.js';
+export type {
+  SalvageClass,
+  SalvageEffects,
+  SalvageEntry,
+  SalvageInput,
+  SalvageJournal,
+  SalvagePlan,
+  SalvageRow,
+} from './salvage.js';
+export { makeSalvage, makeSubprocessSalvageEffects } from './salvage.js';
 export {
+  CleanupInputSchema,
   PlanSweepInputSchema,
   registry as sweepRegistry,
+  SalvageInputSchema,
   WorktreeForInputSchema,
 } from './registry.js';
 // The registry re-export is ALIASED: the ledger family barrel already sends

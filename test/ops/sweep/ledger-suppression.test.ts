@@ -103,9 +103,11 @@ const INPUT = {
 // ---------------------------------------------------------------------------
 
 describe('sweep registry surface', () => {
-  test('exactly two entries: planSweep + worktreeFor — gitMutex is NOT an op', () => {
+  test('exactly four entries: planSweep + worktreeFor + salvage + cleanup — gitMutex is NOT an op', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([
+      'sweep.cleanup',
       'sweep.planSweep',
+      'sweep.salvage',
       'sweep.worktreeFor',
     ]);
   });
