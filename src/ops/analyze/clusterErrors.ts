@@ -16,15 +16,16 @@
 //     the comparison unit carried on each cluster; the 8-hex id is its
 //     compact stable handle.
 //   - Template normalization is EXACTLY this pipeline, in this order:
-//       1. quoted spans ('…', "…", `…`)          → <str> — bodies are
-//          ESCAPE-AWARE (a backslash consumes the character after it, so
-//          an escaped delimiter cannot close a span), and an OPENING
-//          delimiter must not be preceded by a Unicode letter, number, or
-//          underscore, so a contraction ("doesn't") or a possessive
-//          ("Users'") can never open a span
-//       2. non-space runs containing / or \      → <path>  (posix + windows paths, URLs)
-//       3. numbers (optional decimal part)       → <num>   (counts, line:col refs)
-//       4. whitespace runs collapsed, trimmed
+//       1. quoted spans ('…', "…", `…`)          → <str> — found by a
+//          single-pass LINEAR scanner (no regex rescan of the tail):
+//          bodies are ESCAPE-AWARE (a backslash consumes the character
+//          after it, so an escaped delimiter cannot close a span), an
+//          OPENING delimiter must not be preceded by a Unicode letter,
+//          number, or underscore (so a contraction ("doesn't") or a
+//          possessive ("Users'") can never open a span), and a FAILED
+//          opener (no closer in the tail) makes its style literal for the
+//          rest of the message — a later delimiter of that style would
+//          have closed the span, so no later span of it can exist
 //     Case is PRESERVED (distinct identifiers that differ in case stay
 //     distinct). Later rules see earlier placeholders: a quoted path is
 //     <str>, a number inside a path is already inside <path>. The coarseness
@@ -92,28 +93,77 @@ import { sortByIdentity } from './collectFailures.js';
  * pinned by tests, like the fingerprint vectors).
  */
 export function messageTemplate(message: string): string {
-  return message
-    .replace(QUOTED_SPAN, '<str>')
+  // Stage 1 — quoted spans, via a single-pass LINEAR scanner (the regex it
+  // replaced rescanned the remaining tail at every candidate opener,
+  // O(k·n) on many-opener messages). The per-style dead flags are what
+  // keep the scan linear: each style can fail by TAIL EXHAUSTION at most
+  // once (after that it is literal for the rest of the message), and a
+  // barrier-aborted span only rescans up to its barrier. Every other step
+  // advances. Differential-fuzzed against the regex it replaced.
+  let out = '';
+  let literalStart = 0;
+  let i = 0;
+  const dead = [false, false, false];
+  scan: while (i < message.length) {
+    const style = DELIMITERS.indexOf(message[i] as string);
+    if (style !== -1 && !dead[style] && !isAfterUnicodeWordChar(message, i)) {
+      let j = i + 1;
+      let barrier = false;
+      while (j < message.length) {
+        const c = message[j] as string;
+        if (c === '\\') {
+          if (j + 1 >= message.length || LINE_TERMINATOR.test(message[j + 1] as string)) {
+            // Escape-pair barrier: the regex dot refuses a line terminator
+            // (or the string ends), so this span fails — but unlike tail
+            // exhaustion the style stays ALIVE: a later opener after the
+            // barrier can still succeed. The failed span emits nothing and
+            // the backslash stays literal.
+            barrier = true;
+            break;
+          }
+          j += 2;
+          continue;
+        }
+        if (c === DELIMITERS[style]) {
+          out += `${message.slice(literalStart, i)}<str>`;
+          i = j + 1;
+          literalStart = i;
+          continue scan;
+        }
+        j += 1;
+      }
+      // Tail exhaustion only (no barrier): a later delimiter of this style
+      // would have closed the span, so no later span of it can exist — the
+      // style goes literal for the rest of the message.
+      if (!barrier) dead[style] = true;
+    }
+    i += 1;
+  }
+  const spanReplaced = out + message.slice(literalStart);
+  return spanReplaced
     .replace(/\S+/g, (token) => (token.includes('/') || token.includes('\\') ? '<path>' : token))
     .replace(NUMBER_LIKE, '<num>')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+/** The three quoted-span delimiter styles, indexed by the per-style dead flags. */
+const DELIMITERS: readonly string[] = ["'", '"', '`'];
+
+/** A character that blocks an opener: Unicode letter, number, or underscore. */
+const WORD_CHAR = /[\p{L}\p{N}_]/u;
+
 /**
- * Quoted spans of all three JS quote styles, non-greedy within one pair.
- * ESCAPE-AWARE bodies: a backslash consumes the character after it as a
- * pair, so an escaped delimiter cannot close a span ("a\"b" is ONE span)
- * and a backslash directly before the closer extends the span. The OPENER
- * is boundary-aware: it must NOT be preceded by a Unicode letter, number,
- * or underscore, so a straight apostrophe inside a word — a contraction
- * ("doesn't"), a possessive ("Users'"), or after a non-ASCII letter
- * ("café's") — can never open a span. A quote abutting Unicode word chars
- * on BOTH sides can therefore never open: such content stays literal, and
- * an unpaired quote passes through conservatively.
+ * Characters the escape pair \X refuses to consume (the regex dot's
+ * exclusion — without the s flag a backslash cannot cross a line
+ * terminator, and the span fails there exactly as the regex body did).
  */
-const QUOTED_SPAN =
-  /(?<![\p{L}\p{N}_])'(?:\\.|[^'\\])*'|(?<![\p{L}\p{N}_])"(?:\\.|[^"\\])*"|(?<![\p{L}\p{N}_])`(?:\\.|[^`\\])*`/gu;
+const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
+
+/** True when the character before `index` is a Unicode letter, number, or underscore. */
+function isAfterUnicodeWordChar(message: string, index: number): boolean {
+  return index > 0 && WORD_CHAR.test(message[index - 1] as string);
+}
 
 /** Numbers with an optional decimal part (codes, counts, line:col refs). */
 const NUMBER_LIKE = /\d+(?:\.\d+)?/g;

@@ -162,6 +162,26 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
     expect(messageTemplate("cannot read 'C:\\temp\\log'")).toBe('cannot read <str>');
   });
 
+  test('linear scan at scale: 2000 space-preceded apostrophes pair into 1000 spans (identical semantics)', () => {
+    // Every apostrophe after the first is the previous opener's CLOSER
+    // candidate, so this many-opener input pairs into spans rather than
+    // failing — the exact output is pinned via .repeat, which also pins
+    // the scanner's linear single-pass shape (no per-opener tail rescans).
+    const message = "'a ".repeat(2000);
+    // The pipeline's trailing trim removes the final space of the last
+    // literal 'a ' unit.
+    const expected = '<str>a '.repeat(999) + '<str>a';
+    expect(messageTemplate(message)).toBe(expected);
+  });
+
+  test('a failed opener (no closer in the tail) makes the rest of the message literal', () => {
+    // The failed-opener rule: the single apostrophe opens, the scan
+    // exhausts the tail without a closer, and the style goes dead — the
+    // whole message passes through literally. Exact output pinned.
+    const message = `'${'a'.repeat(4000)}`;
+    expect(messageTemplate(message)).toBe(message);
+  });
+
   test('pathological tokens normalize with correct output (token-wise scan, unbounded messages)', () => {
     const longToken = 'a'.repeat(200_000);
     // With a separator: the whole maximal non-space run is one <path>.
