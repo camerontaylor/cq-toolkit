@@ -31,10 +31,10 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job, plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the four command steps below are this repo's
+instantiation tokens; the five command steps below are this repo's
 `{{COMMANDS...}}` slot — typecheck ratchet first (that step IS the
 typecheck gate: full `tsc6 --noEmit` plus the error-count baseline), then
-lint, test, build. This repo's `.github/workflows/ci.yml` IS this template
+format check, lint, test, build. This repo's `.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
 The `from-source` companion job below mirrors ci.yml's second job exactly
@@ -77,6 +77,8 @@ jobs:
       # error-count baseline, so no separate Typecheck step is needed.
       - name: Typecheck ratchet
         run: node scripts/ratchet-typecheck.mjs
+      - name: Check formatting
+        run: npm run format:check
       - name: Lint
         run: npm run lint
       - name: Test
@@ -120,7 +122,7 @@ jobs:
 ```
 
 When adopting for another repository: keep the `on:` block and the
-permissions shape exactly as shown, swap the tokens, and replace the four
+permissions shape exactly as shown, swap the tokens, and replace the five
 command steps with your own `{{COMMANDS...}}` — then add the resulting
 workflow's file name and job id (the check name) as a pair in
 `REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.

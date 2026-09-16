@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "singleQuote": true,
+  "semi": true,
+  "printWidth": 100,
+  "sortImports": false,
+  "sortPackageJson": false,
+  "embeddedLanguageFormatting": "off",
+  "ignorePatterns": [
+    "dist/**",
+    "coverage/**",
+    ".github/workflows/**",
+    "test/fixtures/check-outputs/**"
+  ]
+}

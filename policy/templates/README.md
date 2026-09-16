@@ -35,7 +35,7 @@ substitution.
 | `{{RUNNER}}` | required-check.md, affected-tests.md | `runs-on` label, e.g. `ubuntu-latest` |
 | `{{NODE_VERSION}}` | required-check.md, affected-tests.md | Node version for `setup-node` |
 | `{{INSTALL_CMD}}` | required-check.md, affected-tests.md | dependency install command, e.g. `npm ci` |
-| `{{COMMANDS...}}` | required-check.md | HAND-REPLACED slot (see above): the variadic ordered run-steps of the static job. The template carries this repo's four literal steps — typecheck ratchet, lint, test, build — and an adopter replaces them by hand with their own commands; no placeholder text is substituted. |
+| `{{COMMANDS...}}` | required-check.md | HAND-REPLACED slot (see above): the variadic ordered run-steps of the static job. The template carries this repo's five literal steps — typecheck ratchet, format check, lint, test, build — and an adopter replaces them by hand with their own commands; no placeholder text is substituted. |
 
 ## How instantiation works
 
