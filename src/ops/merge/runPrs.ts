@@ -290,7 +290,16 @@ export async function runMergePrs(
                 pr: candidate.pr,
                 repoRoot: input.repoRoot,
                 headBranch: candidate.headRefName,
-                baseBranch: input.baseBranch,
+                // The candidate's OWN base branch: a stacked pr's conflict
+                // is against its parent's head branch, not the trunk —
+                // resolving against input.baseBranch could push an acted
+                // commit that still conflicts against the real base, and
+                // pass 2 could never make it eligible. Roots have
+                // baseRefName === baseBranch, so they are unchanged by
+                // this. resolveConflict renders baseRef as
+                // origin/<baseBranch> (fetch origin <branch>, merge
+                // FETCH_HEAD) — exactly right for a branch-name base.
+                baseBranch: candidate.baseRefName,
                 modelSpec,
                 ...(input.protectedBranch !== undefined
                   ? { protectedBranch: input.protectedBranch }

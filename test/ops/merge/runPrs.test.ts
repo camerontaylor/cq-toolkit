@@ -387,6 +387,56 @@ describe('runMergePrs', () => {
     expect(outcome.needsHuman).toEqual([]);
   });
 
+  test('the resolve input carries the CANDIDATE base: stacked vs root', async () => {
+    const effects = new FakeMergeEffects();
+    // pr 43: root on 'main' (its head is the stack's parent branch);
+    // pr 45: stacked ON that parent branch — its conflict is against
+    // 'b-parent', not the trunk; pr 46: an ordinary conflicting root.
+    const candidates = [
+      eligible(43, { headRefName: 'b-parent' }),
+      conflicting(45, { baseRefName: 'b-parent' }),
+      conflicting(46),
+    ];
+    const calls: ResolveConflictInput[] = [];
+    const resolve = async (
+      input: ResolveConflictInput,
+    ): Promise<OpResult<ConflictResolutionValue>> => {
+      calls.push(input);
+      return acted(input.pr, `pushed ${String(input.pr)}`);
+    };
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    // The dispatch base is each candidate's OWN baseRefName: the stacked
+    // pr resolves against 'b-parent' (its parent's head branch), the root
+    // against input.baseBranch ('main' — a root's baseRefName IS the base
+    // branch, so roots are unchanged by the candidate-base rule).
+    expect(calls.map((call) => ({ pr: call.pr, baseBranch: call.baseBranch }))).toEqual([
+      { pr: 45, baseBranch: 'b-parent' },
+      { pr: 46, baseBranch: 'main' },
+    ]);
+    expect(calls[0]).toEqual({
+      pr: 45,
+      repoRoot: '/repo',
+      headBranch: 'feat/45',
+      baseBranch: 'b-parent',
+      modelSpec: MODEL_SPEC,
+    });
+    expect(outcome.resolutions).toEqual([
+      { pr: 45, decision: 'acted', summary: 'pushed 45' },
+      { pr: 46, decision: 'acted', summary: 'pushed 46' },
+    ]);
+    // Pass 1 merged the eligible parent; pass 2 (guarded) excluded it and
+    // the two unflipped conflicts re-withheld — the honest no-refetch
+    // outcome for a claimed-but-unobserved flip.
+    expect(outcome.firstPass.merged).toEqual([43]);
+    expect(outcome.secondPass?.merged).toEqual([]);
+    expect(outcome.needsHuman).toEqual([
+      { pr: 45, reason: 'not_eligible' },
+      { pr: 46, reason: 'not_eligible' },
+    ]);
+  });
+
   test('refetch THROW fails closed: no re-plan, secondPass null, every acted pr owed a row', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(acted(46, 'pushed 46'));
