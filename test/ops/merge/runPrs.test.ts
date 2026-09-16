@@ -11,10 +11,17 @@
 //      resolve (F4, bounded) → second pass only when something acted →
 //      needs-human union + post-mortem of the FINAL report.
 //   3. NO RE-GRADING: the conflict set is derived from the F1 verdict, and
-//      a second pass re-classifies the candidates AS THEY STAND — the fake
-//      resolve flipping the candidate's mergeState stands in for the
-//      pushed resolution changing reality; the composition fabricates
-//      nothing.
+//      a second pass re-classifies the candidate set AS IT STANDS — the
+//      composition fabricates nothing. With deps.refetch the refreshed set
+//      is what pass 2 classifies (the resolution is on the remote; the
+//      in-memory candidates are stale); without it, the caller-side flip of
+//      the in-memory candidate stands in for the pushed resolution and
+//      stays pinned (safe: executeMerges revalidates live state per
+//      action).
+//   3a. THE PASS-2 CANDIDATE SET FAILS CLOSED: a refetch THROW → no
+//       re-plan, secondPass null, every acted pr owed a 'pass-2 refresh
+//       failed:' needsHuman row; no acted resolution → the seam is never
+//       invoked.
 //   4. THE MODEL GATE: conflicts + no modelSpec → needsHuman rows naming
 //      modelSpec, resolve NEVER called, no second pass.
 //   5. NEVER SILENT: a failed/indeterminate/budget-exhausted resolve
@@ -201,6 +208,25 @@ const fakeResolve = (
   return { resolve, calls };
 };
 
+/**
+ * THE FAKE REFETCH — the pass-2 live-refresh seam: records every
+ * invocation and answers with a scripted candidate set (or throws — the
+ * fail-closed surface). The scripted set is the refreshed forge view; a
+ * formerly-conflicting pr arrives CLEAN, and merged/closed prs may be
+ * omitted entirely.
+ */
+const fakeRefetch = (
+  scripted: MergePrsCandidate[] | Error,
+): { refetch: () => Promise<MergePrsCandidate[]>; callCount: () => number } => {
+  let calls = 0;
+  const refetch = async (): Promise<MergePrsCandidate[]> => {
+    calls += 1;
+    if (scripted instanceof Error) throw scripted;
+    return scripted;
+  };
+  return { refetch, callCount: () => calls };
+};
+
 // ---------------------------------------------------------------------------
 // The pipeline, stage by stage
 // ---------------------------------------------------------------------------
@@ -225,13 +251,38 @@ describe('runMergePrs', () => {
     expect(calls).toEqual([]);
   });
 
-  test('conflict → acted: the flip earns a second pass and the pr MERGES there', async () => {
+  test('happy path, no conflicts: both eligible prs merge in pass 1; the agent never runs', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve, calls } = fakeResolve(acted(999));
+    const { refetch, callCount } = fakeRefetch([]);
+    const outcome = await runMergePrs(baseInput([eligible(44), eligible(45)]), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    expect(outcome.firstPass.merged).toEqual([44, 45]);
+    expect(outcome.secondPass).toBeNull();
+    expect(outcome.resolutions).toEqual([]);
+    expect(outcome.needsHuman).toEqual([]);
+    // The post-mortem of the final (= first) report: nothing to do.
+    expect(outcome.diagnosis.needsHuman).toEqual([]);
+    expect(outcome.diagnosis.causes).toEqual([]);
+    // The agent is never dispatched when nothing conflicts.
+    expect(calls).toEqual([]);
+    // And with no acted resolution the pass-2 refresh seam is never paid.
+    expect(callCount()).toBe(0);
+  });
+
+  test('conflict → acted, NO refetch seam: pass 2 runs on the in-memory candidates', async () => {
     const candidates = [eligible(44), conflicting(45)];
     const effects = new FakeMergeEffects();
-    // The agent's pushed resolution changes reality: the formerly-DIRTY
-    // branch merges clean now. The fake resolve flips the candidate — the
-    // composition must read that fresh at pass-2 classify time and
-    // fabricate nothing itself.
+    // No refetch seam: pass 2 classifies the IN-MEMORY candidates, so the
+    // caller-side flip of the candidate stands in for the pushed
+    // resolution changing reality. Safe, never unsound: executeMerges
+    // revalidates live state per action, so stale candidates can only
+    // produce skipped-with-reason outcomes — this test pins the in-memory
+    // path (the seam path is the next test).
     const { resolve, calls } = fakeResolve(acted(45, 'union merge pushed'), (input) => {
       const target = candidates.find((candidate) => candidate.pr === input.pr);
       if (target !== undefined) target.mergeState = 'CLEAN';
@@ -262,6 +313,71 @@ describe('runMergePrs', () => {
     expect(outcome.secondPass?.merged).toContain(45);
     expect(outcome.needsHuman).toEqual([]);
     expect(calls).toHaveLength(1);
+  });
+
+  test('conflict → acted WITH refetch: pass 2 classifies the REFRESHED set and merges there', async () => {
+    const effects = new FakeMergeEffects();
+    // The resolve fake does NOT touch the candidates: the in-memory
+    // snapshot stays stale (still DIRTY) exactly as it would in production
+    // — the pushed resolution lives on the remote.
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
+    // The refreshed forge view: the formerly-DIRTY pr arrives CLEAN (and a
+    // merged/closed pr could be omitted entirely — same shape, fewer rows).
+    const { refetch, callCount } = fakeRefetch([eligible(44), eligible(45)]);
+
+    const outcome = await runMergePrs(baseInput([eligible(44), conflicting(45)], MODEL_SPEC), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    // Pass 1: only the eligible pr merges; the conflicting one is withheld.
+    expect(outcome.firstPass.merged).toEqual([44]);
+    expect(outcome.resolutions).toEqual([
+      { pr: 45, decision: 'acted', summary: 'union merge pushed' },
+    ]);
+    // The seam earned its keep: invoked exactly once, and pass 2 — planned
+    // from the REFRESHED set — merges the formerly-conflicting pr.
+    expect(callCount()).toBe(1);
+    expect(outcome.secondPass).not.toBeNull();
+    expect(outcome.secondPass?.merged).toContain(45);
+    expect(outcome.needsHuman).toEqual([]);
+  });
+
+  test('refetch THROW fails closed: no re-plan, secondPass null, every acted pr owed a row', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve, calls } = fakeResolve(acted(46, 'pushed 46'));
+    // Two acted prs: the failure rows must name EVERY one of them.
+    const { resolve: resolveSecond, calls: callsSecond } = fakeResolve(acted(47, 'pushed 47'));
+    const bothResolve = async (
+      input: ResolveConflictInput,
+    ): Promise<OpResult<ConflictResolutionValue>> =>
+      input.pr === 46 ? resolve(input) : resolveSecond(input);
+    const { refetch, callCount } = fakeRefetch(new Error('forge unreachable'));
+
+    const outcome = await runMergePrs(baseInput([conflicting(46), conflicting(47)], MODEL_SPEC), {
+      effects,
+      resolve: bothResolve,
+      refetch,
+    });
+
+    // The resolutions happened and stay recorded as acted.
+    expect(outcome.resolutions).toEqual([
+      { pr: 46, decision: 'acted', summary: 'pushed 46' },
+      { pr: 47, decision: 'acted', summary: 'pushed 47' },
+    ]);
+    // Fail closed: the seam was tried, pass 2 never ran.
+    expect(callCount()).toBe(1);
+    expect(outcome.secondPass).toBeNull();
+    // Every acted pr is owed a row naming the refresh failure — the
+    // resolution happened but re-entry is unproven, never a silent success.
+    expect(outcome.needsHuman).toEqual([
+      { pr: 46, reason: 'pass-2 refresh failed: forge unreachable' },
+      { pr: 47, reason: 'pass-2 refresh failed: forge unreachable' },
+    ]);
+    expect(outcome.firstPass.merged).toEqual([]);
+    expect(calls).toHaveLength(1);
+    expect(callsSecond).toHaveLength(1);
   });
 
   test('resolve passthroughs (protectedBranch/wallClockMs/sessionsDir) ride the resolve input', async () => {

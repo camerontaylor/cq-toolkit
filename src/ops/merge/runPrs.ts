@@ -14,6 +14,27 @@
 // that decided anything else — or a branch still conflicting at pass 2 —
 // lands in needsHuman instead of looping; a human owes the next move.
 //
+// THE PASS-2 CANDIDATE SET: the agent's resolution is ON THE REMOTE, so the
+// caller's in-memory candidates (their mergeState/lastCommitAt are the
+// fetch-time snapshot) are stale the moment a resolution acts. Pass 2
+// therefore classifies `deps.refetch()` when the caller supplies the seam.
+// The refreshed set carries the same MergePrsCandidate shape; closed/merged
+// prs MAY be omitted — classifyStage nulls closed classifications and
+// absent prs simply do not re-plan, which is the honest live view. A
+// refetch THROW fails closed: no re-plan, secondPass stays null, and every
+// acted pr gets a needsHuman row 'pass-2 refresh failed: …' — the
+// resolution happened, but re-entry is unproven; never a silent success.
+//
+// WHY THE NO-REFETCH PASS 2 IS STILL SAFE: without the seam, pass 2
+// classifies the in-memory candidates — and executeMerges revalidates LIVE
+// state per action (F3 rule a: fetch, then validate; a head that moved or
+// vanished is skipped with a reason — stale — never merged), so stale
+// candidates can only produce skipped-with-reason outcomes, never bad
+// merges. The cost is honesty about waste: pass 2 may re-withhold what a
+// live fetch would have merged. Callers wanting a live second pass pass
+// refetch; the function-valued seam (not an input field) keeps the op's
+// JSON input boundary plain data.
+//
 // WHY THE needsHuman ROWS ARE DATA: every row is plain { pr, reason } —
 // the CLI layer owns any exit-code mapping (I1: the op never sees exit
 // codes), so the composition only carries the frozen taxonomy. Rows are
@@ -32,10 +53,11 @@
 // NO RE-GRADING: the conflict set is derived from the F1 classification
 // itself (verdict 'conflicting'), NEVER from the planner's reason strings,
 // and the planner's decisions are carried whole. The second pass
-// re-classifies the candidates AS THEY STAND at pass-2 time: the resolve
-// stage's real-world effect (the pushed resolution) is what flips a branch
-// DIRTY → CLEAN — the composition fabricates no data and never marks a pr
-// eligible by fiat.
+// re-classifies the candidate set AS IT STANDS at pass-2 time —
+// deps.refetch()'s refreshed view when the seam is present, else the
+// in-memory candidates — and fabricates nothing: what flips a branch
+// DIRTY → CLEAN is the resolve stage's real-world effect (the pushed
+// resolution), never the composition's own verdict.
 //
 // DETERMINISM: classify and plan are pure and clock-free; Date.now() is
 // read ONCE, here (the composition is the one place the ambient clock is
@@ -133,10 +155,11 @@ export interface MergePrsOutcome {
    * 'conflict agent did not complete: …' text for a non-acted verdict —
    * the composition NEVER hides a non-acted outcome as silent success). */
   resolutions: Array<{ pr: number; decision: 'acted' | 'escalate'; summary: string }>;
-  /** The needs-human union — escalations + the FINAL plan's withheld prs +
-   * the FINAL report's stale/failed/blocked — pr-sorted, deduped; a pr
-   * appears once with the first reason in the priority escalation >
-   * planner withhold > execution outcome. Data for the CLI layer (I1). */
+  /** The needs-human union — escalations + pass-2 refresh failures + the
+   * FINAL plan's withheld prs + the FINAL report's stale/failed/blocked —
+   * pr-sorted, deduped; a pr appears once with the first reason in the
+   * priority escalation > planner withhold > execution outcome. Data for
+   * the CLI layer (I1). */
   needsHuman: Array<{ pr: number; reason: string }>;
   /** The post-mortem of the FINAL report (pass 2 when it ran, else pass 1). */
   diagnosis: MergeFailureDiagnosis;
@@ -154,6 +177,20 @@ export interface RunMergePrsDeps {
   resolve: Op<ResolveConflictInput, ConflictResolutionValue>;
   /** executeMerges passthrough (input.maxRetries wins when both are set). */
   maxRetries?: number;
+  /**
+   * The pass-2 live-refresh seam: re-fetch the candidate set from the forge
+   * AFTER a resolution acted (the resolution is on the remote — the
+   * in-memory candidates are stale). Answers the same MergePrsCandidate
+   * shape; closed/merged prs may be omitted (classifyStage nulls closed
+   * classifications; absent prs do not re-plan). A THROW fails closed: no
+   * re-plan, secondPass stays null, and every acted pr gets a
+   * 'pass-2 refresh failed: …' needsHuman row. Optional — without it pass 2
+   * classifies the in-memory candidates (safe: executeMerges revalidates
+   * live state per action; the cost is pass 2 may re-withhold — see the
+   * module doc). Function-valued so the op's JSON input boundary stays
+   * clean: the INPUT stays plain data.
+   */
+  refetch?: () => Promise<MergePrsCandidate[]>;
 }
 
 /** Stage 1: classify every OPEN candidate through F1's table (the default
@@ -169,6 +206,9 @@ const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedP
     classification: candidate.state === 'open' ? classifyPr(candidate, nowMs) : null,
     truncated: candidate.truncated,
   }));
+
+/** A throwable's message, whatever landed. */
+const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
 /**
  * Run the merge-prs pipeline (see the module doc). Never throws for a
@@ -287,24 +327,51 @@ export async function runMergePrs(
   }
 
   // Stage 5: the second pass — ONLY when at least one resolution acted
-  // (only a pushed resolution can change what the next plan sees). The
-  // WHOLE open set re-classifies fresh from the candidates as they stand
-  // now; the LAST pass — pass cap 2. Anything still conflicting after this
-  // is the final plan's 'not_eligible', and the union carries it.
-  if (resolutions.some((resolution) => resolution.decision === 'acted')) {
-    const planned2 = classifyStage(input.prs, nowMs);
-    const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
-    const second = await execute(plan2);
-    secondPass = second;
-    finalPlan = plan2;
-    finalReport = second;
+  // (only a pushed resolution can change what the next plan sees); the
+  // LAST pass — pass cap 2. The candidate set: deps.refetch()'s refreshed
+  // view when the seam is present (the resolution is on the remote; the
+  // in-memory snapshot is stale), else the in-memory candidates (safe —
+  // executeMerges revalidates live state per action; see the module doc).
+  // A refetch THROW fails closed: no re-plan, secondPass stays null, and
+  // every acted pr is owed a needsHuman row — the resolution happened but
+  // re-entry is unproven, never a silent success. Anything still
+  // conflicting after pass 2 is the final plan's 'not_eligible', and the
+  // union carries it.
+  const actedResolutions = resolutions.filter((resolution) => resolution.decision === 'acted');
+  const refetchFailed: Array<{ pr: number; reason: string }> = [];
+  if (actedResolutions.length > 0) {
+    let pass2Candidates = input.prs;
+    let refreshFailed = false;
+    if (deps.refetch !== undefined) {
+      try {
+        pass2Candidates = await deps.refetch();
+      } catch (err) {
+        refreshFailed = true;
+        for (const acted of actedResolutions) {
+          refetchFailed.push({
+            pr: acted.pr,
+            reason: `pass-2 refresh failed: ${errorMessage(err)}`,
+          });
+        }
+      }
+    }
+    if (!refreshFailed) {
+      const planned2 = classifyStage(pass2Candidates, nowMs);
+      const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
+      const second = await execute(plan2);
+      secondPass = second;
+      finalPlan = plan2;
+      finalReport = second;
+    }
   }
 
   // Stage 6: the needs-human union + the final post-mortem. Insertion
   // order IS the priority: escalations (undispatched conflicts first —
-  // they were never resolved — then decided escalations), then the final
-  // plan's withheld prs, then the final report's execution outcomes; a pr
-  // keeps its FIRST reason.
+  // they were never resolved — then decided escalations, then pass-2
+  // refresh failures — all escalation-class: the composition refused or
+  // could not confirm the re-entry), then the final plan's withheld prs,
+  // then the final report's execution outcomes; a pr keeps its FIRST
+  // reason.
   const byPr = new Map<number, string>();
   const addRow = (pr: number, reason: string): void => {
     if (!byPr.has(pr)) byPr.set(pr, reason);
@@ -313,6 +380,7 @@ export async function runMergePrs(
   for (const resolution of resolutions) {
     if (resolution.decision === 'escalate') addRow(resolution.pr, resolution.summary);
   }
+  for (const row of refetchFailed) addRow(row.pr, row.reason);
   for (const row of finalPlan.needsHuman) addRow(row.pr, row.reason);
   for (const entry of finalReport.stale) addRow(entry.pr, entry.detail);
   for (const entry of finalReport.failed) addRow(entry.pr, entry.error);
@@ -343,14 +411,18 @@ export interface MakeRunMergePrsOpDeps {
 }
 
 /**
- * The `merge.prs` op (the registry entry lands in the next slice): the
- * composition with its defaults wired. The effects and the conflict-agent
- * op are built LAZILY PER CALL — the effects target THIS run's repoRoot,
- * and the resolve op binds the SAME effects instance (the executor's
- * mutations and the agent's worktree lifecycle share one seam), plus the
- * caller's driver/sessionsDir seams. Absent optionals are OMITTED
+ * The `merge.prs` op (the merge.runPrs registry entry binds this default
+ * export): the composition with its defaults wired. The effects and the
+ * conflict-agent op are built LAZILY PER CALL — the effects target THIS
+ * run's repoRoot, and the resolve op binds the SAME effects instance (the
+ * executor's mutations and the agent's worktree lifecycle share one seam),
+ * plus the caller's driver/sessionsDir seams. Absent optionals are OMITTED
  * (exactOptionalPropertyTypes); an absent driver means the resolve op's
- * own default SubprocessDriver.
+ * own default SubprocessDriver. The wrapper passes NO refetch seam — the
+ * frozen MergeEffects has no candidate re-fetch capability — so the
+ * default op's pass 2 classifies the in-memory candidates (safe, never
+ * unsound; see the module doc); SDK callers wanting a live second pass
+ * call runMergePrs with a refetch of their own.
  */
 export function makeRunMergePrsOp(
   deps?: MakeRunMergePrsOpDeps,
