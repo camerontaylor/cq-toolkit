@@ -86,9 +86,16 @@ export interface AnalysisTargetDigest {
   digest: string;
 }
 
-/** Per-cluster evidence: the deduplicated, sorted target files of ONE cluster id. */
+/**
+ * Per-cluster evidence: the deduplicated, sorted target files of ONE
+ * cluster, keyed by the (clusterId, signature) PAIR — two DISTINCT
+ * signatures can share an FNV-1a 32-bit id (a pinned collision exists in
+ * the G1 tests), so the id alone cannot address a cluster's evidence.
+ */
 export interface ClusterEvidence {
   clusterId: string;
+  /** The cluster's canonical signature — the disambiguating half of the evidence key. */
+  signature: string;
   targets: AnalysisTargetDigest[];
 }
 
@@ -271,6 +278,9 @@ const AnalysisSidecarSchema: z.ZodType<AnalysisSidecar> = z
       z
         .object({
           clusterId: Hex8,
+          // The disambiguating half of the evidence key: two distinct
+          // signatures can share an FNV id (G1's pinned collision).
+          signature: z.string().min(1).max(SIGNATURE_MAX_CHARS),
           targets: z.array(
             z
               .object({
@@ -292,10 +302,14 @@ const AnalysisSidecarSchema: z.ZodType<AnalysisSidecar> = z
   })
   .refine(
     (sidecar) => {
-      const ids = new Set(sidecar.report.clusters.map((cluster) => cluster.id));
-      return sidecar.evidence.every((cluster) => ids.has(cluster.clusterId));
+      const pairs = new Set(
+        sidecar.report.clusters.map((cluster) => `${cluster.id}\u0000${cluster.signature}`),
+      );
+      return sidecar.evidence.every((cluster) =>
+        pairs.has(`${cluster.clusterId}\u0000${cluster.signature}`),
+      );
     },
-    { message: 'evidence names a cluster id absent from the report' },
+    { message: 'evidence names a (cluster id, signature) pair absent from the report' },
   )
   // COVERAGE CONTRACT: absence of evidence is a FORMAT ERROR, never a silent
   // disabling of staleness checking. Every report cluster must carry an
@@ -308,7 +322,15 @@ const AnalysisSidecarSchema: z.ZodType<AnalysisSidecar> = z
   // only change what counts as "unchanged", and the codemod shape-match
   // bounds that harm.
   .superRefine((sidecar, ctx) => {
-    const byCluster = new Map(sidecar.evidence.map((entry) => [entry.clusterId, entry.targets]));
+    // Keyed by the (id, signature) PAIR: two distinct signatures can share
+    // an FNV id (G1 pins a concrete pair), so an id-keyed map collapses them
+    // last-wins and under-covers one cluster.
+    const byPair = new Map(
+      sidecar.evidence.map((entry) => [
+        `${entry.clusterId}\u0000${entry.signature}`,
+        entry.targets,
+      ]),
+    );
     for (const cluster of sidecar.report.clusters) {
       const expected = [
         ...new Set(
@@ -317,7 +339,7 @@ const AnalysisSidecarSchema: z.ZodType<AnalysisSidecar> = z
             .filter((file): file is string => file !== null),
         ),
       ].sort();
-      const actual = byCluster.get(cluster.id);
+      const actual = byPair.get(`${cluster.id}\u0000${cluster.signature}`);
       if (actual === undefined) {
         ctx.addIssue({
           code: 'custom',
@@ -434,7 +456,7 @@ export function makeRenderAnalysisReport(
           const bytes = await store.readBytes(file);
           targets.push({ file, digest: contentDigest(Buffer.from(bytes).toString('utf8')) });
         }
-        evidence.push({ clusterId: cluster.id, targets });
+        evidence.push({ clusterId: cluster.id, signature: cluster.signature, targets });
       }
     } catch (err) {
       return {

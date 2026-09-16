@@ -60,6 +60,7 @@ function fixtureReport(): ClusterErrorsReport {
 function sidecarTextFor(report: ClusterErrorsReport, fileContents: Record<string, string>): string {
   const evidence = report.clusters.map((cluster) => ({
     clusterId: cluster.id,
+    signature: cluster.signature,
     targets: [
       ...new Set(
         cluster.failures
@@ -351,6 +352,107 @@ describe('applyRemediation acceptance: fail-closed sidecar contract', () => {
   });
 });
 
+describe('colliding cluster ids: the signature disambiguator (F2)', () => {
+  // The G1-pinned FNV collision: two distinct signatures share one 32-bit id.
+  const collidingReport = clusterErrors({
+    tool: 'eslint',
+    exitCode: 1,
+    failures: [
+      failureOf({ file: 'src/a.ts', ruleId: 'r', message: 'tjivlzyj' }),
+      failureOf({ file: 'src/b.ts', ruleId: 'r', message: 'qcmqx' }),
+    ],
+  });
+  const files = { 'src/a.ts': 'foo_bar();\n', 'src/b.ts': 'foo_bar();\n' };
+  const [clusterA, clusterB] = collidingReport.clusters;
+
+  test('WITHOUT the disambiguator an ambiguous id is a failed fault naming it', async () => {
+    const store = memoryStore('/ws', {
+      ...files,
+      [SIDECAR_PATH]: sidecarTextFor(collidingReport, files),
+    });
+    const result = await makeOp(
+      store,
+      codemodRunner(files),
+    )({
+      ...baseInput(),
+      clusterId: clusterA?.id ?? '',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain(`ambiguous cluster id '${clusterA?.id}'`);
+      expect(result.error).toContain('pass the cluster');
+      expect(result.error).toContain('signature');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('WITH the signature each colliding cluster applies independently', async () => {
+    // A runner scoped like the real ast-grep: only the REQUESTED files'
+    // matches come back (the scan is invoked with targets, not both files).
+    const contents: Record<string, string> = files;
+    const scopedRunner: RunCheck = async (cmd) => {
+      const requested = cmd.args.slice(cmd.args.indexOf('--') + 1);
+      const matches: object[] = [];
+      for (const file of requested) {
+        const text = contents[file] as string;
+        for (
+          let index = text.indexOf('foo_bar');
+          index !== -1;
+          index = text.indexOf('foo_bar', index + 1)
+        ) {
+          matches.push({
+            file,
+            replacement: 'fooBar',
+            replacementOffsets: { start: index, end: index + 'foo_bar'.length },
+          });
+        }
+      }
+      return { stdout: JSON.stringify(matches), stderr: '', exitCode: 0 };
+    };
+    for (const cluster of [clusterA, clusterB]) {
+      const freshStore = memoryStore('/ws', {
+        ...files,
+        [SIDECAR_PATH]: sidecarTextFor(collidingReport, files),
+      });
+      const result = await makeOp(
+        freshStore,
+        scopedRunner,
+      )({
+        ...baseInput(),
+        clusterId: cluster?.id ?? '',
+        signature: cluster?.signature ?? '',
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok' || result.value.mode !== 'applied') continue;
+      // Each cluster's evidence targets only its own member file.
+      const failure = (cluster?.failures[0] ?? null) as CheckFailure | null;
+      expect(result.value.targets).toEqual(failure === null ? [] : [failure.file as string]);
+      expect(result.value.clusterId).toBe(cluster === undefined ? '' : cluster.id);
+    }
+  });
+
+  test('a WRONG disambiguating signature is a fault listing the id signatures', async () => {
+    const store = memoryStore('/ws', {
+      ...files,
+      [SIDECAR_PATH]: sidecarTextFor(collidingReport, files),
+    });
+    const result = await makeOp(
+      store,
+      codemodRunner(files),
+    )({
+      ...baseInput(),
+      clusterId: clusterA?.id ?? '',
+      signature: 'no-match',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("no cluster with id '" + (clusterA?.id ?? '') + "'");
+      expect(result.error).toContain(clusterA?.signature ?? '');
+      expect(result.error).toContain(clusterB?.signature ?? '');
+    }
+  });
+});
+
 describe('applyRemediation store-relative path discipline (M1 regressions)', () => {
   test('a RELATIVE sidecarPath with a NESTED dir component (no input.dir): the store is rooted at its dirname and reads the basename', async () => {
     // Pre-M1 the op passed the FULL sidecarPath to a store rooted at
@@ -507,9 +609,47 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.error).toContain("could not write 'src/b.ts'");
+      // F3: the first target was RESTORED (best-effort rollback), not stranded.
+      expect(result.error).toContain('rolled back src/a.ts');
+      expect(result.error).toContain('original bytes restored');
+    }
+    // The first target's ORIGINAL bytes are back on disk.
+    expect(
+      Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
+    ).toBe('const foo_bar = 1;\n');
+  });
+
+  test('when the ROLLBACK itself faults, the already-written wording survives and names the rollback failure (F3)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // Faults on the second target's write AND on every subsequent restore.
+    let writeCount = 0;
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        writeCount += 1;
+        if (writeCount >= 2) {
+          throw new AnalysisStoreError(`analysis store: disk full on write ${writeCount}`);
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/b.ts'");
+      expect(result.error).toContain('rollback FAILED for');
       expect(result.error).toContain('already written: src/a.ts');
     }
-    // The first target really is remediated on disk.
+    // The first write (src/a.ts remediated) landed before the fault and
+    // could not be undone — the stranded state is named, not hidden.
     expect(
       Buffer.from(store.written.get(resolve('/ws', 'src/a.ts')) as Uint8Array).toString('utf8'),
     ).toBe('const fooBar = 1;\n');

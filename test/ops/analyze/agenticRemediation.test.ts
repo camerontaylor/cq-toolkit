@@ -10,6 +10,7 @@
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import {
+  AGENTIC_PROPOSAL_SCHEMA,
   agenticRemediationPrompt,
   makeAgenticRemediation,
 } from '../../../src/ops/analyze/agenticRemediation.js';
@@ -203,6 +204,31 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     expect(driver.invocations).toHaveLength(1);
     const invocation = driver.invocations[0] as OpInvocation;
     expect(invocation.toolPolicy).toEqual({ allow: [], mode: 'unrestricted' });
+  });
+
+  test('AGENTIC_PROPOSAL_SCHEMA accepts a proposal and rejects garbage (F1)', () => {
+    expect(AGENTIC_PROPOSAL_SCHEMA.parse({ summary: 'rename foo_bar' })).toEqual({
+      summary: 'rename foo_bar',
+    });
+    expect(
+      AGENTIC_PROPOSAL_SCHEMA.parse({ summary: 'rename', patch: '-foo_bar\n+fooBar' }),
+    ).toEqual({ summary: 'rename', patch: '-foo_bar\n+fooBar' });
+    expect(AGENTIC_PROPOSAL_SCHEMA.safeParse({}).success).toBe(false);
+    expect(AGENTIC_PROPOSAL_SCHEMA.safeParse({ summary: '' }).success).toBe(false);
+    expect(AGENTIC_PROPOSAL_SCHEMA.safeParse({ summary: 's', extra: 1 }).success).toBe(false);
+  });
+
+  test('a complete run WITH structuredOutput passes the proposal through verbatim (F1)', async () => {
+    const proposal = {
+      summary: 'rename foo_bar to fooBar',
+      patch: '-const foo_bar\n+const fooBar',
+    };
+    const driver = fakeDriver({ ...COMPLETE, structuredOutput: proposal });
+    const result = await makeAgenticRemediation(driver)(baseInput());
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    // Verbatim: the op adds nothing and strips nothing.
+    expect(result.value.structuredOutput).toEqual(proposal);
   });
 
   test('a clusterId that does not match cluster.id is a failed result (L3: the id names ITS cluster)', async () => {

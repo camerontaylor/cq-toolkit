@@ -48,8 +48,40 @@ import type {
   ToolPolicy,
   WorkerResult,
 } from '../../driver/types.js';
+import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
 import type { Cluster } from './clusterErrors.js';
+
+/**
+ * The remediation PROPOSAL the worker must return as structured output —
+ * the op's entire purpose is obtaining one, so the bound driver carries
+ * this schema (a plain-data request: `summary` required; `patch` carried
+ * when the proposal is a concrete mechanical edit).
+ */
+export interface AgenticProposal {
+  /** What the cluster is and the proposed fix, in prose. */
+  summary: string;
+  /** The concrete edit (unified diff or patch text), when the proposal is mechanical. */
+  patch?: string;
+}
+
+/**
+ * The zod form of {@link AgenticProposal}, bound into the registry's driver
+ * construction (`new SubprocessDriver({ outputSchema: AGENTIC_PROPOSAL_SCHEMA })`):
+ * the subprocess lane serializes it to `--json-schema` and validates the
+ * settle-time structured_output against it before it lands in
+ * `WorkerResult.structuredOutput` — so a dispatched run's ok result carries
+ * the proposal. It is a REQUEST the DRIVER enforces, not something the op
+ * can guarantee across lanes: a driver that cannot enforce schemas returns
+ * a WorkerResult WITHOUT structuredOutput, and the ok result passes that
+ * through verbatim (honest absence, never a fabricated proposal).
+ */
+export const AGENTIC_PROPOSAL_SCHEMA: z.ZodType<AgenticProposal> = z
+  .object({
+    summary: z.string().min(1),
+    patch: z.string().min(1).exactOptional(),
+  })
+  .strict();
 
 /** JSON-serializable input of the `analyze.agenticRemediation` op. */
 export interface AgenticRemediationInput {

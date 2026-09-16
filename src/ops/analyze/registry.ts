@@ -349,16 +349,22 @@ export const registry: OpRegistryEntry[] = [
     name: 'analyze.agenticRemediation',
     inputSchema: AgenticRemediationInputSchema,
     // The subprocess driver (the null-hypothesis floor lane) is composed at
-    // the importer — construction spawns nothing; a run is one fresh
-    // invocation (I6). The op returns the driver's WorkerResult and NEVER
-    // applies anything itself; its consumer decides outside the autonomous
-    // path.
+    // the importer with the op's PROPOSAL SCHEMA (the frozen OpInvocation
+    // cannot carry a schema): the lane serializes it to --json-schema and
+    // validates the settle-time structured_output against it, so a
+    // dispatched run's ok result carries the remediation proposal.
+    // Construction spawns nothing; a run is one fresh invocation (I6). The
+    // op returns the driver's WorkerResult and NEVER applies anything
+    // itself; its consumer decides outside the autonomous path.
     importer: () =>
       Promise.all([
         import('./agenticRemediation.js'),
         import('../../driver/subprocess/index.js'),
       ]).then(
-        ([m, d]) => m.makeAgenticRemediation(new d.SubprocessDriver()) as Op<unknown, unknown>,
+        ([m, d]) =>
+          m.makeAgenticRemediation(
+            new d.SubprocessDriver({ outputSchema: m.AGENTIC_PROPOSAL_SCHEMA }),
+          ) as Op<unknown, unknown>,
       ),
   },
   {

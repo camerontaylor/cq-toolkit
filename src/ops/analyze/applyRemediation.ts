@@ -80,6 +80,14 @@ export interface ApplyRemediationInput {
    * mandate.
    */
   clusterId?: string;
+  /**
+   * Disambiguator for the astronomically rare FNV-1a id collision (two
+   * distinct signatures hashing to one 32-bit id — G1 pins a concrete
+   * pair): REQUIRED by the op when the sidecar carries more than one
+   * cluster with the requested id, and faulted when it does not match the
+   * selected cluster.
+   */
+  signature?: string;
   /** The explicit approval flag; anything but `true` refuses the op (`needs-human`). */
   approved?: boolean;
   /** The consumer's ast-grep rule text (the mechanical remediation for this cluster). */
@@ -187,11 +195,33 @@ export function makeApplyRemediation(
         reason: `remediation is never auto-applied — an explicit cluster id AND an explicit approval flag are required, for the dry-run preview as much as for the apply; pass { clusterId: "<id>", approved: true }`,
       };
     }
-    const cluster = sidecar.report.clusters.find((candidate) => candidate.id === input.clusterId);
-    if (cluster === undefined) {
+    // Cluster selection, fail-closed on the FNV id collision: the id alone
+    // is ambiguous when two distinct signatures share it (G1 pins a concrete
+    // pair), so a multi-match REQUIRES the signature disambiguator —
+    // addressing "the first" would be an accident of sort order.
+    const matching = sidecar.report.clusters.filter(
+      (candidate) => candidate.id === input.clusterId,
+    );
+    if (matching.length === 0) {
       return {
         status: 'failed',
         error: `unknown cluster id '${input.clusterId}' — the sidecar carries: ${sidecar.report.clusters.map((candidate) => candidate.id).join(', ') || '(no clusters)'}`,
+      };
+    }
+    let cluster = matching[0] as (typeof matching)[number];
+    if (input.signature !== undefined) {
+      const bySignature = matching.find((candidate) => candidate.signature === input.signature);
+      if (bySignature === undefined) {
+        return {
+          status: 'failed',
+          error: `no cluster with id '${input.clusterId}' carries the given signature — the id's signature(s): ${matching.map((candidate) => candidate.signature).join(' | ')}`,
+        };
+      }
+      cluster = bySignature;
+    } else if (matching.length > 1) {
+      return {
+        status: 'failed',
+        error: `ambiguous cluster id '${input.clusterId}' — ${matching.length} distinct clusters share this FNV-1a id; pass the cluster's signature as the disambiguator. Signature(s): ${matching.map((candidate) => candidate.signature).join(' | ')}`,
       };
     }
     // ---- 4. Scan → collision check → dry-run or apply.
@@ -321,16 +351,47 @@ export function makeApplyRemediation(
       try {
         await store.writeBytes(file, after);
       } catch (err) {
-        // Partial multi-file apply is never silent: the fault names the
-        // files ALREADY on disk in their remediated form, so the caller
-        // knows the exact on-disk state this failure leaves behind.
-        const alreadyWritten =
-          appliedFiles.length === 0
-            ? ''
-            : `; already written: ${appliedFiles.map((applied) => applied.file).join(', ')}`;
+        // BEST-EFFORT ROLLBACK: partial multi-file apply is never stranded.
+        // The faulted file itself may hold a PARTIAL write (the store's
+        // writeFileSync is not atomic), and every target existed pre-apply —
+        // so the faulted file AND every already-written file are restored
+        // from the in-memory original bytes (`current`, verified unchanged
+        // pre-scan) through the same store, newest first, before faulting.
+        // When the rollback itself faults, the already-written wording
+        // survives and the rollback failure is named — the caller always
+        // knows the exact on-disk state.
+        const rolledBack: string[] = [];
+        const rollbackFaults: string[] = [];
+        let faultedFileRestoreFailed = '';
+        // The faulted file may hold a PARTIAL write — restore it best-effort
+        // first; its failure is noted but strands no already-written file.
+        try {
+          await store.writeBytes(file, current.get(file) as Uint8Array);
+        } catch (restoreErr) {
+          faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
+        }
+        for (const applied of [...appliedFiles].reverse()) {
+          try {
+            await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
+            rolledBack.push(applied.file);
+          } catch (rollbackErr) {
+            rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+          }
+        }
+        if (rollbackFaults.length === 0) {
+          const rolledBackNote =
+            rolledBack.length === 0
+              ? 'no earlier files to roll back'
+              : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
+          return {
+            status: 'failed',
+            error: `remediation: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
+          };
+        }
+        const stranded = appliedFiles.map((applied) => applied.file);
         return {
           status: 'failed',
-          error: `remediation: could not write '${file}' — ${messageOf(err)}${alreadyWritten}`,
+          error: `remediation: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; already written: ${stranded.join(', ')}${faultedFileRestoreFailed}`,
         };
       }
       appliedFiles.push({

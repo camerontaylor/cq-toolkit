@@ -138,6 +138,7 @@ describe('renderAnalysisReport (pure core): determinism is the contract', () => 
     const evidence = [
       {
         clusterId: report.clusters[0]?.id ?? '',
+        signature: report.clusters[0]?.signature ?? '',
         targets: [{ file: 'src/a.ts', digest: '0deadbe0' }],
       },
     ];
@@ -161,12 +162,22 @@ describe('renderAnalysisReport (pure core): determinism is the contract', () => 
     };
     expect(reportFingerprint(edited)).not.toBe(reportFingerprint(report));
     const withEvidence = renderAnalysisReport(report, {
-      evidence: [{ clusterId: report.clusters[0]?.id ?? '', targets: [] }],
+      evidence: [
+        {
+          clusterId: report.clusters[0]?.id ?? '',
+          signature: report.clusters[0]?.signature ?? '',
+          targets: [],
+        },
+      ],
     });
     const withoutEvidence = renderAnalysisReport(report);
     expect(withEvidence.markdown).toBe(withoutEvidence.markdown);
     expect(withEvidence.sidecar.evidence).toEqual([
-      { clusterId: report.clusters[0]?.id ?? '', targets: [] },
+      {
+        clusterId: report.clusters[0]?.id ?? '',
+        signature: report.clusters[0]?.signature ?? '',
+        targets: [],
+      },
     ]);
     expect(withoutEvidence.sidecar.evidence).toEqual([]);
   });
@@ -200,6 +211,7 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
       evidence: [
         {
           clusterId: report.clusters[0]?.id ?? '',
+          signature: report.clusters[0]?.signature ?? '',
           targets: [
             { file: 'src/a.ts', digest: contentDigest('const x = 1;\n') },
             { file: 'src/b.ts', digest: contentDigest('export const y = 2;\n') },
@@ -227,7 +239,7 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
       noise: [],
     };
     const nullFileSidecar = renderAnalysisReport(nullFileReport, {
-      evidence: [{ clusterId: '0deadbe0', targets: [] }],
+      evidence: [{ clusterId: '0deadbe0', signature: '["t","r","m"]', targets: [] }],
     }).sidecar;
     expect(parseAnalysisSidecar(serializeAnalysisSidecar(nullFileSidecar))).toEqual(
       nullFileSidecar,
@@ -244,7 +256,9 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
     // A PARTIAL sidecar (evidence for a different cluster) faults the same way.
     const other = report.clusters[0]?.id ?? '';
     const partial = serializeAnalysisSidecar(
-      renderAnalysisReport(report, { evidence: [{ clusterId: '0deadbe0', targets: [] }] }).sidecar,
+      renderAnalysisReport(report, {
+        evidence: [{ clusterId: '0deadbe0', signature: 'no-match', targets: [] }],
+      }).sidecar,
     );
     if (other === '0deadbe0') return; // fixture-dependent guard
     expect(() => parseAnalysisSidecar(partial)).toThrow(/does not cover cluster/);
@@ -256,6 +270,7 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
       evidence: [
         {
           clusterId: report.clusters[0]?.id ?? '',
+          signature: report.clusters[0]?.signature ?? '',
           targets: [{ file: 'src/a.ts', digest: '0deadbe0' }],
         },
       ],
@@ -297,10 +312,10 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
     const { sidecar } = renderAnalysisReport(report);
     const badEvidence = {
       ...sidecar,
-      evidence: [{ clusterId: '00000000', targets: [] }],
+      evidence: [{ clusterId: '00000000', signature: 'no-match', targets: [] }],
     };
     expect(() => parseAnalysisSidecar(JSON.stringify(badEvidence))).toThrow(
-      /evidence names a cluster id absent from the report/,
+      /pair absent from the report/,
     );
     const badSize = JSON.parse(serializeAnalysisSidecar(sidecar)) as {
       report: { clusters: Array<{ size: number }> };
@@ -342,6 +357,7 @@ describe('makeRenderAnalysisReport (op over an injected store)', () => {
       evidence: [
         {
           clusterId: fixtureReport().clusters[0]?.id ?? '',
+          signature: fixtureReport().clusters[0]?.signature ?? '',
           targets: [
             { file: 'src/a.ts', digest: contentDigest(fileContents['src/a.ts'] as string) },
             { file: 'src/b.ts', digest: contentDigest(fileContents['src/b.ts'] as string) },
@@ -361,6 +377,7 @@ describe('makeRenderAnalysisReport (op over an injected store)', () => {
     expect(parsed.evidence).toEqual([
       {
         clusterId: parsed.report.clusters[0]?.id,
+        signature: parsed.report.clusters[0]?.signature,
         targets: [
           { file: 'src/a.ts', digest: contentDigest(fileContents['src/a.ts'] as string) },
           { file: 'src/b.ts', digest: contentDigest(fileContents['src/b.ts'] as string) },
@@ -558,6 +575,49 @@ describe('the render op importer resolves end-to-end (real fs over a mkdtemp dir
     // The planted link's target is untouched.
     expect(await readFile(sentinelPath, 'utf8')).toBe('sentinel\n');
     await rm(sentinelPath, { force: true });
+  });
+});
+
+describe('FNV id collisions: evidence is keyed by the (id, signature) PAIR (F2)', () => {
+  // The G1-pinned collision pair: two DISTINCT signatures, one 32-bit id.
+  const collidingReport = clusterErrors({
+    tool: 'eslint',
+    exitCode: 1,
+    failures: [
+      failureOf({ file: 'src/a.ts', ruleId: 'r', message: 'tjivlzyj' }),
+      failureOf({ file: 'src/b.ts', ruleId: 'r', message: 'qcmqx' }),
+    ],
+  });
+
+  test('the two clusters genuinely share one id but carry distinct signatures', () => {
+    const [first, second] = collidingReport.clusters;
+    expect(first?.id).toBe(second?.id);
+    expect(first?.signature).not.toBe(second?.signature);
+  });
+
+  test('the render op publishes both clusters evidence and the sidecar parses with full pair coverage (F2)', async () => {
+    const files = { 'src/a.ts': 'tjivlzyj;\n', 'src/b.ts': 'qcmqx;\n' };
+    const store = memoryStore('/ws', files);
+    const op = makeOp(store);
+    const result = await op({ report: collidingReport, dir: '/ws' });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    const parsed = parseAnalysisSidecar(
+      Buffer.from(
+        store.written.get(
+          resolve('/ws', sidecarFileName(result.value.reportFingerprint)),
+        ) as Uint8Array,
+      ).toString('utf8'),
+    );
+    // Pre-F2 a by-id evidence map collapsed these to one entry (last wins)
+    // and coverage failed or silently under-covered one cluster.
+    expect(parsed.evidence).toHaveLength(2);
+    expect(parsed.evidence[0]?.clusterId).toBe(parsed.evidence[1]?.clusterId);
+    expect(parsed.evidence[0]?.signature).not.toBe(parsed.evidence[1]?.signature);
+    // Evidence order follows the report (clusters sort by the signature
+    // tiebreak: qcmqx before tjivlzyj).
+    const targetSets = parsed.evidence.map((entry) => entry.targets.map((t) => t.file));
+    expect(targetSets).toEqual([['src/b.ts'], ['src/a.ts']]);
   });
 });
 
