@@ -26,7 +26,12 @@ const SCRIPT = 'scripts/ratchet-typecheck.mjs';
 const BASELINE_REL = 'baselines/typecheck--typecheck-count--7caef1e76077.json';
 
 function runTypecheckScript() {
-  return spawnSync(process.execPath, [SCRIPT], { cwd: ROOT, encoding: 'utf8' });
+  return spawnSync(process.execPath, [SCRIPT], {
+    cwd: ROOT,
+    encoding: 'utf8',
+    timeout: 120_000,
+    killSignal: 'SIGKILL',
+  });
 }
 
 function outputOf(res: { stdout: string; stderr: string }): string {
@@ -90,6 +95,8 @@ describe('ratchet-typecheck (self-host swap): the driver over the built engine',
       const res = spawnSync(process.execPath, ['test/fixtures/ratchet-lib-selfhost.mjs'], {
         cwd: ROOT,
         encoding: 'utf8',
+        timeout: 120_000,
+        killSignal: 'SIGKILL',
       });
       expect(res.status, outputOf(res)).toBe(0);
       expect(res.stderr).toContain('ratchet-lib-selfhost: ok');
@@ -111,6 +118,8 @@ describe('ratchet-typecheck (self-host swap): the driver over the built engine',
       const res = spawnSync(process.execPath, ['scripts/ratchet-propose.mjs'], {
         cwd: ROOT,
         encoding: 'utf8',
+        timeout: 30_000,
+        killSignal: 'SIGKILL',
         env,
       });
       expect(res.status, outputOf(res)).toBe(0);

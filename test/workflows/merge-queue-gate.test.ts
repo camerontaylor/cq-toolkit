@@ -161,7 +161,7 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     // list' generated) — the two sanctioned token-level divergences of the
     // instantiation. Normalize BOTH to placeholders before comparing; ANY
     // other drift still fails. The generated list is matched by SHAPE, and
-    // only as the `echo` argument (`(echo )'[a-z,]+'` — a bare `tr ','` must
+    // only as the `echo` argument (`(echo )'[a-z]+(?:,[a-z]+)*'` — a bare `tr ','` must
     // NOT match, whose comma is in the class but is not the wait list), so a
     // future wait-list change ('static,denylist,ratchet' was the second
     // entry) cannot re-break the identity assertion — only real drift can.
@@ -169,7 +169,7 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     // ('{{GATE_CHECKS}}' is uppercase and braced, outside the shape).
     const normalize = (text: string): string =>
       extractFailClosedSnippet(text)
-        .replace(/(echo )'[a-z,]+'/, `$1'<LIST>'`)
+        .replace(/(echo )'[a-z]+(?:,[a-z]+)*'/, `$1'<LIST>'`)
         .replace(`'{{GATE_CHECKS}}'`, `'<LIST>'`)
         .replace(`an empty {{GATE_CHECKS}}:`, `an empty <SUBJECT>:`)
         .replace(`an empty gate wait list:`, `an empty <SUBJECT>:`);

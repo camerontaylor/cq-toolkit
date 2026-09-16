@@ -3,7 +3,7 @@
 Source: the toolkit plan's invariants table. Role: adoptable policy text, shipped in
 `policy/`, instantiated by any repository the same way the merge-queue templates
 are (`policy/templates/README.md`). Each invariant carries a Rule, a Why, and an
-Enforcement. This repo enforces I4, I3, part of I5, and the I10 lint rule today.
+Enforcement. This repo enforces I4, I3, both halves of I5, and the I10 lint rule today.
 
 ## I1 — stdout is JSON, stderr is narration; exit codes 0/1/2/3
 
