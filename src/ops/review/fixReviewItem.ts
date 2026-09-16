@@ -56,8 +56,13 @@
 //   On ok, WorkerResult.usage becomes result.usage and denials pass
 //   through verbatim; on every other status the worker's evidence has no
 //   result to ride (the frozen OpResult carries none).
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
+import { SessionStore } from '../../harness/session.js';
+import { SubprocessDriver } from '../../driver/subprocess/index.js';
 import type {
   Budget,
   Driver,
@@ -169,11 +174,36 @@ export const MAX_COMMENT_CHARS = 2_000;
  */
 export const MAX_ITEM_BODY_CHARS = 8_000;
 
+/**
+ * Head-cap for the worker SUMMARY, in chars — the reply body is composed
+ * from the summary, so an unbounded one could blow the gh argv (finding:
+ * round-2 item 5+7). An empty summary is a contract violation outright
+ * (there is nothing honest to post); an oversized one is head-capped and
+ * feeds the existing `truncated` flag.
+ */
+export const MAX_SUMMARY_CHARS = 1_000;
+
 /** Head-truncate text to maxChars; reports whether the cap fired. */
 const headCapped = (text: string, maxChars: number): { text: string; truncated: boolean } =>
   text.length > maxChars
     ? { text: text.slice(0, maxChars), truncated: true }
     : { text, truncated: false };
+
+/**
+ * Defang fence-forgery inside untrusted content: any line whose trimmed
+ * form starts with the fence prefix is prefixed with `[defanged] ` so no
+ * embedded line can close the fence early (finding: a body carrying the
+ * literal END-marker line would otherwise escape the fence). Deterministic;
+ * applied AFTER the head caps (a truncated '[defanged' fragment still
+ * cannot start a fence line).
+ */
+const defangFenceLines = (text: string): string =>
+  text
+    .split('\n')
+    .map((line) =>
+      line.trimStart().startsWith('----- UNTRUSTED REVIEW CONTENT') ? `[defanged] ${line}` : line,
+    )
+    .join('\n');
 
 /** The labeled fence that frames untrusted review content (module doc). */
 const FENCE_BEGIN =
@@ -228,10 +258,11 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
   lines.push('Reviewed item body:');
   // The body and the comments are UNTRUSTED review content (finding: prompt
   // injection): each rides inside a labeled fence — data to act on, never
-  // instructions — and the system prompt says so explicitly.
+  // instructions — and the system prompt says so explicitly. Fence-forgery
+  // (an embedded END line) is defanged below.
   const cappedBody = headCapped(input.item.body, MAX_ITEM_BODY_CHARS);
   lines.push(FENCE_BEGIN);
-  lines.push(cappedBody.text);
+  lines.push(defangFenceLines(cappedBody.text));
   lines.push(FENCE_END);
   let truncated = cappedBody.truncated;
   if (input.item.comments.length === 0) {
@@ -248,7 +279,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
       truncated = truncated || capped.truncated;
       const author = comment.authorLogin ?? 'unknown author';
       const at = comment.createdAt ?? 'unknown time';
-      lines.push(`${index}. ${author} (${at}): ${capped.text}`);
+      lines.push(defangFenceLines(`${index}. ${author} (${at}): ${capped.text}`));
     }
     lines.push(FENCE_END);
   }
@@ -278,7 +309,7 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
  */
 const parseFixOutput = (
   raw: unknown,
-): { changed: boolean; summary: string; commits: string[] } | null => {
+): { changed: boolean; summary: string; commits: string[]; summaryTruncated: boolean } | null => {
   let value: unknown = raw;
   if (typeof raw === 'string') {
     try {
@@ -303,6 +334,14 @@ const parseFixOutput = (
   if (typeof record['changed'] !== 'boolean' || typeof record['summary'] !== 'string') {
     return null;
   }
+  // An EMPTY summary is a definitive contract violation — the reply body is
+  // composed from it, and "changed nothing, saying nothing" is not honest
+  // evidence. An oversized summary is head-capped (the reply must not blow
+  // the gh argv) and feeds the `truncated` flag.
+  if (record['summary'].trim().length < 1) {
+    return null;
+  }
+  const summary = headCapped(record['summary'], MAX_SUMMARY_CHARS);
   const commits = record['commits'];
   if (!Array.isArray(commits)) {
     return null;
@@ -323,7 +362,12 @@ const parseFixOutput = (
   if ((changed === true && shas.length === 0) || (changed === false && shas.length > 0)) {
     return null;
   }
-  return { changed, summary: record['summary'], commits: shas };
+  return {
+    changed,
+    summary: summary.text,
+    commits: shas,
+    summaryTruncated: summary.truncated,
+  };
 };
 
 /** Error message of an unknown throwable, for indeterminate/failed details. */
@@ -334,16 +378,19 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
  *   - a plain {@link Driver} — the caller owns the seam entirely (tests,
  *     in-process callers that enforce the harness themselves);
  *   - `{ perHarness }` — the DISPATCHED form (the registry binds it): the
- *     driver is built FROM THE INPUT'S HARNESS per invocation. Needed
- *     because {@link toolPolicyFor} reduces the harness to tool NAMES —
- *     command/path restrictions (run.commandPatterns, pathPatterns) cannot
- *     ride the frozen OpInvocation, so a driver built once from
- *     `defaultHarnessConfig` would run the worker with the wrong surface
- *     (the run tool either deny-all or advertised without the caller's
- *     command restrictions). The default-config path (no input harness)
- *     keeps ONE shared instance — no per-call construction churn.
+ *     driver is built FROM THE INPUT'S HARNESS AND WORKTREE per invocation.
+ *     Needed because {@link toolPolicyFor} reduces the harness to tool
+ *     NAMES — command/path restrictions (run.commandPatterns, pathPatterns)
+ *     cannot ride the frozen OpInvocation (Codex P1) — and because the
+ *     worker must run IN THE PR WORKTREE (round-2 finding 1, HIGH): the
+ *     registry binds it to
+ *     `worktreeFixDriver({ harnessConfig: harness, worktreePath:
+ *     worktree.path })`, whose session record makes the worktree the
+ *     invocation's workspace.
  */
-export type FixDriverSource = Driver | { perHarness: (harness: HarnessConfig) => Driver };
+export type FixDriverSource =
+  | Driver
+  | { perHarness: (harness: HarnessConfig, worktree: { path: string; branch: string }) => Driver };
 
 /**
  * Build the `review.fixItem` op over the injected runtime seam (see
@@ -355,20 +402,64 @@ export type FixDriverSource = Driver | { perHarness: (harness: HarnessConfig) =>
  * with a changed↔commits contradiction) is a definitive contract violation
  * (`failed`), never a guessed ok.
  */
+export interface WorktreeFixDriverOptions {
+  /** The harness the inner driver binds its tool surface to. */
+  harnessConfig: HarnessConfig;
+  /** The PR worktree the worker must run in (the session record's workspace). */
+  worktreePath: string;
+  /** Injectable for tests; default: mkdtemp under os.tmpdir(). */
+  sessionsDir?: string;
+  /** Injectable inner-driver seam; default: `new SubprocessDriver({ harnessConfig, sessionsDir })`. */
+  makeInner?: (sessionsDir: string) => Driver;
+}
+
+/**
+ * The dispatched fix-worker seam (round-2 finding 1, HIGH): SubprocessDriver
+ * creates a FRESH temp workspace for every fresh invocation and the frozen
+ * OpInvocation carries no workspace — so a driver bound from defaults alone
+ * runs the worker in a scratch dir the prompt's PR worktree never reaches.
+ * The adapter closes that gap with the SHIPPED seams only:
+ *   - it owns a fresh sessionsDir (mkdtemp under os.tmpdir(), injectable);
+ *   - per run(): `new SessionStore(sessionsDir).create(worktreePath)` — a
+ *     FRESH session record per invocation (I6: no session reuse) whose
+ *     workspace IS the PR worktree;
+ *   - then delegates to the inner driver with that `sessionRef` — the
+ *     resume path loads the record and binds the tool surface (cwd, read/
+ *     edit confinement) to the worktree.
+ * The inner driver is injectable (`makeInner`) so tests can observe the
+ * session wiring; the default binds `new SubprocessDriver({ harnessConfig,
+ * sessionsDir })`.
+ */
+export function worktreeFixDriver(
+  opts: WorktreeFixDriverOptions,
+): Driver & { sessionsDir: string } {
+  const sessionsDir = opts.sessionsDir ?? mkdtempSync(join(tmpdir(), 'cq-fix-worktree-'));
+  const inner = opts.makeInner
+    ? opts.makeInner(sessionsDir)
+    : new SubprocessDriver({
+        harnessConfig: opts.harnessConfig,
+        sessionsDir,
+      });
+  const driver: Driver = {
+    run: async (invocation) => {
+      const store = new SessionStore(sessionsDir);
+      const record = await store.create(opts.worktreePath);
+      return inner.run({ ...invocation, sessionRef: record.sessionId });
+    },
+  };
+  return Object.assign(driver, { sessionsDir });
+}
+
 export function makeFixReviewItem(deps: {
   driver: FixDriverSource;
 }): Op<FixReviewItemInput, FixReviewItemResult> {
-  // The shared default-config instance for the perHarness form (lazily
-  // built once per op; the plain-Driver form ignores it).
-  let sharedDefaultDriver: Driver | undefined;
+  // The perHarness form builds the driver from the invocation's OWN harness
+  // AND worktree (the dispatched seam must run in the PR worktree — see
+  // worktreeFixDriver); the plain-Driver form is the caller's whole seam.
   const driverFor = (input: FixReviewItemInput): Driver => {
     const source = deps.driver;
     if ('perHarness' in source) {
-      if (input.harness === undefined) {
-        sharedDefaultDriver ??= source.perHarness(defaultHarnessConfig);
-        return sharedDefaultDriver;
-      }
-      return source.perHarness(input.harness);
+      return source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree);
     }
     return source;
   };
@@ -415,7 +506,7 @@ export function makeFixReviewItem(deps: {
     if (parsed === null) {
       return {
         status: 'failed',
-        error: `fixReviewItem: complete run carried no parseable fix contract — structured output must be an object with exactly the keys changed/summary/commits or a single JSON line with them${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
+        error: `fixReviewItem: complete run carried no parseable fix contract — structured output must be an object with exactly the keys changed/summary/commits (non-empty summary; changed true ⇔ commits non-empty) or a single JSON line with them${worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`}`,
       };
     }
     return {
@@ -424,7 +515,7 @@ export function makeFixReviewItem(deps: {
         changed: parsed.changed,
         summary: parsed.summary,
         commits: parsed.commits,
-        ...(truncated ? { truncated: true } : {}),
+        ...(truncated || parsed.summaryTruncated ? { truncated: true } : {}),
         denials: worker.denials,
         usage: worker.usage,
       },

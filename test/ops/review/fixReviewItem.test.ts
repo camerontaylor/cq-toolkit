@@ -32,14 +32,17 @@
 // only CONSTRUCTS the driver's importer result.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import type { HarnessConfig } from '../../../src/harness/config.js';
+import { rm } from 'node:fs/promises';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
+import { SessionStore } from '../../../src/harness/session.js';
 import {
   MAX_COMMENT_CHARS,
   MAX_ITEM_BODY_CHARS,
   makeFixReviewItem,
+  worktreeFixDriver,
 } from '../../../src/ops/review/fixReviewItem.js';
 import type {
   FixReviewItemInput,
@@ -493,14 +496,125 @@ describe('fixReviewItem untrusted-content fences (finding 3)', () => {
   });
 });
 
+// Adapter-created session dirs — cleaned up after each test.
+const adapterSessionDirs: string[] = [];
+afterEach(async () => {
+  while (adapterSessionDirs.length > 0) {
+    const dir = adapterSessionDirs.pop();
+    if (dir !== undefined) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+describe('summary contract (round-2 finding 5+7)', () => {
+  test('an EMPTY summary is a definitive contract violation → failed', async () => {
+    const { driver } = scriptedDriver([
+      completeWorker({ changed: false, summary: '   ', commits: [] }),
+    ]);
+    const result = await makeFixReviewItem({ driver })(baseInput());
+    expect(result.status).toBe('failed');
+  });
+
+  test(`an oversized summary is head-capped to MAX_SUMMARY_CHARS and feeds truncated`, async () => {
+    const { driver } = scriptedDriver([
+      completeWorker({ changed: false, summary: 'z'.repeat(1001), commits: [] }),
+    ]);
+    const value = expectOk(await makeFixReviewItem({ driver })(baseInput()));
+    expect(value.summary).toHaveLength(1000);
+    expect(value.truncated).toBe(true);
+  });
+});
+
+describe('worktreeFixDriver (round-2 finding 1, HIGH)', () => {
+  test('the adapter creates a fresh session record whose workspace IS the worktree, and passes exactly its sessionRef', async () => {
+    const sessionDirs: string[] = [];
+    const invocations: OpInvocation[] = [];
+    const inner: Driver = {
+      run: async (invocation) => {
+        invocations.push(invocation);
+        return completeWorker({ changed: true, summary: 's', commits: ['a'] });
+      },
+    };
+    const driver = worktreeFixDriver({
+      harnessConfig: defaultHarnessConfig,
+      worktreePath: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+      makeInner: (sessionsDir) => {
+        sessionDirs.push(sessionsDir);
+        adapterSessionDirs.push(sessionsDir);
+        return inner;
+      },
+    });
+    await driver.run({
+      prompt: 'p',
+      modelSpec: { model: 'm', provider: 'p' },
+      toolPolicy: { mode: 'allowlist', allow: ['read'] },
+      sandboxPolicy: { level: 'workspace-write' },
+      budget: {},
+    });
+    expect(sessionDirs).toHaveLength(1);
+    const sessionRef = invocations[0]?.sessionRef;
+    expect(typeof sessionRef).toBe('string');
+    const record = await new SessionStore(sessionDirs[0] ?? '').load(sessionRef ?? '');
+    expect(record?.workspace).toBe('/repo/.git/cq-review-worktrees/pr-7-pr-7-fix');
+    // FRESH record (I6): zero messages — nothing is reused.
+    expect(record?.messages).toEqual([]);
+  });
+
+  test('two runs create two DISTINCT session records (I6: no reuse)', async () => {
+    const sessionDirs: string[] = [];
+    const invocations: OpInvocation[] = [];
+    const driver = worktreeFixDriver({
+      harnessConfig: defaultHarnessConfig,
+      worktreePath: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+      makeInner: (sessionsDir) => {
+        sessionDirs.push(sessionsDir);
+        adapterSessionDirs.push(sessionsDir);
+        return {
+          run: async (invocation) => {
+            invocations.push(invocation);
+            return completeWorker({ changed: false, summary: 'n/a', commits: [] });
+          },
+        };
+      },
+    });
+    await driver.run({
+      prompt: 'p',
+      modelSpec: { model: 'm', provider: 'p' },
+      toolPolicy: { mode: 'allowlist', allow: [] },
+      sandboxPolicy: { level: 'workspace-write' },
+      budget: {},
+    });
+    await driver.run({
+      prompt: 'p2',
+      modelSpec: { model: 'm', provider: 'p' },
+      toolPolicy: { mode: 'allowlist', allow: [] },
+      sandboxPolicy: { level: 'workspace-write' },
+      budget: {},
+    });
+    expect(invocations).toHaveLength(2);
+    const refs = invocations.map((invocation) => invocation.sessionRef);
+    expect(refs[0]).toBeDefined();
+    expect(refs[1]).toBeDefined();
+    expect(refs[0]).not.toBe(refs[1]);
+    const store = new SessionStore(sessionDirs[0] ?? '');
+    const first = await store.load(refs[0] ?? '');
+    const second = await store.load(refs[1] ?? '');
+    expect(first?.workspace).toBe('/repo/.git/cq-review-worktrees/pr-7-pr-7-fix');
+    expect(second?.workspace).toBe('/repo/.git/cq-review-worktrees/pr-7-pr-7-fix');
+  });
+});
+
 describe('fixReviewItem dispatched harness source (Codex P1)', () => {
   test('the perHarness factory receives the INPUT harness; the default path shares one instance', async () => {
     const received: HarnessConfig[] = [];
     const invocations: OpInvocation[] = [];
+    const worktrees: Array<{ path: string; branch: string }> = [];
     const op = makeFixReviewItem({
       driver: {
-        perHarness: (harness) => {
+        perHarness: (harness, worktree) => {
           received.push(harness);
+          worktrees.push(worktree);
           return {
             run: async (invocation) => {
               invocations.push(invocation);
@@ -515,14 +629,21 @@ describe('fixReviewItem dispatched harness source (Codex P1)', () => {
     });
     await op(baseInput({ harness: custom }));
     await op(baseInput({ harness: custom }));
-    expect(received).toHaveLength(2);
+    await op(baseInput());
+    await op(baseInput());
+    // The factory runs PER INVOCATION with that input's harness AND worktree
+    // (the dispatched driver is built from both — round-2 finding 1).
+    expect(received).toHaveLength(4);
     expect(received[0]?.tools.run.commandPatterns).toEqual(['git *']);
     expect(received[1]?.tools.run.commandPatterns).toEqual(['git *']);
-    // The default-config path builds ONE shared instance (no per-call churn).
-    await op(baseInput());
-    await op(baseInput());
-    expect(received).toHaveLength(3);
     expect(received[2]).toEqual(defaultHarnessConfig);
+    expect(received[3]).toEqual(defaultHarnessConfig);
+    expect(worktrees).toEqual([
+      { path: '/tmp/cq-fix-review/pr-7', branch: 'cq-review/pr-7' },
+      { path: '/tmp/cq-fix-review/pr-7', branch: 'cq-review/pr-7' },
+      { path: '/tmp/cq-fix-review/pr-7', branch: 'cq-review/pr-7' },
+      { path: '/tmp/cq-fix-review/pr-7', branch: 'cq-review/pr-7' },
+    ]);
     // toolPolicyFor is unchanged: names still derive from the harness.
     expect(invocations[0]?.toolPolicy).toEqual({
       mode: 'allowlist',

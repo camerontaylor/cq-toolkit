@@ -19,14 +19,27 @@
 //   therefore the inertness proof.
 //   Plus: the three PURE adapters actually execute over minimal inputs and
 //   fold to honest ok values (classify/plan round-trip, verify's exact
-//   "NO PROGRESS" literal); the gh-consuming and fixItem adapters are
-//   resolved but never CALLED — calling one would spawn the real gh CLI or
-//   driver, which unit tests must not do.
+//   "NO PROGRESS" literal); the gh-consuming adapters are resolved but
+//   never CALLED (that would spawn the real gh CLI); the fixItem adapter
+//   IS called twice — once through the full registry wiring (the inner
+//   driver refuses the unknown test model pre-dispatch, so nothing spawns)
+//   and once through the adapter itself with an injected session dir (the
+//   round-2 workspace pin). The push transport (round-2 finding 4) is
+//   exercised against a REAL tiny git repo in tmpdir: `rev-parse HEAD`
+//   succeeds under git semantics and fails under a gh binary.
 //
-// Hermetic by construction: no network, no spawned processes, no writes.
+// Hermetic otherwise: no network, no real worker runs; writes stay under
+// os.tmpdir().
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { defaultHarnessConfig } from '../../../src/harness/config.js';
+import { SessionStore } from '../../../src/harness/session.js';
 import { makeGhRunner } from '../../../src/ops/review/gh.js';
 import { registry } from '../../../src/ops/review/registry.js';
+import { worktreeFixDriver } from '../../../src/ops/review/fixReviewItem.js';
 
 /** The op result shape the adapters fold to (loose, for assertions). */
 interface LooseResult {
@@ -254,5 +267,102 @@ describe('pure review adapters execute over minimal inputs', () => {
     };
     const result = await call('review.classifyThreads', input);
     expect(result.status).toBe('failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-2 — the dispatched fix worker runs in the PR worktree (finding 1)
+// and the push transport speaks GIT (finding 4)
+// ---------------------------------------------------------------------------
+
+describe('review.fixItem dispatched worktree (round-2 finding 1)', () => {
+  test('through the full registry wiring, the op refuses the unknown test model pre-dispatch (nothing spawns)', async () => {
+    const entry = entryByName('review.fixItem');
+    const op = await entry.importer();
+    const input = minimalInput('review.fixItem');
+    // The inner SubprocessDriver refuses the unknown model BEFORE any spawn
+    // (routeFor is pre-dispatch); the op adapter folds that into an
+    // indeterminate detail naming the routing — the proof the wiring ran
+    // through the adapter's session store into the real inner driver.
+    const result = (await (op as (i: unknown) => Promise<{ status: string; detail?: string }>)(
+      input,
+    )) as { status: string; detail?: string };
+    expect(result.status).toBe('indeterminate');
+    expect(result.detail).toContain('unknown provider');
+  });
+
+  test('the perHarness binding produces an adapter whose session record workspace IS the input worktree', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-registry-wfd-'));
+    try {
+      const worktreePath = join(scratch, 'wt');
+      await mkdir(worktreePath, { recursive: true });
+      const sessionsDir = join(scratch, 'sessions');
+      // The importer's EXACT binding expression, with an injectable session
+      // dir so the record is observable (the default inner driver refuses
+      // the unknown test model pre-dispatch — nothing spawns).
+      const driver = worktreeFixDriver({
+        harnessConfig: defaultHarnessConfig,
+        worktreePath,
+        sessionsDir,
+      });
+      await expect(
+        driver.run({
+          prompt: 'p',
+          modelSpec: { model: 'test-model', provider: 'test-provider' },
+          toolPolicy: { mode: 'allowlist', allow: ['read'] },
+          sandboxPolicy: { level: 'workspace-write' },
+          budget: {},
+        }),
+      ).rejects.toThrow();
+      // Exactly one fresh session record, and its workspace IS the worktree.
+      const files = await readdir(sessionsDir);
+      expect(files).toHaveLength(1);
+      const sessionId = (files[0] ?? '').replace(/\.jsonl$/, '');
+      const record = await new SessionStore(sessionsDir).load(sessionId);
+      expect(record?.workspace).toBe(worktreePath);
+      expect(record?.messages).toEqual([]);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('replyAndResolve push transport is GIT (round-2 finding 4)', () => {
+  test('pushArgs run with git semantics: a real rev-parse HEAD in a tiny tmpdir repo succeeds', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-registry-push-'));
+    try {
+      const repoDir = join(scratch, 'repo');
+      execFileSync('git', ['init', '-q', repoDir]);
+      execFileSync('git', [
+        '-C',
+        repoDir,
+        '-c',
+        'user.email=t@example.test',
+        '-c',
+        'user.name=t',
+        'commit',
+        '--allow-empty',
+        '-q',
+        '-m',
+        'init',
+      ]);
+      const entry = entryByName('review.replyAndResolve');
+      const op = await entry.importer();
+      const input = minimalInput('review.replyAndResolve');
+      input['pushArgs'] = ['-C', repoDir, 'rev-parse', 'HEAD'];
+      const result = await (
+        (await entry.importer()) as (i: unknown) => Promise<{
+          status: string;
+          value?: { pushed?: boolean };
+        }>
+      )(input);
+      void op;
+      expect(result.status).toBe('ok');
+      // git semantics: the push transport executed real git — a gh binary
+      // would exit nonzero on these argv.
+      expect(result.value?.pushed).toBe(true);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   });
 });

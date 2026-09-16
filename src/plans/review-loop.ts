@@ -39,11 +39,13 @@
 //      review_reply on its thread (summary + commit refs) + resolve_thread;
 //      ok+unchanged → review_reply only (the honest "no change made"
 //      answer), never a resolve; failed/needs-human/indeterminate rows →
-//      no action, they feed hasFailures. The resolve rides a PER-ITEM gate:
-//      at least one reported commit must verify in the pushed worktree
-//      (rev-parse --verify + merge-base --is-ancestor via the git seam) —
-//      a hallucinated sha never hides its thread ('unverified-commits'
-//      reason, reply still posts).
+//      no action, they feed hasFailures. RESOLVES ARE GATED PER ITEM on
+//      locally-verified commits (rev-parse --verify + STRICT descendant of
+//      the before-snapshot head + ancestor of the pushed HEAD, via the git
+//      seam): origin REST lag cannot block a genuinely verified fix, and a
+//      sibling's progress cannot prove another thread. The PR-wide
+//      VerifyOutcome rides the outcome payload for OBSERVABILITY only — it
+//      does not gate resolves and does not feed hasFailures.
 //   7. replyAndResolve         — push-before-post (its push argv is the
 //      same composed worktree push: an idempotent re-assertion against
 //      origin races between the two moments), dispatch-log deduped.
@@ -186,7 +188,12 @@ export interface ReviewLoopOutcome {
    * one did.
    */
   fixReport?: RunReport;
-  /** The before/after verdict — present exactly when at least one fix job ran. */
+  /**
+   * The before/after verdict — present exactly when at least one fix job
+   * ran. OBSERVABILITY ONLY: it rides the payload for humans; resolve
+   * gating is per-item commit verification, and this verdict never feeds
+   * `reasons`.
+   */
   verify?: VerifyOutcome;
   /** The reply/resolve dispatch result — present when any action was dispatched. */
   reply?: ReplyAndResolveResult;
@@ -358,13 +365,39 @@ const worktreePushArgs = (worktreePath: string, headRefName: string): string[] =
  * THIS check, never the global snapshot: a hallucinated sha must not hide
  * its thread, and a real one must not wait on a lagging origin read.
  */
+const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/**
+ * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
+ * strictly mechanically (exit codes only), hardened against spoofing
+ * (round-2 finding 2):
+ *   - the candidate must BE a full 40-hex sha — the literal "HEAD" and
+ *     short shas are rejected before any git call;
+ *   - `rev-parse --verify <sha>^{commit}` must succeed (it exists here);
+ *   - `merge-base --is-ancestor <before.headSha> <sha>` must exit 0 with
+ *     the sha DISTINCT from the before-snapshot head — a STRICT descendant:
+ *     the pre-existing base commit is not a fix;
+ *   - `merge-base --is-ancestor <sha> HEAD` must exit 0 (the worktree HEAD
+ *     is the exact tree the stage-5 publish pushed).
+ */
 const commitInPushedHead = async (
   git: GhFn,
   worktreePath: string,
   sha: string,
+  baseSha: string,
 ): Promise<boolean> => {
+  if (!COMMIT_SHA_RE.test(sha)) {
+    return false;
+  }
+  if (sha.toLowerCase() === baseSha.toLowerCase()) {
+    return false; // STRICT descendant: the before-head itself is not a fix
+  }
   const verify = await git(['-C', worktreePath, 'rev-parse', '--verify', `${sha}^{commit}`]);
   if (verify.code !== 0) {
+    return false;
+  }
+  const descendant = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', baseSha, sha]);
+  if (descendant.code !== 0) {
     return false;
   }
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
@@ -500,18 +533,19 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       nowMs: opts.nowMs,
     });
     verify = verifyPrOutcome(before, after, { responderLogin: opts.responderLogin ?? null });
-    if (!verify.progress) {
-      reasons.push(
-        'verify: NO PROGRESS — the after-snapshot shows no new commit, responder reply, or resolved thread',
-      );
-    }
+    // VerifyOutcome is OBSERVABILITY ONLY (round-2 finding 6): it rides the
+    // outcome payload and never feeds hasFailures — resolve gating is the
+    // per-item commit verification, and one thread's missing PR-wide signal
+    // (REST lag, an unrelated sibling) must not condemn the whole loop.
   }
 
   // (6) Actions from the fix rows. ok+changed+commits → reply + resolve;
   // ok+unchanged → reply only (the honest no-change answer), never a
   // resolve; non-ok rows → nothing, they feed hasFailures. RESOLVES ARE
-  // WITHHELD on NO PROGRESS (recorded above). actionIds are stable
-  // coordinates (pr + item id) so a re-run dedupes against the dispatch log.
+  // GATED PER ITEM on locally-verified commits (see the module doc) — the
+  // PR-wide VerifyOutcome is observability only. actionIds are stable
+  // coordinates (pr + item id) so a re-run dedupes against the dispatch
+  // log.
   const actions: ReviewAction[] = [];
   for (const row of fixReport.jobs) {
     if (row.result.status !== 'ok') {
@@ -561,7 +595,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       if (value.changed && value.commits.length > 0) {
         let verified = false;
         for (const sha of value.commits) {
-          if (await commitInPushedHead(opts.git, worktree.path, sha)) {
+          if (await commitInPushedHead(opts.git, worktree.path, sha, before.headSha)) {
             verified = true;
             break;
           }

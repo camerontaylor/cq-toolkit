@@ -467,20 +467,26 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: FixReviewItemInputSchema,
     // The dispatch seam re-validates input through inputSchema.parseAsync
     // before invoking the op, so the erased op typing is safe here (gates
-    // precedent). The importer resolves BOTH the op module and the
-    // subprocess driver and binds the seam there — the SubprocessDriver
-    // constructor is env-free and spawns nothing (env reads and processes
-    // are run()-time), so resolving this entry is inert. The DISPATCHED
-    // seam is the perHarness factory (Codex P1): toolPolicyFor reduces the
-    // input's harness to tool NAMES, so command/path restrictions can only
-    // reach the worker through a driver constructed with that harness; the
-    // default-config path keeps one shared instance (no per-call churn).
+    // precedent). The importer resolves the op module and binds the seam
+    // there (gates importer-binds-dependencies precedent). The DISPATCHED
+    // seam is the perHarness factory (Codex P1 + round-2 finding 1):
+    // toolPolicyFor reduces the input's harness to tool NAMES, so
+    // command/path restrictions can only reach the worker through a driver
+    // constructed with that harness, and worktreeFixDriver's session record
+    // makes the PR worktree the invocation's workspace. The SubprocessDriver
+    // class loads through the op module's own import (constructor is inert —
+    // env reads and processes are run()-time), so resolving this entry never
+    // touches env, the network, or the filesystem.
     importer: () =>
-      Promise.all([import('./fixReviewItem.js'), import('../../driver/subprocess/index.js')]).then(
-        ([m, subprocess]) =>
+      import('./fixReviewItem.js').then(
+        (m) =>
           m.makeFixReviewItem({
             driver: {
-              perHarness: (harness) => new subprocess.SubprocessDriver({ harnessConfig: harness }),
+              perHarness: (harness, worktree) =>
+                m.worktreeFixDriver({
+                  harnessConfig: harness,
+                  worktreePath: worktree.path,
+                }),
             },
           }) as Op<unknown, unknown>,
       ),
@@ -562,21 +568,25 @@ export const registry: OpRegistryEntry[] = [
     // anything posts; absent → null (no push), exactly the library's
     // option shape.
     importer: () =>
-      Promise.all([import('./replyAndResolve.js'), import('./gh.js')]).then(
-        ([m, gh]) =>
-          awaitOp(async (input: ReplyAndResolveOpInput) => {
-            const run = gh.makeGhRunner();
-            return m.replyAndResolve(input.actions, {
-              owner: input.owner,
-              repo: input.repo,
-              pr: input.pr,
-              run,
-              push: input.pushArgs === undefined ? null : { run, args: input.pushArgs },
-              dispatchLog: m.fileDispatchLog(input.dispatchLogPath),
-              nowMs: input.nowMs,
-            });
-          }) as Op<unknown, unknown>,
-      ),
+      Promise.all([import('./replyAndResolve.js'), import('./gh.js')]).then(([m, gh]) => {
+        // TWO transports (round-2 finding 4): the gh API runner serves the
+        // posts/mutations; the push is GIT — binding makeGhRunner() as the
+        // push transport would hand git argv to a gh binary (it cannot
+        // `git push`). Separate closures, same injected seam.
+        const run = gh.makeGhRunner();
+        const gitPush = gh.makeGhRunner({ bin: 'git' });
+        return awaitOp(async (input: ReplyAndResolveOpInput) => {
+          return m.replyAndResolve(input.actions, {
+            owner: input.owner,
+            repo: input.repo,
+            pr: input.pr,
+            run,
+            push: input.pushArgs === undefined ? null : { run: gitPush, args: input.pushArgs },
+            dispatchLog: m.fileDispatchLog(input.dispatchLogPath),
+            nowMs: input.nowMs,
+          });
+        }) as Op<unknown, unknown>;
+      }),
   },
   {
     name: 'review.verifyReviewOutcome',
