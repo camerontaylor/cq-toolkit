@@ -10,14 +10,15 @@
 // (realMergeEffects) is just one more implementor of the same interface.
 //
 // I3 — MERGE COMMITS ONLY. The executor may never squash, force, rebase,
-// hard-reset, or push to the protected branch, whatever calls it. The guard
-// is `safeArgs`: a git/gh argv that contains a squash/force/rebase/hard
-// token, or a push whose DESTINATION ref is the PROTECTED branch under
-// either spelling (bare, or refs/heads/<branch>; configurable via
-// `protectedBranch`, default `main`), THROWS before any process can spawn.
-// realMergeEffects routes EVERY argv — reads included — through safeArgs
-// via `safeRunner`, the single I3 enforcement point; the negative tests
-// prove the guard shape by shape.
+// hard-reset, amend, or push to the protected branch, whatever calls it.
+// The guard is `safeArgs` — an ALLOWLIST (round 2): only the seven argv
+// shapes this family documents may execute (see the safeArgs doc); any
+// other argv is refused as an unknown shape before any process can spawn,
+// and the push shape itself refuses force markers, bare/symbolic
+// refspecs, and protected-branch destinations (configurable via
+// `protectedBranch`, default `main`). realMergeEffects routes EVERY argv —
+// reads included — through safeArgs via `safeRunner`, the single I3
+// enforcement point; the negative tests prove the guard shape by shape.
 //
 // TRANSPORT: the same GhFn pattern as ../review/gh.js — a thin
 // `(args) => Promise<GhResult>` seam that RESOLVES with the exit code
@@ -56,25 +57,8 @@ export class UnsafeMergeArgsError extends Error {
   }
 }
 
-/**
- * The forbidden-mutation word list, matched against each argv token with
- * leading dashes stripped: `squash` (and `--squash`), `f` (`-f`), `rebase`
- * (and `--rebase`), `hard` (`--hard`), `amend` (`--amend` — history
- * rewrite, round 1), and anything starting `force` (`--force` and
- * `--force-with-lease` alike). `merge`/`--merge` — the ONLY allowed merge
- * method — is not on the list; `ff-only` and friends are not mutations I3
- * names.
- */
-const isForbiddenWord = (word: string): boolean =>
-  word === 'squash' ||
-  word === 'f' ||
-  word === 'rebase' ||
-  word === 'hard' ||
-  word === 'amend' ||
-  word.startsWith('force');
-
-/** The destination half of a push refspec (`[+]<src>[:<dst>]` — no colon
- * means the source doubles as the destination). */
+/** The destination half of a refspec (`[+]<src>[:<dst>]` — no colon means
+ * the source doubles as the destination). */
 const pushDestination = (refspec: string): string => {
   const colon = refspec.indexOf(':');
   return colon === -1 ? refspec : refspec.slice(colon + 1);
@@ -99,62 +83,125 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
   ref === protectedBranch || ref === `refs/heads/${protectedBranch}`;
 
 /**
- * THE I3 GUARD: validate a git/gh argv before execution. THROWS
- * UnsafeMergeArgsError on any squash/force/rebase/hard/amend token, any
- * bundled short flag carrying an `f` (`-qf` rides --force), or any push
- * (a `push` subcommand anywhere in the argv) that lacks an explicit refspec
- * or whose DESTINATION ref is the protected branch (`opts.protectedBranch`,
- * default 'main') under either spelling — bare `main`, `HEAD:main`,
- * `feat:refs/heads/main`, and the remote-branch deletion `:main` all land
- * on the protected branch, so all are refused. Returns the argv unchanged
- * otherwise (the caller executes exactly what went in). Flag-value
- * awareness is deliberately absent: a flag value that reads as a
- * push-to-protected refspec fails closed.
+ * THE I3 GUARD — AN ALLOWLIST (round 2): only the argv shapes this family
+ * documents may execute; EVERYTHING ELSE is refused with
+ * `refused: unknown argv shape`, so an undocumented mutation cannot ride
+ * the guard through however innocuous its tokens look. The seven shapes
+ * (after the `-C <path>` prefix is stripped):
+ *   rev-parse <flags/ref>…                    — ref resolution (≥1 arg)
+ *   fetch <remote> <refspec>…                 — refspecs may carry the '+'
+ *       in-place marker, but a ':'-refspec whose (+-stripped) DESTINATION
+ *       names the protected branch is a forced update of that branch —
+ *       refused; colon-less refspecs land in FETCH_HEAD only and cannot
+ *       move a branch, so they need no destination check
+ *   worktree add -B <label> <path> <ref>      — the exact prepare shape
+ *   worktree list|remove <arg>…               — rough arity
+ *   push <remote> <src:dst>                   — an EXPLICIT src:dst refspec
+ *       is required (bare HEAD/@/upstream shorthands refused, round 2), a
+ *       '+' force marker is refused OUTRIGHT (round 2 — I3 forbids force,
+ *       period), and the destination must not be the protected branch
+ *   gh pr merge <n> --merge                   — the ONLY merge method (I3)
+ *   gh pr edit <n> --base <base>              — the retarget
+ * opts.protectedBranch (default 'main') names the branch pushes may never
+ * land on, under either spelling.
  */
 export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): readonly string[] {
   const protectedBranch = opts.protectedBranch ?? DEFAULT_PROTECTED_BRANCH;
-  for (const arg of args) {
-    if (isForbiddenWord(arg.replace(/^-+/, ''))) {
-      throw new UnsafeMergeArgsError(
-        args,
-        `forbidden mutation token ${JSON.stringify(arg)} — squash, force (-f/--force), rebase, amend, and hard resets never execute`,
-      );
-    }
-    // BUNDLED SHORT FLAGS (round 1): a single-dash token carrying an `f`
-    // anywhere is the force flag riding a bundle (`-qf`, `-af`, …) — git
-    // expands it to --force. Refuse; no legitimate argv in this family
-    // bundles an `f`.
-    if (arg.startsWith('-') && !arg.startsWith('--') && arg.includes('f')) {
-      throw new UnsafeMergeArgsError(
-        args,
-        `bundled short flags ${JSON.stringify(arg)} carry an 'f' (force) — refuse`,
-      );
-    }
+  let rest = args;
+  if (rest[0] === '-C') {
+    rest = rest.slice(2);
   }
-  const pushAt = args.indexOf('push');
-  if (pushAt !== -1) {
-    const pushTail = args.slice(pushAt + 1).filter((arg) => !arg.startsWith('-'));
-    // pushTail[0] is the REMOTE; the rest are the refspecs. FAIL CLOSED
-    // (round 1): with fewer than two non-flag tokens there is NO explicit
-    // refspec — push.default would choose the destination (under `simple`
-    // it lands on the CURRENT branch, possibly the protected one) — so the
-    // push is refused; name an explicit refspec.
-    if (pushTail.length < 2) {
-      throw new UnsafeMergeArgsError(
-        args,
-        'push with no explicit refspec — push.default would choose the destination (possibly the protected branch); name an explicit refspec',
-      );
-    }
-    for (const arg of pushTail.slice(1)) {
-      if (isProtectedRef(pushDestination(arg), protectedBranch)) {
-        throw new UnsafeMergeArgsError(
-          args,
-          `push with destination ${JSON.stringify(pushDestination(arg))} — the protected branch ${JSON.stringify(protectedBranch)} is never pushed to`,
-        );
+  const unknown = (): UnsafeMergeArgsError =>
+    new UnsafeMergeArgsError(
+      args,
+      'refused: unknown argv shape — the merge family executes only its seven documented shapes (rev-parse, fetch, worktree add/list/remove, push, gh pr merge, gh pr edit)',
+    );
+  const sub = rest[0];
+  switch (sub) {
+    case 'rev-parse':
+      if (rest.length < 2) throw unknown();
+      return args;
+    case 'fetch': {
+      const tail = rest.slice(1);
+      if (tail.length < 2) throw unknown(); // remote + ≥1 refspec
+      for (const refspec of tail.slice(1)) {
+        if (refspec.includes(':')) {
+          const dst = pushDestination(refspec.replace(/^\+/, ''));
+          if (isProtectedRef(dst, protectedBranch)) {
+            throw new UnsafeMergeArgsError(
+              args,
+              `fetch refspec ${JSON.stringify(refspec)} would force-update the protected branch ${JSON.stringify(dst)}`,
+            );
+          }
+        }
       }
+      return args;
     }
+    case 'worktree': {
+      const verb = rest[1];
+      if (verb !== 'add' && verb !== 'list' && verb !== 'remove') throw unknown();
+      if (verb === 'add') {
+        // The exact prepare shape the family builds: -B <label> <path> <ref>.
+        if (rest.length !== 6 || rest[2] !== '-B') throw unknown();
+      } else if (rest.length < 3) {
+        throw unknown();
+      }
+      return args;
+    }
+    case 'push': {
+      const tail = rest.slice(1).filter((arg) => !arg.startsWith('-'));
+      // tail[0] is the REMOTE; the rest are the refspecs. Fewer than two
+      // non-flag tokens means NO explicit refspec (round 1): push.default
+      // would choose the destination — possibly the protected branch.
+      if (tail.length < 2) throw unknown();
+      for (const refspec of tail.slice(1)) {
+        if (refspec.startsWith('+')) {
+          // Force-marker bypass, closed (round 2): a '+'-marked PUSH
+          // refspec is a force-push — I3 forbids force outright, whatever
+          // it names.
+          throw new UnsafeMergeArgsError(
+            args,
+            `force-marked push refspec ${JSON.stringify(refspec)} — I3 forbids force pushes outright`,
+          );
+        }
+        if (!refspec.includes(':')) {
+          throw new UnsafeMergeArgsError(
+            args,
+            `push refspec ${JSON.stringify(refspec)} is not an explicit src:dst — bare or symbolic refspecs (HEAD, @, upstream shorthand) are refused`,
+          );
+        }
+        if (isProtectedRef(pushDestination(refspec), protectedBranch)) {
+          throw new UnsafeMergeArgsError(
+            args,
+            `push with destination ${JSON.stringify(pushDestination(refspec))} — the protected branch ${JSON.stringify(protectedBranch)} is never pushed to`,
+          );
+        }
+      }
+      return args;
+    }
+    case 'pr':
+      // The two gh shapes: the merge (I3's only method) and the retarget.
+      if (
+        rest.length === 4 &&
+        rest[1] === 'merge' &&
+        /^\d+$/.test(rest[2]) &&
+        rest[3] === '--merge'
+      ) {
+        return args;
+      }
+      if (
+        rest.length === 5 &&
+        rest[1] === 'edit' &&
+        /^\d+$/.test(rest[2]) &&
+        rest[3] === '--base' &&
+        rest[4] !== ''
+      ) {
+        return args;
+      }
+      throw unknown();
+    default:
+      throw unknown();
   }
-  return args;
 }
 
 /**
@@ -207,13 +254,14 @@ export interface MergeEffects {
    * `refs/pull/<n>/head` is unpushable — the CR1 regression is pinned by
    * test), and never merges (I3). Resolves with the exit code. */
   retargetBase(pr: number, newBase: string): Promise<GhResult>;
-  /** Push `ref` from the worktree at `fromPath`. Resolves with the exit
-   * code; safeArgs refuses any push whose destination is the protected
-   * branch before the process level is ever reached. SEAM CONSUMER
-   * (round 1): NOT this executor — merge entries are server-side and
-   * retargets ride retargetBase — but pushRef stays in the interface as a
-   * frozen contract for the WS-I merge-prs wiring, its I3 guard pinned by
-   * the safeArgs push tests. */
+  /** Push the EXPLICIT `src:dst` refspec `ref` from the worktree at
+   * `fromPath` (round 2: bare/symbolic refspecs — HEAD, @, upstream
+   * shorthand — are refused by the guard, as is any '+' force marker and
+   * any protected-branch destination). Resolves with the exit code. SEAM
+   * CONSUMER (round 1): NOT this executor — merge entries are server-side
+   * and retargets ride retargetBase — but pushRef stays in the interface
+   * as a frozen contract for the WS-I merge-prs wiring, its I3 guard
+   * pinned by the safeArgs push tests. */
   pushRef(ref: string, fromPath: string): Promise<GhResult>;
 }
 
@@ -299,15 +347,17 @@ export interface RealMergeEffectsOpts {
  *   - fetchRef:     `git -C <root> fetch origin +<ref>:<ref>` ('+' allows a
  *                   force-pushed head to refresh the ref in place)
  *   - worktreePrepare: `git -C <root> worktree add -B cq-merge/pr-<n>
- *                   <root>/.git/cq-merge-worktrees/pr-<n> <ref>` (the label
- *                   is pr-keyed, mirroring review ops' cq-review/pr-<n>)
+ *                   <commonDir>/cq-merge-worktrees/pr-<n> <ref>` (the label
+ *                   is pr-keyed, mirroring review ops' cq-review/pr-<n>;
+ *                   the root derives from `rev-parse --git-common-dir` —
+ *                   round 2: <repoRoot>/.git is a FILE in a linked
+ *                   worktree, so it cannot host the trees)
  *   - worktreeRemove:  `git -C <root> worktree remove <path>` (no --force —
  *                   a refusing tree stays and throws)
  *   - mergePr:      `gh pr merge <pr> --merge`
- *   - retargetBase: `gh pr edit <pr> --base <newBase>` (--base is not a
- *                   forbidden token — the guard rejects squash / force /
- *                   rebase / --hard / push-to-main only)
- *   - pushRef:      `git -C <fromPath> push origin <ref>`
+ *   - retargetBase: `gh pr edit <pr> --base <newBase>`
+ *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
+ *                   refspec — round 2: bare/symbolic forms are refused)
  */
 export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // Absolute everywhere (prWorktree doctrine): mkdir resolves from the
@@ -332,10 +382,26 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const fetchRef = (ref: string): Promise<GhResult> =>
     git(['-C', repoRoot, 'fetch', 'origin', `+${ref}:${ref}`]);
 
+  // The worktree root's base dir, derived LAZILY (first prepare, then
+  // cached) from git's COMMON dir (round 2): a linked worktree's .git is a
+  // FILE (a `gitdir:` pointer), so joining <repoRoot>/.git threw ENOTDIR
+  // there. `git rev-parse --git-common-dir` names the shared dir (a
+  // relative answer resolves against repoRoot); if the probe fails or
+  // prints nothing the fallback is <repoRoot>/.git — the main-checkout
+  // layout, documented.
+  let gitCommonDir: string | undefined;
+  const commonDir = async (): Promise<string> => {
+    if (gitCommonDir !== undefined) return gitCommonDir;
+    const probe = await git(['-C', repoRoot, 'rev-parse', '--git-common-dir']);
+    const answered = probe.code === 0 ? probe.stdout.trim() : '';
+    gitCommonDir = answered === '' ? join(repoRoot, '.git') : pathResolve(repoRoot, answered);
+    return gitCommonDir;
+  };
+
   const worktreeLabel = (pr: number): string => `cq-merge/pr-${pr}`;
 
   const worktreePrepare = async (pr: number, ref: string): Promise<{ path: string }> => {
-    const path = join(repoRoot, '.git', 'cq-merge-worktrees', `pr-${String(pr)}`);
+    const path = join(await commonDir(), 'cq-merge-worktrees', `pr-${String(pr)}`);
     await mkdir(dirname(path), { recursive: true });
     const result = await git([
       '-C',

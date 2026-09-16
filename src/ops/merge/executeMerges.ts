@@ -185,11 +185,15 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
   // marks a head unresolvable even AFTER its fetch — genuine absence (the
   // pr was merged or closed upstream and its ref reaped) — stale on its
   // turn without any further calls.
-  const failBaselineWholesale = (effect: string, why: string): ExecutionReport => {
+  // Run-scoped wholesale failure (round 2, finding 4): the MESSAGE names
+  // the sweep, the phase, and the pr it aborted on — every planned pr
+  // still gets its own failed record (totality), all quoting the same run
+  // cause.
+  const failBaselineWholesale = (effect: string, firstPr: number, why: string): ExecutionReport => {
     for (const plannedEntry of plan.order) {
       report.failed.push({
         pr: plannedEntry.pr,
-        error: `baseline ${effect} for pr ${plannedEntry.pr} threw: ${why}`,
+        error: `baseline sweep aborted during ${effect} (first failure at pr ${String(firstPr)}): ${why}`,
       });
     }
     return report;
@@ -199,7 +203,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     try {
       await effects.fetchRef(headRefFor(entry.pr));
     } catch (err) {
-      return failBaselineWholesale('fetchRef', errorMessage(err));
+      return failBaselineWholesale('fetchRef', entry.pr, errorMessage(err));
     }
   }
   for (const entry of plan.order) {
@@ -207,7 +211,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     try {
       probe = await effects.validateRef(headRefFor(entry.pr));
     } catch (err) {
-      return failBaselineWholesale('validateRef', errorMessage(err));
+      return failBaselineWholesale('validateRef', entry.pr, errorMessage(err));
     }
     baseline.set(entry.pr, probe.ok && probe.sha !== undefined ? probe.sha : null);
   }
