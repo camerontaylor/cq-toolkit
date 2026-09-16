@@ -413,7 +413,11 @@ function scanAddedLine(
   }
   if (config.detectTautologies) {
     for (const tautology of content.matchAll(TAUTOLOGY_RE)) {
-      if (tautology[1].trim() === tautology[2].trim()) {
+      const [, left, right] = tautology;
+      if (left === undefined || right === undefined) {
+        throw new Error('tautology pattern must capture both expressions');
+      }
+      if (left.trim() === right.trim()) {
         findings.push({
           kind: 'tautological-assertion',
           file,

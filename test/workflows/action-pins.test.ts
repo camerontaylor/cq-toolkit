@@ -42,7 +42,9 @@ function usesRefs(text: string): Array<{ line: number; ref: string }> {
     const pattern = /["']?uses["']?\s*:\s*(\S+)/g;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(line)) !== null) {
-      refs.push({ line: idx + 1, ref: match[1] });
+      const ref = match[1];
+      if (ref === undefined) throw new Error('uses pattern must capture a reference');
+      refs.push({ line: idx + 1, ref });
     }
   });
   return refs;
@@ -66,8 +68,10 @@ function stepBlocks(text: string): string[] {
   lines.forEach((line, i) => {
     const m = /^(\s*)- /.exec(line);
     if (m === null) return;
-    if (base === null) base = m[1].length;
-    if (m[1].length === base) starts.push(i);
+    const indent = m[1];
+    if (indent === undefined) throw new Error('step pattern must capture indentation');
+    if (base === null) base = indent.length;
+    if (indent.length === base) starts.push(i);
   });
   const blocks: string[] = [];
   for (let s = 0; s < starts.length; s++) {

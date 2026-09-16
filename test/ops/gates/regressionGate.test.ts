@@ -335,7 +335,9 @@ describe('regressionGate ordering-invariance property (seeded, deterministic)', 
     for (let i = copy.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
       const swap = copy[i];
-      copy[i] = copy[j];
+      const other = copy[j];
+      if (swap === undefined || other === undefined) throw new Error('shuffle index out of range');
+      copy[i] = other;
       copy[j] = swap;
     }
     return copy;
@@ -423,7 +425,8 @@ describe('regressionGate × real vitest fixture (adapter → gate integration)',
   if (parsed.verdict !== 'parsed') {
     throw new Error('the committed vitest fixture must parse');
   }
-  const fixtureFailure: CheckFailure = parsed.set.failures[0];
+  const fixtureFailure = parsed.set.failures[0];
+  if (fixtureFailure === undefined) throw new Error('fixture must contain a failure');
 
   test('a hand-built base with different content → regression with the REAL fixture failure as novel', async () => {
     const handBuilt: CheckFailure = { ...fixtureFailure, message: 'a different test failed' };

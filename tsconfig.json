@@ -10,7 +10,8 @@
     "skipLibCheck": true,
     "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
-    "noImplicitReturns": true
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true
   },
   "include": ["src", "test", "lint/rules", "vitest.config.ts"]
 }

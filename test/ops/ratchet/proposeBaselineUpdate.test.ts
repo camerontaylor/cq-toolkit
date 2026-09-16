@@ -201,7 +201,7 @@ describe('proposeBaselineUpdate', () => {
     expect(effects.prs.size).toBe(1);
     expect(effects.findCalls()).toBe(1);
     expect(effects.upsertCalls()).toBe(1);
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     expect(pr?.base).toBe('main');
     expect(pr?.title).toBe('chore(ratchet): tighten baselines (1 metric)');
     expect(pr?.commitMessage).toBe('chore(ratchet): tighten baselines (proposeBaselineUpdate)');
@@ -238,7 +238,7 @@ describe('proposeBaselineUpdate', () => {
     await createProposeBaselineUpdate(effects)(
       proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
     );
-    const content = effects.prs.get([...effects.prs.keys()][0])?.files[0]?.content ?? '';
+    const content = effects.prs.values().next().value?.files[0]?.content ?? '';
     const onPr = JSON.parse(content) as { capturedAt?: string };
     expect(Number.isNaN(Date.parse(onPr.capturedAt ?? 'x'))).toBe(false);
     // The clock-default bytes must be FULLY committed-evidence shaped: the
@@ -255,7 +255,7 @@ describe('proposeBaselineUpdate', () => {
         improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
       }),
     );
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     const expected: BaselineFile = {
       schemaVersion: 1,
       target: TARGET,
@@ -401,7 +401,7 @@ describe('proposeBaselineUpdate', () => {
       status: 'ok',
       value: { proposal: 'created', applied: [{ oldValue: 10, newValue: 5 }] },
     });
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     expect(pr?.files[0]?.content).toContain('"value": 5');
   });
 
@@ -480,7 +480,7 @@ describe('proposeBaselineUpdate', () => {
         improvements: [{ target: hostile, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
       }),
     );
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     // The body line carries the STRIPPED identity — the backtick and newline
     // cannot break out of the markdown backticks — while the applied outcome
     // and the committed FILE keep the raw identity.
@@ -505,7 +505,7 @@ describe('proposeBaselineUpdate', () => {
       status: 'ok',
       value: { proposal: 'created', applied: [{ oldValue: 5, newValue: 10 }] },
     });
-    const content = effects.prs.get([...effects.prs.keys()][0])?.files[0]?.content ?? '';
+    const content = effects.prs.values().next().value?.files[0]?.content ?? '';
     expect((JSON.parse(content) as { direction?: string }).direction).toBe('higher-is-better');
     const effects2 = makeFakeEffects();
     await expect(
@@ -815,7 +815,7 @@ describe('proposeBaselineUpdate', () => {
       },
     });
     expect(effects.prs.size).toBe(1);
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     expect(pr?.title).toBe('chore(ratchet): tighten baselines (2 metrics)');
     expect(pr?.files).toHaveLength(2);
     expect(pr?.files.map((f) => f.path)).toEqual([relB, relA]);
@@ -1003,7 +1003,7 @@ describe('proposeBaselineUpdate', () => {
         improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
       }),
     );
-    const pr = clean.prs.get([...clean.prs.keys()][0]);
+    const pr = clean.prs.values().next().value;
     expect(pr?.body).toContain('Target branch: `release/main`.');
     expect(pr?.base).toBe('release/main');
   });

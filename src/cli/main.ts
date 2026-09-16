@@ -358,11 +358,11 @@ async function dispatchCli(
   const opsRoot = opts?.opsRoot;
   // No subcommand at all: a usage error the CLI detects (exit 2, nothing on
   // stdout) — `--help` is the way to opt into the help surface.
-  if (argv.length === 0) {
+  const sub = argv[0];
+  if (sub === undefined) {
     narrate(io, 'missing subcommand (try --help)');
     return EXIT_CODES.usage;
   }
-  const sub = argv[0];
   // Global help: --help/-h as the leading argument (lenient about what
   // follows — help wins).
   if (sub === '--help' || sub === '-h') {

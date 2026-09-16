@@ -292,8 +292,8 @@ export class SessionStore {
     }
     let header: SessionHeaderLine | undefined;
     const messages: SessionMessage[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      const parsed = parseLine(lines[i]);
+    for (const [i, line] of lines.entries()) {
+      const parsed = parseLine(line);
       if (parsed === null) {
         if (i === lines.length - 1 && !endsWithNewline) {
           break; // torn tail: a genuine mid-write fragment — only the LAST line may be lost

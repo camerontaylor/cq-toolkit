@@ -181,7 +181,8 @@ function stripDiffPrefix(p: string): string {
 function sectionPath(lines: string[]): string | null {
   for (const line of lines) {
     if (line.startsWith('+++ /dev/null')) continue; // lifecycle marker, not a path
-    if (line.startsWith('+++ ')) return stripDiffPrefix(line.slice('+++ '.length).split('\t')[0]);
+    if (line.startsWith('+++ '))
+      return stripDiffPrefix(line.slice('+++ '.length).replace(/\t.*$/, ''));
   }
   const header = lines.find((l) => l.startsWith('diff --git '));
   if (header === undefined) return null;
@@ -196,7 +197,7 @@ function sectionPath(lines: string[]): string | null {
     }
   }
   if (bestAt !== -1) {
-    return stripDiffPrefix(rest.slice(bestAt + 1 + bestPrefix.length).split('\t')[0]);
+    return stripDiffPrefix(rest.slice(bestAt + 1 + bestPrefix.length).replace(/\t.*$/, ''));
   }
   // noprefix dialect prints the identical path twice: 'X X'. The pair is
   // always ODD-length (2·|X| + 1 for the separator space), so floor-halve:
@@ -477,7 +478,10 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       // ignored: there is nothing there to judge.
       const { minus, plus } = contentLines(section);
       if (minus.length > 0 || plus.length > 0) {
-        violations.push({ path: section[0], why: 'unparsable baseline diff' });
+        violations.push({
+          path: section[0] ?? '(missing diff header)',
+          why: 'unparsable baseline diff',
+        });
       }
       continue;
     }

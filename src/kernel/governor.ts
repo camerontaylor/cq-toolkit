@@ -1524,8 +1524,8 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
   // those.
   const counts: RunCounts = { ...report.counts };
   let reMarked = false;
-  jobs.forEach((row, index) => {
-    const original = report.jobs[index];
+  report.jobs.forEach((original, index) => {
+    const row = jobs[index];
     if (row === original) {
       return; // untouched — the runner's count stands
     }

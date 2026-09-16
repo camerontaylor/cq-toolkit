@@ -529,6 +529,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const server = (options['mcpServers'] as Record<string, { tools: Array<{ name: string }> }>)[
         'cq-harness'
       ];
+      if (server === undefined) throw new Error('missing cq-harness server');
       expect(server.tools.map((t) => t.name)).toEqual(['read']);
       // workspace-write sandbox → the defense-in-depth option.
       expect(options['sandbox']).toEqual({ enabled: true, failIfUnavailable: false });

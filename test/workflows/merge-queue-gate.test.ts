@@ -38,8 +38,9 @@ function extractAwkProgram(text: string): string {
   const start = lines.findIndex((line) => line.includes("awk -F'\\t'"));
   if (start === -1) throw new Error('no awk verdict program found');
   const body: string[] = [];
-  for (let i = start + 1; i < lines.length && lines[i].trim() !== '\')"'; i++) {
-    body.push(lines[i]);
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '\')"') break;
+    body.push(line);
   }
   if (body.length === 0) throw new Error('empty awk verdict program');
   return body.join('\n');
@@ -77,21 +78,11 @@ function extractPromotionScript(text: string): string {
   const lines = text.split(/\r?\n/);
   const nameLine = lines.findIndex((line) => line.includes('Fast-forward promote the gated sha'));
   if (nameLine === -1) throw new Error('promotion step not found');
-  let start = -1;
-  for (let i = nameLine + 1; i < lines.length; i++) {
-    if (/^ {10}set -euo pipefail$/.test(lines[i])) {
-      start = i;
-      break;
-    }
-  }
+  const start = lines.findIndex((line, i) => i > nameLine && /^ {10}set -euo pipefail$/.test(line));
   if (start === -1) throw new Error('promotion run script not found');
-  let end = -1;
-  for (let i = start; i < lines.length; i++) {
-    if (lines[i].includes('promoted ${SHA} to main by pure fast-forward')) {
-      end = i;
-      break;
-    }
-  }
+  const end = lines.findIndex(
+    (line, i) => i >= start && line.includes('promoted ${SHA} to main by pure fast-forward'),
+  );
   if (end === -1) throw new Error('promotion script tail not found');
   return lines.slice(start, end + 1).join('\n');
 }
@@ -157,6 +148,8 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
   // cases exercise — these string-identity checks catch ALL drift.
   it('extracted program and guard snippet are byte-identical across the files', () => {
     const [generated, template] = gates;
+    if (generated === undefined || template === undefined)
+      throw new Error('both workflow sources are required');
     expect(
       extractAwkProgram(generated.text),
       'the files drifted outside the behavioral cases: the awk verdict program',
@@ -245,6 +238,8 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     // revert; the promotion run script itself must be byte-identical.
     it('the promotion step run script is byte-identical across the files (identity lockstep)', () => {
       const [generated, template] = gates;
+      if (generated === undefined || template === undefined)
+        throw new Error('both workflow sources are required');
       const gen = extractPromotionScript(generated.text);
       const tmpl = extractPromotionScript(template.text);
       expect(gen, 'the promotion step drifted between template and instantiation').toBe(tmpl);

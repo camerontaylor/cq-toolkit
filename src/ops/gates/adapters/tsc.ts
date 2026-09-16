@@ -27,13 +27,24 @@ function parseTscLines(raw: RawCheckOutput): CheckParseResult {
     if (match === null) {
       continue;
     }
+    const [, file, lineNumber, column, severity, ruleId, message] = match;
+    if (
+      file === undefined ||
+      lineNumber === undefined ||
+      column === undefined ||
+      severity === undefined ||
+      ruleId === undefined ||
+      message === undefined
+    ) {
+      return { verdict: 'indeterminate', reason: 'tsc-lines: incomplete diagnostic captures' };
+    }
     failures.push({
-      file: match[1],
-      line: Number(match[2]),
-      column: Number(match[3]),
-      ruleId: match[5],
-      message: match[6],
-      severity: match[4] === 'error' ? 'error' : 'warning',
+      file,
+      line: Number(lineNumber),
+      column: Number(column),
+      ruleId,
+      message,
+      severity: severity === 'error' ? 'error' : 'warning',
     });
   }
   if (raw.stdout.trim() === '') {

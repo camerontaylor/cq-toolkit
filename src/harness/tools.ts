@@ -205,8 +205,7 @@ export function compilePathPatterns(patterns: readonly string[]): RegExp[] {
     if (cached !== undefined) return cached;
     const segments = pattern.split('/');
     let source = '^';
-    for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i];
+    for (const [i, segment] of segments.entries()) {
       const last = i === segments.length - 1;
       if (segment === '**') {
         source += last ? '.*' : '(?:[^/]+/)*';

@@ -482,6 +482,7 @@ describe('gates registry entry', () => {
 
   test('the importer resolves to the subprocess-bound op', async () => {
     const entry = registry[0];
+    if (entry === undefined) throw new Error('registry must contain the adapter op');
     expect(typeof entry.inputSchema).toBe('object');
     const op = await entry.importer();
     expect(typeof op).toBe('function');

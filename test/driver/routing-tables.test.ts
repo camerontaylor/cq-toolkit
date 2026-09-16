@@ -28,6 +28,8 @@ describe('routing tables — the two lanes ship ONE endpoint truth', () => {
     (provider) => {
       const subprocess = subprocessEndpoints[provider];
       const claude = claudeEndpoints[provider];
+      if (claude === undefined || subprocess === undefined)
+        throw new Error(`missing endpoint: ${provider}`);
       expect(claude).toBeDefined(); // implied by the set pin above; kept for a clear failure message
       expect(claude.baseUrlEnv).toBe(subprocess.baseUrlEnv);
       expect(claude.baseUrlDefault).toBe(subprocess.baseUrlDefault);

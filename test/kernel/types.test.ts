@@ -95,7 +95,9 @@ function bool(r: Rng): boolean {
 }
 
 function pick<T>(r: Rng, values: readonly T[]): T {
-  return values[Math.floor(r() * values.length)];
+  const value = values[Math.floor(r() * values.length)];
+  if (value === undefined) throw new Error('pick requires a populated array and an in-range RNG');
+  return value;
 }
 
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789-_';
