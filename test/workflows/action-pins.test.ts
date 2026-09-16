@@ -1,7 +1,7 @@
 // Slice C — the action-pinning policy, mechanically enforced:
 //   1. EVERY `uses:` across every generated workflow (all *.yml and *.yaml
 //      under .github/workflows/ — GitHub executes both extensions) and the
-//      five template files under
+//      six template files under
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
@@ -23,10 +23,11 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
 
-// The five template files (source of truth) that carry `uses:` steps or are
+// The six template files (source of truth) that carry `uses:` steps or are
 // otherwise part of the pinning policy.
 const TEMPLATE_FILES = [
   'policy/templates/init-merge-queue.yml',
+  'policy/templates/live-merge.yml',
   'policy/templates/merge-queue-gate.yml',
   'policy/templates/sync-merge-queue.yml',
   'policy/templates/required-check.md',
@@ -94,7 +95,7 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
   });
 
   it('generated ci.yml, denylist.yml, and install-matrix.yml drop the token on EVERY checkout step', () => {
-    for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml']) {
+    for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml', 'live-merge.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
       const checkoutBlocks = stepBlocks(text).filter((block) =>
         block.includes('actions/checkout@'),
