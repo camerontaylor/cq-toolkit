@@ -157,7 +157,7 @@ export interface PlanMergeResult {
 /**
  * Plan the merge order for a stack of PRs. Pure and deterministic: same
  * input → deep-equal result. See the module doc for the graph, the
- * roots-first ordering, and the five fail-closed rules; the base branch
+ * roots-first ordering, and the seven fail-closed rules; the base branch
  * name is configuration arriving on `input` — no queue-branch name is
  * hardcoded anywhere in this family.
  */
@@ -180,17 +180,20 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
 
   // Gate 1 — duplicate pr numbers: the fetch layer handed the SAME pr
   // number more than once (possibly with divergent refs), so no rule can
-  // tell which row is real. Every duplicate entry is withheld, and this
-  // guard runs AHEAD of every other rule: a duplicated number never
-  // plans, never roots, never retargets. (The entries still lend their
-  // head names to the open-owner map built below, so a child of a
-  // duplicated head resolves its edge and cascades off the withheld set
-  // in the usual way.)
+  // tell which row is real. Every duplicate OPEN entry is withheld, and
+  // this guard runs AHEAD of every other rule: a duplicated number never
+  // plans, never roots, never retargets. The count spans EVERY row with
+  // that pr number — an open twin of a closed duplicate is withheld —
+  // but the ledger reports open entries only (closed rows never appear
+  // in needsHuman). (The entries still lend their head names to the
+  // open-owner map built below, so a child of a duplicated head resolves
+  // its edge and cascades off the withheld set in the usual way.)
   const prCount = new Map<number, number>();
   for (const candidate of sorted) {
     prCount.set(candidate.pr, (prCount.get(candidate.pr) ?? 0) + 1);
   }
   for (const candidate of sorted) {
+    if (candidate.state !== 'open') continue;
     if ((prCount.get(candidate.pr) ?? 0) !== 1) {
       withhold(candidate.pr, 'duplicate_pr');
     }
@@ -252,9 +255,18 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     }
     const openBase = openOwnerOfHead.get(candidate.baseRefName);
     if (openBase !== undefined) {
-      // A self-reference (headRefName === baseRefName) stays an edge —
-      // the cycle walk below reads it as the length-1 cycle it is.
-      baseOf.set(candidate.pr, openBase);
+      // Gate-1 duplicates contribute NO edge: for equal-pr rows the last
+      // write would win (the stable sort keeps input order, so array
+      // position would become a hidden tie-breaker) and a live PR whose
+      // chain walks through the duplicate could flip between cyclic and
+      // cascaded — a determinism leak. Their head names still anchor
+      // children: the open-owner map above is built from ALL open rows,
+      // so child resolution and cascades are unchanged. A self-reference
+      // (headRefName === baseRefName) on a live row stays an edge — the
+      // cycle walk below reads it as the length-1 cycle it is.
+      if (prCount.get(candidate.pr) === 1) {
+        baseOf.set(candidate.pr, openBase);
+      }
       continue;
     }
     if (closedOwnerOfHead.has(candidate.baseRefName)) {

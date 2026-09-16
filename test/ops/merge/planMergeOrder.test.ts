@@ -28,8 +28,12 @@
 //      unresolved_base), and a truncated cycle MEMBER keeps its gate
 //      reason while the clean partner gets stack_cycle.
 //   8. DUPLICATE PR NUMBERS: the same pr number in two entries withholds
-//      BOTH as duplicate_pr (round-2 recorded deviation) — never ordered;
-//      children of a duplicated head cascade stack_base_needs_human.
+//      the OPEN entries as duplicate_pr (round-2 recorded deviation) —
+//      never ordered; the count spans EVERY row with that number (an open
+//      twin of a closed duplicate is withheld; closed rows never report);
+//      children of a duplicated head cascade stack_base_needs_human; the
+//      duplicate rows contribute NO stack edge, so swapping them cannot
+//      flip the plan.
 //   9. STACK CYCLE: A on B, B on A (misconfigured bases) → both cycle
 //      members needs-human with stack_cycle, absent from the order;
 //      independent PRs still plan; a tail leading into the cycle cascades
@@ -52,7 +56,8 @@
 //      a hardcoded constant — the same stack plans identically under any
 //      branch name, and the result echoes the name it was given.
 //  15. DETERMINISM: same input → deep-equal plan, whatever order the
-//      input array arrived in.
+//      input array arrived in — including swapping equal-pr duplicate
+//      rows — and the ledger is pr-number sorted, not gate-fire order.
 //
 // Pure data tests: no I/O, no clocks — instant by construction.
 import { describe, expect, test } from 'vitest';
@@ -319,6 +324,28 @@ describe('planMergeOrder — fail-closed gates (nothing merges uninvited)', () =
     ]);
   });
 
+  test('a duplicated CLOSED row never reports; its open twin is withheld (count spans all rows)', () => {
+    const result = plan('main', [
+      planned(5, 'main', 'x', { state: 'closed' }), // closed row of the pair
+      planned(5, 'main', 'x'), // open twin — same pr number
+      planned(6, 'main', 'independent'),
+    ]);
+    // The pr count spans BOTH rows, so the open half is withheld; the
+    // closed half stays structural silence (never in needsHuman).
+    expect(result.order).toEqual([{ pr: 6, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([{ pr: 5, reason: 'duplicate_pr' }]);
+  });
+
+  test('a lone pair of duplicated closed rows is structural silence — nothing anywhere', () => {
+    const result = plan('main', [
+      planned(5, 'main', 'x', { state: 'closed' }),
+      planned(5, 'q', 'y', { state: 'closed' }),
+      planned(6, 'main', 'independent'),
+    ]);
+    expect(result.order).toEqual([{ pr: 6, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([]);
+  });
+
   test('a base ref that resolves to nothing is not guessed: unresolved_base', () => {
     const result = plan('main', [planned(12, 'ghost-branch', 'adrift')]);
     expect(result.order).toEqual([]);
@@ -517,5 +544,43 @@ describe('planMergeOrder — deterministic', () => {
     const second = plan('main', [...prs].reverse());
     expect(first).toEqual(second);
     expect(first).toEqual(plan('main', prs));
+  });
+
+  test('duplicate rows contribute no stack edge: swapping the two equal-pr rows cannot flip the plan', () => {
+    const rows = [
+      planned(1, 'main', 'x'), // root
+      planned(5, 'r9', 'q'), // dup row A: base is pr 9's head
+      planned(5, 'x', 'q'), // dup row B: base is pr 1's head — pre-fix, the
+      // LAST of these two writes won baseOf[5] (the stable sort keeps input
+      // order, so array position was a hidden tie-breaker).
+      planned(7, 'q', 'c7'), // child of the duplicated head
+      planned(9, 'q', 'r9'), // its chain walks THROUGH the duplicate's edge
+    ];
+    const first = plan('main', rows);
+    // The same rows, the two pr-5 entries swapped: pre-fix, pr 9's chain
+    // walked through a DIFFERENT phantom edge (baseOf[5] = 1 vs 9) and its
+    // reason flipped between stack_base_needs_human and stack_cycle.
+    const swapped = plan('main', [rows[0], rows[2], rows[1], rows[3], rows[4]]);
+    expect(swapped).toEqual(first);
+    // Reasons stable in both runs: 5 is the duplicate; 7 and 9 cascade.
+    expect(first.needsHuman).toEqual([
+      { pr: 5, reason: 'duplicate_pr' },
+      { pr: 7, reason: 'stack_base_needs_human' },
+      { pr: 9, reason: 'stack_base_needs_human' },
+    ]);
+    expect(first.order).toEqual([{ pr: 1, action: 'merge', basePr: null, depth: 0 }]);
+  });
+
+  test('the ledger is pr-number sorted, not gate-fire order: {2 cascaded} before {9 truncated}', () => {
+    const result = plan('main', [
+      planned(9, 'main', 'cap-hit', { truncated: true }), // high number, gated first
+      planned(2, 'cap-hit', 'child'), // low number, cascades off it later
+    ]);
+    expect(result.order).toEqual([]);
+    // Gate fire order would put 9 first; the pr-number sort is load-bearing.
+    expect(result.needsHuman).toEqual([
+      { pr: 2, reason: 'stack_base_needs_human' },
+      { pr: 9, reason: 'review_data_truncated' },
+    ]);
   });
 });
