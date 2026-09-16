@@ -10,17 +10,19 @@
 //
 // THE SANDBOX TRAP (UC row 44, I11-adjacent — read before touching the
 // invocation): the frozen SandboxPolicy carries an isolation LEVEL and no
-// network field, and a workspace-write sandbox blocks network egress — but
-// this agent MUST push the resolved branch over the network. Level 'none'
-// is therefore the ONLY correct request here. It is not a grant of anarchy
-// — but neither is it confinement: there is NO OS-level confinement on
-// this seam. The worktree cwd (the driver runs the CLI with cwd = the
-// prepared worktree) is a CONVENTION the prompt enforces, not an OS bound;
-// the bounds that remain are the allowlisted tool surface ({read, edit,
-// run} in allowlist mode), the prompt's hard constraints (no force, no
-// squash, no rebase, no amend, no protected-branch destination), and the
-// wall-clock budget request (Budget.wallClockMs) — not a sandbox level. A
-// future sandbox that does carry network semantics must re-derive this.
+// network field, and a lane MAY map workspace-write onto an egress-blocking
+// sandbox — but this agent MUST push the resolved branch over the network,
+// so requesting workspace-write here would be wrong at the seam level.
+// Level 'none' — "no isolation requested" — is the only honest request for
+// a network-needing op under this policy. It is not a grant of anarchy —
+// but neither is it confinement: there is NO OS-level confinement on this
+// seam. The worktree cwd (the driver runs the CLI with cwd = the prepared
+// worktree) is a CONVENTION the prompt enforces, not an OS bound; the
+// bounds that remain are the allowlisted tool surface ({read, edit, run}
+// in allowlist mode), the prompt's hard constraints (no force, no squash,
+// no rebase, no amend, no protected-branch destination), and the
+// wall-clock budget request (Budget.wallClockMs). A future sandbox that
+// does carry network semantics must re-derive this.
 //
 // THE DECISION CONTRACT (the op's output vocabulary, UC row 44): the agent
 // ends with EXACTLY ONE JSON line {"decision":"acted|escalate","summary":
@@ -87,6 +89,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
 import type { Driver, ModelSpec, WorkerResult } from '../../driver/types.js';
+import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
 import { ModelSpecSchema } from '../../kernel/schema.js';
 import type { Op, OpResult } from '../../kernel/types.js';
@@ -325,6 +328,17 @@ export interface ResolveConflictDeps {
   /** Default: a SubprocessDriver bound to MergeConflictDecisionSchema (the
    * caller's sessionsDir threads through when given). */
   driver?: Driver;
+  /**
+   * Harness config threaded to the default SubprocessDriver (tool surface
+   * plus the sandbox/path restrictions the harness maps per lane). The
+   * SHIPPED default is `defaultHarnessConfig` — run-deny-all: on an
+   * in-process lane the agent cannot execute git commands; on the
+   * subprocess lane tool execution rides the HOST CLI's own permission
+   * model (`--allowedTools` carries names only). A live-capable config is
+   * wired by the caller (F5 exercises the scripted-agent path via
+   * `deps.driver`).
+   */
+  harnessConfig?: HarnessConfig;
   /** SessionStore dir for the default createSession; default
    * DEFAULT_RESOLVE_SESSIONS_DIR (mirrors the driver's own default). */
   sessionsDir?: string;
@@ -345,14 +359,20 @@ const defaultLoadPrompt = async (): Promise<string> =>
  * The default driver: a SubprocessDriver bound to the decision schema, so
  * the driver-side structured_output gate never rejects a payload the
  * tolerant contract accepts (the schema mirrors the parser's tolerance).
- * The caller's sessionsDir threads through; under exactOptionalPropertyTypes
- * an absent dir is OMITTED so the driver falls back to ITS OWN default —
- * the dir DEFAULT_RESOLVE_SESSIONS_DIR mirrors by contract.
+ * The caller's sessionsDir and harnessConfig thread through; under
+ * exactOptionalPropertyTypes an absent option is OMITTED so the driver
+ * falls back to ITS OWN default — the dir DEFAULT_RESOLVE_SESSIONS_DIR
+ * mirrors by contract, and the harness default is defaultHarnessConfig
+ * (run-deny-all; see ResolveConflictDeps.harnessConfig).
  */
-const defaultDriver = (sessionsDir: string | undefined): Driver =>
+const defaultDriver = (
+  sessionsDir: string | undefined,
+  harnessConfig: HarnessConfig | undefined,
+): Driver =>
   new SubprocessDriver({
     outputSchema: MergeConflictDecisionSchema,
     ...(sessionsDir !== undefined ? { sessionsDir } : {}),
+    ...(harnessConfig !== undefined ? { harnessConfig } : {}),
   });
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -362,6 +382,13 @@ const stderrSuffix = (stderr: string): string => {
   const trimmed = stderr.trim();
   return trimmed === '' ? '' : `: ${trimmed}`;
 };
+
+/** The session handle appended to failure/indeterminate payloads that
+ * follow a completed driver run — an operator locates the session record
+ * with it. Absent session → empty suffix (pre-driver failures carry
+ * none). */
+const sessionSuffix = (result: WorkerResult): string =>
+  result.sessionId === undefined ? '' : ` (session ${result.sessionId})`;
 
 /**
  * Build the conflict agent op (the family's first driver consumer). See the
@@ -397,7 +424,7 @@ export function makeResolveConflictOp(
         const record = await new SessionStore(sessionsDir).create(workspace);
         return record.sessionId;
       });
-    const driver = deps.driver ?? defaultDriver(callerSessionsDir);
+    const driver = deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig);
 
     // (b) Truth first: fetch the PR head ref. A nonzero exit means the
     // truth is unavailable — fail closed before any worktree exists.
@@ -463,12 +490,14 @@ export function makeResolveConflictOp(
           });
 
           // (e) THE INVOCATION — the write-capable surface. sandboxPolicy
-          // level 'none' is the ONLY correct request (the sandbox trap in
-          // the module doc): the agent must push over the network, and the
-          // frozen policy has no network field. The worktree cwd is a
-          // prompt-enforced convention, NOT an OS bound — the bounds that
-          // remain are this allowlist, the prompt's constraints, and the
-          // wall-clock budget request.
+          // level 'none' means "no isolation requested" — the only honest
+          // request for a network-needing op under the frozen policy,
+          // which carries no network field and whose workspace-write a
+          // lane MAY map onto an egress-blocking sandbox (the recorded
+          // UC-row-44 trap). The worktree cwd is a prompt-enforced
+          // convention, NOT an OS bound — the bounds that remain are this
+          // allowlist, the prompt's constraints, and the wall-clock
+          // budget request.
           let result: WorkerResult;
           try {
             result = await driver.run({
@@ -492,8 +521,7 @@ export function makeResolveConflictOp(
           if (result.stopReason === 'aborted') {
             return {
               status: 'indeterminate',
-              detail:
-                'conflict agent aborted before completing; partial work may exist in the worktree',
+              detail: `conflict agent aborted before completing; partial work may exist in the worktree${sessionSuffix(result)}`,
             };
           }
           if (result.stopReason === 'budget') {
@@ -504,7 +532,10 @@ export function makeResolveConflictOp(
               result.denials.length > 0
                 ? `${result.denials.length} tool use(s) denied by policy (see the session record for narration)`
                 : 'no denials recorded (see the session record for narration)';
-            return { status: 'failed', error: `conflict agent failed: ${hint}` };
+            return {
+              status: 'failed',
+              error: `conflict agent failed: ${hint}${sessionSuffix(result)}`,
+            };
           }
 
           // (g) Parse the decision — fail closed on a contract violation
@@ -516,7 +547,7 @@ export function makeResolveConflictOp(
             if (err instanceof MergeConflictContractError) {
               return {
                 status: 'failed',
-                error: `conflict agent output violates the decision contract: ${err.message}`,
+                error: `conflict agent output violates the decision contract: ${err.message}${sessionSuffix(result)}`,
               };
             }
             throw err;
@@ -541,39 +572,54 @@ export function makeResolveConflictOp(
           // validate. Unchanged sha or an unresolvable-after head →
           // 'indeterminate' (the resolution may or may not have landed —
           // callers assume neither success nor failure; never ok, never
-          // needs-human). A fetch/validate THROW here is a 'failed'
-          // outcome (totality). An unresolvable PRE baseline skipped the
-          // check entirely — unverifiable is not unproven.
-          if (baselineSha !== undefined) {
-            let verifyFetch: GhResult;
-            try {
-              verifyFetch = await effects.fetchRef(ref);
-            } catch (err) {
-              return {
-                status: 'failed',
-                error: `resolveConflict: verification fetch ${ref} for pr ${input.pr} threw: ${errorMessage(err)}`,
-              };
-            }
-            let moved: { ok: boolean; sha?: string };
-            try {
-              moved = await effects.validateRef(ref);
-            } catch (err) {
-              return {
-                status: 'failed',
-                error: `resolveConflict: verification validateRef ${ref} for pr ${input.pr} threw: ${errorMessage(err)}`,
-              };
-            }
-            if (
-              verifyFetch.code !== 0 ||
-              !moved.ok ||
-              moved.sha === undefined ||
-              moved.sha === baselineSha
-            ) {
-              return {
-                status: 'indeterminate',
-                detail: `conflict agent reported acted but the head ref ${ref} did not move (baseline ${baselineSha})`,
-              };
-            }
+          // needs-human). An UNRESOLVABLE PRE baseline makes the check
+          // impossible → 'indeterminate' as well (unverifiable is never
+          // ok). A fetch/validate THROW here is a 'failed' outcome
+          // (totality).
+          //
+          // ATTRIBUTION LIMIT: the sha-moved check proves the head MOVED,
+          // not that the AGENT moved it — a concurrent push by the PR
+          // author inside the window reads as acted success. Downstream
+          // harm is bounded: pass 2 re-classifies whatever actually
+          // landed, and the forge-side merge gate re-checks mergeability
+          // before any server-side merge.
+          if (baselineSha === undefined) {
+            // Unverifiable is never ok: without a pre-dispatch baseline
+            // the self-report cannot be checked at all.
+            return {
+              status: 'indeterminate',
+              detail:
+                'conflict agent reported acted but the head ref was unverifiable (pre-dispatch baseline unresolvable)',
+            };
+          }
+          let verifyFetch: GhResult;
+          try {
+            verifyFetch = await effects.fetchRef(ref);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: verification fetch ${ref} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          let moved: { ok: boolean; sha?: string };
+          try {
+            moved = await effects.validateRef(ref);
+          } catch (err) {
+            return {
+              status: 'failed',
+              error: `resolveConflict: verification validateRef ${ref} for pr ${input.pr} threw: ${errorMessage(err)}${sessionSuffix(result)}`,
+            };
+          }
+          if (
+            verifyFetch.code !== 0 ||
+            !moved.ok ||
+            moved.sha === undefined ||
+            moved.sha === baselineSha
+          ) {
+            return {
+              status: 'indeterminate',
+              detail: `conflict agent reported acted but the head ref ${ref} did not move (baseline ${baselineSha})${sessionSuffix(result)}`,
+            };
           }
           return {
             status: 'ok',

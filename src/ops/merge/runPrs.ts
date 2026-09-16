@@ -260,10 +260,21 @@ export async function runMergePrs(
   let finalPlan = plan1;
   let finalReport = firstPass;
 
+  const seenConflicts = new Set<number>();
   const conflictSet = planned1
     .filter(
       (planned) => planned.state === 'open' && planned.classification?.verdict === 'conflicting',
     )
+    // One dispatch per pr: duplicate open conflicting rows (the fetch
+    // layer's duplicate_pr hazard) would double-spend a worktree+worker
+    // run on the same pr under the p-limit pool. The FIRST occurrence in
+    // input order wins; the planner's duplicate_pr gate separately
+    // withholds every duplicate from the order.
+    .filter((planned) => {
+      if (seenConflicts.has(planned.pr)) return false;
+      seenConflicts.add(planned.pr);
+      return true;
+    })
     .sort((a, b) => a.pr - b.pr);
 
   if (conflictSet.length > 0) {

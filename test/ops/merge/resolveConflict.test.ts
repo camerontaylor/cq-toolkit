@@ -40,6 +40,7 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
+import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type {
   Driver,
   DriverStopReason,
@@ -73,8 +74,10 @@ const OK: GhResult = { code: 0, stdout: '', stderr: '' };
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 const MODEL_SPEC = { model: 'resolver-model', provider: 'zai' };
 
-/** A WorkerResult for a 'complete' run carrying `structuredOutput`. */
-const completed = (structuredOutput: unknown): WorkerResult => ({
+/** A WorkerResult for a 'complete' run carrying `structuredOutput` (and,
+ * when scripted, the driver-reported session handle). */
+const completed = (structuredOutput: unknown, sessionId?: string): WorkerResult => ({
+  ...(sessionId !== undefined ? { sessionId } : {}),
   structuredOutput,
   usage: ZERO_USAGE,
   denials: [],
@@ -711,6 +714,30 @@ describe('resolveConflict op', () => {
     });
   });
 
+  test('the harnessConfig dep threads to the default driver construction (seam-agnostic dispatch)', async () => {
+    // The load-bearing half is the TYPE-level threading into the
+    // SubprocessDriver constructor (exactOptional conditional spread) —
+    // deliberately unobservable through a fake driver. Behaviorally: a
+    // dispatch with a harnessConfig present behaves identically; the LIVE
+    // proof of a config's effect is F5's scripted-agent path (deps.driver).
+    const effects = new FakeMergeEffects();
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'ok' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+      harnessConfig: defaultHarnessConfig,
+    });
+
+    await expect(op(baseInput())).resolves.toEqual({
+      status: 'ok',
+      value: { pr: 44, decision: 'acted', summary: 'ok' },
+    });
+    // And the default op builds with the config alone (nothing runs).
+    expect(() => makeResolveConflictOp({ harnessConfig: defaultHarnessConfig })).not.toThrow();
+  });
+
   test('the default op builds — deps default lazily, nothing runs at construction', () => {
     expect(() => makeResolveConflictOp()).not.toThrow();
     expect(typeof makeResolveConflictOp()).toBe('function');
@@ -827,9 +854,76 @@ describe('the acted verification', () => {
     expect(failedError(result)).toContain('verify validate lost');
   });
 
-  test('an UNRESOLVABLE baseline skips the check: unverifiable is not unproven', async () => {
+  test('an UNRESOLVABLE baseline → indeterminate: unverifiable acted is never ok', async () => {
     const effects = new FakeMergeEffects();
     effects.baselineSha = null; // the head did not resolve pre-dispatch
+    const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    // Without a baseline the self-report cannot be checked — never ok.
+    await expect(op(baseInput())).resolves.toEqual({
+      status: 'indeterminate',
+      detail:
+        'conflict agent reported acted but the head ref was unverifiable (pre-dispatch baseline unresolvable)',
+    });
+    // The check never ran: the only validate is the baseline attempt.
+    const validateCalls = effects.calls.filter((call) => call.startsWith('validate:'));
+    expect(validateCalls).toEqual([`validate:${headRefFor(44)}`]);
+  });
+
+  test('acted payloads carry the session handle when the driver reported one', async () => {
+    const effects = new FakeMergeEffects();
+    effects.postSha = effects.baselineSha; // the self-report lies
+    const driver = new FakeDriver(
+      completed({ decision: 'acted', summary: 'pushed' }, 'ses-driver-1'),
+    );
+    const op = makeResolveConflictOp({
+      effects,
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+
+    const result = await op(baseInput());
+    expect(result.status).toBe('indeterminate');
+    if (result.status === 'indeterminate') {
+      expect(result.detail).toContain('did not move');
+      expect(result.detail.endsWith('(session ses-driver-1)')).toBe(true);
+    }
+
+    // A failed payload shows the session id too.
+    const failing = new FakeDriver(completed('I resolved everything fine', 'ses-driver-2'));
+    const failedOp = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      driver: failing,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+    const failedResult = await failedOp(baseInput());
+    expect(failedResult.status).toBe('failed');
+    expect(failedError(failedResult)).toContain('(session ses-driver-2)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// I11 forge fact carried as a test: the head push lands in refs/pull/<pr>/head
+// ---------------------------------------------------------------------------
+
+describe('I11 forge fact: a push to the head branch IS refs/pull/<pr>/head', () => {
+  test('the acted verification observes the push THROUGH the pull ref, exclusively', async () => {
+    // THE PREMISE (I11: forge facts carried as tests — the sibling pin is
+    // executeMerges.test.ts's exact-sequence assertions, where every
+    // baseline and revalidation call addresses refs/pull/<n>/head): the
+    // agent pushes to the pr's head BRANCH, and the forge reflects that on
+    // the read-only pull ref. The fake models exactly that — its movable
+    // head lives ON refs/pull/<pr>/head — so the acted verification's
+    // moved-sha reading is the pull ref's new sha.
+    const effects = new FakeMergeEffects(); // default: postSha ≠ baselineSha
     const driver = new FakeDriver(completed({ decision: 'acted', summary: 'pushed' }));
     const op = makeResolveConflictOp({
       effects,
@@ -842,9 +936,14 @@ describe('the acted verification', () => {
       status: 'ok',
       value: { pr: 44, decision: 'acted', summary: 'pushed' },
     });
-    // The check was skipped: the only validate is the baseline attempt.
-    const validateCalls = effects.calls.filter((call) => call.startsWith('validate:'));
-    expect(validateCalls).toEqual([`validate:${headRefFor(44)}`]);
+    // The verification addressed the pr ONLY through the pull ref: every
+    // fetch/validate in the log names refs/pull/44/head — the push and its
+    // observation are the same ref (the fact the acted check depends on).
+    const refCalls = effects.calls.filter(
+      (call) => call.startsWith('fetch:') || call.startsWith('validate:'),
+    );
+    expect(refCalls.every((call) => call.endsWith(headRefFor(44)))).toBe(true);
+    expect(refCalls).toContain(`validate:${headRefFor(44)}`);
   });
 });
 

@@ -39,6 +39,7 @@ import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import type { OpResult } from '../../../src/kernel/types.js';
 import { REVIEW_ACCEPT_SETTLE_MS } from '../../../src/ops/merge/classify.config.js';
+import { headRefFor } from '../../../src/ops/merge/effects.js';
 import type { MergeEffects } from '../../../src/ops/merge/effects.js';
 import type { GhResult } from '../../../src/ops/review/gh.js';
 import {
@@ -127,9 +128,16 @@ class FakeMergeEffects implements MergeEffects {
   fetchCode = 0;
   fetchStderr = '';
   readonly mergeFailures = new Set<number>();
+  /** Refs whose head MOVES between the baseline validate (call 1) and any
+   * later validate — the plan→run drift-stale scripting hook. */
+  readonly driftRefs = new Set<string>();
+  private validateCounts = new Map<string, number>();
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
+    const count = (this.validateCounts.get(ref) ?? 0) + 1;
+    this.validateCounts.set(ref, count);
+    if (this.driftRefs.has(ref) && count > 1) return { ok: true, sha: 'd'.repeat(40) };
     return { ok: true, sha: 'b'.repeat(40) };
   }
 
@@ -437,6 +445,38 @@ describe('runMergePrs', () => {
     ]);
   });
 
+  test('duplicate open conflicting rows produce exactly ONE resolve dispatch (first row wins)', async () => {
+    const effects = new FakeMergeEffects();
+    // The same pr twice with DIVERGENT head refs — the fetch layer's
+    // duplicate_pr hazard. The resolve set keeps ONE dispatch (first
+    // occurrence in input order); the planner separately withholds both
+    // rows from the order.
+    const candidates = [
+      conflicting(45, { headRefName: 'feat/45' }),
+      conflicting(45, { headRefName: 'feat/45-typo' }),
+    ];
+    const { resolve, calls } = fakeResolve(acted(45, 'pushed once'));
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    expect(calls).toEqual([
+      {
+        pr: 45,
+        repoRoot: '/repo',
+        headBranch: 'feat/45', // the FIRST row's shape
+        baseBranch: 'main',
+        modelSpec: MODEL_SPEC,
+      },
+    ]);
+    expect(outcome.resolutions).toEqual([{ pr: 45, decision: 'acted', summary: 'pushed once' }]);
+    // The planner withheld both rows as duplicate_pr (its gate 1 runs
+    // ahead of the verdict gate) — one resolve dispatch, one union row.
+    expect(outcome.firstPass.merged).toEqual([]);
+    expect(outcome.secondPass).not.toBeNull();
+    expect(outcome.secondPass?.merged).toEqual([]);
+    expect(outcome.needsHuman).toEqual([{ pr: 45, reason: 'duplicate_pr' }]);
+  });
+
   test('refetch THROW fails closed: no re-plan, secondPass null, every acted pr owed a row', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(acted(46, 'pushed 46'));
@@ -650,13 +690,23 @@ describe('runMergePrs', () => {
     ).rejects.toThrow('resolveConcurrency');
   });
 
-  test('the needs-human union: escalation + planner withhold + failed merge, pr-sorted, deduped', async () => {
+  test('the needs-human union: escalation + planner + stale + failed + blocked, pr-sorted, deduped', async () => {
     const effects = new FakeMergeEffects();
-    effects.mergeFailures.add(44); // the eligible pr's merge is refused
+    effects.mergeFailures.add(44); // the eligible root's merge is refused
+    effects.driftRefs.add(headRefFor(48)); // 48's head moves after the baseline → stale
     const { resolve, calls } = fakeResolve(escalated('a human must reconcile the semantics'));
 
     const outcome = await runMergePrs(
-      baseInput([draft(41), eligible(44), conflicting(45)], MODEL_SPEC),
+      baseInput(
+        [
+          draft(41),
+          eligible(44),
+          eligible(47, { baseRefName: 'feat/44' }), // 44's child — blocked when 44 fails
+          conflicting(45),
+          eligible(48),
+        ],
+        MODEL_SPEC,
+      ),
       {
         effects,
         resolve,
@@ -666,16 +716,29 @@ describe('runMergePrs', () => {
     // No second pass: nothing acted.
     expect(outcome.secondPass).toBeNull();
     expect(outcome.firstPass.merged).toEqual([]);
+    // The execution buckets: 44 failed, 48 stale (drift), 47 blocked by
+    // its failed ancestor.
+    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44]);
+    expect(outcome.firstPass.stale.map((entry) => entry.pr)).toEqual([48]);
+    expect(outcome.firstPass.blocked.map((entry) => entry.pr)).toEqual([47]);
     // Dedupe + priority pinned on pr 45: it is BOTH an escalation AND a
     // planner withhold ('not_eligible' — it is conflicting) — the decided
     // escalation's summary wins, the planner's gate reason does not.
-    expect(outcome.needsHuman).toEqual([
-      { pr: 41, reason: 'not_eligible' },
-      { pr: 44, reason: 'gh pr merge 44 --merge failed (exit 1): refused by the forge' },
-      { pr: 45, reason: 'a human must reconcile the semantics' },
-    ]);
-    // The final report is pass 1, so its post-mortem names the failed merge.
-    expect(outcome.diagnosis.needsHuman).toEqual([44]);
+    expect(outcome.needsHuman.map((row) => row.pr)).toEqual([41, 44, 45, 47, 48]);
+    const reasonOf = (pr: number): string => {
+      const row = outcome.needsHuman.find((candidate) => candidate.pr === pr);
+      if (row === undefined) throw new Error(`no needsHuman row for pr ${String(pr)}`);
+      return row.reason;
+    };
+    expect(reasonOf(41)).toBe('not_eligible');
+    expect(reasonOf(44)).toBe('gh pr merge 44 --merge failed (exit 1): refused by the forge');
+    expect(reasonOf(45)).toBe('a human must reconcile the semantics');
+    expect(reasonOf(47)).toBe('blocked_by_ancestor');
+    // The stale row carries the drift detail (baseline sha vs moved sha).
+    expect(reasonOf(48)).toContain('head moved between plan and run');
+    // The final report is pass 1, so its post-mortem names all three
+    // execution outcomes.
+    expect(outcome.diagnosis.needsHuman).toEqual([44, 47, 48]);
     expect(calls).toHaveLength(1);
   });
 
