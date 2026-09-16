@@ -371,40 +371,42 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     expect(repo.removed).toHaveLength(0);
   });
 
-  test('containment: traversal, dot, absolute, and prefix-trap entries are refused — never touched on disk', async () => {
+  test('containment: ANY refused cache entry FAILS the reuse — a stale cache is never certified (I7)', async () => {
     const repo = fakeRepo();
     repo.worktrees = [{ path: PATH, branch: BRANCH }];
     repo.clean.add(PATH);
     const hostile = ['../outside', '.', '/etc/tool-cache', '../wt-sibling/cache'];
-    const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), {
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
       ...INPUT,
       baselineCacheDirs: hostile,
     });
-    // Every hostile entry lands in the refused field, nothing is removed…
-    expect(workspace.refusedBaselineCaches).toEqual(hostile);
-    expect(workspace.clearedBaselineCaches).toEqual([]);
+    // The refusal fails the reuse and names EVERY refused entry…
+    expect(error).toMatch(/refused baseline cache entries/);
+    for (const entry of hostile) {
+      expect(error).toContain(entry);
+    }
+    expect(error).toMatch(/clean them up manually/);
+    // …and the refusal is total: nothing was deleted or even probed.
     expect(repo.removed).toHaveLength(0);
-    // …and the refusal is total: not even an existence probe runs outside.
     expect(repo.calls.some((call) => call.startsWith('pathExists:'))).toBe(false);
   });
 
-  test('containment spares nothing legitimate: a real subdir is still evicted alongside refusals', async () => {
+  test('a mixed set (legit subdir + hostile entry) also fails — partial eviction cannot precede certification', async () => {
     const repo = fakeRepo();
     repo.worktrees = [{ path: PATH, branch: BRANCH }];
     repo.clean.add(PATH);
     repo.dirs.add(`${PATH}/.cq/baseline`);
-    const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), {
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
       ...INPUT,
       baselineCacheDirs: ['.cq/baseline', '../outside'],
     });
-    expect(workspace.clearedBaselineCaches).toEqual(['.cq/baseline']);
-    expect(workspace.refusedBaselineCaches).toEqual(['../outside']);
-    expect(repo.removed).toEqual([`${PATH}/.cq/baseline`]);
+    expect(error).toMatch(/refused baseline cache entries/);
+    expect(error).toContain('../outside');
+    expect(repo.removed).toHaveLength(0);
   });
 
-  test('an intermediate SYMLINK refuses the entry; a FINAL-segment symlink is unlinked, not followed', async () => {
-    // REAL fs: the intermediate-symlink guard lstats actual segments and the
-    // rmDir effect below performs real deletions.
+  test('an intermediate SYMLINK refuses the entry and FAILS the reuse — nothing is deleted through it', async () => {
+    // REAL fs: the intermediate-symlink guard lstats actual segments.
     const dir = mkdtempSync(join(tmpdir(), 'worktree-evict-'));
     try {
       const wt = join(dir, 'wt', 'fix', 'core'); // the derived path for this input
@@ -412,9 +414,37 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
       mkdirSync(join(dir, 'outside'));
       writeFileSync(join(dir, 'outside', 'keep.txt'), 'keep');
       symlinkSync(join(dir, 'outside'), join(wt, '.cq')); // intermediate symlink
+      const repo = fakeRepo();
+      repo.worktrees = [{ path: wt, branch: BRANCH }];
+      // The op probes strict-clean at the CANONICAL tree path (realpath'd
+      // prefix) — seed the same form the comparisons will use.
+      repo.clean.add(realpathSync(wt));
+      const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+        ...INPUT,
+        repoRoot: dir,
+        worktreesDir: join(dir, 'wt'),
+        baselineCacheDirs: ['.cq/baseline'],
+      });
+      expect(error).toMatch(/refused baseline cache entries/);
+      expect(error).toContain('.cq/baseline');
+      expect(error).toMatch(/clean them up manually/);
+      expect(repo.removed).toHaveLength(0);
+      // The symlink and its target are untouched.
+      expect(existsSync(join(wt, '.cq'))).toBe(true);
+      expect(existsSync(join(dir, 'outside', 'keep.txt'))).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('a FINAL-segment symlink is unlinked ITSELF, never followed (real rm)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'worktree-evict-'));
+    try {
+      const wt = join(dir, 'wt', 'fix', 'core');
+      mkdirSync(wt, { recursive: true });
+      mkdirSync(join(dir, 'outside'));
+      writeFileSync(join(dir, 'outside', 'keep.txt'), 'keep');
       symlinkSync(join(dir, 'outside'), join(wt, 'cache-link')); // FINAL-segment symlink
-      // The op evicts under the CANONICAL tree path (realpath'd prefix), so
-      // the fake existence probe must know that form too.
       const canonicalWt = realpathSync(wt);
       const repo = fakeRepo();
       repo.worktrees = [{ path: wt, branch: BRANCH }];
@@ -434,19 +464,50 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
         ...INPUT,
         repoRoot: dir,
         worktreesDir: join(dir, 'wt'),
-        baselineCacheDirs: ['.cq/baseline', 'cache-link'],
+        baselineCacheDirs: ['cache-link'],
       });
-      // The symlinked intermediate refuses the entry — nothing deleted through it.
-      expect(workspace.refusedBaselineCaches).toEqual(['.cq/baseline']);
-      expect(repo.removed.some((p) => p.includes('.cq'))).toBe(false);
-      // The final-segment symlink is unlinked ITSELF; the target survives.
       expect(workspace.clearedBaselineCaches).toEqual(['cache-link']);
       expect(repo.removed).toEqual([join(canonicalWt, 'cache-link')]);
-      expect(existsSync(join(dir, 'outside', 'keep.txt'))).toBe(true);
+      // The LINK is gone; the target directory and its file survive.
       expect(existsSync(join(wt, 'cache-link'))).toBe(false);
+      expect(existsSync(join(dir, 'outside', 'keep.txt'))).toBe(true);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  test('a stat FAULT on a cache path is a failed result naming it — never a silent skip (I7)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      pathExists: async (p) => {
+        if (p.endsWith('guarded')) {
+          throw new Error(`EACCES: permission denied, stat '${p}'`);
+        }
+        return repo.dirs.has(p);
+      },
+    };
+    const error = await failedAt(makeWorktreeFor(effects), {
+      ...INPUT,
+      baselineCacheDirs: ['node_modules/.cache/guarded'],
+    });
+    expect(error).toMatch(/could not check for baseline cache/);
+    expect(error).toMatch(/guarded/);
+    expect(repo.removed).toHaveLength(0);
+  });
+
+  test('an ABSENT cache path is still honestly skipped (absence class only)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      baselineCacheDirs: ['node_modules/.cache/absent'],
+    });
+    expect(workspace.clearedBaselineCaches).toEqual([]);
+    expect(repo.removed).toHaveLength(0);
   });
 });
 
@@ -583,6 +644,25 @@ describe('sweep.worktreeFor path safety', () => {
     const error = await failedAt(makeWorktreeFor(effectsOf(repo)), { ...INPUT, slug: 'foo.lock' });
     expect(error).toMatch(/slug/);
     expect(error).toMatch(/refname/);
+  });
+
+  test('a control character in worktreesDir is refused — the porcelain lists are line-oriented', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      worktreesDir: '/runs/wt\n/evil',
+    });
+    expect(error).toMatch(/worktreesDir/);
+    expect(error).toMatch(/control characters/);
+  });
+
+  test('a control character in runPrefix is refused', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      runPrefix: 'cq/09-16a\r/x',
+    });
+    expect(error).toMatch(/runPrefix/);
   });
 });
 

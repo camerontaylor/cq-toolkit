@@ -64,11 +64,13 @@ export interface WorktreeForInput {
    * REUSED tree — I7: the baseline is never cached on reuse; the caller
    * re-probes. Each entry must be a NORMALIZED non-empty RELATIVE path
    * ('' / '.' / absolute / any '..' segment refused), and its resolution
-   * against the worktree path must land STRICTLY INSIDE the tree — a
-   * refused entry is never touched on disk and is listed in the result's
-   * `refusedBaselineCaches`. Only ignored/untracked tool state should live
-   * here: a TRACKED file under one of these paths would make the tree dirty
-   * long before eviction, and dirty reuse is refused (UC row 20).
+   * against the worktree path must land STRICTLY INSIDE the tree. ANY
+   * refused entry FAILS the reuse — a tree with stale, still-readable
+   * baseline cache is never certified reusable (I7); the error names every
+   * refused entry and the manual-cleanup path. Only ignored/untracked tool
+   * state should live here: a TRACKED file under one of these paths would
+   * make the tree dirty long before eviction, and dirty reuse is refused
+   * (UC row 20).
    */
   baselineCacheDirs?: string[];
 }
@@ -93,7 +95,13 @@ export interface SweepWorkspace {
   reused: boolean;
   /** I7: baseline cache dirs evicted from a reused tree (input-relative names). Empty on create. */
   clearedBaselineCaches: string[];
-  /** I7 security: baseline cache entries REFUSED by containment (never touched on disk). Empty when none. */
+  /**
+   * I7 security: baseline cache entries REFUSED by containment. Always
+   * empty on an `ok` result — since the PR138 cap round, ANY refusal FAILS
+   * the reuse (a tree with stale, still-readable baseline cache is never
+   * certified reusable); the field remains on the failed-result contract
+   * shape, with the entries named in the error.
+   */
   refusedBaselineCaches: string[];
 }
 
@@ -128,8 +136,15 @@ export interface WorktreeEffects {
    * configured-but-broken one.
    */
   remoteGetUrl?(): Promise<string | null>;
+  /**
+   * False ONLY for the absence class (ENOENT / ENOTDIR); any other stat
+   * fault THROWS — I7 forbids reading a stat failure as "the cache is
+   * absent" and silently skipping it.
+   */
   pathExists(p: string): Promise<boolean>;
-  /** STRICT clean: `git status --porcelain` EMPTY semantics — untracked files count as dirty. */
+  /**
+   * STRICT clean: `git status --porcelain` EMPTY semantics — untracked files count as dirty.
+   */
   isStrictClean(worktreePath: string): Promise<boolean>;
   worktreeAdd(input: WorktreeAddRequest): Promise<void>;
   worktreePrune(repoRoot: string): Promise<void>;
@@ -144,6 +159,14 @@ export interface WorktreeEffects {
  * as an ARRAY, and this keeps even a hostile config from trying).
  */
 const SEGMENT_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+
+/**
+ * Control characters (the Unicode Cc category: C0, DEL, C1) —
+ * newline/carriage-return above all: git's `worktree list --porcelain` is
+ * LINE-oriented, and one of these in a compared value would corrupt the
+ * framing.
+ */
+const CONTROL_CHARS_RE = /[\p{Cc}]/u;
 
 /**
  * git-refname hardening on top of SEGMENT_RE: a '..' run walks refs
@@ -173,11 +196,14 @@ function refnameUnsafeSegment(segment: string): boolean {
  * auto-cleaned; salvage is D2's business). (c) CREATE — `git worktree
  * prune` then `git worktree add -b <branch> <path> <base>`, both inside
  * the git mutex when configured. (d) I7 — before a reused tree is
- * returned, every configured `baselineCacheDirs` present in the tree is
- * removed and listed in `clearedBaselineCaches`: the caller must re-probe
- * the baseline for every reused tree; the create path carries an empty
- * list. Every effects fault is a `failed` result — never a throw across
- * the op seam.
+ * returned, every configured `baselineCacheDirs` entry is validated and
+ * every clearable one present in the tree is removed and listed in
+ * `clearedBaselineCaches`: the caller must re-probe the baseline for every
+ * reused tree. ANY refused entry (containment or intermediate-symlink
+ * refusal) FAILS the reuse — a tree with stale, still-readable baseline
+ * cache is never certified reusable; the error names the entries and the
+ * manual-cleanup path, and the create path carries an empty list. Every
+ * effects fault is a `failed` result — never a throw across the op seam.
  */
 export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, SweepWorkspace> {
   return async (input) => {
@@ -251,12 +277,13 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
         };
       }
       // I7: the baseline is never cached on reuse — evict, list, and hand
-      // the caller a tree it must re-probe. Every entry passes the
-      // containment check and the intermediate-symlink guard FIRST: a
-      // refused entry is never touched on disk (no stat, no rm) and only
-      // listed. The eviction base is the CANONICAL tree path, so a
-      // symlinked component above it cannot bend the containment math.
-      const clearedBaselineCaches: string[] = [];
+      // the caller a tree it must re-probe. PASS ONE validates every entry:
+      // containment (normalized non-empty relative, strictly inside the
+      // tree) and the intermediate-symlink guard. A REFUSED entry is never
+      // touched on disk (no stat, no rm), and ANY refusal fails the reuse —
+      // a tree whose stale baseline cache remains readable must never be
+      // certified reusable; the error names every refused entry and the
+      // manual-cleanup path. PASS TWO evicts the clearable entries.
       const refusedBaselineCaches: string[] = [];
       for (const rel of input.baselineCacheDirs ?? []) {
         const containmentFault = baselineCacheContainmentFault(rel, candidate.real);
@@ -275,8 +302,16 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
         }
         if (symlinkFault !== null) {
           refusedBaselineCaches.push(rel);
-          continue;
         }
+      }
+      if (refusedBaselineCaches.length > 0) {
+        return {
+          status: 'failed',
+          error: `sweep: worktree '${candidate.real}' keeps refused baseline cache entries (${refusedBaselineCaches.join(', ')}) — a reused tree with stale baseline state must never be certified reusable (I7); clean them up manually (the cleanup op or explicit removal) and re-invoke`,
+        };
+      }
+      const clearedBaselineCaches: string[] = [];
+      for (const rel of input.baselineCacheDirs ?? []) {
         const inTree = resolve(candidate.real, rel);
         let exists: boolean;
         try {
@@ -306,7 +341,7 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
           requestedBase: input.base,
           reused: true,
           clearedBaselineCaches,
-          refusedBaselineCaches,
+          refusedBaselineCaches: [],
         },
       };
     }
@@ -488,7 +523,7 @@ async function intermediateSymlinkFault(worktreePath: string, rel: string): Prom
     try {
       info = await lstat(current);
     } catch (err) {
-      if (isEnoent(err)) return null;
+      if (isAbsence(err)) return null;
       throw err;
     }
     if (!info.isDirectory()) {
@@ -498,13 +533,19 @@ async function intermediateSymlinkFault(worktreePath: string, rel: string): Prom
   return null;
 }
 
-/** True when a thrown value is a node:fs ENOENT (the missing-file case). */
-function isEnoent(err: unknown): boolean {
+/**
+ * The ABSENCE class of node:fs faults — ENOENT and ENOTDIR (a path walking
+ * through a file) both mean "nothing there". ANY OTHER stat/lstat fault
+ * (EACCES-class) must propagate to the op boundary as a `failed` result:
+ * I7 forbids silently skipping cache state because reading it failed.
+ */
+function isAbsence(err: unknown): boolean {
   return (
     typeof err === 'object' &&
     err !== null &&
     'code' in err &&
-    (err as { code?: unknown }).code === 'ENOENT'
+    ((err as { code?: unknown }).code === 'ENOENT' ||
+      (err as { code?: unknown }).code === 'ENOTDIR')
   );
 }
 
@@ -521,6 +562,16 @@ function inputFaultOf(input: WorktreeForInput): string | null {
     if (typeof value !== 'string' || value === '') {
       return `sweep: ${field} must be a non-empty string`;
     }
+  }
+  // CONTROL CHARACTERS (jCoNL): git's `worktree list --porcelain` is
+  // LINE-oriented, so a newline/carriage-return (any control character)
+  // inside a compared value corrupts the framing. git 2.43's NUL-record
+  // `-z` form is the recorded follow-up surface; for now the values that
+  // feed comparisons and derivations are rejected outright. kind/slug and
+  // every runPrefix segment are covered by SEGMENT_RE below (it admits no
+  // control characters); worktreesDir gets its own check.
+  if (CONTROL_CHARS_RE.test(input.worktreesDir)) {
+    return `sweep: worktreesDir must not contain control characters (newline/carriage return) — the porcelain lists it is compared against are line-oriented`;
   }
   // kind/slug are single segments; runPrefix may nest, but every segment is
   // held to the same safe-segment rule, so the derived branch and path can
@@ -777,8 +828,12 @@ export function makeSubprocessWorktreeEffects(
       try {
         await stat(p);
         return true;
-      } catch {
-        return false;
+      } catch (err) {
+        // FALSE only for the absence class (ENOENT / ENOTDIR): any other
+        // stat fault THROWS — I7 forbids reading a stat failure as "the
+        // cache is absent" and silently skipping it.
+        if (isAbsence(err)) return false;
+        throw err;
       }
     },
     isStrictClean: async (worktreePath) =>
