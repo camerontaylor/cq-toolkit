@@ -94,6 +94,8 @@ interface FakeRepo {
   remoteBranches: string[];
   dirs: Set<string>;
   clean: Set<string>;
+  /** seeded per absolute target path: the tracked files the effect reports */
+  tracked: Map<string, string[]>;
   calls: string[];
   addCalls: Array<{ repoRoot: string; path: string; branch: string; base: string }>;
   prunes: string[];
@@ -107,6 +109,7 @@ function fakeRepo(): FakeRepo {
     remoteBranches: [],
     dirs: new Set<string>(),
     clean: new Set<string>(),
+    tracked: new Map<string, string[]>(),
     calls: [],
     addCalls: [],
     prunes: [],
@@ -132,6 +135,7 @@ function effectsOf(repo: FakeRepo): WorktreeEffects {
       repo.calls.push(`pathExists:${p}`);
       return repo.dirs.has(p);
     },
+    trackedFilesUnder: async (p) => repo.tracked.get(p) ?? [],
     isStrictClean: async (p) => {
       repo.calls.push(`isStrictClean:${p}`);
       return repo.clean.has(p);
@@ -389,6 +393,22 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     // …and the refusal is total: nothing was deleted or even probed.
     expect(repo.removed).toHaveLength(0);
     expect(repo.calls.some((call) => call.startsWith('pathExists:'))).toBe(false);
+  });
+
+  test('a cache entry holding TRACKED files is refused — deleting would dirty the certified tree (jFhPh)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH); // files unmodified, so strict-clean PASSES…
+    repo.tracked.set(`${PATH}/.cq/baseline`, ['.cq/baseline/committed.data']);
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      baselineCacheDirs: ['.cq/baseline'],
+    });
+    expect(error).toMatch(/refused baseline cache entries/);
+    expect(error).toMatch(/tracked file/);
+    expect(error).toContain('.cq/baseline');
+    // Refusal is total: the tracked contents were never touched.
+    expect(repo.removed).toHaveLength(0);
   });
 
   test('a backslash-carrying cache entry is refused — posix separators only, never reinterpreted (jEXRZ)', async () => {
@@ -877,6 +897,9 @@ describe('subprocess worktree-effects (real git smoke)', () => {
       );
       expect(await resilient(() => effects.pathExists(wtPath))).toBe(true);
       expect(await resilient(() => effects.isStrictClean(wtPath))).toBe(true);
+      // The commit is EMPTY, so ls-files under the worktree reports nothing —
+      // the tracked-content refusal (jFhPh) keys on exactly this effect.
+      expect(await resilient(() => effects.trackedFilesUnder(wtPath))).toEqual([]);
       const worktrees = await resilient(() => effects.listWorktrees());
       const onBranch = worktrees.find((w) => w.branch === 'cq/x/fix/core');
       expect(onBranch?.path).toMatch(/wt\/fix\/core$/);

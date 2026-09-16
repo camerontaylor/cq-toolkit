@@ -145,6 +145,13 @@ export interface WorktreeEffects {
    */
   pathExists(p: string): Promise<boolean>;
   /**
+   * The tracked files under `targetAbsPath` (`git ls-files -- <target>`),
+   * empty when none. The op only tests the COUNT: a non-empty result marks
+   * a baselineCacheDirs entry as holding tracked content, which must never
+   * be deleted (deleting would dirty the certified tree — I7/UC row 20).
+   */
+  trackedFilesUnder(targetAbsPath: string): Promise<string[]>;
+  /**
    * STRICT clean: `git status --porcelain` EMPTY semantics — untracked files count as dirty.
    */
   isStrictClean(worktreePath: string): Promise<boolean>;
@@ -281,7 +288,9 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
       // I7: the baseline is never cached on reuse — evict, list, and hand
       // the caller a tree it must re-probe. PASS ONE validates every entry:
       // containment (normalized non-empty relative, strictly inside the
-      // tree) and the intermediate-symlink guard. A REFUSED entry is never
+      // tree), the intermediate-symlink guard, and the TRACKED-CONTENT
+      // check (an entry naming files git tracks must never be deleted —
+      // deleting would dirty the certified tree). A REFUSED entry is never
       // touched on disk (no stat, no rm), and ANY refusal fails the reuse —
       // a tree whose stale baseline cache remains readable must never be
       // certified reusable; the error names every refused entry and the
@@ -307,6 +316,23 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
         if (symlinkFault !== null) {
           refusedBaselineCaches.push(rel);
           refusals.push(`'${rel}' (${symlinkFault})`);
+          continue;
+        }
+        const inTree = resolve(candidate.real, rel);
+        let tracked: string[];
+        try {
+          tracked = await git.trackedFilesUnder(inTree);
+        } catch (err) {
+          return {
+            status: 'failed',
+            error: `sweep: could not check '${inTree}' for tracked files — ${messageOf(err)}`,
+          };
+        }
+        if (tracked.length > 0) {
+          refusedBaselineCaches.push(rel);
+          refusals.push(
+            `'${rel}' (holds tracked files — deleting would dirty the tree; the target must not be removed)`,
+          );
         }
       }
       if (refusedBaselineCaches.length > 0) {
@@ -854,6 +880,10 @@ export function makeSubprocessWorktreeEffects(
         throw err;
       }
     },
+    trackedFilesUnder: async (targetAbsPath) =>
+      // One repo-relative path per line — the same non-empty-line shape the
+      // branch-ref parser handles; only the COUNT matters to the op.
+      parseBranchRefs(await runGit(['ls-files', '--', targetAbsPath], repoRoot, timeoutMs)),
     isStrictClean: async (worktreePath) =>
       (await runGit(['status', '--porcelain'], worktreePath, timeoutMs)).trim() === '',
     worktreeAdd: async (add) => {
