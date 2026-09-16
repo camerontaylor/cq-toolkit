@@ -54,7 +54,14 @@
 //      remove-in-finally; the op never calls worktreePrepare/Remove
 //      itself. A throw out of it (spawn-level worktree failure, or a
 //      session/prompt fault inside fn) is an op OUTCOME here → 'failed'
-//      with the message, not a crash.
+//      with the message, not a crash. KNOWN WEDGE (review-debt #143): a
+//      non-acted outcome after the agent started can leave a DIRTY tree,
+//      which the frozen no-force worktreeRemove refuses (and which the
+//      lifecycle swallows when fn itself resolved) — the wedge surfaces
+//      LOUDLY at the next prepare for that pr (worktree add refuses the
+//      existing path), but recovery until then is manual: git worktree
+//      remove --force / prune. A guarded cleanup shape in the effects
+//      allowlist is the deferred fix.
 //   d. Inside: a fresh session record is created in the worktree (its
 //      sessionId is the OpInvocation.sessionRef; the driver runs the CLI
 //      with cwd = that workspace) and the prompt is rendered from

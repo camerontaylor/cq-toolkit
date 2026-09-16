@@ -234,4 +234,35 @@ describe('registry mirror fidelity (spot-checks)', () => {
     expect(parses({ headBranch: '-lead' })).toBe(false);
     expect(parses({ baseBranch: 'a..b' })).toBe(false);
   });
+
+  // TWIN PARITY extended to the candidate fields: the composition's
+  // stack-graph branch names are prompt-interpolated by the resolver too,
+  // so MergePrsCandidateSchema's headRefName/baseRefName carry the SAME
+  // conservative gate as the conflict agent's input.
+  test('runPrs twin: candidate headRefName/baseRefName carry the refname gate', () => {
+    const candidate = {
+      pr: 7,
+      headRefName: 'feat/7',
+      baseRefName: 'main',
+      state: 'open',
+      authorLogin: null,
+      draft: false,
+      mergeState: 'CLEAN',
+      truncated: false,
+      threads: [],
+      reviews: [],
+      issueComments: [],
+      lastCommitAt: '2026-01-01T00:00:00Z',
+    };
+    const parses = (over: Record<string, unknown>): boolean =>
+      RunMergePrsInputSchema.safeParse({
+        baseBranch: 'main',
+        repoRoot: '/repo',
+        prs: [{ ...candidate, ...over }],
+      }).success;
+
+    expect(parses({})).toBe(true);
+    expect(parses({ headRefName: 'topic$(touch x)' })).toBe(false);
+    expect(parses({ baseRefName: 'a..b' })).toBe(false);
+  });
 });

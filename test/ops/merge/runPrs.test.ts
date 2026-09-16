@@ -329,7 +329,7 @@ describe('runMergePrs', () => {
     expect(calls).toHaveLength(1);
   });
 
-  test('no-refetch pass 2 EXCLUDES pass-1 merged prs: 44 never re-merged, 45 still processes', async () => {
+  test('no-refetch pass 2 CLOSED-ANCHORS pass-1 merged prs: 44 never re-merged, 45 still processes', async () => {
     const candidates = [eligible(44), conflicting(45)];
     const effects = new FakeMergeEffects();
     const { resolve } = fakeResolve(acted(45, 'union merge pushed'), (input) => {
@@ -345,18 +345,25 @@ describe('runMergePrs', () => {
     // into a false needsHuman row.
     const mergeCalls = effects.calls.filter((call) => call.startsWith('merge:'));
     expect(mergeCalls).toEqual(['merge:44:merge', 'merge:45:merge']);
-    // Pass 2 processed ONLY the flipped pr: 45 merges there; 44 — merged
-    // in pass 1 — is excluded from the pass-2 report entirely.
+    // 44 re-enters pass 2 as a CLOSED structural row (open row dropped,
+    // input row forced closed): the planner never orders it, so the
+    // executor never touches it again — exactly its two pass-1 fetches,
+    // nothing more.
+    const fetch44 = effects.calls.filter((call) => call === `fetch:${headRefFor(44)}`);
+    expect(fetch44).toHaveLength(2); // baseline sweep + pass-1 revalidation
+    // Pass 2 processed ONLY the flipped pr: 45 merges there; the merged
+    // parent is closed structure, not a pass-2 merge candidate.
     expect(outcome.firstPass.merged).toEqual([44]);
     expect(outcome.secondPass?.merged).toEqual([45]);
     expect(outcome.needsHuman).toEqual([]);
   });
 
-  test('refetch pass 2 also EXCLUDES pass-1 merged prs (a racing fetch cannot resurrect one)', async () => {
+  test('refetch pass 2 also CLOSED-ANCHORS pass-1 merged prs (a racing fetch cannot resurrect one)', async () => {
     const effects = new FakeMergeEffects();
     const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
-    // The refreshed set still lists pr 44 — as if the fetch raced the
-    // server-side merge: the exclusion must filter it anyway.
+    // The refreshed set still lists pr 44 as OPEN — as if the fetch raced
+    // the server-side merge: the open row is dropped and the closed anchor
+    // (input row forced closed) is appended instead.
     const { refetch } = fakeRefetch([eligible(44), eligible(45)]);
 
     const outcome = await runMergePrs(baseInput([eligible(44), conflicting(45)], MODEL_SPEC), {
@@ -367,8 +374,51 @@ describe('runMergePrs', () => {
 
     const mergeCalls = effects.calls.filter((call) => call.startsWith('merge:'));
     expect(mergeCalls).toEqual(['merge:44:merge', 'merge:45:merge']);
+    // The refreshed open row for 44 was dropped: the only fetches of its
+    // ref are pass 1's two (the closed anchor is never executed).
+    const fetch44 = effects.calls.filter((call) => call === `fetch:${headRefFor(44)}`);
+    expect(fetch44).toHaveLength(2);
     expect(outcome.firstPass.merged).toEqual([44]);
     expect(outcome.secondPass?.merged).toEqual([45]);
+    expect(outcome.needsHuman).toEqual([]);
+  });
+
+  test('a merged parent CLOSED-ANCHORS pass 2: a refetch omitting it still lets the stacked child proceed', async () => {
+    const effects = new FakeMergeEffects();
+    const candidates = [
+      eligible(44, { headRefName: 'feat/44' }),
+      conflicting(45, { baseRefName: 'feat/44' }),
+    ];
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
+    // The refreshed set OMITS the merged parent 44 — and the child's
+    // refreshed row STILL names the old base ('feat/44'). Without the
+    // closed anchor, 45's base would resolve to nothing (unresolved_base)
+    // and the rung would stall. The anchor (input row forced closed) keeps
+    // 44's head resolvable, so plan2 plans 45 as retarget-self onto the
+    // trunk — F3's closed-ancestor rule — and it merges in a future run.
+    const { refetch, callCount } = fakeRefetch([eligible(45, { baseRefName: 'feat/44' })]);
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    // Pass 1 merged the parent; the resolution acted for the child.
+    expect(outcome.firstPass.merged).toEqual([44]);
+    expect(outcome.resolutions).toEqual([
+      { pr: 45, decision: 'acted', summary: 'union merge pushed' },
+    ]);
+    expect(callCount()).toBe(1);
+    // Pass 2: the rung PROCEEDED — 45 was retargeted onto the trunk (the
+    // unresolved_base withhold is gone), and the merged parent was never
+    // re-merged.
+    expect(outcome.secondPass?.retargeted).toEqual([45]);
+    expect(effects.calls.filter((call) => call.startsWith('retarget:'))).toEqual([
+      'retarget:45:base=main',
+    ]);
+    const mergeCalls = effects.calls.filter((call) => call.startsWith('merge:'));
+    expect(mergeCalls).toEqual(['merge:44:merge']);
     expect(outcome.needsHuman).toEqual([]);
   });
 
@@ -515,12 +565,12 @@ describe('runMergePrs', () => {
     ]);
   });
 
-  test('duplicate open conflicting rows produce exactly ONE resolve dispatch (first row wins)', async () => {
+  test('duplicate conflicting rows are refused ENTIRELY: zero dispatches, one escalation row', async () => {
     const effects = new FakeMergeEffects();
-    // The same pr twice with DIVERGENT head refs — the fetch layer's
-    // duplicate_pr hazard. The resolve set keeps ONE dispatch (first
-    // occurrence in input order); the planner separately withholds both
-    // rows from the order.
+    // The same pr twice with DIVERGENT head refs — the fetch layer cannot
+    // say which row is real, so a write-capable resolver is never
+    // dispatched on arbitrary metadata (the planner's duplicate_pr gate
+    // refuses the merge for the same reason).
     const candidates = [
       conflicting(45, { headRefName: 'feat/45' }),
       conflicting(45, { headRefName: 'feat/45-typo' }),
@@ -529,22 +579,40 @@ describe('runMergePrs', () => {
 
     const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
 
-    expect(calls).toEqual([
+    expect(calls).toEqual([]);
+    expect(outcome.resolutions).toEqual([]);
+    expect(outcome.needsHuman).toEqual([
       {
         pr: 45,
-        repoRoot: '/repo',
-        headBranch: 'feat/45', // the FIRST row's shape
-        baseBranch: 'main',
-        modelSpec: MODEL_SPEC,
+        reason: 'duplicate candidate rows for pr 45 — refusing to dispatch the conflict agent',
       },
     ]);
-    expect(outcome.resolutions).toEqual([{ pr: 45, decision: 'acted', summary: 'pushed once' }]);
-    // The planner withheld both rows as duplicate_pr (its gate 1 runs
-    // ahead of the verdict gate) — one resolve dispatch, one union row.
-    expect(outcome.firstPass.merged).toEqual([]);
-    expect(outcome.secondPass).not.toBeNull();
-    expect(outcome.secondPass?.merged).toEqual([]);
-    expect(outcome.needsHuman).toEqual([{ pr: 45, reason: 'duplicate_pr' }]);
+  });
+
+  test('a hostile candidate refname is refused at the composition boundary (library path)', async () => {
+    const effects = new FakeMergeEffects();
+    // The LIBRARY path has no schema gate (deps.resolve is injected
+    // directly), so the composition screens both branch fields of every
+    // conflicting candidate before dispatch — first failing field wins.
+    const candidates = [
+      conflicting(45, { headRefName: 'topic$(touch x)' }),
+      conflicting(46, { baseRefName: 'a b' }),
+    ];
+    const { resolve, calls } = fakeResolve(acted(45, 'pushed'));
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    // Zero dispatches; each hostile refname goes to needsHuman naming the
+    // failing field and value.
+    expect(calls).toEqual([]);
+    expect(outcome.resolutions).toEqual([]);
+    expect(outcome.needsHuman).toEqual([
+      {
+        pr: 45,
+        reason: 'branch name fails the conservative refname gate: headRefName=topic$(touch x)',
+      },
+      { pr: 46, reason: 'branch name fails the conservative refname gate: baseRefName=a b' },
+    ]);
   });
 
   test('the pass-1 safety net: a refetch that omits a pass-1-failed pr keeps its row', async () => {

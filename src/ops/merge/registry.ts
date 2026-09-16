@@ -346,13 +346,17 @@ export const DiagnoseMergeFailureInputSchema: z.ZodType<DiagnoseMergeFailureInpu
  * The registry-time twin of the composition's candidate (runPrs.ts's
  * MergePrsCandidate = PrCandidate + the stack graph), composed from
  * PrCandidateObject.shape — one source for the shared evidence fields, no
- * drift (the gates composition pattern).
+ * drift (the gates composition pattern). The stack-graph branch fields
+ * carry the SAME conservative refname gate as the conflict agent's input
+ * (conservativeRefname above): a candidate's headRefName/baseRefName are
+ * interpolated into the resolver's prompt commands, so the dispatch
+ * boundary refuses hostile refnames here too.
  */
 export const MergePrsCandidateSchema: z.ZodType<MergePrsCandidate> = z
   .object({
     ...PrCandidateObject.shape,
-    headRefName: z.string().min(1),
-    baseRefName: z.string().min(1),
+    headRefName: conservativeRefname(),
+    baseRefName: conservativeRefname(),
     state: z.enum(['open', 'closed']),
   })
   .strict();

@@ -20,9 +20,12 @@
 // therefore classifies `deps.refetch()` when the caller supplies the seam.
 // The refreshed set carries the same MergePrsCandidate shape; closed/merged
 // prs MAY be omitted — classifyStage nulls closed classifications and
-// absent prs simply do not re-plan, which is the honest live view. The
-// pass-1 exclusion is asymmetric: MERGED prs are excluded from pass 2 in
-// BOTH branches, while RETARGETED prs are excluded only on the no-refetch
+// absent prs simply do not re-plan, which is the honest live view. Pass-1
+// MERGED prs are CLOSED-ANCHORED into pass 2 in BOTH branches: their open
+// rows are dropped and a closed structural row is appended, so the
+// never-re-merge property rides planMergeOrder's closed-PR rule and the
+// merged head still anchors stacked children (retarget-self instead of
+// unresolved_base). RETARGETED prs are excluded only on the no-refetch
 // branch — on the refetch branch the refreshed row carries the NEW base
 // (baseRefName = the trunk) and re-enters the plan as a root (F3's
 // retarget-self contract); see the guarded-pass-2 doc below. A refetch
@@ -36,17 +39,18 @@
 // cannot withhold an already-merged pr — an unguarded pass 2 would merge it
 // AGAIN and fail it into a false needsHuman row (the earlier
 // "revalidation withholds stale rows" reading was refuted in review). The
-// merge guard is therefore structural: every pr in firstPass.merged is
-// EXCLUDED from the pass-2 candidate set in BOTH branches (a fetch that
-// raced a merge must not resurrect a merged pr). The retargeted half is
-// branch-dependent: on the no-refetch branch the in-memory retargeted row
-// still names the OLD base, so replanning it there would target a stale
-// base — retargeted prs are excluded too; on the refetch branch the
-// refreshed row carries the new base and replans normally. What staleness
-// remains is bounded: a conflict still DIRTY in memory can only
-// re-withhold — never re-merge, never fabricate. Callers wanting a live
-// second pass pass refetch; the function-valued seam (not an input field)
-// keeps the op's JSON input boundary plain data.
+// merge guard is therefore structural: every pass-1 MERGED pr's open row
+// is dropped from the pass-2 candidate set in BOTH branches and replaced
+// by a CLOSED structural row, so the never-re-merge property rides the
+// planner's closed-PR rule. The retargeted half is branch-dependent: on
+// the no-refetch branch the in-memory retargeted row still names the OLD
+// base, so replanning it there would target a stale base — retargeted prs
+// are excluded too; on the refetch branch the refreshed row carries the
+// new base and replans normally. What staleness remains is bounded: a
+// conflict still DIRTY in memory can only re-withhold — never re-merge,
+// never fabricate. Callers wanting a live second pass pass refetch; the
+// function-valued seam (not an input field) keeps the op's JSON input
+// boundary plain data.
 //
 // WHY THE needsHuman ROWS ARE DATA: every row is plain { pr, reason } —
 // the CLI layer owns any exit-code mapping (I1: the op never sees exit
@@ -89,7 +93,7 @@ import { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
 import type { MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 import { planMergeOrder } from './planMergeOrder.js';
 import type { PlanMergeResult, PlannedPr } from './planMergeOrder.js';
-import { makeResolveConflictOp } from './resolveConflict.js';
+import { makeResolveConflictOp, MergeConflictInputSchema } from './resolveConflict.js';
 import type { ConflictResolutionValue, ResolveConflictInput } from './resolveConflict.js';
 
 /**
@@ -259,29 +263,35 @@ export async function runMergePrs(
   // Stage 4: the conflict set — open candidates whose F1 VERDICT is
   // 'conflicting' (exactly the ones the planner withheld as conflicting;
   // derived from the classification, never from a reason string), pr-sorted
-  // so the resolutions order is deterministic.
+  // so the resolutions order is deterministic. DUPLICATE candidate rows are
+  // refused ENTIRELY — all rows: the fetch layer cannot say which row is
+  // real, and dispatching a write-capable resolver on arbitrary metadata is
+  // worse than withholding it (the planner's duplicate_pr gate refuses the
+  // merge for the same reason).
   const resolutions: Array<{ pr: number; decision: 'acted' | 'escalate'; summary: string }> = [];
   const undispatched: Array<{ pr: number; reason: string }> = [];
   let secondPass: ExecutionReport | null = null;
   let finalPlan = plan1;
   let finalReport = firstPass;
 
-  const seenConflicts = new Set<number>();
-  const conflictSet = planned1
-    .filter(
-      (planned) => planned.state === 'open' && planned.classification?.verdict === 'conflicting',
-    )
-    // One dispatch per pr: duplicate open conflicting rows (the fetch
-    // layer's duplicate_pr hazard) would double-spend a worktree+worker
-    // run on the same pr under the p-limit pool. The FIRST occurrence in
-    // input order wins; the planner's duplicate_pr gate separately
-    // withholds every duplicate from the order.
-    .filter((planned) => {
-      if (seenConflicts.has(planned.pr)) return false;
-      seenConflicts.add(planned.pr);
-      return true;
-    })
+  const conflictingRows = planned1.filter(
+    (planned) => planned.state === 'open' && planned.classification?.verdict === 'conflicting',
+  );
+  const conflictingRowCount = new Map<number, number>();
+  for (const planned of conflictingRows) {
+    conflictingRowCount.set(planned.pr, (conflictingRowCount.get(planned.pr) ?? 0) + 1);
+  }
+  const conflictSet = conflictingRows
+    .filter((planned) => conflictingRowCount.get(planned.pr) === 1)
     .sort((a, b) => a.pr - b.pr);
+  for (const [duplicatePr, count] of conflictingRowCount) {
+    if (count > 1) {
+      undispatched.push({
+        pr: duplicatePr,
+        reason: `duplicate candidate rows for pr ${duplicatePr} — refusing to dispatch the conflict agent`,
+      });
+    }
+  }
 
   if (conflictSet.length > 0) {
     if (input.modelSpec === undefined) {
@@ -296,8 +306,43 @@ export async function runMergePrs(
       // The ONE bounded-parallel stage: each resolution is an independent
       // worktree + worker run; p-limit caps in-flight at resolveConcurrency.
       const limit = pLimit(resolveConcurrency);
+      // THE LIBRARY PATH HAS NO SCHEMA GATE (deps.resolve is injected
+      // directly), so the composition screens the two branch fields
+      // defensively before dispatch: a hostile refname goes to needsHuman
+      // instead of a write-capable resolver. The gate is
+      // resolveConflict's OWN input schema — same module this file already
+      // imports (pure schema, no new lazy-rule weight), one source, no
+      // third regex.
+      const refnameFailure = (candidate: PlannedPr): string | undefined => {
+        const fields = [
+          ['headRefName', candidate.headRefName],
+          ['baseRefName', candidate.baseRefName],
+        ] as const;
+        for (const [field, value] of fields) {
+          const probe = MergeConflictInputSchema.safeParse({
+            pr: candidate.pr,
+            repoRoot: input.repoRoot,
+            headBranch: field === 'headRefName' ? value : 'gate/ok',
+            baseBranch: field === 'baseRefName' ? value : 'gate/ok',
+          });
+          if (!probe.success) return `${field}=${value}`;
+        }
+        return undefined;
+      };
+      const dispatchable: PlannedPr[] = [];
+      for (const candidate of conflictSet) {
+        const failure = refnameFailure(candidate);
+        if (failure !== undefined) {
+          undispatched.push({
+            pr: candidate.pr,
+            reason: `branch name fails the conservative refname gate: ${failure}`,
+          });
+          continue;
+        }
+        dispatchable.push(candidate);
+      }
       const settled = await Promise.all(
-        conflictSet.map((candidate) =>
+        dispatchable.map((candidate) =>
           limit(
             async (): Promise<{
               candidate: PlannedPr;
@@ -389,22 +434,33 @@ export async function runMergePrs(
       }
     }
     if (!refreshFailed) {
-      // Pass-1 MERGED prs are final for this run in BOTH branches: a
-      // server-side merge does not delete refs/pull/N/head, so re-planning
-      // a merged pr would merge it AGAIN (per-action revalidation cannot
-      // withhold it) and fail it into a false needsHuman row. The
-      // RETARGETED half is asymmetric: a retarget-self result is a forge
-      // base-edit — the pr stays open and must re-enter the next plan as a
-      // root (F3's retarget-self contract) — but only the REFRESHED view
-      // knows its new base (baseRefName = the trunk). So the no-refetch
-      // branch excludes retargeted prs too (its in-memory rows still name
-      // the stale old base), while the refetch branch excludes MERGED prs
-      // only and lets the refreshed retargeted rows replan normally.
-      const excludedInPass2 =
-        deps.refetch !== undefined
-          ? new Set<number>(firstPass.merged)
-          : new Set<number>([...firstPass.merged, ...firstPass.retargeted]);
-      const pass2Set = pass2Candidates.filter((candidate) => !excludedInPass2.has(candidate.pr));
+      // Pass-1 MERGED prs anchor pass 2 as CLOSED STRUCTURAL ROWS in BOTH
+      // branches: their open rows (in-memory or refreshed) are dropped — a
+      // server-side merge does not delete refs/pull/N/head, so an open
+      // re-plan row would merge the pr AGAIN — and the pass-1 candidate
+      // row is appended with state forced to 'closed'. planMergeOrder's
+      // closed-PR rule then carries the never-re-merge property (closed
+      // rows are never ordered) while the merged head still ANCHORS the
+      // stack: a child whose row still names the merged head resolves to a
+      // closed owner and plans as retarget-self instead of
+      // unresolved_base. The RETARGETED half stays branch-asymmetric: a
+      // retarget-self result is a forge base-edit — the pr stays open and
+      // must re-enter the next plan as a root (F3's retarget-self
+      // contract) — but only the REFRESHED view knows its new base
+      // (baseRefName = the trunk), so the no-refetch branch excludes
+      // retargeted prs (in-memory rows name the stale old base) while the
+      // refetch branch lets refreshed retargeted rows replan normally.
+      const mergedInPass1 = new Set<number>(firstPass.merged);
+      const retargetedInPass1 = new Set<number>(firstPass.retargeted);
+      const keptOpen = pass2Candidates.filter((candidate) => {
+        if (mergedInPass1.has(candidate.pr)) return false; // re-enters as a closed anchor below
+        if (deps.refetch === undefined && retargetedInPass1.has(candidate.pr)) return false;
+        return true;
+      });
+      const anchorRows = input.prs
+        .filter((candidate) => mergedInPass1.has(candidate.pr))
+        .map((candidate) => ({ ...candidate, state: 'closed' as const }));
+      const pass2Set = [...keptOpen, ...anchorRows];
       const planned2 = classifyStage(pass2Set, nowMs);
       const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
       const second = await execute(plan2);
