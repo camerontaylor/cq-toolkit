@@ -22,25 +22,36 @@
 //      has-issues each → needs-human, not_eligible, absent from the
 //      order — and a non-eligible parent cascades its children like any
 //      withheld rung.
-//   7. STACK CYCLE: A on B, B on A (misconfigured bases) → both cycle
+//   7. GATE PRECEDENCE: the gates fire before base resolution and cycle
+//      detection, so a gate reason is never overwritten — a truncated PR
+//      with a ghost base keeps review_data_truncated (not
+//      unresolved_base), and a truncated cycle MEMBER keeps its gate
+//      reason while the clean partner gets stack_cycle.
+//   8. DUPLICATE PR NUMBERS: the same pr number in two entries withholds
+//      BOTH as duplicate_pr (round-2 recorded deviation) — never ordered;
+//      children of a duplicated head cascade stack_base_needs_human.
+//   9. STACK CYCLE: A on B, B on A (misconfigured bases) → both cycle
 //      members needs-human with stack_cycle, absent from the order;
 //      independent PRs still plan; a tail leading into the cycle cascades
 //      (6 → 5 → (1 ⇄ 2): 5 and 6 are stack_base_needs_human).
-//   8. THE FAIL-CLOSED CASCADE: a child of any withheld PR is withheld
+//  10. THE FAIL-CLOSED CASCADE: a child of any withheld PR is withheld
 //      too (stack_base_needs_human) — ordering it would merge its base's
-//      commits uninvited.
-//   9. UNRESOLVED BASE: a base ref that is neither the base branch nor
+//      commits uninvited; withheld parents include unresolved_base and
+//      gated rungs of every kind.
+//  11. UNRESOLVED BASE: a base ref that is neither the base branch nor
 //      any fetched head is not guessed — needs-human, unresolved_base.
-//  10. CLOSED PRs are structural only: they appear in neither bucket,
-//      even when truncated or unclassified (the gates are open-PR gates).
-//  11. DUPLICATE HEAD NAMES resolve deterministically: the stack head
+//  12. CLOSED PRs are structural only: they appear in neither bucket,
+//      even when truncated or unclassified (the gates are open-PR gates),
+//      and a gated PR parked on a closed rung is withheld by its gate —
+//      never planned as retarget-self.
+//  13. DUPLICATE HEAD NAMES resolve deterministically: the stack head
 //      resolves to the LOWER-NUMBERED open owner; an open owner outranks
 //      a closed owner of the same head; the lowest-numbered closed owner
 //      anchors retarget-self.
-//  12. BASE-BRANCH CONFIGURABILITY: the base branch name is input, never
+//  14. BASE-BRANCH CONFIGURABILITY: the base branch name is input, never
 //      a hardcoded constant — the same stack plans identically under any
 //      branch name, and the result echoes the name it was given.
-//  13. DETERMINISM: same input → deep-equal plan, whatever order the
+//  15. DETERMINISM: same input → deep-equal plan, whatever order the
 //      input array arrived in.
 //
 // Pure data tests: no I/O, no clocks — instant by construction.
@@ -164,6 +175,17 @@ describe('planMergeOrder — closed-ancestor retarget-self', () => {
       { pr: 11, action: 'merge', basePr: 10, depth: 1 },
     ]);
   });
+
+  test('a gated PR parked on a closed rung is withheld by its gate — never planned as retarget-self', () => {
+    const result = plan('main', [
+      planned(30, 'main', 'old', { state: 'closed' }),
+      // Stacked on the closed rung AND truncated: the gate fires first,
+      // and the !excluded.has guard keeps it out of the retarget roots.
+      planned(31, 'old', 'capped', { truncated: true }),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 31, reason: 'review_data_truncated' }]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -193,6 +215,28 @@ describe('planMergeOrder — fail-closed gates (nothing merges uninvited)', () =
       planned(8, 'main', 'both', { classification: null, truncated: true }),
     ]);
     expect(result.needsHuman).toEqual([{ pr: 8, reason: 'review_data_truncated' }]);
+  });
+
+  test('a truncated PR with a ghost base keeps review_data_truncated (gates precede base resolution)', () => {
+    const result = plan('main', [
+      // Truncated AND its base matches no fetched head: the gate fires
+      // first — the ledger never re-reports it as unresolved_base.
+      planned(9, 'ghost-branch', 'cap-hit', { truncated: true }),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 9, reason: 'review_data_truncated' }]);
+  });
+
+  test('a truncated cycle MEMBER keeps review_data_truncated; the clean partner gets stack_cycle', () => {
+    const result = plan('main', [
+      planned(1, 'h2', 'h1', { truncated: true }), // gated AND mutually stacked with 2
+      planned(2, 'h1', 'h2'),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([
+      { pr: 1, reason: 'review_data_truncated' },
+      { pr: 2, reason: 'stack_cycle' },
+    ]);
   });
 
   test('a `never` verdict is never ordered: needs-human, not_eligible', () => {
@@ -244,6 +288,34 @@ describe('planMergeOrder — fail-closed gates (nothing merges uninvited)', () =
     expect(result.needsHuman).toEqual([
       { pr: 1, reason: 'not_eligible' },
       { pr: 2, reason: 'stack_base_needs_human' },
+    ]);
+  });
+
+  test('the cascade covers an unresolved_base parent: adrift rung, its child cascades', () => {
+    const result = plan('main', [
+      planned(1, 'ghost-branch', 'adrift'), // gate 5: base resolves to nothing
+      planned(2, 'adrift', 'child'), // stacked on the adrift rung
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([
+      { pr: 1, reason: 'unresolved_base' },
+      { pr: 2, reason: 'stack_base_needs_human' },
+    ]);
+  });
+
+  test('duplicate pr numbers: both entries withheld duplicate_pr, the child cascades, nothing plans', () => {
+    const result = plan('main', [
+      planned(5, 'main', 'x'), // pr 5, row A: a root with head 'x'
+      planned(5, 'x', 'q'), // pr 5, row B: DIVERGENT refs — head 'q', stacked on 'x'
+      planned(7, 'q', 'z'), // child of row B's head
+    ]);
+    // The plan cannot tell which row-5 is real, so pr 5 is withheld once
+    // (one ledger line per PR, first gate wins) and pr 7 — whose base 'q'
+    // is the withheld duplicate's head — cascades. Nothing plans.
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([
+      { pr: 5, reason: 'duplicate_pr' },
+      { pr: 7, reason: 'stack_base_needs_human' },
     ]);
   });
 

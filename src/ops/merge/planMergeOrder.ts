@@ -22,27 +22,36 @@
 // needsHuman — under NOTHING MERGES UNINVITED (I2): where the stack data
 // is ambiguous or incomplete, the plan refuses to order the merge and
 // names a human. The fail-closed rules, in the order they fire:
-//   1. truncated fetch data            → `review_data_truncated`  (UC row 42)
-//   2. no F1 classification            → `unclassified`
-//   3. F1 verdict is not `eligible`    → `not_eligible`
+//   1. the same pr number arrives in
+//      more than one entry (the fetch
+//      layer cannot say which row is
+//      real)                            → `duplicate_pr`
+//   2. truncated fetch data            → `review_data_truncated`  (UC row 42)
+//   3. no F1 classification            → `unclassified`
+//   4. F1 verdict is not `eligible`    → `not_eligible`
 //      (never / conflicting / awaiting / has-issues — a PR F1 judged not
 //      mergeable is not re-graded into the order by the planner)
-//   4. base ref resolves to nothing    → `unresolved_base`
+//   5. base ref resolves to nothing    → `unresolved_base`
 //      (neither the base branch nor any fetched headRefName — a stack
 //      position that cannot be computed is a stack position that must not
 //      be guessed)
-//   5. a stack cycle (X on Y, Y on X —
+//   6. a stack cycle (X on Y, Y on X —
 //      possible via misconfigured bases;
 //      a PR stacked on itself counts)   → `stack_cycle`
-//   6. base PR held by any rule above   → `stack_base_needs_human`
+//   7. base PR held by any rule above   → `stack_base_needs_human`
 //      (fail-closed CASCADE: merging a stacked PR merges its base's
 //      commits with it — ordering the child while the parent is held
 //      would merge the parent UNINVITED, so the child is held too,
 //      transitively)
-// Rules 1–3 are F1's per-PR acceptance decision carried to the stack
+// Rules 1–7 are FIRST MATCH WINS and strictly ordered: the gates (1–4)
+// all run before base resolution (5) and cycle detection (6), so a PR's
+// gate reason is never overwritten by a later rule — a truncated PR with
+// a ghost base stays `review_data_truncated`, and a truncated cycle
+// member keeps its gate reason while the clean partner reads as
+// `stack_cycle`.
+// Rules 2–4 are F1's per-PR acceptance decision carried to the stack
 // level WHOLE — truncation, nullness, AND the verdict: only a PR F1 said
-// `eligible` is ever ordered for immediate merge (first match wins,
-// truncated first).
+// `eligible` is ever ordered for immediate merge (truncated first).
 //
 // CLOSED-ANCESTOR RETARGET (`retarget-self`): an open PR whose base head
 // is owned by a CLOSED PR (the rung it stacked on was already merged or
@@ -104,6 +113,9 @@ export interface PlanMergeInput {
  * removing, or renaming a reason is a recorded deviation.
  */
 export type PlanBlockReason =
+  // Round-2 recorded deviation (PR131 r2): the duplicate-pr guard's
+  // addition to this frozen vocabulary.
+  | 'duplicate_pr'
   | 'review_data_truncated'
   | 'unclassified'
   | 'not_eligible'
@@ -166,6 +178,24 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     needsHuman.push({ pr, reason });
   };
 
+  // Gate 1 — duplicate pr numbers: the fetch layer handed the SAME pr
+  // number more than once (possibly with divergent refs), so no rule can
+  // tell which row is real. Every duplicate entry is withheld, and this
+  // guard runs AHEAD of every other rule: a duplicated number never
+  // plans, never roots, never retargets. (The entries still lend their
+  // head names to the open-owner map built below, so a child of a
+  // duplicated head resolves its edge and cascades off the withheld set
+  // in the usual way.)
+  const prCount = new Map<number, number>();
+  for (const candidate of sorted) {
+    prCount.set(candidate.pr, (prCount.get(candidate.pr) ?? 0) + 1);
+  }
+  for (const candidate of sorted) {
+    if ((prCount.get(candidate.pr) ?? 0) !== 1) {
+      withhold(candidate.pr, 'duplicate_pr');
+    }
+  }
+
   // Closed PRs: structural only — never merged, never reported; their
   // head names anchor the retarget-self rule (lowest number wins on
   // duplicate heads).
@@ -176,7 +206,7 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     }
   }
 
-  // Fail-closed gates 1–3 (F1's carry, first match wins): truncated fetch
+  // Gates 2–4 (F1's carry, first match wins): truncated fetch
   // data means the classification's evidence may be missing — the PR is
   // never ordered for merge (UC row 42); a missing classification means
   // the acceptance decision was never made; a classification that came
@@ -208,7 +238,7 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
 
   // Resolve each candidate's stack position: root (merge), root
   // (retarget-self — its rung was closed), stacked (edge to its base), or
-  // unresolved (gate 3). An OPEN owner of the base head always outranks a
+  // unresolved (gate 5). An OPEN owner of the base head always outranks a
   // closed one: a live rung is the stack, a closed one is history. Gated
   // candidates keep their gate reason (withhold ignores re-firings) but
   // still contribute their edge — their children must cascade off them.
@@ -234,7 +264,7 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     withhold(candidate.pr, 'unresolved_base');
   }
 
-  // Gate 4 — stack cycles: a candidate is ON a cycle exactly when walking
+  // Gate 6 — stack cycles: a candidate is ON a cycle exactly when walking
   // its base chain returns to it (covers length-1 self-loops and any
   // misconfigured mutual stacking). Cycle members are withheld, not
   // ordered — a cycle has no root to merge from. Already-withheld
@@ -270,7 +300,7 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     }
   }
 
-  // Gate 5 — the fail-closed cascade: a child of any withheld PR is
+  // Gate 7 — the fail-closed cascade: a child of any withheld PR is
   // withheld too (merging it would merge its parent's commits
   // UNINVITED), transitively down the stack.
   const cascade = (pr: number): void => {
