@@ -399,6 +399,17 @@ describe('sweep.worktreeFor path safety', () => {
       failedAt(makeWorktreeFor(effectsOf(repo)), { ...INPUT, slug: '' }),
     ).resolves.toMatch(/slug/);
   });
+
+  test('a flag-impersonating worktreesDir is refused — the derived path is a positional git argument', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      worktreesDir: '--upstream=x',
+    });
+    expect(error).toMatch(/worktreesDir/);
+    expect(error).toMatch(/never a flag/);
+    expect(repo.addCalls).toHaveLength(0);
+  });
 });
 
 // ---------------------------------------------------------------------------

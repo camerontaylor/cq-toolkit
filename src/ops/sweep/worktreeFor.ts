@@ -335,6 +335,12 @@ function inputFaultOf(input: WorktreeForInput): string | null {
   if (input.base.startsWith('-')) {
     return `sweep: base '${input.base}' must not start with '-' — it is a positional git argument, never a flag`;
   }
+  // The DERIVED PATH is a positional git argument too: `<worktreesDir>/…`
+  // lands verbatim in `worktree add -b <branch> <path> <base>`, so a
+  // worktreesDir starting with '-' would inject it as a flag.
+  if (input.worktreesDir.startsWith('-')) {
+    return `sweep: worktreesDir '${input.worktreesDir}' must not start with '-' — the derived path is a positional git argument, never a flag`;
+  }
   if (
     input.mutex !== undefined &&
     (typeof input.mutex.lockPath !== 'string' || input.mutex.lockPath === '')

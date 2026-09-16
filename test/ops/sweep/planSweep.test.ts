@@ -174,6 +174,27 @@ describe('planSweep selector contract (UC §1 row 16: no default selector)', () 
 });
 
 // ---------------------------------------------------------------------------
+// 1b. The library input boundary (untyped-caller hardening)
+// ---------------------------------------------------------------------------
+
+describe('planSweep library input boundary (reachable past any schema)', () => {
+  test('a non-array packages field is a failed result — never an escaping TypeError', async () => {
+    const input = baseInput({ packages: 'packages/core' as unknown as PlanSweepPackage[] });
+    await expect(failedPlan(makePlanner(), input)).resolves.toMatch(
+      /packages must be an array of manifest entries/,
+    );
+  });
+
+  test('a null selector is a failed result — the required-selector taxonomy', async () => {
+    const input = baseInput({
+      selector: null as unknown as PlanSweepInput['selector'],
+    });
+    await expect(failedPlan(makePlanner(), input)).resolves.toMatch(/selector is required/);
+    await expect(failedPlan(makePlanner(), input)).resolves.toMatch(/NO default selector/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 2. Selection
 // ---------------------------------------------------------------------------
 

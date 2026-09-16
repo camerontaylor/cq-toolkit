@@ -358,6 +358,13 @@ function inputFaultOf(input: PlanSweepInput): string | null {
   if (typeof input.repoRoot !== 'string' || input.repoRoot === '') {
     return 'sweep: repoRoot must be a non-empty string';
   }
+  // SHAPE guards over typed fields: these values are reachable from an
+  // untyped caller past any schema (the ledger boundary's lengthFaultOf
+  // precedent — a malformed library input is a `failed` result, never an
+  // escaping TypeError from iterating a non-array or reading a null).
+  if (!Array.isArray(input.packages)) {
+    return 'sweep: packages must be an array of manifest entries';
+  }
   const seen: string[] = [];
   for (const pkg of input.packages) {
     if (
@@ -379,7 +386,11 @@ function inputFaultOf(input: PlanSweepInput): string | null {
   if (input.fixers.some((fixer) => typeof fixer !== 'string' || fixer === '')) {
     return 'sweep: every requested fixer label must be a non-empty string';
   }
-  if (input.selector === undefined) {
+  if (
+    input.selector === undefined ||
+    input.selector === null ||
+    typeof input.selector !== 'object'
+  ) {
     return 'sweep: selector is required — pass one of {mode:"workspace-all"}, {mode:"changed-vs-base",base}, {mode:"explicit",packages}; there is NO default selector (UC §1 row 16)';
   }
   if (input.selector.mode === 'changed-vs-base') {
