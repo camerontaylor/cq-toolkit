@@ -9,8 +9,9 @@
 //     content-derived — FNV-1a 32-bit (the gates family's fnv1a32Hex) over
 //     the canonical signature JSON — so the same failure set yields the
 //     same ids in any presentation order (property-tested with seeded
-//     shuffles). Clusters sort by id; members and noise sort by exact
-//     failure identity (collectFailures' identity), making the whole report
+//     shuffles). Clusters sort by id, signature breaking the (astronomically
+//     rare) 32-bit id tie; members and noise sort by exact failure identity
+//     (collectFailures' identity), making the whole report
 //     order-invariant. As in fingerprint.ts, the full signature string is
 //     the comparison unit carried on each cluster; the 8-hex id is its
 //     compact stable handle.
@@ -89,10 +90,12 @@ const NUMBER_LIKE = /\d+(?:\.\d+)?/g;
  * the ledger-matching form (record THIS through the ledger record op to
  * suppress the failure cluster-wide) and the pre-hash unit of the cluster
  * id. JSON tuple, like the gates' canonical keys, so no delimiter in a
- * component can forge a collision.
+ * component can forge a collision. A null ruleId is encoded as null, never
+ * coerced to '' — the two stay distinct signatures, so a cluster's reported
+ * ruleId is deterministic regardless of input order.
  */
 export function clusterSignature(failure: CheckFailure, tool: string): string {
-  return JSON.stringify([tool, failure.ruleId ?? '', messageTemplate(failure.message)]);
+  return JSON.stringify([tool, failure.ruleId, messageTemplate(failure.message)]);
 }
 
 /** Confidence vocabulary. v1 emits only 'high' and 'low' (see module header). */
@@ -156,9 +159,8 @@ export function clusterErrors(set: FailureSet, ledger?: LedgerView): ClusterErro
     }
   }
   const clusters: Cluster[] = [...groups.entries()].map(([signature, members]) => {
-    // Every member of the group shares the signature's ruleId slot; the
-    // first member carries the original null-or-string value the signature
-    // collapsed to ''.
+    // Signature equality implies an IDENTICAL ruleId (null is encoded, not
+    // coerced), so any member yields the same value — the first is fine.
     const ruleId = (members[0] as CheckFailure).ruleId;
     return {
       id: fnv1a32Hex(signature),
@@ -170,7 +172,21 @@ export function clusterErrors(set: FailureSet, ledger?: LedgerView): ClusterErro
       size: members.length,
     };
   });
-  clusters.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  // Ids are 32-bit FNV, so two DISTINCT signatures can collide on one id;
+  // the signature breaks the tie so ordering never depends on map insertion
+  // order (determinism acceptance check). No test contrives a real
+  // collision — this comment is the pin of the documented rule.
+  clusters.sort((a, b) =>
+    a.id < b.id
+      ? -1
+      : a.id > b.id
+        ? 1
+        : a.signature < b.signature
+          ? -1
+          : a.signature > b.signature
+            ? 1
+            : 0,
+  );
   return { clusters, noise: sortByIdentity(noise, set.tool) };
 }
 

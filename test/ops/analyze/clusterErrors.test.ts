@@ -91,12 +91,12 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
 });
 
 describe('clusterSignature (the ledger-matching form)', () => {
-  test('is the canonical JSON tuple: tool, ruleId (null → empty), template', () => {
+  test('is the canonical JSON tuple: tool, ruleId (null stays null — never coerced), template', () => {
     expect(
       clusterSignature(failureOf({ ruleId: 'prefer-const', message: 'x is 3' }), 'eslint'),
     ).toBe(JSON.stringify(['eslint', 'prefer-const', 'x is <num>']));
     expect(clusterSignature(failureOf({ ruleId: null, message: 'a' }), 'vitest')).toBe(
-      JSON.stringify(['vitest', '', 'a']),
+      JSON.stringify(['vitest', null, 'a']),
     );
   });
 
@@ -207,8 +207,23 @@ describe('clusterErrors decision table', () => {
     const report = clusterErrors(set);
     expect(report.clusters).toHaveLength(1); // shape-identical names merge — documented
     expect(report.clusters[0]?.signature).toBe(
-      JSON.stringify(['vitest', '', 'dates > handles <num> cases']),
+      JSON.stringify(['vitest', null, 'dates > handles <num> cases']),
     );
+  });
+
+  test('a null ruleId and an EMPTY-STRING ruleId are distinct signatures (no coercion), in any order', () => {
+    const nullRule = failureOf({ file: 'src/n.ts', line: 1, ruleId: null, message: 'same shape' });
+    const emptyRule = failureOf({ file: 'src/e.ts', line: 2, ruleId: '', message: 'same shape' });
+    const forward = clusterErrors(setOf([nullRule, emptyRule]));
+    const backward = clusterErrors(setOf([emptyRule, nullRule]));
+    expect(forward.clusters).toHaveLength(2);
+    // Order-invariant, and each cluster reports its own ruleId — the
+    // members[0] read is deterministic because signature equality implies
+    // an identical ruleId value.
+    expect(forward.clusters).toEqual(backward.clusters);
+    const byRuleId = new Map(forward.clusters.map((cluster) => [cluster.ruleId, cluster]));
+    expect(byRuleId.get(null)?.failures).toEqual([nullRule]);
+    expect(byRuleId.get('')?.failures).toEqual([emptyRule]);
   });
 
   test('empty set → empty report (clustering nothing asserts nothing)', () => {
