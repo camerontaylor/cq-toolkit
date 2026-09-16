@@ -16,10 +16,7 @@ export type {
   ThreadComment,
   TruncationFlag,
 } from './threads.js';
-export {
-  attachRestReplies,
-  countUnresolvedThreads,
-} from './threads.js';
+export { attachRestReplies, countUnresolvedThreads } from './threads.js';
 export type { GhFn, GhResult } from './gh.js';
 export { GhError, ghJson, makeGhRunner } from './gh.js';
 export type {
@@ -63,8 +60,4 @@ export type {
   WorktreeRegistry,
   WorktreeRegistryEntry,
 } from './prWorktree.js';
-export {
-  fileWorktreeRegistry,
-  removePrWorktree,
-  resolvePrWorktree,
-} from './prWorktree.js';
+export { fileWorktreeRegistry, removePrWorktree, resolvePrWorktree } from './prWorktree.js';

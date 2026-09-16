@@ -255,10 +255,11 @@ export async function terminateAcpProcess(
   const killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
   const wait = opts.delay ?? defaultDelay;
   /** true as soon as the child closed (never rejects). */
-  const closed = (): Promise<boolean> => acpExitPromise(child).then(
-    () => true,
-    () => true,
-  );
+  const closed = (): Promise<boolean> =>
+    acpExitPromise(child).then(
+      () => true,
+      () => true,
+    );
   /** Wait the grace window; true if the child closed FIRST. */
   const closesWithin = (ms: number): Promise<boolean> =>
     Promise.race([closed(), wait(ms).then(() => false)]);

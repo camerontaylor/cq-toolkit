@@ -1,3 +1,5 @@
+import { spawnSync } from 'node:child_process';
+import { resolve } from 'node:path';
 // ratchet-typecheck — the ci.yml 'Typecheck ratchet' step (self-host swap:
 // lane H slice 1, goal H4). Same path, same CLI contract as the placeholder
 // it replaces — exit 0 pass / 1 fail, human narration on stderr — but ALL
@@ -24,6 +26,8 @@ import { fail, loadEngine, runTypecheckRaw, typecheckEvidence, ROOT } from './ra
 // Build dist fresh, import the engine, register the metric. The registry is
 // runtime-only composition wiring — the op input below carries ids only
 // (CODEX P1), so this registration is exactly how the kernel would wire it.
+if (process.argv.length > 2)
+  fail('unsupported arguments; baseline changes belong to captureBaseline');
 const engine = await loadEngine();
 engine.registerAdapter(engine.adapters.typecheckCount);
 
@@ -43,9 +47,7 @@ if (evidence === null) {
 // The op reads ONE live reading through the catalog and compares it against
 // the committed baseline; every failure mode below lands on verdict 'fail'
 // with a reason naming what failed — never a throw, never a fabricated pass.
-const checkRatchet = engine.createCheckRatchet(
-  new Map([['tsc', async () => evidence]]),
-);
+const checkRatchet = engine.createCheckRatchet(new Map([['tsc', async () => evidence]]));
 const result = await checkRatchet({
   ws: ROOT,
   target: 'typecheck',
@@ -57,9 +59,36 @@ const outcome = result.value;
 if (outcome.verdict !== 'pass') {
   console.error(`ratchet-typecheck: FAIL (${outcome.path})`);
   if (outcome.reason) console.error(outcome.reason);
+  if (rawText.trim()) console.error(rawText.trim());
   process.exit(1);
 }
 console.error(
   `ratchet-typecheck: pass — ${outcome.currentValue} error(s) <= baseline ` +
     `${outcome.baselineValue} (${outcome.path})`,
 );
+
+const lint = spawnSync(
+  process.execPath,
+  [
+    resolve(ROOT, 'node_modules', 'oxlint', 'bin', 'oxlint'),
+    '--config',
+    resolve(ROOT, '.oxlintrc.json'),
+    '--disable-nested-config',
+    '--type-aware',
+    '--report-unused-disable-directives-severity',
+    'error',
+    'src',
+    'test',
+    'lint',
+    'scripts',
+    'vitest.config.ts',
+  ],
+  { cwd: ROOT, encoding: 'utf8' },
+);
+if (lint.stdout) process.stdout.write(lint.stdout);
+if (lint.stderr) process.stderr.write(lint.stderr);
+if (lint.error || lint.status !== 0) {
+  fail(
+    `lint failed: ${lint.error?.message ?? (lint.signal ? `signal ${lint.signal}` : `exit ${lint.status}`)}`,
+  );
+}

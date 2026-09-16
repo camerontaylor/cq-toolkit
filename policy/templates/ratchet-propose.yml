@@ -1,0 +1,61 @@
+# ratchet-propose — lane H slice 2 (goal H4), round-1 fix: post-merge
+# baseline-tightening proposals. After an improvement lands on main,
+# ratchet-propose.mjs measures the live ratchets, diffs them against the
+# committed baselines, and opens exactly ONE idempotent proposal PR per
+# improvement set — authored with CQ_AUTOMATION_TOKEN, never GITHUB_TOKEN (a
+# GITHUB_TOKEN-authored PR suppresses workflow runs, so its required I4 check
+# would never run — the script enforces the doctrine too; this job is the
+# outer belt).
+#
+# NO job-level `if:` gate: the env context is not available at job-if
+# evaluation time (the env-intermediary pattern tried in slice 2 never
+# worked — PR-105 round-1 finding), and `secrets` cannot be read in `if:`
+# directly either. Instead the job ALWAYS runs and the SCRIPT is the gate:
+# without CQ_AUTOMATION_TOKEN it prints a skip message and exits 0 (belt —
+# this workflow; braces — the script's own token gate). A tokenless runner
+# therefore shows a green no-op, and a manual workflow_dispatch run behaves
+# the same.
+#
+# Invariant I4: no paths-ignore and no path filters anywhere; the absence of
+# an `if:` is the point — nothing here can silently skip.
+name: ratchet-propose
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ratchet-propose-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  propose:
+    name: propose
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the repo (full history — the proposal branches from origin/main)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          fetch-depth: 0
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false). The proposal
+          # push authenticates with CQ_AUTOMATION_TOKEN via GIT_ASKPASS —
+          # never with this checkout's token.
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Propose baseline tightening
+        run: node scripts/ratchet-propose.mjs
+        env:
+          CQ_AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN }}

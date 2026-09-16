@@ -25,7 +25,7 @@ describe('DD-1 governor config — code matches the measurement write-up', () =>
     // Exactly one code-style statement of the default in the doc — the
     // spike-derived block. More than one would make the pin ambiguous.
     expect(matches.length).toBe(1);
-    const documented = Number(matches[0][1]);
+    const documented = Number(matches[0]?.[1]);
     expect(Number.isFinite(documented)).toBe(true);
     expect(documented).toBeGreaterThan(0);
     expect(DEFAULT_ABORT_GRACE_MS).toBe(documented);

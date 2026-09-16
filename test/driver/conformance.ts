@@ -341,8 +341,14 @@ export function runDriverConformance(
           run2.denials.some((d) => d.tool === 'read' && d.reason.includes('file not found')),
         ).toBe(true);
         // Run 1's prompt and tool message leak nowhere into run 2's record.
-        expect(record2?.messages.some((m) => m.role === 'user' && m.content === 'isolation run one')).toBe(false);
-        expect(record2?.messages.some((m) => m.role === 'tool' && m.content.includes('echo conformance-marker'))).toBe(false);
+        expect(
+          record2?.messages.some((m) => m.role === 'user' && m.content === 'isolation run one'),
+        ).toBe(false);
+        expect(
+          record2?.messages.some(
+            (m) => m.role === 'tool' && m.content.includes('echo conformance-marker'),
+          ),
+        ).toBe(false);
       });
     });
 
@@ -374,6 +380,7 @@ export function runDriverConformance(
           },
           scratchDir,
         });
+        if (run1.sessionId === undefined) throw new Error('first run must create a session');
         const run2 = await driver2.run(
           invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
         );
@@ -384,8 +391,12 @@ export function runDriverConformance(
         expect(after?.workspace).toBe(workspace1);
         expect(after?.messages.length).toBeGreaterThan(lengthBefore);
         // The transcript carries run 1 AND run 2 turns, in order.
-        expect(after?.messages.some((m) => m.role === 'user' && m.content === 'resume run one')).toBe(true);
-        expect(after?.messages.some((m) => m.role === 'user' && m.content === 'resume run two')).toBe(true);
+        expect(
+          after?.messages.some((m) => m.role === 'user' && m.content === 'resume run one'),
+        ).toBe(true);
+        expect(
+          after?.messages.some((m) => m.role === 'user' && m.content === 'resume run two'),
+        ).toBe(true);
       });
     });
 
@@ -507,7 +518,9 @@ export function runDriverConformance(
         );
         expect(allowed.denials.some((d) => d.tool === 'read')).toBe(true); // executed and refused on the merits
         const allowedRecord = await store.load(allowed.sessionId as string);
-        expect(allowedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
+        expect(
+          allowedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'read'),
+        ).toBe(true);
         // Disallowed tool: never executes — no tool message for it, and the
         // side effect (the file) never appears. maxTokens bounds the step
         // loop the same way as the none-mode test.
@@ -524,7 +537,9 @@ export function runDriverConformance(
           invocation({ toolPolicy: policy, prompt: 'allowlist denied', budget: { maxTokens: 25 } }),
         );
         const deniedRecord = await store.load(denied.sessionId as string);
-        expect(deniedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(false);
+        expect(deniedRecord?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(
+          false,
+        );
       });
     });
 
@@ -540,7 +555,9 @@ export function runDriverConformance(
           scratchDir,
         });
         const result = await driver.run(invocation({ prompt: 'escape attempt' }));
-        expect(result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape'))).toBe(true);
+        expect(
+          result.denials.some((d) => d.tool === 'read' && d.reason.includes('path escape')),
+        ).toBe(true);
       });
     });
 

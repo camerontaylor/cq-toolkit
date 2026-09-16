@@ -25,7 +25,10 @@ import { describe, expect, test } from 'vitest';
 import type { LedgerEntry, LedgerFile } from '../../../src/ops/ledger/store.js';
 import type { LedgerStore } from '../../../src/ops/ledger/ledger.js';
 import { makeLedgerQuery, makeLedgerRecord } from '../../../src/ops/ledger/ledger.js';
-import { LedgerQueryInputSchema, LedgerRecordInputSchema } from '../../../src/ops/ledger/registry.js';
+import {
+  LedgerQueryInputSchema,
+  LedgerRecordInputSchema,
+} from '../../../src/ops/ledger/registry.js';
 
 /** In-memory store over a deep-cloned file — the same fake the decision table uses. */
 function memoryStore(entries: LedgerEntry[]): LedgerStore {
@@ -45,7 +48,10 @@ describe('planSweep consumption contract (WS-D / lane D)', () => {
       { signature: 'sig-noise', count: 2 }, // at suppressAt → known noise
       { signature: 'sig-human', count: 4 }, // escalated → known noise AND needsHuman
     ]);
-    const query = await makeLedgerQuery(() => store)({ root: 'unused-by-the-fake', storePath: 'unused-by-the-fake' });
+    const query = await makeLedgerQuery(() => store)({
+      root: 'unused-by-the-fake',
+      storePath: 'unused-by-the-fake',
+    });
     if (query.status !== 'ok') {
       throw new Error(`query failed: ${query.status === 'failed' ? query.error : query.status}`);
     }
@@ -56,16 +62,31 @@ describe('planSweep consumption contract (WS-D / lane D)', () => {
   test('(b) needsHuman entries must route to a human: the record op emitted needs-human with the naming reason', async () => {
     const store = memoryStore([]);
     const record = makeLedgerRecord(() => store);
-    await record({ root: 'unused-by-the-fake', storePath: 'unused-by-the-fake', signature: 'sig-human' });
-    await record({ root: 'unused-by-the-fake', storePath: 'unused-by-the-fake', signature: 'sig-human' });
-    const escalated = await record({ root: 'unused-by-the-fake', storePath: 'unused-by-the-fake', signature: 'sig-human' });
+    await record({
+      root: 'unused-by-the-fake',
+      storePath: 'unused-by-the-fake',
+      signature: 'sig-human',
+    });
+    await record({
+      root: 'unused-by-the-fake',
+      storePath: 'unused-by-the-fake',
+      signature: 'sig-human',
+    });
+    const escalated = await record({
+      root: 'unused-by-the-fake',
+      storePath: 'unused-by-the-fake',
+      signature: 'sig-human',
+    });
     // The escalation IS the needs-human emission — this result shape is what
     // dispatch observes, and the reason is what the human reads.
     expect(escalated).toEqual({
       status: 'needs-human',
       reason: 'error signature exceeded escalation threshold: sig-human (count 3 ≥ 3)',
     });
-    const query = await makeLedgerQuery(() => store)({ root: 'unused-by-the-fake', storePath: 'unused-by-the-fake' });
+    const query = await makeLedgerQuery(() => store)({
+      root: 'unused-by-the-fake',
+      storePath: 'unused-by-the-fake',
+    });
     expect(query.status === 'ok' && query.value.needsHuman).toEqual(['sig-human']);
     // (a) holds for escalated signatures too: needsHuman ⊆ knownNoise.
     expect(query.status === 'ok' && query.value.knownNoise).toContain('sig-human');
@@ -77,7 +98,10 @@ describe('planSweep consumption contract (WS-D / lane D)', () => {
       { signature: 'sig-human', count: 5, note: 'gh thread 12' },
       { signature: 'sig-fresh', count: 1 },
     ]);
-    const query = await makeLedgerQuery(() => store)({ root: 'unused-by-the-fake', storePath: 'unused-by-the-fake' });
+    const query = await makeLedgerQuery(() => store)({
+      root: 'unused-by-the-fake',
+      storePath: 'unused-by-the-fake',
+    });
     if (query.status !== 'ok') {
       throw new Error(`query failed: ${query.status === 'failed' ? query.error : query.status}`);
     }
@@ -86,10 +110,15 @@ describe('planSweep consumption contract (WS-D / lane D)', () => {
 
   test('(d) the registry schemas accept the plain JSON a planner would send', () => {
     expect(
-      LedgerRecordInputSchema.safeParse({ root: '.cq', storePath: '.cq/ledger.json', signature: 'sig-a' })
-        .success,
+      LedgerRecordInputSchema.safeParse({
+        root: '.cq',
+        storePath: '.cq/ledger.json',
+        signature: 'sig-a',
+      }).success,
     ).toBe(true);
-    expect(LedgerQueryInputSchema.safeParse({ root: '.cq', storePath: '.cq/ledger.json' }).success).toBe(true);
+    expect(
+      LedgerQueryInputSchema.safeParse({ root: '.cq', storePath: '.cq/ledger.json' }).success,
+    ).toBe(true);
     // …including the optional fields a planner may attach.
     expect(
       LedgerRecordInputSchema.safeParse({

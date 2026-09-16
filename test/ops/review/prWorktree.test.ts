@@ -124,7 +124,8 @@ const mkModel = (
 });
 
 /** Build the injected run (GhFn shape, bin 'git' by convention). */
-const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
+const fakeGit =
+  (model: FakeGit, calls?: string[][]): GhFn =>
   async (args: string[]): Promise<GhResult> => {
     calls?.push(args);
     const sub = args[2];
@@ -137,7 +138,11 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
       // (it would miss, or grab an unrelated same-named base-repo branch).
       const refspec = (args[4] ?? '').replace(/^\+/, '');
       if (!refspec.startsWith('refs/pull/')) {
-        return { code: 128, stdout: '', stderr: `fatal: couldn't find remote ref refs/heads/${refspec}` };
+        return {
+          code: 128,
+          stdout: '',
+          stderr: `fatal: couldn't find remote ref refs/heads/${refspec}`,
+        };
       }
       return { code: 0, stdout: '', stderr: '' };
     }
@@ -160,23 +165,31 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
     if (sub === 'rev-parse' && args[3] === '--absolute-git-dir') {
       // Real git resolves a linked-worktree .git FILE to the real dir; the
       // model answers <repoRoot>/.git like a plain checkout.
-      return { code: 0, stdout: `${join(args[1], '.git')}\n`, stderr: '' };
+      return { code: 0, stdout: `${join(args[1] ?? '', '.git')}\n`, stderr: '' };
     }
     if (sub === 'rev-parse') {
       // argv shapes: ['-C', <path>, 'rev-parse', 'refs/cq-review/pr-7'],
       // ['-C', <path>, 'rev-parse', 'HEAD'],
       // ['-C', <path>, 'rev-parse', '--abbrev-ref', 'HEAD'].
       const at = args[1] ?? '';
-      const target = args[3];
+      const target = args[3] ?? '';
       if (target === 'FETCH_HEAD' || target.startsWith('refs/cq-review/')) {
         if (model.fetchHeadFails !== undefined) {
-          return { code: model.fetchHeadFails.code, stdout: '', stderr: model.fetchHeadFails.stderr };
+          return {
+            code: model.fetchHeadFails.code,
+            stdout: '',
+            stderr: model.fetchHeadFails.stderr,
+          };
         }
         return { code: 0, stdout: `${model.fetchHeadSha ?? SHA_B}\n`, stderr: '' };
       }
       const checkout = model.headOf[at];
       if (checkout === undefined) {
-        return { code: 128, stdout: '', stderr: 'fatal: not a git repository (or any of the parent directories): .git' };
+        return {
+          code: 128,
+          stdout: '',
+          stderr: 'fatal: not a git repository (or any of the parent directories): .git',
+        };
       }
       if (target === 'HEAD') {
         return { code: 0, stdout: `${checkout.head}\n`, stderr: '' };
@@ -184,13 +197,20 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
       if (target === '--abbrev-ref' && args[4] === 'HEAD') {
         return { code: 0, stdout: `${checkout.branch ?? 'HEAD'}\n`, stderr: '' };
       }
-      return { code: 2, stdout: '', stderr: `fake git: unexpected rev-parse ${JSON.stringify(args)}` };
+      return {
+        code: 2,
+        stdout: '',
+        stderr: `fake git: unexpected rev-parse ${JSON.stringify(args)}`,
+      };
     }
     if (sub === 'worktree') {
       const verb = args[3];
       if (verb === 'list') {
         const blocks = model.worktrees
-          .map((wt) => `worktree ${wt.path}\nHEAD ${wt.head}${wt.branch === null ? '' : `\nbranch refs/heads/${wt.branch}`}`)
+          .map(
+            (wt) =>
+              `worktree ${wt.path}\nHEAD ${wt.head}${wt.branch === null ? '' : `\nbranch refs/heads/${wt.branch}`}`,
+          )
           .join('\n\n');
         return { code: 0, stdout: blocks === '' ? '' : `${blocks}\n`, stderr: '' };
       }
@@ -200,7 +220,11 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
         }
         // The ONLY add shape review ops uses: add -B <branch> <path> <sha>.
         if (args[4] !== '-B') {
-          return { code: 2, stdout: '', stderr: `fake git: unexpected add argv ${JSON.stringify(args)}` };
+          return {
+            code: 2,
+            stdout: '',
+            stderr: `fake git: unexpected add argv ${JSON.stringify(args)}`,
+          };
         }
         const branch = args[5] ?? '';
         const path = args[6] ?? '';
@@ -210,15 +234,26 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
         // git's message. `worktree remove` clears the hold.
         const holder = model.worktrees.find((wt) => wt.branch === branch && wt.path !== path);
         if (holder !== undefined) {
-          return { code: 128, stdout: '', stderr: `fatal: '${branch}' is already checked out at '${holder.path}'` };
+          return {
+            code: 128,
+            stdout: '',
+            stderr: `fatal: '${branch}' is already checked out at '${holder.path}'`,
+          };
         }
         if (model.worktrees.some((wt) => wt.path === path)) {
-          return { code: 128, stdout: '', stderr: `fatal: '${path}' is already a registered worktree` };
+          return {
+            code: 128,
+            stdout: '',
+            stderr: `fatal: '${path}' is already a registered worktree`,
+          };
         }
         // `-B` (re)points the branch at the requested commit: the new
         // tree's HEAD lands at that sha (FETCH_HEAD resolves to the
         // fetched truth).
-        const head = commitish === 'FETCH_HEAD' || commitish.startsWith('refs/cq-review/') ? (model.fetchHeadSha ?? SHA_B) : commitish;
+        const head =
+          commitish === 'FETCH_HEAD' || commitish.startsWith('refs/cq-review/')
+            ? (model.fetchHeadSha ?? SHA_B)
+            : commitish;
         model.worktrees.push({ path, branch, head });
         model.headOf[path] = { branch, head };
         return { code: 0, stdout: `Preparing worktree (checking out '${branch}')\n`, stderr: '' };
@@ -237,7 +272,9 @@ const fakeGit = (model: FakeGit, calls?: string[][]): GhFn =>
   };
 
 /** An in-memory WorktreeRegistry that records load/save/update calls in order. */
-const memRegistry = (initial: RegistryMap = {}): WorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
+const memRegistry = (
+  initial: RegistryMap = {},
+): WorktreeRegistry & { calls: string[]; current: () => RegistryMap } => {
   const calls: string[] = [];
   let stored: RegistryMap = { ...initial };
   return {
@@ -266,7 +303,11 @@ const memRegistry = (initial: RegistryMap = {}): WorktreeRegistry & { calls: str
 /** Base opts over the fake model; repoRoot is a throwaway absolute path —
  * the fake git ignores -C (except through the model's own bookkeeping),
  * and only mkdir/stat touch the real fs. */
-const baseOpts = (model: FakeGit, registry: WorktreeRegistry, over?: Partial<PrWorktreeOpts>): PrWorktreeOpts => ({
+const baseOpts = (
+  model: FakeGit,
+  registry: WorktreeRegistry,
+  over?: Partial<PrWorktreeOpts>,
+): PrWorktreeOpts => ({
   repoRoot: '/repo',
   pr: PR,
   headRefName: BRANCH,
@@ -283,16 +324,32 @@ const baseOpts = (model: FakeGit, registry: WorktreeRegistry, over?: Partial<PrW
 describe('fetch-first — origin branch is truth', () => {
   test('the fetch runs FIRST and a fetch failure THROWS before the registry is even consulted', async () => {
     const calls: string[][] = [];
-    const registry = memRegistry({ '7': { path: '/somewhere/pr-7', branch: LABEL, createdAt: NOW - 1000 } });
-    const model = mkModel([], { fetchFails: { code: 128, stderr: "fatal: couldn't find remote ref refs/pull/7/head" } });
+    const registry = memRegistry({
+      '7': { path: '/somewhere/pr-7', branch: LABEL, createdAt: NOW - 1000 },
+    });
+    const model = mkModel([], {
+      fetchFails: { code: 128, stderr: "fatal: couldn't find remote ref refs/pull/7/head" },
+    });
     await expect(
       resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) })),
     ).rejects.toThrow(/fetch origin refs\/pull\/7\/head failed.*couldn't find remote ref/s);
     // The fetch was the only thing attempted — registry untouched.
     expect(calls).toHaveLength(2);
     expect(calls[0]).toEqual(['-C', '/repo', 'rev-parse', '--absolute-git-dir']);
-    expect(calls[1]).toEqual(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/cq-review/pr-7']);
-      expect(calls[1]).toEqual(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/cq-review/pr-7']);
+    expect(calls[1]).toEqual([
+      '-C',
+      '/repo',
+      'fetch',
+      'origin',
+      '+refs/pull/7/head:refs/cq-review/pr-7',
+    ]);
+    expect(calls[1]).toEqual([
+      '-C',
+      '/repo',
+      'fetch',
+      'origin',
+      '+refs/pull/7/head:refs/cq-review/pr-7',
+    ]);
     expect(registry.calls).toEqual([]);
     // The pre-existing registry entry survives untouched (nothing decided).
     expect(registry.current()['7']).toBeDefined();
@@ -308,7 +365,13 @@ describe('fetch-first — origin branch is truth', () => {
       const model = mkModel();
       await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
       expect(calls[0]).toEqual(['-C', repoRoot, 'rev-parse', '--absolute-git-dir']);
-      expect(calls[1]).toEqual(['-C', repoRoot, 'fetch', 'origin', '+refs/pull/7/head:refs/cq-review/pr-7']);
+      expect(calls[1]).toEqual([
+        '-C',
+        repoRoot,
+        'fetch',
+        'origin',
+        '+refs/pull/7/head:refs/cq-review/pr-7',
+      ]);
       expect(calls[2]).toEqual(['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7']);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -327,11 +390,21 @@ describe('fetch-first — origin branch is truth', () => {
       const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
       const expectedPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${forkBranch}`);
       const result = await resolvePrWorktree(
-        baseOpts(model, registry, { repoRoot, headRefName: forkBranch, run: fakeGit(model, calls) }),
+        baseOpts(model, registry, {
+          repoRoot,
+          headRefName: forkBranch,
+          run: fakeGit(model, calls),
+        }),
       );
       expect(result).toEqual({ path: expectedPath, reused: false, branch: LABEL, foreign: [] });
       // The truth came from the PULL REF, not the (nonexistent) branch name.
-      expect(calls[1]).toEqual(['-C', repoRoot, 'fetch', 'origin', `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`]);
+      expect(calls[1]).toEqual([
+        '-C',
+        repoRoot,
+        'fetch',
+        'origin',
+        `+refs/pull/${PR}/head:refs/cq-review/pr-${PR}`,
+      ]);
       // The local branch label was created AT the fetched sha.
       expect(model.headOf[expectedPath]).toEqual({ branch: LABEL, head: SHA_B });
     } finally {
@@ -341,8 +414,12 @@ describe('fetch-first — origin branch is truth', () => {
 
   test('an unnameable fetch (rev-parse of the PR-specific ref fails) THROWS — nothing is decided on unknown truth', async () => {
     const calls: string[][] = [];
-    const registry = memRegistry({ '7': { path: '/somewhere/pr-7', branch: LABEL, createdAt: NOW - 1000 } });
-    const model = mkModel([], { fetchHeadFails: { code: 128, stderr: 'fatal: ambiguous argument' } });
+    const registry = memRegistry({
+      '7': { path: '/somewhere/pr-7', branch: LABEL, createdAt: NOW - 1000 },
+    });
+    const model = mkModel([], {
+      fetchHeadFails: { code: 128, stderr: 'fatal: ambiguous argument' },
+    });
     await expect(
       resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) })),
     ).rejects.toThrow(/rev-parse refs\/cq-review\/pr-7 failed.*unnameable/s);
@@ -357,13 +434,15 @@ describe('fetch-first — origin branch is truth', () => {
     const registry = memRegistry();
     const model = mkModel();
     const run = fakeGit(model, calls);
-    await expect(resolvePrWorktree(baseOpts(model, registry, { pr: 0, run }))).rejects.toThrow(/resolvePrWorktree:/);
-    await expect(resolvePrWorktree(baseOpts(model, registry, { headRefName: '', run }))).rejects.toThrow(
+    await expect(resolvePrWorktree(baseOpts(model, registry, { pr: 0, run }))).rejects.toThrow(
       /resolvePrWorktree:/,
     );
-    await expect(resolvePrWorktree(baseOpts(model, registry, { headRefName: '-evil', run }))).rejects.toThrow(
-      /resolvePrWorktree:/,
-    );
+    await expect(
+      resolvePrWorktree(baseOpts(model, registry, { headRefName: '', run })),
+    ).rejects.toThrow(/resolvePrWorktree:/);
+    await expect(
+      resolvePrWorktree(baseOpts(model, registry, { headRefName: '-evil', run })),
+    ).rejects.toThrow(/resolvePrWorktree:/);
     expect(calls).toEqual([]);
     expect(registry.calls).toEqual([]);
   });
@@ -382,13 +461,23 @@ describe('registry consult', () => {
       // registry consult too).
       const entryDir = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
       await mkdir(entryDir, { recursive: true });
-      const registry = memRegistry({ '7': { path: entryDir, branch: LABEL, createdAt: NOW - 1000 } });
+      const registry = memRegistry({
+        '7': { path: entryDir, branch: LABEL, createdAt: NOW - 1000 },
+      });
       const model = mkModel([], { headOf: { [entryDir]: { branch: LABEL, head: SHA_B } } });
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       expect(result).toEqual({ path: entryDir, reused: true, branch: LABEL, foreign: [] });
       // fetch → FETCH_HEAD → the entry's branch rev-parse → its sha
       // rev-parse — no scan, no add.
-      expect(calls.map((args) => args[2])).toEqual(['rev-parse', 'fetch', 'rev-parse', 'rev-parse', 'rev-parse']);
+      expect(calls.map((args) => args[2])).toEqual([
+        'rev-parse',
+        'fetch',
+        'rev-parse',
+        'rev-parse',
+        'rev-parse',
+      ]);
       expect(calls[2]).toEqual(['-C', repoRoot, 'rev-parse', 'refs/cq-review/pr-7']);
       expect(calls[3]).toEqual(['-C', entryDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
       expect(calls[4]).toEqual(['-C', entryDir, 'rev-parse', 'HEAD']);
@@ -409,7 +498,9 @@ describe('registry consult', () => {
       { path: '/repo', branch: 'main', head: SHA_MAIN },
       { path: candidate, branch: LABEL, head: SHA_B },
     ]);
-    const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
+    const result = await resolvePrWorktree(
+      baseOpts(model, registry, { run: fakeGit(model, calls) }),
+    );
     // The dead entry was SKIPPED (never pruned up front — no prune-save);
     // the scan found the branch checked out in OUR root AT THE FETCHED sha
     // and the register overwrote the stale entry.
@@ -434,12 +525,16 @@ describe('registry consult', () => {
       // module does not own it, so the consult must not reuse it.
       const outsidePath = join(repoRoot, 'outside-tree');
       await mkdir(outsidePath, { recursive: true });
-      const registry = memRegistry({ '7': { path: outsidePath, branch: LABEL, createdAt: NOW - 1000 } });
+      const registry = memRegistry({
+        '7': { path: outsidePath, branch: LABEL, createdAt: NOW - 1000 },
+      });
       const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
         headOf: { [outsidePath]: { branch: LABEL, head: SHA_B } },
       });
       const expectedPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       expect(result).toEqual({ path: expectedPath, reused: false, branch: LABEL, foreign: [] });
       // The inside-the-root entry (created fresh) replaced the outside pointer.
       expect(registry.current()).toEqual({
@@ -460,16 +555,22 @@ describe('registry consult', () => {
       // the ownership gate first).
       const staleDir = join(repoRoot, '.git', 'cq-review-worktrees', 'stale-tree');
       await mkdir(staleDir, { recursive: true });
-      const registry = memRegistry({ '7': { path: staleDir, branch: LABEL, createdAt: NOW - 1000 } });
+      const registry = memRegistry({
+        '7': { path: staleDir, branch: LABEL, createdAt: NOW - 1000 },
+      });
       const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }], {
         headOf: { [staleDir]: { branch: 'some-other-branch', head: SHA_A } },
       });
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       expect(result.reused).toBe(false);
       expect(result.foreign).toEqual([]);
       // NO up-front prune: load, then the create's per-key register.
       expect(registry.calls).toEqual(['load', 'update:7']);
-      expect(registry.current()['7']?.path).toBe(join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`));
+      expect(registry.current()['7']?.path).toBe(
+        join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`),
+      );
       // rev-parse ran against the stale tree and exposed the wrong branch.
       expect(calls[3]).toEqual(['-C', staleDir, 'rev-parse', '--abbrev-ref', 'HEAD']);
       expect(calls.some((args) => args.includes('add'))).toBe(true);
@@ -486,12 +587,16 @@ describe('registry consult', () => {
       // while origin moved to sha B — at exactly the path the create wants.
       const stalePath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
       await mkdir(stalePath, { recursive: true });
-      const registry = memRegistry({ '7': { path: stalePath, branch: LABEL, createdAt: NOW - 1000 } });
+      const registry = memRegistry({
+        '7': { path: stalePath, branch: LABEL, createdAt: NOW - 1000 },
+      });
       const model = mkModel([
         { path: '/repo', branch: 'main', head: SHA_MAIN },
         { path: stalePath, branch: LABEL, head: SHA_A },
       ]);
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       // The refresh CONVERGED at the same path, at the fetched sha.
       expect(result).toEqual({ path: stalePath, reused: false, branch: LABEL, foreign: [] });
       // The stale entry was overwritten by the successful register — load
@@ -534,7 +639,9 @@ describe('registry consult', () => {
       const calls: string[][] = [];
       const stalePath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
       await mkdir(stalePath, { recursive: true });
-      const registry = memRegistry({ '7': { path: stalePath, branch: LABEL, createdAt: NOW - 1000 } });
+      const registry = memRegistry({
+        '7': { path: stalePath, branch: LABEL, createdAt: NOW - 1000 },
+      });
       const model = mkModel(
         [
           { path: '/repo', branch: 'main', head: SHA_MAIN },
@@ -553,7 +660,11 @@ describe('registry consult', () => {
       // The stale entry was NEVER pruned: the machine-readable pointer
       // survives the wedged run for the next one.
       expect(registry.calls).toEqual(['load']);
-      expect(registry.current()['7']).toEqual({ path: stalePath, branch: LABEL, createdAt: NOW - 1000 });
+      expect(registry.current()['7']).toEqual({
+        path: stalePath,
+        branch: LABEL,
+        createdAt: NOW - 1000,
+      });
       // The tree itself is untouched — review ops never force-destroys.
       expect(model.worktrees).toHaveLength(2);
       expect(calls.some((args) => args.includes('--force'))).toBe(false);
@@ -577,10 +688,18 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
       { path: ownPath, branch: LABEL, head: SHA_B },
       { path: '/other/thing', branch: 'unrelated', head: SHA_MAIN },
     ]);
-    const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
+    const result = await resolvePrWorktree(
+      baseOpts(model, registry, { run: fakeGit(model, calls) }),
+    );
     expect(result).toEqual({ path: ownPath, reused: true, branch: LABEL, foreign: [] });
     // fetch → FETCH_HEAD → worktree list → sha probe; no add.
-    expect(calls.map((args) => args[2])).toEqual(['rev-parse', 'fetch', 'rev-parse', 'worktree', 'rev-parse']);
+    expect(calls.map((args) => args[2])).toEqual([
+      'rev-parse',
+      'fetch',
+      'rev-parse',
+      'worktree',
+      'rev-parse',
+    ]);
     expect(calls[3]).toEqual(['-C', '/repo', 'worktree', 'list', '--porcelain']);
     expect(calls[4]).toEqual(['-C', ownPath, 'rev-parse', 'HEAD']);
     expect(calls.some((args) => args.includes('add'))).toBe(false);
@@ -598,18 +717,31 @@ describe('existing-worktree scan reuse (LABEL match AND SHA match, INSIDE the ro
       // path is the PR's slot, not the branch's — reclaim it.
       const targetPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
       await mkdir(targetPath, { recursive: true });
-      const registry = memRegistry({ '7': { path: targetPath, branch: 'old-pr-7-branch', createdAt: NOW - 1000 } });
+      const registry = memRegistry({
+        '7': { path: targetPath, branch: 'old-pr-7-branch', createdAt: NOW - 1000 },
+      });
       const model = mkModel([
         { path: '/repo', branch: 'main', head: SHA_MAIN },
         { path: targetPath, branch: 'old-pr-7-branch', head: SHA_A },
       ]);
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       expect(result).toEqual({ path: targetPath, reused: false, branch: LABEL, foreign: [] });
       expect(registry.calls).toEqual(['load', 'update:7']);
       // The squatter was removed NON-FORCED and the create landed at the
       // same pr-keyed slot, at the fetched sha.
       expect(calls).toContainEqual(['-C', repoRoot, 'worktree', 'remove', targetPath]);
-      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', LABEL, targetPath, SHA_B]);
+      expect(calls[calls.length - 1]).toEqual([
+        '-C',
+        repoRoot,
+        'worktree',
+        'add',
+        '-B',
+        LABEL,
+        targetPath,
+        SHA_B,
+      ]);
       expect(calls.some((args) => args.includes('--force'))).toBe(false);
       expect(model.worktrees).toEqual([
         { path: '/repo', branch: 'main', head: SHA_MAIN },
@@ -657,7 +789,9 @@ describe('create path', () => {
       const calls: string[][] = [];
       const registry = memRegistry();
       const model = mkModel([{ path: '/repo', branch: 'main', head: SHA_MAIN }]);
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       const expectedPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
       expect(result).toEqual({ path: expectedPath, reused: false, branch: LABEL, foreign: [] });
       // The create rides the RESOLVED sha (not the FETCH_HEAD name): the
@@ -689,7 +823,9 @@ describe('create path', () => {
       const registry = memRegistry();
       const model = mkModel();
       const explicit = join(repoRoot, 'custom-trees');
-      await resolvePrWorktree(baseOpts(model, registry, { repoRoot, worktreeRoot: explicit, run: fakeGit(model, calls) }));
+      await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, worktreeRoot: explicit, run: fakeGit(model, calls) }),
+      );
       expect(calls.find((args) => args.includes('add'))).toEqual([
         '-C',
         repoRoot,
@@ -719,16 +855,24 @@ describe('create path', () => {
         }),
       );
       const addArgs = calls.find((args) => args.includes('add'));
-      expect(addArgs?.[6]).toBe(join(repoRoot, '.git', 'cq-review-worktrees', 'pr-7-feature-fix-42_x-retest'));
+      expect(addArgs?.[6]).toBe(
+        join(repoRoot, '.git', 'cq-review-worktrees', 'pr-7-feature-fix-42_x-retest'),
+      );
       // The create rides the RESOLVED sha.
       expect(addArgs?.[7]).toBe(SHA_B);
       // The added DIRECTORY is one path segment under the worktree root.
-      expect(addArgs?.[6]?.startsWith(join(repoRoot, '.git', 'cq-review-worktrees') + '/')).toBe(true);
-      expect(addArgs?.[6]?.slice((join(repoRoot, '.git', 'cq-review-worktrees') + '/').length)).not.toContain('/');
+      expect(addArgs?.[6]?.startsWith(join(repoRoot, '.git', 'cq-review-worktrees') + '/')).toBe(
+        true,
+      );
+      expect(
+        addArgs?.[6]?.slice((join(repoRoot, '.git', 'cq-review-worktrees') + '/').length),
+      ).not.toContain('/');
       // The collision rule: "feat/x" and "feat-x" sanitize to the SAME
       // segment, but each PR's directory carries its own number — two
       // branches can never share one review tree path.
-      expect('feat/x'.replace(/[^A-Za-z0-9._-]/g, '-')).toBe('feat-x'.replace(/[^A-Za-z0-9._-]/g, '-'));
+      expect('feat/x'.replace(/[^A-Za-z0-9._-]/g, '-')).toBe(
+        'feat-x'.replace(/[^A-Za-z0-9._-]/g, '-'),
+      );
       expect('pr-1-feat-x').not.toBe('pr-2-feat-x');
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -741,11 +885,19 @@ describe('create path', () => {
       const calls: string[][] = [];
       const registry = memRegistry();
       const model = mkModel([], {
-        addFails: { code: 128, stderr: `fatal: '${LABEL}' is already checked out at '/elsewhere/${LABEL}'` },
+        addFails: {
+          code: 128,
+          stderr: `fatal: '${LABEL}' is already checked out at '/elsewhere/${LABEL}'`,
+        },
       });
       await expect(
         resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
-      ).rejects.toThrow(new RegExp(`worktree add -B ${LABEL}.*failed.*already checked out`.replace(/\//g, '\\/'), 's'));
+      ).rejects.toThrow(
+        new RegExp(
+          `worktree add -B ${LABEL}.*failed.*already checked out`.replace(/\//g, '\\/'),
+          's',
+        ),
+      );
       expect(registry.calls).toEqual(['load']); // load happened, save NEVER did
       expect(registry.current()).toEqual({});
     } finally {
@@ -779,11 +931,23 @@ describe('PR-keyed branch labels', () => {
       expect(r9).toEqual({ path: path9, reused: false, branch: reviewBranchFor(9), foreign: [] });
       // One registry, two keys, two different paths — the two-keys-one-path
       // confusion is gone because the labels are pr-keyed.
-      expect(registry.current()['7']).toEqual({ path: path7, branch: reviewBranchFor(7), createdAt: NOW });
-      expect(registry.current()['9']).toEqual({ path: path9, branch: reviewBranchFor(9), createdAt: NOW });
+      expect(registry.current()['7']).toEqual({
+        path: path7,
+        branch: reviewBranchFor(7),
+        createdAt: NOW,
+      });
+      expect(registry.current()['9']).toEqual({
+        path: path9,
+        branch: reviewBranchFor(9),
+        createdAt: NOW,
+      });
       // PR 7's tree still stands, untouched, on its own label.
-      expect(model.worktrees.some((wt) => wt.path === path7 && wt.branch === reviewBranchFor(7))).toBe(true);
-      expect(model.worktrees.some((wt) => wt.path === path9 && wt.branch === reviewBranchFor(9))).toBe(true);
+      expect(
+        model.worktrees.some((wt) => wt.path === path7 && wt.branch === reviewBranchFor(7)),
+      ).toBe(true);
+      expect(
+        model.worktrees.some((wt) => wt.path === path9 && wt.branch === reviewBranchFor(9)),
+      ).toBe(true);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
     }
@@ -805,7 +969,9 @@ describe('ownership boundary — foreign trees are surfaced, never claimed', () 
       { path: foreignPath, branch: LABEL, head: SHA_B },
       { path: ownPath, branch: LABEL, head: SHA_B },
     ]);
-    const result = await resolvePrWorktree(baseOpts(model, registry, { run: fakeGit(model, calls) }));
+    const result = await resolvePrWorktree(
+      baseOpts(model, registry, { run: fakeGit(model, calls) }),
+    );
     // The OWN in-root tree was reused; the foreign at-sha tree was only
     // SURFACED — never claimed, never registered, never removed.
     expect(result).toEqual({
@@ -836,7 +1002,9 @@ describe('ownership boundary — foreign trees are surfaced, never claimed', () 
       // nothing is registered.
       await expect(
         resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) })),
-      ).rejects.toThrow(/worktree add -B.*failed.*already checked out at '\/elsewhere\/foreign-pr-7-fix'/s);
+      ).rejects.toThrow(
+        /worktree add -B.*failed.*already checked out at '\/elsewhere\/foreign-pr-7-fix'/s,
+      );
       expect(registry.calls).toEqual(['load']);
       expect(registry.current()).toEqual({});
     } finally {
@@ -873,7 +1041,11 @@ describe('path canonicalization — symlink-proof ownership', () => {
       ]);
       const aliasPath = join(aliasRoot, `pr-${PR}-${BRANCH}`);
       const result = await resolvePrWorktree(
-        baseOpts(model, registry, { repoRoot, worktreeRoot: aliasRoot, run: fakeGit(model, calls) }),
+        baseOpts(model, registry, {
+          repoRoot,
+          worktreeRoot: aliasRoot,
+          run: fakeGit(model, calls),
+        }),
       );
       // Canonicalization, not a raw prefix compare: the stale tree is OURS
       // (its canonical path lives inside the canonicalized root) — so it is
@@ -881,7 +1053,16 @@ describe('path canonicalization — symlink-proof ownership', () => {
       // never left blocking the create with a phantom branch hold.
       expect(result).toEqual({ path: aliasPath, reused: false, branch: LABEL, foreign: [] });
       expect(calls).toContainEqual(['-C', repoRoot, 'worktree', 'remove', stalePath]);
-      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', LABEL, aliasPath, SHA_B]);
+      expect(calls[calls.length - 1]).toEqual([
+        '-C',
+        repoRoot,
+        'worktree',
+        'add',
+        '-B',
+        LABEL,
+        aliasPath,
+        SHA_B,
+      ]);
       expect(registry.current()['7']?.path).toBe(aliasPath);
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -897,9 +1078,15 @@ describe('removePrWorktree', () => {
   test('success removes the tree via git and prunes the registry entry', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
-      '7': { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, createdAt: NOW - 1000 },
+      '7': {
+        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        branch: LABEL,
+        createdAt: NOW - 1000,
+      },
     });
-    const model = mkModel([{ path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, head: SHA_B }]);
+    const model = mkModel([
+      { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, head: SHA_B },
+    ]);
     await removePrWorktree({
       ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
       path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
@@ -920,14 +1107,21 @@ describe('removePrWorktree', () => {
   test('a dirty/locked tree → rethrows with stderr and prunes NOTHING (the caller decides)', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
-      '7': { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, createdAt: NOW - 1000 },
-    });
-    const model = mkModel([{ path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, head: SHA_B }], {
-      removeFails: {
-        code: 128,
-        stderr: 'fatal: ... contains modified or untracked files, use --force to delete it',
+      '7': {
+        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        branch: LABEL,
+        createdAt: NOW - 1000,
       },
     });
+    const model = mkModel(
+      [{ path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, head: SHA_B }],
+      {
+        removeFails: {
+          code: 128,
+          stderr: 'fatal: ... contains modified or untracked files, use --force to delete it',
+        },
+      },
+    );
     await expect(
       removePrWorktree({
         ...baseOpts(model, registry, { run: fakeGit(model, calls) }),
@@ -958,14 +1152,22 @@ describe('removePrWorktree', () => {
     expect(model.worktrees).toEqual([]);
     // …but the registry entry describes a DIFFERENT path and SURVIVES
     // (load ran; save never did — nothing was pruned).
-    expect(registry.current()['7']).toEqual({ path: entryPath, branch: LABEL, createdAt: NOW - 1000 });
+    expect(registry.current()['7']).toEqual({
+      path: entryPath,
+      branch: LABEL,
+      createdAt: NOW - 1000,
+    });
     expect(registry.calls).toEqual(['load']);
   });
 
   test('a path OUTSIDE the worktreeRoot is refused before any destructive git runs — the registry and the foreign tree are untouched', async () => {
     const calls: string[][] = [];
     const registry = memRegistry({
-      '7': { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, createdAt: NOW - 1000 },
+      '7': {
+        path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+        branch: LABEL,
+        createdAt: NOW - 1000,
+      },
     });
     const model = mkModel([{ path: '/elsewhere/foreign-pr-7-fix', branch: LABEL, head: SHA_B }]);
     await expect(
@@ -1009,7 +1211,9 @@ describe('domain boundary vs the sweep ops worktree', () => {
         { path: sweepB, branch: 'pkg-b-branch', head: SHA_B },
       ]);
       const expectedPath = join(repoRoot, '.git', 'cq-review-worktrees', `pr-${PR}-${BRANCH}`);
-      const result = await resolvePrWorktree(baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }));
+      const result = await resolvePrWorktree(
+        baseOpts(model, registry, { repoRoot, run: fakeGit(model, calls) }),
+      );
       expect(result).toEqual({ path: expectedPath, reused: false, branch: LABEL, foreign: [] });
       // The full argv walk: fetch → FETCH_HEAD → scan → create AT the
       // fetched sha. No sweep path is ever probed (no branch-matching
@@ -1050,7 +1254,16 @@ describe('domain boundary vs the sweep ops worktree', () => {
       expect(calls).toContainEqual(['-C', sweepA, 'rev-parse', 'HEAD']);
       expect(calls.some((args) => args.includes('remove'))).toBe(false);
       // The LAST call is the refused create — nothing ran after it.
-      expect(calls[calls.length - 1]).toEqual(['-C', repoRoot, 'worktree', 'add', '-B', LABEL, expectedPath, SHA_B]);
+      expect(calls[calls.length - 1]).toEqual([
+        '-C',
+        repoRoot,
+        'worktree',
+        'add',
+        '-B',
+        LABEL,
+        expectedPath,
+        SHA_B,
+      ]);
       expect(registry.current()).toEqual({});
     } finally {
       await rm(repoRoot, { recursive: true, force: true });
@@ -1069,7 +1282,13 @@ describe('fileWorktreeRegistry', () => {
       const path = join(dir, 'worktrees.json');
       const log = fileWorktreeRegistry(path);
       expect(await log.load()).toEqual({});
-      const map: RegistryMap = { '7': { path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix', branch: LABEL, createdAt: NOW } };
+      const map: RegistryMap = {
+        '7': {
+          path: '/repo/.git/cq-review-worktrees/pr-7-pr-7-fix',
+          branch: LABEL,
+          createdAt: NOW,
+        },
+      };
       await log.save(map);
       // A fresh registry over the same path sees the saved map (cross-run).
       expect(await fileWorktreeRegistry(path).load()).toEqual(map);
@@ -1102,7 +1321,11 @@ describe('fileWorktreeRegistry', () => {
       // next load would throw corrupt.
       for (let cycle = 0; cycle < 15; cycle++) {
         const map: RegistryMap = {
-          '7': { path: `/repo/.cq-review-worktrees/pr-7-${cycle}`, branch: LABEL, createdAt: NOW + cycle },
+          '7': {
+            path: `/repo/.cq-review-worktrees/pr-7-${cycle}`,
+            branch: LABEL,
+            createdAt: NOW + cycle,
+          },
         };
         await Promise.all([registry.load(), registry.save(map), registry.load()]);
         const onDisk: unknown = JSON.parse(await readFile(path, 'utf8'));

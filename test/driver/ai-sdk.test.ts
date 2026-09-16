@@ -21,9 +21,21 @@ import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
-import { AiSdkDriver, DEFAULT_MAX_STEPS, stopReasonOf, usageFromSdk } from '../../src/driver/ai-sdk/index.js';
+import {
+  AiSdkDriver,
+  DEFAULT_MAX_STEPS,
+  stopReasonOf,
+  usageFromSdk,
+} from '../../src/driver/ai-sdk/index.js';
 import type { AiSdkDriverOptions } from '../../src/driver/ai-sdk/index.js';
-import { type ConformanceSpec, CONFORMANCE_PROVIDER, type ModelDirective, BANNED_VOCABULARY, SESSIONS_DIR, runDriverConformance } from './conformance.js';
+import {
+  type ConformanceSpec,
+  CONFORMANCE_PROVIDER,
+  type ModelDirective,
+  BANNED_VOCABULARY,
+  SESSIONS_DIR,
+  runDriverConformance,
+} from './conformance.js';
 import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
@@ -56,7 +68,11 @@ function lastGenerateTextArgs(): {
 } {
   const last = captured.generateTextArgs[captured.generateTextArgs.length - 1];
   if (last === undefined) throw new Error('no generateText call was captured');
-  return last as { system?: string; messages?: Array<{ role: string; content: string }>; stopWhen?: unknown };
+  return last as {
+    system?: string;
+    messages?: Array<{ role: string; content: string }>;
+    stopWhen?: unknown;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -84,7 +100,14 @@ function textResult(text: string): LanguageModelV4GenerateResult {
 
 function toolCallResult(tool: string, input: unknown): LanguageModelV4GenerateResult {
   return {
-    content: [{ type: 'tool-call', toolCallId: 'conformance-call-1', toolName: tool, input: JSON.stringify(input) }],
+    content: [
+      {
+        type: 'tool-call',
+        toolCallId: 'conformance-call-1',
+        toolName: tool,
+        input: JSON.stringify(input),
+      },
+    ],
     finishReason: { unified: 'tool-calls', raw: undefined },
     usage: mockUsage(),
     warnings: [],
@@ -92,7 +115,10 @@ function toolCallResult(tool: string, input: unknown): LanguageModelV4GenerateRe
 }
 
 /** A plain reply model carrying ARBITRARY per-step token usage (custom usage-shape tests). */
-function usageModel(usage: LanguageModelV4GenerateResult['usage'], modelId = 'mock-1'): MockLanguageModelV4 {
+function usageModel(
+  usage: LanguageModelV4GenerateResult['usage'],
+  modelId = 'mock-1',
+): MockLanguageModelV4 {
   return new MockLanguageModelV4({
     modelId,
     doGenerate: {
@@ -110,13 +136,16 @@ function usageModel(usage: LanguageModelV4GenerateResult['usage'], modelId = 'mo
  * response reports the REQUESTED id as served — the observed-model fact
  * WorkerResult.model carries.
  */
-function modelFor(directive: ModelDirective | undefined, servedModel?: string): MockLanguageModelV4 {
+function modelFor(
+  directive: ModelDirective | undefined,
+  servedModel?: string,
+): MockLanguageModelV4 {
   switch (directive?.kind) {
     case 'block-until-abort': {
       const abortError = (): Error =>
         Object.assign(new Error('run aborted by the governed signal'), { name: 'AbortError' });
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: async (options) => {
           const signal = options.abortSignal;
           if (signal?.aborted) throw abortError();
@@ -129,23 +158,30 @@ function modelFor(directive: ModelDirective | undefined, servedModel?: string): 
     case 'fail':
       // A plain non-abort failure: the driver must return stopReason 'error'.
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: async () => {
           throw new Error('scripted model failure');
         },
       });
     case 'tool-then-reply':
       return new MockLanguageModelV4({
-        modelId: servedModel,
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: [toolCallResult(directive.tool, directive.input), textResult(directive.reply)],
       });
+    case 'reply':
+    case undefined:
     default:
-      return new MockLanguageModelV4({ modelId: servedModel, doGenerate: textResult(directive?.text ?? 'ok') });
+      return new MockLanguageModelV4({
+        ...(servedModel === undefined ? {} : { modelId: servedModel }),
+        doGenerate: textResult(directive?.text ?? 'ok'),
+      });
   }
 }
 
 /** Conformance harness config: the conformance write permitted via an anchored re: pattern (token patterns deny redirects by design); workspaces inside scratchDir. */
-function conformanceHarnessConfig(scratchDir: string): AiSdkDriverOptions['harnessConfig'] {
+function conformanceHarnessConfig(
+  scratchDir: string,
+): NonNullable<AiSdkDriverOptions['harnessConfig']> {
   return {
     ...defaultHarnessConfig,
     workspaceRoot: join(scratchDir, 'workspaces'),
@@ -223,7 +259,10 @@ describe('ai-sdk driver specifics (mock model)', () => {
     try {
       const sessionsDir = join(scratchDir, 'sessions');
       await mkdir(sessionsDir, { recursive: true });
-      const driver = new AiSdkDriver({ providers: { mock: () => modelFor(undefined) }, sessionsDir });
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor(undefined) },
+        sessionsDir,
+      });
       await expect(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'm' } })),
       ).rejects.toThrow(/unknown provider 'nope'/);
@@ -254,20 +293,80 @@ describe('ai-sdk driver specifics (mock model)', () => {
 
   test('stopReason mapping table (checked in order: aborted → budget → error → complete)', () => {
     // 1. abort dominates every other condition.
-    expect(stopReasonOf({ finishReason: 'length', aborted: true, tokenBudget: 10, totalTokens: 99 })).toBe('aborted');
-    expect(stopReasonOf({ finishReason: 'error', aborted: true, tokenBudget: undefined, totalTokens: 0 })).toBe('aborted');
+    expect(
+      stopReasonOf({ finishReason: 'length', aborted: true, tokenBudget: 10, totalTokens: 99 }),
+    ).toBe('aborted');
+    expect(
+      stopReasonOf({
+        finishReason: 'error',
+        aborted: true,
+        tokenBudget: undefined,
+        totalTokens: 0,
+      }),
+    ).toBe('aborted');
     // 2. the token budget (totalTokens >= maxTokens) trips before finish reasons.
-    expect(stopReasonOf({ finishReason: 'stop', aborted: false, tokenBudget: 10, totalTokens: 10 })).toBe('budget');
-    expect(stopReasonOf({ finishReason: 'tool-calls', aborted: false, tokenBudget: 10, totalTokens: 11 })).toBe('budget');
+    expect(
+      stopReasonOf({ finishReason: 'stop', aborted: false, tokenBudget: 10, totalTokens: 10 }),
+    ).toBe('budget');
+    expect(
+      stopReasonOf({
+        finishReason: 'tool-calls',
+        aborted: false,
+        tokenBudget: 10,
+        totalTokens: 11,
+      }),
+    ).toBe('budget');
     // 3. SDK 'length' is a budget stop even without an explicit cap.
-    expect(stopReasonOf({ finishReason: 'length', aborted: false, tokenBudget: undefined, totalTokens: 5 })).toBe('budget');
+    expect(
+      stopReasonOf({
+        finishReason: 'length',
+        aborted: false,
+        tokenBudget: undefined,
+        totalTokens: 5,
+      }),
+    ).toBe('budget');
     // 4. SDK error / content-filter are driver-level errors.
-    expect(stopReasonOf({ finishReason: 'error', aborted: false, tokenBudget: undefined, totalTokens: 0 })).toBe('error');
-    expect(stopReasonOf({ finishReason: 'content-filter', aborted: false, tokenBudget: undefined, totalTokens: 0 })).toBe('error');
+    expect(
+      stopReasonOf({
+        finishReason: 'error',
+        aborted: false,
+        tokenBudget: undefined,
+        totalTokens: 0,
+      }),
+    ).toBe('error');
+    expect(
+      stopReasonOf({
+        finishReason: 'content-filter',
+        aborted: false,
+        tokenBudget: undefined,
+        totalTokens: 0,
+      }),
+    ).toBe('error');
     // 5. everything else is a normal completion.
-    expect(stopReasonOf({ finishReason: 'stop', aborted: false, tokenBudget: undefined, totalTokens: 0 })).toBe('complete');
-    expect(stopReasonOf({ finishReason: 'tool-calls', aborted: false, tokenBudget: undefined, totalTokens: 0 })).toBe('complete');
-    expect(stopReasonOf({ finishReason: 'other', aborted: false, tokenBudget: undefined, totalTokens: 0 })).toBe('complete');
+    expect(
+      stopReasonOf({
+        finishReason: 'stop',
+        aborted: false,
+        tokenBudget: undefined,
+        totalTokens: 0,
+      }),
+    ).toBe('complete');
+    expect(
+      stopReasonOf({
+        finishReason: 'tool-calls',
+        aborted: false,
+        tokenBudget: undefined,
+        totalTokens: 0,
+      }),
+    ).toBe('complete');
+    expect(
+      stopReasonOf({
+        finishReason: 'other',
+        aborted: false,
+        tokenBudget: undefined,
+        totalTokens: 0,
+      }),
+    ).toBe('complete');
   });
 
   test('usage mapping: details win over totals; no details → totals with cache at 0; reasoning NEVER set (subset of output)', () => {
@@ -297,7 +396,11 @@ describe('ai-sdk driver specifics (mock model)', () => {
     expect(
       usageFromSdk({
         inputTokens: 10,
-        inputTokenDetails: { noCacheTokens: undefined, cacheReadTokens: undefined, cacheWriteTokens: undefined },
+        inputTokenDetails: {
+          noCacheTokens: undefined,
+          cacheReadTokens: undefined,
+          cacheWriteTokens: undefined,
+        },
         outputTokens: 3,
         outputTokenDetails: { textTokens: 3, reasoningTokens: undefined },
         totalTokens: 13,
@@ -312,7 +415,9 @@ describe('ai-sdk driver specifics (mock model)', () => {
         // The mock must serve the REQUESTED id: pricing keys on the OBSERVED
         // served model id now (issue #24), so a mock serving its default id
         // would be — correctly — unpriced for the requested model.
-        providers: { anthropic: () => modelFor({ kind: 'reply', text: 'ok' }, 'claude-sonnet-4-5') },
+        providers: {
+          anthropic: () => modelFor({ kind: 'reply', text: 'ok' }, 'claude-sonnet-4-5'),
+        },
         sessionsDir: join(scratchDir, 'sessions'),
       });
       const knownResult = await known.run(
@@ -391,9 +496,13 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
         sessionsDir: join(scratchDir, 'sessions'),
       });
       // AT the cap: the fold (35) >= 35 trips exactly.
-      expect((await driver.run(invocation({ budget: { maxTokens: 35 } }))).stopReason).toBe('budget');
+      expect((await driver.run(invocation({ budget: { maxTokens: 35 } }))).stopReason).toBe(
+        'budget',
+      );
       // Headroom: 35 < 40 — the old 43-fold would have tripped here too.
-      expect((await driver.run(invocation({ budget: { maxTokens: 40 } }))).stopReason).toBe('complete');
+      expect((await driver.run(invocation({ budget: { maxTokens: 40 } }))).stopReason).toBe(
+        'complete',
+      );
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -430,7 +539,8 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
     expect(Object.isFrozen(defaultHarnessConfig.tools.run)).toBe(true);
     const chars = defaultHarnessConfig.promptBudget.maxSystemPromptChars;
     expect(() => {
-      (defaultHarnessConfig.promptBudget as { maxSystemPromptChars: number }).maxSystemPromptChars = 1;
+      (defaultHarnessConfig.promptBudget as { maxSystemPromptChars: number }).maxSystemPromptChars =
+        1;
     }).toThrow(TypeError);
     expect(defaultHarnessConfig.promptBudget.maxSystemPromptChars).toBe(chars);
 
@@ -505,11 +615,17 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
         providers: { mock: () => modelFor({ kind: 'reply', text: 'recovered' }) },
         sessionsDir: join(scratchDir, 'sessions'),
       });
-      await retryDriver.run(invocation({ prompt: 'retry-me-once', sessionRef: failed.sessionId as string }));
+      await retryDriver.run(
+        invocation({ prompt: 'retry-me-once', sessionRef: failed.sessionId as string }),
+      );
       const messages = lastGenerateTextArgs().messages ?? [];
-      expect(messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once')).toHaveLength(1);
+      expect(
+        messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once'),
+      ).toHaveLength(1);
       const after = await store.load(failed.sessionId as string);
-      expect(after?.messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once')).toHaveLength(1);
+      expect(
+        after?.messages.filter((m) => m.role === 'user' && m.content === 'retry-me-once'),
+      ).toHaveLength(1);
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -529,7 +645,9 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
           return { input: 1, output: 2 };
         },
       });
-      const result = await driver.run(invocation({ modelSpec: { provider: 'mock', model: 'deepseek-chat' } }));
+      const result = await driver.run(
+        invocation({ modelSpec: { provider: 'mock', model: 'deepseek-chat' } }),
+      );
       expect(result.model).toBe('deepseek-flash'); // WorkerResult.model keeps the served id
       // The price lookup got the SERVED id with the REQUESTED provider.
       expect(pricingKeys).toEqual([{ provider: 'mock', model: 'deepseek-flash' }]);
@@ -558,43 +676,49 @@ const liveCases: ReadonlyArray<[provider: string, model: string, keyName: string
 ];
 
 describe.skipIf(!process.env.LIVE_DRIVERS)('live ai-sdk driver (opt-in: LIVE_DRIVERS=1)', () => {
-  test.each(liveCases)('%s %s replies within the budget cap', async (provider, model, keyName) => {
-    if (process.env[keyName] === undefined || process.env[keyName] === '') {
-      throw new Error(`LIVE_DRIVERS=1 but ${keyName} is not set — refusing to silently skip one leg`);
-    }
-    const driver = new AiSdkDriver(); // the REAL default registry, no mocks
-    const result = await driver.run({
-      prompt: 'Reply with the word ok.',
-      modelSpec: { provider, model },
-      toolPolicy: { allow: [], mode: 'none' },
-      sandboxPolicy: { level: 'none' },
-      budget: { maxUsd: 2, maxTokens: 2000 },
-    });
-    // The live assertions are the conformance invariants that make sense
-    // over the wire: usage present, no vendor vocabulary, the strict mirror
-    // parses the result, and a tiny prompt completes inside the cap.
-    const serialized = JSON.stringify(result);
-    for (const banned of BANNED_VOCABULARY) {
-      expect(serialized).not.toContain(banned);
-    }
-    const parsed = WorkerResultSchema.parse(JSON.parse(serialized));
-    expect(typeof parsed.usage.input).toBe('number');
-    expect(typeof parsed.usage.output).toBe('number');
-    expect(parsed.stopReason).toBe('complete');
-    // Per-leg cost posture: `deepseek-flash` (the wire's served id) has NO
-    // published rates (models.dev/deepseek lists no such id, checked
-    // 2026-09-15) — under never-fabricate its cost stays absent and the run
-    // is bounded by the declared maxUsd/maxTokens instead; the priced legs
-    // (e.g. the anthropic entry) assert a real figure under the cap. The
-    // observed-model identity asserts what the SDK SURFACES (a remap it
-    // does not surface is recorded, not caught — the fold falls back to the
-    // requested id).
-    if (model === 'deepseek-flash') {
-      expect(parsed.costUSD).toBeUndefined();
-    } else {
-      expect(parsed.costUSD).toBeDefined();
-      expect(parsed.costUSD as number).toBeLessThan(2);
-    }
-    expect(parsed.model).toBe(model);
-  }, 60_000);
+  test.each(liveCases)(
+    '%s %s replies within the budget cap',
+    async (provider, model, keyName) => {
+      if (process.env[keyName] === undefined || process.env[keyName] === '') {
+        throw new Error(
+          `LIVE_DRIVERS=1 but ${keyName} is not set — refusing to silently skip one leg`,
+        );
+      }
+      const driver = new AiSdkDriver(); // the REAL default registry, no mocks
+      const result = await driver.run({
+        prompt: 'Reply with the word ok.',
+        modelSpec: { provider, model },
+        toolPolicy: { allow: [], mode: 'none' },
+        sandboxPolicy: { level: 'none' },
+        budget: { maxUsd: 2, maxTokens: 2000 },
+      });
+      // The live assertions are the conformance invariants that make sense
+      // over the wire: usage present, no vendor vocabulary, the strict mirror
+      // parses the result, and a tiny prompt completes inside the cap.
+      const serialized = JSON.stringify(result);
+      for (const banned of BANNED_VOCABULARY) {
+        expect(serialized).not.toContain(banned);
+      }
+      const parsed = WorkerResultSchema.parse(JSON.parse(serialized));
+      expect(typeof parsed.usage.input).toBe('number');
+      expect(typeof parsed.usage.output).toBe('number');
+      expect(parsed.stopReason).toBe('complete');
+      // Per-leg cost posture: `deepseek-flash` (the wire's served id) has NO
+      // published rates (models.dev/deepseek lists no such id, checked
+      // 2026-09-15) — under never-fabricate its cost stays absent and the run
+      // is bounded by the declared maxUsd/maxTokens instead; the priced legs
+      // (e.g. the anthropic entry) assert a real figure under the cap. The
+      // observed-model identity asserts what the SDK SURFACES (a remap it
+      // does not surface is recorded, not caught — the fold falls back to the
+      // requested id).
+      if (model === 'deepseek-flash') {
+        expect(parsed.costUSD).toBeUndefined();
+      } else {
+        expect(parsed.costUSD).toBeDefined();
+        expect(parsed.costUSD as number).toBeLessThan(2);
+      }
+      expect(parsed.model).toBe(model);
+    },
+    60_000,
+  );
 });

@@ -7,7 +7,12 @@
     "lib": ["ES2023"],
     "types": ["node"],
     "noEmit": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true
   },
-  "include": ["src", "test", "eslint/rules", "vitest.config.ts"]
+  "include": ["src", "test", "lint/rules", "vitest.config.ts"]
 }

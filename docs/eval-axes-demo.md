@@ -35,13 +35,13 @@ exactly the conductor decision: eval wires REQUEST the served id so the
 observed-model check passes green and cells compare what actually ran,
 honestly labeled.
 
-| lane | provider | model | served model | stopReason | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| claude-agent | zai | glm-4.6 | glm-4.6 | complete | 382 | 95 | 0 | 0 | $0.00043820 | yes |
-| subprocess | zai | glm-4.6 | glm-4.6 | complete | 1132 | 26 | 0 | 0 | $0.00073640 | yes |
-| acp | zai | glm-5.3-flash | builtin:bigmodel\GLM-5.3 | complete | 15727 | 12 | 10368 | 0 | absent | yes |
-| ai-sdk | deepseek | deepseek-chat | **deepseek-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
-| ai-sdk | zai | glm-4.6 | **glm-5.3-flash** | FAILED (served-model mismatch) | — | — | — | — | absent | — |
+| lane         | provider | model         | served model             | stopReason                     | input | output | cacheRead | cacheWrite | costUSD (modeled) | fold agrees |
+| ------------ | -------- | ------------- | ------------------------ | ------------------------------ | ----- | ------ | --------- | ---------- | ----------------- | ----------- |
+| claude-agent | zai      | glm-4.6       | glm-4.6                  | complete                       | 382   | 95     | 0         | 0          | $0.00043820       | yes         |
+| subprocess   | zai      | glm-4.6       | glm-4.6                  | complete                       | 1132  | 26     | 0         | 0          | $0.00073640       | yes         |
+| acp          | zai      | glm-5.3-flash | builtin:bigmodel\GLM-5.3 | complete                       | 15727 | 12     | 10368     | 0          | absent            | yes         |
+| ai-sdk       | deepseek | deepseek-chat | **deepseek-flash**       | FAILED (served-model mismatch) | —     | —      | —         | —          | absent            | —           |
+| ai-sdk       | zai      | glm-4.6       | **glm-5.3-flash**        | FAILED (served-model mismatch) | —     | —      | —         | —          | absent            | —           |
 
 > cell ai-sdk/deepseek-chat evidence (re-run live 2026-09-14 under the
 > current script): the run completed, but the endpoint REPORTED serving
@@ -83,7 +83,7 @@ honestly labeled.
 > 'error', zero usage: the driver's session/new schema transcribed
 > `modes.availableModes` as bare STRINGS while the live wire sends
 > `{id, name}` OBJECTS (probe-verbatim: `[{ id: 'plan', name: 'Plan' },
-> …]`) — the handshake-failure narration in the session record carried
+…]`) — the handshake-failure narration in the session record carried
 > the zod evidence. The in-repo fake fixture emitted strings too, which
 > is why conformance stayed green while the live parse threw. The schema
 > (`SessionModesSchema`) and the fixture were fixed to the recorded
@@ -111,7 +111,7 @@ honestly labeled.
 >    (2026-09-14, same key, this host): `/api/paas/v4` → 429 — the
 >    pay-as-you-go wire, unfunded by design; `/api/coding/paas/v4` → 200 —
 >    the GLM Coding Plan's OpenAI-compatible endpoint; `/api/anthropic/
->    v1/messages` → 200 — the plan's anthropic-compat endpoint. The plan
+v1/messages` → 200 — the plan's anthropic-compat endpoint. The plan
 >    funds exactly TWO wires; the pay-as-you-go wire is not one of them.
 > 2. **The interim workaround (superseded).** The cell was briefly run
 >    through an `@ai-sdk/anthropic` override at the anthropic-compat

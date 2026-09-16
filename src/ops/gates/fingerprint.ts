@@ -140,7 +140,15 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
     return [cfg.tool, file, ruleId, f.severity, 'position', String(lineBucket), String(colBucket)];
   }
   const offsetBucket = Math.floor((f.column ?? 0) / cfg.offsetBucketSize);
-  return [cfg.tool, file, ruleId, f.severity, 'content', normalizeMessage(f.message), String(offsetBucket)];
+  return [
+    cfg.tool,
+    file,
+    ruleId,
+    f.severity,
+    'content',
+    normalizeMessage(f.message),
+    String(offsetBucket),
+  ];
 }
 
 /**
@@ -151,7 +159,9 @@ function keyComponents(f: CheckFailure, cfg: Required<FingerprintConfig>): strin
  * sharing a prefix would key identically).
  */
 function normalizeMessage(message: string): string {
-  return message.split('\n', 1)[0].replace(/\s+/g, ' ').trim();
+  const newline = message.indexOf('\n');
+  const firstLine = newline === -1 ? message : message.slice(0, newline);
+  return firstLine.replace(/\s+/g, ' ').trim();
 }
 
 /** Backslashes to posix separators, then strip `rootDir` (also posix-normalized) when the path is under it. */

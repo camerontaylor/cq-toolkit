@@ -38,8 +38,8 @@ prevents opening the PR.
 ## Adjudications — every critical/major; remaining minors if material
 
 | Finding (file:line) | Severity | Disposition | Commit / reason |
-|---------------------|----------|-------------|-----------------|
-| | | | |
+| ------------------- | -------- | ----------- | --------------- |
+|                     |          |             |                 |
 
 ## Final gates (actual exits, final implementation state)
 

@@ -115,7 +115,7 @@ budget event (the usage still rolls; `maxTokens` binds it).
 ## 6. Evidence
 
 - `test/kernel/governor.test.ts`, describe `DD-9 (T1.6b): parallel token
-  rollup + api-equivalent USD` — six cases:
+rollup + api-equivalent USD` — six cases:
   1. `maxTokens` trips independently of `maxUsd` (reason names the token
      rollup; admission refuses with reason `budget`; the governed dispatch
      returns `budget-exhausted`; a control governor under the cap never

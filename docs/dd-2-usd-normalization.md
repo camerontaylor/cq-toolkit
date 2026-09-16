@@ -37,21 +37,21 @@ models.dev, MIT, as-of 2026-09, re-verified in `docs/reverify-2026-09.md`).
 
 ## The rates used (and their sources)
 
-| model | input | output | cacheRead | source |
-| --- | --- | --- | --- | --- |
-| glm-4.6 | $0.60 | $2.20 | $0.11 | models.dev/zai (vendored); matches Z.AI's official GLM-4.6 API pricing ($0.60 in / $2.20 out / $0.11 cached input per Mtok — re-checked against Z.AI's published pricing today) |
-| deepseek-chat | $0.28 | $0.42 | $0.028 | models.dev/deepseek (vendored); matches DeepSeek's official pricing page (api-docs.deepseek.com) |
-| glm-5.3-flash (the acp lane's served model) | — | — | — | UNPRICED — the vendored table (models.dev as-of 2026-09) knows glm-4.5-air and glm-4.6 under zai but neither glm-5.3-flash nor the vendor's materialized encoding `builtin:bigmodel\GLM-5.3`; the fold records the gap (costUSD absent on both sides) rather than fabricating rates. GLM-5.3-flash list pricing observed elsewhere on Z.AI's wires ($0.15/$0.50 per Mtok) is NOT vendored and NOT applied here. |
+| model                                       | input | output | cacheRead | source                                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------------------------------- | ----- | ------ | --------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| glm-4.6                                     | $0.60 | $2.20  | $0.11     | models.dev/zai (vendored); matches Z.AI's official GLM-4.6 API pricing ($0.60 in / $2.20 out / $0.11 cached input per Mtok — re-checked against Z.AI's published pricing today)                                                                                                                                                                                                                                 |
+| deepseek-chat                               | $0.28 | $0.42  | $0.028    | models.dev/deepseek (vendored); matches DeepSeek's official pricing page (api-docs.deepseek.com)                                                                                                                                                                                                                                                                                                                |
+| glm-5.3-flash (the acp lane's served model) | —     | —      | —         | UNPRICED — the vendored table (models.dev as-of 2026-09) knows glm-4.5-air and glm-4.6 under zai but neither glm-5.3-flash nor the vendor's materialized encoding `builtin:bigmodel\GLM-5.3`; the fold records the gap (costUSD absent on both sides) rather than fabricating rates. GLM-5.3-flash list pricing observed elsewhere on Z.AI's wires ($0.15/$0.50 per Mtok) is NOT vendored and NOT applied here. |
 
 ## Measured (usage in tokens; the glm × ai-sdk row re-run live over the compat wire — see below)
 
-| lane | model (served) | input | output | cacheRead | cacheWrite | rate math | costUSD (modeled) | inside tolerance? |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| claude-agent | glm-4.6 (glm-4.6) | 382 | 95 | 0 | 0 | (382×0.6 + 95×2.2)/1e6 = $0.00043820 | $0.00043820 | YES — exact |
-| subprocess | glm-4.6 (glm-4.6) | 1132 | 26 | 0 | 0 | (1132×0.6 + 26×2.2)/1e6 = $0.00073640 | $0.00073640 | YES — exact |
-| acp | glm-5.3-flash (served: builtin:bigmodel\GLM-5.3 — the vendor's materialized encoding of it) | 15727 | 12 | 10368 | 0 | unpriced — no vendored rates for the served id | absent | YES — fold agrees (both sides absent) |
-| ai-sdk | deepseek-chat (served: **deepseek-flash** — mismatch guard FAILED the cell) | — | — | — | — | — | absent | FAILED — served-model mismatch |
-| ai-sdk | glm-4.6 (served: **glm-5.3-flash** — coding wire) | — | — | — | — | — | absent | FAILED — served-model mismatch |
+| lane         | model (served)                                                                              | input | output | cacheRead | cacheWrite | rate math                                      | costUSD (modeled) | inside tolerance?                     |
+| ------------ | ------------------------------------------------------------------------------------------- | ----- | ------ | --------- | ---------- | ---------------------------------------------- | ----------------- | ------------------------------------- |
+| claude-agent | glm-4.6 (glm-4.6)                                                                           | 382   | 95     | 0         | 0          | (382×0.6 + 95×2.2)/1e6 = $0.00043820           | $0.00043820       | YES — exact                           |
+| subprocess   | glm-4.6 (glm-4.6)                                                                           | 1132  | 26     | 0         | 0          | (1132×0.6 + 26×2.2)/1e6 = $0.00073640          | $0.00073640       | YES — exact                           |
+| acp          | glm-5.3-flash (served: builtin:bigmodel\GLM-5.3 — the vendor's materialized encoding of it) | 15727 | 12     | 10368     | 0          | unpriced — no vendored rates for the served id | absent            | YES — fold agrees (both sides absent) |
+| ai-sdk       | deepseek-chat (served: **deepseek-flash** — mismatch guard FAILED the cell)                 | —     | —      | —         | —          | —                                              | absent            | FAILED — served-model mismatch        |
+| ai-sdk       | glm-4.6 (served: **glm-5.3-flash** — coding wire)                                           | —     | —      | —         | —          | —                                              | absent            | FAILED — served-model mismatch        |
 
 **Tolerance, stated precisely — three different claims:**
 
@@ -142,8 +142,8 @@ eval cell's live run shows:
 - **The discount signal is not client-observable.** The one wire place
   discount-shaped context could ride is the prompt response's `_meta` —
   the probe captured it verbatim: `_meta.zcode.usage = { source:
-  "provider", modelRequestCount: 1, webFetchRequests: 0,
-  webSearchRequests: 0 }`. Provenance and request counts; NOTHING
+"provider", modelRequestCount: 1, webFetchRequests: 0,
+webSearchRequests: 0 }`. Provenance and request counts; NOTHING
   plan-, subscription-, or discount-shaped. THE RECORD: discount not
   client-observable; the commercial basis is the vendor's published
   harness pricing. Whether the app's GLM Coding Plan subscription

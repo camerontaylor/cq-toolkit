@@ -139,9 +139,7 @@ async function scanPlans(root: string): Promise<PlanRegistryEntry[]> {
     }
     const p = plan as Partial<PlanRegistryEntry> | null;
     if (typeof p !== 'object' || p === null) {
-      throw new Error(
-        `plan module '${file}': 'plan' export must be a PlanRegistryEntry object`,
-      );
+      throw new Error(`plan module '${file}': 'plan' export must be a PlanRegistryEntry object`);
     }
     if (typeof p.name !== 'string' || p.name === '') {
       throw new Error(`plan module '${file}': plan.name must be a non-empty string`);

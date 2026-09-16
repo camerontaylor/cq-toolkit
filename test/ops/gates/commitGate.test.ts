@@ -22,11 +22,7 @@ function messageOf(subject: string, trailers: string[], body: string[] = []): st
 /** The shipped-shape valid message: conventional subject, complete trailers. */
 const VALID = messageOf(
   'fix(test): cache eviction kept stale entries past their TTL',
-  [
-    'Confidence: 0.92',
-    'Tested: npm run test -- test/ops/cache.test.ts',
-    'Outcome: broken-test',
-  ],
+  ['Confidence: 0.92', 'Tested: npm run test -- test/ops/cache.test.ts', 'Outcome: broken-test'],
   ['The eviction branch compared the wrong clock, so entries survived expiry.'],
 );
 
@@ -247,7 +243,9 @@ describe('commitGate subject↔Outcome implications', () => {
 
 describe('commitGate trailer-block parsing', () => {
   test('trailers NOT in the trailing paragraph (prose after a blank line) are treated as missing', async () => {
-    const result = await commitGate({ message: `${VALID}\n\nReviewer asked to revisit next week.` });
+    const result = await commitGate({
+      message: `${VALID}\n\nReviewer asked to revisit next week.`,
+    });
     expect(result.status).toBe('ok');
     if (result.status !== 'ok') {
       throw new Error('unreachable');
@@ -286,7 +284,11 @@ describe('commitGate trailer-block parsing', () => {
       ].join('\n'),
       config: {
         trailers: [
-          { name: 'Notes', required: true, pattern: '^audited the new clock skew tolerance line-by-line against the TTL table$' },
+          {
+            name: 'Notes',
+            required: true,
+            pattern: '^audited the new clock skew tolerance line-by-line against the TTL table$',
+          },
           { name: 'Confidence', required: true, pattern: '^[0-9]+(\\.[0-9]+)?$' },
         ],
       },
@@ -363,9 +365,10 @@ describe('commitGate config genericity', () => {
     }).toThrow(TypeError);
     expect(DEFAULT_COMMIT_TRAILERS[0]?.required).toBe(true);
     const outcome = DEFAULT_COMMIT_TRAILERS.find((rule) => rule.name === 'Outcome');
-    expect(Object.isFrozen(outcome?.oneOf)).toBe(true);
+    if (!outcome?.oneOf) throw new Error('Outcome must enumerate allowed values');
+    expect(Object.isFrozen(outcome.oneOf)).toBe(true);
     expect(() => {
-      (outcome?.oneOf as string[]).push('shipping');
+      (outcome.oneOf as string[]).push('shipping');
     }).toThrow(TypeError);
     expect(outcome?.oneOf).toEqual(['broken-test', 'code-bug', 'todo']);
   });

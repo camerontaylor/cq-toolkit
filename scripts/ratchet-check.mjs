@@ -99,7 +99,12 @@ if (tcEvidence === null) {
 }
 const checkTypecheck = engine.createCheckRatchet(new Map([['tsc', async () => tcEvidence]]));
 const tcOutcome = (
-  await checkTypecheck({ ws: ROOT, target: 'typecheck', metric: 'typecheck-count', sourceId: 'tsc' })
+  await checkTypecheck({
+    ws: ROOT,
+    target: 'typecheck',
+    metric: 'typecheck-count',
+    sourceId: 'tsc',
+  })
 ).value;
 if (tcOutcome.verdict === 'pass') {
   console.error(

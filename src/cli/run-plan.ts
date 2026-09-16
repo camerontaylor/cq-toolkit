@@ -147,7 +147,7 @@ export async function runPlanCommand(
   // ACCESSOR — the key would never become an own property (the strict schema
   // would silently stop seeing it) and the parsed value would re-point this
   // record's prototype instead.
-  const normalizedFlags: Record<string, unknown> = Object.create(null);
+  const normalizedFlags: Record<string, unknown> = { __proto__: null };
   for (const [rawKey, value] of Object.entries(flags)) {
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
     if (key === 'json' || key === 'help' || key === 'h') continue;
@@ -219,7 +219,8 @@ export async function runPlanCommand(
 
   // Registry view over the resolved ops root: the explicit --ops-root flag
   // (input.opsRoot) wins over the runCli-level DI override (opts.opsRoot).
-  const entries = await list({ opsRoot: input.opsRoot ?? opts?.opsRoot });
+  const opsRoot = input.opsRoot ?? opts?.opsRoot;
+  const entries = await list(opsRoot === undefined ? {} : { opsRoot });
   const entryByName = new Map(entries.map((entry) => [entry.name, entry]));
   // Variance adapter (kernel runner.ts OpRegistryView note): the view returns
   // OpRegistryEntry<never, never> — the bottom instantiation — while the

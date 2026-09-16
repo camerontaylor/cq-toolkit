@@ -187,7 +187,15 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
-import type { Driver, ModelSpec, OpInvocation, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
+import type {
+  Driver,
+  ModelSpec,
+  OpInvocation,
+  ToolDenial,
+  ToolPolicy,
+  Usage,
+  WorkerResult,
+} from '../types.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
 import { spawnManaged, terminateGracefully } from './process.js';
@@ -271,11 +279,14 @@ export class SubprocessDriver implements Driver {
   private readonly killGraceMs: number | undefined;
   private readonly sessionsDir: string | undefined;
   private readonly harnessConfig: HarnessConfig;
-  private readonly pricingOverride: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined;
+  private readonly pricingOverride:
+    | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
+    | undefined;
   private readonly spawnImpl: SpawnFn;
 
   constructor(options: SubprocessDriverOptions = {}) {
-    this.binary = typeof options.binary === 'string' ? [options.binary] : options.binary ?? ['claude'];
+    this.binary =
+      typeof options.binary === 'string' ? [options.binary] : (options.binary ?? ['claude']);
     // An empty binary template cannot spawn anything — invalid argv would
     // only explode at spawn time (post-dispatch). Validate HERE, loudly.
     if (this.binary.length === 0 || this.binary.some((part) => part === '')) {
@@ -289,7 +300,9 @@ export class SubprocessDriver implements Driver {
     // structured_output is validated against it post-settle (below).
     this.outputSchema = options.outputSchema;
     this.outputJsonSchema =
-      options.outputSchema === undefined ? undefined : JSON.stringify(z.toJSONSchema(options.outputSchema));
+      options.outputSchema === undefined
+        ? undefined
+        : JSON.stringify(z.toJSONSchema(options.outputSchema));
     // An invalid table throws HERE (construction is the closest thing to
     // compile time a data table has) — never silently at route time.
     this.routingTable = RoutingTableSchema.parse(options.routingTable ?? defaultRoutingTable());
@@ -320,7 +333,10 @@ export class SubprocessDriver implements Driver {
     // spawned and (except routing/key checks) before any session exists.
     const route = routeFor(modelSpec, this.routingTable); // unknown provider/model → the footgun throw
     const childEnv = this.resolveChildEnv(route); // missing key env → throw
-    if (budget.maxTokens !== undefined && (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)) {
+    if (
+      budget.maxTokens !== undefined &&
+      (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
+    ) {
       throw new Error(
         `subprocess driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
@@ -338,7 +354,9 @@ export class SubprocessDriver implements Driver {
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
     // --- Tool surface: harness names ∩ per-op ToolPolicy → --allowedTools.
-    const harnessNames = buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map((t) => t.name);
+    const harnessNames = buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map(
+      (t) => t.name,
+    );
     const allowed = allowedToolNames(harnessNames, toolPolicy);
 
     // --- Trust statement (header): sandboxPolicy names the tool surface ---
@@ -364,7 +382,12 @@ export class SubprocessDriver implements Driver {
     const governed = currentJobContext();
     const signal = governed?.signal;
     if (signal?.aborted === true) {
-      return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
 
     // --- The one spawn. From here on, run() NEVER throws past the seam —
@@ -394,7 +417,10 @@ export class SubprocessDriver implements Driver {
           role: 'tool',
           toolName: NARRATION_TOOL,
           content: JSON.stringify([
-            JSON.stringify({ cq: 'spawn-failed', error: err instanceof Error ? err.message : String(err) }),
+            JSON.stringify({
+              cq: 'spawn-failed',
+              error: err instanceof Error ? err.message : String(err),
+            }),
           ]),
           at: nowIso(),
         });
@@ -460,7 +486,11 @@ export class SubprocessDriver implements Driver {
     // fails is dropped and its rejection recorded as narration, never
     // trusted (the ai-sdk lane gets the same guarantee from Output.object).
     const rawStructured = observation.result?.['structured_output'];
-    if (this.outputSchema !== undefined && observation.result !== undefined && rawStructured !== undefined) {
+    if (
+      this.outputSchema !== undefined &&
+      observation.result !== undefined &&
+      rawStructured !== undefined
+    ) {
       const check = this.outputSchema.safeParse(rawStructured);
       if (check.success) {
         observation.result['structured_output'] = check.data;
@@ -483,7 +513,11 @@ export class SubprocessDriver implements Driver {
     // runs record the mismatch and price off the served id (below).
     if (observation.servedModel !== undefined && observation.servedModel !== modelSpec.model) {
       observation.narration.push(
-        JSON.stringify({ cq: 'served-model-mismatch', requested: modelSpec.model, served: observation.servedModel }),
+        JSON.stringify({
+          cq: 'served-model-mismatch',
+          requested: modelSpec.model,
+          served: observation.servedModel,
+        }),
       );
     }
 
@@ -537,7 +571,8 @@ export class SubprocessDriver implements Driver {
     sessionId: string,
     aborted: boolean,
   ): WorkerResult {
-    const measured = observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
+    const measured =
+      observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const structured =
       observation.result === undefined ? undefined : observation.result.structured_output;
@@ -612,7 +647,9 @@ function defaultSessionsDir(): string {
 async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
   const record = await store.load(sessionRef);
   if (record === undefined) {
-    throw new Error(`subprocess driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`);
+    throw new Error(
+      `subprocess driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
+    );
   }
   return record;
 }
@@ -622,7 +659,10 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
  * 'unrestricted' → the whole harness surface; 'allowlist' (the default
  * reading when mode is omitted) → harness names in `allow` only.
  */
-export function allowedToolNames(harnessToolNames: readonly string[], policy: ToolPolicy): string[] {
+export function allowedToolNames(
+  harnessToolNames: readonly string[],
+  policy: ToolPolicy,
+): string[] {
   const mode = policy.mode ?? 'allowlist';
   if (mode === 'none') return [];
   if (mode === 'unrestricted') return [...harnessToolNames];
@@ -652,7 +692,8 @@ export interface ArgBuildInputs {
 export function buildArgs(inputs: ArgBuildInputs): string[] {
   const args: string[] = [
     '-p', // headless print mode; the prompt rides stdin
-    '--output-format', 'stream-json',
+    '--output-format',
+    'stream-json',
     // The real CLI refuses `-p --output-format stream-json` without
     // --verbose (found live against CLI 2.1.270, T1.6 slice 4) — always
     // emitted so stream-json parses on every lane.
@@ -946,7 +987,10 @@ async function persistObservation(
  * unreadable → undefined (an honest workspace-only continuation, never a
  * fabricated resume).
  */
-async function readCliSessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
+async function readCliSessionId(
+  sessionsDir: string,
+  sessionId: string,
+): Promise<string | undefined> {
   try {
     const raw = await readFile(join(sessionsDir, `${sessionId}${CLI_SESSION_FILE}`), 'utf8');
     const trimmed = raw.trim();
@@ -1002,7 +1046,8 @@ export interface StopReasonInputs {
 /** THE mapping (checked in order): aborted → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
-  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
+  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
+    return 'budget';
   if (inputs.resultStatus !== 'success') return 'error';
   return 'complete';
 }

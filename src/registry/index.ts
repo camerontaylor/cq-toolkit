@@ -152,8 +152,7 @@ function isAbsentFamilyRegistry(err: unknown, target: string): boolean {
   const targets = decodedPath === undefined ? [target] : [target, decodedPath];
   return targets.some(
     (candidate) =>
-      (code === 'ERR_MODULE_NOT_FOUND' &&
-        message.includes(`Cannot find module '${candidate}'`)) ||
+      (code === 'ERR_MODULE_NOT_FOUND' && message.includes(`Cannot find module '${candidate}'`)) ||
       message.includes(`Could not resolve "${candidate}"`),
   );
 }
@@ -190,8 +189,9 @@ function unwrapToObjectSchema(schema: unknown): unknown {
 function hasCatchWrapper(schema: unknown): boolean {
   let current = schema;
   for (let depth = 0; depth < 10; depth++) {
-    const def = (current as { def?: { type?: unknown; innerType?: unknown; in?: unknown } } | undefined)
-      ?.def;
+    const def = (
+      current as { def?: { type?: unknown; innerType?: unknown; in?: unknown } } | undefined
+    )?.def;
     if (def === undefined) return false;
     if (def.type === 'catch') return true;
     const inner = def.innerType ?? def.in;
@@ -343,7 +343,7 @@ async function scanOps(
       if (hasCatchWrapper(e.inputSchema)) {
         throw new Error(
           `op family '${family}': op '${e.name}' input schema wraps its object in .catch() — ` +
-            'the fallback would swallow the unknown-key rejection the .strict() convention exists to enforce (a typo\'d flag must exit 2, not reach the op as fallback data)',
+            "the fallback would swallow the unknown-key rejection the .strict() convention exists to enforce (a typo'd flag must exit 2, not reach the op as fallback data)",
         );
       }
       const shape = (unwrapped as { shape?: unknown }).shape;
@@ -372,8 +372,9 @@ async function scanOps(
         // through transforms (the object sits on a pipe's OUT side) and
         // non-object schemas (string, array, record, union) expose no
         // `shape` — there is nothing to judge.
-        const def = (unwrapped as { def?: { type?: unknown; catchall?: { def?: { type?: unknown } } } })
-          .def;
+        const def = (
+          unwrapped as { def?: { type?: unknown; catchall?: { def?: { type?: unknown } } } }
+        ).def;
         if (def?.type === 'object') {
           const catchallType = def.catchall?.def?.type;
           if (catchallType !== 'never') {

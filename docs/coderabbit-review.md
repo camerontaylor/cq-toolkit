@@ -50,12 +50,12 @@ any selected component fails the scan.
 
 ## 2. Scope: what a review sees
 
-| Command | Files reviewed |
-| --- | --- |
-| `coderabbit review` | Tracked changes: committed + staged (staged new files included) + unstaged tracked edits |
-| `coderabbit review --committed` | Committed changes only |
-| `coderabbit review --uncommitted` | Staged + unstaged tracked edits |
-| `coderabbit review --include-untracked` | Default scope plus non-ignored untracked files |
+| Command                                 | Files reviewed                                                                           |
+| --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `coderabbit review`                     | Tracked changes: committed + staged (staged new files included) + unstaged tracked edits |
+| `coderabbit review --committed`         | Committed changes only                                                                   |
+| `coderabbit review --uncommitted`       | Staged + unstaged tracked edits                                                          |
+| `coderabbit review --include-untracked` | Default scope plus non-ignored untracked files                                           |
 
 `--committed` and `--uncommitted` conflict and are rejected before a review
 starts. `--include-untracked` combines with `--uncommitted` or works alone
@@ -124,7 +124,7 @@ never block indefinitely, never treat a long silence as completion.
 
 Deterministic gates run THREE times — before cycle 1 (green baseline), after
 cycle-1 addressing and BEFORE cycle 2, and after cycle-2 addressing:
-`node scripts/ratchet-typecheck.mjs`, `npm run lint`, `npm run test`, and
+`npm run check:static`, `npm run format:check`, `npm run test`, `npm run knip`, and
 the three whitespace/conflict-marker checks below. Use the immutable `BASE`
 from §3 and stage your own new files before these checks so they are covered:
 
@@ -193,9 +193,10 @@ table: <https://docs.coderabbit.ai/management/plans#rate-limits>.
 The third gate run (§5, after cycle-2 addressing) is the final one; record
 its actual exits in the PR body:
 
-- `node scripts/ratchet-typecheck.mjs`
-- `npm run lint`
+- `npm run check:static`
+- `npm run format:check`
 - `npm run test`
+- `npm run knip`
 - `git diff --check "$BASE" HEAD` (committed PR changes)
 - `git diff --check --cached` (staged changes)
 - `git diff --check` (unstaged tracked changes)

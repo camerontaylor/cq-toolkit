@@ -73,17 +73,18 @@ describe('HackDetectorInputSchema (full input, and only it)', () => {
       }).success,
     ).toBe(false);
     expect(
-      HackDetectorInputSchema.safeParse({ diff: '', tamper: { detectDeletedTests: 'yes' } }).success,
+      HackDetectorInputSchema.safeParse({ diff: '', tamper: { detectDeletedTests: 'yes' } })
+        .success,
     ).toBe(false);
   });
 
   test('rejects empty regex-source strings (an empty pattern matches everything vacuously)', () => {
-    expect(HackDetectorInputSchema.safeParse({ diff: '', tamper: { skipOnlyPattern: '' } }).success).toBe(
-      false,
-    );
-    expect(HackDetectorInputSchema.safeParse({ diff: '', tamper: { testFilePatterns: [''] } }).success).toBe(
-      false,
-    );
+    expect(
+      HackDetectorInputSchema.safeParse({ diff: '', tamper: { skipOnlyPattern: '' } }).success,
+    ).toBe(false);
+    expect(
+      HackDetectorInputSchema.safeParse({ diff: '', tamper: { testFilePatterns: [''] } }).success,
+    ).toBe(false);
   });
 });
 
@@ -110,7 +111,8 @@ describe('CommitGateInputSchema (full input, and only it)', () => {
   test('rejects unknown keys at the top level, in config, in rules, and in implications', () => {
     expect(CommitGateInputSchema.safeParse({ ...VALID, verdict: 'ok' }).success).toBe(false);
     expect(
-      CommitGateInputSchema.safeParse({ ...VALID, config: { ...VALID.config, cache: true } }).success,
+      CommitGateInputSchema.safeParse({ ...VALID, config: { ...VALID.config, cache: true } })
+        .success,
     ).toBe(false);
     expect(
       CommitGateInputSchema.safeParse({
@@ -236,7 +238,8 @@ describe('the C3 importers resolve to working pure ops', () => {
     }
     const op = await entry.importer();
     const passing = await op({
-      message: 'fix(test): cache eviction kept stale entries\n\nConfidence: 0.9\nTested: vitest\nOutcome: broken-test',
+      message:
+        'fix(test): cache eviction kept stale entries\n\nConfidence: 0.9\nTested: vitest\nOutcome: broken-test',
     });
     expect(passing).toEqual({ status: 'ok', value: { ok: true, violations: [] } });
     const failing = await op({ message: 'updated stuff' });

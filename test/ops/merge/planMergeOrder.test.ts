@@ -82,7 +82,10 @@ const ELIGIBLE: PrClassification = {
 
 /** A classification with a specific verdict/reason (thread count is not the
  * planner's business — any value plans identically). */
-const classified = (verdict: PrClassification['verdict'], reason: PrClassification['reason']): PrClassification => ({
+const classified = (
+  verdict: PrClassification['verdict'],
+  reason: PrClassification['reason'],
+): PrClassification => ({
   verdict,
   reason,
   unresolvedExternalThreads: 0,
@@ -134,7 +137,7 @@ describe('planMergeOrder — the order (roots first, parents before children)', 
     expect(result.needsHuman).toEqual([]);
   });
 
-  test('two roots with descendants: ALL roots first (PR-number order), then each root\'s subtree depth-first', () => {
+  test("two roots with descendants: ALL roots first (PR-number order), then each root's subtree depth-first", () => {
     const result = plan('main', [
       planned(2, 'main', 'r2'),
       planned(1, 'main', 'r1'),
@@ -208,9 +211,7 @@ describe('planMergeOrder — fail-closed gates (nothing merges uninvited)', () =
   });
 
   test('an unclassified PR is never ordered: needs-human, unclassified', () => {
-    const result = plan('main', [
-      planned(6, 'main', 'never-classified', { classification: null }),
-    ]);
+    const result = plan('main', [planned(6, 'main', 'never-classified', { classification: null })]);
     expect(result.order).toEqual([]);
     expect(result.needsHuman).toEqual([{ pr: 6, reason: 'unclassified' }]);
   });
@@ -547,7 +548,7 @@ describe('planMergeOrder — deterministic', () => {
   });
 
   test('duplicate rows contribute no stack edge: swapping the two equal-pr rows cannot flip the plan', () => {
-    const rows = [
+    const rows: [PlannedPr, PlannedPr, PlannedPr, PlannedPr, PlannedPr] = [
       planned(1, 'main', 'x'), // root
       planned(5, 'r9', 'q'), // dup row A: base is pr 9's head
       planned(5, 'x', 'q'), // dup row B: base is pr 1's head — pre-fix, the

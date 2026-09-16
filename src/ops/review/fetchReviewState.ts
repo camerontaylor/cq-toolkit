@@ -215,7 +215,12 @@ interface RawRestReview {
 }
 
 /** Review verdicts the shared vocabulary carries; anything else → null. */
-const REVIEW_STATES: readonly string[] = ['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED'];
+const REVIEW_STATES: readonly string[] = [
+  'APPROVED',
+  'CHANGES_REQUESTED',
+  'COMMENTED',
+  'DISMISSED',
+];
 
 // Owner/repo spellings are validated by gh.ts's shared ghNameOk (GH_NAME_OK
 // charset + the dot-segment rule); this module keeps only its own
@@ -317,7 +322,13 @@ async function fetchRestComments(
   reason: string,
   truncatedBecause: string[],
 ): Promise<RestComment[]> {
-  const pages = await fetchRestPages<RawRestComment>(run, path, restPages, reason, truncatedBecause);
+  const pages = await fetchRestPages<RawRestComment>(
+    run,
+    path,
+    restPages,
+    reason,
+    truncatedBecause,
+  );
   return pages.flat().map(toRestComment);
 }
 
@@ -409,18 +420,26 @@ export async function fetchReviewState(
     // Server-side GraphQL errors arrive as a 200 body with a non-empty
     // errors array — fail closed carrying the server's messages.
     if (payload.errors !== undefined && payload.errors.length > 0) {
-      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
+      const messages = payload.errors
+        .map((error) => error.message ?? JSON.stringify(error))
+        .join('; ');
       throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
     }
     const pullRequest = payload.data?.repository?.pullRequest ?? null;
     if (pullRequest === null) {
-      throw new Error(`gh api graphql returned no pullRequest payload for ${input.owner}/${input.repo}#${input.pr}`);
+      throw new Error(
+        `gh api graphql returned no pullRequest payload for ${input.owner}/${input.repo}#${input.pr}`,
+      );
     }
     if (pullRequest.reviewThreads == null) {
-      throw new Error(`gh api graphql returned no reviewThreads collection for ${input.owner}/${input.repo}#${input.pr}`);
+      throw new Error(
+        `gh api graphql returned no reviewThreads collection for ${input.owner}/${input.repo}#${input.pr}`,
+      );
     }
     if (pullRequest.reviews == null) {
-      throw new Error(`gh api graphql returned no reviews collection for ${input.owner}/${input.repo}#${input.pr}`);
+      throw new Error(
+        `gh api graphql returned no reviews collection for ${input.owner}/${input.repo}#${input.pr}`,
+      );
     }
     const threadCollection = pullRequest.reviewThreads;
     const reviewCollection = pullRequest.reviews;
@@ -441,7 +460,11 @@ export async function fetchReviewState(
     // — no re-fetch accounting, no duplicate reasons.
     if (!threadsDone) {
       const threadPageInfo = threadCollection.pageInfo;
-      if (threadPageInfo.hasNextPage && page < threadPagesCap && threadPageInfo.endCursor !== null) {
+      if (
+        threadPageInfo.hasNextPage &&
+        page < threadPagesCap &&
+        threadPageInfo.endCursor !== null
+      ) {
         threadsCursor = threadPageInfo.endCursor;
       } else {
         if (threadPageInfo.hasNextPage) {
@@ -452,7 +475,11 @@ export async function fetchReviewState(
     }
     if (!reviewsDone) {
       const reviewPageInfo = reviewCollection.pageInfo;
-      if (reviewPageInfo.hasNextPage && page < reviewPagesCap && reviewPageInfo.endCursor !== null) {
+      if (
+        reviewPageInfo.hasNextPage &&
+        page < reviewPagesCap &&
+        reviewPageInfo.endCursor !== null
+      ) {
         reviewsCursor = reviewPageInfo.endCursor;
       } else {
         if (reviewPageInfo.hasNextPage) {

@@ -29,15 +29,15 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      # The typecheck gate IS this ratchet step: it runs the full
-      # `tsc6 --noEmit` over the whole repo config and then enforces the
-      # error-count baseline, so no separate Typecheck step is needed.
-      - name: Typecheck ratchet
-        run: node scripts/ratchet-typecheck.mjs
-      - name: Lint
-        run: npm run lint
+      # One compiler ratchet plus typed lint; aliases must not duplicate it.
+      - name: Static gate
+        run: npm run check:static
+      - name: Check formatting
+        run: npm run format:check
       - name: Test
         run: npm run test
+      - name: Check unused files and dependencies
+        run: npm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
       # emits dist/ and recompiles (checked emit, no --noCheck) — the
       # deliberate, boring-safe choice.
@@ -45,12 +45,10 @@ jobs:
         run: npm run build
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
-  # FROM SOURCE — the BUILT CLI drives a real governed plan: the smoke spawns
-  # `node dist/cli.js run-plan` (two jobs through the CLI's governed
-  # composition, the fixture ops family via --ops-root, the subprocess
-  # driver, and the fake agent CLI fixture) and asserts the report shape,
-  # the journal evidence, and the I1 output contract. A companion job, not a
-  # required check: REQUIRED_WORKFLOW_CHECKS
+  # FROM SOURCE — the built artifact drives a real governed plan (two jobs
+  # through the subprocess driver and the fake agent CLI fixture) and the
+  # script asserts the report shape, the journal evidence, and the I1 output
+  # contract. A companion job, not a required check: REQUIRED_WORKFLOW_CHECKS
   # in scripts/denylist-scan stays {denylist.yml: denylist, ci.yml: static,
   # ratchet.yml: ratchet} (review-debt #120: the enumeration was stale
   # before the ratchet became a required check),
@@ -71,8 +69,7 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      # The smoke spawns the BUILT CLI (`node dist/cli.js run-plan`) with the
-      # fixture ops family (test/fixtures/cli-smoke-ops) — emitting dist/
+      # The smoke imports the BUILT barrel (dist/index.js) — emitting dist/
       # is the from-source point, so build runs unconditionally here (the
       # static job's build above is its own job's emit gate).
       - name: Build

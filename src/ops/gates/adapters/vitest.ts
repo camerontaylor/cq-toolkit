@@ -43,7 +43,10 @@ function parseVitestJson(raw: RawCheckOutput): CheckParseResult {
   for (const suite of report.testResults) {
     const suiteRecord = asRecord(suite);
     if (suiteRecord === null) {
-      return { verdict: 'indeterminate', reason: 'vitest-json: testResults entry is not an object' };
+      return {
+        verdict: 'indeterminate',
+        reason: 'vitest-json: testResults entry is not an object',
+      };
     }
     const file = typeof suiteRecord.name === 'string' ? suiteRecord.name : null;
     if (!Array.isArray(suiteRecord.assertionResults)) {

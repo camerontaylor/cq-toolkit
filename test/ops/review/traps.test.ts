@@ -38,9 +38,15 @@ import { makeGhRunner } from '../../../src/ops/review/gh.js';
 import type { GhFn } from '../../../src/ops/review/gh.js';
 
 const FAKE_GH = fileURLToPath(new URL('../../fixtures/gh/fake-gh.mjs', import.meta.url));
-const SCENARIO = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-traps.json', import.meta.url));
-const LAG_SCENARIO = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-lag.json', import.meta.url));
-const LAG_GRAPHQL_SNAPSHOT = fileURLToPath(new URL('../../fixtures/gh/scenarios/e1-lag-graphql.json', import.meta.url));
+const SCENARIO = fileURLToPath(
+  new URL('../../fixtures/gh/scenarios/e1-traps.json', import.meta.url),
+);
+const LAG_SCENARIO = fileURLToPath(
+  new URL('../../fixtures/gh/scenarios/e1-lag.json', import.meta.url),
+);
+const LAG_GRAPHQL_SNAPSHOT = fileURLToPath(
+  new URL('../../fixtures/gh/scenarios/e1-lag-graphql.json', import.meta.url),
+);
 const INPUT: FetchReviewStateInput = { owner: 'octo', repo: 'toolkit', pr: 7 };
 
 // ---------------------------------------------------------------------------
@@ -53,7 +59,10 @@ afterEach(async () => {
 });
 
 /** A runner wired to the fake gh + a scenario, logging every call. */
-const harness = async (label: string, scenario: string = SCENARIO): Promise<{ run: GhFn; logPath: string }> => {
+const harness = async (
+  label: string,
+  scenario: string = SCENARIO,
+): Promise<{ run: GhFn; logPath: string }> => {
   const dir = await mkdtemp(join(tmpdir(), `cq-e1-${label}-`));
   tempDirs.push(dir);
   const logPath = join(dir, 'calls.jsonl');
@@ -110,7 +119,9 @@ describe('trap: REST silent pagination loss', () => {
     // one flat array (v2.100.0 paginatedArrayReader); --slurp keeps pages.
     const merged = await run(['api', path, '--paginate']);
     expect(JSON.parse(merged.stdout)).toHaveLength(31);
-    const slurped = JSON.parse((await run(['api', path, '--paginate', '--slurp'])).stdout) as unknown[][];
+    const slurped = JSON.parse(
+      (await run(['api', path, '--paginate', '--slurp'])).stdout,
+    ) as unknown[][];
     expect(slurped).toHaveLength(2);
     expect(slurped[0]).toHaveLength(20);
     expect(slurped[1]).toHaveLength(11);
@@ -122,7 +133,9 @@ describe('trap: REST silent pagination loss', () => {
     expect(state.restReviewComments).toHaveLength(31);
     expect(state.truncated).toBe(false);
     // The REST calls really paginated: --paginate --slurp at per_page=100.
-    const restCalls = (await readLog(logPath)).filter((args) => args.some((a) => a.startsWith('repos/')));
+    const restCalls = (await readLog(logPath)).filter((args) =>
+      args.some((a) => a.startsWith('repos/')),
+    );
     expect(restCalls).toHaveLength(3); // pulls comments + issue comments + reviews
     for (const call of restCalls) {
       expect(call).toContain('--paginate');
@@ -150,7 +163,12 @@ describe('trap: GraphQL query variable collision', () => {
     // Server-side modeling: a doc declaring `$query` yields GitHub's GraphQL
     // validation-errors body in a 200 response — the caller must check
     // payload.errors, never rely on a nonzero exit.
-    const declared = await run(['api', 'graphql', '-f', 'query=query ($query: String) { viewer { login } }']);
+    const declared = await run([
+      'api',
+      'graphql',
+      '-f',
+      'query=query ($query: String) { viewer { login } }',
+    ]);
     expect(declared.code).toBe(0);
     const payload = JSON.parse(declared.stdout) as { errors?: Array<{ message?: string }> };
     expect(payload.errors?.[0]?.message).toMatch(/\$query/);
@@ -218,15 +236,26 @@ describe('trap: GraphQL query variable collision', () => {
 describe('trap: replies endpoint 404', () => {
   test('trap fires: a GET /replies invocation exits 1 with gh 404 stderr (a POST routes normally)', async () => {
     const { run } = await harness('replies-without');
-    const get = await run(['api', '--method', 'GET', 'repos/octo/toolkit/pulls/7/comments/101/replies']);
+    const get = await run([
+      'api',
+      '--method',
+      'GET',
+      'repos/octo/toolkit/pulls/7/comments/101/replies',
+    ]);
     expect(get.code).toBe(1);
-    expect(get.stderr).toContain('gh: Not Found (HTTP 404) - no GET/list replies endpoint for review comments');
+    expect(get.stderr).toContain(
+      'gh: Not Found (HTTP 404) - no GET/list replies endpoint for review comments',
+    );
     expect(get.stderr).toContain('in_reply_to_id');
     // A POST is how replies are CREATED — it bypasses the 404 builtin and
     // routes like any other call (the URL carries the pulls-comments route
     // substring, so it gets that route's payload); the point is the 404
     // never fires for a POST.
-    const post = await run(['api', '--method=POST', 'repos/octo/toolkit/pulls/7/comments/101/replies']);
+    const post = await run([
+      'api',
+      '--method=POST',
+      'repos/octo/toolkit/pulls/7/comments/101/replies',
+    ]);
     expect(post.code).toBe(0);
     expect(post.stderr).not.toMatch(/404/);
   }, 20_000);
@@ -273,7 +302,9 @@ describe('trap: reviewThreads lag', () => {
     expect(state.threads.map((thread) => thread.rootDatabaseId)).toEqual([300]);
     // The plain lag case — a fresh reply on a KNOWN thread — attaches fine.
     const known = state.threads.find((thread) => thread.id === 'PRRT_kwDOClag1');
-    expect(known?.replies.map((reply) => reply.body)).toEqual(['fresh responder reply on the KNOWN thread']);
+    expect(known?.replies.map((reply) => reply.body)).toEqual([
+      'fresh responder reply on the KNOWN thread',
+    ]);
     // And BOTH lag flavors truncate the result fail-closed, in stable order:
     // the scenario also carries a fresh REST-only review (node_id absent
     // from the GraphQL snapshot).

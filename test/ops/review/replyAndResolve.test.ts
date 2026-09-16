@@ -45,7 +45,12 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileDispatchLog, replyAndResolve } from '../../../src/ops/review/replyAndResolve.js';
-import type { DispatchLog, DispatchRecord, ReplyAndResolveOpts, ReviewAction } from '../../../src/ops/review/replyAndResolve.js';
+import type {
+  DispatchLog,
+  DispatchRecord,
+  ReplyAndResolveOpts,
+  ReviewAction,
+} from '../../../src/ops/review/replyAndResolve.js';
 import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
 
 // ---------------------------------------------------------------------------
@@ -55,7 +60,11 @@ import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
 const NOW = 1_750_000_000_000;
 const REPO = { owner: 'octo', repo: 'widget', pr: 7 } as const;
 
-const mkReply = (actionId: string, threadRootRestId: number, body = `fixed in head — see root ${threadRootRestId}`): ReviewAction => ({
+const mkReply = (
+  actionId: string,
+  threadRootRestId: number,
+  body = `fixed in head — see root ${threadRootRestId}`,
+): ReviewAction => ({
   kind: 'review_reply',
   actionId,
   threadRootRestId,
@@ -112,7 +121,11 @@ const recordingGh = (
     if (args.includes('graphql')) {
       return {
         code: 0,
-        stdout: JSON.stringify({ data: { resolveReviewThread: { thread: { id: flagValue(args, 'threadId'), isResolved: true } } } }),
+        stdout: JSON.stringify({
+          data: {
+            resolveReviewThread: { thread: { id: flagValue(args, 'threadId'), isResolved: true } },
+          },
+        }),
         stderr: '',
       };
     }
@@ -121,7 +134,10 @@ const recordingGh = (
 };
 
 /** An in-memory DispatchLog; optionally mirrors records into the event stream. */
-const memLog = (initial: DispatchRecord[] = [], events?: string[]): DispatchLog & { records: DispatchRecord[] } => {
+const memLog = (
+  initial: DispatchRecord[] = [],
+  events?: string[],
+): DispatchLog & { records: DispatchRecord[] } => {
   const records = [...initial];
   return {
     records,
@@ -147,10 +163,12 @@ const baseOpts = (
 });
 
 /** A push runner resolving with `code` (records its argv). */
-const pushRun = (calls: string[][], code = 0): GhFn => async (args: string[]) => {
-  calls.push(args);
-  return { code, stdout: '', stderr: code === 0 ? '' : 'fatal: unable to access' };
-};
+const pushRun =
+  (calls: string[][], code = 0): GhFn =>
+  async (args: string[]) => {
+    calls.push(args);
+    return { code, stdout: '', stderr: code === 0 ? '' : 'fatal: unable to access' };
+  };
 
 // ---------------------------------------------------------------------------
 // a. PUSH-BEFORE-POST ORDERING (no rollback)
@@ -162,7 +180,10 @@ describe('push-before-post', () => {
     const pushCalls: string[][] = [];
     const result = await replyAndResolve(
       [mkReply('r1', 1201), mkIssue('i1'), mkResolve('s1', 'PRRT_1')],
-      baseOpts(recordingGh(calls), memLog(), { run: pushRun(pushCalls, 1), args: ['push', 'origin', 'refs/heads/branch'] }),
+      baseOpts(recordingGh(calls), memLog(), {
+        run: pushRun(pushCalls, 1),
+        args: ['push', 'origin', 'refs/heads/branch'],
+      }),
     );
     expect(result.pushed).toBe(false);
     expect(result.posted).toEqual([]);
@@ -187,7 +208,10 @@ describe('push-before-post', () => {
     };
     const result = await replyAndResolve(
       [mkReply('r1', 1201)],
-      baseOpts(recordingGh(calls), memLog(), { run: throwingPush, args: ['push', 'origin', 'main'] }),
+      baseOpts(recordingGh(calls), memLog(), {
+        run: throwingPush,
+        args: ['push', 'origin', 'main'],
+      }),
     );
     expect(result.pushed).toBe(false);
     expect(result.posted).toEqual([]);
@@ -233,7 +257,13 @@ describe('reply-before-resolve ordering and record-before-next', () => {
     const calls: GhCall[] = [];
     const log = memLog([], events);
     const result = await replyAndResolve(
-      [mkReply('r1', 1201), mkIssue('i1'), mkReply('r2', 1202), mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')],
+      [
+        mkReply('r1', 1201),
+        mkIssue('i1'),
+        mkReply('r2', 1202),
+        mkResolve('s1', 'PRRT_1'),
+        mkResolve('s2', 'PRRT_2'),
+      ],
       baseOpts(recordingGh(calls, events), log),
     );
     expect(result.pushed).toBe(true);
@@ -304,7 +334,12 @@ describe('dedupe via the dispatch log', () => {
 
 describe('crash replay — reply recorded at post time, resolve retried', () => {
   test('run 1 fails on the resolve; the re-run with the SAME actions posts NO duplicate replies and retries only the resolves', async () => {
-    const actions: ReviewAction[] = [mkReply('r1', 1201), mkReply('r2', 1202), mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')];
+    const actions: ReviewAction[] = [
+      mkReply('r1', 1201),
+      mkReply('r2', 1202),
+      mkResolve('s1', 'PRRT_1'),
+      mkResolve('s2', 'PRRT_2'),
+    ];
 
     // Run 1: the gh seam returns nonzero for the resolve mutation ONLY.
     const calls1: GhCall[] = [];
@@ -313,7 +348,9 @@ describe('crash replay — reply recorded at post time, resolve retried', () => 
       actions,
       baseOpts(
         recordingGh(calls1, undefined, (label) =>
-          label.startsWith('resolve:') ? { code: 1, stdout: '', stderr: 'gh: GraphQL: internal error' } : undefined,
+          label.startsWith('resolve:')
+            ? { code: 1, stdout: '', stderr: 'gh: GraphQL: internal error' }
+            : undefined,
         ),
         log,
       ),
@@ -349,7 +386,11 @@ describe('per-action failure isolation', () => {
     const result = await replyAndResolve(
       [mkReply('r1', 1201), mkResolve('res1', 'PRRT_kwA')],
       baseOpts(
-        recordingGh(calls, undefined, (label) => (label === 'reply:1201' ? { code: 1, stdout: '', stderr: 'gh: comment rejected' } : undefined)),
+        recordingGh(calls, undefined, (label) =>
+          label === 'reply:1201'
+            ? { code: 1, stdout: '', stderr: 'gh: comment rejected' }
+            : undefined,
+        ),
         log,
       ),
     );
@@ -383,7 +424,11 @@ describe('per-action failure isolation', () => {
     const result = await replyAndResolve(
       [mkReply('r1', 1201), mkReply('rmid', 1202), mkIssue('i1')],
       baseOpts(
-        recordingGh(calls, undefined, (label) => (label === 'reply:1202' ? { code: 1, stdout: '', stderr: 'gh: comment payload rejected' } : undefined)),
+        recordingGh(calls, undefined, (label) =>
+          label === 'reply:1202'
+            ? { code: 1, stdout: '', stderr: 'gh: comment payload rejected' }
+            : undefined,
+        ),
         log,
       ),
     );
@@ -408,12 +453,17 @@ describe('per-action failure isolation', () => {
       [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1'), mkResolve('s2', 'PRRT_2')],
       baseOpts(
         recordingGh(calls, undefined, (label) => {
-          if (label === 'resolve:PRRT_1') return { code: 4, stdout: '', stderr: 'gh: mutation conflicted' };
+          if (label === 'resolve:PRRT_1')
+            return { code: 4, stdout: '', stderr: 'gh: mutation conflicted' };
           if (label === 'resolve:PRRT_2') {
             // A 200 whose body carries server-side GraphQL errors OTHER
             // than the idempotent already-resolved case — the mutation did
             // NOT land; a safe retry.
-            return { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Bad credentials' }] }), stderr: '' };
+            return {
+              code: 0,
+              stdout: JSON.stringify({ errors: [{ message: 'Bad credentials' }] }),
+              stderr: '',
+            };
           }
           return undefined;
         }),
@@ -440,7 +490,11 @@ describe('per-action failure isolation', () => {
             // The mutation's effects are already in place (a prior run's
             // mutation landed, its record did not — the crash window);
             // GitHub answers with this GraphQL error.
-            return { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved.' }] }), stderr: '' };
+            return {
+              code: 0,
+              stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved.' }] }),
+              stderr: '',
+            };
           }
           return undefined;
         }),
@@ -452,8 +506,13 @@ describe('per-action failure isolation', () => {
     expect(result.skippedAlreadyResolved).toBe(1);
     // Recorded exactly like a landed success — resultRef is the thread id.
     expect(result.posted.map((r) => r.actionId)).toEqual(['r1', 's1']);
-    expect(result.posted[1]).toEqual({ actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW });
-    expect((await log.load())).toEqual([
+    expect(result.posted[1]).toEqual({
+      actionId: 's1',
+      kind: 'resolve_thread',
+      resultRef: 'PRRT_1',
+      at: NOW,
+    });
+    expect(await log.load()).toEqual([
       { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
       { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
     ]);
@@ -472,7 +531,10 @@ describe('per-action failure isolation', () => {
             ? {
                 code: 0,
                 stdout: JSON.stringify({
-                  errors: [{ message: 'Thread is already resolved' }, { message: 'Bad credentials' }],
+                  errors: [
+                    { message: 'Thread is already resolved' },
+                    { message: 'Bad credentials' },
+                  ],
                 }),
                 stderr: '',
               }
@@ -487,7 +549,9 @@ describe('per-action failure isolation', () => {
     expect(result.skippedAlreadyResolved).toBe(0);
     expect(result.failed).toHaveLength(1);
     expect(result.failed[0]?.action.actionId).toBe('s1');
-    expect(result.failed[0]?.error).toContain('GraphQL errors: Thread is already resolved; Bad credentials');
+    expect(result.failed[0]?.error).toContain(
+      'GraphQL errors: Thread is already resolved; Bad credentials',
+    );
     expect((await log.load()).map((r) => r.actionId)).toEqual(['r1']);
   });
 
@@ -503,7 +567,11 @@ describe('per-action failure isolation', () => {
       baseOpts(
         recordingGh(calls1, undefined, (label) =>
           label === 'resolve:PRRT_1'
-            ? { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved' }] }), stderr: '' }
+            ? {
+                code: 0,
+                stdout: JSON.stringify({ errors: [{ message: 'Thread is already resolved' }] }),
+                stderr: '',
+              }
             : undefined,
         ),
         log,
@@ -527,7 +595,7 @@ describe('per-action failure isolation', () => {
     expect(calls1.filter((c) => c.label === 'resolve:PRRT_1')).toHaveLength(1);
     expect(calls2.filter((c) => c.label === 'resolve:PRRT_1')).toHaveLength(0);
     // No duplicate anything: one record per action, period.
-    expect((await log.load())).toHaveLength(2);
+    expect(await log.load()).toHaveLength(2);
   });
 });
 
@@ -543,7 +611,9 @@ describe('non-conforming gh outcomes', () => {
       [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
       baseOpts(
         recordingGh(calls, undefined, (label) =>
-          label === 'resolve:PRRT_1' ? { code: 0, stdout: 'gh: rendered an error page, not JSON', stderr: '' } : undefined,
+          label === 'resolve:PRRT_1'
+            ? { code: 0, stdout: 'gh: rendered an error page, not JSON', stderr: '' }
+            : undefined,
         ),
         log,
       ),
@@ -555,35 +625,47 @@ describe('non-conforming gh outcomes', () => {
     expect(result.failed[0]?.error).toContain('non-JSON');
     // NOT recorded — the next run retries it (recording an unknown outcome
     // could swallow a mutation that never landed).
-    expect(await log.load()).toEqual([{ actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW }]);
+    expect(await log.load()).toEqual([
+      { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+    ]);
   });
 
   test.each([
     ['an EMPTY response object', {}],
     ['a null data payload', { data: null }],
-    ['an isResolved:false thread', { data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: false } } } }],
+    [
+      'an isResolved:false thread',
+      { data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: false } } } },
+    ],
     ['a response with no thread', { data: { resolveReviewThread: {} } }],
-  ])('a resolve confirmed by NOTHING (%s) → failed with "resolve mutation did not land", unrecorded', async (_label, stdoutBody) => {
-    const calls: GhCall[] = [];
-    const log = memLog();
-    const result = await replyAndResolve(
-      [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
-      baseOpts(
-        recordingGh(calls, undefined, (label) =>
-          label === 'resolve:PRRT_1' ? { code: 0, stdout: JSON.stringify(stdoutBody), stderr: '' } : undefined,
+  ])(
+    'a resolve confirmed by NOTHING (%s) → failed with "resolve mutation did not land", unrecorded',
+    async (_label, stdoutBody) => {
+      const calls: GhCall[] = [];
+      const log = memLog();
+      const result = await replyAndResolve(
+        [mkReply('r1', 1201), mkResolve('s1', 'PRRT_1')],
+        baseOpts(
+          recordingGh(calls, undefined, (label) =>
+            label === 'resolve:PRRT_1'
+              ? { code: 0, stdout: JSON.stringify(stdoutBody), stderr: '' }
+              : undefined,
+          ),
+          log,
         ),
-        log,
-      ),
-    );
-    // Exit 0 + no errors is not proof: the response must CONFIRM the
-    // resolve. The reply sibling was unaffected.
-    expect(result.posted.map((r) => r.actionId)).toEqual(['r1']);
-    expect(result.failed).toHaveLength(1);
-    expect(result.failed[0]?.action.actionId).toBe('s1');
-    expect(result.failed[0]?.error).toContain('resolve mutation did not land');
-    // NOT recorded — the next run retries it.
-    expect(await log.load()).toEqual([{ actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW }]);
-  });
+      );
+      // Exit 0 + no errors is not proof: the response must CONFIRM the
+      // resolve. The reply sibling was unaffected.
+      expect(result.posted.map((r) => r.actionId)).toEqual(['r1']);
+      expect(result.failed).toHaveLength(1);
+      expect(result.failed[0]?.action.actionId).toBe('s1');
+      expect(result.failed[0]?.error).toContain('resolve mutation did not land');
+      // NOT recorded — the next run retries it.
+      expect(await log.load()).toEqual([
+        { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW },
+      ]);
+    },
+  );
 
   test('a resolve the response CONFIRMS (isResolved true) is recorded exactly like a landed success', async () => {
     const calls: GhCall[] = [];
@@ -593,15 +675,25 @@ describe('non-conforming gh outcomes', () => {
       baseOpts(
         recordingGh(calls, undefined, (label) =>
           label === 'resolve:PRRT_1'
-            ? { code: 0, stdout: JSON.stringify({ data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: true } } } }), stderr: '' }
+            ? {
+                code: 0,
+                stdout: JSON.stringify({
+                  data: { resolveReviewThread: { thread: { id: 'PRRT_1', isResolved: true } } },
+                }),
+                stderr: '',
+              }
             : undefined,
         ),
         log,
       ),
     );
     expect(result.failed).toEqual([]);
-    expect(result.posted).toEqual([{ actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW }]);
-    expect(await log.load()).toEqual([{ actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW }]);
+    expect(result.posted).toEqual([
+      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+    ]);
+    expect(await log.load()).toEqual([
+      { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW },
+    ]);
   });
 
   test('a THROWN main-run gh seam failure fails just that action with the throw message — siblings proceed', async () => {
@@ -638,8 +730,10 @@ describe('non-conforming gh outcomes', () => {
       [mkReply('r1', 1201), mkIssue('i1')],
       baseOpts(
         recordingGh(calls, undefined, (label) => {
-          if (label === 'reply:1201') return { code: 0, stdout: '<html>gateway garbage</html>', stderr: '' };
-          if (label === 'issue-comment') return { code: 0, stdout: JSON.stringify({ id: 'not-a-number' }), stderr: '' };
+          if (label === 'reply:1201')
+            return { code: 0, stdout: '<html>gateway garbage</html>', stderr: '' };
+          if (label === 'issue-comment')
+            return { code: 0, stdout: JSON.stringify({ id: 'not-a-number' }), stderr: '' };
           return undefined;
         }),
         log,
@@ -716,8 +810,16 @@ describe('pre-flight validation', () => {
   test.each([
     ['bad owner', { ...REPO, owner: '../evil' }, [mkReply('r1', 1201)]],
     ['bad repo', { ...REPO, repo: 'bad repo' }, [mkReply('r1', 1201)]],
-    ['dot owner (dot segment into the request path)', { ...REPO, owner: '.' }, [mkReply('r1', 1201)]],
-    ['dotdot repo (dot segment into the request path)', { ...REPO, repo: '..' }, [mkReply('r1', 1201)]],
+    [
+      'dot owner (dot segment into the request path)',
+      { ...REPO, owner: '.' },
+      [mkReply('r1', 1201)],
+    ],
+    [
+      'dotdot repo (dot segment into the request path)',
+      { ...REPO, repo: '..' },
+      [mkReply('r1', 1201)],
+    ],
     ['bad pr', { ...REPO, pr: 0 }, [mkReply('r1', 1201)]],
     ['empty actionId', REPO, [mkReply('', 1201)]],
     ['bad threadRootRestId', REPO, [mkReply('r1', 0)]],
@@ -752,8 +854,18 @@ describe('fileDispatchLog', () => {
       const path = join(dir, 'dispatch.jsonl');
       const log = fileDispatchLog(path);
       expect(await log.load()).toEqual([]);
-      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
-      const second: DispatchRecord = { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW };
+      const first: DispatchRecord = {
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
+      const second: DispatchRecord = {
+        actionId: 's1',
+        kind: 'resolve_thread',
+        resultRef: 'PRRT_1',
+        at: NOW,
+      };
       await log.record(first);
       await log.record(second);
       // One JSON record per line (JSON-lines-ish), newline-terminated.
@@ -773,9 +885,23 @@ describe('fileDispatchLog', () => {
       const path = join(dir, 'dispatch.jsonl');
       // A broken line with MORE records after it is not a truncated tail —
       // it is real corruption: load must refuse loudly.
-      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
-      const third: DispatchRecord = { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW };
-      await writeFile(path, `${JSON.stringify(first)}\n{"actionId":"r2","kind":\n${JSON.stringify(third)}\n`, 'utf8');
+      const first: DispatchRecord = {
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
+      const third: DispatchRecord = {
+        actionId: 's1',
+        kind: 'resolve_thread',
+        resultRef: 'PRRT_1',
+        at: NOW,
+      };
+      await writeFile(
+        path,
+        `${JSON.stringify(first)}\n{"actionId":"r2","kind":\n${JSON.stringify(third)}\n`,
+        'utf8',
+      );
       const log = fileDispatchLog(path);
       await expect(log.load()).rejects.toThrow(/corrupt.*line 2.*later lines follow/s);
     } finally {
@@ -787,7 +913,12 @@ describe('fileDispatchLog', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
       const path = join(dir, 'dispatch.jsonl');
-      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
+      const first: DispatchRecord = {
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
       // The second line was cut off mid-write by a crash — no newline, no
       // closing brace.
       await writeFile(path, `${JSON.stringify(first)}\n{"actionId":"r2","kind`, 'utf8');
@@ -805,8 +936,18 @@ describe('fileDispatchLog', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
       const path = join(dir, 'dispatch.jsonl');
-      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
-      const second: DispatchRecord = { actionId: 'r2', kind: 'issue_comment', resultRef: '8002', at: NOW + 1 };
+      const first: DispatchRecord = {
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
+      const second: DispatchRecord = {
+        actionId: 'r2',
+        kind: 'issue_comment',
+        resultRef: '8002',
+        at: NOW + 1,
+      };
       // The crash residue: a complete line followed by unterminated partial
       // bytes ("line1\npartialtail").
       await writeFile(path, `${JSON.stringify(first)}\n{"actionId":"r2","kind`, 'utf8');
@@ -827,9 +968,24 @@ describe('fileDispatchLog', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-dispatch-'));
     try {
       const path = join(dir, 'dispatch.jsonl');
-      const first: DispatchRecord = { actionId: 'r1', kind: 'review_reply', resultRef: '8001', at: NOW };
-      const second: DispatchRecord = { actionId: 'r2', kind: 'issue_comment', resultRef: '8002', at: NOW + 1 };
-      const third: DispatchRecord = { actionId: 's1', kind: 'resolve_thread', resultRef: 'PRRT_1', at: NOW + 2 };
+      const first: DispatchRecord = {
+        actionId: 'r1',
+        kind: 'review_reply',
+        resultRef: '8001',
+        at: NOW,
+      };
+      const second: DispatchRecord = {
+        actionId: 'r2',
+        kind: 'issue_comment',
+        resultRef: '8002',
+        at: NOW + 1,
+      };
+      const third: DispatchRecord = {
+        actionId: 's1',
+        kind: 'resolve_thread',
+        resultRef: 'PRRT_1',
+        at: NOW + 2,
+      };
       // The crash landed the SECOND record COMPLETE but without its newline:
       // it is valid JSON that load() already counts dispatched.
       await writeFile(path, `${JSON.stringify(first)}\n${JSON.stringify(second)}`, 'utf8');
@@ -840,7 +996,12 @@ describe('fileDispatchLog', () => {
       expect(await fileDispatchLog(path).load()).toEqual([first, second, third]);
       const text = await readFile(path, 'utf8');
       expect(text.endsWith('\n')).toBe(true);
-      expect(text.split('\n')).toEqual([JSON.stringify(first), JSON.stringify(second), JSON.stringify(third), '']);
+      expect(text.split('\n')).toEqual([
+        JSON.stringify(first),
+        JSON.stringify(second),
+        JSON.stringify(third),
+        '',
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -857,21 +1018,28 @@ describe('fileDispatchLog', () => {
       for (let cycle = 0; cycle < 20; cycle++) {
         await Promise.all([
           log.load(),
-          log.record({ actionId: `r${cycle}`, kind: 'issue_comment', resultRef: String(cycle), at: NOW + cycle }),
+          log.record({
+            actionId: `r${cycle}`,
+            kind: 'issue_comment',
+            resultRef: String(cycle),
+            at: NOW + cycle,
+          }),
           log.load(),
           log.load(),
         ]);
         const text = await readFile(path, 'utf8');
         for (const line of text.split('\n')) {
           if (line.trim() === '') continue;
-          expect(() => JSON.parse(line)).not.toThrow();
+          expect((): unknown => JSON.parse(line)).not.toThrow();
         }
       }
       // Every record survived (appends never overwrite), and a FRESH log
       // instance sees the whole history.
       const history = await fileDispatchLog(path).load();
       expect(history).toHaveLength(20);
-      expect(history.map((r) => r.actionId)).toEqual(Array.from({ length: 20 }, (_v, i) => `r${i}`));
+      expect(history.map((r) => r.actionId)).toEqual(
+        Array.from({ length: 20 }, (_v, i) => `r${i}`),
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

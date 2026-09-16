@@ -23,13 +23,16 @@ import type { LedgerQueryInput, LedgerRecordInput } from './ledger.js';
  */
 export const LedgerThresholdsOverrideSchema = z
   .object({
-    suppressAt: z.number().int().min(1).optional(),
-    escalateAt: z.number().int().min(2).optional(),
+    suppressAt: z.number().int().min(1).exactOptional(),
+    escalateAt: z.number().int().min(2).exactOptional(),
   })
   .strict()
-  .refine((t) => t.suppressAt === undefined || t.escalateAt === undefined || t.suppressAt < t.escalateAt, {
-    message: 'escalateAt must be greater than suppressAt',
-  });
+  .refine(
+    (t) => t.suppressAt === undefined || t.escalateAt === undefined || t.suppressAt < t.escalateAt,
+    {
+      message: 'escalateAt must be greater than suppressAt',
+    },
+  );
 
 /**
  * Registry-time mirror of {@link LedgerRecordInput}: the full input, and
@@ -47,9 +50,9 @@ export const LedgerRecordInputSchema: z.ZodType<LedgerRecordInput> = z
     root: z.string().min(1),
     storePath: z.string().min(1),
     signature: z.string().min(1).max(500),
-    component: z.string().min(1).max(200).optional(),
-    note: z.string().min(1).max(500).optional(),
-    thresholds: LedgerThresholdsOverrideSchema.optional(),
+    component: z.string().min(1).max(200).exactOptional(),
+    note: z.string().min(1).max(500).exactOptional(),
+    thresholds: LedgerThresholdsOverrideSchema.exactOptional(),
   })
   .strict();
 
@@ -58,7 +61,7 @@ export const LedgerQueryInputSchema: z.ZodType<LedgerQueryInput> = z
   .object({
     root: z.string().min(1),
     storePath: z.string().min(1),
-    thresholds: LedgerThresholdsOverrideSchema.optional(),
+    thresholds: LedgerThresholdsOverrideSchema.exactOptional(),
   })
   .strict();
 
@@ -76,9 +79,10 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([import('./ledger.js'), import('./store.js')]).then(
         ([m, s]) =>
-          m.makeLedgerRecord((input) =>
-            s.pathLedgerStore(input.root, input.storePath),
-          ) as Op<unknown, unknown>,
+          m.makeLedgerRecord((input) => s.pathLedgerStore(input.root, input.storePath)) as Op<
+            unknown,
+            unknown
+          >,
       ),
   },
   {
@@ -87,9 +91,10 @@ export const registry: OpRegistryEntry[] = [
     importer: () =>
       Promise.all([import('./ledger.js'), import('./store.js')]).then(
         ([m, s]) =>
-          m.makeLedgerQuery((input) =>
-            s.pathLedgerStore(input.root, input.storePath),
-          ) as Op<unknown, unknown>,
+          m.makeLedgerQuery((input) => s.pathLedgerStore(input.root, input.storePath)) as Op<
+            unknown,
+            unknown
+          >,
       ),
   },
 ];

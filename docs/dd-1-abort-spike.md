@@ -39,11 +39,11 @@ never printed or persisted.
 
 ## Measured — lane `ai-sdk` (`@ai-sdk/zai`, OpenAI-compat host)
 
-| sample | settledAtMs | settleLatencyMs | stopReason | usageAtAbort | post-poll | spendStopped |
-| --- | --- | --- | --- | --- | --- | --- |
-| 1 | 5006 | **6** | `aborted` | zeros (by design) | no accrual channel exists; poll held for parity | **true** |
-| 2 | 568 | — | `error` | — | — | — (see below) |
-| 3 | 569 | — | `error` | — | — | — (see below) |
+| sample | settledAtMs | settleLatencyMs | stopReason | usageAtAbort      | post-poll                                       | spendStopped  |
+| ------ | ----------- | --------------- | ---------- | ----------------- | ----------------------------------------------- | ------------- |
+| 1      | 5006        | **6**           | `aborted`  | zeros (by design) | no accrual channel exists; poll held for parity | **true**      |
+| 2      | 568         | —               | `error`    | —                 | —                                               | — (see below) |
+| 3      | 569         | —               | `error`    | —                 | —                                               | — (see below) |
 
 - Sample 1 is the abort datum: the verdict settled **6 ms** after the signal,
   `stopReason: 'aborted'`, zero cost claim (the unmeasured-abort rule).
@@ -60,10 +60,10 @@ never printed or persisted.
 
 ## Measured — lane `claude-agent` (agent SDK, anthropic-compat host)
 
-| sample | settledAtMs | settleLatencyMs | stopReason | usageAtAbort | transcript at settle → after 5 s poll | lingering workers | spendStopped |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 7006 | **2006** | `aborted` | zeros (no assistant frame yet) | 1 msg → 1 msg | none | **true** |
-| 2 | 7008 | **2008** | `aborted` | zeros (no assistant frame yet) | 1 msg → 1 msg | none | **true** |
+| sample | settledAtMs | settleLatencyMs | stopReason | usageAtAbort                   | transcript at settle → after 5 s poll | lingering workers | spendStopped |
+| ------ | ----------- | --------------- | ---------- | ------------------------------ | ------------------------------------- | ----------------- | ------------ |
+| 1      | 7006        | **2006**        | `aborted`  | zeros (no assistant frame yet) | 1 msg → 1 msg                         | none              | **true**     |
+| 2      | 7008        | **2008**        | `aborted`  | zeros (no assistant frame yet) | 1 msg → 1 msg                         | none              | **true**     |
 
 - Both samples settled **~2.0 s** after the signal (2006 / 2008 ms — tight
   variance; the latency is the SDK's child teardown: the abort controller

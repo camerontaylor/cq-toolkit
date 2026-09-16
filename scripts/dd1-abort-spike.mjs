@@ -52,7 +52,13 @@
 // production default loader; make the optional peer resolvable for LIVE
 // runs only, without touching package.json/lockfile:
 //   ln -s /tmp/sdk-probe/node_modules/@anthropic-ai node_modules/@anthropic-ai
-import { AiSdkDriver, ClaudeAgentDriver, SessionStore, defaultHarnessConfig, runLadder } from '../dist/index.js';
+import {
+  AiSdkDriver,
+  ClaudeAgentDriver,
+  SessionStore,
+  defaultHarnessConfig,
+  runLadder,
+} from '../dist/index.js';
 import { AGENT_SESSION_FILE } from '../dist/driver/claude-agent/index.js';
 import dns from 'node:dns';
 import net from 'node:net';
@@ -100,7 +106,9 @@ const PROMPT =
   'on the history of text editors from TECO to LSP. Do not stop early; keep writing until all ' +
   'ten sections are complete. Begin now with section 1.';
 
-const lane = process.argv.includes('--lane') ? process.argv[process.argv.indexOf('--lane') + 1] : undefined;
+const lane = process.argv.includes('--lane')
+  ? process.argv[process.argv.indexOf('--lane') + 1]
+  : undefined;
 
 /**
  * pgrep helper: pids whose cmdline matches, as an array of strings.
@@ -112,7 +120,10 @@ const lane = process.argv.includes('--lane') ? process.argv[process.argv.indexOf
 async function matchingPids(pattern) {
   try {
     const { stdout } = await execFileAsync('pgrep', ['-f', pattern]);
-    return stdout.split('\n').map((s) => s.trim()).filter((s) => s !== '');
+    return stdout
+      .split('\n')
+      .map((s) => s.trim())
+      .filter((s) => s !== '');
   } catch (err) {
     if (err?.code === 1) return []; // pgrep's documented "no processes matched"
     throw new Error(`pgrep failed for '${pattern}' (exit ${String(err?.code ?? 'unknown')})`);
@@ -180,7 +191,9 @@ async function claudeAgentPollEvidence(verdict, scratchDir) {
   // sweepLingeringWorkers (the authoritative, every-exit-path sweep).
   const evidence = { transcriptCountAtSettle: undefined, transcriptCountAfterPoll: undefined };
   try {
-    const record = await new SessionStore(join(scratchDir, 'agent-sessions')).load(verdict.sessionId);
+    const record = await new SessionStore(join(scratchDir, 'agent-sessions')).load(
+      verdict.sessionId,
+    );
     const workspace = record.workspace;
     const agentSessionId = (await readFile(join(workspace, AGENT_SESSION_FILE), 'utf8')).trim();
     const sdk = await import('@anthropic-ai/claude-agent-sdk');
@@ -238,11 +251,14 @@ async function sweepLingeringWorkers(scratchDir) {
     try {
       cwd = await cwdOfPid(pid);
     } catch (err) {
-      result.processCheckError =
-        `could not verify worker pid ${pid} (unverified workers are never killed): ${err instanceof Error ? err.message : String(err)}`;
+      result.processCheckError = `could not verify worker pid ${pid} (unverified workers are never killed): ${err instanceof Error ? err.message : String(err)}`;
       continue;
     }
-    const ours = cwd === scratchDir || cwd === realScratch || cwd.startsWith(scratchDir + '/') || cwd.startsWith(realScratch + '/');
+    const ours =
+      cwd === scratchDir ||
+      cwd === realScratch ||
+      cwd.startsWith(scratchDir + '/') ||
+      cwd.startsWith(realScratch + '/');
     if (!ours) continue; // someone else's worker — never touched
     result.lingeringWorkerPids.push(pid);
     try {
@@ -332,10 +348,12 @@ async function measure(laneName) {
     pollEvidence.lingeringWorkerPids = sweep.lingeringWorkerPids;
   }
 
-  const grew = pollEvidence.transcriptCountAtSettle !== undefined &&
+  const grew =
+    pollEvidence.transcriptCountAtSettle !== undefined &&
     pollEvidence.transcriptCountAfterPoll !== undefined &&
     pollEvidence.transcriptCountAfterPoll > pollEvidence.transcriptCountAtSettle;
-  const lingered = Array.isArray(pollEvidence.lingeringWorkerPids) && pollEvidence.lingeringWorkerPids.length > 0;
+  const lingered =
+    Array.isArray(pollEvidence.lingeringWorkerPids) && pollEvidence.lingeringWorkerPids.length > 0;
   const settledPromptly = settledAtMs <= WALL_CLOCK_MS + 3_000; // signal → settle well inside rung-2 territory
   // EVIDENCE AVAILABILITY gates the verdict: a missing poll channel (failed
   // store load / transcript read / SDK import) must never be scored as
@@ -351,10 +369,12 @@ async function measure(laneName) {
     inconclusiveReason = `post-abort evidence channel failed: ${pollEvidence.pollError}`;
   } else if (
     lane === 'claude-agent' &&
-    (pollEvidence.transcriptCountAtSettle === undefined || pollEvidence.transcriptCountAfterPoll === undefined)
+    (pollEvidence.transcriptCountAtSettle === undefined ||
+      pollEvidence.transcriptCountAfterPoll === undefined)
   ) {
     spendStopped = 'inconclusive';
-    inconclusiveReason = 'the agent transcript message counts were unavailable at settle and/or after the poll';
+    inconclusiveReason =
+      'the agent transcript message counts were unavailable at settle and/or after the poll';
   } else if (lane === 'claude-agent' && pollEvidence.processCheckError !== undefined) {
     // The lingering-process check FAILED (pgrep itself broke) — an empty
     // pid list was never observed, so "no survivors" cannot be claimed.
@@ -365,7 +385,8 @@ async function measure(laneName) {
     // failed. Spend did NOT verifiably stop — the worker was killed, not
     // obeying — and the sweep above cleaned up whatever survived.
     spendStopped = 'inconclusive';
-    inconclusiveReason = 'the ladder reached rung 3 (kill) — the worker never settled cooperatively after the governed signal';
+    inconclusiveReason =
+      'the ladder reached rung 3 (kill) — the worker never settled cooperatively after the governed signal';
   } else {
     spendStopped = verdict.stopReason === 'aborted' && settledPromptly && !grew && !lingered;
   }
@@ -412,7 +433,9 @@ if (verdictJson.error !== undefined || verdictJson.spendStopped !== true) {
     verdictJson.error !== undefined
       ? verdictJson.error
       : `spendStopped=${String(verdictJson.spendStopped)}` +
-        (verdictJson.inconclusiveReason !== undefined ? ` — ${verdictJson.inconclusiveReason}` : '');
+        (verdictJson.inconclusiveReason !== undefined
+          ? ` — ${verdictJson.inconclusiveReason}`
+          : '');
   console.error(`dd1-abort-spike: ABORT VERDICT FAILED for lane '${lane}': ${why}`);
   // Drain, THEN a bounded exit (PR #114 review, Codex P1): a bare
   // process.exit truncates a piped stdout before the verdict JSON drains
@@ -424,5 +447,7 @@ if (verdictJson.error !== undefined || verdictJson.spendStopped !== true) {
   process.stdout.write('', () => process.exit(1)); // flush-drain, then the bounded exit
   process.exitCode = 1; // the callback above owns the bound; this is the fallback
 } else {
-  console.error(`dd1-abort-spike: abort verdict passed for lane '${lane}' (spend verifiably stopped)`);
+  console.error(
+    `dd1-abort-spike: abort verdict passed for lane '${lane}' (spend verifiably stopped)`,
+  );
 }

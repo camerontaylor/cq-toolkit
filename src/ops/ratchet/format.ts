@@ -41,8 +41,7 @@ export interface BaselineFile {
 // it accepts locale formats ('September 15, 2026') and normalizes
 // nonexistent calendar dates ('2026-02-30' rolls into March 2) — so shape
 // and round-trip are checked explicitly below.
-const ISO_INSTANT_PATTERN =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
+const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/;
 
 /**
  * Strict ISO-8601 instant validation, shared by parseBaseline's schema and
@@ -72,23 +71,26 @@ export function isIso8601Instant(iso: string): boolean {
   const expected = iso
     .replace(
       /(\.\d{1,9})?(?=Z$|[+-]\d{2}:\d{2}$)/,
-      (_, frac) => `.${(frac ?? '.000').slice(1, 4).padEnd(3, '0')}`,
+      (_: string, frac: unknown) =>
+        `.${(typeof frac === 'string' ? frac : '.000').slice(1, 4).padEnd(3, '0')}`,
     )
     .replace(/[+-]\d{2}:\d{2}$/, 'Z');
   return rebuilt === expected;
 }
 
-const BaselineFileSchema: z.ZodType<BaselineFile> = z.object({
-  schemaVersion: z.literal(1),
-  target: z.string(),
-  metric: z.string(),
-  direction: z.enum(['lower-is-better', 'higher-is-better']),
-  value: z.number().finite(),
-  unit: z.string().optional(),
-  capturedAt: z.string().refine(isIso8601Instant, {
-    message: 'capturedAt must be a strict ISO-8601 instant (e.g. 2026-09-15T12:00:00Z)',
-  }),
-}).strict();
+const BaselineFileSchema: z.ZodType<BaselineFile> = z
+  .object({
+    schemaVersion: z.literal(1),
+    target: z.string(),
+    metric: z.string(),
+    direction: z.enum(['lower-is-better', 'higher-is-better']),
+    value: z.number().finite(),
+    unit: z.string().exactOptional(),
+    capturedAt: z.string().refine(isIso8601Instant, {
+      message: 'capturedAt must be a strict ISO-8601 instant (e.g. 2026-09-15T12:00:00Z)',
+    }),
+  })
+  .strict();
 
 /** Serialize a baseline deterministically: schema-order keys, 2-space indent, trailing newline. */
 export function renderBaseline(b: BaselineFile): string {

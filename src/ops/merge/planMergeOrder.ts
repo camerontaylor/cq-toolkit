@@ -338,7 +338,12 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
   const retargetSet = new Set(retargetRoots);
   const roots = [...mergeRoots, ...retargetRoots].sort((a, b) => a - b);
   for (const pr of roots) {
-    order.push({ pr, action: retargetSet.has(pr) ? 'retarget-self' : 'merge', basePr: null, depth: 0 });
+    order.push({
+      pr,
+      action: retargetSet.has(pr) ? 'retarget-self' : 'merge',
+      basePr: null,
+      depth: 0,
+    });
   }
   const emitSubtree = (pr: number, basePr: number, depth: number): void => {
     order.push({ pr, action: 'merge', basePr, depth });

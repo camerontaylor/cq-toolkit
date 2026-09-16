@@ -63,7 +63,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
-import { checkDiffMonotonicity, formatViolations } from '../../../src/ops/ratchet/monotonicGuard.js';
+import {
+  checkDiffMonotonicity,
+  formatViolations,
+} from '../../../src/ops/ratchet/monotonicGuard.js';
 import { describe, expect, test } from 'vitest';
 
 const CAPTURED_AT = '2026-09-15T00:00:00.000Z';
@@ -75,16 +78,21 @@ const COV_METRIC = 'coverage';
 const REL_COV = baselineRelPath(COV_TARGET, COV_METRIC);
 
 /** A real baseline body, rendered by the production serializer. */
-function body(direction: Direction, value: number, overrides: Partial<BaselineFile> = {}): string {
+function body(
+  direction: Direction,
+  value: number,
+  overrides: Omit<Partial<BaselineFile>, 'unit'> & { unit?: string | null } = {},
+): string {
+  const { unit = 'errors', ...rest } = overrides;
   return renderBaseline({
     schemaVersion: 1,
     target: TARGET,
     metric: METRIC,
     direction,
     value,
-    unit: 'errors',
+    ...(unit === null ? {} : { unit }),
     capturedAt: CAPTURED_AT,
-    ...overrides,
+    ...rest,
   });
 }
 
@@ -337,7 +345,11 @@ describe('checkDiffMonotonicity', () => {
   });
 
   test('a unit flip at EQUAL values still fails as unit changed (scale moved, not the number)', () => {
-    const diff = fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3, { unit: 'failures' }));
+    const diff = fullRewrite(
+      REL,
+      body('lower-is-better', 3),
+      body('lower-is-better', 3, { unit: 'failures' }),
+    );
     expect(checkDiffMonotonicity(diff)).toEqual({
       ok: false,
       violations: [
@@ -359,7 +371,7 @@ describe('checkDiffMonotonicity', () => {
   test.each([
     {
       label: 'a unit ADDED between the sides (undefined → errors)',
-      oldOverrides: { unit: undefined },
+      oldOverrides: { unit: null },
       newOverrides: {},
       oldUnit: undefined,
       newUnit: 'errors',
@@ -367,29 +379,36 @@ describe('checkDiffMonotonicity', () => {
     {
       label: 'a unit REMOVED between the sides (errors → undefined)',
       oldOverrides: {},
-      newOverrides: { unit: undefined },
+      newOverrides: { unit: null },
       oldUnit: 'errors',
       newUnit: undefined,
     },
-  ])('$label fails as unit changed — one-sided scale is a re-scale too', ({ oldOverrides, newOverrides, oldUnit, newUnit }) => {
-    const diff = fullRewrite(REL, body('lower-is-better', 3, oldOverrides), body('lower-is-better', 3, newOverrides));
-    expect(checkDiffMonotonicity(diff)).toEqual({
-      ok: false,
-      violations: [
-        {
-          path: REL,
-          target: TARGET,
-          metric: METRIC,
-          oldValue: 3,
-          newValue: 3,
-          why: 'unit changed',
-          oldUnit,
-          newUnit,
-        },
-      ],
-      filesChecked: 1,
-    });
-  });
+  ])(
+    '$label fails as unit changed — one-sided scale is a re-scale too',
+    ({ oldOverrides, newOverrides, oldUnit, newUnit }) => {
+      const diff = fullRewrite(
+        REL,
+        body('lower-is-better', 3, oldOverrides),
+        body('lower-is-better', 3, newOverrides),
+      );
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [
+          {
+            path: REL,
+            target: TARGET,
+            metric: METRIC,
+            oldValue: 3,
+            newValue: 3,
+            why: 'unit changed',
+            oldUnit,
+            newUnit,
+          },
+        ],
+        filesChecked: 1,
+      });
+    },
+  );
 
   test('± unit occurrences win over context for their side (change visible despite unchanged context unit)', () => {
     // Context carries the OLD unit while the ± sides rename it: the new
@@ -524,16 +543,8 @@ describe('checkDiffMonotonicity', () => {
   });
 
   test.each([
-    [
-      'a truncated value line (no number after the colon)',
-      ['  "value": 3,'],
-      ['  "value": '],
-    ],
-    [
-      'a renamed field (value absent from the new side)',
-      ['  "value": 3,'],
-      ['  "points": 3,'],
-    ],
+    ['a truncated value line (no number after the colon)', ['  "value": 3,'], ['  "value": ']],
+    ['a renamed field (value absent from the new side)', ['  "value": 3,'], ['  "points": 3,']],
     ['content the baseline schema cannot speak (garbage)', ['hello'], ['world']],
     [
       'a non-Direction direction string',
@@ -548,14 +559,17 @@ describe('checkDiffMonotonicity', () => {
       ['  "value": 80,'],
       ['  "value": 1e999,'],
     ],
-  ])('a modified section with %s fails closed as unparsable (I5: never a pass)', (_label, minus, plus) => {
-    const diff = modifiedSection(REL, minus, plus);
-    expect(checkDiffMonotonicity(diff)).toEqual({
-      ok: false,
-      violations: [{ path: REL, why: 'unparsable baseline diff' }],
-      filesChecked: 1,
-    });
-  });
+  ])(
+    'a modified section with %s fails closed as unparsable (I5: never a pass)',
+    (_label, minus, plus) => {
+      const diff = modifiedSection(REL, minus, plus);
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [{ path: REL, why: 'unparsable baseline diff' }],
+        filesChecked: 1,
+      });
+    },
+  );
 
   test('a plus-only section WITHOUT new-file metadata fails closed (Codex P1)', () => {
     // No `new file mode` / `--- /dev/null`: this is a modification of an
@@ -778,22 +792,25 @@ describe('checkDiffMonotonicity', () => {
     ['a leading-dot number (.70 — invalid JSON)', '  "value": .70,'],
     ['a trailing-dot number (1. — invalid JSON)', '  "value": 1.,'],
     ['a leading-zero token followed by junk (01x — invalid JSON)', '  "value": 01x,'],
-  ])('an invalid-JSON numeric token on the + side (%s) fails closed — the committed file would not parse', (_label, plusLine) => {
-    // The strict tokenizer captures NO number from these tokens, so the ±
-    // value counts mismatch (old 1, new 0) and the section fails closed:
-    // a threshold the committed file could never contain is never judged
-    // as a tighten.
-    const diff = modifiedSection(
-      REL,
-      ['  "direction": "lower-is-better",', '  "value": 3,'],
-      ['  "direction": "lower-is-better",', plusLine],
-    );
-    expect(checkDiffMonotonicity(diff)).toEqual({
-      ok: false,
-      violations: [{ path: REL, why: 'unparsable baseline diff' }],
-      filesChecked: 1,
-    });
-  });
+  ])(
+    'an invalid-JSON numeric token on the + side (%s) fails closed — the committed file would not parse',
+    (_label, plusLine) => {
+      // The strict tokenizer captures NO number from these tokens, so the ±
+      // value counts mismatch (old 1, new 0) and the section fails closed:
+      // a threshold the committed file could never contain is never judged
+      // as a tighten.
+      const diff = modifiedSection(
+        REL,
+        ['  "direction": "lower-is-better",', '  "value": 3,'],
+        ['  "direction": "lower-is-better",', plusLine],
+      );
+      expect(checkDiffMonotonicity(diff)).toEqual({
+        ok: false,
+        violations: [{ path: REL, why: 'unparsable baseline diff' }],
+        filesChecked: 1,
+      });
+    },
+  );
 
   test('removing the direction while tightening 3 → 2 fails as direction changed (schema-invalid file)', () => {
     // The minus side declares the direction, the plus side has dropped it:
@@ -850,11 +867,7 @@ describe('checkDiffMonotonicity', () => {
   });
 
   test('a ±count mismatch (two removed values, one added) fails closed — the pair cannot be lined up', () => {
-    const diff = modifiedSection(
-      REL,
-      ['  "value": 2,', '  "value": 3,'],
-      ['  "value": 4,'],
-    );
+    const diff = modifiedSection(REL, ['  "value": 2,', '  "value": 3,'], ['  "value": 4,']);
     expect(checkDiffMonotonicity(diff)).toEqual({
       ok: false,
       violations: [{ path: REL, why: 'unparsable baseline diff' }],
@@ -889,8 +902,10 @@ describe('checkDiffMonotonicity', () => {
     // Hand-written minimal JSON whose body omits direction entirely: even
     // with hunk context there is no direction to judge under — non-passing
     // evidence, never a pass.
-    const oldBody = '{\n  "schemaVersion": 1,\n  "target": "hand",\n  "metric": "m",\n  "value": 3\n}\n';
-    const newBody = '{\n  "schemaVersion": 1,\n  "target": "hand",\n  "metric": "m",\n  "value": 4\n}\n';
+    const oldBody =
+      '{\n  "schemaVersion": 1,\n  "target": "hand",\n  "metric": "m",\n  "value": 3\n}\n';
+    const newBody =
+      '{\n  "schemaVersion": 1,\n  "target": "hand",\n  "metric": "m",\n  "value": 4\n}\n';
     const diff = hunkDiff(REL, oldBody, newBody, 1);
     expect(checkDiffMonotonicity(diff)).toEqual({
       ok: false,
@@ -936,21 +951,17 @@ describe('checkDiffMonotonicity', () => {
   });
 
   test('a hunk carrying BOTH the direction and value lines is judged: tighten passes, loosen fails', () => {
-    const tighten = modifiedSection(REL, [
-      '  "direction": "lower-is-better",',
-      '  "value": 3,',
-    ], [
-      '  "direction": "lower-is-better",',
-      '  "value": 2,',
-    ]);
+    const tighten = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 3,'],
+      ['  "direction": "lower-is-better",', '  "value": 2,'],
+    );
     expect(checkDiffMonotonicity(tighten)).toEqual({ ok: true, violations: [], filesChecked: 1 });
-    const loosen = modifiedSection(REL, [
-      '  "direction": "lower-is-better",',
-      '  "value": 2,',
-    ], [
-      '  "direction": "lower-is-better",',
-      '  "value": 3,',
-    ]);
+    const loosen = modifiedSection(
+      REL,
+      ['  "direction": "lower-is-better",', '  "value": 2,'],
+      ['  "direction": "lower-is-better",', '  "value": 3,'],
+    );
     expect(checkDiffMonotonicity(loosen)).toEqual({
       ok: false,
       // The hunk carries only direction+value, so target/metric are not
@@ -1016,29 +1027,21 @@ describe('checkDiffMonotonicity', () => {
 
 const gitDescribe = gitAvailable() ? describe : describe.skip;
 gitDescribe('real git diff fixtures (literal git output from a temp repo)', () => {
-  test(
-    'a real tighten diff passes',
-    { timeout: 20_000 },
-    async () => {
-      const diff = await realGitDiff(body('lower-is-better', 3), body('lower-is-better', 2));
-      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
-    },
-  );
+  test('a real tighten diff passes', { timeout: 20_000 }, async () => {
+    const diff = await realGitDiff(body('lower-is-better', 3), body('lower-is-better', 2));
+    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
 
-  test(
-    'a real loosen diff fails naming path + metric + values',
-    { timeout: 20_000 },
-    async () => {
-      const diff = await realGitDiff(body('lower-is-better', 2), body('lower-is-better', 3));
-      expect(checkDiffMonotonicity(diff)).toEqual({
-        ok: false,
-        violations: [
-          { path: REL, target: TARGET, metric: METRIC, oldValue: 2, newValue: 3, why: 'loosened' },
-        ],
-        filesChecked: 1,
-      });
-    },
-  );
+  test('a real loosen diff fails naming path + metric + values', { timeout: 20_000 }, async () => {
+    const diff = await realGitDiff(body('lower-is-better', 2), body('lower-is-better', 3));
+    expect(checkDiffMonotonicity(diff)).toEqual({
+      ok: false,
+      violations: [
+        { path: REL, target: TARGET, metric: METRIC, oldValue: 2, newValue: 3, why: 'loosened' },
+      ],
+      filesChecked: 1,
+    });
+  });
 
   test('a noprefix DELETED baseline is attributed via the header fallback (floor-halved pair) and skipped', () => {
     // RED before the round-3 fix: the identical `X X` header pair is always
@@ -1091,7 +1094,9 @@ gitDescribe('real git diff fixtures (literal git output from a temp repo)', () =
 
 describe('formatViolations', () => {
   test('loosened renders path + metric + old → new, verbatim', () => {
-    const verdict = checkDiffMonotonicity(fullRewrite(REL, body('lower-is-better', 2), body('lower-is-better', 3)));
+    const verdict = checkDiffMonotonicity(
+      fullRewrite(REL, body('lower-is-better', 2), body('lower-is-better', 3)),
+    );
     expect(verdict.ok).toBe(false);
     if (verdict.ok) throw new Error('unreachable');
     expect(formatViolations(verdict.violations)).toEqual([
@@ -1100,7 +1105,9 @@ describe('formatViolations', () => {
   });
 
   test('direction changed renders the old → new directions, verbatim', () => {
-    const verdict = checkDiffMonotonicity(fullRewrite(REL, body('lower-is-better', 3), body('higher-is-better', 3)));
+    const verdict = checkDiffMonotonicity(
+      fullRewrite(REL, body('lower-is-better', 3), body('higher-is-better', 3)),
+    );
     expect(verdict.ok).toBe(false);
     if (verdict.ok) throw new Error('unreachable');
     expect(formatViolations(verdict.violations)).toEqual([
@@ -1225,8 +1232,8 @@ describe('formatViolations', () => {
     //     section judges normally (a tightening of 5 → 3 passes).
     const crafted = fullRewrite(
       REL,
-      body('lower-is-better', 5, { unit: undefined }),
-      body('lower-is-better', 3, { unit: undefined }),
+      body('lower-is-better', 5, { unit: null }),
+      body('lower-is-better', 3, { unit: null }),
     ).replace('"target": "typecheck"', '"target": "prefix "unit": nope"');
     expect(checkDiffMonotonicity(crafted)).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
@@ -1239,7 +1246,11 @@ describe('formatViolations', () => {
     const base = fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3));
     const diff = base
       .split('\n')
-      .map((line) => (line.includes('"direction": "lower-is-better"') ? `${line[0]}"direction": "lower-is-\\x"` : line))
+      .map((line) =>
+        line.includes('"direction": "lower-is-better"')
+          ? `${line[0]}"direction": "lower-is-\\x"`
+          : line,
+      )
       .join('\n');
     const verdict = checkDiffMonotonicity(diff);
     expect(verdict.ok).toBe(false);
@@ -1253,14 +1264,22 @@ describe('formatViolations', () => {
     // the closing quote): the value regex matches nothing, and the old
     // logic read the unit as ABSENT — an added-unit re-scaling could be
     // waved through. Key presence now fails closed.
-    const base = fullRewrite(REL, body('lower-is-better', 3, { unit: undefined }), body('lower-is-better', 3, { unit: undefined }));
+    const base = fullRewrite(
+      REL,
+      body('lower-is-better', 3, { unit: null }),
+      body('lower-is-better', 3, { unit: null }),
+    );
     const plusAt = base.indexOf('+++ b/');
     const diff =
       base.slice(0, plusAt) +
       base
         .slice(plusAt)
         .split('\n')
-        .map((line) => (line.startsWith('+') && line.includes('"value"') ? `${line}\n+    "unit": "errors\\` : line))
+        .map((line) =>
+          line.startsWith('+') && line.includes('"value"')
+            ? `${line}\n+    "unit": "errors\\`
+            : line,
+        )
         .join('\n');
     expect(checkDiffMonotonicity(diff).ok).toBe(false);
   });
@@ -1283,7 +1302,11 @@ describe('formatViolations', () => {
 
   test('unit changed renders old → new — with undefined for an absent side — verbatim', () => {
     const flipped = checkDiffMonotonicity(
-      fullRewrite(REL, body('lower-is-better', 3), body('lower-is-better', 3, { unit: 'failures' })),
+      fullRewrite(
+        REL,
+        body('lower-is-better', 3),
+        body('lower-is-better', 3, { unit: 'failures' }),
+      ),
     );
     expect(flipped.ok).toBe(false);
     if (flipped.ok) throw new Error('unreachable');
@@ -1291,7 +1314,7 @@ describe('formatViolations', () => {
       `${REL}: unit changed errors → failures — incomparable scale`,
     ]);
     const added = checkDiffMonotonicity(
-      fullRewrite(REL, body('lower-is-better', 3, { unit: undefined }), body('lower-is-better', 3)),
+      fullRewrite(REL, body('lower-is-better', 3, { unit: null }), body('lower-is-better', 3)),
     );
     expect(added.ok).toBe(false);
     if (added.ok) throw new Error('unreachable');
@@ -1301,9 +1324,7 @@ describe('formatViolations', () => {
   });
 
   test('unparsable renders the I5 wording, verbatim', () => {
-    const verdict = checkDiffMonotonicity(
-      modifiedSection(REL, ['  "value": 3,'], ['  "value": ']),
-    );
+    const verdict = checkDiffMonotonicity(modifiedSection(REL, ['  "value": 3,'], ['  "value": ']));
     expect(verdict.ok).toBe(false);
     if (verdict.ok) throw new Error('unreachable');
     expect(formatViolations(verdict.violations)).toEqual([

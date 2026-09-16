@@ -149,7 +149,13 @@ const ROW_CASES: RowCase[] = [
     name: 'row 1 — a resolved thread → resolved (thread_resolved)',
     state: baseState({ threads: [thread({ id: 'T1', isResolved: true })] }),
     expected: [
-      { kind: 'thread', id: 'T1', verdict: 'resolved', path: 'src/a.ts', reason: 'thread_resolved' },
+      {
+        kind: 'thread',
+        id: 'T1',
+        verdict: 'resolved',
+        path: 'src/a.ts',
+        reason: 'thread_resolved',
+      },
     ],
   },
   {
@@ -170,7 +176,13 @@ const ROW_CASES: RowCase[] = [
     name: 'row 4 — an outdated unresolved thread → blocked (outdated_unresolved)',
     state: baseState({ threads: [thread({ id: 'T4', isOutdated: true })] }),
     expected: [
-      { kind: 'thread', id: 'T4', verdict: 'blocked', path: 'src/a.ts', reason: 'outdated_unresolved' },
+      {
+        kind: 'thread',
+        id: 'T4',
+        verdict: 'blocked',
+        path: 'src/a.ts',
+        reason: 'outdated_unresolved',
+      },
     ],
   },
   {
@@ -184,32 +196,52 @@ const ROW_CASES: RowCase[] = [
       ],
     }),
     expected: [
-      { kind: 'thread', id: 'T5', verdict: 'responded', path: 'src/a.ts', reason: 'responder_last_word' },
+      {
+        kind: 'thread',
+        id: 'T5',
+        verdict: 'responded',
+        path: 'src/a.ts',
+        reason: 'responder_last_word',
+      },
     ],
   },
   {
     name: 'row 6 — an unresolved external thread → actionable (thread_needs_response)',
     state: baseState({ threads: [thread({ id: 'T6' })] }),
     expected: [
-      { kind: 'thread', id: 'T6', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'T6',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ],
   },
   {
     name: 'row 7 — a review authored by the responder → skip (responder_authored)',
     state: baseState({ reviews: [review({ id: 'R7', authorLogin: 'pr-author' })] }),
-    expected: [{ kind: 'review', id: 'R7', verdict: 'skip', path: null, reason: 'responder_authored' }],
+    expected: [
+      { kind: 'review', id: 'R7', verdict: 'skip', path: null, reason: 'responder_authored' },
+    ],
   },
   {
     name: 'row 8 — a review whose body is a bot failure notice → skip (bot_skip_notice)',
     state: baseState({
-      reviews: [review({ id: 'R8', body: 'CodeRabbit failed to complete: error after 3 attempts' })],
+      reviews: [
+        review({ id: 'R8', body: 'CodeRabbit failed to complete: error after 3 attempts' }),
+      ],
     }),
-    expected: [{ kind: 'review', id: 'R8', verdict: 'skip', path: null, reason: 'bot_skip_notice' }],
+    expected: [
+      { kind: 'review', id: 'R8', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
+    ],
   },
   {
     name: 'row 9 — a DISMISSED review → skip (review_dismissed)',
     state: baseState({ reviews: [review({ id: 'R9', state: 'DISMISSED' })] }),
-    expected: [{ kind: 'review', id: 'R9', verdict: 'skip', path: null, reason: 'review_dismissed' }],
+    expected: [
+      { kind: 'review', id: 'R9', verdict: 'skip', path: null, reason: 'review_dismissed' },
+    ],
   },
   {
     name: 'row 10 — a responder TOP-LEVEL issue comment postdates the review → skip (review_already_answered)',
@@ -242,7 +274,13 @@ const ROW_CASES: RowCase[] = [
     name: 'row 12 — a plain review summary → actionable (review_summary_needs_response)',
     state: baseState({ reviews: [review({ id: 'R12', body: 'Please add a test' })] }),
     expected: [
-      { kind: 'review', id: 'R12', verdict: 'actionable', path: null, reason: 'review_summary_needs_response' },
+      {
+        kind: 'review',
+        id: 'R12',
+        verdict: 'actionable',
+        path: null,
+        reason: 'review_summary_needs_response',
+      },
     ],
   },
   {
@@ -250,14 +288,18 @@ const ROW_CASES: RowCase[] = [
     state: baseState({
       restIssueComments: [restComment({ id: 601, authorLogin: 'pr-author' })],
     }),
-    expected: [{ kind: 'comment', id: '601', verdict: 'skip', path: null, reason: 'responder_authored' }],
+    expected: [
+      { kind: 'comment', id: '601', verdict: 'skip', path: null, reason: 'responder_authored' },
+    ],
   },
   {
     name: 'row 14 — a conversation comment matching a skip pattern → skip (bot_skip_notice)',
     state: baseState({
       restIssueComments: [restComment({ id: 602, body: 'CodeRabbit is skipping this draft' })],
     }),
-    expected: [{ kind: 'comment', id: '602', verdict: 'skip', path: null, reason: 'bot_skip_notice' }],
+    expected: [
+      { kind: 'comment', id: '602', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
+    ],
   },
   {
     name: 'row 15 — a plain top-level comment → actionable (top_level_summary)',
@@ -265,7 +307,13 @@ const ROW_CASES: RowCase[] = [
       restIssueComments: [restComment({ id: 603, body: 'Overall: please split this module' })],
     }),
     expected: [
-      { kind: 'comment', id: '603', verdict: 'actionable', path: null, reason: 'top_level_summary' },
+      {
+        kind: 'comment',
+        id: '603',
+        verdict: 'actionable',
+        path: null,
+        reason: 'top_level_summary',
+      },
     ],
   },
 ];
@@ -307,16 +355,32 @@ describe('truncation flag propagation', () => {
 
 describe('row-order precedence — threads', () => {
   test('row 1 beats row 4 — a resolved outdated thread → resolved, not blocked', () => {
-    expect(itemsOf(baseState({ threads: [thread({ id: 'TP1', isResolved: true, isOutdated: true })] }))).toEqual([
-      { kind: 'thread', id: 'TP1', verdict: 'resolved', path: 'src/a.ts', reason: 'thread_resolved' },
+    expect(
+      itemsOf(baseState({ threads: [thread({ id: 'TP1', isResolved: true, isOutdated: true })] })),
+    ).toEqual([
+      {
+        kind: 'thread',
+        id: 'TP1',
+        verdict: 'resolved',
+        path: 'src/a.ts',
+        reason: 'thread_resolved',
+      },
     ]);
   });
 
   test('row 2 beats row 4 — an outdated responder-authored thread → skip, not blocked', () => {
     expect(
-      itemsOf(baseState({ threads: [thread({ id: 'TP2', authorLogin: 'pr-author', isOutdated: true })] })),
+      itemsOf(
+        baseState({ threads: [thread({ id: 'TP2', authorLogin: 'pr-author', isOutdated: true })] }),
+      ),
     ).toEqual([
-      { kind: 'thread', id: 'TP2', verdict: 'skip', path: 'src/a.ts', reason: 'responder_authored' },
+      {
+        kind: 'thread',
+        id: 'TP2',
+        verdict: 'skip',
+        path: 'src/a.ts',
+        reason: 'responder_authored',
+      },
     ]);
   });
 
@@ -324,11 +388,19 @@ describe('row-order precedence — threads', () => {
     expect(
       itemsOf(
         baseState({
-          threads: [thread({ id: 'TP3', authorLogin: 'pr-author', body: 'CodeRabbit skipped this run' })],
+          threads: [
+            thread({ id: 'TP3', authorLogin: 'pr-author', body: 'CodeRabbit skipped this run' }),
+          ],
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TP3', verdict: 'skip', path: 'src/a.ts', reason: 'responder_authored' },
+      {
+        kind: 'thread',
+        id: 'TP3',
+        verdict: 'skip',
+        path: 'src/a.ts',
+        reason: 'responder_authored',
+      },
     ]);
   });
 
@@ -337,12 +409,21 @@ describe('row-order precedence — threads', () => {
       itemsOf(
         baseState({
           threads: [
-            thread({ id: 'TP4', replies: [said('pr-author', T1, 'fixed'), said('reviewer', T2, 'still broken')] }),
+            thread({
+              id: 'TP4',
+              replies: [said('pr-author', T1, 'fixed'), said('reviewer', T2, 'still broken')],
+            }),
           ],
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TP4', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'TP4',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ]);
   });
 
@@ -363,12 +444,22 @@ describe('row-order precedence — threads', () => {
       itemsOf(
         baseState({
           threads: [
-            thread({ id: 'TP6', isOutdated: true, replies: [said('reviewer', T1), said('pr-author', T2)] }),
+            thread({
+              id: 'TP6',
+              isOutdated: true,
+              replies: [said('reviewer', T1), said('pr-author', T2)],
+            }),
           ],
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TP6', verdict: 'blocked', path: 'src/a.ts', reason: 'outdated_unresolved' },
+      {
+        kind: 'thread',
+        id: 'TP6',
+        verdict: 'blocked',
+        path: 'src/a.ts',
+        reason: 'outdated_unresolved',
+      },
     ]);
   });
 });
@@ -379,19 +470,27 @@ describe('row-order precedence — reviews (documented ordering)', () => {
     // review is not outstanding feedback no matter what it carries.
     expect(
       itemsOf(
-        baseState({ reviews: [review({ id: 'RP1', authorLogin: 'pr-author', state: 'DISMISSED' })] }),
+        baseState({
+          reviews: [review({ id: 'RP1', authorLogin: 'pr-author', state: 'DISMISSED' })],
+        }),
       ),
-    ).toEqual([{ kind: 'review', id: 'RP1', verdict: 'skip', path: null, reason: 'responder_authored' }]);
+    ).toEqual([
+      { kind: 'review', id: 'RP1', verdict: 'skip', path: null, reason: 'responder_authored' },
+    ]);
   });
 
   test('row 7 precedes row 8 — a responder-authored review with a bot-notice body → responder_authored', () => {
     expect(
       itemsOf(
         baseState({
-          reviews: [review({ id: 'RP2', authorLogin: 'pr-author', body: 'CodeRabbit skipped this run' })],
+          reviews: [
+            review({ id: 'RP2', authorLogin: 'pr-author', body: 'CodeRabbit skipped this run' }),
+          ],
         }),
       ),
-    ).toEqual([{ kind: 'review', id: 'RP2', verdict: 'skip', path: null, reason: 'responder_authored' }]);
+    ).toEqual([
+      { kind: 'review', id: 'RP2', verdict: 'skip', path: null, reason: 'responder_authored' },
+    ]);
   });
 
   test('row 8 precedes row 9 — a DISMISSED review with a bot-notice body → bot_skip_notice', () => {
@@ -401,7 +500,9 @@ describe('row-order precedence — reviews (documented ordering)', () => {
           reviews: [review({ id: 'RP3', state: 'DISMISSED', body: 'CodeRabbit skipped this run' })],
         }),
       ),
-    ).toEqual([{ kind: 'review', id: 'RP3', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+    ).toEqual([
+      { kind: 'review', id: 'RP3', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
+    ]);
   });
 
   test('row 9 precedes row 10 — a dismissed review with a postdating responder reply → review_dismissed', () => {
@@ -428,10 +529,10 @@ describe('row-order precedence — reviews (documented ordering)', () => {
     // Dismissal is the stronger void: it answers "should anyone act on
     // this" before the emptiness check (row 11) is ever consulted.
     expect(
-      itemsOf(
-        baseState({ reviews: [review({ id: 'RP5', state: 'DISMISSED', body: '' })] }),
-      ),
-    ).toEqual([{ kind: 'review', id: 'RP5', verdict: 'skip', path: null, reason: 'review_dismissed' }]);
+      itemsOf(baseState({ reviews: [review({ id: 'RP5', state: 'DISMISSED', body: '' })] })),
+    ).toEqual([
+      { kind: 'review', id: 'RP5', verdict: 'skip', path: null, reason: 'review_dismissed' },
+    ]);
   });
 
   test('row 11 sits before the fallback — a NON-empty APPROVED body → actionable, not skipped', () => {
@@ -439,7 +540,15 @@ describe('row-order precedence — reviews (documented ordering)', () => {
     // body, so a text-carrying approval stays on the content rows.
     expect(
       itemsOf(
-        baseState({ reviews: [review({ id: 'RP6', state: 'APPROVED', body: 'Approved — but please tighten the retry cap next time.' })] }),
+        baseState({
+          reviews: [
+            review({
+              id: 'RP6',
+              state: 'APPROVED',
+              body: 'Approved — but please tighten the retry cap next time.',
+            }),
+          ],
+        }),
       ),
     ).toEqual([
       {
@@ -485,7 +594,9 @@ describe('null timestamps fall back per treatNullCreatedAtAs', () => {
   test("default 'nowMs': an unparseable last reply is equally NO ONE'S word — actionable", () => {
     const items = itemsOf(
       baseState({
-        threads: [thread({ id: 'TN3', replies: [said('reviewer', T2), said('pr-author', 'not-a-date')] })],
+        threads: [
+          thread({ id: 'TN3', replies: [said('reviewer', T2), said('pr-author', 'not-a-date')] }),
+        ],
       }),
     );
     expect(items[0]?.verdict).toBe('actionable');
@@ -495,7 +606,9 @@ describe('null timestamps fall back per treatNullCreatedAtAs', () => {
   test("'epochMs': an unparseable createdAt behaves like null — reviewer last word → actionable", () => {
     const items = itemsOf(
       baseState({
-        threads: [thread({ id: 'TN4', replies: [said('reviewer', T2), said('pr-author', 'not-a-date')] })],
+        threads: [
+          thread({ id: 'TN4', replies: [said('reviewer', T2), said('pr-author', 'not-a-date')] }),
+        ],
       }),
       NOW,
       { ...defaultClassifyConfig, treatNullCreatedAtAs: 'epochMs' },
@@ -569,7 +682,9 @@ describe('answering requires a real reply timestamp', () => {
     const items = itemsOf(
       baseState({
         reviews: [review({ id: 'RW2', submittedAt: T1 })],
-        restIssueComments: [restComment({ id: 522, authorLogin: 'pr-author', createdAt: 'not-a-date' })],
+        restIssueComments: [
+          restComment({ id: 522, authorLogin: 'pr-author', createdAt: 'not-a-date' }),
+        ],
       }),
     );
     expect(items[0]?.verdict).toBe('actionable');
@@ -607,7 +722,10 @@ describe('answering requires a real reply timestamp', () => {
     const items = itemsOf(
       baseState({
         threads: [
-          thread({ id: 'RW5', replies: [said('pr-author', null, 'fixed'), said('reviewer', T2, 'bumping')] }),
+          thread({
+            id: 'RW5',
+            replies: [said('pr-author', null, 'fixed'), said('reviewer', T2, 'bumping')],
+          }),
         ],
       }),
     );
@@ -706,11 +824,17 @@ describe('the answer scan covers TOP-LEVEL issue comments only', () => {
 describe('null authorLogin is never the responder (fails toward actionable)', () => {
   test('a null-author thread is external — actionable, not skipped', () => {
     expect(itemsOf(baseState({ threads: [thread({ id: 'TA1', authorLogin: null })] }))).toEqual([
-      { kind: 'thread', id: 'TA1', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'TA1',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ]);
   });
 
-  test('a null-author last reply is not the responder\'s word — actionable, not responded', () => {
+  test("a null-author last reply is not the responder's word — actionable, not responded", () => {
     const items = itemsOf(
       baseState({ threads: [thread({ id: 'TA2', replies: [said(null, T2)] })] }),
     );
@@ -736,15 +860,25 @@ describe('null authorLogin is never the responder (fails toward actionable)', ()
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TA3', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
-      { kind: 'comment', id: '612', verdict: 'actionable', path: null, reason: 'top_level_summary' },
+      {
+        kind: 'thread',
+        id: 'TA3',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
+      {
+        kind: 'comment',
+        id: '612',
+        verdict: 'actionable',
+        path: null,
+        reason: 'top_level_summary',
+      },
     ]);
   });
 
   test('a null-author review is external — actionable, not skipped', () => {
-    const items = itemsOf(
-      baseState({ reviews: [review({ id: 'TA4', authorLogin: null })] }),
-    );
+    const items = itemsOf(baseState({ reviews: [review({ id: 'TA4', authorLogin: null })] }));
     expect(items[0]?.reason).toBe('review_summary_needs_response');
   });
 });
@@ -761,11 +895,10 @@ describe('both-values config coverage', () => {
     'blockOnOutdatedThreads=$flag — an outdated unresolved thread → $verdict ($reason)',
     ({ flag, verdict, reason }) => {
       expect(
-        itemsOf(
-          baseState({ threads: [thread({ id: 'TB1', isOutdated: true })] }),
-          NOW,
-          { ...defaultClassifyConfig, blockOnOutdatedThreads: flag },
-        ),
+        itemsOf(baseState({ threads: [thread({ id: 'TB1', isOutdated: true })] }), NOW, {
+          ...defaultClassifyConfig,
+          blockOnOutdatedThreads: flag,
+        }),
       ).toEqual([{ kind: 'thread', id: 'TB1', verdict, path: 'src/a.ts', reason }]);
     },
   );
@@ -777,11 +910,10 @@ describe('both-values config coverage', () => {
     'skipResponderAuthoredThreads=$flag — a responder-authored thread → $verdict ($reason)',
     ({ flag, verdict, reason }) => {
       expect(
-        itemsOf(
-          baseState({ threads: [thread({ id: 'TB2', authorLogin: 'pr-author' })] }),
-          NOW,
-          { ...defaultClassifyConfig, skipResponderAuthoredThreads: flag },
-        ),
+        itemsOf(baseState({ threads: [thread({ id: 'TB2', authorLogin: 'pr-author' })] }), NOW, {
+          ...defaultClassifyConfig,
+          skipResponderAuthoredThreads: flag,
+        }),
       ).toEqual([{ kind: 'thread', id: 'TB2', verdict, path: 'src/a.ts', reason }]);
     },
   );
@@ -793,11 +925,10 @@ describe('both-values config coverage', () => {
     'skipDismissedReviews=$flag — a DISMISSED review → $verdict ($reason)',
     ({ flag, verdict, reason }) => {
       expect(
-        itemsOf(
-          baseState({ reviews: [review({ id: 'TB3', state: 'DISMISSED' })] }),
-          NOW,
-          { ...defaultClassifyConfig, skipDismissedReviews: flag },
-        ),
+        itemsOf(baseState({ reviews: [review({ id: 'TB3', state: 'DISMISSED' })] }), NOW, {
+          ...defaultClassifyConfig,
+          skipDismissedReviews: flag,
+        }),
       ).toEqual([{ kind: 'review', id: 'TB3', verdict, path: null, reason }]);
     },
   );
@@ -817,25 +948,19 @@ describe('approval and empty-summary reviews (row 11)', () => {
   });
 
   test('an APPROVED review with a NON-EMPTY body → actionable (the approver may have noted follow-ups)', () => {
-    const items = itemsOf(
-      baseState({ reviews: [review({ id: 'RA2', state: 'APPROVED' })] }),
-    );
+    const items = itemsOf(baseState({ reviews: [review({ id: 'RA2', state: 'APPROVED' })] }));
     expect(items[0]?.verdict).toBe('actionable');
     expect(items[0]?.reason).toBe('review_summary_needs_response');
   });
 
   test('a null-state review with an EMPTY body → skip (empty_summary_no_state)', () => {
-    const items = itemsOf(
-      baseState({ reviews: [review({ id: 'RA3', state: null, body: '' })] }),
-    );
+    const items = itemsOf(baseState({ reviews: [review({ id: 'RA3', state: null, body: '' })] }));
     expect(items[0]?.verdict).toBe('skip');
     expect(items[0]?.reason).toBe('empty_summary_no_state');
   });
 
   test('a null-state review WITH text → actionable', () => {
-    const items = itemsOf(
-      baseState({ reviews: [review({ id: 'RA4', state: null })] }),
-    );
+    const items = itemsOf(baseState({ reviews: [review({ id: 'RA4', state: null })] }));
     expect(items[0]?.verdict).toBe('actionable');
     expect(items[0]?.reason).toBe('review_summary_needs_response');
   });
@@ -866,11 +991,10 @@ describe('approval and empty-summary reviews (row 11)', () => {
     'skipApprovalReviews=$flag — an empty-body APPROVED review → $verdict ($reason)',
     ({ flag, verdict, reason }) => {
       expect(
-        itemsOf(
-          baseState({ reviews: [review({ id: 'RA5', state: 'APPROVED', body: '' })] }),
-          NOW,
-          { ...defaultClassifyConfig, skipApprovalReviews: flag },
-        ),
+        itemsOf(baseState({ reviews: [review({ id: 'RA5', state: 'APPROVED', body: '' })] }), NOW, {
+          ...defaultClassifyConfig,
+          skipApprovalReviews: flag,
+        }),
       ).toEqual([{ kind: 'review', id: 'RA5', verdict, path: null, reason }]);
     },
   );
@@ -898,8 +1022,16 @@ describe('approval and empty-summary reviews (row 11)', () => {
 
 describe('config.responderIs', () => {
   test("'pr-author' (the only value) selects state.authorLogin as the responder", () => {
-    expect(itemsOf(baseState({ threads: [thread({ id: 'TRI1', authorLogin: 'pr-author' })] }))).toEqual([
-      { kind: 'thread', id: 'TRI1', verdict: 'skip', path: 'src/a.ts', reason: 'responder_authored' },
+    expect(
+      itemsOf(baseState({ threads: [thread({ id: 'TRI1', authorLogin: 'pr-author' })] })),
+    ).toEqual([
+      {
+        kind: 'thread',
+        id: 'TRI1',
+        verdict: 'skip',
+        path: 'src/a.ts',
+        reason: 'responder_authored',
+      },
     ]);
   });
 });
@@ -912,7 +1044,10 @@ describe('default skipPatterns', () => {
   test.each([
     ['CodeRabbit skipped', 'CodeRabbit skipped this PR because the diff was empty'],
     ['bot-anchored failure', 'coderabbitai failed to post the review: error 500'],
-    ['configuration problem skip', 'CodeRabbit: configuration problem detected — skipping this run'],
+    [
+      'configuration problem skip',
+      'CodeRabbit: configuration problem detected — skipping this run',
+    ],
     ['bot self-skip (skipping)', 'CodeRabbit is skipping this PR — no reviewable diff'],
     ['bot self-skip (not reviewing)', 'chatgpt-codex-connector: not reviewing this run'],
   ])('bot-anchored pattern (%s) fires → bot_skip_notice', (_label, body) => {
@@ -925,11 +1060,22 @@ describe('default skipPatterns', () => {
     expect(
       itemsOf(
         baseState({
-          threads: [thread({ id: 'TH1', body: 'The review failed to consider the null case — please handle it.' })],
+          threads: [
+            thread({
+              id: 'TH1',
+              body: 'The review failed to consider the null case — please handle it.',
+            }),
+          ],
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TH1', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'TH1',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ]);
   });
 
@@ -941,16 +1087,25 @@ describe('default skipPatterns', () => {
       itemsOf(
         baseState({
           threads: [
-            thread({ id: 'TH3', body: 'Codex-style tooling failed us here — please fix the harness manually.' }),
+            thread({
+              id: 'TH3',
+              body: 'Codex-style tooling failed us here — please fix the harness manually.',
+            }),
           ],
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TH3', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'TH3',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ]);
   });
 
-  test("a HUMAN \"I'm not reviewing the migrations this pass, but …\" must NOT skip → actionable", () => {
+  test('a HUMAN "I\'m not reviewing the migrations this pass, but …" must NOT skip → actionable', () => {
     expect(
       itemsOf(
         baseState({
@@ -963,7 +1118,13 @@ describe('default skipPatterns', () => {
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TH2', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'TH2',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ]);
   });
 
@@ -984,7 +1145,13 @@ describe('default skipPatterns', () => {
         }),
       ),
     ).toEqual([
-      { kind: 'thread', id: 'TH4', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' },
+      {
+        kind: 'thread',
+        id: 'TH4',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
     ]);
   });
 
@@ -1003,7 +1170,15 @@ describe('default skipPatterns', () => {
           ],
         }),
       ),
-    ).toEqual([{ kind: 'thread', id: 'TH7', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' }]);
+    ).toEqual([
+      {
+        kind: 'thread',
+        id: 'TH7',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
+    ]);
   });
 
   test('a HUMAN sentence MENTIONING CodeRabbit alongside "skipped" mid-sentence must NOT skip → actionable', () => {
@@ -1022,7 +1197,15 @@ describe('default skipPatterns', () => {
           ],
         }),
       ),
-    ).toEqual([{ kind: 'comment', id: '627', verdict: 'actionable', path: null, reason: 'top_level_summary' }]);
+    ).toEqual([
+      {
+        kind: 'comment',
+        id: '627',
+        verdict: 'actionable',
+        path: null,
+        reason: 'top_level_summary',
+      },
+    ]);
   });
 
   test('a bot configuration-error notice ("CodeRabbit: configuration error, skipping review") → skip (bot_skip_notice)', () => {
@@ -1031,7 +1214,9 @@ describe('default skipPatterns', () => {
     expect(
       itemsOf(
         baseState({
-          restIssueComments: [restComment({ id: 624, body: 'CodeRabbit: configuration error, skipping review' })],
+          restIssueComments: [
+            restComment({ id: 624, body: 'CodeRabbit: configuration error, skipping review' }),
+          ],
         }),
       ),
     ).toEqual([
@@ -1044,10 +1229,18 @@ describe('default skipPatterns', () => {
     // skips when a bot/tool identity LEADS the line.
     expect(
       itemsOf(
-        baseState({ restIssueComments: [restComment({ id: 623, body: 'Skipping review for this draft PR' })] }),
+        baseState({
+          restIssueComments: [restComment({ id: 623, body: 'Skipping review for this draft PR' })],
+        }),
       ),
     ).toEqual([
-      { kind: 'comment', id: '623', verdict: 'actionable', path: null, reason: 'top_level_summary' },
+      {
+        kind: 'comment',
+        id: '623',
+        verdict: 'actionable',
+        path: null,
+        reason: 'top_level_summary',
+      },
     ]);
   });
 
@@ -1059,20 +1252,30 @@ describe('default skipPatterns', () => {
       itemsOf(
         baseState({
           restIssueComments: [
-            restComment({ id: 625, body: 'Review queued; results will appear below.\nCodeRabbit is skipping this PR — no reviewable diff' }),
+            restComment({
+              id: 625,
+              body: 'Review queued; results will appear below.\nCodeRabbit is skipping this PR — no reviewable diff',
+            }),
           ],
         }),
       ),
-    ).toEqual([{ kind: 'comment', id: '625', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+    ).toEqual([
+      { kind: 'comment', id: '625', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
+    ]);
     expect(
       itemsOf(
         baseState({
           restIssueComments: [
-            restComment({ id: 626, body: 'Preamble line.\ncoderabbitai failed to post the review: error 500' }),
+            restComment({
+              id: 626,
+              body: 'Preamble line.\ncoderabbitai failed to post the review: error 500',
+            }),
           ],
         }),
       ),
-    ).toEqual([{ kind: 'comment', id: '626', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+    ).toEqual([
+      { kind: 'comment', id: '626', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
+    ]);
   });
 
   test('a SPLIT-LINE notice (identity and skip verb on different lines) skips — the bounded window spans the break', () => {
@@ -1087,7 +1290,9 @@ describe('default skipPatterns', () => {
           restIssueComments: [restComment({ id: 627, body: 'CodeRabbit\nskipped this run' })],
         }),
       ),
-    ).toEqual([{ kind: 'comment', id: '627', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+    ).toEqual([
+      { kind: 'comment', id: '627', verdict: 'skip', path: null, reason: 'bot_skip_notice' },
+    ]);
   });
 
   test('a HUMAN mid-body sentence (line 2, no bot identity) stays actionable even with the `m` flag', () => {
@@ -1105,15 +1310,32 @@ describe('default skipPatterns', () => {
           ],
         }),
       ),
-    ).toEqual([{ kind: 'thread', id: 'TH5', verdict: 'actionable', path: 'src/a.ts', reason: 'thread_needs_response' }]);
+    ).toEqual([
+      {
+        kind: 'thread',
+        id: 'TH5',
+        verdict: 'actionable',
+        path: 'src/a.ts',
+        reason: 'thread_needs_response',
+      },
+    ]);
   });
 
   test('a normal review body matches no default pattern → stays actionable', () => {
     const items = itemsOf(
       baseState({
-        threads: [thread({ id: 'TS1', body: 'Please extract this loop into a helper and add a regression test.' })],
-        reviews: [review({ id: 'TS2', body: 'The null-handling branch is untested; please add a case.' })],
-        restIssueComments: [restComment({ id: 622, body: 'Overall this looks close — one blocking nit below.' })],
+        threads: [
+          thread({
+            id: 'TS1',
+            body: 'Please extract this loop into a helper and add a regression test.',
+          }),
+        ],
+        reviews: [
+          review({ id: 'TS2', body: 'The null-handling branch is untested; please add a case.' }),
+        ],
+        restIssueComments: [
+          restComment({ id: 622, body: 'Overall this looks close — one blocking nit below.' }),
+        ],
       }),
     );
     expect(items.map((item) => item.verdict)).toEqual(['actionable', 'actionable', 'actionable']);
@@ -1137,9 +1359,17 @@ describe('skip-pattern evaluation is stateless vs lastIndex', () => {
    * config-supplied pattern takes, and the shape that goes stateful. */
   const gConfig = { ...defaultClassifyConfig, skipPatterns: [/skipped/g] };
   const yConfig = { ...defaultClassifyConfig, skipPatterns: [/skipped/y] };
-  const state = baseState({ threads: [thread({ id: 'TG1', body: 'CodeRabbit skipped this run' })] });
+  const state = baseState({
+    threads: [thread({ id: 'TG1', body: 'CodeRabbit skipped this run' })],
+  });
   const expected = [
-    { kind: 'thread' as const, id: 'TG1', verdict: 'skip' as const, path: 'src/a.ts', reason: 'bot_skip_notice' },
+    {
+      kind: 'thread' as const,
+      id: 'TG1',
+      verdict: 'skip' as const,
+      path: 'src/a.ts',
+      reason: 'bot_skip_notice',
+    },
   ];
 
   test('a /g config pattern classifies the same body identically across three consecutive calls', () => {

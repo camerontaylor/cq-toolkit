@@ -173,7 +173,10 @@ export const commitGate: Op<CommitGateInput, CommitGateReport> = async (input) =
     });
   } catch (err) {
     if (err instanceof SyntaxError) {
-      return { status: 'failed', error: `invalid pattern config for commitGate: ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `invalid pattern config for commitGate: ${messageOf(err)}`,
+      };
     }
     throw err;
   }
@@ -290,7 +293,7 @@ function trailersOf(lines: string[]): Map<string, string> {
     return trailers;
   }
   const last = paragraphs[paragraphs.length - 1];
-  if (!TRAILER_LINE_RE.test(last[0])) {
+  if (last === undefined || last[0] === undefined || !TRAILER_LINE_RE.test(last[0])) {
     return trailers;
   }
   for (const line of last.slice(1)) {
@@ -302,6 +305,7 @@ function trailersOf(lines: string[]): Map<string, string> {
   for (const line of last) {
     if (CONTINUATION_LINE_RE.test(line)) {
       const previous = entries[entries.length - 1];
+      if (previous === undefined) return trailers;
       previous.value = `${previous.value} ${line.trim()}`;
       continue;
     }

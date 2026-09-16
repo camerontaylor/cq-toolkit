@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Gates lane C3 — test evidence for the hack detector: every shipped
 // tamper-diff fixture round-trips to its EXACT expected findings
 // (kind/file/line/pattern/snippet/message), the must-NOT-flag fixtures
@@ -26,7 +27,10 @@ async function findingsOf(
   diff: string,
   suppressionPatterns?: readonly SuppressionPattern[],
 ): Promise<TamperFinding[]> {
-  const result = await hackDetector({ diff, suppressionPatterns });
+  const result = await hackDetector({
+    diff,
+    ...(suppressionPatterns === undefined ? {} : { suppressionPatterns }),
+  });
   expect(result.status).toBe('ok');
   return result.status === 'ok' ? result.value : [];
 }
@@ -370,20 +374,37 @@ describe('hackDetector: suppression config', () => {
     expect(await findingsOf(diff)).toEqual([]);
   });
 
+  test.each(['oxlint-disable', 'oxlint-disable-next-line', 'oxlint-disable-line'])(
+    'detects added %s directives',
+    async (directive) => {
+      const diff = [
+        'diff --git a/src/a.ts b/src/a.ts',
+        '--- a/src/a.ts',
+        '+++ b/src/a.ts',
+        '@@ -0,0 +1 @@',
+        `+// ${directive} no-debugger -- fixture`,
+      ].join('\n');
+      expect(await findingsOf(diff)).toEqual([
+        match.objectContaining({ pattern: 'oxlint-disable' }),
+      ]);
+    },
+  );
+
   test('the shipped defaults are DEEP-frozen: mutation attempts throw in strict mode', () => {
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS)).toBe(true);
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS[0])).toBe(true);
     expect(Object.isFrozen(DEFAULT_SUPPRESSION_PATTERNS[3])).toBe(true);
     expect(DEFAULT_SUPPRESSION_PATTERNS.map((p) => p.name)).toEqual([
       'eslint-disable',
+      'oxlint-disable',
       '@ts-ignore',
       '@ts-expect-error',
       'istanbul ignore',
     ]);
     expect(() => {
-      (DEFAULT_SUPPRESSION_PATTERNS[1] as { pattern: string }).pattern = '\\bnever\\b';
+      (DEFAULT_SUPPRESSION_PATTERNS[2] as { pattern: string }).pattern = '\\bnever\\b';
     }).toThrow(TypeError);
-    expect(DEFAULT_SUPPRESSION_PATTERNS[1]?.pattern).toBe('@ts-ignore\\b');
+    expect(DEFAULT_SUPPRESSION_PATTERNS[2]?.pattern).toBe('@ts-ignore\\b');
   });
 
   test('the frozen defaults pass STRAIGHT into the readonly config fields, no casts', async () => {
@@ -399,7 +420,10 @@ describe('hackDetector: suppression config', () => {
   });
 
   test('a custom pattern source that does not compile is a `failed` op, never a crash', async () => {
-    const result = await hackDetector({ diff: '+anything', suppressionPatterns: [{ name: 'bad', pattern: '(' }] });
+    const result = await hackDetector({
+      diff: '+anything',
+      suppressionPatterns: [{ name: 'bad', pattern: '(' }],
+    });
     expect(result.status).toBe('failed');
   });
 
@@ -497,7 +521,9 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
       '+export const x = test.skip("later");',
     ].join('\n');
     const findings = await findingsOf(diff);
-    expect(findings.map((f) => [f.kind, f.file, f.line])).toEqual([['new-skip-only', 'src/fresh.ts', 1]]);
+    expect(findings.map((f) => [f.kind, f.file, f.line])).toEqual([
+      ['new-skip-only', 'src/fresh.ts', 1],
+    ]);
   });
 
   test('non-blank input with NO diff structure is indeterminate, never a silent clean scan (I5)', async () => {

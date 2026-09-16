@@ -5,6 +5,8 @@
 # rules, typecheck ratchet, denylist scan, workflow tests) remain the
 # enforcement; see policy/DOCTRINE.md. The GitHub App reviews opened PRs;
 # these settings also govern that once merged to the default branch.
+# Inherit shared defaults from camerontaylor/coderabbit, including review frequency.
+inheritance: true
 language: en-US
 tone_instructions: >-
   Concise and technical; cite file:line. Prefer few high-confidence findings
@@ -21,14 +23,14 @@ reviews:
   # entries mirror .gitignore's local-agent runtime scratch; authored agent
   # guidance (.claude skills/settings, AGENTS.md) stays visible.
   path_filters:
-    - "!dist/**"
-    - "!coverage/**"
-    - "!node_modules/**"
-    - "!.gjc/**"
-    - "!.zcode/**"
-    - "!.paseo/**"
-    - "!.claude/worktrees/**"
-    - "!package-lock.json"
+    - '!dist/**'
+    - '!coverage/**'
+    - '!node_modules/**'
+    - '!.gjc/**'
+    - '!.zcode/**'
+    - '!.paseo/**'
+    - '!.claude/worktrees/**'
+    - '!package-lock.json'
   path_instructions:
     - path: src/kernel/**
       instructions: >-
@@ -204,4 +206,4 @@ knowledge_base:
     # **/CLAUDE.md, ...): carry the doctrine as a repo-wide guideline too.
     filePatterns:
       - files: policy/DOCTRINE.md
-        applyTo: "**/*"
+        applyTo: '**/*'

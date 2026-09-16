@@ -42,7 +42,9 @@ function usesRefs(text: string): Array<{ line: number; ref: string }> {
     const pattern = /["']?uses["']?\s*:\s*(\S+)/g;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(line)) !== null) {
-      refs.push({ line: idx + 1, ref: match[1] });
+      const ref = match[1];
+      if (ref === undefined) throw new Error('uses pattern must capture a reference');
+      refs.push({ line: idx + 1, ref });
     }
   });
   return refs;
@@ -66,8 +68,10 @@ function stepBlocks(text: string): string[] {
   lines.forEach((line, i) => {
     const m = /^(\s*)- /.exec(line);
     if (m === null) return;
-    if (base === null) base = m[1].length;
-    if (m[1].length === base) starts.push(i);
+    const indent = m[1];
+    if (indent === undefined) throw new Error('step pattern must capture indentation');
+    if (base === null) base = indent.length;
+    if (indent.length === base) starts.push(i);
   });
   const blocks: string[] = [];
   for (let s = 0; s < starts.length; s++) {
@@ -92,12 +96,18 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
   it('generated ci.yml, denylist.yml, and install-matrix.yml drop the token on EVERY checkout step', () => {
     for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
-      const checkoutBlocks = stepBlocks(text).filter((block) => block.includes('actions/checkout@'));
+      const checkoutBlocks = stepBlocks(text).filter((block) =>
+        block.includes('actions/checkout@'),
+      );
       // Vacuity guard: a refactor that removed the steps (or the checkout)
       // must not silently turn this assertion into a no-op.
-      expect(checkoutBlocks.length, `${name}: at least one checkout step`).toBeGreaterThanOrEqual(1);
+      expect(checkoutBlocks.length, `${name}: at least one checkout step`).toBeGreaterThanOrEqual(
+        1,
+      );
       for (const block of checkoutBlocks) {
-        expect(block, `${name}: a checkout step must set persist-credentials: false`).toMatch(/["']?persist-credentials["']?\s*:\s*false/);
+        expect(block, `${name}: a checkout step must set persist-credentials: false`).toMatch(
+          /["']?persist-credentials["']?\s*:\s*false/,
+        );
       }
     }
   });
@@ -110,11 +120,15 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
       // policy assertion is that neither file DECLARES the key (which would
       // have to be `true` to matter, and `false` would break the push); the
       // gate's prose comment mentioning the word is not a declaration.
-      expect(text, `${name}: must not declare a persist-credentials key`).not.toMatch(/^\s+["']?persist-credentials["']?\s*:/m);
+      expect(text, `${name}: must not declare a persist-credentials key`).not.toMatch(
+        /^\s+["']?persist-credentials["']?\s*:/m,
+      );
     }
   });
 
   it('the templates README documents the pinning policy', () => {
-    expect(readFileSync(join(ROOT, 'policy/templates/README.md'), 'utf8')).toContain('## Action pinning');
+    expect(readFileSync(join(ROOT, 'policy/templates/README.md'), 'utf8')).toContain(
+      '## Action pinning',
+    );
   });
 });

@@ -110,10 +110,13 @@ describe('serializeLedger / parseLedger round trip', () => {
 
   test('optional fields absent vs undefined serialize identically', () => {
     const absent = serializeLedger({ version: 1, entries: [{ signature: 's', count: 1 }] });
-    const undef = serializeLedger({
-      version: 1,
-      entries: [{ signature: 's', count: 1, component: undefined, note: undefined }],
-    });
+    // A JavaScript caller can still supply explicit undefined despite the typed contract.
+    const undef: unknown = Reflect.apply(serializeLedger, undefined, [
+      {
+        version: 1,
+        entries: [{ signature: 's', count: 1, component: undefined, note: undefined }],
+      },
+    ]);
     expect(undef).toBe(absent);
   });
 
@@ -125,7 +128,13 @@ describe('serializeLedger / parseLedger round trip', () => {
       serializeLedger({ version: 1, entries: [{ signature: 's', count: 1.5 }] }),
     ).toThrow(LedgerFormatError);
     expect(() =>
-      serializeLedger({ version: 1, entries: [{ signature: 's', count: 1 }, { signature: 's', count: 2 }] }),
+      serializeLedger({
+        version: 1,
+        entries: [
+          { signature: 's', count: 1 },
+          { signature: 's', count: 2 },
+        ],
+      }),
     ).toThrow(LedgerFormatError);
   });
 });
@@ -190,7 +199,13 @@ describe('parseLedger rejections (the deterministic format is load-bearing)', ()
     const overlongComponent = `{"signature": "sig-a", "count": 1, "component": "${'c'.repeat(201)}"}`;
     const emptyNote = `{"signature": "sig-a", "count": 1, "note": ""}`;
     const overlongNote = `{"signature": "sig-a", "count": 1, "note": "${'n'.repeat(501)}"}`;
-    for (const bad of [overlongSignature, emptyComponent, overlongComponent, emptyNote, overlongNote]) {
+    for (const bad of [
+      overlongSignature,
+      emptyComponent,
+      overlongComponent,
+      emptyNote,
+      overlongNote,
+    ]) {
       expect(() => parseLedger(`{"version": 1, "entries": [${bad}]}`)).toThrow(LedgerFormatError);
     }
   });
@@ -239,7 +254,10 @@ describe('sortEntries', () => {
   });
 
   test('orders by code point — UTF-8 byte order, so a non-BMP signature sorts by its true bytes', () => {
-    const sorted = sortEntries([{ signature: '�', count: 1 }, { signature: '🚀', count: 1 }]);
+    const sorted = sortEntries([
+      { signature: '�', count: 1 },
+      { signature: '🚀', count: 1 },
+    ]);
     // U+FFFD (EF BF BD in UTF-8) sorts before U+1F680 (F0 9F 9A 80), even
     // though the rocket's surrogate high half (D83D) would flip UTF-16
     // code-unit order.

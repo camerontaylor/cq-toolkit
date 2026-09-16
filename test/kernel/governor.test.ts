@@ -1,3 +1,4 @@
+import { match } from '../helpers/matchers.js';
 // T1.3 slice 2 — tests for the budget governor (src/kernel/governor.ts).
 //
 // THE ws-a acceptance checks, in goal order:
@@ -55,11 +56,7 @@ import {
 import { decideRescue, rescueInputFromJournal } from '../../src/kernel/rescue.js';
 import { runPlan } from '../../src/kernel/runner.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
-import type {
-  GovernorEvent,
-  JobGovernance,
-  LadderRungMarker,
-} from '../../src/kernel/governor.js';
+import type { GovernorEvent, JobGovernance, LadderRungMarker } from '../../src/kernel/governor.js';
 import type {
   JournalEvent,
   Op,
@@ -117,7 +114,10 @@ function virtualClock(startMs = 1_000_000): VirtualClock {
 }
 
 /** One macrotask turn — lets the runner's real fs work and microtasks progress. */
-const tick = (): Promise<void> => new Promise<void>((resolve) => { setImmediate(resolve); });
+const tick = (): Promise<void> =>
+  new Promise<void>((resolve) => {
+    setImmediate(resolve);
+  });
 
 /**
  * Advance the virtual clock in steps until `promise` settles (runs need
@@ -125,11 +125,19 @@ const tick = (): Promise<void> => new Promise<void>((resolve) => { setImmediate(
  * of virtual time max, then fails LOUDLY — a hanging run is a test failure,
  * never a suite hang.
  */
-async function pumped<T>(promise: Promise<T>, clock: VirtualClock, maxAdvance = 600_000): Promise<T> {
+async function pumped<T>(
+  promise: Promise<T>,
+  clock: VirtualClock,
+  maxAdvance = 600_000,
+): Promise<T> {
   let settled = false;
   void promise.then(
-    () => { settled = true; },
-    () => { settled = true; },
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
   );
   let advanced = 0;
   while (!settled) {
@@ -172,7 +180,10 @@ function entry(
 
 function viewWith(...entries: OpRegistryEntry<never, never>[]): OpRegistryView {
   const map = new Map(
-    entries.map((candidate): [string, OpRegistryEntry<never, never>] => [candidate.name, candidate]),
+    entries.map((candidate): [string, OpRegistryEntry<never, never>] => [
+      candidate.name,
+      candidate,
+    ]),
   );
   return { get: (name) => map.get(name) };
 }
@@ -227,10 +238,16 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
     const task = async (ctx: JobGovernance): Promise<never> => {
       // IGNORES the abort signal for settling purposes (listens but never
       // returns early) — only the final rung may end this op.
-      ctx.signal.addEventListener('abort', () => { signalObserved = true; });
+      ctx.signal.addEventListener('abort', () => {
+        signalObserved = true;
+      });
       ctx.setCancelPort({
-        hardCancel: () => { hardCancels.push('hard'); },
-        kill: () => { kills.push('kill'); },
+        hardCancel: () => {
+          hardCancels.push('hard');
+        },
+        kill: () => {
+          kills.push('kill');
+        },
       });
       return new Promise<never>(() => {}); // never settles on its own
     };
@@ -239,7 +256,12 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
       task,
       { wallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
       { op: 'fake', jobKey: 'j1', attempt: 1 },
-      { clock: clock, onRung: (marker) => { markers.push(marker); } },
+      {
+        clock: clock,
+        onRung: (marker) => {
+          markers.push(marker);
+        },
+      },
     );
     await tick(); // the task starts on a microtask — let it register signal listener + port
 
@@ -258,7 +280,9 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
     const outcome = await outcomePromise;
     expect(outcome.outcome).toBe('killed');
     expect(markers.map((marker) => marker.rung)).toEqual(['signal', 'timeout', 'kill']);
-    expect(markers.map((marker) => [marker.delayMs, marker.sinceStartMs, marker.delivered])).toEqual([
+    expect(
+      markers.map((marker) => [marker.delayMs, marker.sinceStartMs, marker.delivered]),
+    ).toEqual([
       [100, 100, true],
       [10, 110, true],
       [20, 130, true],
@@ -272,7 +296,9 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
   test('a rejection AFTER the kill is swallowed by the detachment — no unhandled rejection', async () => {
     const clock = virtualClock();
     const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
     process.on('unhandledRejection', onUnhandled);
     try {
       const task = async (ctx: JobGovernance): Promise<never> => {
@@ -304,7 +330,9 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
   test('an ASYNC cancel-port rejection is recorded on the marker — never unhandled (review #15-5)', async () => {
     const clock = virtualClock();
     const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => { unhandled.push(reason); };
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
     process.on('unhandledRejection', onUnhandled);
     try {
       const markers: LadderRungMarker[] = [];
@@ -313,7 +341,9 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
         // An `async () => void` port: the sync try/catch cannot see its
         // REJECTION — only a `.then(undefined, handler)` can record it.
         ctx.setCancelPort({
-          hardCancel: async () => { throw new Error('async boom'); },
+          hardCancel: async () => {
+            throw new Error('async boom');
+          },
         });
         return new Promise<never>(() => {});
       };
@@ -321,7 +351,12 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
         task,
         { wallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
         { op: 'fake', jobKey: 'j1', attempt: 1 },
-        { clock: clock, onRung: (marker) => { markers.push(marker); } },
+        {
+          clock: clock,
+          onRung: (marker) => {
+            markers.push(marker);
+          },
+        },
       );
       await tick(); // let the task register its async port
       clock.advance(110); // rung 1 (signal) + rung 2 (the async hardCancel REJECTS)
@@ -350,7 +385,12 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
       task,
       { wallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
       { op: 'fake', jobKey: 'j1', attempt: 1 },
-      { clock: clock, onRung: (marker) => { markers.push(marker); } },
+      {
+        clock: clock,
+        onRung: (marker) => {
+          markers.push(marker);
+        },
+      },
     );
     clock.advance(1_000); // well past the wall clock: nothing may fire
     expect(outcome).toMatchObject({ outcome: 'completed', value: 'done' });
@@ -364,8 +404,12 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
     const task = async (ctx: JobGovernance): Promise<never> => {
       ctx.signal.addEventListener('abort', () => {}); // ignored
       ctx.setCancelPort({
-        hardCancel: () => { throw new Error('hard boom'); },
-        kill: () => { throw new Error('kill boom'); },
+        hardCancel: () => {
+          throw new Error('hard boom');
+        },
+        kill: () => {
+          throw new Error('kill boom');
+        },
       });
       return new Promise<never>(() => {});
     };
@@ -373,7 +417,12 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
       task,
       { wallClockMs: 100, abortGraceMs: 10, killGraceMs: 20 },
       { op: 'fake', jobKey: 'j1', attempt: 1 },
-      { clock: clock, onRung: (marker) => { markers.push(marker); } },
+      {
+        clock: clock,
+        onRung: (marker) => {
+          markers.push(marker);
+        },
+      },
     );
     await tick(); // let the task register its hostile port
     clock.advance(130); // all three rungs come due
@@ -381,7 +430,9 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
     // The ladder settled (killed) despite BOTH port throws, in order, on time.
     expect(outcome.outcome).toBe('killed');
     expect(outcome.elapsedMs).toBe(130);
-    expect(markers.map((marker) => [marker.rung, marker.delayMs, marker.delivered, marker.error])).toEqual([
+    expect(
+      markers.map((marker) => [marker.rung, marker.delayMs, marker.delivered, marker.error]),
+    ).toEqual([
       ['signal', 100, true, undefined],
       ['timeout', 10, false, 'hard boom'],
       ['kill', 20, false, 'kill boom'],
@@ -424,6 +475,52 @@ describe('runLadder — THE kill-ladder check (ws-a item 1)', () => {
 // ---------------------------------------------------------------------------
 
 describe('governRegistry — the ladder through runPlan (ws-a item 1)', () => {
+  test('recorded rung events retain late async cancellation errors', async () => {
+    const clock = virtualClock();
+    let rejectHard: (reason: Error) => void = () => {};
+    let rejectKill: (reason: Error) => void = () => {};
+    const hard = new Promise<void>((_resolve, reject) => {
+      rejectHard = reject;
+    });
+    const kill = new Promise<void>((_resolve, reject) => {
+      rejectKill = reject;
+    });
+    const hangOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.setCancelPort({
+        hardCancel: () => hard,
+        kill: () => kill,
+      });
+      return new Promise<never>(() => {});
+    };
+    const governor = new BudgetGovernor(
+      governorConfig(
+        { concurrency: 1, stopOnError: false },
+        { perJobWallClockMs: 100 },
+        { abortGraceMs: 10, killGraceMs: 20 },
+      ),
+      clock,
+    );
+    await pumped(
+      runPlan(
+        independentPlan('async-errors', 1, 'hang'),
+        { concurrency: 1, stopOnError: false },
+        governRegistry(viewWith(entry('hang', hangOp)), governor),
+      ),
+      clock,
+    );
+    rejectHard(new Error('hard failure'));
+    rejectKill(new Error('kill failure'));
+    await tick();
+    const rungs = governor.events.filter(
+      (event): event is LadderRungEvent => event.kind === 'ladder-rung',
+    );
+    expect(rungs.map(({ rung, delivered, error }) => [rung, delivered, error])).toEqual([
+      ['signal', true, undefined],
+      ['timeout', true, 'async: hard failure'],
+      ['kill', true, 'async: kill failure'],
+    ]);
+  });
+
   test('a hanging op that ignores the signal is killed at the final rung; the run completes', async () => {
     const clock = virtualClock();
     const calls: string[] = [];
@@ -468,13 +565,19 @@ describe('governRegistry — the ladder through runPlan (ws-a item 1)', () => {
     // THE RUNG ASSERTION: what fired, in what order, with what delays. The op
     // registered no port, so rungs 2–3 record delivered:false — fired, with
     // nothing to deliver.
-    const rungs = governor.events.filter((event): event is LadderRungEvent => event.kind === 'ladder-rung');
-    expect(rungs.map((event) => [event.rung, event.delayMs, event.sinceStartMs, event.delivered])).toEqual([
+    const rungs = governor.events.filter(
+      (event): event is LadderRungEvent => event.kind === 'ladder-rung',
+    );
+    expect(
+      rungs.map((event) => [event.rung, event.delayMs, event.sinceStartMs, event.delivered]),
+    ).toEqual([
       ['signal', 100, 100, true],
       ['timeout', 10, 110, false],
       ['kill', 20, 130, false],
     ]);
-    const completions = governor.events.filter((event): event is CompletedEvent => event.kind === 'completed');
+    const completions = governor.events.filter(
+      (event): event is CompletedEvent => event.kind === 'completed',
+    );
     expect(completions.map((event) => event.status)).toEqual(['budget-exhausted', 'ok', 'ok']);
   });
 });
@@ -491,7 +594,11 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     const plan = independentPlan('plan-usd', 5, 'spendy');
     const registry = viewWith(entry('spendy', spendyOp));
 
-    const raw = await runPlan(plan, { concurrency: 2, stopOnError: false, maxUsd: 1.0 }, governRegistry(registry, governor));
+    const raw = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false, maxUsd: 1.0 },
+      governRegistry(registry, governor),
+    );
     // Runner-side the run reached a terminal state for every job (the
     // governor short-circuited post-trip dispatches): each refusal IS a
     // real budget-exhausted verdict, and the raw report is silent.
@@ -507,7 +614,13 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // refused post-trip and keep their real budget-exhausted verdicts.
     expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: 'j1' });
     expect(report.jobs[1]?.result).toEqual({ status: 'ok', value: 'j2' });
-    expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted', 'budget-exhausted']);
+    expect(rowStatuses(report)).toEqual([
+      'ok',
+      'ok',
+      'budget-exhausted',
+      'budget-exhausted',
+      'budget-exhausted',
+    ]);
     expect(report.counts).toEqual({
       queued: 0,
       running: 0,
@@ -537,12 +650,18 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
       ],
     };
     const registry = viewWith(entry('spendy', spendyOp), entry('ok', okOp));
-    const raw = await runPlan(plan, { concurrency: 1, stopOnError: true, maxUsd: 1.0 }, governRegistry(registry, governor));
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true, maxUsd: 1.0 },
+      governRegistry(registry, governor),
+    );
     // Raw: d never started and its dependency c is budget-exhausted — the
     // runner's sweep honestly calls that blocked (its sweep predates the
     // governor and cannot attribute).
     expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'failed']);
-    expect((raw.jobs[3]?.result as { error: string }).error).toMatch(/blocked: dependency 'c'/);
+    expect(raw.jobs[3]?.result).toMatchObject({
+      error: match.stringMatching(/blocked: dependency 'c'/),
+    });
 
     // The governor's voice: withBudgetStop re-marks the row whose ENTIRE
     // dependency obstruction is transitively budget-caused.
@@ -578,8 +697,19 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
       ],
     };
     const registry = viewWith(entry('spendy', spendyOp), entry('ok', okOp));
-    const raw = await runPlan(plan, { concurrency: 1, stopOnError: true, maxUsd: 1.0 }, governRegistry(registry, governor));
-    expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'failed', 'failed', 'failed']);
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true, maxUsd: 1.0 },
+      governRegistry(registry, governor),
+    );
+    expect(rowStatuses(raw)).toEqual([
+      'ok',
+      'ok',
+      'budget-exhausted',
+      'failed',
+      'failed',
+      'failed',
+    ]);
 
     const report = withBudgetStop(raw, plan, governor);
     // ALL of d, b, c AND the diamond root a are budget-caused — the memoized
@@ -619,7 +749,11 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
       ],
     };
     const registry = viewWith(entry('fail', failOp), entry('spendy', spendyOp), entry('ok', okOp));
-    const raw = await runPlan(plan, { concurrency: 1, stopOnError: false, maxUsd: 1.0 }, governRegistry(registry, governor));
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 1.0 },
+      governRegistry(registry, governor),
+    );
     // Raw: f2 blocked on the REAL f1 failure; s4 blocked on budget-exhausted s3.
     expect(raw.counts).toEqual({
       queued: 0,
@@ -642,7 +776,10 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
       'budget-exhausted',
       'budget-exhausted',
     ]);
-    expect(report.jobs[2]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'f1'/ });
+    expect(report.jobs[2]?.result).toMatchObject({
+      status: 'failed',
+      error: /blocked: dependency 'f1'/,
+    });
     expect(report.jobs[5]?.result).toEqual({ status: 'budget-exhausted' });
     expect(report.counts).toEqual({
       queued: 0,
@@ -688,7 +825,9 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
     expect(governor.admit('j3')).toEqual({ decision: 'reject', reason: 'budget' });
     const governedEntry = governRegistry(viewWith(entry('fake', okOp)), governor).get('fake');
     if (governedEntry === undefined) throw new Error('governed entry missing');
-    const governedOp = (await governedEntry.importer()) as (input: unknown) => Promise<OpResult<unknown>>;
+    const governedOp = (await governedEntry.importer()) as (
+      input: unknown,
+    ) => Promise<OpResult<unknown>>;
     expect(await governedOp({ jobId: 'never-runs' })).toEqual({ status: 'budget-exhausted' });
 
     // Control: a governor whose fold stays UNDER the cap never trips.
@@ -781,14 +920,20 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
   test('independence cuts both ways: each trip reason names ITS cap, not the other', async () => {
     // Cost overage with tokens safely under: the USD (modeled) cap trips.
     const overCost = new BudgetGovernor({ maxTokens: 10_000, maxUsd: 0.5 });
-    overCost.observeResult('j1', { usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 }, costUSD: 0.9 });
+    overCost.observeResult('j1', {
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+      costUSD: 0.9,
+    });
     expect(overCost.tripped).toBe(true);
     expect(overCost.tripReason).toMatch(/usd rollup 0\.9 exceeded cap 0\.5/);
     expect(overCost.tripReason).not.toMatch(/token rollup/);
 
     // Token overage with USD safely under: the token cap trips.
     const overTokens = new BudgetGovernor({ maxTokens: 10, maxUsd: 50 });
-    overTokens.observeResult('j1', { usage: { input: 100, output: 5, cacheRead: 0, cacheWrite: 0 }, costUSD: 0.1 });
+    overTokens.observeResult('j1', {
+      usage: { input: 100, output: 5, cacheRead: 0, cacheWrite: 0 },
+      costUSD: 0.1,
+    });
     expect(overTokens.tripped).toBe(true);
     expect(overTokens.tripReason).toMatch(/token rollup 105 exceeded cap 10/);
     expect(overTokens.tripReason).not.toMatch(/usd rollup/);
@@ -798,12 +943,27 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-dd9-seed-'));
     try {
       const log = openRunLog(dir);
-      const plan: Plan = { id: 'plan-dd9-seed', jobs: [{ id: 'c1', op: 'usagey', input: { jobId: 'c1' } }] };
+      const plan: Plan = {
+        id: 'plan-dd9-seed',
+        jobs: [{ id: 'c1', op: 'usagey', input: { jobId: 'c1' } }],
+      };
       const manifest = makeManifest(plan);
       // Prior run: c1 reached a terminal budget-exhausted record, usage
       // journaled (the same shape as the seeded-USD test).
-      await log.append('plan-dd9-seed--prior--aa', { type: 'run-started', runId: 'plan-dd9-seed--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dd9-seed' });
-      await log.append('plan-dd9-seed--prior--aa', { type: 'job-started', runId: 'plan-dd9-seed--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'usagey', attempt: 1 });
+      await log.append('plan-dd9-seed--prior--aa', {
+        type: 'run-started',
+        runId: 'plan-dd9-seed--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-dd9-seed',
+      });
+      await log.append('plan-dd9-seed--prior--aa', {
+        type: 'job-started',
+        runId: 'plan-dd9-seed--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        op: 'usagey',
+        attempt: 1,
+      });
       await log.append('plan-dd9-seed--prior--aa', {
         type: 'job-finished',
         runId: 'plan-dd9-seed--prior--aa',
@@ -847,7 +1007,13 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
       governor.observeUsage('j2', { input: 10, output: Number.NaN, cacheRead: 0, cacheWrite: 0 }),
     ).toThrowError(/usage\.output must be a finite number >= 0, got NaN/);
     expect(() =>
-      governor.observeUsage('j2', { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: Infinity }),
+      governor.observeUsage('j2', {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        reasoning: Infinity,
+      }),
     ).toThrowError(/usage\.reasoning must be a finite number >= 0, got Infinity/);
     expect(() =>
       governor.observeUsage('j2', { input: -5, output: 1, cacheRead: 0, cacheWrite: 0 }),
@@ -886,7 +1052,7 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
     expect(report.jobs[0]?.result.status).toBe('failed');
     expect(report.jobs[0]?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/non-serializable result/),
+      error: match.stringMatching(/non-serializable result/),
     });
     expect(governor.usage).toBeUndefined(); // folded NOTHING
     expect(governor.tripped).toBe(false);
@@ -915,7 +1081,9 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
         costGovernor,
       ).get('costly');
       if (costlyEntry === undefined) throw new Error('governed entry missing');
-      const costlyOp = (await costlyEntry.importer()) as (input: unknown) => Promise<OpResult<unknown>>;
+      const costlyOp = (await costlyEntry.importer()) as (
+        input: unknown,
+      ) => Promise<OpResult<unknown>>;
       const verdict = await costlyOp({ jobId: 'cost-lying' });
       expect(verdict.status).toBe('ok'); // the verdict is untouched — no throw
       expect(costGovernor.usage).toBeUndefined(); // the WHOLE lying result folded nothing
@@ -927,8 +1095,20 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
   test('(c) a seeded journal event with negative usage throws at seed time', () => {
     const governor = new BudgetGovernor({ maxTokens: 100 });
     const events: JournalEvent[] = [
-      { type: 'run-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-lying' },
-      { type: 'job-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 },
+      {
+        type: 'run-started',
+        runId: 'r1',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-seed-lying',
+      },
+      {
+        type: 'job-started',
+        runId: 'r1',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        op: 'fake',
+        attempt: 1,
+      },
       {
         type: 'job-finished',
         runId: 'r1',
@@ -947,7 +1127,13 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
 
   test('(d) valid folds are untouched: the cap trips exactly as before', () => {
     const governor = new BudgetGovernor({ maxTokens: 100 });
-    governor.observeUsage('j1', { input: 60, output: 40, cacheRead: 0, cacheWrite: 0, reasoning: 0 });
+    governor.observeUsage('j1', {
+      input: 60,
+      output: 40,
+      cacheRead: 0,
+      cacheWrite: 0,
+      reasoning: 0,
+    });
     governor.observeUsage('j2', { input: 60, output: 40, cacheRead: 0, cacheWrite: 0 });
     expect(governor.tripped).toBe(true);
     expect(governor.tripReason).toMatch(/token rollup 200 exceeded cap 100/);
@@ -960,7 +1146,10 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
 
 describe('governOp folds a returned WorkerResult through observeResult (#14-1/#14-2)', () => {
   const WORKER_USAGE = { input: 100, output: 50, cacheRead: 0, cacheWrite: 0 };
-  const workerValue = (extra?: { costUSD?: number; costBasis?: 'modeled' | 'billed' }): unknown => ({
+  const workerValue = (extra?: {
+    costUSD?: number;
+    costBasis?: 'modeled' | 'billed';
+  }): unknown => ({
     usage: WORKER_USAGE,
     denials: [],
     stopReason: 'complete',
@@ -986,7 +1175,10 @@ describe('governOp folds a returned WorkerResult through observeResult (#14-1/#1
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0.02);
     expect(governor.tripped).toBe(false);
-    expect(report.jobs[0]?.result).toEqual({ status: 'ok', value: workerValue({ costUSD: 0.02, costBasis: 'modeled' }) });
+    expect(report.jobs[0]?.result).toEqual({
+      status: 'ok',
+      value: workerValue({ costUSD: 0.02, costBasis: 'modeled' }),
+    });
   });
 
   test('returned UNPRICED usage under maxUsd trips the budget through the production path', async () => {
@@ -1042,7 +1234,14 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
   const SEED_USAGE = { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 };
   const seededEvents = (): JournalEvent[] => [
     { type: 'run-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-usd' },
-    { type: 'job-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 },
+    {
+      type: 'job-started',
+      runId: 'r1',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c1',
+      op: 'fake',
+      attempt: 1,
+    },
     {
       type: 'job-finished',
       runId: 'r1',
@@ -1076,17 +1275,17 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
 
   test('a usdOf deriving NaN throws at seed time (construction-time: fail loud and early)', () => {
     const governor = new BudgetGovernor({ maxUsd: 1.0 });
-    expect(() =>
-      governor.seedFromJournal(seededEvents(), { usdOf: () => NaN }),
-    ).toThrowError(/derived cost must be a finite number >= 0, got NaN/);
+    expect(() => governor.seedFromJournal(seededEvents(), { usdOf: () => NaN })).toThrowError(
+      /derived cost must be a finite number >= 0, got NaN/,
+    );
     expect(governor.usdSpent).toBe(0); // the rollup was never poisoned
   });
 
   test('a usdOf deriving a negative usd throws likewise', () => {
     const governor = new BudgetGovernor({ maxUsd: 1.0 });
-    expect(() =>
-      governor.seedFromJournal(seededEvents(), { usdOf: () => -1 }),
-    ).toThrowError(/derived cost must be a finite number >= 0, got -1/);
+    expect(() => governor.seedFromJournal(seededEvents(), { usdOf: () => -1 })).toThrowError(
+      /derived cost must be a finite number >= 0, got -1/,
+    );
   });
 });
 
@@ -1132,14 +1331,20 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
       ],
     };
     const registry = viewWith(entry('fake', okOp));
-    const raw = await runPlan(plan, { concurrency: 1, stopOnError: true }, governRegistry(registry, governor));
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true },
+      governRegistry(registry, governor),
+    );
     // j3's refusal is a non-ok terminal → stopOnError halts dispatching; j4
     // never dispatched (its dep j2 is done) → the runner's queued marker.
     expect(governor.tripped).toBe(false); // a quota stop is NOT a USD/token trip…
-    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    const refusals = governor.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
     expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'indeterminate']);
-    expect((raw.jobs[3]?.result as { detail: string }).detail).toMatch(/^queued:/);
+    expect(raw.jobs[3]?.result).toMatchObject({ detail: match.stringMatching(/^queued:/) });
 
     // …yet the run stopped for budget-family reasons: withBudgetStop
     // annotates and re-marks the queued row even though no trip fired.
@@ -1161,7 +1366,11 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
     const governor = new BudgetGovernor({ maxUsd: 0.5 });
     const plan = independentPlan('plan-trip-no-gate', 2, 'spendy');
     const registry = viewWith(entry('spendy', spendyOp));
-    const raw = await runPlan(plan, { concurrency: 1, stopOnError: false }, governRegistry(registry, governor));
+    const raw = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      governRegistry(registry, governor),
+    );
     // j1's cost trips the cap mid-run; j2's dispatch is refused — both rows
     // are real terminal verdicts; nothing was ever queued or blocked.
     expect(governor.tripped).toBe(true);
@@ -1189,7 +1398,9 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
       { concurrency: 1, stopOnError: false },
       governRegistry(viewWith(entry('lying', lyingOp)), governor),
     );
-    const admissions = governor.events.filter((event): event is AdmittedEvent => event.kind === 'admitted');
+    const admissions = governor.events.filter(
+      (event): event is AdmittedEvent => event.kind === 'admitted',
+    );
     expect(admissions.map((event) => event.jobKey)).toEqual(['j1']); // the governor ADMITTED this job
     expect(governor.tripped).toBe(true);
     expect(rowStatuses(raw)).toEqual(['indeterminate']);
@@ -1198,7 +1409,10 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
     // The row keeps its REAL verdict — the queued marker was written by
     // executed code, not the runner's stop sweep — and with nothing
     // re-marked there is no stoppedEarly claim either.
-    expect(report.jobs[0]?.result).toEqual({ status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' });
+    expect(report.jobs[0]?.result).toEqual({
+      status: 'indeterminate',
+      detail: 'queued: (fabricated by the op itself)',
+    });
     expect(report.stoppedEarly).toBe(false);
   });
 
@@ -1231,10 +1445,16 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
 
     const report = withBudgetStop(raw, plan, governor);
     // The fabricated row keeps its verdict…
-    expect(report.jobs[0]?.result).toEqual({ status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' });
+    expect(report.jobs[0]?.result).toEqual({
+      status: 'indeterminate',
+      detail: 'queued: (fabricated by the op itself)',
+    });
     // …and the dependent is NOT re-marked budget-exhausted off the lie: it
     // stays honestly blocked on an unresolved row.
-    expect(report.jobs[1]?.result).toMatchObject({ status: 'failed', error: /blocked: dependency 'f1'/ });
+    expect(report.jobs[1]?.result).toMatchObject({
+      status: 'failed',
+      error: /blocked: dependency 'f1'/,
+    });
     expect(report.stoppedEarly).toBe(false); // nothing was re-marked
   });
 });
@@ -1254,7 +1474,9 @@ describe('dual caps (ws-a item 4)', () => {
     entered.push(jobId);
     inFlight += 1;
     highWater = Math.max(highWater, inFlight);
-    await new Promise<void>((resolve) => { releases.set(jobId, resolve); });
+    await new Promise<void>((resolve) => {
+      releases.set(jobId, resolve);
+    });
     inFlight -= 1;
     return { status: 'ok', value: jobId };
   };
@@ -1338,7 +1560,14 @@ describe('dual caps (ws-a item 4)', () => {
     );
     expect(calls).toHaveLength(4); // the quota, exactly
     expect(governor.dispatchCount).toBe(4);
-    expect(rowStatuses(report)).toEqual(['ok', 'ok', 'ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
+    expect(rowStatuses(report)).toEqual([
+      'ok',
+      'ok',
+      'ok',
+      'ok',
+      'budget-exhausted',
+      'budget-exhausted',
+    ]);
     const refusals = governor.events.filter((event) => event.kind === 'short-circuited');
     expect(refusals).toHaveLength(2);
     expect(refusals.map((event) => (event as { reason: string }).reason)).toEqual([
@@ -1357,7 +1586,10 @@ describe('attempt caps (ws-a item 2)', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-attempt-'));
     try {
       const log = openRunLog(dir);
-      const plan: Plan = { id: 'plan-attempt', jobs: [{ id: 'j1', op: 'flaky', input: { jobId: 'j1' } }] };
+      const plan: Plan = {
+        id: 'plan-attempt',
+        jobs: [{ id: 'j1', op: 'flaky', input: { jobId: 'j1' } }],
+      };
       const calls: string[] = [];
       const flaky = async (raw: unknown): Promise<OpResult<unknown>> => {
         calls.push((raw as { jobId: string }).jobId);
@@ -1374,13 +1606,20 @@ describe('attempt caps (ws-a item 2)', () => {
       const run1 = await runPlan(
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
-        governRegistry(viewWith(entry('flaky', flaky)), new BudgetGovernor({ maxAttemptsPerJob: 2 })),
+        governRegistry(
+          viewWith(entry('flaky', flaky)),
+          new BudgetGovernor({ maxAttemptsPerJob: 2 }),
+        ),
       );
       expect(calls).toEqual(['j1']);
       const events1 = await log.read(run1.runId);
-      expect(events1.filter((event) => event.type === 'job-started')).toMatchObject([{ attempt: 1 }]);
+      expect(events1.filter((event) => event.type === 'job-started')).toMatchObject([
+        { attempt: 1 },
+      ]);
       // The rescue lane licenses exactly one more attempt...
-      const decision1 = decideRescue(rescueInputFromJournal(events1, 'j1', 'flaky'), { rows: [row] });
+      const decision1 = decideRescue(rescueInputFromJournal(events1, 'j1', 'flaky'), {
+        rows: [row],
+      });
       expect(decision1).toEqual({ kind: 'retry', attempt: 2, rowId: 'retry-2' });
 
       // ...whose EXECUTION is a resumed run under a governor seeded from run 1.
@@ -1393,7 +1632,9 @@ describe('attempt caps (ws-a item 2)', () => {
         governRegistry(viewWith(entry('flaky', flaky)), governor2),
       );
       expect(calls).toEqual(['j1', 'j1']); // attempt 2 happened
-      expect(governor2.events.filter((event) => event.kind === 'admitted').map((event) => event.attempt)).toEqual([2]);
+      expect(
+        governor2.events.filter((event) => event.kind === 'admitted').map((event) => event.attempt),
+      ).toEqual([2]);
       const events2 = await log.read(run2.runId);
       // (The T1.2 runner writes attempt: 1 per run — true ordinals in the
       // journal are the recorded T1.4 handoff; the governor's ordinals and
@@ -1424,7 +1665,9 @@ describe('attempt caps (ws-a item 2)', () => {
       expect(calls).toEqual(['j1', 'j1']); // UNCHANGED — no third dispatch
       expect(run3.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
       const refusals = governor3.events.filter((event) => event.kind === 'short-circuited');
-      expect(refusals.map((event) => (event as { reason: string }).reason)).toEqual(['attempt-cap']);
+      expect(refusals.map((event) => (event as { reason: string }).reason)).toEqual([
+        'attempt-cap',
+      ]);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -1434,13 +1677,35 @@ describe('attempt caps (ws-a item 2)', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-attempt-field-'));
     try {
       const log = openRunLog(dir);
-      const plan: Plan = { id: 'plan-field', jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }] };
+      const plan: Plan = {
+        id: 'plan-field',
+        jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+      };
       const manifest = makeManifest(plan);
       // A prior run whose journal carries TRUE ordinals (what the T1.4
       // runner will emit): attempts 1 and 2, definitively failed.
-      await log.append('plan-field--prior--aa', { type: 'run-started', runId: 'plan-field--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-field' });
-      await log.append('plan-field--prior--aa', { type: 'job-started', runId: 'plan-field--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'j1', op: 'fake', attempt: 1 });
-      await log.append('plan-field--prior--aa', { type: 'job-started', runId: 'plan-field--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'j1', op: 'fake', attempt: 2 });
+      await log.append('plan-field--prior--aa', {
+        type: 'run-started',
+        runId: 'plan-field--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-field',
+      });
+      await log.append('plan-field--prior--aa', {
+        type: 'job-started',
+        runId: 'plan-field--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append('plan-field--prior--aa', {
+        type: 'job-started',
+        runId: 'plan-field--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 2,
+      });
       await log.append('plan-field--prior--aa', {
         type: 'job-finished',
         runId: 'plan-field--prior--aa',
@@ -1469,7 +1734,9 @@ describe('attempt caps (ws-a item 2)', () => {
       expect(calls).toEqual([]); // a third dispatch never runs the op
       expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
       const refusals = governor.events.filter((event) => event.kind === 'short-circuited');
-      expect(refusals.map((event) => (event as { reason: string }).reason)).toEqual(['attempt-cap']);
+      expect(refusals.map((event) => (event as { reason: string }).reason)).toEqual([
+        'attempt-cap',
+      ]);
       expect(governor.tripped).toBe(false); // an attempt cap is not a USD trip
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1506,7 +1773,9 @@ describe('default job key — the cap exists without config (review F3)', () => 
     expect(calls).toEqual(['1', '2']); // the third dispatch never runs the op
     expect(governor.attemptsFor('numbered')).toBe(2);
     expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted']);
-    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    const refusals = governor.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
     expect(refusals.map((event) => event.reason)).toEqual(['attempt-cap']);
   });
 
@@ -1515,10 +1784,25 @@ describe('default job key — the cap exists without config (review F3)', () => 
     try {
       const log = openRunLog(dir);
       // Prior run: job 'x' ran op 'solo' once (attempt 1) and failed.
-      const plan: Plan = { id: 'plan-seed-align', jobs: [{ id: 'x', op: 'solo', input: { n: 0 } }] };
+      const plan: Plan = {
+        id: 'plan-seed-align',
+        jobs: [{ id: 'x', op: 'solo', input: { n: 0 } }],
+      };
       const manifest = makeManifest(plan);
-      await log.append('plan-seed-align--prior--aa', { type: 'run-started', runId: 'plan-seed-align--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-align' });
-      await log.append('plan-seed-align--prior--aa', { type: 'job-started', runId: 'plan-seed-align--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'x', op: 'solo', attempt: 1 });
+      await log.append('plan-seed-align--prior--aa', {
+        type: 'run-started',
+        runId: 'plan-seed-align--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-seed-align',
+      });
+      await log.append('plan-seed-align--prior--aa', {
+        type: 'job-started',
+        runId: 'plan-seed-align--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'x',
+        op: 'solo',
+        attempt: 1,
+      });
       await log.append('plan-seed-align--prior--aa', {
         type: 'job-finished',
         runId: 'plan-seed-align--prior--aa',
@@ -1556,10 +1840,14 @@ describe('default job key — the cap exists without config (review F3)', () => 
         governRegistry(viewWith(entry('solo', solo, schema)), governor),
       );
       expect(calls).toEqual(['1']); // exactly one more dispatch
-      const admissions = governor.events.filter((event): event is AdmittedEvent => event.kind === 'admitted');
+      const admissions = governor.events.filter(
+        (event): event is AdmittedEvent => event.kind === 'admitted',
+      );
       expect(admissions.map((event) => event.attempt)).toEqual([2]);
       expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
-      const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+      const refusals = governor.events.filter(
+        (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+      );
       expect(refusals.map((event) => event.reason)).toEqual(['attempt-cap']);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1571,10 +1859,29 @@ describe('default job key — the cap exists without config (review F3)', () => 
     try {
       const log = openRunLog(dir);
       // Two journal jobs sharing op 'solo', two attempts EACH = 4 dispatches.
-      await log.append('p-sum--r1--aa', { type: 'run-started', runId: 'p-sum--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-sum' });
+      await log.append('p-sum--r1--aa', {
+        type: 'run-started',
+        runId: 'p-sum--r1--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-sum',
+      });
       for (const jobId of ['x1', 'x2']) {
-        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 1 });
-        await log.append('p-sum--r1--aa', { type: 'job-started', runId: 'p-sum--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 2 });
+        await log.append('p-sum--r1--aa', {
+          type: 'job-started',
+          runId: 'p-sum--r1--aa',
+          at: '2026-09-16T00:00:00.000Z',
+          jobId: jobId,
+          op: 'solo',
+          attempt: 1,
+        });
+        await log.append('p-sum--r1--aa', {
+          type: 'job-started',
+          runId: 'p-sum--r1--aa',
+          at: '2026-09-16T00:00:00.000Z',
+          jobId: jobId,
+          op: 'solo',
+          attempt: 2,
+        });
         await log.append('p-sum--r1--aa', {
           type: 'job-finished',
           runId: 'p-sum--r1--aa',
@@ -1613,7 +1920,9 @@ describe('default job key — the cap exists without config (review F3)', () => 
       );
       expect(calls).toEqual([]);
       expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
-      const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+      const refusals = governor.events.filter(
+        (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+      );
       expect(refusals.map((event) => event.reason)).toEqual(['attempt-cap', 'attempt-cap']);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1624,10 +1933,29 @@ describe('default job key — the cap exists without config (review F3)', () => 
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-seed-sum2-'));
     try {
       const log = openRunLog(dir);
-      await log.append('p-sum2--r1--aa', { type: 'run-started', runId: 'p-sum2--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-sum2' });
+      await log.append('p-sum2--r1--aa', {
+        type: 'run-started',
+        runId: 'p-sum2--r1--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-sum2',
+      });
       for (const jobId of ['x1', 'x2']) {
-        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 1 });
-        await log.append('p-sum2--r1--aa', { type: 'job-started', runId: 'p-sum2--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: jobId, op: 'solo', attempt: 2 });
+        await log.append('p-sum2--r1--aa', {
+          type: 'job-started',
+          runId: 'p-sum2--r1--aa',
+          at: '2026-09-16T00:00:00.000Z',
+          jobId: jobId,
+          op: 'solo',
+          attempt: 1,
+        });
+        await log.append('p-sum2--r1--aa', {
+          type: 'job-started',
+          runId: 'p-sum2--r1--aa',
+          at: '2026-09-16T00:00:00.000Z',
+          jobId: jobId,
+          op: 'solo',
+          attempt: 2,
+        });
         await log.append('p-sum2--r1--aa', {
           type: 'job-finished',
           runId: 'p-sum2--r1--aa',
@@ -1664,10 +1992,14 @@ describe('default job key — the cap exists without config (review F3)', () => 
         governRegistry(viewWith(entry('solo', solo, schema)), governor),
       );
       expect(calls).toEqual(['1']);
-      const admissions = governor.events.filter((event): event is AdmittedEvent => event.kind === 'admitted');
+      const admissions = governor.events.filter(
+        (event): event is AdmittedEvent => event.kind === 'admitted',
+      );
       expect(admissions.map((event) => event.attempt)).toEqual([5]);
       expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
-      const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+      const refusals = governor.events.filter(
+        (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+      );
       expect(refusals.map((event) => event.reason)).toEqual(['attempt-cap']);
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1692,16 +2024,42 @@ describe('seedFromJournal usage dedupe across multi-run journals (review F4)', (
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-seed-dedupe-'));
     try {
       const log = openRunLog(dir);
-      const plan: Plan = { id: 'plan-dedupe', jobs: [{ id: 'c1', op: 'fake', input: { jobId: 'c1' } }] };
+      const plan: Plan = {
+        id: 'plan-dedupe',
+        jobs: [{ id: 'c1', op: 'fake', input: { jobId: 'c1' } }],
+      };
       const manifest = makeManifest(plan);
       const inputsHash = manifest.jobs[0]?.inputsHash ?? '';
       // Run 1: dispatched + finished with usage. Run 2 (chained resume): the
       // SAME dispatch's outcome re-attested — a finish with NO start.
-      await log.append('plan-dedupe--r1--aa', { type: 'run-started', runId: 'plan-dedupe--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe' });
-      await log.append('plan-dedupe--r1--aa', { type: 'job-started', runId: 'plan-dedupe--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
-      await log.append('plan-dedupe--r1--aa', finishedWithUsage('plan-dedupe--r1--aa', 'c1', inputsHash));
-      await log.append('plan-dedupe--r2--bb', { type: 'run-started', runId: 'plan-dedupe--r2--bb', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe' });
-      await log.append('plan-dedupe--r2--bb', finishedWithUsage('plan-dedupe--r2--bb', 'c1', inputsHash));
+      await log.append('plan-dedupe--r1--aa', {
+        type: 'run-started',
+        runId: 'plan-dedupe--r1--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-dedupe',
+      });
+      await log.append('plan-dedupe--r1--aa', {
+        type: 'job-started',
+        runId: 'plan-dedupe--r1--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(
+        'plan-dedupe--r1--aa',
+        finishedWithUsage('plan-dedupe--r1--aa', 'c1', inputsHash),
+      );
+      await log.append('plan-dedupe--r2--bb', {
+        type: 'run-started',
+        runId: 'plan-dedupe--r2--bb',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-dedupe',
+      });
+      await log.append(
+        'plan-dedupe--r2--bb',
+        finishedWithUsage('plan-dedupe--r2--bb', 'c1', inputsHash),
+      );
       const events: JournalEvent[] = [
         ...(await log.read('plan-dedupe--r1--aa')),
         ...(await log.read('plan-dedupe--r2--bb')),
@@ -1721,16 +2079,49 @@ describe('seedFromJournal usage dedupe across multi-run journals (review F4)', (
     const dir = await mkdtemp(join(tmpdir(), 'cq-gov-seed-dedupe2-'));
     try {
       const log = openRunLog(dir);
-      const plan: Plan = { id: 'plan-dedupe2', jobs: [{ id: 'c1', op: 'fake', input: { jobId: 'c1' } }] };
+      const plan: Plan = {
+        id: 'plan-dedupe2',
+        jobs: [{ id: 'c1', op: 'fake', input: { jobId: 'c1' } }],
+      };
       const manifest = makeManifest(plan);
       const inputsHash = manifest.jobs[0]?.inputsHash ?? '';
       // Two runs, each a genuine dispatch of c1 (start + finish).
-      await log.append('plan-dedupe2--r1--aa', { type: 'run-started', runId: 'plan-dedupe2--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe2' });
-      await log.append('plan-dedupe2--r1--aa', { type: 'job-started', runId: 'plan-dedupe2--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
-      await log.append('plan-dedupe2--r1--aa', finishedWithUsage('plan-dedupe2--r1--aa', 'c1', inputsHash));
-      await log.append('plan-dedupe2--r2--bb', { type: 'run-started', runId: 'plan-dedupe2--r2--bb', at: '2026-09-16T00:00:00.000Z', planId: 'plan-dedupe2' });
-      await log.append('plan-dedupe2--r2--bb', { type: 'job-started', runId: 'plan-dedupe2--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 2 });
-      await log.append('plan-dedupe2--r2--bb', finishedWithUsage('plan-dedupe2--r2--bb', 'c1', inputsHash));
+      await log.append('plan-dedupe2--r1--aa', {
+        type: 'run-started',
+        runId: 'plan-dedupe2--r1--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-dedupe2',
+      });
+      await log.append('plan-dedupe2--r1--aa', {
+        type: 'job-started',
+        runId: 'plan-dedupe2--r1--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        op: 'fake',
+        attempt: 1,
+      });
+      await log.append(
+        'plan-dedupe2--r1--aa',
+        finishedWithUsage('plan-dedupe2--r1--aa', 'c1', inputsHash),
+      );
+      await log.append('plan-dedupe2--r2--bb', {
+        type: 'run-started',
+        runId: 'plan-dedupe2--r2--bb',
+        at: '2026-09-16T00:00:00.000Z',
+        planId: 'plan-dedupe2',
+      });
+      await log.append('plan-dedupe2--r2--bb', {
+        type: 'job-started',
+        runId: 'plan-dedupe2--r2--bb',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        op: 'fake',
+        attempt: 2,
+      });
+      await log.append(
+        'plan-dedupe2--r2--bb',
+        finishedWithUsage('plan-dedupe2--r2--bb', 'c1', inputsHash),
+      );
       const events: JournalEvent[] = [
         ...(await log.read('plan-dedupe2--r1--aa')),
         ...(await log.read('plan-dedupe2--r2--bb')),
@@ -1773,8 +2164,20 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     };
     const manifest = makeManifest(plan);
     // Prior run: c1 done ok; c2 hard-killed mid-flight (started, NO finish).
-    await log.append('plan-resume-kill--prior--aa', { type: 'run-started', runId: 'plan-resume-kill--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-resume-kill' });
-    await log.append('plan-resume-kill--prior--aa', { type: 'job-started', runId: 'plan-resume-kill--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-kill--prior--aa', {
+      type: 'run-started',
+      runId: 'plan-resume-kill--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'plan-resume-kill',
+    });
+    await log.append('plan-resume-kill--prior--aa', {
+      type: 'job-started',
+      runId: 'plan-resume-kill--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c1',
+      op: 'fake',
+      attempt: 1,
+    });
     await log.append('plan-resume-kill--prior--aa', {
       type: 'job-finished',
       runId: 'plan-resume-kill--prior--aa',
@@ -1784,7 +2187,14 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       inputsHash: manifest.jobs[0]?.inputsHash ?? '',
       result: { status: 'ok', value: 'c1' },
     });
-    await log.append('plan-resume-kill--prior--aa', { type: 'job-started', runId: 'plan-resume-kill--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-kill--prior--aa', {
+      type: 'job-started',
+      runId: 'plan-resume-kill--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      op: 'fake',
+      attempt: 1,
+    });
 
     const calls: string[] = [];
     const countingOk = async (raw: unknown): Promise<OpResult<unknown>> => {
@@ -1824,8 +2234,20 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     const manifest = makeManifest(plan);
     // Prior run: c1 done ok; c2 killed by the governor (terminal
     // budget-exhausted record, usage journaled).
-    await log.append('plan-resume-budget--prior--aa', { type: 'run-started', runId: 'plan-resume-budget--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-resume-budget' });
-    await log.append('plan-resume-budget--prior--aa', { type: 'job-started', runId: 'plan-resume-budget--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-budget--prior--aa', {
+      type: 'run-started',
+      runId: 'plan-resume-budget--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'plan-resume-budget',
+    });
+    await log.append('plan-resume-budget--prior--aa', {
+      type: 'job-started',
+      runId: 'plan-resume-budget--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c1',
+      op: 'fake',
+      attempt: 1,
+    });
     await log.append('plan-resume-budget--prior--aa', {
       type: 'job-finished',
       runId: 'plan-resume-budget--prior--aa',
@@ -1835,7 +2257,14 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       inputsHash: manifest.jobs[0]?.inputsHash ?? '',
       result: { status: 'ok', value: 'c1' },
     });
-    await log.append('plan-resume-budget--prior--aa', { type: 'job-started', runId: 'plan-resume-budget--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
+    await log.append('plan-resume-budget--prior--aa', {
+      type: 'job-started',
+      runId: 'plan-resume-budget--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      op: 'fake',
+      attempt: 1,
+    });
     await log.append('plan-resume-budget--prior--aa', {
       type: 'job-finished',
       runId: 'plan-resume-budget--prior--aa',
@@ -1881,12 +2310,27 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
 
   test('seeding replays the dispatch count: runDispatchQuota carries across resume (review R2)', async () => {
     const log = openRunLog(dir);
-    const plan: Plan = { id: 'plan-resume-quota', jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }] };
+    const plan: Plan = {
+      id: 'plan-resume-quota',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
     const manifest = makeManifest(plan);
     // Prior run: THREE journaled dispatches of j1 (attempts 1-3, all failed).
-    await log.append('plan-resume-quota--prior--aa', { type: 'run-started', runId: 'plan-resume-quota--prior--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-resume-quota' });
+    await log.append('plan-resume-quota--prior--aa', {
+      type: 'run-started',
+      runId: 'plan-resume-quota--prior--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'plan-resume-quota',
+    });
     for (const attempt of [1, 2, 3]) {
-      await log.append('plan-resume-quota--prior--aa', { type: 'job-started', runId: 'plan-resume-quota--prior--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'j1', op: 'fake', attempt: attempt });
+      await log.append('plan-resume-quota--prior--aa', {
+        type: 'job-started',
+        runId: 'plan-resume-quota--prior--aa',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: attempt,
+      });
       await log.append('plan-resume-quota--prior--aa', {
         type: 'job-finished',
         runId: 'plan-resume-quota--prior--aa',
@@ -1899,7 +2343,8 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     }
     const events = await log.read('plan-resume-quota--prior--aa');
 
-    const calls: string[] = [];    const countingOk = async (raw: unknown): Promise<OpResult<unknown>> => {
+    const calls: string[] = [];
+    const countingOk = async (raw: unknown): Promise<OpResult<unknown>> => {
       calls.push((raw as { jobId: string }).jobId);
       return okOp(raw);
     };
@@ -1914,7 +2359,9 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     );
     expect(calls).toEqual([]); // zero further dispatches
     expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
-    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    const refusals = governor.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
     expect(governor.dispatchCount).toBe(3); // refusals do not consume quota
   });
@@ -1934,23 +2381,110 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     const U2 = { input: 20, output: 10, cacheRead: 0, cacheWrite: 0 };
 
     // Run 1: real dispatches with usage — c1 ok, c2 killed (budget-exhausted).
-    await log.append('plan-chained--r1--aa', { type: 'run-started', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'plan-chained' });
-    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', op: 'fake', attempt: 1 });
-    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
-    await log.append('plan-chained--r1--aa', { type: 'job-started', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
-    await log.append('plan-chained--r1--aa', { type: 'job-finished', runId: 'plan-chained--r1--aa', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
+    await log.append('plan-chained--r1--aa', {
+      type: 'run-started',
+      runId: 'plan-chained--r1--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'plan-chained',
+    });
+    await log.append('plan-chained--r1--aa', {
+      type: 'job-started',
+      runId: 'plan-chained--r1--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append('plan-chained--r1--aa', {
+      type: 'job-finished',
+      runId: 'plan-chained--r1--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c1',
+      opId: 'fake',
+      inputsHash: hashOf(0),
+      result: { status: 'ok', value: 'c1' },
+      usage: U1,
+    });
+    await log.append('plan-chained--r1--aa', {
+      type: 'job-started',
+      runId: 'plan-chained--r1--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append('plan-chained--r1--aa', {
+      type: 'job-finished',
+      runId: 'plan-chained--r1--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      opId: 'fake',
+      inputsHash: hashOf(1),
+      result: { status: 'budget-exhausted' },
+      usage: U2,
+    });
 
     // Run 2 (resume): c1 re-ATTESTED (finish-only — usage must NOT double-
     // count), c2 really re-dispatched and killed again (usage counts again).
-    await log.append('plan-chained--r2--bb', { type: 'run-started', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', planId: 'plan-chained' });
-    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c1', opId: 'fake', inputsHash: hashOf(0), result: { status: 'ok', value: 'c1' }, usage: U1 });
-    await log.append('plan-chained--r2--bb', { type: 'job-started', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 1 });
-    await log.append('plan-chained--r2--bb', { type: 'job-finished', runId: 'plan-chained--r2--bb', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'budget-exhausted' }, usage: U2 });
+    await log.append('plan-chained--r2--bb', {
+      type: 'run-started',
+      runId: 'plan-chained--r2--bb',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'plan-chained',
+    });
+    await log.append('plan-chained--r2--bb', {
+      type: 'job-finished',
+      runId: 'plan-chained--r2--bb',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c1',
+      opId: 'fake',
+      inputsHash: hashOf(0),
+      result: { status: 'ok', value: 'c1' },
+      usage: U1,
+    });
+    await log.append('plan-chained--r2--bb', {
+      type: 'job-started',
+      runId: 'plan-chained--r2--bb',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append('plan-chained--r2--bb', {
+      type: 'job-finished',
+      runId: 'plan-chained--r2--bb',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      opId: 'fake',
+      inputsHash: hashOf(1),
+      result: { status: 'budget-exhausted' },
+      usage: U2,
+    });
 
     // Run 3 (resume): c2 re-dispatched once more (fails, no usage).
-    await log.append('plan-chained--r3--cc', { type: 'run-started', runId: 'plan-chained--r3--cc', at: '2026-09-16T00:00:00.000Z', planId: 'plan-chained' });
-    await log.append('plan-chained--r3--cc', { type: 'job-started', runId: 'plan-chained--r3--cc', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', op: 'fake', attempt: 2 });
-    await log.append('plan-chained--r3--cc', { type: 'job-finished', runId: 'plan-chained--r3--cc', at: '2026-09-16T00:00:00.000Z', jobId: 'c2', opId: 'fake', inputsHash: hashOf(1), result: { status: 'failed', error: 'flake' } });
+    await log.append('plan-chained--r3--cc', {
+      type: 'run-started',
+      runId: 'plan-chained--r3--cc',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'plan-chained',
+    });
+    await log.append('plan-chained--r3--cc', {
+      type: 'job-started',
+      runId: 'plan-chained--r3--cc',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      op: 'fake',
+      attempt: 2,
+    });
+    await log.append('plan-chained--r3--cc', {
+      type: 'job-finished',
+      runId: 'plan-chained--r3--cc',
+      at: '2026-09-16T00:00:00.000Z',
+      jobId: 'c2',
+      opId: 'fake',
+      inputsHash: hashOf(1),
+      result: { status: 'failed', error: 'flake' },
+    });
 
     // The helper folds ALL THREE runs, oldest-first — not just the latest.
     const governor = await seedFromRunLog(log, 'plan-chained', { config: { runDispatchQuota: 3 } });
@@ -1978,7 +2512,9 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     // refuses (short-circuited before the op runs).
     expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
     expect(report.jobs[1]?.result).toEqual({ status: 'budget-exhausted' });
-    const refusals = governor.events.filter((event): event is ShortCircuitEvent => event.kind === 'short-circuited');
+    const refusals = governor.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
   });
 
@@ -1987,7 +2523,12 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
     // corrupt journal of plan 'a--b' threw /corrupt line/ into plan 'a''s
     // governed resume. It now shares the runner's candidateRunsForPlan.
     const log = openRunLog(dir);
-    await log.append('a--r1--aa', { type: 'run-started', runId: 'a--r1--aa', at: '2026-09-16T00:00:00.000Z', planId: 'a' });
+    await log.append('a--r1--aa', {
+      type: 'run-started',
+      runId: 'a--r1--aa',
+      at: '2026-09-16T00:00:00.000Z',
+      planId: 'a',
+    });
     await log.append('a--r1--aa', {
       type: 'job-started',
       runId: 'a--r1--aa',
@@ -2044,13 +2585,22 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
       const events = await openRunLog(dir).read(report.runId);
       expect(events[0]).toMatchObject({ type: 'run-started', planId: 'plan-evidence' });
       const started = events.filter((event) => event.type === 'job-started');
-      expect(started[0]).toMatchObject({ type: 'job-started', jobId: 'j1', op: 'hang', attempt: 1, runId: report.runId });
+      expect(started[0]).toMatchObject({
+        type: 'job-started',
+        jobId: 'j1',
+        op: 'hang',
+        attempt: 1,
+        runId: report.runId,
+      });
       const finished = events.filter((event) => event.type === 'job-finished');
       expect(finished[0]).toMatchObject({ jobId: 'j1', result: { status: 'budget-exhausted' } });
       // The runner-side run-finished stays stoppedEarly:false — the honest-
       // stop flags are the governor's voice via withBudgetStop (T1.4 folds
       // them into the runner).
-      expect(events[events.length - 1]).toMatchObject({ type: 'run-finished', stoppedEarly: false });
+      expect(events[events.length - 1]).toMatchObject({
+        type: 'run-finished',
+        stoppedEarly: false,
+      });
 
       // The shared fold derives exactly the report's states, in first-appearance order.
       expect(await openRunLog(dir).statusOf(report.runId)).toEqual([

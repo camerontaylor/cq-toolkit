@@ -168,14 +168,21 @@ function assertJsonLossless(value: unknown): void {
         for (const key of Reflect.ownKeys(value)) {
           if (key === 'length') continue;
           if (typeof key === 'symbol') {
-            throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
+            throw new Error(
+              `symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`,
+            );
           }
           const index = Number(key);
           // A real array index is 0..2^32-2 (PR #114 review, CodeRabbit
           // Major + Codex P2): "4294967295" is a plain property — length
           // never grows, JSON.stringify drops it — so it must NOT pass as
           // an index here.
-          if (Number.isInteger(index) && index >= 0 && index <= 2 ** 32 - 2 && String(index) === key) {
+          if (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index <= 2 ** 32 - 2 &&
+            String(index) === key
+          ) {
             continue;
           }
           throw new Error(
@@ -185,7 +192,7 @@ function assertJsonLossless(value: unknown): void {
           );
         }
         for (let i = 0; i < value.length; i++) {
-          const element = value[i];
+          const element: unknown = value[i];
           if (element === undefined) throw new Error(`undefined array element at [${i}]`);
           assertJsonLossless(element);
         }
@@ -225,6 +232,10 @@ function assertJsonLossless(value: unknown): void {
       }
       return;
     }
+    case 'bigint':
+    case 'function':
+    case 'symbol':
+    case 'undefined':
     default:
       throw new Error(`non-JSON value of type '${typeof value}'`);
   }
@@ -392,7 +403,8 @@ export async function runPlan(
   // caller or test consumes an in-memory list). The fold over the sequence —
   // journal deriveJobStatuses over a journaled run's file — is
   // mode-independent by construction.
-  const runLog: RunLog | undefined = opts.journalDir !== undefined ? openRunLog(opts.journalDir) : undefined;
+  const runLog: RunLog | undefined =
+    opts.journalDir !== undefined ? openRunLog(opts.journalDir) : undefined;
   const emit = async (event: JournalEvent): Promise<void> => {
     if (runLog) await runLog.append(runId, event);
   };
@@ -446,9 +458,7 @@ export async function runPlan(
     changed = false;
     for (const job of manifest.jobs) {
       if (unschedulable.has(job.id)) continue;
-      const missingDep = job.dependsOn.find(
-        (dep) => !jobIds.has(dep) || unschedulable.has(dep),
-      );
+      const missingDep = job.dependsOn.find((dep) => !jobIds.has(dep) || unschedulable.has(dep));
       if (missingDep !== undefined) {
         unschedulable.add(job.id);
         changed = true;
@@ -472,9 +482,10 @@ export async function runPlan(
     entries.set(job.id, {
       result: {
         status: 'failed',
-        error: missing !== undefined
-          ? `blocked: dependency '${missing}' missing from plan`
-          : 'blocked: upstream dependency did not succeed',
+        error:
+          missing !== undefined
+            ? `blocked: dependency '${missing}' missing from plan`
+            : 'blocked: upstream dependency did not succeed',
       },
       state: 'blocked',
       origin: 'blocked',
@@ -648,7 +659,13 @@ export async function runPlan(
       cacheWrite += u.cacheWrite;
       if (u.reasoning !== undefined) reasoning = (reasoning ?? 0) + u.reasoning;
     }
-    usage = { input, output, cacheRead, cacheWrite, ...(reasoning !== undefined ? { reasoning } : {}) };
+    usage = {
+      input,
+      output,
+      cacheRead,
+      cacheWrite,
+      ...(reasoning !== undefined ? { reasoning } : {}),
+    };
   }
 
   return {

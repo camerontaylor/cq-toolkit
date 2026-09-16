@@ -80,14 +80,21 @@ export function assertJsonLossless(value: unknown): void {
         for (const key of Reflect.ownKeys(value)) {
           if (key === 'length') continue;
           if (typeof key === 'symbol') {
-            throw new Error(`symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`);
+            throw new Error(
+              `symbol-keyed own member '${key.toString()}' — JSON.stringify drops it`,
+            );
           }
           const index = Number(key);
           // A real array index is 0..2^32-2 (PR #114 review, CodeRabbit
           // Major + Codex P2): "4294967295" is a plain property — length
           // never grows, JSON.stringify drops it — so it must NOT pass as
           // an index here.
-          if (Number.isInteger(index) && index >= 0 && index <= 2 ** 32 - 2 && String(index) === key) {
+          if (
+            Number.isInteger(index) &&
+            index >= 0 &&
+            index <= 2 ** 32 - 2 &&
+            String(index) === key
+          ) {
             continue;
           }
           throw new Error(
@@ -97,7 +104,7 @@ export function assertJsonLossless(value: unknown): void {
           );
         }
         for (let i = 0; i < value.length; i++) {
-          const element = value[i];
+          const element: unknown = value[i];
           if (element === undefined) throw new Error(`undefined array element at [${i}]`);
           assertJsonLossless(element);
         }
@@ -137,6 +144,10 @@ export function assertJsonLossless(value: unknown): void {
       }
       return;
     }
+    case 'bigint':
+    case 'function':
+    case 'symbol':
+    case 'undefined':
     default:
       throw new Error(`non-JSON value of type '${typeof value}'`);
   }
@@ -193,7 +204,10 @@ export function narrateOpResult(
   if (mode === 'json') return; // machine mode: stderr stays empty
   if (result.status === 'ok') return; // failures-only narration
   const detail = resultDetail(result);
-  narrate(io, detail === '' ? `${name}: ${result.status}` : `${name}: ${result.status} — ${detail}`);
+  narrate(
+    io,
+    detail === '' ? `${name}: ${result.status}` : `${name}: ${result.status} — ${detail}`,
+  );
 }
 
 /**

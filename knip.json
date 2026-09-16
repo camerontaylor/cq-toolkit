@@ -1,0 +1,22 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "entry": [
+    "src/index.ts",
+    "src/cli.ts",
+    "src/registry/types.ts",
+    "src/ops/*/registry.ts",
+    "scripts/*.mjs",
+    "scripts/lib/eval-axes-select.d.mts",
+    "test/fixtures/ratchet-lib-selfhost.mjs",
+    "test/fixtures/cli-ops/fixture/*.js",
+    "test/fixtures/cli-smoke-ops/smoke/*.js"
+  ],
+  "project": [
+    "src/**/*.ts",
+    "test/**/*.{ts,js,mjs}",
+    "lint/**/*.{ts,mjs}",
+    "scripts/**/*.{mjs,mts}"
+  ],
+  "ignoreDependencies": ["@anthropic-ai/claude-agent-sdk"],
+  "include": ["files", "dependencies", "unlisted", "unresolved"]
+}

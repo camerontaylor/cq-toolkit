@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Lane H slice 3 (goal H3, ws-h scope item 7) — tests for
 // proposeBaselineUpdate (src/ops/ratchet/proposeBaselineUpdate.ts).
 //
@@ -151,7 +152,7 @@ async function seedBaseline(
       metric,
       direction,
       value,
-      unit,
+      ...(unit === undefined ? {} : { unit }),
       capturedAt: BASELINE_CAPTURED_AT,
     }),
     'utf8',
@@ -182,7 +183,9 @@ describe('proposeBaselineUpdate', () => {
     const propose = createProposeBaselineUpdate(effects);
     await expect(
       propose(
-        proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }] }),
+        proposeInput({
+          improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
+        }),
       ),
     ).resolves.toEqual({
       status: 'ok',
@@ -190,7 +193,7 @@ describe('proposeBaselineUpdate', () => {
         proposal: 'created',
         prNumber: 1,
         prUrl: 'https://github.com/acme/repo/pull/1',
-        head: expect.stringMatching(/^ratchet\/propose-[0-9a-f]{12}$/),
+        head: match.stringMatching(/^ratchet\/propose-[0-9a-f]{12}$/),
         applied: [{ path: REL, target: TARGET, metric: METRIC, oldValue: 10, newValue: 7 }],
         skipped: [],
       },
@@ -199,7 +202,7 @@ describe('proposeBaselineUpdate', () => {
     expect(effects.prs.size).toBe(1);
     expect(effects.findCalls()).toBe(1);
     expect(effects.upsertCalls()).toBe(1);
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     expect(pr?.base).toBe('main');
     expect(pr?.title).toBe('chore(ratchet): tighten baselines (1 metric)');
     expect(pr?.commitMessage).toBe('chore(ratchet): tighten baselines (proposeBaselineUpdate)');
@@ -236,7 +239,7 @@ describe('proposeBaselineUpdate', () => {
     await createProposeBaselineUpdate(effects)(
       proposeInput({ improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
     );
-    const content = effects.prs.get([...effects.prs.keys()][0])?.files[0]?.content ?? '';
+    const content = effects.prs.values().next().value?.files[0]?.content ?? '';
     const onPr = JSON.parse(content) as { capturedAt?: string };
     expect(Number.isNaN(Date.parse(onPr.capturedAt ?? 'x'))).toBe(false);
     // The clock-default bytes must be FULLY committed-evidence shaped: the
@@ -253,7 +256,7 @@ describe('proposeBaselineUpdate', () => {
         improvements: [{ target: TARGET, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
       }),
     );
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     const expected: BaselineFile = {
       schemaVersion: 1,
       target: TARGET,
@@ -317,7 +320,7 @@ describe('proposeBaselineUpdate', () => {
             {
               target: TARGET,
               metric: METRIC,
-              reason: expect.stringMatching(
+              reason: match.stringMatching(
                 new RegExp(`10 → ${value} is not a tightening \\(lower-is-better\\)`),
               ),
             },
@@ -356,7 +359,7 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(/10 → 12 is not a tightening/),
+            reason: match.stringMatching(/10 → 12 is not a tightening/),
           },
         ],
       },
@@ -399,7 +402,7 @@ describe('proposeBaselineUpdate', () => {
       status: 'ok',
       value: { proposal: 'created', applied: [{ oldValue: 10, newValue: 5 }] },
     });
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     expect(pr?.files[0]?.content).toContain('"value": 5');
   });
 
@@ -478,7 +481,7 @@ describe('proposeBaselineUpdate', () => {
         improvements: [{ target: hostile, metric: METRIC, value: 7, capturedAt: CAPTURED_AT }],
       }),
     );
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     // The body line carries the STRIPPED identity — the backtick and newline
     // cannot break out of the markdown backticks — while the applied outcome
     // and the committed FILE keep the raw identity.
@@ -503,7 +506,7 @@ describe('proposeBaselineUpdate', () => {
       status: 'ok',
       value: { proposal: 'created', applied: [{ oldValue: 5, newValue: 10 }] },
     });
-    const content = effects.prs.get([...effects.prs.keys()][0])?.files[0]?.content ?? '';
+    const content = effects.prs.values().next().value?.files[0]?.content ?? '';
     expect((JSON.parse(content) as { direction?: string }).direction).toBe('higher-is-better');
     const effects2 = makeFakeEffects();
     await expect(
@@ -512,7 +515,10 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toMatchObject({
       status: 'ok',
-      value: { proposal: 'none', skipped: [expect.objectContaining({ reason: expect.stringMatching(/not a tightening/) })] },
+      value: {
+        proposal: 'none',
+        skipped: [match.objectContaining({ reason: match.stringMatching(/not a tightening/) })],
+      },
     });
     expect(effects2.findCalls()).toBe(0);
   });
@@ -538,7 +544,7 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(
+            reason: match.stringMatching(
               /no usable baseline — refusing to propose from nothing \(I5\)/,
             ),
           },
@@ -571,7 +577,7 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(
+            reason: match.stringMatching(
               /is corrupt — no usable baseline — refusing to propose from nothing \(I5\)/,
             ),
           },
@@ -604,7 +610,7 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(/is not a regular file — refusing to read as evidence/),
+            reason: match.stringMatching(/is not a regular file — refusing to read as evidence/),
           },
         ],
       },
@@ -637,14 +643,14 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(
+            reason: match.stringMatching(
               /not found — no usable baseline — refusing to propose from nothing \(I5\)/,
             ),
           },
           {
             target: 'other-target',
             metric: METRIC,
-            reason: expect.stringMatching(
+            reason: match.stringMatching(
               /not found — no usable baseline — refusing to propose from nothing \(I5\)/,
             ),
           },
@@ -691,7 +697,7 @@ describe('proposeBaselineUpdate', () => {
             {
               target: TARGET,
               metric: METRIC,
-              reason: expect.stringMatching(/is not a regular file — refusing to read as evidence/),
+              reason: match.stringMatching(/is not a regular file — refusing to read as evidence/),
             },
           ],
         },
@@ -728,12 +734,16 @@ describe('proposeBaselineUpdate', () => {
             {
               target: TARGET,
               metric: METRIC,
-              reason: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+              reason: match.stringMatching(
+                /does not resolve to a strict descendant of the workspace/,
+              ),
             },
             {
               target: 'other-target',
               metric: METRIC,
-              reason: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+              reason: match.stringMatching(
+                /does not resolve to a strict descendant of the workspace/,
+              ),
             },
           ],
         },
@@ -773,7 +783,7 @@ describe('proposeBaselineUpdate', () => {
           {
             target: TARGET,
             metric: METRIC,
-            reason: expect.stringMatching(/disagrees on target 'elsewhere' → 'typecheck'/),
+            reason: match.stringMatching(/disagrees on target 'elsewhere' → 'typecheck'/),
           },
         ],
       },
@@ -806,11 +816,13 @@ describe('proposeBaselineUpdate', () => {
       },
     });
     expect(effects.prs.size).toBe(1);
-    const pr = effects.prs.get([...effects.prs.keys()][0]);
+    const pr = effects.prs.values().next().value;
     expect(pr?.title).toBe('chore(ratchet): tighten baselines (2 metrics)');
     expect(pr?.files).toHaveLength(2);
     expect(pr?.files.map((f) => f.path)).toEqual([relB, relA]);
-    expect(pr?.body).toContain(`- \`${relB}\` (bundle-size / kb-total): 512 → 480 (lower-is-better)`);
+    expect(pr?.body).toContain(
+      `- \`${relB}\` (bundle-size / kb-total): 512 → 480 (lower-is-better)`,
+    );
     expect(pr?.body).toContain(`- \`${relA}\` (${TARGET} / ${METRIC}): 10 → 7 (lower-is-better)`);
   });
 
@@ -874,7 +886,7 @@ describe('proposeBaselineUpdate', () => {
     );
     expect(result).toMatchObject({
       status: 'ok',
-      value: { head: expect.stringMatching(/^ratchet\/nightly-[0-9a-f]{12}$/) },
+      value: { head: match.stringMatching(/^ratchet\/nightly-[0-9a-f]{12}$/) },
     });
   });
 
@@ -896,9 +908,7 @@ describe('proposeBaselineUpdate', () => {
       });
     }
     // Non-strings keep the plain must-be-a-string wording.
-    await expect(
-      propose(proposeInput({ headPrefix: 7 as unknown as string })),
-    ).resolves.toEqual({
+    await expect(propose(proposeInput({ headPrefix: 7 as unknown as string }))).resolves.toEqual({
       status: 'failed',
       error: "ratchet: invalid input — 'headPrefix' must be a string",
     });
@@ -918,7 +928,7 @@ describe('proposeBaselineUpdate', () => {
     );
     expect(result).toMatchObject({
       status: 'ok',
-      value: { head: expect.stringMatching(/^ratchet\/nightly\.v1-beta-[0-9a-f]{12}$/) },
+      value: { head: match.stringMatching(/^ratchet\/nightly\.v1-beta-[0-9a-f]{12}$/) },
     });
   });
 
@@ -936,7 +946,9 @@ describe('proposeBaselineUpdate', () => {
       );
       expect(result.status, headPrefix).toBe('ok');
       if (result.status === 'ok') {
-        expect(result.value.head, headPrefix).toMatch(new RegExp(`^${headPrefix.replace(/[.]/g, '\\.')}-[0-9a-f]{12}$`));
+        expect(result.value.head, headPrefix).toMatch(
+          new RegExp(`^${headPrefix.replace(/[.]/g, '\\.')}-[0-9a-f]{12}$`),
+        );
       }
     }
     const midDot = await createProposeBaselineUpdate(effects)(
@@ -949,7 +961,10 @@ describe('proposeBaselineUpdate', () => {
     // A .lock COMPONENT anywhere is invalid — prefix or base.
     for (const bad of ['ratchet.lock/nightly', 'a/b.lock/c']) {
       const asPrefix = await createProposeBaselineUpdate(effects)(
-        proposeInput({ headPrefix: bad, improvements: [{ target: TARGET, metric: METRIC, value: 7 }] }),
+        proposeInput({
+          headPrefix: bad,
+          improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
+        }),
       );
       expect(asPrefix.status, bad).toBe('failed');
       const asBase = await createProposeBaselineUpdate(effects)(
@@ -972,7 +987,7 @@ describe('proposeBaselineUpdate', () => {
     );
     expect(result).toMatchObject({
       status: 'ok',
-      value: { head: expect.stringMatching(/^ratchet\/nightly_lock-[0-9a-f]{12}$/) },
+      value: { head: match.stringMatching(/^ratchet\/nightly_lock-[0-9a-f]{12}$/) },
     });
   });
 
@@ -1026,7 +1041,7 @@ describe('proposeBaselineUpdate', () => {
         improvements: [{ target: TARGET, metric: METRIC, value: 7 }],
       }),
     );
-    const pr = clean.prs.get([...clean.prs.keys()][0]);
+    const pr = clean.prs.values().next().value;
     expect(pr?.body).toContain('Target branch: `release/main`.');
     expect(pr?.base).toBe('release/main');
   });
@@ -1037,15 +1052,11 @@ describe('proposeBaselineUpdate', () => {
       status: 'failed',
       error: 'ratchet: invalid input — expected a non-null object',
     });
-    await expect(
-      propose(proposeInput({ ws: 42 as unknown as string })),
-    ).resolves.toEqual({
+    await expect(propose(proposeInput({ ws: 42 as unknown as string }))).resolves.toEqual({
       status: 'failed',
       error: "ratchet: invalid input — 'ws' must be a string",
     });
-    await expect(
-      propose(proposeInput({ base: undefined as unknown as string })),
-    ).resolves.toEqual({
+    await expect(propose(proposeInput({ base: undefined as unknown as string }))).resolves.toEqual({
       status: 'failed',
       error: "ratchet: invalid input — 'base' must be a string",
     });
@@ -1058,7 +1069,7 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toEqual({
       status: 'failed',
-      error: "ratchet: invalid input — improvements[0].value must be a finite number",
+      error: 'ratchet: invalid input — improvements[0].value must be a finite number',
     });
     // The remaining boundary guards, each pinned with its arg-error wording.
     await expect(
@@ -1103,7 +1114,7 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /improvements\[0\]\.capturedAt must be a strict ISO-8601 instant/,
       ),
     });
@@ -1139,7 +1150,7 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/could not look up an open proposal PR.*gh api exploded/s),
+      error: match.stringMatching(/could not look up an open proposal PR.*gh api exploded/s),
     });
   });
 
@@ -1155,9 +1166,7 @@ describe('proposeBaselineUpdate', () => {
       ),
     ).resolves.toEqual({
       status: 'indeterminate',
-      detail: expect.stringMatching(
-        /may or may not have landed.*network dropped/s,
-      ),
+      detail: match.stringMatching(/may or may not have landed.*network dropped/s),
     });
   });
 });

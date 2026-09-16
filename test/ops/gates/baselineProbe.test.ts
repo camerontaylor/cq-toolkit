@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Gates lane C2 — test evidence: the baseline probe's full decision table
 // over a SCRIPTED fake runner (no subprocesses): every ProbeVerdict value —
 // clean, failing, bail (pattern and exitCode-null flavors, retry budget
@@ -6,10 +7,7 @@
 // no baseline field by construction, and two identical calls re-run the
 // check twice.
 import { describe, expect, test } from 'vitest';
-import {
-  DEFAULT_BAIL_PATTERNS,
-  makeBaselineProbe,
-} from '../../../src/ops/gates/baselineProbe.js';
+import { DEFAULT_BAIL_PATTERNS, makeBaselineProbe } from '../../../src/ops/gates/baselineProbe.js';
 import type { BaselineProbeInput } from '../../../src/ops/gates/index.js';
 import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/index.js';
 
@@ -24,7 +22,13 @@ const CLEAN_VITEST = (exitCode = 0): RawCheckOutput => ({
         name: '/tmp/a.test.ts',
         status: 'passed',
         assertionResults: [
-          { title: 'ok', fullName: 'a > ok', status: 'passed', ancestorTitles: ['a'], failureMessages: [] },
+          {
+            title: 'ok',
+            fullName: 'a > ok',
+            status: 'passed',
+            ancestorTitles: ['a'],
+            failureMessages: [],
+          },
         ],
       },
     ],
@@ -38,7 +42,15 @@ const FAILING_ESLINT: RawCheckOutput = {
   stdout: JSON.stringify([
     {
       filePath: '/tmp/bad.ts',
-      messages: [{ ruleId: 'prefer-const', severity: 2, message: "'g' is never reassigned.", line: 4, column: 7 }],
+      messages: [
+        {
+          ruleId: 'prefer-const',
+          severity: 2,
+          message: "'g' is never reassigned.",
+          line: 4,
+          column: 7,
+        },
+      ],
     },
   ]),
   stderr: '',
@@ -46,7 +58,10 @@ const FAILING_ESLINT: RawCheckOutput = {
 };
 
 /** A scripted runner: pops one script entry per call; a spent script throws loudly. */
-function scriptedRunner(...script: Array<RawCheckOutput | Error>): { run: RunCheck; callCount(): number } {
+function scriptedRunner(...script: Array<RawCheckOutput | Error>): {
+  run: RunCheck;
+  callCount(): number;
+} {
   let index = 0;
   let calls = 0;
   return {
@@ -156,7 +171,11 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
   });
 
   test('exitCode null with NO pattern match (signal kill) is a bail per the exitCode-null rule', async () => {
-    const fake = scriptedRunner({ stdout: 'partial output, no signature', stderr: '', exitCode: null });
+    const fake = scriptedRunner({
+      stdout: 'partial output, no signature',
+      stderr: '',
+      exitCode: null,
+    });
     const result = await makeBaselineProbe(fake.run)(probeInput({ bail: { maxBailRetries: 0 } }));
     expect(result).toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
   });
@@ -242,7 +261,7 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
   test('indeterminate (b): unparseable garbage → indeterminate', async () => {
     const fake = scriptedRunner({ stdout: '⟨not json at all⟩', stderr: '', exitCode: 1 });
     const result = await makeBaselineProbe(fake.run)(probeInput());
-    expect(result).toMatchObject({ status: 'indeterminate', detail: expect.any(String) });
+    expect(result).toMatchObject({ status: 'indeterminate', detail: match.any(String) });
   });
 
   test('indeterminate (c): a thrown runner crashes the probe → indeterminate with check-runner-crashed detail', async () => {
@@ -278,7 +297,13 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
             name: '/tmp/x.test.ts',
             status: 'passed',
             assertionResults: [
-              { title: 'no tests found', fullName: 'x > no tests found', status: 'passed', ancestorTitles: ['x'], failureMessages: [] },
+              {
+                title: 'no tests found',
+                fullName: 'x > no tests found',
+                status: 'passed',
+                ancestorTitles: ['x'],
+                failureMessages: [],
+              },
             ],
           },
         ],
@@ -298,10 +323,15 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
       makeBaselineProbe(indeterminatePath.run)(probeInput({ bail: patterns })),
     ).resolves.toMatchObject({ status: 'indeterminate' });
     // Positive control: the CUSTOM signature does bail.
-    const dooming = scriptedRunner({ stdout: 'CUSTOM INFRASTRUCTURE DOOM', stderr: '', exitCode: 0 });
-    await expect(
-      makeBaselineProbe(dooming.run)(probeInput({ bail: patterns })),
-    ).resolves.toEqual({ status: 'ok', value: { verdict: 'bail', attempts: 1 } });
+    const dooming = scriptedRunner({
+      stdout: 'CUSTOM INFRASTRUCTURE DOOM',
+      stderr: '',
+      exitCode: 0,
+    });
+    await expect(makeBaselineProbe(dooming.run)(probeInput({ bail: patterns }))).resolves.toEqual({
+      status: 'ok',
+      value: { verdict: 'bail', attempts: 1 },
+    });
   });
 });
 

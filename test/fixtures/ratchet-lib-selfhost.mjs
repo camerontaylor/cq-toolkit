@@ -67,16 +67,24 @@ await check('typecheckCount extracts the structured count (object form)', () => 
 await check('coverage extracts total.lines.pct with detail', () => {
   deepEqual(
     engine.adapters.coverage.extract({
-      total: { lines: { pct: 87.5 }, branches: { pct: 80 }, functions: { pct: 90 }, statements: { pct: 88 } },
+      total: {
+        lines: { pct: 87.5 },
+        branches: { pct: 80 },
+        functions: { pct: 90 },
+        statements: { pct: 88 },
+      },
     }),
     { value: 87.5, unit: 'pct', detail: { branches: 80, functions: 90, statements: 88 } },
   );
 });
 await check('typecheckEvidence: status 0 -> the authoritative object zero', () => {
-  deepEqual(lib.typecheckEvidence(engine.adapters.typecheckCount, { status: 0, stdout: '', stderr: '' }), {
-    evidence: { count: 0 },
-    rawText: '',
-  });
+  deepEqual(
+    lib.typecheckEvidence(engine.adapters.typecheckCount, { status: 0, stdout: '', stderr: '' }),
+    {
+      evidence: { count: 0 },
+      rawText: '',
+    },
+  );
 });
 await check('typecheckEvidence: errored-but-parsable run -> the raw text itself', () => {
   const stdout = 'src/a.ts(1,7): error TS2322: boom\n';
@@ -93,6 +101,25 @@ await check('typecheckEvidence: nonzero exit, no parsable diagnostics -> null (I
   });
   equal(evidence, null);
 });
+await check(
+  'typecheckEvidence rejects abnormal, signaled, noisy-success and configuration runs',
+  () => {
+    for (const run of [
+      { status: 3, stdout: 'src/a.ts(1,7): error TS2322: boom\n', stderr: '' },
+      { status: null, signal: 'SIGTERM', stdout: '', stderr: '' },
+      { status: 0, stdout: 'unexpected banner', stderr: '' },
+      { status: 0, stdout: '', stderr: '', error: new Error('spawn failed') },
+      { status: 1, stdout: 'error TS5083: Cannot read project\n', stderr: '' },
+      {
+        status: 2,
+        stdout: 'tsconfig.json(1,2): error TS5023: Unknown compiler option\n',
+        stderr: '',
+      },
+    ]) {
+      equal(lib.typecheckEvidence(engine.adapters.typecheckCount, run).evidence, null);
+    }
+  },
+);
 await check('normalizeCoverageSummary rounds total.lines.pct to integer percent', () => {
   const rounded = lib.normalizeCoverageSummary({ total: { lines: { pct: 93.46 } } });
   equal(rounded.total.lines.pct, 93); // 93.46 and CI's 93.38 are the same ratchet reading
@@ -124,23 +151,26 @@ function baselineValueDiff(oldValue, newValue) {
     ' }',
   ].join('\n');
 }
-await check('normalizeBaselineDiffValues rewrites fractional values on -, + AND context lines only in baselines sections', () => {
-  const diff = [
-    `diff --git a/${BASELINE_FILE} b/${BASELINE_FILE}`,
-    `--- a/${BASELINE_FILE}`,
-    `+++ b/${BASELINE_FILE}`,
-    '@@ -1,3 +1,3 @@',
-    '-  "value": 93.46,',
-    '+  "value": 93.4,',
-    '   "value": 91.6,',
-    ' }',
-  ].join('\n');
-  const normalized = lib.normalizeBaselineDiffValues(diff);
-  ok(normalized.includes('-  "value": 93,'));
-  ok(normalized.includes('+  "value": 93,'));
-  ok(normalized.includes('   "value": 92,'));
-  ok(normalized.includes('93.46') === false);
-});
+await check(
+  'normalizeBaselineDiffValues rewrites fractional values on -, + AND context lines only in baselines sections',
+  () => {
+    const diff = [
+      `diff --git a/${BASELINE_FILE} b/${BASELINE_FILE}`,
+      `--- a/${BASELINE_FILE}`,
+      `+++ b/${BASELINE_FILE}`,
+      '@@ -1,3 +1,3 @@',
+      '-  "value": 93.46,',
+      '+  "value": 93.4,',
+      '   "value": 91.6,',
+      ' }',
+    ].join('\n');
+    const normalized = lib.normalizeBaselineDiffValues(diff);
+    ok(normalized.includes('-  "value": 93,'));
+    ok(normalized.includes('+  "value": 93,'));
+    ok(normalized.includes('   "value": 92,'));
+    ok(normalized.includes('93.46') === false);
+  },
+);
 await check('normalizeBaselineDiffValues leaves non-baseline files byte-identical', () => {
   const diff = [
     'diff --git a/src/x.ts b/src/x.ts',
@@ -169,12 +199,15 @@ await check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
     `${BASELINE_FILE}: metric coverage loosened 93 → 92 — only tightening diffs pass`,
   ]);
 });
-await check('guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)', () => {
-  const verdict = engine.checkDiffMonotonicity(
-    lib.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
-  );
-  deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
-});
+await check(
+  'guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)',
+  () => {
+    const verdict = engine.checkDiffMonotonicity(
+      lib.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
+    );
+    deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
+  },
+);
 
 // Coverage-ONLY normalization (PR-105 round-2 finding 4): a fractional
 // non-coverage metric (complexity avg-cx, 2 decimals) is a REAL granularity —
@@ -201,44 +234,54 @@ await check('normalizeBaselineDiffValues leaves a complexity section byte-identi
   const diff = baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49');
   equal(lib.normalizeBaselineDiffValues(diff), diff);
 });
-await check('normalizeBaselineDiffValues: the coverage flag RESETS per header — a complexity section following a coverage one is never normalized', () => {
-  // Realistic two-file diff: the complexity section that FOLLOWS the
-  // coverage section must not inherit its normalization (the flag is
-  // re-assigned per header — and per `diff --git` section boundary).
-  const realistic = [
-    baselineValueDiff('93.46', '93'),
-    baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49'),
-  ].join('\n');
-  const normalizedRealistic = lib.normalizeBaselineDiffValues(realistic);
-  ok(normalizedRealistic.includes('-  "value": 93,')); // coverage side: normalized
-  ok(normalizedRealistic.includes('-  "value": 2.40,')); // complexity side: untouched
-  ok(normalizedRealistic.includes('+  "value": 2.49,')); // complexity side: untouched
-  // Added-file header reset: `--- /dev/null` assigns the flag FALSE (no
-  // path), so only the `+++` side's coverage path can set it again.
-  const added = [
-    `diff --git a/${COMPLEXITY_FILE} b/${COMPLEXITY_FILE}`,
-    'new file mode 100644',
-    '--- /dev/null',
-    `+++ b/${COMPLEXITY_FILE}`,
-    '@@ -0,0 +1,8 @@',
-    '+  "value": 2.49,',
-  ].join('\n');
-  equal(lib.normalizeBaselineDiffValues(added), added);
-});
-await check('guard verdict: complexity 2.40 -> 2.49 is STILL a loosened violation (not normalized away)', () => {
-  const verdict = engine.checkDiffMonotonicity(
-    lib.normalizeBaselineDiffValues(baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49')),
-  );
-  equal(verdict.ok, false);
-  equal(verdict.violations.length, 1);
-  equal(verdict.violations[0].why, 'loosened');
-  deepEqual(engine.formatViolations(verdict.violations), [
-    `${COMPLEXITY_FILE}: metric complexity loosened 2.4 → 2.49 — only tightening diffs pass`,
-  ]);
-});
+await check(
+  'normalizeBaselineDiffValues: the coverage flag RESETS per header — a complexity section following a coverage one is never normalized',
+  () => {
+    // Realistic two-file diff: the complexity section that FOLLOWS the
+    // coverage section must not inherit its normalization (the flag is
+    // re-assigned per header — and per `diff --git` section boundary).
+    const realistic = [
+      baselineValueDiff('93.46', '93'),
+      baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49'),
+    ].join('\n');
+    const normalizedRealistic = lib.normalizeBaselineDiffValues(realistic);
+    ok(normalizedRealistic.includes('-  "value": 93,')); // coverage side: normalized
+    ok(normalizedRealistic.includes('-  "value": 2.40,')); // complexity side: untouched
+    ok(normalizedRealistic.includes('+  "value": 2.49,')); // complexity side: untouched
+    // Added-file header reset: `--- /dev/null` assigns the flag FALSE (no
+    // path), so only the `+++` side's coverage path can set it again.
+    const added = [
+      `diff --git a/${COMPLEXITY_FILE} b/${COMPLEXITY_FILE}`,
+      'new file mode 100644',
+      '--- /dev/null',
+      `+++ b/${COMPLEXITY_FILE}`,
+      '@@ -0,0 +1,8 @@',
+      '+  "value": 2.49,',
+    ].join('\n');
+    equal(lib.normalizeBaselineDiffValues(added), added);
+  },
+);
+await check(
+  'guard verdict: complexity 2.40 -> 2.49 is STILL a loosened violation (not normalized away)',
+  () => {
+    const verdict = engine.checkDiffMonotonicity(
+      lib.normalizeBaselineDiffValues(
+        baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49'),
+      ),
+    );
+    equal(verdict.ok, false);
+    equal(verdict.violations.length, 1);
+    equal(verdict.violations[0].why, 'loosened');
+    deepEqual(engine.formatViolations(verdict.violations), [
+      `${COMPLEXITY_FILE}: metric complexity loosened 2.4 → 2.49 — only tightening diffs pass`,
+    ]);
+  },
+);
 await check('guard verdict: a complexity TIGHTEN at 2 decimals still passes untouched', () => {
   const verdict = engine.checkDiffMonotonicity(
-    lib.normalizeBaselineDiffValues(baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.49', '2.40')),
+    lib.normalizeBaselineDiffValues(
+      baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.49', '2.40'),
+    ),
   );
   deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
 });
@@ -246,74 +289,108 @@ await check('guard verdict: a complexity TIGHTEN at 2 decimals still passes unto
 // Proposal upsert recovery (PR-105 round-2 finding 5): a PR found open can
 // vanish between the list and the edit — the failed edit falls back to a
 // FRESH create, reported honestly.
-await check('upsertProposalPr: no existing PR -> create only (created, not recovered)', async () => {
-  let edits = 0;
-  let creates = 0;
-  const out = await lib.upsertProposalPr({
-    existing: null,
-    edit: async () => { edits++; },
-    create: async () => { creates++; },
-  });
-  deepEqual(out, { created: true, recovered: false });
-  equal(edits, 0);
-  equal(creates, 1);
-});
-await check('upsertProposalPr: existing PR + successful edit -> edit only (no recovery)', async () => {
-  let edits = 0;
-  let creates = 0;
-  const out = await lib.upsertProposalPr({
-    existing: { number: 105, url: 'https://github.com/o/r/pull/105' },
-    edit: async () => { edits++; },
-    create: async () => { creates++; },
-  });
-  deepEqual(out, { created: false, recovered: false });
-  equal(edits, 1);
-  equal(creates, 0);
-});
-await check('upsertProposalPr: edit FAILURE (PR closed between list and edit) -> fresh create, honestly reported', async () => {
-  let edits = 0;
-  let creates = 0;
-  const out = await lib.upsertProposalPr({
-    existing: { number: 105, url: 'https://github.com/o/r/pull/105' },
-    edit: async () => { edits++; throw new Error('Pull request is not open (closed between list and edit)'); },
-    create: async () => { creates++; },
-  });
-  deepEqual(out, { created: true, recovered: true });
-  equal(edits, 1);
-  equal(creates, 1);
-});
+await check(
+  'upsertProposalPr: no existing PR -> create only (created, not recovered)',
+  async () => {
+    let edits = 0;
+    let creates = 0;
+    const out = await lib.upsertProposalPr({
+      existing: null,
+      edit: async () => {
+        edits++;
+      },
+      create: async () => {
+        creates++;
+      },
+    });
+    deepEqual(out, { created: true, recovered: false });
+    equal(edits, 0);
+    equal(creates, 1);
+  },
+);
+await check(
+  'upsertProposalPr: existing PR + successful edit -> edit only (no recovery)',
+  async () => {
+    let edits = 0;
+    let creates = 0;
+    const out = await lib.upsertProposalPr({
+      existing: { number: 105, url: 'https://github.com/o/r/pull/105' },
+      edit: async () => {
+        edits++;
+      },
+      create: async () => {
+        creates++;
+      },
+    });
+    deepEqual(out, { created: false, recovered: false });
+    equal(edits, 1);
+    equal(creates, 0);
+  },
+);
+await check(
+  'upsertProposalPr: edit FAILURE (PR closed between list and edit) -> fresh create, honestly reported',
+  async () => {
+    let edits = 0;
+    let creates = 0;
+    const out = await lib.upsertProposalPr({
+      existing: { number: 105, url: 'https://github.com/o/r/pull/105' },
+      edit: async () => {
+        edits++;
+        throw new Error('Pull request is not open (closed between list and edit)');
+      },
+      create: async () => {
+        creates++;
+      },
+    });
+    deepEqual(out, { created: true, recovered: true });
+    equal(edits, 1);
+    equal(creates, 1);
+  },
+);
 // The git contract behind the proposal effects' missing-ref probes (PR-105
 // round-2 finding 3): `rev-parse --verify --quiet` exits NONZERO with EMPTY
 // stdout exactly when the ref is absent — the allowFail+empty-check pattern
 // treats that as "branch absent" (create path), never a driver failure.
-await check('missing-ref probe contract: absent ref -> nonzero + empty stdout; present ref -> oid', () => {
-  const absent = spawnSync(
-    'git',
-    ['rev-parse', '--verify', '--quiet', 'refs/heads/ratchet/propose-definitely-absent'],
-    { cwd: ROOT, encoding: 'utf8' },
-  );
-  equal(absent.status === 0, false);
-  equal((absent.stdout ?? '').trim(), '');
-  const present = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'HEAD'], { cwd: ROOT, encoding: 'utf8' });
-  equal(present.status, 0);
-  equal(present.stdout.trim().length, 40);
-});
+await check(
+  'missing-ref probe contract: absent ref -> nonzero + empty stdout; present ref -> oid',
+  () => {
+    const absent = spawnSync(
+      'git',
+      ['rev-parse', '--verify', '--quiet', 'refs/heads/ratchet/propose-definitely-absent'],
+      { cwd: ROOT, encoding: 'utf8' },
+    );
+    equal(absent.status === 0, false);
+    equal((absent.stdout ?? '').trim(), '');
+    const present = spawnSync('git', ['rev-parse', '--verify', '--quiet', 'HEAD'], {
+      cwd: ROOT,
+      encoding: 'utf8',
+    });
+    equal(present.status, 0);
+    equal(present.stdout.trim().length, 40);
+  },
+);
 
 // gh output parsing (PR-105 round-1 finding 2): `gh pr list --json number,url`
 // emits a JSON ARRAY (empty array / NOTHING when no matches — an empty string
 // means zero PRs, not an error); `gh ... -q <query>` emits a BARE STRING that
 // must never be JSON.parsed; malformed non-empty output throws loudly.
-await check('parseGhJson: literal gh pr list output shapes (array, empty, whitespace, garbage)', () => {
-  deepEqual(
-    lib.parseGhJson('[{"number":105,"url":"https://github.com/camerontaylor/cq-toolkit/pull/105"}]', []),
-    [{ number: 105, url: 'https://github.com/camerontaylor/cq-toolkit/pull/105' }],
-  );
-  deepEqual(lib.parseGhJson('[]', []), []);
-  deepEqual(lib.parseGhJson('', []), []); // no open PRs — gh prints nothing
-  deepEqual(lib.parseGhJson('  \n\t ', []), []); // whitespace-only = empty
-  deepEqual(lib.parseGhJson(undefined, []), []);
-  throws(() => lib.parseGhJson('no open PRs', []), SyntaxError); // mangled output: loud, never silent-empty
-});
+await check(
+  'parseGhJson: literal gh pr list output shapes (array, empty, whitespace, garbage)',
+  () => {
+    deepEqual(
+      lib.parseGhJson(
+        '[{"number":105,"url":"https://github.com/camerontaylor/cq-toolkit/pull/105"}]',
+        [],
+      ),
+      [{ number: 105, url: 'https://github.com/camerontaylor/cq-toolkit/pull/105' }],
+    );
+    deepEqual(lib.parseGhJson('[]', []), []);
+    deepEqual(lib.parseGhJson('', []), []); // no open PRs — gh prints nothing
+    deepEqual(lib.parseGhJson('  \n\t ', []), []); // whitespace-only = empty
+    deepEqual(lib.parseGhJson(undefined, []), []);
+    throws(() => lib.parseGhJson('no open PRs', []), SyntaxError); // mangled output: loud, never silent-empty
+  },
+);
 await check('parseGhJson: -q query output is a bare string and is NOT force-parsed as JSON', () => {
   equal(String('camerontaylor/cq-toolkit'.trim()), 'camerontaylor/cq-toolkit'); // the repoSlug path: trim, no parse
   throws(() => lib.parseGhJson('camerontaylor/cq-toolkit'), SyntaxError); // JSON.parse here was the bug
@@ -321,35 +398,43 @@ await check('parseGhJson: -q query output is a bare string and is NOT force-pars
 
 // GIT_ASKPASS auth (PR-105 round-1 finding 5): the token reaches git through
 // the askpass file's ENVIRONMENT — never its bytes, never a URL/argv/config.
-await check('withGitAskpass: env-only token, no token bytes on disk, cleanup on success AND injected failure', async () => {
-  const TOKEN = 'fake-token-abc123';
-  let askpassPath = null;
-  await lib.withGitAskpass(TOKEN, async (gitEnv) => {
-    askpassPath = gitEnv.GIT_ASKPASS;
-    equal(gitEnv.GIT_TERMINAL_PROMPT, '0');
-    equal(gitEnv.CQ_AUTOMATION_TOKEN, TOKEN);
-    ok(existsSync(askpassPath));
-    // The script's BYTES never contain the token (env-only); running it with
-    // the token in ITS env prints exactly the token (the askpass contract).
-    ok(readFileSync(askpassPath, 'utf8').includes(TOKEN) === false);
-    const out = spawnSync('sh', [askpassPath], { env: gitEnv, encoding: 'utf8' });
-    equal(out.stdout.trim(), TOKEN);
-  });
-  ok(existsSync(askpassPath) === false); // cleaned up on success
-  // Abnormal exit (injected failure): the temp plumbing is still removed.
-  await rejects(lib.withGitAskpass(TOKEN, async (gitEnv) => {
-    askpassPath = gitEnv.GIT_ASKPASS;
-    throw new Error('injected failure');
-  }), /injected failure/);
-  ok(existsSync(askpassPath) === false);
-  // And the git-config channel carries no token — there is no authed URL by
-  // construction; this pins the invariant against regressions.
-  const cfg = spawnSync('git', ['config', '-l'], { cwd: ROOT, encoding: 'utf8' });
-  ok(cfg.stdout.includes(TOKEN) === false);
-});
+await check(
+  'withGitAskpass: env-only token, no token bytes on disk, cleanup on success AND injected failure',
+  async () => {
+    const TOKEN = 'fake-token-abc123';
+    let askpassPath = null;
+    await lib.withGitAskpass(TOKEN, async (gitEnv) => {
+      askpassPath = gitEnv.GIT_ASKPASS;
+      equal(gitEnv.GIT_TERMINAL_PROMPT, '0');
+      equal(gitEnv.CQ_AUTOMATION_TOKEN, TOKEN);
+      ok(existsSync(askpassPath));
+      // The script's BYTES never contain the token (env-only); running it with
+      // the token in ITS env prints exactly the token (the askpass contract).
+      ok(readFileSync(askpassPath, 'utf8').includes(TOKEN) === false);
+      const out = spawnSync('sh', [askpassPath], { env: gitEnv, encoding: 'utf8' });
+      equal(out.stdout.trim(), TOKEN);
+    });
+    ok(existsSync(askpassPath) === false); // cleaned up on success
+    // Abnormal exit (injected failure): the temp plumbing is still removed.
+    await rejects(
+      lib.withGitAskpass(TOKEN, async (gitEnv) => {
+        askpassPath = gitEnv.GIT_ASKPASS;
+        throw new Error('injected failure');
+      }),
+      /injected failure/,
+    );
+    ok(existsSync(askpassPath) === false);
+    // And the git-config channel carries no token — there is no authed URL by
+    // construction; this pins the invariant against regressions.
+    const cfg = spawnSync('git', ['config', '-l'], { cwd: ROOT, encoding: 'utf8' });
+    ok(cfg.stdout.includes(TOKEN) === false);
+  },
+);
 
 if (failures > 0) {
   process.stderr.write(`ratchet-lib-selfhost: ${failures} failure(s)\n`);
   process.exit(1);
 }
-process.stderr.write('ratchet-lib-selfhost: ok — engine wired, adapters registered, evidence classified\n');
+process.stderr.write(
+  'ratchet-lib-selfhost: ok — engine wired, adapters registered, evidence classified\n',
+);

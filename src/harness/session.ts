@@ -57,12 +57,14 @@ import { z } from 'zod';
  * (`content`), the tool that produced it when role is 'tool' (`toolName`),
  * and an ISO-8601 timestamp (`at`).
  */
-export const SessionMessageSchema = z.object({
-  role: z.enum(['user', 'assistant', 'tool']),
-  content: z.string(),
-  toolName: z.string().optional(),
-  at: z.string(),
-}).strict();
+export const SessionMessageSchema = z
+  .object({
+    role: z.enum(['user', 'assistant', 'tool']),
+    content: z.string(),
+    toolName: z.string().optional(),
+    at: z.string(),
+  })
+  .strict();
 
 /**
  * One recorded session: identity (`sessionId`), creation time
@@ -71,12 +73,14 @@ export const SessionMessageSchema = z.object({
  * resumed invocation re-uses — and everything a fresh invocation starts
  * without (I6).
  */
-export const SessionRecordSchema = z.object({
-  sessionId: z.string(),
-  createdAt: z.string(),
-  workspace: z.string(),
-  messages: z.array(SessionMessageSchema),
-}).strict();
+export const SessionRecordSchema = z
+  .object({
+    sessionId: z.string(),
+    createdAt: z.string(),
+    workspace: z.string(),
+    messages: z.array(SessionMessageSchema),
+  })
+  .strict();
 
 export type SessionMessage = z.infer<typeof SessionMessageSchema>;
 export type SessionRecord = z.infer<typeof SessionRecordSchema>;
@@ -84,17 +88,21 @@ export type SessionRecord = z.infer<typeof SessionRecordSchema>;
 // JSONL line shapes (the persisted source of truth; the record above is the
 // read-time fold, like the kernel journal's derived status).
 
-export const SessionHeaderLineSchema = z.object({
-  type: z.literal('session'),
-  sessionId: z.string(),
-  createdAt: z.string(),
-  workspace: z.string(),
-}).strict();
+export const SessionHeaderLineSchema = z
+  .object({
+    type: z.literal('session'),
+    sessionId: z.string(),
+    createdAt: z.string(),
+    workspace: z.string(),
+  })
+  .strict();
 
-export const SessionMessageLineSchema = z.object({
-  type: z.literal('message'),
-  message: SessionMessageSchema,
-}).strict();
+export const SessionMessageLineSchema = z
+  .object({
+    type: z.literal('message'),
+    message: SessionMessageSchema,
+  })
+  .strict();
 
 export const SessionLineSchema = z.discriminatedUnion('type', [
   SessionHeaderLineSchema,
@@ -284,8 +292,8 @@ export class SessionStore {
     }
     let header: SessionHeaderLine | undefined;
     const messages: SessionMessage[] = [];
-    for (let i = 0; i < lines.length; i++) {
-      const parsed = parseLine(lines[i]);
+    for (const [i, line] of lines.entries()) {
+      const parsed = parseLine(line);
       if (parsed === null) {
         if (i === lines.length - 1 && !endsWithNewline) {
           break; // torn tail: a genuine mid-write fragment — only the LAST line may be lost
@@ -298,7 +306,9 @@ export class SessionStore {
       }
       if (parsed.type === 'session') {
         if (header !== undefined) {
-          throw new Error(`session: duplicate header at line ${i + 1} of ${this.pathFor(sessionId)}`);
+          throw new Error(
+            `session: duplicate header at line ${i + 1} of ${this.pathFor(sessionId)}`,
+          );
         }
         if (parsed.sessionId !== sessionId) {
           throw new Error(
@@ -316,7 +326,12 @@ export class SessionStore {
       }
     }
     if (header === undefined) return undefined; // only a torn header — never a real session
-    return { sessionId: header.sessionId, createdAt: header.createdAt, workspace: header.workspace, messages };
+    return {
+      sessionId: header.sessionId,
+      createdAt: header.createdAt,
+      workspace: header.workspace,
+      messages,
+    };
   }
 }
 

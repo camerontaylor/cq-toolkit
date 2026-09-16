@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Lane H slice 2 (+ round-1 and round-2 fixes) — tests for captureBaseline
 // and pruneBaselines (src/ops/ratchet/captureBaseline.ts).
 //
@@ -37,7 +38,18 @@
 // typecheck-count adapter is used so capture is exercised end-to-end with a
 // production adapter.
 import { spawnSync } from 'node:child_process';
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  symlink,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from 'vitest';
@@ -130,7 +142,7 @@ beforeAll(() => {
     extract: (raw) => {
       const record = raw as { count?: unknown; unit?: string };
       if (typeof record.count !== 'number') return null;
-      return { value: record.count, unit: record.unit };
+      return { value: record.count, ...(record.unit === undefined ? {} : { unit: record.unit }) };
     },
   });
   registerAdapter({
@@ -167,30 +179,28 @@ beforeAll(() => {
     direction: 'lower-is-better',
     // Adapter-owned FIELD ACCESS can also throw: the value getter explodes
     // on access, after the reading passed the typeof guard.
-    extract: () =>
-      {
-        const reading = { unit: 'errors' };
-        Object.defineProperty(reading, 'value', {
-          get() {
-            throw new Error('value getter exploded');
-          },
-        });
-        return reading as unknown as MetricReading;
-      },
+    extract: () => {
+      const reading = { unit: 'errors' };
+      Object.defineProperty(reading, 'value', {
+        get() {
+          throw new Error('value getter exploded');
+        },
+      });
+      return reading as unknown as MetricReading;
+    },
   });
   registerAdapter({
     id: THROWING_UNIT_GETTER_METRIC,
     direction: 'lower-is-better',
-    extract: () =>
-      {
-        const reading = { value: 2 };
-        Object.defineProperty(reading, 'unit', {
-          get() {
-            throw new Error('unit getter exploded');
-          },
-        });
-        return reading as unknown as MetricReading;
-      },
+    extract: () => {
+      const reading = { value: 2 };
+      Object.defineProperty(reading, 'unit', {
+        get() {
+          throw new Error('unit getter exploded');
+        },
+      });
+      return reading as unknown as MetricReading;
+    },
   });
 });
 
@@ -263,7 +273,9 @@ describe('captureBaseline', () => {
 
   test('capturedAt defaults to the clock when not injected (parses as ISO-8601)', async () => {
     sourceRaw = { count: 1 };
-    const result = await capture(captureInput({ capturedAt: undefined }));
+    const input = captureInput();
+    delete input.capturedAt;
+    const result = await capture(input);
     expect(result.status).toBe('ok');
     const onDisk = parseBaseline(await readFile(join(ws, REL), 'utf8'));
     expect(Number.isNaN(Date.parse(onDisk.capturedAt))).toBe(false);
@@ -273,9 +285,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3 };
     await capture(captureInput());
     sourceRaw = { count: 5 };
-    await expect(
-      capture(captureInput({ capturedAt: CAPTURED_AT_2 })),
-    ).resolves.toEqual({
+    await expect(capture(captureInput({ capturedAt: CAPTURED_AT_2 }))).resolves.toEqual({
       status: 'ok',
       value: { path: REL, value: 5, previous: 3, lifecycle: 'updated' },
     });
@@ -307,14 +317,14 @@ describe('captureBaseline', () => {
   test('unknown metric fails with an arg-style error', async () => {
     await expect(capture(captureInput({ metric: 'no-such-metric' }))).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/unknown metric 'no-such-metric'/),
+      error: match.stringMatching(/unknown metric 'no-such-metric'/),
     });
   });
 
   test('unknown sourceId fails naming the source', async () => {
     await expect(capture(captureInput({ sourceId: 'no-such-source' }))).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/unknown source 'no-such-source' for metric 'typecheck-count'/),
+      error: match.stringMatching(/unknown source 'no-such-source' for metric 'typecheck-count'/),
     });
   });
 
@@ -322,7 +332,7 @@ describe('captureBaseline', () => {
     sourceRaw = null;
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/metric 'typecheck-count'.*no metrics summary/s),
+      error: match.stringMatching(/metric 'typecheck-count'.*no metrics summary/s),
     });
     // I5 evidence pin: a failed capture must not even create the baselines dir.
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
@@ -341,7 +351,7 @@ describe('captureBaseline', () => {
     sourceRaw = 'definitely not a compiler log';
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/no metrics summary/s),
+      error: match.stringMatching(/no metrics summary/s),
     });
     await expect(readFile(join(ws, REL), 'utf8')).rejects.toThrow();
   });
@@ -349,17 +359,22 @@ describe('captureBaseline', () => {
   test('a throwing source fails instead of crashing the op', async () => {
     await expect(capture(captureInput({ sourceId: 'exploding-source' }))).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/source failed.*boom/s),
+      error: match.stringMatching(/source failed.*boom/s),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
   test('a THROWING direction getter fails the capture inside the snapshot containment (review-debt #72)', async () => {
     await expect(
-      capture(captureInput({ metric: THROWING_DIRECTION_GETTER_METRIC, sourceId: THROWING_DIRECTION_GETTER_METRIC })),
+      capture(
+        captureInput({
+          metric: THROWING_DIRECTION_GETTER_METRIC,
+          sourceId: THROWING_DIRECTION_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'throwing-direction-getter' adapter produced an unusable reading.*direction getter exploded/s,
       ),
     });
@@ -368,10 +383,15 @@ describe('captureBaseline', () => {
 
   test('a thrown value whose MESSAGE getter throws maps to unknown error (review-debt #72)', async () => {
     await expect(
-      capture(captureInput({ metric: THROWING_MESSAGE_GETTER_METRIC, sourceId: THROWING_MESSAGE_GETTER_METRIC })),
+      capture(
+        captureInput({
+          metric: THROWING_MESSAGE_GETTER_METRIC,
+          sourceId: THROWING_MESSAGE_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'throwing-message-getter' adapter failed.*unknown error/s,
       ),
     });
@@ -383,17 +403,19 @@ describe('captureBaseline', () => {
       capture(captureInput({ metric: THROWING_METRIC, sourceId: THROWING_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
+      error: match.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
 
   test('a type-violating adapter returning undefined fails as no-summary (no throw)', async () => {
     await expect(
-      capture(captureInput({ metric: UNDEFINED_READING_METRIC, sourceId: UNDEFINED_READING_METRIC })),
+      capture(
+        captureInput({ metric: UNDEFINED_READING_METRIC, sourceId: UNDEFINED_READING_METRIC }),
+      ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'undefined-reading' has no metrics summary.*never a pass/s,
       ),
     });
@@ -404,11 +426,14 @@ describe('captureBaseline', () => {
   test('a throwing value getter fails as an unusable reading (no rejection, no file)', async () => {
     await expect(
       capture(
-        captureInput({ metric: THROWING_VALUE_GETTER_METRIC, sourceId: THROWING_VALUE_GETTER_METRIC }),
+        captureInput({
+          metric: THROWING_VALUE_GETTER_METRIC,
+          sourceId: THROWING_VALUE_GETTER_METRIC,
+        }),
       ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'throwing-value-getter' adapter produced an unusable reading.*value getter exploded/s,
       ),
     });
@@ -418,11 +443,14 @@ describe('captureBaseline', () => {
   test('a throwing unit getter fails as an unusable reading (no rejection, no file)', async () => {
     await expect(
       capture(
-        captureInput({ metric: THROWING_UNIT_GETTER_METRIC, sourceId: THROWING_UNIT_GETTER_METRIC }),
+        captureInput({
+          metric: THROWING_UNIT_GETTER_METRIC,
+          sourceId: THROWING_UNIT_GETTER_METRIC,
+        }),
       ),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'throwing-unit-getter' adapter produced an unusable reading.*unit getter exploded/s,
       ),
     });
@@ -432,14 +460,14 @@ describe('captureBaseline', () => {
   test('a null rejection fails with the fallback message, never a TypeError', async () => {
     await expect(capture(captureInput({ sourceId: 'rejecting-null' }))).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/source failed.*unknown error/s),
+      error: match.stringMatching(/source failed.*unknown error/s),
     });
   });
 
   test('a string rejection carries that string', async () => {
     await expect(capture(captureInput({ sourceId: 'rejecting-string' }))).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/source failed.*boom-string/s),
+      error: match.stringMatching(/source failed.*boom-string/s),
     });
   });
 
@@ -448,7 +476,7 @@ describe('captureBaseline', () => {
       capture(captureInput({ metric: OBJECT_THROWING_METRIC, sourceId: OBJECT_THROWING_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/adapter failed.*plain boom/s),
+      error: match.stringMatching(/adapter failed.*plain boom/s),
     });
   });
 
@@ -457,7 +485,7 @@ describe('captureBaseline', () => {
       capture(captureInput({ metric: CRAFTED_INFINITE_METRIC, sourceId: CRAFTED_INFINITE_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/metric 'crafted-infinite'.*unusable reading/s),
+      error: match.stringMatching(/metric 'crafted-infinite'.*unusable reading/s),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
@@ -467,7 +495,7 @@ describe('captureBaseline', () => {
       capture(captureInput({ metric: NULL_UNIT_METRIC, sourceId: NULL_UNIT_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'null-unit' produced an unparsable baseline — refusing to publish.*unit/s,
       ),
     });
@@ -483,7 +511,7 @@ describe('captureBaseline', () => {
       capture(captureInput({ metric: BAD_DIRECTION_METRIC, sourceId: BAD_DIRECTION_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'bad-direction' adapter produced an unusable direction \(sideways\) — baseline not captured/s,
       ),
     });
@@ -495,7 +523,7 @@ describe('captureBaseline', () => {
       capture(captureInput({ metric: BIGINT_UNIT_METRIC, sourceId: BIGINT_UNIT_METRIC })),
     ).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /metric 'bigint-unit' produced an unparsable baseline — refusing to publish/s,
       ),
     });
@@ -506,7 +534,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 1 };
     await expect(capture(captureInput({ capturedAt: 'not-a-date' }))).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/invalid capturedAt 'not-a-date'/),
+      error: match.stringMatching(/invalid capturedAt 'not-a-date'/),
     });
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
   });
@@ -516,7 +544,7 @@ describe('captureBaseline', () => {
     for (const bad of ['September 15, 2026', '2026-02-30T00:00:00Z']) {
       await expect(capture(captureInput({ capturedAt: bad }))).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/invalid capturedAt.*strict ISO-8601/s),
+        error: match.stringMatching(/invalid capturedAt.*strict ISO-8601/s),
       });
     }
     await expect(stat(join(ws, 'baselines'))).rejects.toThrow();
@@ -529,7 +557,9 @@ describe('captureBaseline', () => {
     ).resolves.toMatchObject({ status: 'ok' });
     sourceRaw = { count: 2 };
     await expect(
-      capture(captureInput({ target: 'typecheck-nanos', capturedAt: '2026-09-15T10:00:00.123456789Z' })),
+      capture(
+        captureInput({ target: 'typecheck-nanos', capturedAt: '2026-09-15T10:00:00.123456789Z' }),
+      ),
     ).resolves.toMatchObject({ status: 'ok' });
   });
 
@@ -563,7 +593,7 @@ describe('captureBaseline', () => {
     await writeFile(join(ws, REL), corrupt, 'utf8');
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/corrupt and was not overwritten/s),
+      error: match.stringMatching(/corrupt and was not overwritten/s),
     });
     expect(await readFile(join(ws, REL), 'utf8')).toBe(corrupt);
   });
@@ -575,7 +605,7 @@ describe('captureBaseline', () => {
     await mkdir(join(ws, REL), { recursive: true });
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/not a regular file — refusing/),
+      error: match.stringMatching(/not a regular file — refusing/),
     });
   });
 
@@ -600,7 +630,7 @@ describe('captureBaseline', () => {
       // check the read would follow it and return ok/unchanged.
       await expect(capture(captureInput())).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/not a regular file — refusing/),
+        error: match.stringMatching(/not a regular file — refusing/),
       });
       expect(await readFile(outsideFile, 'utf8')).toBe(bytes); // outside untouched
     } finally {
@@ -640,12 +670,15 @@ describe('captureBaseline', () => {
         // give up as indeterminate, and the colliding entries stay untouched
         // (cleanup only removes a temp this invocation created).
         for (let c = 3; c <= 7; c++) {
-          await symlink(outsideFile, join(ws, 'baselines', `.${basename(REL)}.${process.pid}.${c}.tmp`));
+          await symlink(
+            outsideFile,
+            join(ws, 'baselines', `.${basename(REL)}.${process.pid}.${c}.tmp`),
+          );
         }
         sourceRaw = { count: 9 };
         await expect(captureFresh(captureInput({ capturedAt: CAPTURED_AT_2 }))).resolves.toEqual({
           status: 'indeterminate',
-          detail: expect.stringMatching(/writing baseline.*failed/s),
+          detail: match.stringMatching(/writing baseline.*failed/s),
         });
         const tempDebris = (await readdir(join(ws, 'baselines')))
           .filter((n) => n.endsWith('.tmp'))
@@ -690,7 +723,7 @@ describe('captureBaseline', () => {
         sourceRaw = { count: 3 };
         await expect(captureFresh(captureInput())).resolves.toEqual({
           status: 'indeterminate',
-          detail: expect.stringMatching(/writing baseline.*failed/s),
+          detail: match.stringMatching(/writing baseline.*failed/s),
         });
         // Every colliding entry is untouched — cleanup never deletes a temp
         // this invocation did not create.
@@ -725,7 +758,7 @@ describe('captureBaseline', () => {
       status: 'failed',
       // The foreign baseline differs in target AND unit (it carries none) —
       // the message lists every disagreeing field.
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /disagrees on target 'elsewhere' → 'typecheck'; unit undefined → 'errors' — incomparable scale — refusing to overwrite/s,
       ),
     });
@@ -743,11 +776,15 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 5 }; // reading now carries NO unit
     await expect(capture(input)).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /for metric 'unit-shifting' disagrees on unit 'errors' → undefined — incomparable scale — refusing to overwrite/,
       ),
     });
-    expect(parseBaseline(await readFile(join(ws, baselineRelPath('unit-a', UNIT_SHIFTING_METRIC)), 'utf8')).unit).toBe('errors');
+    expect(
+      parseBaseline(
+        await readFile(join(ws, baselineRelPath('unit-a', UNIT_SHIFTING_METRIC)), 'utf8'),
+      ).unit,
+    ).toBe('errors');
   });
 
   test('the unit mismatch is symmetric (none → defined also fails)', async () => {
@@ -761,7 +798,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 5, unit: 'errors' };
     await expect(capture(input)).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/disagrees on unit undefined → 'errors' — incomparable scale/),
+      error: match.stringMatching(/disagrees on unit undefined → 'errors' — incomparable scale/),
     });
   });
 
@@ -776,7 +813,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3, unit: 'failures' };
     await expect(capture(input)).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/disagrees on unit 'errors' → 'failures' — incomparable scale/),
+      error: match.stringMatching(/disagrees on unit 'errors' → 'failures' — incomparable scale/),
     });
   });
 
@@ -797,7 +834,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3 };
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /disagrees on metric 'other-metric' → 'typecheck-count' — incomparable scale/,
       ),
     });
@@ -821,7 +858,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3 };
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /disagrees on direction 'higher-is-better' → 'lower-is-better' — incomparable scale/,
       ),
     });
@@ -835,7 +872,9 @@ describe('captureBaseline', () => {
       sourceRaw = { count: 3 };
       await expect(capture(captureInput())).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\) — refusing/s),
+        error: match.stringMatching(
+          /does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\) — refusing/s,
+        ),
       });
       await expect(readdir(outside)).resolves.toEqual([]); // nothing written outside
     } finally {
@@ -865,7 +904,7 @@ describe('captureBaseline', () => {
       expect(result.status).toBe('failed');
       await expect(capture(captureInput())).resolves.toEqual({
         status: 'failed',
-        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+        error: match.stringMatching(/does not resolve to a strict descendant of the workspace/),
       });
       expect(await readFile(join(outside, basename(REL)), 'utf8')).toBe(bytes); // untouched
     } finally {
@@ -883,7 +922,9 @@ describe('captureBaseline', () => {
         kept: 0,
         skipped: [],
         unreadable: [],
-        error: expect.stringMatching(/does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\)/),
+        error: match.stringMatching(
+          /does not resolve to a strict descendant of the workspace \('.*cq-outside-[^']*'\)/,
+        ),
       });
       expect(await readFile(join(outside, 'stale.json'), 'utf8')).toBe('precious');
     } finally {
@@ -896,7 +937,7 @@ describe('captureBaseline', () => {
     sourceRaw = { count: 3 };
     await expect(capture(captureInput())).resolves.toEqual({
       status: 'failed',
-      error: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+      error: match.stringMatching(/does not resolve to a strict descendant of the workspace/),
     });
     // The ws root is untouched — no baseline landed at its top level.
     await expect(readdir(ws)).resolves.toEqual(['baselines']);
@@ -909,7 +950,7 @@ describe('captureBaseline', () => {
       kept: 0,
       skipped: [],
       unreadable: [],
-      error: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+      error: match.stringMatching(/does not resolve to a strict descendant of the workspace/),
     });
     // The ws root was never scanned (a *.json there would have been
     // classified for deletion) — nothing changed.
@@ -927,7 +968,9 @@ describe('captureBaseline', () => {
       capture(captureInput({ capturedAt: CAPTURED_AT })),
       capture(captureInput({ capturedAt: CAPTURED_AT })),
     ]);
-    const lifecycles = results.map((r) => (r.status === 'ok' ? r.value.lifecycle : `not-ok:${r.status}`)).sort();
+    const lifecycles = results
+      .map((r) => (r.status === 'ok' ? r.value.lifecycle : `not-ok:${r.status}`))
+      .sort();
     expect(lifecycles).toEqual(['created', 'unchanged']);
     // The persisted evidence parses and matches BOTH reports' value; the
     // 'unchanged' one carried the first's value as `previous`.
@@ -979,7 +1022,9 @@ describe('pruneBaselines', () => {
       skipped: [],
       unreadable: [],
     });
-    await expect(readFile(join(ws, baselineRelPath('old-target', METRIC)), 'utf8')).rejects.toThrow();
+    await expect(
+      readFile(join(ws, baselineRelPath('old-target', METRIC)), 'utf8'),
+    ).rejects.toThrow();
     await expect(readFile(join(ws, REL), 'utf8')).resolves.toBeTruthy();
   });
 
@@ -1099,7 +1144,12 @@ describe('pruneBaselines', () => {
     const locked = join(ws, 'baselines', 'locked.json');
     await writeFile(locked, 'locked content', 'utf8');
     await chmod(locked, 0o000);
-    const outcome = await pruneBaselines({ ws, live: [] }).finally(() => chmod(locked, 0o644));
+    let outcome: Awaited<ReturnType<typeof pruneBaselines>>;
+    try {
+      outcome = await pruneBaselines({ ws, live: [] });
+    } finally {
+      await chmod(locked, 0o644);
+    }
     expect(outcome).toEqual({
       deleted: [],
       kept: 0,
@@ -1117,7 +1167,7 @@ describe('pruneBaselines', () => {
       kept: 0,
       skipped: [],
       unreadable: [],
-      error: expect.stringMatching(/could not scan/),
+      error: match.stringMatching(/could not scan/),
     });
   });
 
@@ -1133,7 +1183,9 @@ describe('pruneBaselines', () => {
       unreadable: [],
     });
     await expect(readFile(join(ws, REL), 'utf8')).rejects.toThrow();
-    await expect(readFile(join(ws, baselineRelPath('typecheck-v2', METRIC)), 'utf8')).resolves.toBeTruthy();
+    await expect(
+      readFile(join(ws, baselineRelPath('typecheck-v2', METRIC)), 'utf8'),
+    ).resolves.toBeTruthy();
   });
 
   test('delete drill: an empty live list removes every classifiable baseline', async () => {

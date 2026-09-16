@@ -203,10 +203,7 @@ describe('classifyPr — one test per I2 row', () => {
   test('row 7: explicit all-clear postdating the last commit → eligible, settle wait bypassed', () => {
     // The window has NOT elapsed (nowMs is 1ms after the commit) — the
     // all-clear alone carries it.
-    const result = classifyPr(
-      settleCandidate({ issueComments: [comment()] }),
-      LAST_COMMIT_MS + 1,
-    );
+    const result = classifyPr(settleCandidate({ issueComments: [comment()] }), LAST_COMMIT_MS + 1);
     expect(result.verdict).toBe('eligible');
     expect(result.reason).toBe('explicit_all_clear');
   });
@@ -258,19 +255,13 @@ describe('classifyPr — precedence (first match wins)', () => {
   });
 
   test('conflicting beats truncated (DIRTY wins over the truncation fail-closed)', () => {
-    const result = classifyPr(
-      candidate({ mergeState: 'DIRTY', truncated: true }),
-      SETTLED_MS,
-    );
+    const result = classifyPr(candidate({ mergeState: 'DIRTY', truncated: true }), SETTLED_MS);
     expect(result.verdict).toBe('conflicting');
     expect(result.reason).toBe('merge_conflicts');
   });
 
   test('truncated beats has-issues (the count still surfaces)', () => {
-    const result = classifyPr(
-      candidate({ truncated: true, threads: [thread()] }),
-      SETTLED_MS,
-    );
+    const result = classifyPr(candidate({ truncated: true, threads: [thread()] }), SETTLED_MS);
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('review_data_truncated');
     expect(result.unresolvedExternalThreads).toBe(1);
@@ -283,10 +274,7 @@ describe('classifyPr — precedence (first match wins)', () => {
   });
 
   test('unknown last commit beats has-issues (row 4 fails closed ahead of row 5)', () => {
-    const result = classifyPr(
-      candidate({ lastCommitAt: null, threads: [thread()] }),
-      SETTLED_MS,
-    );
+    const result = classifyPr(candidate({ lastCommitAt: null, threads: [thread()] }), SETTLED_MS);
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('last_commit_unknown');
   });
@@ -433,10 +421,7 @@ describe('classifyPr — the explicit all-clear is strict', () => {
   test('a CHANGES_REQUESTED review with an "LGTM" body never reaches the all-clear row — the objection row fires first', () => {
     const result = classifyPr(
       settleCandidate({
-        reviews: [
-          approved(),
-          approved({ id: 'PRR_2', state: 'CHANGES_REQUESTED', body: 'LGTM' }),
-        ],
+        reviews: [approved(), approved({ id: 'PRR_2', state: 'CHANGES_REQUESTED', body: 'LGTM' })],
       }),
       PENDING_MS,
     );
@@ -482,10 +467,7 @@ describe('classifyPr — an acceptable review must postdate the last commit (DOC
 
   test('a review with a null or unparseable submittedAt never qualifies (fail toward awaiting)', () => {
     for (const submittedAt of [null, 'not-a-timestamp'] as Array<string | null>) {
-      const result = classifyPr(
-        candidate({ reviews: [approved({ submittedAt })] }),
-        SETTLED_MS,
-      );
+      const result = classifyPr(candidate({ reviews: [approved({ submittedAt })] }), SETTLED_MS);
       expect(result.reason).toBe('no_acceptable_review');
     }
   });

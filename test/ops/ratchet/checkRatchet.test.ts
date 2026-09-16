@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // checkRatchet tests — lane H slice 1 (goal H2), for
 // src/ops/ratchet/checkRatchet.ts.
 //
@@ -67,7 +68,14 @@ const INFINITE_VALUE_METRIC = 'infinite-value';
 // ratchet matrix (tighten/equal/loosen) is exercised end-to-end both ways.
 const DIRECTIONS = [
   { label: 'lower-is-better', metric: METRIC, unit: 'errors', baseline: 3, tighten: 2, loosen: 5 },
-  { label: 'higher-is-better', metric: COVERAGE_METRIC, unit: 'pct', baseline: 50, tighten: 60, loosen: 40 },
+  {
+    label: 'higher-is-better',
+    metric: COVERAGE_METRIC,
+    unit: 'pct',
+    baseline: 50,
+    tighten: 60,
+    loosen: 40,
+  },
 ] as const;
 type Dir = (typeof DIRECTIONS)[number];
 
@@ -160,7 +168,7 @@ beforeAll(() => {
     extract: (raw) => {
       const record = raw as { count?: unknown; unit?: string };
       if (typeof record.count !== 'number') return null;
-      return { value: record.count, unit: record.unit };
+      return { value: record.count, ...(record.unit === undefined ? {} : { unit: record.unit }) };
     },
   });
   registerAdapter({
@@ -221,7 +229,11 @@ interface DirSpec {
   unit?: string;
 }
 
-async function plantBaseline(dir: DirSpec, value: number, overrides: Partial<BaselineFile> = {}): Promise<void> {
+async function plantBaseline(
+  dir: DirSpec,
+  value: number,
+  overrides: Partial<BaselineFile> = {},
+): Promise<void> {
   await mkdir(join(ws, 'baselines'), { recursive: true });
   const bytes = renderBaseline({
     schemaVersion: 1,
@@ -229,7 +241,7 @@ async function plantBaseline(dir: DirSpec, value: number, overrides: Partial<Bas
     metric: dir.metric,
     direction: dir.label,
     value,
-    unit: dir.unit,
+    ...(dir.unit === undefined ? {} : { unit: dir.unit }),
     capturedAt: CAPTURED_AT,
     ...overrides,
   });
@@ -246,36 +258,42 @@ describe('checkRatchet', () => {
     ['target: 42', { target: 42 }],
     ['metric: {}', { metric: {} }],
     ['sourceId: null', { sourceId: null }],
-  ])('a non-string input (%s) fails with arg-error wording before any path work — never a throw', async (_label, overrides) => {
-    await expect(
-      check(checkInput(overrides as Partial<CheckRatchetInput>)),
-    ).resolves.toEqual({
-      status: 'ok',
-      value: {
-        path: '',
-        verdict: 'fail',
-        baselineValue: null,
-        currentValue: null,
-        reason: expect.stringMatching(/invalid input — '(ws|target|metric|sourceId)' must be a string/),
-      },
-    });
-  });
+  ])(
+    'a non-string input (%s) fails with arg-error wording before any path work — never a throw',
+    async (_label, overrides) => {
+      await expect(check(checkInput(overrides as Partial<CheckRatchetInput>))).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: '',
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: match.stringMatching(
+            /invalid input — '(ws|target|metric|sourceId)' must be a string/,
+          ),
+        },
+      });
+    },
+  );
 
   test.each([
     ['null', null],
     ['undefined', undefined],
-  ])('calling the op with %s input fails with arg-error wording — no throw', async (_label, badInput) => {
-    await expect(check(badInput as unknown as CheckRatchetInput)).resolves.toEqual({
-      status: 'ok',
-      value: {
-        path: '',
-        verdict: 'fail',
-        baselineValue: null,
-        currentValue: null,
-        reason: expect.stringMatching(/invalid input — expected a non-null object/),
-      },
-    });
-  });
+  ])(
+    'calling the op with %s input fails with arg-error wording — no throw',
+    async (_label, badInput) => {
+      await expect(check(badInput as unknown as CheckRatchetInput)).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: '',
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: match.stringMatching(/invalid input — expected a non-null object/),
+        },
+      });
+    },
+  );
 
   test('a clean non-finite reading (Infinity) fails as an unusable reading — no throw, no comparison', async () => {
     await expect(
@@ -287,19 +305,29 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/adapter produced an unusable reading \(Infinity\)/),
+        reason: match.stringMatching(/adapter produced an unusable reading \(Infinity\)/),
       },
     });
   });
 
-  test.each(DIRECTIONS)('tighten passes ($label): the value improves on the baseline', async (dir) => {
-    await plantBaseline(dir, dir.baseline);
-    raws[dir.metric] = rawFor(dir, dir.tighten);
-    await expect(check(checkInput({ metric: dir.metric, sourceId: dir.metric }))).resolves.toEqual({
-      status: 'ok',
-      value: { path: relFor(dir), verdict: 'pass', baselineValue: dir.baseline, currentValue: dir.tighten },
-    });
-  });
+  test.each(DIRECTIONS)(
+    'tighten passes ($label): the value improves on the baseline',
+    async (dir) => {
+      await plantBaseline(dir, dir.baseline);
+      raws[dir.metric] = rawFor(dir, dir.tighten);
+      await expect(
+        check(checkInput({ metric: dir.metric, sourceId: dir.metric })),
+      ).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: relFor(dir),
+          verdict: 'pass',
+          baselineValue: dir.baseline,
+          currentValue: dir.tighten,
+        },
+      });
+    },
+  );
 
   test.each(DIRECTIONS)('equal passes ($label): an unchanged metric never blocks', async (dir) => {
     await plantBaseline(dir, dir.baseline);
@@ -309,29 +337,39 @@ describe('checkRatchet', () => {
     // reason would fail the match.
     await expect(check(checkInput({ metric: dir.metric, sourceId: dir.metric }))).resolves.toEqual({
       status: 'ok',
-      value: { path: relFor(dir), verdict: 'pass', baselineValue: dir.baseline, currentValue: dir.baseline },
-    });
-  });
-
-  test.each(DIRECTIONS)('loosen fails ($label) with expected vs actual in the reason', async (dir) => {
-    await plantBaseline(dir, dir.baseline);
-    raws[dir.metric] = rawFor(dir, dir.loosen);
-    await expect(check(checkInput({ metric: dir.metric, sourceId: dir.metric }))).resolves.toEqual({
-      status: 'ok',
       value: {
         path: relFor(dir),
-        verdict: 'fail',
+        verdict: 'pass',
         baselineValue: dir.baseline,
-        currentValue: dir.loosen,
-        reason: expect.stringMatching(
-          new RegExp(
-            `metric '${dir.metric}' loosened: baseline ${dir.baseline} → ` +
-              `current ${dir.loosen} \\(${dir.label}\\) — only tightening passes`,
-          ),
-        ),
+        currentValue: dir.baseline,
       },
     });
   });
+
+  test.each(DIRECTIONS)(
+    'loosen fails ($label) with expected vs actual in the reason',
+    async (dir) => {
+      await plantBaseline(dir, dir.baseline);
+      raws[dir.metric] = rawFor(dir, dir.loosen);
+      await expect(
+        check(checkInput({ metric: dir.metric, sourceId: dir.metric })),
+      ).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: relFor(dir),
+          verdict: 'fail',
+          baselineValue: dir.baseline,
+          currentValue: dir.loosen,
+          reason: match.stringMatching(
+            new RegExp(
+              `metric '${dir.metric}' loosened: baseline ${dir.baseline} → ` +
+                `current ${dir.loosen} \\(${dir.label}\\) — only tightening passes`,
+            ),
+          ),
+        },
+      });
+    },
+  );
 
   test('a missing summary fails with the I5 wording EVEN WHEN a permissive baseline exists', async () => {
     // The baseline (3) would pass a current ≤ 3 — but there is no reading:
@@ -346,7 +384,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'typecheck-count' has no metrics summary \(I5: non-passing evidence, never a pass\)/,
         ),
       },
@@ -364,7 +402,9 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/has no metrics summary \(I5: non-passing evidence, never a pass\)/),
+        reason: match.stringMatching(
+          /has no metrics summary \(I5: non-passing evidence, never a pass\)/,
+        ),
       },
     });
   });
@@ -372,20 +412,25 @@ describe('checkRatchet', () => {
   test.each([
     ['undefined', UNDEFINED_READING_METRIC],
     ['a non-object (42)', NONOBJECT_READING_METRIC],
-  ])('a type-violating adapter returning %s fails as no-summary (no throw, no dereference)', async (_kind, metric) => {
-    await expect(check(checkInput({ metric, sourceId: metric }))).resolves.toEqual({
-      status: 'ok',
-      value: {
-        path: baselineRelPath(TARGET, metric),
-        verdict: 'fail',
-        baselineValue: null,
-        currentValue: null,
-        reason: expect.stringMatching(
-          new RegExp(`metric '${metric}' has no metrics summary \\(I5: non-passing evidence, never a pass\\)`),
-        ),
-      },
-    });
-  });
+  ])(
+    'a type-violating adapter returning %s fails as no-summary (no throw, no dereference)',
+    async (_kind, metric) => {
+      await expect(check(checkInput({ metric, sourceId: metric }))).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: baselineRelPath(TARGET, metric),
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: match.stringMatching(
+            new RegExp(
+              `metric '${metric}' has no metrics summary \\(I5: non-passing evidence, never a pass\\)`,
+            ),
+          ),
+        },
+      });
+    },
+  );
 
   test('a missing baseline file fails as non-passing evidence (no dir, and dir present but empty)', async () => {
     raws[METRIC] = { count: 2 };
@@ -397,7 +442,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           new RegExp(
             `baseline '${REL}' not found — metric 'typecheck-count' baseline not found \\(non-passing evidence\\)`,
           ),
@@ -413,7 +458,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(new RegExp(`baseline '${REL}' not found`)),
+        reason: match.stringMatching(new RegExp(`baseline '${REL}' not found`)),
       },
     });
   });
@@ -429,30 +474,41 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(new RegExp(`baseline '${REL}' is corrupt`)),
+        reason: match.stringMatching(new RegExp(`baseline '${REL}' is corrupt`)),
       },
     });
   });
 
   const IDENTITY_MISMATCHES: Array<[string, Partial<BaselineFile>, RegExp]> = [
     ['target', { target: 'elsewhere' }, /disagrees on target 'elsewhere' → 'typecheck'/],
-    ['metric', { metric: 'other-metric' }, /disagrees on metric 'other-metric' → 'typecheck-count'/],
-    ['direction', { direction: 'higher-is-better' }, /disagrees on direction 'higher-is-better' → 'lower-is-better'/],
+    [
+      'metric',
+      { metric: 'other-metric' },
+      /disagrees on metric 'other-metric' → 'typecheck-count'/,
+    ],
+    [
+      'direction',
+      { direction: 'higher-is-better' },
+      /disagrees on direction 'higher-is-better' → 'lower-is-better'/,
+    ],
   ];
-  test.each(IDENTITY_MISMATCHES)('a planted baseline whose %s disagrees is incomparable evidence — fail naming both sides', async (_field, overrides, pattern) => {
-    raws[METRIC] = { count: 2 };
-    await plantBaseline(DIRECTIONS[0], 3, overrides);
-    await expect(check(checkInput())).resolves.toEqual({
-      status: 'ok',
-      value: {
-        path: REL,
-        verdict: 'fail',
-        baselineValue: null,
-        currentValue: null,
-        reason: expect.stringMatching(pattern),
-      },
-    });
-  });
+  test.each(IDENTITY_MISMATCHES)(
+    'a planted baseline whose %s disagrees is incomparable evidence — fail naming both sides',
+    async (_field, overrides, pattern) => {
+      raws[METRIC] = { count: 2 };
+      await plantBaseline(DIRECTIONS[0], 3, overrides);
+      await expect(check(checkInput())).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: REL,
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: match.stringMatching(pattern),
+        },
+      });
+    },
+  );
 
   test('unknown metric fails with arg-error semantics in the reason (a verdict, not a throw)', async () => {
     await expect(check(checkInput({ metric: 'no-such-metric' }))).resolves.toEqual({
@@ -462,7 +518,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/unknown metric 'no-such-metric' — no registered adapter/),
+        reason: match.stringMatching(/unknown metric 'no-such-metric' — no registered adapter/),
       },
     });
   });
@@ -477,7 +533,9 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/unknown source 'no-such-source' for metric 'typecheck-count'/),
+        reason: match.stringMatching(
+          /unknown source 'no-such-source' for metric 'typecheck-count'/,
+        ),
       },
     });
   });
@@ -486,19 +544,22 @@ describe('checkRatchet', () => {
     ['an Error rejection', 'exploding-source', /source failed.*boom/s],
     ['a null rejection', 'rejecting-null', /source failed.*unknown error/s],
     ['a string rejection', 'rejecting-string', /source failed.*boom-string/s],
-  ])('a throwing source (%s) is contained: fail with the mapped message, no throw crosses the seam', async (_kind, sourceId, pattern) => {
-    await plantBaseline(DIRECTIONS[0], 3);
-    await expect(check(checkInput({ sourceId }))).resolves.toEqual({
-      status: 'ok',
-      value: {
-        path: REL,
-        verdict: 'fail',
-        baselineValue: null,
-        currentValue: null,
-        reason: expect.stringMatching(pattern),
-      },
-    });
-  });
+  ])(
+    'a throwing source (%s) is contained: fail with the mapped message, no throw crosses the seam',
+    async (_kind, sourceId, pattern) => {
+      await plantBaseline(DIRECTIONS[0], 3);
+      await expect(check(checkInput({ sourceId }))).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: REL,
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: match.stringMatching(pattern),
+        },
+      });
+    },
+  );
 
   test('a THROWING direction getter is contained by the snapshot (review-debt #72): fail, never a throw', async () => {
     // `direction` was read AFTER the guarded value/unit snapshot — at the
@@ -506,7 +567,12 @@ describe('checkRatchet', () => {
     // getter escaped the op seam. The snapshot now materializes it inside
     // the same containment.
     await expect(
-      check(checkInput({ metric: THROWING_DIRECTION_GETTER_METRIC, sourceId: THROWING_DIRECTION_GETTER_METRIC })),
+      check(
+        checkInput({
+          metric: THROWING_DIRECTION_GETTER_METRIC,
+          sourceId: THROWING_DIRECTION_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'ok',
       value: {
@@ -514,7 +580,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'throwing-direction-getter' adapter produced an unusable reading.*direction getter exploded/s,
         ),
       },
@@ -523,7 +589,12 @@ describe('checkRatchet', () => {
 
   test('a thrown value whose MESSAGE getter throws is contained (review-debt #72): unknown error, never a second throw', async () => {
     await expect(
-      check(checkInput({ metric: THROWING_MESSAGE_GETTER_METRIC, sourceId: THROWING_MESSAGE_GETTER_METRIC })),
+      check(
+        checkInput({
+          metric: THROWING_MESSAGE_GETTER_METRIC,
+          sourceId: THROWING_MESSAGE_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'ok',
       value: {
@@ -531,7 +602,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'throwing-message-getter' adapter failed.*unknown error/s,
         ),
       },
@@ -548,14 +619,19 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
+        reason: match.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
       },
     });
   });
 
   test('a throwing reading-getter is contained: fail as an unusable reading (no rejection)', async () => {
     await expect(
-      check(checkInput({ metric: THROWING_VALUE_GETTER_METRIC, sourceId: THROWING_VALUE_GETTER_METRIC })),
+      check(
+        checkInput({
+          metric: THROWING_VALUE_GETTER_METRIC,
+          sourceId: THROWING_VALUE_GETTER_METRIC,
+        }),
+      ),
     ).resolves.toEqual({
       status: 'ok',
       value: {
@@ -563,7 +639,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'throwing-value-getter' adapter produced an unusable reading.*value getter exploded/s,
         ),
       },
@@ -600,7 +676,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(/is not a regular file — refusing to read as evidence/),
+          reason: match.stringMatching(/is not a regular file — refusing to read as evidence/),
         },
       });
       // The link was never followed — the outside bytes are untouched.
@@ -622,7 +698,7 @@ describe('checkRatchet', () => {
         currentValue: null,
         // The non-ENOENT refusal — negative lookahead pins that it is NOT
         // the missing-baseline 'not found' wording.
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /^(?!.*not found).*is not a regular file — refusing to read as evidence/,
         ),
       },
@@ -648,22 +724,32 @@ describe('checkRatchet', () => {
       raw: { count: 2, unit: 'errors' },
       pattern: /disagrees on unit undefined → 'errors' — incomparable scale/,
     },
-  ])('a unit disagreement fails as incomparable scale ($label)', async ({ plantUnit, raw, pattern }) => {
-    raws[UNIT_SHIFTING_METRIC] = raw;
-    await plantBaseline({ label: 'lower-is-better', metric: UNIT_SHIFTING_METRIC, unit: plantUnit }, 3);
-    await expect(
-      check(checkInput({ metric: UNIT_SHIFTING_METRIC, sourceId: UNIT_SHIFTING_METRIC })),
-    ).resolves.toEqual({
-      status: 'ok',
-      value: {
-        path: baselineRelPath(TARGET, UNIT_SHIFTING_METRIC),
-        verdict: 'fail',
-        baselineValue: null,
-        currentValue: null,
-        reason: expect.stringMatching(pattern),
-      },
-    });
-  });
+  ])(
+    'a unit disagreement fails as incomparable scale ($label)',
+    async ({ plantUnit, raw, pattern }) => {
+      raws[UNIT_SHIFTING_METRIC] = raw;
+      await plantBaseline(
+        {
+          label: 'lower-is-better',
+          metric: UNIT_SHIFTING_METRIC,
+          ...(plantUnit === undefined ? {} : { unit: plantUnit }),
+        },
+        3,
+      );
+      await expect(
+        check(checkInput({ metric: UNIT_SHIFTING_METRIC, sourceId: UNIT_SHIFTING_METRIC })),
+      ).resolves.toEqual({
+        status: 'ok',
+        value: {
+          path: baselineRelPath(TARGET, UNIT_SHIFTING_METRIC),
+          verdict: 'fail',
+          baselineValue: null,
+          currentValue: null,
+          reason: match.stringMatching(pattern),
+        },
+      });
+    },
+  );
 
   test('same-unit checks pass untouched — including unit-undefined ≡ unit-undefined', async () => {
     raws[UNIT_SHIFTING_METRIC] = { count: 2 };
@@ -693,7 +779,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+          reason: match.stringMatching(/does not resolve to a strict descendant of the workspace/),
         },
       });
       // Nothing outside was read as evidence and nothing was written there.

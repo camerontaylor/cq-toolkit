@@ -153,7 +153,9 @@ describe('fingerprintFailure divergence (what counts as a different failure)', (
   });
 
   test('message-independence for POSITIONED failures: different messages, same fingerprint (the drift-survival contract)', () => {
-    expect(fingerprintFailure(failureOf({ message: "'x' is assigned a value but never used." }))).toBe(
+    expect(
+      fingerprintFailure(failureOf({ message: "'x' is assigned a value but never used." })),
+    ).toBe(
       fingerprintFailure(failureOf({ message: "'x' is read here but the rule text changed." })),
     );
   });
@@ -172,27 +174,37 @@ describe('fingerprintFailure location-less content matching (line null keys by m
     const existing = fingerprintFailure(
       failureOf({ ...locationLess, message: 'suite > handles iso dates' }),
     );
-    expect(fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles leap years' }))).not.toBe(
-      existing,
-    );
+    expect(
+      fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles leap years' })),
+    ).not.toBe(existing);
   });
 
   test('the same message keys identically: whitespace runs collapse and trailing lines are ignored', () => {
-    const canonical = fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles iso dates' }));
+    const canonical = fingerprintFailure(
+      failureOf({ ...locationLess, message: 'suite > handles iso dates' }),
+    );
     expect(
-      fingerprintFailure(failureOf({ ...locationLess, message: 'suite >  handles\tiso  dates\nextra line' })),
+      fingerprintFailure(
+        failureOf({ ...locationLess, message: 'suite >  handles\tiso  dates\nextra line' }),
+      ),
     ).toBe(canonical);
   });
 
   test('long messages keep full-length distinctness: NO prefix-collision cap', () => {
     const sharesPrefix = `suite > ${'a'.repeat(200)}`;
     const first = fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}one` }));
-    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}two` }))).not.toBe(first);
-    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}one` }))).toBe(first);
+    expect(
+      fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}two` })),
+    ).not.toBe(first);
+    expect(fingerprintFailure(failureOf({ ...locationLess, message: `${sharesPrefix}one` }))).toBe(
+      first,
+    );
   });
 
   test('case is preserved: distinct test names that differ only in case stay distinct', () => {
-    expect(fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles Edge Case' }))).not.toBe(
+    expect(
+      fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles Edge Case' })),
+    ).not.toBe(
       fingerprintFailure(failureOf({ ...locationLess, message: 'suite > handles edge case' })),
     );
   });
@@ -221,9 +233,11 @@ describe('canonical keys vs compact hash (exact matching)', () => {
     const key = fingerprintKey(failure);
     expect(fingerprintFailure(failure)).not.toBe(key);
     expect(fingerprintFailure(failure)).toMatch(/^[0-9a-f]{8}$/);
-    expect(fingerprintSet({ tool: 'vitest', failures: [failure], exitCode: 1 }).has(fingerprintKey(failure, { tool: 'vitest' }))).toBe(
-      true,
-    );
+    expect(
+      fingerprintSet({ tool: 'vitest', failures: [failure], exitCode: 1 }).has(
+        fingerprintKey(failure, { tool: 'vitest' }),
+      ),
+    ).toBe(true);
   });
 });
 

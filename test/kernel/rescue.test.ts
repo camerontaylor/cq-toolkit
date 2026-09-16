@@ -30,10 +30,7 @@ import {
   decideRescue,
   rescueInputFromJournal,
 } from '../../src/kernel/rescue.js';
-import type {
-  JournalEvent,
-  OpResult,
-} from '../../src/kernel/types.js';
+import type { JournalEvent, OpResult } from '../../src/kernel/types.js';
 import type {
   RescueAttempt,
   RescueGuard,
@@ -50,13 +47,20 @@ const RETRY_EVERYTHING: RescuePolicy = {
   rows: [{ id: 'retry-all', on: 'any', action: { kind: 'retry', maxAttempts: 99 } }],
 };
 
-const attempt = (n: number, outcome: RescueAttempt['outcome'], extra?: Partial<RescueAttempt>): RescueAttempt => ({
+const attempt = (
+  n: number,
+  outcome: RescueAttempt['outcome'],
+  extra?: Partial<RescueAttempt>,
+): RescueAttempt => ({
   attempt: n,
   outcome: outcome,
   ...extra,
 });
 
-const input = (attempts: RescueAttempt[], extra?: { guards?: RescueGuard[] | undefined }): {
+const input = (
+  attempts: RescueAttempt[],
+  extra?: { guards?: RescueGuard[] | undefined },
+): {
   jobId: string;
   op: string;
   attempts: RescueAttempt[];
@@ -95,7 +99,10 @@ const finished = (runId: string, jobId: string, result: OpResult<unknown>): Jour
 
 describe('guards trip → rescue NEVER retries (ws-a item 5)', () => {
   test('baseline-failed guard terminates against a retry-everything table, guard named', () => {
-    const decision = decideRescue(input([attempt(1, 'indeterminate')], { guards: ['baseline-failed'] }), RETRY_EVERYTHING);
+    const decision = decideRescue(
+      input([attempt(1, 'indeterminate')], { guards: ['baseline-failed'] }),
+      RETRY_EVERYTHING,
+    );
     expect(decision).toEqual({
       kind: 'terminate',
       reason: 'guard-baseline-failed',
@@ -104,7 +111,10 @@ describe('guards trip → rescue NEVER retries (ws-a item 5)', () => {
   });
 
   test('human-intervened guard terminates likewise', () => {
-    const decision = decideRescue(input([attempt(3, 'indeterminate')], { guards: ['human-intervened'] }), RETRY_EVERYTHING);
+    const decision = decideRescue(
+      input([attempt(3, 'indeterminate')], { guards: ['human-intervened'] }),
+      RETRY_EVERYTHING,
+    );
     expect(decision).toEqual({
       kind: 'terminate',
       reason: 'guard-human-intervened',
@@ -142,7 +152,9 @@ describe('bounded re-dispatch (ws-a item 5)', () => {
   });
 
   test('at cap → terminate attempt-cap, naming the row', () => {
-    expect(decideRescue(input([attempt(1, 'failed'), attempt(2, 'failed')]), { rows: [ROW] })).toEqual({
+    expect(
+      decideRescue(input([attempt(1, 'failed'), attempt(2, 'failed')]), { rows: [ROW] }),
+    ).toEqual({
       kind: 'terminate',
       reason: 'attempt-cap',
       rowId: 'retry-2',
@@ -162,7 +174,11 @@ describe('bounded re-dispatch (ws-a item 5)', () => {
     });
     // limits cap 3 > row 2: the row stays the binder.
     expect(
-      decideRescue(input([attempt(1, 'failed'), attempt(2, 'failed')]), { rows: [ROW] }, { maxAttemptsPerJob: 3 }),
+      decideRescue(
+        input([attempt(1, 'failed'), attempt(2, 'failed')]),
+        { rows: [ROW] },
+        { maxAttemptsPerJob: 3 },
+      ),
     ).toEqual({
       kind: 'terminate',
       reason: 'attempt-cap',
@@ -214,11 +230,14 @@ describe('caps.maxAttemptsPerJob validation (review round 3)', () => {
     rows: [{ id: 'capped', on: 'failed', action: { kind: 'retry', maxAttempts } }],
   });
 
-  test.each([Number.NaN, 1.5, 0, -2])('caps.maxAttemptsPerJob %p throws naming the field', (bad) => {
-    expect(() =>
-      decideRescue(input([attempt(1, 'failed')]), row(9), { maxAttemptsPerJob: bad }),
-    ).toThrowError(/caps\.maxAttemptsPerJob must be an integer >= 1/);
-  });
+  test.each([Number.NaN, 1.5, 0, -2])(
+    'caps.maxAttemptsPerJob %p throws naming the field',
+    (bad) => {
+      expect(() =>
+        decideRescue(input([attempt(1, 'failed')]), row(9), { maxAttemptsPerJob: bad }),
+      ).toThrowError(/caps\.maxAttemptsPerJob must be an integer >= 1/);
+    },
+  );
 
   test('the rejection names the bad value', () => {
     expect(() =>
@@ -325,7 +344,10 @@ describe('CONSERVATIVE_RESCUE_POLICY and row matching (ws-a item 5)', () => {
         { id: 'second', on: 'failed', action: { kind: 'skip' } },
       ],
     };
-    expect(decideRescue(input([attempt(1, 'failed')]), policy)).toMatchObject({ kind: 'retry', rowId: 'first' });
+    expect(decideRescue(input([attempt(1, 'failed')]), policy)).toMatchObject({
+      kind: 'retry',
+      rowId: 'first',
+    });
   });
 
   test("op-scoped rows only match their op; on:'any' is the fallback (killed included)", () => {
@@ -387,7 +409,9 @@ describe('attemptsFromJournal — the frozen attempt field fold (ws-a item 2/5)'
       { attempt: 1, outcome: 'failed', detail: 'attested worse' },
     ]);
     // A finish with no start and NO history is not attributable — ignored.
-    expect(attemptsFromJournal([finished('r9', 'lone', { status: 'ok', value: 1 })], 'lone')).toEqual([]);
+    expect(
+      attemptsFromJournal([finished('r9', 'lone', { status: 'ok', value: 1 })], 'lone'),
+    ).toEqual([]);
   });
 
   test('rescueInputFromJournal assembles the decision input; the fold feeds decideRescue', () => {
@@ -408,7 +432,11 @@ describe('attemptsFromJournal — the frozen attempt field fold (ws-a item 2/5)'
         { attempt: 2, outcome: 'killed' },
       ],
     });
-    expect(decideRescue(assembled, policy)).toEqual({ kind: 'retry', attempt: 3, rowId: 'kill-retry' });
+    expect(decideRescue(assembled, policy)).toEqual({
+      kind: 'retry',
+      attempt: 3,
+      rowId: 'kill-retry',
+    });
     // ...and no third dispatch once the effective cap is 2.
     expect(decideRescue(assembled, policy, { maxAttemptsPerJob: 2 })).toEqual({
       kind: 'terminate',
@@ -437,7 +465,12 @@ describe('the policy table is plain serializable data (ws-a item 5)', () => {
             carrySessionRef: true,
           },
         },
-        { id: 'retry-plain', on: 'indeterminate', op: 'gen', action: { kind: 'retry', maxAttempts: 2 } },
+        {
+          id: 'retry-plain',
+          on: 'indeterminate',
+          op: 'gen',
+          action: { kind: 'retry', maxAttempts: 2 },
+        },
         { id: 'skip-killed', on: 'killed', action: { kind: 'skip' } },
         { id: 'fallback', on: 'any', action: { kind: 'skip' } },
       ],

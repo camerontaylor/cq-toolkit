@@ -36,7 +36,7 @@ const CheckRunnerInputObject = z
       .object({
         command: z.string(),
         args: z.array(z.string()),
-        cwd: z.string().optional(),
+        cwd: z.string().exactOptional(),
         timeoutMs: z.number().int().positive().default(600_000),
       })
       .strict(),
@@ -63,23 +63,23 @@ export const BaselineProbeInputSchema: z.ZodType<BaselineProbeInput> = z
       .object({
         // min(1): an empty pattern makes includes('') vacuously true —
         // a permanent bail on every attempt.
-        bailPatterns: z.array(z.string().min(1)).optional(),
+        bailPatterns: z.array(z.string().min(1)).exactOptional(),
         // Bounded at the JSON boundary: retries multiply wall clock.
-        maxBailRetries: z.number().int().min(0).max(10).optional(),
+        maxBailRetries: z.number().int().min(0).max(10).exactOptional(),
       })
       .strict()
-      .optional(),
+      .exactOptional(),
   })
   .strict();
 
 /** Registry-time mirror of {@link FingerprintConfig}: the full object, and only it. */
 export const FingerprintConfigSchema: z.ZodType<FingerprintConfig> = z
   .object({
-    lineBucketSize: z.number().int().positive().optional(),
-    columnBucketSize: z.number().int().positive().optional(),
-    offsetBucketSize: z.number().int().positive().optional(),
-    rootDir: z.string().optional(),
-    tool: z.string().optional(),
+    lineBucketSize: z.number().int().positive().exactOptional(),
+    columnBucketSize: z.number().int().positive().exactOptional(),
+    offsetBucketSize: z.number().int().positive().exactOptional(),
+    rootDir: z.string().exactOptional(),
+    tool: z.string().exactOptional(),
   })
   .strict();
 
@@ -114,7 +114,7 @@ export const RegressionGateInputSchema: z.ZodType<RegressionGateInput> = z
   .object({
     base: FailureSetSchema,
     final: FailureSetSchema,
-    config: FingerprintConfigSchema.optional(),
+    config: FingerprintConfigSchema.exactOptional(),
   })
   .strict();
 
@@ -133,22 +133,22 @@ export const HackDetectorInputSchema: z.ZodType<HackDetectorInput> = z
           .object({
             name: z.string().min(1),
             pattern: z.string().min(1),
-            flags: z.string().optional(),
-            requiresReason: z.boolean().optional(),
+            flags: z.string().exactOptional(),
+            requiresReason: z.boolean().exactOptional(),
           })
           .strict(),
       )
-      .optional(),
+      .exactOptional(),
     tamper: z
       .object({
-        testFilePatterns: z.array(z.string().min(1)).optional(),
-        detectDeletedTests: z.boolean().optional(),
-        detectNewSkipOnly: z.boolean().optional(),
-        skipOnlyPattern: z.string().min(1).optional(),
-        detectTautologies: z.boolean().optional(),
+        testFilePatterns: z.array(z.string().min(1)).exactOptional(),
+        detectDeletedTests: z.boolean().exactOptional(),
+        detectNewSkipOnly: z.boolean().exactOptional(),
+        skipOnlyPattern: z.string().min(1).exactOptional(),
+        detectTautologies: z.boolean().exactOptional(),
       })
       .strict()
-      .optional(),
+      .exactOptional(),
   })
   .strict();
 
@@ -165,31 +165,31 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
     message: z.string(),
     config: z
       .object({
-        subjectPattern: z.string().min(1).optional(),
-        requireSubject: z.boolean().optional(),
+        subjectPattern: z.string().min(1).exactOptional(),
+        requireSubject: z.boolean().exactOptional(),
         trailers: z
           .array(
             z
               .object({
                 name: z.string().min(1),
-                required: z.boolean().optional(),
-                oneOf: z.array(z.string().min(1)).optional(),
-                pattern: z.string().min(1).optional(),
+                required: z.boolean().exactOptional(),
+                oneOf: z.array(z.string().min(1)).exactOptional(),
+                pattern: z.string().min(1).exactOptional(),
               })
               .strict(),
           )
-          .optional(),
-        outcomeTrailer: z.string().min(1).optional(),
+          .exactOptional(),
+        outcomeTrailer: z.string().min(1).exactOptional(),
         implications: z
           .array(
             z
               .object({ outcomeValue: z.string().min(1), subjectPattern: z.string().min(1) })
               .strict(),
           )
-          .optional(),
+          .exactOptional(),
       })
       .strict()
-      .optional(),
+      .exactOptional(),
   })
   .strict();
 

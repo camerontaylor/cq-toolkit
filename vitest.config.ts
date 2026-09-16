@@ -16,6 +16,9 @@ import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    // Process-backed suites have real startup and termination deadlines.
+    // Run files serially so competing fixtures do not consume those budgets.
+    fileParallelism: false,
     exclude: [...configDefaults.exclude, '**/dist/**'],
     coverage: {
       provider: 'v8',

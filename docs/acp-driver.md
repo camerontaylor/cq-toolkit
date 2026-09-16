@@ -21,15 +21,15 @@ model. One spawn per run, no daemon, no pooling, no retries.
 
 Endpoints live in a plain-data registry (`src/driver/acp/binaries.ts`):
 
-| endpoint            | default argv         | install                              |
-| ------------------- | -------------------- | ------------------------------------ |
-| `zcode-acp-server`  | `zcode-acp-server`   | `npm install -g zcode-acp-server`    |
-| `dsh-acp`           | `dsh-acp`            | `npm install -g @openma/deepseek-harness-acp` |
+| endpoint           | default argv       | install                                       |
+| ------------------ | ------------------ | --------------------------------------------- |
+| `zcode-acp-server` | `zcode-acp-server` | `npm install -g zcode-acp-server`             |
+| `dsh-acp`          | `dsh-acp`          | `npm install -g @openma/deepseek-harness-acp` |
 
 Resolution order (strategy §3):
 
 1. **Explicit constructor argv first** — `new AcpDriver({ command:
-   ['zcode-acp-server', '--some-flag'] })`. The WHOLE argv is config,
+['zcode-acp-server', '--some-flag'] })`. The WHOLE argv is config,
    because harness launch shapes differ (a package-runner prefix, flags).
 2. **PATH fallback** — a bare binary name is resolved like `which`
    (every `PATH` entry probed for an executable); an absolute or
@@ -149,7 +149,7 @@ message (review-debt #45).
   field, and the conformance suite fails that lane — by design.
 - Usage folds ONLY from `PromptResponse.usage` (`usage_update` frames are
   context telemetry, dropped): `outputTokens → output`, `cachedReadTokens
-  → cacheRead`, `cachedWriteTokens → cacheWrite`, and DERIVED input —
+→ cacheRead`, `cachedWriteTokens → cacheWrite`, and DERIVED input —
   `input = inputTokens − cachedReadTokens − cachedWriteTokens`, floored
   at 0. The wire's `inputTokens` is INCLUSIVE of the cached tokens (the
   live sample: totalTokens 15722 = 4071 + 3 + 11648 + 0 — the derived

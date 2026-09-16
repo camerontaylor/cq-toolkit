@@ -101,7 +101,11 @@ const hasFlag = (flag) => args.includes(flag);
 /** The -f/-F flags as { name, value }, in order (values keep their `=`-joined text). */
 const flags = [];
 for (let i = 0; i < args.length - 1; i++) {
-  if ((args[i] === '-f' || args[i] === '-F') && typeof args[i + 1] === 'string' && args[i + 1].includes('=')) {
+  if (
+    (args[i] === '-f' || args[i] === '-F') &&
+    typeof args[i + 1] === 'string' &&
+    args[i + 1].includes('=')
+  ) {
     const eq = args[i + 1].indexOf('=');
     flags.push({ name: args[i + 1].slice(0, eq), value: args[i + 1].slice(eq + 1) });
   }
@@ -109,7 +113,10 @@ for (let i = 0; i < args.length - 1; i++) {
 
 /** Route matcher: every present `when` key constrains; absent keys are wildcards. */
 const matches = (when) => {
-  if (when.containsAll !== undefined && !when.containsAll.every((needle) => flat.includes(needle))) {
+  if (
+    when.containsAll !== undefined &&
+    !when.containsAll.every((needle) => flat.includes(needle))
+  ) {
     return false;
   }
   if (when.containsAny !== undefined && !when.containsAny.some((needle) => flat.includes(needle))) {
@@ -180,7 +187,9 @@ const emit = (text) => {
 if (route.pages !== undefined) {
   const paginate = hasFlag('--paginate');
   const slurp = hasFlag('--slurp');
-  emit(JSON.stringify(!paginate ? (route.pages[0] ?? []) : slurp ? route.pages : route.pages.flat()));
+  emit(
+    JSON.stringify(!paginate ? (route.pages[0] ?? []) : slurp ? route.pages : route.pages.flat()),
+  );
 }
 if (route.file !== undefined) {
   emit(readFileSync(resolve(dirname(scenarioPath), route.file), 'utf8'));

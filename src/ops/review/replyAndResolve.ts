@@ -402,7 +402,9 @@ export async function replyAndResolve(
     );
   }
   if (!Number.isSafeInteger(opts.pr) || opts.pr <= 0) {
-    throw new Error(`replyAndResolve: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`);
+    throw new Error(
+      `replyAndResolve: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`,
+    );
   }
   for (const action of actions) {
     if (action.actionId === '') {
@@ -410,7 +412,10 @@ export async function replyAndResolve(
         `replyAndResolve: action.actionId must be a non-empty string (the dedupe key across runs) — got ${JSON.stringify(action.actionId)}`,
       );
     }
-    if (action.kind === 'review_reply' && (!Number.isSafeInteger(action.threadRootRestId) || action.threadRootRestId <= 0)) {
+    if (
+      action.kind === 'review_reply' &&
+      (!Number.isSafeInteger(action.threadRootRestId) || action.threadRootRestId <= 0)
+    ) {
       throw new Error(
         `replyAndResolve: action ${JSON.stringify(action.actionId)} has threadRootRestId ${JSON.stringify(action.threadRootRestId)} — must be a positive safe integer`,
       );
@@ -420,7 +425,10 @@ export async function replyAndResolve(
         `replyAndResolve: action ${JSON.stringify(action.actionId)} has an empty or whitespace-only threadId — must be the GraphQL reviewThread node id`,
       );
     }
-    if ((action.kind === 'review_reply' || action.kind === 'issue_comment') && action.body.trim() === '') {
+    if (
+      (action.kind === 'review_reply' || action.kind === 'issue_comment') &&
+      action.body.trim() === ''
+    ) {
       throw new Error(
         `replyAndResolve: action ${JSON.stringify(action.actionId)} has an empty/whitespace body — a contentless post would surface as a phantom "addressed" reply`,
       );
@@ -476,7 +484,9 @@ export async function replyAndResolve(
   // (c) REPLY-BEFORE-RESOLVE: the input order is preserved within each
   // phase; every post precedes every resolve.
   const posts = actions.filter((action) => action.kind !== 'resolve_thread');
-  const resolves = actions.filter((action): action is ResolveThreadAction => action.kind === 'resolve_thread');
+  const resolves = actions.filter(
+    (action): action is ResolveThreadAction => action.kind === 'resolve_thread',
+  );
 
   /** Run one gh argv; a seam rejection (non-conforming runner) becomes a
    * GhResult-shaped failure — exit 1, the error as stderr — so the dispatch
@@ -577,7 +587,8 @@ export async function replyAndResolve(
     if (replyFailed) {
       failed.push({
         action,
-        error: 'withheld: a review_reply in this batch failed — resolving would hide the unanswered thread',
+        error:
+          'withheld: a review_reply in this batch failed — resolving would hide the unanswered thread',
       });
       withheld += 1;
       continue;
@@ -588,7 +599,14 @@ export async function replyAndResolve(
         skippedAlreadyDispatched += 1;
         return;
       }
-      const args = ['api', 'graphql', '-f', `query=${RESOLVE_MUTATION}`, '-f', `threadId=${action.threadId}`];
+      const args = [
+        'api',
+        'graphql',
+        '-f',
+        `query=${RESOLVE_MUTATION}`,
+        '-f',
+        `threadId=${action.threadId}`,
+      ];
       const result = await runGh(args);
       if (result.code !== 0) {
         failed.push({
@@ -635,7 +653,10 @@ export async function replyAndResolve(
           skippedAlreadyResolved += 1;
           return;
         }
-        failed.push({ action, error: `gh api graphql returned GraphQL errors: ${messages.join('; ')}` });
+        failed.push({
+          action,
+          error: `gh api graphql returned GraphQL errors: ${messages.join('; ')}`,
+        });
         return;
       }
       // Exit 0 + no errors is still not PROOF: the mutation's EFFECT must be
@@ -662,5 +683,12 @@ export async function replyAndResolve(
     });
   }
 
-  return { pushed: true, posted, failed, skippedAlreadyDispatched, skippedAlreadyResolved, withheld };
+  return {
+    pushed: true,
+    posted,
+    failed,
+    skippedAlreadyDispatched,
+    skippedAlreadyResolved,
+    withheld,
+  };
 }

@@ -217,9 +217,7 @@ export class AiSdkDriver implements Driver {
     // shared `defaultHarnessConfig` can be reached — or mutated — through
     // the driver (a shared mutable default would leak one caller's change
     // into every later run).
-    this.harnessConfig = deepFreeze(
-      structuredClone(options.harnessConfig ?? defaultHarnessConfig),
-    );
+    this.harnessConfig = deepFreeze(structuredClone(options.harnessConfig ?? defaultHarnessConfig));
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
   }
@@ -337,7 +335,7 @@ export class AiSdkDriver implements Driver {
       }
 
       // Assistant turn persisted in OUR vocabulary before the verdict.
-      const text = await result.text;
+      const text = result.text;
       await store.appendMessage(record.sessionId, {
         role: 'assistant',
         content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
@@ -468,19 +466,26 @@ function defaultProviders(): Record<string, ProviderFactory> {
   const requireKey = (provider: string, envName: string): string => {
     const value = process.env[envName];
     if (value === undefined || value === '') {
-      throw new Error(`ai-sdk driver: provider '${provider}' requires ${envName} in the environment`);
+      throw new Error(
+        `ai-sdk driver: provider '${provider}' requires ${envName} in the environment`,
+      );
     }
     return value;
   };
   return {
-    anthropic: (modelId) => createAnthropic({ apiKey: requireKey('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(modelId),
-    openai: (modelId) => createOpenAI({ apiKey: requireKey('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
+    anthropic: (modelId) =>
+      createAnthropic({ apiKey: requireKey('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(
+        modelId,
+      ),
+    openai: (modelId) =>
+      createOpenAI({ apiKey: requireKey('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
     zai: (modelId) =>
       createZai({
         apiKey: requireKey('zai', 'ZAI_API_KEY'),
         baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
       }).languageModel(modelId),
-    deepseek: (modelId) => createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
+    deepseek: (modelId) =>
+      createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
   };
 }
 
@@ -488,7 +493,9 @@ function defaultProviders(): Record<string, ProviderFactory> {
 async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
   const record = await store.load(sessionRef);
   if (record === undefined) {
-    throw new Error(`ai-sdk driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`);
+    throw new Error(
+      `ai-sdk driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
+    );
   }
   return record;
 }
@@ -541,7 +548,10 @@ function transcriptMessages(messages: readonly SessionMessage[]): ModelMessage[]
     } else if (message.role === 'user') {
       out.push({ role: 'user', content: message.content });
     } else {
-      out.push({ role: 'user', content: `[tool ${message.toolName ?? 'unknown'}] ${message.content}` });
+      out.push({
+        role: 'user',
+        content: `[tool ${message.toolName ?? 'unknown'}] ${message.content}`,
+      });
     }
   }
   return out;
@@ -592,7 +602,7 @@ function addUsage(a: Usage, b: Usage): Usage {
     output: a.output + b.output,
     cacheRead: a.cacheRead + b.cacheRead,
     cacheWrite: a.cacheWrite + b.cacheWrite,
-    ...((a.reasoning !== undefined || b.reasoning !== undefined)
+    ...(a.reasoning !== undefined || b.reasoning !== undefined
       ? { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }
       : {}),
   };

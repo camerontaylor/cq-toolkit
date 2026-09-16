@@ -119,11 +119,20 @@ describe('parseBaseline rejections', () => {
     ['wrong schemaVersion', JSON.stringify({ ...RAW_BASE, schemaVersion: 2 })],
     ['missing required value', JSON.stringify({ ...RAW_BASE, value: undefined })],
     ['non-numeric value', JSON.stringify({ ...RAW_BASE, value: 'three' })],
-    ['a non-finite value (JSON 1e999 parses to Infinity)', JSON.stringify(RAW_BASE).replace('"value":3', '"value":1e999')],
+    [
+      'a non-finite value (JSON 1e999 parses to Infinity)',
+      JSON.stringify(RAW_BASE).replace('"value":3', '"value":1e999'),
+    ],
     ['unknown direction', JSON.stringify({ ...RAW_BASE, direction: 'sideways' })],
     ['an unparseable capturedAt', JSON.stringify({ ...RAW_BASE, capturedAt: 'not a timestamp' })],
-    ['a non-ISO date-string capturedAt', JSON.stringify({ ...RAW_BASE, capturedAt: 'September 15, 2026' })],
-    ['a calendar-rollover capturedAt (Feb 30)', JSON.stringify({ ...RAW_BASE, capturedAt: '2026-02-30T00:00:00Z' })],
+    [
+      'a non-ISO date-string capturedAt',
+      JSON.stringify({ ...RAW_BASE, capturedAt: 'September 15, 2026' }),
+    ],
+    [
+      'a calendar-rollover capturedAt (Feb 30)',
+      JSON.stringify({ ...RAW_BASE, capturedAt: '2026-02-30T00:00:00Z' }),
+    ],
     ['an extra key (strict schema)', JSON.stringify({ ...RAW_BASE, extra: true })],
   ])('%s throws a clear Error', (_label, text) => {
     expect(() => parseBaseline(text)).toThrow(/^baseline: /);

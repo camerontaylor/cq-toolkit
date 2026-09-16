@@ -199,7 +199,10 @@ const fetchRestComments = async (
   path: string,
 ): Promise<Array<{ id: number; author: string | null }>> => {
   const payload = await ghJson<unknown>(run, ['api', path, '--paginate', '--slurp']);
-  return commentEntries(slurpedComments<{ id?: unknown; user?: unknown }>(payload, path).flat(), path);
+  return commentEntries(
+    slurpedComments<{ id?: unknown; user?: unknown }>(payload, path).flat(),
+    path,
+  );
 };
 
 /**
@@ -216,7 +219,9 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     );
   }
   if (!Number.isSafeInteger(opts.pr) || opts.pr <= 0) {
-    throw new Error(`snapshotPrState: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`);
+    throw new Error(
+      `snapshotPrState: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`,
+    );
   }
 
   // Head sha: the plain PR REST object. STRICT — a payload without a
@@ -274,13 +279,18 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
     // Runtime shape guards: a non-array errors or nodes payload is not a
     // GraphQL document this module can trust (the types promise arrays;
     // the wire does not have to).
-    if (payload.errors === null || (payload.errors !== undefined && !Array.isArray(payload.errors))) {
+    if (
+      payload.errors === null ||
+      (payload.errors !== undefined && !Array.isArray(payload.errors))
+    ) {
       throw new Error(
         `gh api graphql returned a non-array errors payload for ${opts.owner}/${opts.repo}#${opts.pr} — snapshot untrustworthy`,
       );
     }
     if (payload.errors !== undefined && payload.errors.length > 0) {
-      const messages = payload.errors.map((error) => error.message ?? JSON.stringify(error)).join('; ');
+      const messages = payload.errors
+        .map((error) => error.message ?? JSON.stringify(error))
+        .join('; ');
       throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
     }
     const threads = payload.data?.repository?.pullRequest?.reviewThreads;
@@ -337,10 +347,10 @@ export async function snapshotPrState(opts: SnapshotPrStateOpts): Promise<PrSnap
  * Progress needs ANY ONE signal; no signal → progress=false and the exact
  * literal summary "NO PROGRESS" (the anti-hallucination contract: an
  * explicit, greppable refusal — never a guessed "done"). The reply signal
- * is AUTHOR-BLIND id-novelty (any new comment is evidence the PR moved;
- * see module doc); responderLogin, when known, is recorded in the detail
- * but never filters. Same inputs → deep-equal output; inputs are read,
- * never mutated.
+ * counts new comments by the responder when responderLogin is known;
+ * comments with unknown authors do not qualify. With no known responder,
+ * id-novelty is author-blind. Same inputs → deep-equal output; inputs are
+ * read, never mutated.
  */
 export function verifyPrOutcome(
   before: PrSnapshot,
@@ -387,7 +397,9 @@ export function verifyPrOutcome(
   }
 
   // thread-resolved: a thread id newly in the resolved set.
-  const newResolvedIds = after.resolvedThreadIds.filter((id) => !before.resolvedThreadIds.includes(id));
+  const newResolvedIds = after.resolvedThreadIds.filter(
+    (id) => !before.resolvedThreadIds.includes(id),
+  );
   if (newResolvedIds.length > 0) {
     reasons.push({
       kind: 'thread-resolved',
@@ -399,6 +411,8 @@ export function verifyPrOutcome(
   return {
     progress,
     reasons,
-    summary: progress ? `PROGRESS: ${reasons.map((reason) => reason.kind).join(', ')}` : 'NO PROGRESS',
+    summary: progress
+      ? `PROGRESS: ${reasons.map((reason) => reason.kind).join(', ')}`
+      : 'NO PROGRESS',
   };
 }

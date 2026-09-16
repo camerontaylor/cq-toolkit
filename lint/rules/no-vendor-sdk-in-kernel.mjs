@@ -1,6 +1,6 @@
 // no-vendor-sdk-in-kernel — boundary rule backing invariant I10: the kernel
 // stays vendor-neutral. The rule CORE reports every vendor-SDK-shaped module
-// source it sees; the scoping lives in eslint.config.js (the rule is
+// source it sees; the scoping lives in .oxlintrc.json (the rule is
 // registered under the "cq" plugin and applied to src/kernel/** and to the
 // driver seam types, src/driver/types.ts).
 // Stub in T0.2; becomes load-bearing in phase 1.
@@ -11,7 +11,8 @@
 // drivers (@openai/, @mistralai/, @google/). Scoped families ban by
 // PREFIX so every package under the scope is covered (@openai/codex-sdk
 // and friends), matching how the driver lane adopts them.
-const VENDOR_SDK_SOURCE = /^(?:@anthropic-ai\/|@ai-sdk\/|@openai\/|@mistralai\/|@google\/|ai(?:\/|$)|openai(?:\/|$))/;
+const VENDOR_SDK_SOURCE =
+  /^(?:@anthropic-ai\/|@ai-sdk\/|@openai\/|@mistralai\/|@google\/|ai(?:\/|$)|openai(?:\/|$))/;
 
 // Module-source text: plain string literals, or template literals with no
 // substitutions (import(`ai`) parses as a TemplateLiteral, not a Literal).
@@ -42,7 +43,8 @@ export default {
   meta: {
     type: 'problem',
     docs: {
-      description: 'Forbid vendor SDK imports in kernel code (invariant I10: kernel stays vendor-neutral).',
+      description:
+        'Forbid vendor SDK imports in kernel code (invariant I10: kernel stays vendor-neutral).',
     },
     schema: [],
     messages: {

@@ -1,3 +1,4 @@
+import { match } from '../helpers/matchers.js';
 // T1.2 slice 2 — tests for the plan runner (src/kernel/runner.ts).
 //
 // The centerpiece is THE ws-a replay check: a 10-job chain run against a
@@ -87,7 +88,11 @@ function makeFake(): { state: FakeState; op: (raw: unknown) => Promise<OpResult<
 const jobInputSchema = z.object({ jobId: z.string() });
 
 /** Wrap an op as a registry entry (op-contract params cast to the bottom instantiation). */
-function entry(name: string, schema: z.ZodType<unknown>, op: (raw: unknown) => Promise<OpResult<unknown>>): OpRegistryEntry<never, never> {
+function entry(
+  name: string,
+  schema: z.ZodType<unknown>,
+  op: (raw: unknown) => Promise<OpResult<unknown>>,
+): OpRegistryEntry<never, never> {
   return {
     name,
     inputSchema: schema as unknown as z.ZodType<never>,
@@ -97,7 +102,10 @@ function entry(name: string, schema: z.ZodType<unknown>, op: (raw: unknown) => P
 
 function viewWith(...entries: OpRegistryEntry<never, never>[]): OpRegistryView {
   const map = new Map(
-    entries.map((candidate): [string, OpRegistryEntry<never, never>] => [candidate.name, candidate]),
+    entries.map((candidate): [string, OpRegistryEntry<never, never>] => [
+      candidate.name,
+      candidate,
+    ]),
   );
   return { get: (name) => map.get(name) };
 }
@@ -175,7 +183,10 @@ describe('runPlan — ws-a replay resume (the goal check)', () => {
     expect(finishes1.filter((event) => event.result.status === 'ok')).toHaveLength(4);
     expect(finishes1.filter((event) => event.result.status === 'failed')).toHaveLength(1);
     expect(events1[0]).toMatchObject({ type: 'run-started', planId: 'plan-wsa' });
-    expect(events1[events1.length - 1]).toMatchObject({ type: 'run-finished', stoppedEarly: false });
+    expect(events1[events1.length - 1]).toMatchObject({
+      type: 'run-finished',
+      stoppedEarly: false,
+    });
 
     // --- Run 2: resume with the fake fixed ---
     state.calls = [];
@@ -251,7 +262,7 @@ describe('runPlan — execution semantics', () => {
     const j4 = report.jobs.find((row) => row.jobId === 'j4');
     expect(j4?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/blocked: dependency 'j3'/),
+      error: match.stringMatching(/blocked: dependency 'j3'/),
     });
   });
 
@@ -288,11 +299,11 @@ describe('runPlan — execution semantics', () => {
     const b2 = report.jobs.find((row) => row.jobId === 'b2');
     expect(a2?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/blocked: dependency 'a1'/),
+      error: match.stringMatching(/blocked: dependency 'a1'/),
     });
     expect(b2?.result).toMatchObject({
       status: 'indeterminate',
-      detail: expect.stringMatching(/queued: run stopped before dispatch/),
+      detail: match.stringMatching(/queued: run stopped before dispatch/),
     });
   });
 
@@ -330,7 +341,7 @@ describe('runPlan — execution semantics', () => {
     // The error names the FAILED dep, not the queued sibling.
     expect(report.jobs.find((row) => row.jobId === 'c')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/blocked: dependency 'a1' did not succeed/),
+      error: match.stringMatching(/blocked: dependency 'a1' did not succeed/),
     });
   });
 
@@ -360,11 +371,11 @@ describe('runPlan — execution semantics', () => {
     });
     expect(report.jobs.find((row) => row.jobId === 'b')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/dependency 'ghost' missing from plan/),
+      error: match.stringMatching(/dependency 'ghost' missing from plan/),
     });
     expect(report.jobs.find((row) => row.jobId === 'c')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/blocked/),
+      error: match.stringMatching(/blocked/),
     });
   });
 
@@ -457,11 +468,7 @@ describe('runPlan — execution semantics', () => {
       id: 'plan-ghost-op',
       jobs: [{ id: 'a', op: 'ghost', input: { jobId: 'a' } }],
     };
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      DEFAULT_VIEW(),
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, DEFAULT_VIEW());
     expect(report.counts.failed).toBe(1);
     expect(report.jobs[0]?.result).toEqual({
       status: 'failed',
@@ -479,14 +486,10 @@ describe('runPlan — execution semantics', () => {
         throw new Error('op must never run');
       }),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.counts.failed).toBe(1);
     expect(report.jobs[0]?.result.status).toBe('failed');
-    expect((report.jobs[0]?.result as { error: string }).error).toMatch(/number/i);
+    expect(report.jobs[0]?.result).toMatchObject({ error: match.stringMatching(/number/i) });
   });
 
   test('a throwing op records failed with the throw message (contract violation, run survives)', async () => {
@@ -499,11 +502,7 @@ describe('runPlan — execution semantics', () => {
         throw new Error('kaboom');
       }),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.jobs[0]?.result).toEqual({ status: 'failed', error: 'kaboom' });
     expect(report.counts.failed).toBe(1);
   });
@@ -514,20 +513,12 @@ describe('runPlan — execution semantics', () => {
       jobs: [{ id: 'a', op: 'fake', input: { jobId: 'a' } }],
     };
     const registry = viewWith(
-      entry(
-        'fake',
-        jobInputSchema,
-        async () => 42 as unknown as OpResult<unknown>,
-      ),
+      entry('fake', jobInputSchema, async () => 42 as unknown as OpResult<unknown>),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 1, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry);
     expect(report.jobs[0]?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/violated the op contract/),
+      error: match.stringMatching(/violated the op contract/),
     });
   });
 
@@ -554,7 +545,7 @@ describe('runPlan — execution semantics', () => {
     );
     expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/non-serializable/),
+      error: match.stringMatching(/non-serializable/),
     });
     expect(report.jobs.find((row) => row.jobId === 'j2')?.result).toEqual({
       status: 'ok',
@@ -599,7 +590,7 @@ describe('runPlan — execution semantics', () => {
     );
     expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/non-serializable.*non-finite/s),
+      error: match.stringMatching(/non-serializable.*non-finite/s),
     });
     expect(report.counts.done).toBe(1); // j2 unaffected — the run continues
     const events = await openRunLog(dir).read(report.runId);
@@ -683,8 +674,11 @@ describe('runPlan — execution semantics', () => {
       { concurrency: 5, stopOnError: false, journalDir: dir },
       registry,
     );
-    const failureOf = (id: string): string =>
-      (report.jobs.find((row) => row.jobId === id)?.result as { error?: string }).error ?? '';
+    const failureOf = (id: string): string => {
+      const result = report.jobs.find((row) => row.jobId === id)?.result;
+      if (result?.status !== 'failed') throw new Error(`Expected failed job ${id}`);
+      return result.error;
+    };
     expect(failureOf('m')).toMatch(/non-serializable.*non-plain object of type 'Map'/);
     expect(failureOf('d')).toMatch(/non-serializable.*non-plain object of type 'Date'/);
     expect(failureOf('f')).toMatch(/non-serializable.*non-JSON value of type 'function'/);
@@ -698,7 +692,9 @@ describe('runPlan — execution semantics', () => {
     expect(failureOf('n')).toMatch(/non-serializable.*non-enumerable own member 'secret'/s);
     expect(failureOf('at')).toMatch(/non-serializable.*own 'toJSON' on an array/s);
     expect(failureOf('ax')).toMatch(/non-serializable.*non-index own member 'extra' on an array/s);
-    expect(failureOf('ah')).toMatch(/non-serializable.*non-index own member '4294967295' on an array/s);
+    expect(failureOf('ah')).toMatch(
+      /non-serializable.*non-index own member '4294967295' on an array/s,
+    );
     expect(report.counts.failed).toBe(10);
     expect(report.counts.done).toBe(1); // the run continues
   });
@@ -710,10 +706,15 @@ describe('runPlan — execution semantics', () => {
     // per-job failure — never a journal line that cannot be replayed.
     const { op } = makeFake();
     const registry = viewWith(
-      entry('absent', jobInputSchema, async () => ({
-        status: 'ok',
-        value: undefined,
-      }) as OpResult<unknown>),
+      entry(
+        'absent',
+        jobInputSchema,
+        async () =>
+          ({
+            status: 'ok',
+            value: undefined,
+          }) as OpResult<unknown>,
+      ),
       entry('fake', jobInputSchema, op),
     );
     const plan: Plan = {
@@ -730,7 +731,7 @@ describe('runPlan — execution semantics', () => {
     );
     expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/non-serializable.*without a 'value'/),
+      error: match.stringMatching(/non-serializable.*without a 'value'/),
     });
     expect(report.counts.done).toBe(1); // j2 unaffected — the run continues
     // Every journaled line still reads back cleanly.
@@ -756,14 +757,10 @@ describe('runPlan — execution semantics', () => {
         { id: 'j2', op: 'ghost', input: { jobId: 'j2' } },
       ],
     };
-    const report = await runPlan(
-      plan,
-      { concurrency: 2, stopOnError: false },
-      cursedView,
-    );
+    const report = await runPlan(plan, { concurrency: 2, stopOnError: false }, cursedView);
     expect(report.jobs.find((row) => row.jobId === 'j1')?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(
+      error: match.stringMatching(
         /registry lookup for op 'cursed' failed: registry backend offline/,
       ),
     });
@@ -805,11 +802,7 @@ describe('runPlan — execution semantics', () => {
       entry('nh', jobInputSchema, async () => ({ status: 'needs-human', reason: 'human please' })),
       entry('ind', jobInputSchema, async () => ({ status: 'indeterminate', detail: 'lost' })),
     );
-    const report = await runPlan(
-      plan,
-      { concurrency: 2, stopOnError: false },
-      registry,
-    );
+    const report = await runPlan(plan, { concurrency: 2, stopOnError: false }, registry);
     // needs-human → blocked (waiting on a human); indeterminate → failed.
     // The ROWS keep the true taxonomy statuses.
     expect(report.counts).toEqual({

@@ -24,7 +24,10 @@ function fixture(name: string): string {
 }
 
 /** Parse through the real guarded entry point (parseCheckOutput, not the raw adapter). */
-function parseWith(adapter: 'vitest-json' | 'eslint-json' | 'tsc-lines', raw: RawCheckOutput): CheckParseResult {
+function parseWith(
+  adapter: 'vitest-json' | 'eslint-json' | 'tsc-lines',
+  raw: RawCheckOutput,
+): CheckParseResult {
   return parseCheckOutput(adapterByName(adapter), raw);
 }
 
@@ -294,9 +297,9 @@ describe('tsc-lines adapter (real captured fixture)', () => {
       verdict: 'parsed',
       set: { tool: 'tsc', failures: [], exitCode: 0 },
     });
-    expect(
-      parseWith('tsc-lines', { stdout: '', stderr: 'crash', exitCode: 1 }).verdict,
-    ).toBe('indeterminate');
+    expect(parseWith('tsc-lines', { stdout: '', stderr: 'crash', exitCode: 1 }).verdict).toBe(
+      'indeterminate',
+    );
   });
 
   test('warning-severity lines map to warnings; related-info lines are skipped', () => {
@@ -479,6 +482,7 @@ describe('gates registry entry', () => {
 
   test('the importer resolves to the subprocess-bound op', async () => {
     const entry = registry[0];
+    if (entry === undefined) throw new Error('registry must contain the adapter op');
     expect(typeof entry.inputSchema).toBe('object');
     const op = await entry.importer();
     expect(typeof op).toBe('function');

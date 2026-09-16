@@ -16,14 +16,7 @@
 // below echo the tool output so the failure is debuggable, not silent.
 
 import { spawnSync } from 'node:child_process';
-import {
-  mkdtempSync,
-  readFileSync,
-  readdirSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -44,8 +37,8 @@ export function fail(message) {
 }
 
 // npm/npx are .cmd shims on win32; since Node's CVE-2024-27980 fix a .cmd
-// must be spawned through a shell (the same reasoning the old typecheck
-// placeholder applied to tsc6.cmd). POSIX takes the direct binary, no shell.
+// must be spawned through a shell. Package JS entrypoints run directly with
+// Node so absolute paths never undergo shell parsing.
 const SHELL_ON_WINDOWS = process.platform === 'win32';
 
 /**
@@ -82,18 +75,14 @@ function newestSrcMtimeMs() {
  * fresh. The mtime heuristic's known weakness is a hand-touched dist (or a
  * clock skew) masking a stale engine — accepted for the LOCAL fast path
  * because the engine is frozen between lane merges; CI's cold checkout is
- * the trust-critical path and it never reuses. tsc6 is checked-emit: a build
+ * the trust-critical path and it never reuses. TS7 is checked-emit: a build
  * error fails loudly here, never downstream.
  */
 export function ensureDist() {
   try {
     const marker = statSync(join(ROOT, 'dist', 'index.js'));
     const engineEntry = statSync(join(ROOT, 'dist', 'ops', 'ratchet', 'checkRatchet.js'));
-    if (
-      marker.isFile() &&
-      engineEntry.isFile() &&
-      marker.mtimeMs >= newestSrcMtimeMs()
-    ) {
+    if (marker.isFile() && engineEntry.isFile() && marker.mtimeMs >= newestSrcMtimeMs()) {
       return; // dist exists and is newer than every src file — reuse it
     }
   } catch {
@@ -198,19 +187,35 @@ export async function loadEngine() {
 }
 
 /**
- * Run the repo's own typecheck script (tsc6 -p tsconfig.json — the pinned
- * compiler alias) and return the RAW outcome: {status, stdout, stderr, error}.
+ * Run the pinned TS7 compiler directly (the typecheck alias runs this ratchet
+ * and must not recurse) and return the RAW outcome: {status, stdout, stderr, error}.
  * No judging here — classification happens in typecheckEvidence below so the
  * caller can echo the tool output before anything is counted.
  */
 export function runTypecheckRaw() {
-  const res = spawnSync('npm', ['run', 'typecheck'], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: MAX_BUFFER,
-    shell: SHELL_ON_WINDOWS,
-  });
-  return { status: res.status, stdout: res.stdout ?? '', stderr: res.stderr ?? '', error: res.error };
+  const res = spawnSync(
+    process.execPath,
+    [
+      resolve(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
+      '--noEmit',
+      '-p',
+      'tsconfig.json',
+      '--pretty',
+      'false',
+    ],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: MAX_BUFFER,
+    },
+  );
+  return {
+    status: res.status,
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? '',
+    error: res.error,
+    signal: res.signal,
+  };
 }
 
 /**
@@ -230,7 +235,14 @@ export function runTypecheckRaw() {
  */
 export function typecheckEvidence(typecheckCountAdapter, run) {
   const rawText = `${run.stdout}${run.stderr}`;
-  if (run.status === 0) return { evidence: { count: 0 }, rawText };
+  if (run.error || run.signal || ![0, 1, 2].includes(run.status))
+    return { evidence: null, rawText };
+  if (/^error TS\d+:|^.*\.json\(\d+,\d+\): error TS\d+:/m.test(rawText))
+    return {
+      evidence: null,
+      rawText: `compiler configuration or project-loading failure:\n${rawText}`,
+    };
+  if (run.status === 0) return { evidence: rawText.trim() === '' ? { count: 0 } : null, rawText };
   const counted = typecheckCountAdapter.extract(rawText);
   return { evidence: counted === null ? null : rawText, rawText };
 }
@@ -276,7 +288,8 @@ export function normalizeCoverageSummary(summary) {
 // guard's own VALUE_RE (monotonicGuard) exactly — strict JSON number,
 // terminator lookahead — so normalization can only ever rewrite a token the
 // guard would read.
-const DIFF_VALUE_TOKEN = /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
+const DIFF_VALUE_TOKEN =
+  /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
 const COVERAGE_BASELINE_SECTION = /^baselines\/coverage/;
 const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
 
@@ -356,7 +369,10 @@ export function normalizeBaselineDiffValues(diff, exactCoverageBaselinePath) {
       out.push(line);
       continue;
     }
-    if (isCoverageSection && (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))) {
+    if (
+      isCoverageSection &&
+      (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))
+    ) {
       out.push(
         line.replace(DIFF_VALUE_TOKEN, (_, head, num) => head + String(Math.round(Number(num)))),
       );

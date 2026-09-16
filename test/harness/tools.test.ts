@@ -93,7 +93,9 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
     await withScratch(async (scratchDir) => {
       // Builtins only — the case EXECUTES (the re: author owns the full
       // metachar-bearing string), so nothing external may spawn.
-      const run = buildTools(runConfig(['re:^echo pilot.*$']), scratchDir).find((t) => t.name === 'run');
+      const run = buildTools(runConfig(['re:^echo pilot.*$']), scratchDir).find(
+        (t) => t.name === 'run',
+      );
       const result = await run?.execute({ command: 'echo pilot; exit 0' });
       expect(result?.ok).toBe(true); // the re: author owns the full string
     });
@@ -106,9 +108,10 @@ describe('run allowlist: token patterns vs shell metacharacters (fix 1)', () => 
       // it must still allow outright, whatever the pattern order. Builtins
       // only (the case EXECUTES); exit 3 proves the command RAN by mapping
       // to ok:true + exitCode 3 — no external binary involved.
-      const run = buildTools(runConfig(['echo pilot', 're:^echo pilot ; exit 3$']), scratchDir).find(
-        (t) => t.name === 'run',
-      );
+      const run = buildTools(
+        runConfig(['echo pilot', 're:^echo pilot ; exit 3$']),
+        scratchDir,
+      ).find((t) => t.name === 'run');
       const result = await run?.execute({ command: 'echo pilot ; exit 3' });
       expect(result?.ok).toBe(true);
       if (result?.ok) {
@@ -209,7 +212,9 @@ describe('symlink hardening (fix 5)', () => {
       const editViaLink = await edit?.execute({ path: 'src/link', oldText: 'top', newText: 'x' });
       expect(editViaLink?.ok).toBe(false);
       if (!editViaLink?.ok) {
-        expect(editViaLink?.denial.reason).toContain('path not allowed by harness config allowlist');
+        expect(editViaLink?.denial.reason).toContain(
+          'path not allowed by harness config allowlist',
+        );
       }
 
       // The out-of-pattern target stays unreachable by its own name too…

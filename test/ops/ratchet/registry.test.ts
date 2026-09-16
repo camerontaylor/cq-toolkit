@@ -71,34 +71,34 @@ describe('typecheckCount', () => {
   });
 
   const TSC_OUTPUT =
-    'src/a.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.\n' +
-    'src/b.ts(4,1): error TS2304: Cannot find name \'missing\'.\n' +
-    'src/c.ts(9,3): error TS2345: Argument of type \'x\' is not assignable.\n';
+    "src/a.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n" +
+    "src/b.ts(4,1): error TS2304: Cannot find name 'missing'.\n" +
+    "src/c.ts(9,3): error TS2345: Argument of type 'x' is not assignable.\n";
 
   // A real diagnostic header followed by a displayed SOURCE line that merely
   // quotes the literal text — the unanchored /error TS\d+:/ counted 2 here.
   const TSC_OUTPUT_WITH_QUOTED_TEXT =
-    'src/a.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.\n' +
+    "src/a.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n" +
     'const message = "error TS1234:";';
 
   const TSC_PRETTY_OUTPUT =
-    'src/p.ts:3:1 - error TS2304: Cannot find name \'missing\'.\n' +
-    'src/q.ts:4:5 - error TS2571: Object is possibly \'undefined\'.';
+    "src/p.ts:3:1 - error TS2304: Cannot find name 'missing'.\n" +
+    "src/q.ts:4:5 - error TS2571: Object is possibly 'undefined'.";
 
   const TSC_MIXED_OUTPUT =
-    'src/a.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.\n' +
-    'src/p.ts:3:1 - error TS2304: Cannot find name \'missing\'.';
+    "src/a.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.\n" +
+    "src/p.ts:3:1 - error TS2304: Cannot find name 'missing'.";
 
   const TSC_SPACED_PATH =
-    'bad file.ts(1,7): error TS2322: Type \'string\' is not assignable to type \'number\'.';
+    "bad file.ts(1,7): error TS2322: Type 'string' is not assignable to type 'number'.";
 
-  const TSC_PAREN_PATH = 'weird(1).ts(2,3): error TS2322: Property \'x\' is missing.';
+  const TSC_PAREN_PATH = "weird(1).ts(2,3): error TS2322: Property 'x' is missing.";
 
   const TSC_LOCATION_FREE =
-    'error TS18003: No inputs were found in configuration file \'tsconfig.json\'.';
+    "error TS18003: No inputs were found in configuration file 'tsconfig.json'.";
 
   const TSC_ANSI_PRETTY =
-    '\u001b[96msrc/p.ts\u001b[0m:\u001b[93m3\u001b[0m:\u001b[93m5\u001b[0m - \u001b[91merror TS2304\u001b[0m: Cannot find name \'missing\'.';
+    "\u001b[96msrc/p.ts\u001b[0m:\u001b[93m3\u001b[0m:\u001b[93m5\u001b[0m - \u001b[91merror TS2304\u001b[0m: Cannot find name 'missing'.";
 
   const TSC_ANSI_QUOTED = '\u001b[36mconst message = "error TS1234:";\u001b[0m';
 
@@ -121,9 +121,17 @@ describe('typecheckCount', () => {
     ['location-free diagnostic header counts', TSC_LOCATION_FREE, 1],
     ['ANSI-colored pretty header counts', TSC_ANSI_PRETTY, 1],
     ['ANSI-colored quoted source text still does not count', TSC_ANSI_QUOTED, null],
-    ['a source line quoting a FULL header still counts (documented limitation)', 'const msg = "src/a.ts(1,7): error TS2322: boom";', 1],
+    [
+      'a source line quoting a FULL header still counts (documented limitation)',
+      'const msg = "src/a.ts(1,7): error TS2322: boom";',
+      1,
+    ],
     ['quoted diagnostic text in a source line is not counted', TSC_OUTPUT_WITH_QUOTED_TEXT, 1],
-    ['a file of only quoted diagnostic text yields null', 'const message = "error TS1234:";\nconst other = "error TS9999:";', null],
+    [
+      'a file of only quoted diagnostic text yields null',
+      'const message = "error TS1234:";\nconst other = "error TS9999:";',
+      null,
+    ],
     ['negative count', { count: -1 }, null],
     ['non-integer count (a fraction of an error is unusable)', { count: 0.5 }, null],
     ['huge integer count is not a representable cardinality', { count: 1e100 }, null],

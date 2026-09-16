@@ -221,7 +221,16 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
-import type { Driver, ModelSpec, OpInvocation, SandboxLevel, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
+import type {
+  Driver,
+  ModelSpec,
+  OpInvocation,
+  SandboxLevel,
+  ToolDenial,
+  ToolPolicy,
+  Usage,
+  WorkerResult,
+} from '../types.js';
 import {
   ACP_METHODS,
   ACP_PROTOCOL_VERSION,
@@ -448,12 +457,18 @@ interface WireHandlers {
  */
 class AcpWire {
   private nextId = 1;
-  private readonly pending = new Map<number, { resolve: (value: unknown) => void; reject: (err: Error) => void }>();
+  private readonly pending = new Map<
+    number,
+    { resolve: (value: unknown) => void; reject: (err: Error) => void }
+  >();
   private lineBuffer = '';
   private stderrBuffer = '';
   readonly exit: Promise<AcpExitInfo>;
 
-  constructor(private readonly child: ChildProcess, private readonly handlers: WireHandlers) {
+  constructor(
+    private readonly child: ChildProcess,
+    private readonly handlers: WireHandlers,
+  ) {
     child.stdout?.on('data', (chunk: string) => {
       this.lineBuffer += chunk;
       let nl = this.lineBuffer.indexOf('\n');
@@ -516,22 +531,26 @@ class AcpWire {
       if (this.stderrBuffer.length > 8000) this.stderrBuffer = this.stderrBuffer.slice(-4000);
     });
     this.exit = acpExitPromise(child);
-    void this.exit.then(() => {
-      // Trailing partial lines flush at exit ('close' fires only after
-      // stdio is flushed, so nothing can arrive after this): stderr's is
-      // often the death diagnosis; stdout's is an unterminated wire line,
-      // which still gets its parse-or-narrate chance — same symmetry.
-      const trailingStdout = this.lineBuffer;
-      this.lineBuffer = '';
-      if (trailingStdout.trim() !== '') this.onLine(trailingStdout);
-      const trailing = this.stderrBuffer;
-      this.stderrBuffer = '';
-      if (trailing.trim() !== '') this.handlers.onStderrLine(trailing);
-      for (const p of this.pending.values()) {
-        p.reject(new Error('the harness process exited before responding'));
-      }
-      this.pending.clear();
-    });
+    this.exit
+      .then(() => {
+        // Trailing partial lines flush at exit ('close' fires only after
+        // stdio is flushed, so nothing can arrive after this): stderr's is
+        // often the death diagnosis; stdout's is an unterminated wire line,
+        // which still gets its parse-or-narrate chance — same symmetry.
+        const trailingStdout = this.lineBuffer;
+        this.lineBuffer = '';
+        if (trailingStdout.trim() !== '') this.onLine(trailingStdout);
+        const trailing = this.stderrBuffer;
+        this.stderrBuffer = '';
+        if (trailing.trim() !== '') this.handlers.onStderrLine(trailing);
+        for (const p of this.pending.values()) {
+          p.reject(new Error('the harness process exited before responding'));
+        }
+        this.pending.clear();
+      })
+      .catch((error: unknown) => {
+        this.failConnection(new Error(`ACP exit processing failed: ${messageOf(error)}`));
+      });
   }
 
   /** Send one request; rejects on an error response, a dead pipe, or child exit. */
@@ -668,7 +687,9 @@ class AcpWire {
         reject(new Error('the harness stdin is closed'));
         return;
       }
-      stdin.write(`${JSON.stringify(frame)}\n`, (err) => (err !== null && err !== undefined ? reject(err) : resolve()));
+      stdin.write(`${JSON.stringify(frame)}\n`, (err) =>
+        err !== null && err !== undefined ? reject(err) : resolve(),
+      );
     });
   }
 }
@@ -701,7 +722,9 @@ export class AcpDriver implements Driver {
   private readonly outputSchema: ZodType | undefined;
   private readonly workspaceRoot: string | undefined;
   private readonly sessionsDir: string | undefined;
-  private readonly pricingOverride: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined;
+  private readonly pricingOverride:
+    | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
+    | undefined;
   private readonly termGraceMs: number | undefined;
   private readonly killGraceMs: number | undefined;
   private readonly cancelWriteGraceMs: number;
@@ -731,8 +754,16 @@ export class AcpDriver implements Driver {
     // harness is spawned (and, except the sessionRef check, before any
     // session exists). Absent binary / unknown endpoint → the §3 throw
     // naming the binary + install hint.
-    const resolved = await resolveAcpCommand(this.command, this.endpoint, this.endpointTable, process.env);
-    if (budget.maxTokens !== undefined && (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)) {
+    const resolved = await resolveAcpCommand(
+      this.command,
+      this.endpoint,
+      this.endpointTable,
+      process.env,
+    );
+    if (
+      budget.maxTokens !== undefined &&
+      (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
+    ) {
       throw new Error(
         `acp driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
@@ -771,7 +802,12 @@ export class AcpDriver implements Driver {
     const governed = currentJobContext();
     const signal = governed?.signal;
     if (signal?.aborted === true) {
-      return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -871,15 +907,22 @@ export class AcpDriver implements Driver {
     const handleServerRequest = (method: string, id: number | string, params: unknown): void => {
       if (method !== ACP_METHODS.sessionRequestPermission) {
         observation.narration.push(JSON.stringify({ cq: 'unhandled-server-request', method }));
-        void wire.failRequest(id, `cq acp driver does not implement ${method}`).catch(() => undefined);
+        void wire
+          .failRequest(id, `cq acp driver does not implement ${method}`)
+          .catch(() => undefined);
         return;
       }
       const parsed = RequestPermissionParamsSchema.safeParse(params);
       if (!parsed.success) {
         observation.narration.push(
-          JSON.stringify({ cq: 'unshapeable-request-permission', issues: parsed.error.issues.length }),
+          JSON.stringify({
+            cq: 'unshapeable-request-permission',
+            issues: parsed.error.issues.length,
+          }),
         );
-        void wire.failRequest(id, 'unshapeable session/request_permission params').catch(() => undefined);
+        void wire
+          .failRequest(id, 'unshapeable session/request_permission params')
+          .catch(() => undefined);
         return;
       }
       const request = parsed.data;
@@ -899,8 +942,9 @@ export class AcpDriver implements Driver {
             note: 'session/request_permission did not name the active session — rejected before any answer-table or evidence effects',
           }),
         );
-        wire.failRequest(id, 'session/request_permission rejected: not the active session').catch(
-          (sendErr: unknown) => {
+        void wire
+          .failRequest(id, 'session/request_permission rejected: not the active session')
+          .catch((sendErr: unknown) => {
             // A failed REJECTION write is the same BROKEN ENFORCEMENT
             // CHANNEL as a failed answer write (PR #97 review, Codex P1):
             // the vendor would wait forever for a response that can never
@@ -916,8 +960,7 @@ export class AcpDriver implements Driver {
               }),
             );
             void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
-          },
-        );
+          });
         return;
       }
       const toolCallId = request.toolCall.toolCallId;
@@ -944,13 +987,22 @@ export class AcpDriver implements Driver {
         );
         void wire.respond(id, CANCELLED_PERMISSION_ANSWER).catch((err: unknown) => {
           observation.narration.push(
-            JSON.stringify({ cq: 'permission-cancel-send-failed', toolCallId, message: messageOf(err) }),
+            JSON.stringify({
+              cq: 'permission-cancel-send-failed',
+              toolCallId,
+              message: messageOf(err),
+            }),
           );
         });
         return;
       }
       const identity = permissionToolIdentity(request.toolCall.title, request.toolCall.kind);
-      const decision = decidePermission(toolPolicy, sandboxPolicy.level, identity, request.toolCall.kind);
+      const decision = decidePermission(
+        toolPolicy,
+        sandboxPolicy.level,
+        identity,
+        request.toolCall.kind,
+      );
       const selection = selectPermissionAnswer(decision.decision, request.options);
       if (!selection.ok) {
         // A decision whose required side was NOT OFFERED — an allow with
@@ -969,7 +1021,10 @@ export class AcpDriver implements Driver {
             cq: 'permission-answer-failed',
             side: selection.side,
             toolCallId,
-            offered: request.options.map((option) => ({ optionId: option.optionId, kind: option.kind })),
+            offered: request.options.map((option) => ({
+              optionId: option.optionId,
+              kind: option.kind,
+            })),
             note:
               selection.side === 'allow'
                 ? 'no allow option offered on the allow side — the run fails; never answered cancelled'
@@ -982,7 +1037,11 @@ export class AcpDriver implements Driver {
         return;
       }
       observation.permissionDecisions.set(toolCallId, decision.decision);
-      if (decision.decision === 'deny' && decision.denial !== undefined && !observation.deniedToolCallIds.has(toolCallId)) {
+      if (
+        decision.decision === 'deny' &&
+        decision.denial !== undefined &&
+        !observation.deniedToolCallIds.has(toolCallId)
+      ) {
         observation.deniedToolCallIds.add(toolCallId);
         observation.denials.push(decision.denial); // the frozen record, synthesized AT the answer
       }
@@ -997,7 +1056,11 @@ export class AcpDriver implements Driver {
         // on the wire's exit path — the run settles instead of hanging.
         answerWriteFailed = true;
         observation.narration.push(
-          JSON.stringify({ cq: 'permission-answer-send-failed', toolCallId, message: messageOf(err) }),
+          JSON.stringify({
+            cq: 'permission-answer-send-failed',
+            toolCallId,
+            message: messageOf(err),
+          }),
         );
         void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
       });
@@ -1117,20 +1180,33 @@ export class AcpDriver implements Driver {
         // SIGTERM.
         const cancelWrite = wire.notify(ACP_METHODS.sessionCancel, { sessionId: target });
         void cancelWrite.then(
-          () => observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
+          () =>
+            observation.narration.push(JSON.stringify({ cq: 'cancel-sent', sessionId: target })),
           (err: unknown) =>
-            observation.narration.push(JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) })),
-        );
-        void raceWithGrace(cancelWrite, this.cancelWriteGraceMs).then((outcome) => {
-          if (outcome === 'stalled') {
             observation.narration.push(
-              JSON.stringify({ cq: 'cancel-write-stalled', graceMs: this.cancelWriteGraceMs, sessionId: target }),
+              JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) }),
+            ),
+        );
+        raceWithGrace(cancelWrite, this.cancelWriteGraceMs)
+          .then((outcome) => {
+            if (outcome === 'stalled') {
+              observation.narration.push(
+                JSON.stringify({
+                  cq: 'cancel-write-stalled',
+                  graceMs: this.cancelWriteGraceMs,
+                  sessionId: target,
+                }),
+              );
+            }
+            // The decided kill, gated on NOTHING the child controls (the
+            // prompt-phase kill rung; Codex P1).
+            return terminateAcpProcess(child, graceOpts(), onRung);
+          })
+          .catch((error: unknown) => {
+            observation.narration.push(
+              JSON.stringify({ cq: 'cancel-termination-failed', message: messageOf(error) }),
             );
-          }
-          // The decided kill, gated on NOTHING the child controls (the
-          // prompt-phase kill rung; Codex P1).
-          void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
-        });
+          });
       } else {
         observation.narration.push(
           JSON.stringify({
@@ -1167,7 +1243,10 @@ export class AcpDriver implements Driver {
       try {
         const initRaw = await wire.request(ACP_METHODS.initialize, {
           protocolVersion: ACP_PROTOCOL_VERSION,
-          clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
           clientInfo: { name: 'cq-toolkit', version: '0.0.0' },
         });
         const init = InitializeResultSchema.parse(initRaw);
@@ -1234,7 +1313,11 @@ export class AcpDriver implements Driver {
               );
             }
           }
-        } else if (sessionRef !== undefined && resumeAcpSessionId !== undefined && agentSupportsResume) {
+        } else if (
+          sessionRef !== undefined &&
+          resumeAcpSessionId !== undefined &&
+          agentSupportsResume
+        ) {
           // RUNG 2 — unstable_resumeSession when sessionCapabilities.resume
           // is advertised (strategy §6: the reference's own middle rung;
           // NO history replay on this rung, so no replay window). The same
@@ -1251,7 +1334,10 @@ export class AcpDriver implements Driver {
           // RUNG 3 (and the fresh-run path) — session/new. Reaching here
           // WITH a recorded sidecar means NEITHER resume capability is
           // advertised: the honest-partial rung, narrated.
-          const createdRaw = await wire.request(ACP_METHODS.sessionNew, { cwd: workspace, mcpServers: [] });
+          const createdRaw = await wire.request(ACP_METHODS.sessionNew, {
+            cwd: workspace,
+            mcpServers: [],
+          });
           const created = SessionNewResultSchema.parse(createdRaw);
           acpSessionId = created.sessionId;
           if (sessionRef !== undefined && resumeAcpSessionId !== undefined) {
@@ -1430,7 +1516,10 @@ export class AcpDriver implements Driver {
       }
       if (unparseable) {
         observation.narration.push(
-          JSON.stringify({ cq: 'structured-output-unparseable', note: 'the assembled agent text is not JSON — dropped (strategy §4)' }),
+          JSON.stringify({
+            cq: 'structured-output-unparseable',
+            note: 'the assembled agent text is not JSON — dropped (strategy §4)',
+          }),
         );
       } else {
         const check = this.outputSchema.safeParse(parsedJson);
@@ -1454,14 +1543,20 @@ export class AcpDriver implements Driver {
     // answerWriteFailed mirror). The measured usage still folds.
     const connectionFailure = wire.connectionFailure;
     if (connectionFailure !== undefined) {
-      observation.narration.push(JSON.stringify({ cq: 'connection-failed', message: connectionFailure.message }));
+      observation.narration.push(
+        JSON.stringify({ cq: 'connection-failed', message: connectionFailure.message }),
+      );
     }
 
     // --- Failure records land in narration BEFORE persistence (evidence,
     // not silence) — the verdict itself has no error-message field.
     if (handshakeFailure !== undefined) {
       observation.narration.push(
-        JSON.stringify({ cq: 'handshake-failure', negotiatedProtocolVersion: negotiatedVersion ?? null, message: handshakeFailure }),
+        JSON.stringify({
+          cq: 'handshake-failure',
+          negotiatedProtocolVersion: negotiatedVersion ?? null,
+          message: handshakeFailure,
+        }),
       );
     }
     if (promptFailure !== undefined) {
@@ -1491,7 +1586,8 @@ export class AcpDriver implements Driver {
       // deliberately swallowed — the honest verdict outranks the record
     }
 
-    const measuredUsage = promptResponse === undefined ? undefined : mapWireUsage(promptResponse.usage);
+    const measuredUsage =
+      promptResponse === undefined ? undefined : mapWireUsage(promptResponse.usage);
     // PR #97 review (Codex P1): a response that CARRIES a usage the wire
     // gate rejects (negative/fractional/non-finite counts) is MALFORMED
     // REPORTED usage — not absent usage. Without the distinction, verdict()
@@ -1631,7 +1727,9 @@ function defaultSessionsDir(): string {
 async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
   const record = await store.load(sessionRef);
   if (record === undefined) {
-    throw new Error(`acp driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`);
+    throw new Error(
+      `acp driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
+    );
   }
   return record;
 }
@@ -1665,7 +1763,11 @@ export function decidePermission(
   kind: string | undefined,
 ): { decision: 'allow' | 'deny'; tool: string; denial?: ToolDenial } {
   if (policy.mode === 'none') {
-    return { decision: 'deny', tool: identity, denial: { tool: identity, reason: 'tool policy: mode none' } };
+    return {
+      decision: 'deny',
+      tool: identity,
+      denial: { tool: identity, reason: 'tool policy: mode none' },
+    };
   }
   if (sandboxLevel === 'read-only') {
     // Fail-closed (header): no read/write classification on this wire can
@@ -1677,7 +1779,8 @@ export function decidePermission(
       tool: identity,
       denial: {
         tool: identity,
-        reason: 'sandbox policy: read-only denies every gated tool execution (the permission boundary is this lane\'s only enforcement channel)',
+        reason:
+          "sandbox policy: read-only denies every gated tool execution (the permission boundary is this lane's only enforcement channel)",
       },
     };
   }
@@ -1724,7 +1827,9 @@ export function composePrompt(prompt: string, outputSchema: ZodType | undefined)
 export function foldSessionUpdate(observation: RunObservation, params: unknown): void {
   const checked = SessionUpdateParamsSchema.safeParse(params);
   if (!checked.success) {
-    observation.narration.push(JSON.stringify({ cq: 'unshapeable-session-update', preview: previewOf(params) }));
+    observation.narration.push(
+      JSON.stringify({ cq: 'unshapeable-session-update', preview: previewOf(params) }),
+    );
     return;
   }
   const update = parseAcpUpdate(checked.data.update);
@@ -1746,7 +1851,9 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
     case 'agent_thought_chunk': {
       // Thought CONTENT is not a token count and must not become one
       // (§2.3); the fact of it is evidence, the text is not persisted.
-      observation.narration.push(JSON.stringify({ cq: 'agent-thought', chars: update.text.length }));
+      observation.narration.push(
+        JSON.stringify({ cq: 'agent-thought', chars: update.text.length }),
+      );
       return;
     }
     case 'tool_call':
@@ -1804,7 +1911,10 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
         observation.deniedToolCallIds.add(id);
         observation.denials.push({
           tool: existing.identity,
-          reason: existing.output !== '' ? existing.output : `tool execution failed (${existing.identity})`,
+          reason:
+            existing.output !== ''
+              ? existing.output
+              : `tool execution failed (${existing.identity})`,
         });
       }
       return;
@@ -1885,7 +1995,11 @@ async function persistObservation(
     const message: SessionMessage = {
       role: 'tool',
       toolName: tool.identity,
-      content: JSON.stringify({ input: tool.rawInput ?? null, ok: tool.status === 'completed', output: tool.output }),
+      content: JSON.stringify({
+        input: tool.rawInput ?? null,
+        ok: tool.status === 'completed',
+        output: tool.output,
+      }),
       at: nowIso(),
     };
     await store.appendMessage(record.sessionId, message);
@@ -1894,7 +2008,10 @@ async function persistObservation(
   if (text !== '') {
     await store.appendMessage(record.sessionId, { role: 'assistant', content: text, at: nowIso() });
   }
-  const diagnostics = [...observation.narration, ...observation.stderr.map((line) => `[stderr] ${line}`)];
+  const diagnostics = [
+    ...observation.narration,
+    ...observation.stderr.map((line) => `[stderr] ${line}`),
+  ];
   if (diagnostics.length > 0) {
     const message: SessionMessage = {
       role: 'tool',
@@ -1964,10 +2081,12 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
   if (inputs.malformedUsage === true) return 'error'; // reported usage failed the wire gate — zeros would erase accounting and bypass the budget (PR #97 review, Codex P1)
   if (inputs.deniedRan === true) return 'error'; // a denied tool ran anyway — ungated through the answer channel (review-debt #45)
   if (inputs.ungated) return 'error';
-  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
+  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
+    return 'budget';
   if (!inputs.responded) return 'error';
   if (inputs.promptStopReason === 'end_turn') return 'complete';
-  if (inputs.promptStopReason === 'max_tokens' || inputs.promptStopReason === 'max_turn_requests') return 'budget';
+  if (inputs.promptStopReason === 'max_tokens' || inputs.promptStopReason === 'max_turn_requests')
+    return 'budget';
   return 'error'; // refusal, an unknown vendor reason, or an unshapeable response
 }
 

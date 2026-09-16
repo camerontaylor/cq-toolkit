@@ -207,7 +207,16 @@ import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
-import type { Driver, ModelSpec, OpInvocation, SandboxLevel, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
+import type {
+  Driver,
+  ModelSpec,
+  OpInvocation,
+  SandboxLevel,
+  ToolDenial,
+  ToolPolicy,
+  Usage,
+  WorkerResult,
+} from '../types.js';
 import { defaultEndpointTable, resolveEndpoint } from './routing.js';
 import type { EndpointTable, ResolvedEndpoint } from './routing.js';
 import { abortRootFollowing } from './process.js';
@@ -325,7 +334,9 @@ export class ClaudeAgentDriver implements Driver {
   private readonly outputJsonSchema: string | undefined;
   private readonly harnessConfig: HarnessConfig;
   private readonly sessionsDir: string | undefined;
-  private readonly pricingOverride: ((modelSpec: ModelSpec) => PerMillionRates | undefined) | undefined;
+  private readonly pricingOverride:
+    | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
+    | undefined;
   /** Memoized load — one feature-detect per driver instance, never per run. */
   private sdkModule: Promise<AgentSdkModule> | undefined;
 
@@ -338,7 +349,9 @@ export class ClaudeAgentDriver implements Driver {
     // structured_output is validated against it post-settle (below).
     this.outputSchema = options.outputSchema;
     this.outputJsonSchema =
-      options.outputSchema === undefined ? undefined : JSON.stringify(zToJsonSchema(options.outputSchema));
+      options.outputSchema === undefined
+        ? undefined
+        : JSON.stringify(zToJsonSchema(options.outputSchema));
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.sessionsDir = options.sessionsDir;
     this.pricingOverride = options.pricing;
@@ -354,7 +367,10 @@ export class ClaudeAgentDriver implements Driver {
     const endpoint = resolveEndpoint(modelSpec, this.endpointTable); // unknown provider → the throw
     const keyValue = readKeyEnvOrThrow(endpoint); // missing key env → throw
     const sdk = await this.loadSdk(); // peer absent / misshaped → throw
-    if (budget.maxTokens !== undefined && (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)) {
+    if (
+      budget.maxTokens !== undefined &&
+      (!Number.isFinite(budget.maxTokens) || budget.maxTokens <= 0)
+    ) {
       throw new Error(
         `claude-agent driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
@@ -375,7 +391,10 @@ export class ClaudeAgentDriver implements Driver {
     // as the SDK's in-process custom tools; built-ins are disabled
     // wholesale (the governed surface is the WHOLE surface, header).
     const harnessTools = buildTools(this.harnessConfig, workspace, sandboxPolicy.level);
-    const allowed = allowedToolNames(harnessTools.map((t) => t.name), toolPolicy);
+    const allowed = allowedToolNames(
+      harnessTools.map((t) => t.name),
+      toolPolicy,
+    );
     const selected = harnessTools.filter((t) => allowed.includes(t.name));
 
     // --- Agent-level resume: the agent session id recorded in the -------
@@ -389,7 +408,12 @@ export class ClaudeAgentDriver implements Driver {
     const governed = currentJobContext();
     const signal = governed?.signal;
     if (signal?.aborted === true) {
-      return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'aborted' };
+      return {
+        usage: zeroUsage(),
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'aborted',
+      };
     }
 
     // The per-run observation — created before the options assembly because
@@ -432,12 +456,21 @@ export class ClaudeAgentDriver implements Driver {
       },
       systemPrompt: systemPreamble(this.harnessConfig.promptBudget.maxSystemPromptChars),
       ...(selected.length > 0
-        ? { mcpServers: { [MCP_SERVER_NAME]: sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }) } }
+        ? {
+            mcpServers: {
+              [MCP_SERVER_NAME]: sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }),
+            },
+          }
         : {}),
       ...(sandbox !== undefined ? { sandbox } : {}),
       ...(resumeAgentSessionId !== undefined ? { resume: resumeAgentSessionId } : {}),
       ...(this.outputJsonSchema !== undefined
-        ? { outputFormat: { type: 'json_schema', schema: JSON.parse(this.outputJsonSchema) as unknown } }
+        ? {
+            outputFormat: {
+              type: 'json_schema',
+              schema: JSON.parse(this.outputJsonSchema) as unknown,
+            },
+          }
         : {}),
     };
     const abortRoot = abortRootFollowing(signal); // ./process.ts — the wiring only
@@ -483,7 +516,11 @@ export class ClaudeAgentDriver implements Driver {
     // rejection recorded as narration, never trusted.
     let structured: unknown;
     const rawStructured = observation.result?.['structured_output'];
-    if (this.outputSchema !== undefined && observation.result !== undefined && rawStructured !== undefined) {
+    if (
+      this.outputSchema !== undefined &&
+      observation.result !== undefined &&
+      rawStructured !== undefined
+    ) {
       const check = this.outputSchema.safeParse(rawStructured);
       if (check.success) {
         structured = check.data;
@@ -551,7 +588,8 @@ export class ClaudeAgentDriver implements Driver {
     aborted: boolean,
     structured: unknown,
   ): WorkerResult {
-    const measured = observation.result !== undefined ? usageFromAgent(observation.result['usage']) : undefined;
+    const measured =
+      observation.result !== undefined ? usageFromAgent(observation.result['usage']) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted,
@@ -671,7 +709,9 @@ function readKeyEnvOrThrow(endpoint: ResolvedEndpoint): string {
 async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Promise<SessionRecord> {
   const record = await store.load(sessionRef);
   if (record === undefined) {
-    throw new Error(`claude-agent driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`);
+    throw new Error(
+      `claude-agent driver: unknown sessionRef '${sessionRef}' — no recorded session to resume`,
+    );
   }
   return record;
 }
@@ -681,7 +721,10 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
  * 'unrestricted' → the whole harness surface; 'allowlist' (the default
  * reading when mode is omitted) → harness names in `allow` only.
  */
-export function allowedToolNames(harnessToolNames: readonly string[], policy: ToolPolicy): string[] {
+export function allowedToolNames(
+  harnessToolNames: readonly string[],
+  policy: ToolPolicy,
+): string[] {
   const mode = policy.mode ?? 'allowlist';
   if (mode === 'none') return [];
   if (mode === 'unrestricted') return [...harnessToolNames];
@@ -736,7 +779,11 @@ async function runHarnessTool(
     await store.appendMessage(record.sessionId, {
       role: 'tool',
       toolName: harnessTool.name,
-      content: JSON.stringify({ input: input ?? null, ok: result.ok, output: result.ok ? result.output : result.denial.reason }),
+      content: JSON.stringify({
+        input: input ?? null,
+        ok: result.ok,
+        output: result.ok ? result.output : result.denial.reason,
+      }),
       at: nowIso(),
     });
   } catch {
@@ -946,7 +993,10 @@ function mapPermissionDenials(observation: RunObservation): void {
     if (toolUseId !== undefined && observation.deniedToolUseIds.has(toolUseId)) continue;
     if (toolUseId !== undefined) observation.deniedToolUseIds.add(toolUseId);
     const tool = harnessToolName(asString(rec?.['tool_name']) ?? 'unknown');
-    observation.denials.push({ tool, reason: `tool use denied by the agent permission gate (${tool})` });
+    observation.denials.push({
+      tool,
+      reason: `tool use denied by the agent permission gate (${tool})`,
+    });
   }
 }
 
@@ -1001,7 +1051,10 @@ async function persistObservation(
  * unreadable → undefined (an honest workspace-only continuation, never a
  * fabricated resume).
  */
-async function readAgentSessionId(sessionsDir: string, sessionId: string): Promise<string | undefined> {
+async function readAgentSessionId(
+  sessionsDir: string,
+  sessionId: string,
+): Promise<string | undefined> {
   try {
     const raw = await readFile(join(sessionsDir, `${sessionId}${AGENT_SESSION_FILE}`), 'utf8');
     const trimmed = raw.trim();
@@ -1065,7 +1118,8 @@ export interface StopReasonInputs {
 /** THE mapping (checked in order): aborted → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
-  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens) return 'budget';
+  if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
+    return 'budget';
   if (inputs.resultStatus === 'success') return 'complete';
   if (inputs.resultStatus === 'cap') return 'budget';
   return 'error';

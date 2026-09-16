@@ -1,3 +1,4 @@
+# instantiated from policy/templates/ratchet-propose.yml — edit the template, not this file
 # ratchet-propose — lane H slice 2 (goal H4), round-1 fix: post-merge
 # baseline-tightening proposals. After an improvement lands on main,
 # ratchet-propose.mjs measures the live ratchets, diffs them against the

@@ -20,17 +20,17 @@ record is the input to that confirmation, not a substitute for it.
 
 ## Runtime dependencies (npm registry, checked 2026-09-13)
 
-| package | current version | license (SPDX, registry) | this repo's pin |
-| --- | --- | --- | --- |
-| `ai` | 7.0.99 (current 7.x release) | Apache-2.0 | 7.0.99 |
-| `@ai-sdk/anthropic` | 4.0.53 | Apache-2.0 | 4.0.53 |
-| `@ai-sdk/openai` | 4.0.66 | Apache-2.0 | 4.0.66 |
-| `@ai-sdk/zai` | 3.0.10 | Apache-2.0 | 3.0.10 |
-| `@ai-sdk/deepseek` | 3.0.44 | Apache-2.0 | 3.0.44 |
-| `p-limit` | 7.3.2 | MIT | 7.3.2 |
-| `zod` | 4.6.4 | MIT | 4.6.4 |
-| `proper-lockfile` | 4.1.2 | MIT | 4.1.2 |
-| `@ast-grep/napi` | 0.45.3 | MIT | 0.45.3 |
+| package             | current version              | license (SPDX, registry) | this repo's pin |
+| ------------------- | ---------------------------- | ------------------------ | --------------- |
+| `ai`                | 7.0.99 (current 7.x release) | Apache-2.0               | 7.0.99          |
+| `@ai-sdk/anthropic` | 4.0.53                       | Apache-2.0               | 4.0.53          |
+| `@ai-sdk/openai`    | 4.0.66                       | Apache-2.0               | 4.0.66          |
+| `@ai-sdk/zai`       | 3.0.10                       | Apache-2.0               | 3.0.10          |
+| `@ai-sdk/deepseek`  | 3.0.44                       | Apache-2.0               | 3.0.44          |
+| `p-limit`           | 7.3.2                        | MIT                      | 7.3.2           |
+| `zod`               | 4.6.4                        | MIT                      | 4.6.4           |
+| `proper-lockfile`   | 4.1.2                        | MIT                      | 4.1.2           |
+| `@ast-grep/napi`    | 0.45.3                       | MIT                      | 0.45.3          |
 
 Every pin is at the registry-current version as of 2026-09-13 — nothing is
 stale; the leader saw the same 7.0.99 for `ai` at pin time. The nine rows
@@ -102,11 +102,11 @@ any way — the tool comes from the digest-pinned GitHub release only.
 
 ## ADR revisit triggers (status as of 2026-09-13)
 
-| trigger | status | evidence |
-| --- | --- | --- |
-| AI SDK HarnessAgent stabilizes | not fired | docs still say "Harness packages are experimental. Expect breaking changes between releases as this early API gets further refined." — https://ai-sdk.dev/docs/ai-sdk-harnesses/overview (2026-09-13) |
-| pi publishes a stability/semver statement | not fired | pi coding agent still 0.x — 0.85.1 at `@earendil-works/pi-coding-agent` (MIT, registry), the maintained name; the original `@mariozechner/pi-coding-agent` (0.73.1) is deprecated at the registry in its favor ("please use @earendil-works/pi-coding-agent instead going forward"); breaking changes documented in its changelog, no stability statement found — https://www.npmjs.com/package/@earendil-works/pi-coding-agent and https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md (2026-09-13) |
-| models.dev license verified | fired — answered by this document | MIT for the vendored scope — the eval-matrix pricing entries now transcribed into `src/driver/pricing/data.ts` (the upstream root MIT covers its data files; per-model `license` fields describe the models' own terms, not the data's); see the verdict above. T1.4 may vendor that scope with the copyright notice preserved |
-| Anthropic blesses non-Claude routing through the Agent SDK | not fired | no such statement found in the 0.3.270 README or the official docs — https://code.claude.com/docs/en/agent-sdk/overview (2026-09-13) |
-| codex-sdk matures | not fired | `@openai/codex-sdk` remains pre-1.0 (0.154.0, https://registry.npmjs.org/@openai/codex-sdk, 2026-09-13); no stability statement found |
-| R1 staleness / 6-week re-verify | fired — discharged by this document | this record IS that re-verification (R1/R2 were current as of 2026-09-12) |
+| trigger                                                    | status                              | evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| AI SDK HarnessAgent stabilizes                             | not fired                           | docs still say "Harness packages are experimental. Expect breaking changes between releases as this early API gets further refined." — https://ai-sdk.dev/docs/ai-sdk-harnesses/overview (2026-09-13)                                                                                                                                                                                                                                                                                                                              |
+| pi publishes a stability/semver statement                  | not fired                           | pi coding agent still 0.x — 0.85.1 at `@earendil-works/pi-coding-agent` (MIT, registry), the maintained name; the original `@mariozechner/pi-coding-agent` (0.73.1) is deprecated at the registry in its favor ("please use @earendil-works/pi-coding-agent instead going forward"); breaking changes documented in its changelog, no stability statement found — https://www.npmjs.com/package/@earendil-works/pi-coding-agent and https://github.com/earendil-works/pi/blob/main/packages/coding-agent/CHANGELOG.md (2026-09-13) |
+| models.dev license verified                                | fired — answered by this document   | MIT for the vendored scope — the eval-matrix pricing entries now transcribed into `src/driver/pricing/data.ts` (the upstream root MIT covers its data files; per-model `license` fields describe the models' own terms, not the data's); see the verdict above. T1.4 may vendor that scope with the copyright notice preserved                                                                                                                                                                                                     |
+| Anthropic blesses non-Claude routing through the Agent SDK | not fired                           | no such statement found in the 0.3.270 README or the official docs — https://code.claude.com/docs/en/agent-sdk/overview (2026-09-13)                                                                                                                                                                                                                                                                                                                                                                                               |
+| codex-sdk matures                                          | not fired                           | `@openai/codex-sdk` remains pre-1.0 (0.154.0, https://registry.npmjs.org/@openai/codex-sdk, 2026-09-13); no stability statement found                                                                                                                                                                                                                                                                                                                                                                                              |
+| R1 staleness / 6-week re-verify                            | fired — discharged by this document | this record IS that re-verification (R1/R2 were current as of 2026-09-12)                                                                                                                                                                                                                                                                                                                                                                                                                                                          |

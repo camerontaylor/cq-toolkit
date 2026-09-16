@@ -200,7 +200,8 @@ function stripDiffPrefix(p: string): string {
 function sectionPath(lines: string[]): string | null {
   for (const line of lines) {
     if (line.startsWith('+++ /dev/null')) continue; // lifecycle marker, not a path
-    if (line.startsWith('+++ ')) return stripDiffPrefix(line.slice('+++ '.length).split('\t')[0]);
+    if (line.startsWith('+++ '))
+      return stripDiffPrefix(line.slice('+++ '.length).replace(/\t.*$/, ''));
   }
   const header = lines.find((l) => l.startsWith('diff --git '));
   if (header === undefined) return null;
@@ -215,7 +216,7 @@ function sectionPath(lines: string[]): string | null {
     }
   }
   if (bestAt !== -1) {
-    return stripDiffPrefix(rest.slice(bestAt + 1 + bestPrefix.length).split('\t')[0]);
+    return stripDiffPrefix(rest.slice(bestAt + 1 + bestPrefix.length).replace(/\t.*$/, ''));
   }
   // noprefix dialect prints the identical path twice: 'X X'. The pair is
   // always ODD-length (2·|X| + 1 for the separator space), so floor-halve:
@@ -311,7 +312,7 @@ function scanSide(lines: string[], re: RegExp): SideScan {
       last = m[1];
     }
   }
-  return { count, last };
+  return { count, ...(last === undefined ? {} : { last }) };
 }
 
 /**
@@ -392,17 +393,16 @@ function judgeModified(
   // (malformed escape) — is committed evidence the file could not parse
   // back. Unparsable, never a lucky pass and never a silent absence.
   const oldDirKeyPresent =
-    preferDiffLines(scanSide(minus, DIRECTION_KEY_RE), scanSide(context, DIRECTION_KEY_RE)).count > 0;
+    preferDiffLines(scanSide(minus, DIRECTION_KEY_RE), scanSide(context, DIRECTION_KEY_RE)).count >
+    0;
   const newDirKeyPresent =
-    preferDiffLines(scanSide(plus, DIRECTION_KEY_RE), scanSide(context, DIRECTION_KEY_RE)).count > 0;
+    preferDiffLines(scanSide(plus, DIRECTION_KEY_RE), scanSide(context, DIRECTION_KEY_RE)).count >
+    0;
   const newDir =
     newSide.direction.last === undefined ? undefined : decodeJsonString(newSide.direction.last);
   const oldDir =
     oldSide.direction.last === undefined ? undefined : decodeJsonString(oldSide.direction.last);
-  if (
-    (oldDirKeyPresent && oldDir === undefined) ||
-    (newDirKeyPresent && newDir === undefined)
-  ) {
+  if ((oldDirKeyPresent && oldDir === undefined) || (newDirKeyPresent && newDir === undefined)) {
     return [unparsable()];
   }
   const direction = newDir ?? oldDir;
@@ -438,13 +438,13 @@ function judgeModified(
     return [
       {
         path,
-        target,
-        metric,
-        oldValue,
-        newValue,
+        ...(target === undefined ? {} : { target }),
+        ...(metric === undefined ? {} : { metric }),
+        ...(oldValue === undefined ? {} : { oldValue }),
+        ...(newValue === undefined ? {} : { newValue }),
         why: 'direction changed',
-        oldDirection: oldDir,
-        newDirection: newDir,
+        ...(oldDir === undefined ? {} : { oldDirection: oldDir }),
+        ...(newDir === undefined ? {} : { newDirection: newDir }),
       },
     ];
   }
@@ -469,20 +469,23 @@ function judgeModified(
   const newUnitRaw = newSide.unit.last;
   const oldUnit = oldUnitRaw === undefined ? undefined : decodeJsonString(oldUnitRaw);
   const newUnit = newUnitRaw === undefined ? undefined : decodeJsonString(newUnitRaw);
-  if ((oldUnitKeyPresent && oldUnit === undefined) || (newUnitKeyPresent && newUnit === undefined)) {
+  if (
+    (oldUnitKeyPresent && oldUnit === undefined) ||
+    (newUnitKeyPresent && newUnit === undefined)
+  ) {
     return [unparsable()];
   }
   if (oldUnit !== newUnit) {
     return [
       {
         path,
-        target,
-        metric,
-        oldValue,
-        newValue,
+        ...(target === undefined ? {} : { target }),
+        ...(metric === undefined ? {} : { metric }),
+        ...(oldValue === undefined ? {} : { oldValue }),
+        ...(newValue === undefined ? {} : { newValue }),
         why: 'unit changed',
-        oldUnit,
-        newUnit,
+        ...(oldUnit === undefined ? {} : { oldUnit }),
+        ...(newUnit === undefined ? {} : { newUnit }),
       },
     ];
   }
@@ -505,19 +508,26 @@ function judgeModified(
       return [unparsable()];
     }
     if (loosens(oldValue, newValue, direction)) {
-      violations.push({ path, target, metric, oldValue, newValue, why: 'loosened' });
+      violations.push({
+        path,
+        ...(target === undefined ? {} : { target }),
+        ...(metric === undefined ? {} : { metric }),
+        oldValue,
+        newValue,
+        why: 'loosened',
+      });
     }
   }
   if (flip) {
     violations.push({
       path,
-      target,
-      metric,
-      oldValue,
-      newValue,
+      ...(target === undefined ? {} : { target }),
+      ...(metric === undefined ? {} : { metric }),
+      ...(oldValue === undefined ? {} : { oldValue }),
+      ...(newValue === undefined ? {} : { newValue }),
       why: 'direction changed',
-      oldDirection: oldDir,
-      newDirection: newDir,
+      ...(oldDir === undefined ? {} : { oldDirection: oldDir }),
+      ...(newDir === undefined ? {} : { newDirection: newDir }),
     });
   }
   return violations;
@@ -541,7 +551,10 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       // ignored: there is nothing there to judge.
       const { minus, plus } = contentLines(section);
       if (minus.length > 0 || plus.length > 0) {
-        violations.push({ path: section[0], why: 'unparsable baseline diff' });
+        violations.push({
+          path: section[0] ?? '(missing diff header)',
+          why: 'unparsable baseline diff',
+        });
       }
       continue;
     }

@@ -8,14 +8,16 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 
 ## Files
 
-| file | what it is |
-| --- | --- |
-| `init-merge-queue.yml` | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD |
+| file                   | what it is                                                                                                                                                                         |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init-merge-queue.yml` | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD                                                                                              |
 | `merge-queue-gate.yml` | on push to `merge-queue`: wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind a merge-queue-tip guard and two merge-base guards |
-| `sync-merge-queue.yml` | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate |
-| `required-check.md` | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example |
-| `affected-tests.md` | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay |
-| `README.md` | this guide |
+| `sync-merge-queue.yml` | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate                 |
+| `required-check.md`    | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                         |
+| `affected-tests.md`    | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay                                                                                         |
+| `ratchet.yml`          | required type and coverage baseline checks on pushes and pull requests                                                                                                             |
+| `ratchet-propose.yml`  | post-merge baseline tightening proposals using the automation token                                                                                                                |
+| `README.md`            | this guide                                                                                                                                                                         |
 
 ## Placeholder tokens
 
@@ -27,15 +29,15 @@ appears in `required-check.md` — the worked example carries this repo's
 real run steps — so an adopter swaps those steps by hand rather than by
 substitution.
 
-| token | used by | meaning |
-| --- | --- | --- |
-| `{{PROMOTE_SECRET}}` | init, gate, sync | NAME of the repository secret holding a PAT with `contents: write` (branch writes: bootstrap push, ff-promote, refs PATCH, merge API), `actions: write` (sync dispatches the gate), `issues: write` (the divergence alarm), and `checks: read` (the gate's required-check wait polls the check-runs API) — a fine-grained PAT with those four permissions, or the coarse classic-PAT equivalent. Instantiated files reference it as `${{ secrets.<name> }}` — a name, never a value; a template or instantiation that embeds a token value is a denylist-class bug. |
-| `{{GATE_CHECKS}}` | gate | comma list of required check names the gate waits for, e.g. `static,denylist` |
-| `{{GATE_TIMEOUT_MIN}}` | gate | minutes the gate waits for the checks before refusing to promote (default 20; never promote unchecked) |
-| `{{RUNNER}}` | required-check.md, affected-tests.md | `runs-on` label, e.g. `ubuntu-latest` |
-| `{{NODE_VERSION}}` | required-check.md, affected-tests.md | Node version for `setup-node` |
-| `{{INSTALL_CMD}}` | required-check.md, affected-tests.md | dependency install command, e.g. `npm ci` |
-| `{{COMMANDS...}}` | required-check.md | HAND-REPLACED slot (see above): the variadic ordered run-steps of the static job. The template carries this repo's four literal steps — typecheck ratchet, lint, test, build — and an adopter replaces them by hand with their own commands; no placeholder text is substituted. |
+| token                  | used by                              | meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------- | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{PROMOTE_SECRET}}`   | init, gate, sync                     | NAME of the repository secret holding a PAT with `contents: write` (branch writes: bootstrap push, ff-promote, refs PATCH, merge API), `actions: write` (sync dispatches the gate), `issues: write` (the divergence alarm), and `checks: read` (the gate's required-check wait polls the check-runs API) — a fine-grained PAT with those four permissions, or the coarse classic-PAT equivalent. Instantiated files reference it as `${{ secrets.<name> }}` — a name, never a value; a template or instantiation that embeds a token value is a denylist-class bug. |
+| `{{GATE_CHECKS}}`      | gate                                 | comma list of required check names the gate waits for, e.g. `static,denylist`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `{{GATE_TIMEOUT_MIN}}` | gate                                 | minutes the gate waits for the checks before refusing to promote (default 20; never promote unchecked)                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `{{RUNNER}}`           | required-check.md, affected-tests.md | `runs-on` label, e.g. `ubuntu-latest`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `{{NODE_VERSION}}`     | required-check.md, affected-tests.md | Node version for `setup-node`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `{{INSTALL_CMD}}`      | required-check.md, affected-tests.md | dependency install command, e.g. `npm ci`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `{{COMMANDS...}}`      | required-check.md                    | HAND-REPLACED slot (see above): the variadic ordered run-steps of the static job. The template carries this repo's five literal steps — static gate, format check, test, Knip, build — and an adopter replaces them by hand with their own commands; no placeholder text is substituted.                                                                                                                                                                                                                                                                            |
 
 ## How instantiation works
 
@@ -44,7 +46,7 @@ substitution.
 2. Drop the result, otherwise unchanged, into `.github/workflows/`.
 3. Keep the provenance header the instantiator adds
    (`# instantiated from policy/templates/... — edit the template, not this
-   file`); it is what makes template drift visible in diffs.
+file`); it is what makes template drift visible in diffs.
 4. When a NEW required check lands, remember that "required" is defined in
    THREE unlinked places, and all three must learn it:
    - `REQUIRED_WORKFLOW_CHECKS` in `scripts/denylist-scan` — the I4 policy
@@ -77,6 +79,7 @@ engine-based runners `scripts/ratchet-typecheck.mjs` and
 (one schemaVersion-1 file per (target, metric), written by
 `createCaptureBaseline`). Concretely, in this repo: `.github/workflows/ci.yml`
 is `required-check.md` instantiated, the three queue workflows are the three
+`.yml` templates instantiated, the two ratchet workflows are their matching
 `.yml` templates instantiated, and `denylist.yml` (which predates the
 templates) carries the required-check trigger shape with the denylist job
 body and a provenance comment pointing back at `required-check.md`. If you

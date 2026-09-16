@@ -106,19 +106,16 @@ describe('planReviewBatch filters to actionable', () => {
 // ---------------------------------------------------------------------------
 
 describe('planReviewBatch isolation default (I6)', () => {
-  test(
-    'I6 default: a single actionable item → exactly ONE isolated batch with ONE item and worktreeHint null',
-    () => {
-      const single = item();
-      const batches = planReviewBatch(classificationOf([single]));
-      expect(batches).toHaveLength(1);
-      expect(batches[0]).toEqual({
-        mode: 'isolated',
-        worktreeHint: null,
-        items: [single],
-      });
-    },
-  );
+  test('I6 default: a single actionable item → exactly ONE isolated batch with ONE item and worktreeHint null', () => {
+    const single = item();
+    const batches = planReviewBatch(classificationOf([single]));
+    expect(batches).toHaveLength(1);
+    expect(batches[0]).toEqual({
+      mode: 'isolated',
+      worktreeHint: null,
+      items: [single],
+    });
+  });
 
   test('I6 default: multiple actionable items → one isolated batch EACH, input order preserved', () => {
     const first = item({ path: 'src/a.ts' });
@@ -133,12 +130,15 @@ describe('planReviewBatch isolation default (I6)', () => {
   });
 
   test('isolated mode ignores sharedGroupBy and the cap — never consulted', () => {
-    const batches = planReviewBatch(
-      classificationOf([item(), item()]),
-      { ...defaultPlanBatchConfig, sharedGroupBy: 'none', maxItemsPerSharedBatch: 1 },
-    );
+    const batches = planReviewBatch(classificationOf([item(), item()]), {
+      ...defaultPlanBatchConfig,
+      sharedGroupBy: 'none',
+      maxItemsPerSharedBatch: 1,
+    });
     expect(batches).toHaveLength(2);
-    expect(batches.every((batch) => batch.mode === 'isolated' && batch.items.length === 1)).toBe(true);
+    expect(batches.every((batch) => batch.mode === 'isolated' && batch.items.length === 1)).toBe(
+      true,
+    );
   });
 });
 
@@ -171,21 +171,22 @@ describe('planReviewBatch shared mode', () => {
     expect(batches.every((batch) => batch.worktreeHint === 'shared-pr-worktree')).toBe(true);
   });
 
-  test("null paths group under their OWN bucket — never mixed with a concrete path", () => {
+  test('null paths group under their OWN bucket — never mixed with a concrete path', () => {
     const fileItem = item({ path: 'src/a.ts' });
     const nullOne = item({ kind: 'review', path: null, reason: 'review_summary_needs_response' });
     const nullTwo = item({ kind: 'comment', path: null, reason: 'top_level_summary' });
-    const batches = planReviewBatch(
-      classificationOf([fileItem, nullOne, nullTwo]),
-      sharedConfig(),
-    );
+    const batches = planReviewBatch(classificationOf([fileItem, nullOne, nullTwo]), sharedConfig());
     expect(batches).toHaveLength(2);
     expect(batches[0]?.items).toEqual([fileItem]);
     expect(batches[1]?.items).toEqual([nullOne, nullTwo]);
   });
 
   test('the cap ALWAYS holds, even in shared mode: 3 items on one path, cap 2 → two batches [2, 1]', () => {
-    const items = [item({ path: 'src/a.ts' }), item({ path: 'src/a.ts' }), item({ path: 'src/a.ts' })];
+    const items = [
+      item({ path: 'src/a.ts' }),
+      item({ path: 'src/a.ts' }),
+      item({ path: 'src/a.ts' }),
+    ];
     const batches = planReviewBatch(
       classificationOf(items),
       sharedConfig({ maxItemsPerSharedBatch: 2 }),
@@ -237,6 +238,8 @@ describe('planReviewBatch determinism', () => {
     const classification = classificationOf(items);
     expect(planReviewBatch(classification)).toEqual(planReviewBatch(classification));
     const config = sharedConfig({ maxItemsPerSharedBatch: 2 });
-    expect(planReviewBatch(classification, config)).toEqual(planReviewBatch(classification, config));
+    expect(planReviewBatch(classification, config)).toEqual(
+      planReviewBatch(classification, config),
+    );
   });
 });

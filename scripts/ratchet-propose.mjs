@@ -72,7 +72,9 @@ delete process.env.CQ_AUTOMATION_TOKEN;
 // checkouts are clean; a local run with a token is refused here.
 const status = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
 if (status.error || status.status !== 0) {
-  fail(`cannot inspect the worktree: ${status.error ? status.error.message : `exit ${status.status}`}`);
+  fail(
+    `cannot inspect the worktree: ${status.error ? status.error.message : `exit ${status.status}`}`,
+  );
 }
 if ((status.stdout ?? '').trim() !== '') {
   fail(
@@ -93,9 +95,7 @@ const { evidence: tcEvidence, rawText: tcRaw } = typecheckEvidence(
   tcRun,
 );
 const tcValue =
-  tcEvidence === null
-    ? null
-    : (engine.adapters.typecheckCount.extract(tcEvidence)?.value ?? null);
+  tcEvidence === null ? null : (engine.adapters.typecheckCount.extract(tcEvidence)?.value ?? null);
 if (tcValue === null) {
   console.error(
     `ratchet-propose: note — typecheck-count has no usable reading ` +
@@ -121,7 +121,9 @@ if (covValue === null) {
 // ---- committed baselines: parse each with the engine's own parser ----
 const baselinesDir = join(ROOT, 'baselines');
 const committed = [];
-for (const name of readdirSync(baselinesDir).filter((n) => n.endsWith('.json')).sort()) {
+for (const name of readdirSync(baselinesDir)
+  .filter((n) => n.endsWith('.json'))
+  .sort()) {
   const abs = join(baselinesDir, name);
   // lstat BEFORE read (mirror the engine's leaf discipline): a non-regular
   // entry is refused as evidence, never followed.
@@ -199,7 +201,12 @@ function runGit(args, { allowFail = false, env = process.env } = {}) {
 }
 
 function runGh(args) {
-  const res = spawnSync('gh', args, { cwd: ROOT, encoding: 'utf8', env: ghEnv(), maxBuffer: MAX_BUFFER });
+  const res = spawnSync('gh', args, {
+    cwd: ROOT,
+    encoding: 'utf8',
+    env: ghEnv(),
+    maxBuffer: MAX_BUFFER,
+  });
   if (res.error || res.status !== 0) {
     throw new Error(
       `gh ${args[0]} failed: ${res.error ? res.error.message : `exit ${res.status}`}\n` +
@@ -225,7 +232,18 @@ if (repoSlug === '') {
 // the truth, and a non-open PR routes to the fresh-create path).
 function listOpenProposalPrs(head, base) {
   const list = parseGhJson(
-    runGh(['pr', 'list', '--head', head, '--base', base, '--state', 'open', '--json', 'number,url']),
+    runGh([
+      'pr',
+      'list',
+      '--head',
+      head,
+      '--base',
+      base,
+      '--state',
+      'open',
+      '--json',
+      'number,url',
+    ]),
     [],
   );
   return list.filter((pr) => {
@@ -261,7 +279,10 @@ const effects = {
       // the fresh-checkout case for the local head, and the FIRST-push case
       // for the remote-tracking ref. An absent ref is the create/plain-push
       // path, never an error (PR-105 round-2 finding 3).
-      const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`], { allowFail: true, env: gitEnv }).stdout.trim();
+      const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`], {
+        allowFail: true,
+        env: gitEnv,
+      }).stdout.trim();
       if (localHead !== '') {
         runGit(['checkout', head]); // reuse: idempotent re-run keeps its history
       } else {
@@ -274,12 +295,23 @@ const effects = {
       }
       runGit(['add', '--', ...files.map((f) => f.path)]);
       const commit = runGit(
-        ['-c', 'user.name=cq-toolkit ratchet', '-c', 'user.email=ratchet@cq-toolkit.local', 'commit', '-m', commitMessage],
+        [
+          '-c',
+          'user.name=cq-toolkit ratchet',
+          '-c',
+          'user.email=ratchet@cq-toolkit.local',
+          'commit',
+          '-m',
+          commitMessage,
+        ],
         { allowFail: true },
       );
       // Idempotency: identical bytes on a re-run commit nothing — that is
       // success, not failure.
-      if (commit.status !== 0 && /nothing to commit/.test(`${commit.stdout}${commit.stderr}`) === false) {
+      if (
+        commit.status !== 0 &&
+        /nothing to commit/.test(`${commit.stdout}${commit.stderr}`) === false
+      ) {
         throw new Error(
           `git commit failed: exit ${commit.status}\n` +
             redact(`${commit.stdout}${commit.stderr}`).trim(),
@@ -288,10 +320,25 @@ const effects = {
       // Lease push: a TRUE lease against the remote head when it exists
       // (idempotent re-push), a plain create when it does not (first push —
       // the tracking ref probe below fails on exactly that).
-      runGit([...cred, 'fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], { allowFail: true, env: gitEnv });
-      const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`], { allowFail: true, env: gitEnv }).stdout.trim();
+      runGit([...cred, 'fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], {
+        allowFail: true,
+        env: gitEnv,
+      });
+      const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`], {
+        allowFail: true,
+        env: gitEnv,
+      }).stdout.trim();
       if (expected !== '') {
-        runGit([...cred, 'push', `--force-with-lease=refs/heads/${head}:${expected}`, 'origin', `${head}:refs/heads/${head}`], { env: gitEnv });
+        runGit(
+          [
+            ...cred,
+            'push',
+            `--force-with-lease=refs/heads/${head}:${expected}`,
+            'origin',
+            `${head}:refs/heads/${head}`,
+          ],
+          { env: gitEnv },
+        );
       } else {
         runGit([...cred, 'push', 'origin', `${head}:refs/heads/${head}`], { env: gitEnv });
       }
@@ -319,8 +366,24 @@ const effects = {
         runGh(['pr', 'edit', String(existing[0].number), '--title', title, '--body', body]);
       },
       create: async () => {
-        const out = runGh(['pr', 'create', '--base', base, '--head', head, '--title', title, '--body', body]);
-        const url = out.trim().split('\n').filter((l) => l.startsWith('http')).pop() ?? null;
+        const out = runGh([
+          'pr',
+          'create',
+          '--base',
+          base,
+          '--head',
+          head,
+          '--title',
+          title,
+          '--body',
+          body,
+        ]);
+        const url =
+          out
+            .trim()
+            .split('\n')
+            .filter((l) => l.startsWith('http'))
+            .pop() ?? null;
         const m = /\/pull\/(\d+)/.exec(url ?? '');
         fresh = { number: m === null ? null : Number(m[1]), url };
       },
@@ -334,7 +397,11 @@ const effects = {
     if (upsert.created === false) {
       return { created: false, number: existing[0].number, url: existing[0].url };
     }
-    return { created: true, number: fresh === null ? null : fresh.number, url: fresh === null ? null : fresh.url };
+    return {
+      created: true,
+      number: fresh === null ? null : fresh.number,
+      url: fresh === null ? null : fresh.url,
+    };
   },
 };
 
@@ -342,9 +409,7 @@ const effects = {
 const propose = engine.createProposeBaselineUpdate(effects);
 const result = await propose({ ws: ROOT, base: BASE, improvements });
 if (result.status !== 'ok') {
-  console.error(
-    `ratchet-propose: proposal ${result.status} — ${result.error ?? result.detail}`,
-  );
+  console.error(`ratchet-propose: proposal ${result.status} — ${result.error ?? result.detail}`);
   process.exit(1);
 }
 const outcome = result.value;

@@ -17,18 +17,23 @@
     "cq": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc6 -p tsconfig.build.json",
-    "typecheck": "tsc6 -p tsconfig.json",
-    "lint": "eslint .",
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "npm run check:static",
+    "lint": "npm run check:static",
     "test": "vitest run",
-    "denylist": "./scripts/denylist-scan"
+    "denylist": "./scripts/denylist-scan",
+    "format:check": "oxfmt --check .",
+    "check:static": "node scripts/ratchet-typecheck.mjs",
+    "lint:fast": "node scripts/lint-fast.mjs",
+    "fix": "node scripts/fix.mjs",
+    "check": "npm run format:check && npm run check:static && npm run test && npm run knip",
+    "knip": "knip --no-progress"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.53",
     "@ai-sdk/deepseek": "3.0.44",
     "@ai-sdk/openai": "4.0.66",
     "@ai-sdk/zai": "3.0.10",
-    "@ast-grep/napi": "0.45.3",
     "ai": "7.0.99",
     "p-limit": "7.3.2",
     "proper-lockfile": "4.1.2",
@@ -43,12 +48,14 @@
     }
   },
   "devDependencies": {
-    "@eslint/js": "10.0.1",
-    "@types/node": "26.5.1",
-    "@vitest/coverage-v8": "5.0.0",
-    "eslint": "10.10.0",
-    "typescript": "npm:@typescript/typescript6@6.0.2",
-    "typescript-eslint": "8.70.0",
-    "vitest": "5.0.0"
+    "@ai-sdk/provider": "4.0.14",
+    "@types/node": "24.13.5",
+    "knip": "6.35.1",
+    "oxfmt": "0.68.0",
+    "oxlint": "1.83.0",
+    "oxlint-tsgolint": "7.0.2001",
+    "typescript": "7.0.2",
+    "vitest": "5.0.0",
+    "@vitest/coverage-v8": "5.0.0"
   }
 }

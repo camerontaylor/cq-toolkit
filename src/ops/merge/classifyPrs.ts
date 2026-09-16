@@ -325,7 +325,11 @@ export function classifyPr(
   // Row 5 — a human owes the PR work: unresolved threads from reviewers
   // other than the author (the author's own threads do not block).
   if (unresolvedExternalThreads > 0) {
-    return { verdict: 'has-issues', reason: 'unresolved_external_threads', unresolvedExternalThreads };
+    return {
+      verdict: 'has-issues',
+      reason: 'unresolved_external_threads',
+      unresolvedExternalThreads,
+    };
   }
   // Rows 6–9 read review evidence; they share one screening context.
   const ctx: ReviewContext = { authorLogin: candidate.authorLogin, lastCommitMs, config };
@@ -358,33 +362,35 @@ export function classifyPr(
   // already held before we got here. An all-clear at-or-before the commit
   // speaks about earlier code and falls through.
   const allClearAfterLastCommit =
-    candidate.reviews.some((review) =>
-      // A review body is all-clear evidence only when its VERDICT can
-      // carry evidence at all (stateCounts — a DISMISSED or
-      // CHANGES_REQUESTED "LGTM" body is a retracted note or an
-      // objection, not an all-clear).
-      stateCounts(review.state) &&
-      isAllClearAfter(
-        review.body,
-        review.authorLogin,
-        review.submittedAt,
-        candidate.authorLogin,
-        lastCommitMs,
-        config,
-      ),
+    candidate.reviews.some(
+      (review) =>
+        // A review body is all-clear evidence only when its VERDICT can
+        // carry evidence at all (stateCounts — a DISMISSED or
+        // CHANGES_REQUESTED "LGTM" body is a retracted note or an
+        // objection, not an all-clear).
+        stateCounts(review.state) &&
+        isAllClearAfter(
+          review.body,
+          review.authorLogin,
+          review.submittedAt,
+          candidate.authorLogin,
+          lastCommitMs,
+          config,
+        ),
     ) ||
-    candidate.issueComments.some((comment) =>
-      // Only TOP-LEVEL conversation comments: a reply rides on someone
-      // else's thread, it is not the commenter's own verdict on the PR.
-      comment.inReplyToId === null &&
-      isAllClearAfter(
-        comment.body,
-        comment.authorLogin,
-        comment.createdAt,
-        candidate.authorLogin,
-        lastCommitMs,
-        config,
-      ),
+    candidate.issueComments.some(
+      (comment) =>
+        // Only TOP-LEVEL conversation comments: a reply rides on someone
+        // else's thread, it is not the commenter's own verdict on the PR.
+        comment.inReplyToId === null &&
+        isAllClearAfter(
+          comment.body,
+          comment.authorLogin,
+          comment.createdAt,
+          candidate.authorLogin,
+          lastCommitMs,
+          config,
+        ),
     );
   if (allClearAfterLastCommit) {
     return { verdict: 'eligible', reason: 'explicit_all_clear', unresolvedExternalThreads };

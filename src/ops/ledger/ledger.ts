@@ -218,7 +218,10 @@ export function makeLedgerRecord(
     try {
       store = storeFor(input);
     } catch (err) {
-      return { status: 'failed', error: `ledger: could not load the error ledger — ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `ledger: could not load the error ledger — ${messageOf(err)}`,
+      };
     }
     // The critical section is deliberately ALL-SYNC (load, mutate, save):
     // within a process it cannot interleave; the lock makes it exclusive
@@ -264,14 +267,20 @@ export function makeLedgerRecord(
       updated = store.lock !== undefined ? await store.lock(applyRecord) : applyRecord();
     } catch (err) {
       if (err instanceof StoreFault) return { status: 'failed', error: err.message };
-      return { status: 'failed', error: `ledger: could not update the error ledger — ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `ledger: could not update the error ledger — ${messageOf(err)}`,
+      };
     }
     return updated.count >= escalateAt
       ? {
           status: 'needs-human',
           reason: `error signature exceeded escalation threshold: ${updated.signature} (count ${updated.count} ≥ ${escalateAt})`,
         }
-      : { status: 'ok', value: { signature: updated.signature, count: updated.count, escalated: false } };
+      : {
+          status: 'ok',
+          value: { signature: updated.signature, count: updated.count, escalated: false },
+        };
   };
 }
 
@@ -295,7 +304,10 @@ export function makeLedgerQuery(
     try {
       file = storeFor(input).load();
     } catch (err) {
-      return { status: 'failed', error: `ledger: could not load the error ledger — ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `ledger: could not load the error ledger — ${messageOf(err)}`,
+      };
     }
     const { suppressAt, escalateAt } = thresholds.thresholds;
     const entries = sortEntries(file.entries);
@@ -316,16 +328,21 @@ export function makeLedgerQuery(
  * caught). Returns the fault message instead of throwing: thresholds enter
  * at the op boundary, and boundary violations are `failed` results.
  */
-function resolvedThresholdsOrFault(
-  overrides?: { suppressAt?: number; escalateAt?: number },
-): { thresholds: LedgerThresholds } | { fault: string } {
+function resolvedThresholdsOrFault(overrides?: {
+  suppressAt?: number;
+  escalateAt?: number;
+}): { thresholds: LedgerThresholds } | { fault: string } {
   const suppressAt = overrides?.suppressAt ?? DEFAULT_THRESHOLD.suppressAt;
   const escalateAt = overrides?.escalateAt ?? DEFAULT_THRESHOLD.escalateAt;
   if (!Number.isInteger(suppressAt) || suppressAt < 1) {
-    return { fault: `ledger: invalid thresholds — suppressAt (${String(suppressAt)}) must be an integer ≥ 1` };
+    return {
+      fault: `ledger: invalid thresholds — suppressAt (${String(suppressAt)}) must be an integer ≥ 1`,
+    };
   }
   if (!Number.isInteger(escalateAt) || escalateAt < 2) {
-    return { fault: `ledger: invalid thresholds — escalateAt (${String(escalateAt)}) must be an integer ≥ 2` };
+    return {
+      fault: `ledger: invalid thresholds — escalateAt (${String(escalateAt)}) must be an integer ≥ 2`,
+    };
   }
   if (escalateAt <= suppressAt) {
     return {

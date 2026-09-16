@@ -82,6 +82,8 @@ function countsFor(jobs: Array<OpResult<unknown>>): RunReport['counts'] {
       case 'budget-exhausted':
         counts['budget-exhausted'] += 1;
         break;
+      case 'failed':
+      case 'indeterminate':
       default:
         counts.failed += 1;
     }
@@ -128,7 +130,9 @@ async function makeTmpOpsRoot(prefix: string): Promise<string> {
 }
 
 /** Write a plan file (and journal dir path) into a fresh tmp dir. */
-async function writePlanFile(plan: unknown): Promise<{ dir: string; planPath: string; journalDir: string }> {
+async function writePlanFile(
+  plan: unknown,
+): Promise<{ dir: string; planPath: string; journalDir: string }> {
   const dir = await makeTmpDir('cq-i1-plan-');
   const planPath = join(dir, 'plan.json');
   await writeFile(planPath, typeof plan === 'string' ? plan : JSON.stringify(plan));
@@ -158,7 +162,7 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
     for (const c of cases) {
       const { code, out, err } = await capture([c.name], { opsRoot });
       expect(code).toBe(c.code);
-      expect(JSON.parse(out).status).toBe(c.status);
+      expect(JSON.parse(out)).toMatchObject({ status: c.status });
       // Human-mode narration: one `cq: <name>: <status> — <detail>` line.
       expect(err).toContain(`cq: ${c.name}: ${c.status} — `);
     }
@@ -168,7 +172,7 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
     const { code, out, err } = await capture(['boom', '--json'], { opsRoot });
     expect(code).toBe(1);
     expect(err).toBe(''); // machine mode: stderr stays EMPTY
-    expect(JSON.parse(out).status).toBe('failed');
+    expect(JSON.parse(out)).toMatchObject({ status: 'failed' });
   });
 
   test('unknown subcommand: exit 2, no stdout, narrated to stderr', async () => {
@@ -215,7 +219,9 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
   test('--ops-root on an OP subcommand: reserved run-plan flag → exit 2, stdout empty', async () => {
     // Op inputs own their schema keys — no hidden flag collision: the flag is
     // rejected as a usage error BEFORE input validation, whatever the schema.
-    const { code, out, err } = await capture(['echo', '--msg=x', '--ops-root=/tmp/whatever'], { opsRoot });
+    const { code, out, err } = await capture(['echo', '--msg=x', '--ops-root=/tmp/whatever'], {
+      opsRoot,
+    });
     expect(code).toBe(2);
     expect(out).toBe('');
     expect(err).toMatch(/--ops-root is a run-plan flag/);
@@ -345,7 +351,9 @@ describe('4530779 pins: async-schema gate, lossless-result probes, reserved valu
     const human = await capture(['asyncthrow'], { opsRoot: tmp });
     expect(human.code).toBe(2);
     expect(human.out).toBe('');
-    expect(human.err).toMatch(/invalid input for 'asyncthrow': schema gate threw — refinement exploded/);
+    expect(human.err).toMatch(
+      /invalid input for 'asyncthrow': schema gate threw — refinement exploded/,
+    );
     expect(human.err).not.toMatch(/threw:/); // never the last-resort crash narration
     const machine = await capture(['asyncthrow', '--json'], { opsRoot: tmp });
     expect(machine.code).toBe(2);
@@ -466,7 +474,12 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
   test('machine mode: missing plan + --json → exit 2 with stdout AND stderr EMPTY; human mode narrates', async () => {
     const dir = await makeTmpDir('cq-i1-silent-');
     const missing = join(dir, 'absent.json');
-    const json = await capture(['run-plan', `--plan=${missing}`, `--ops-root=${opsRoot}`, '--json']);
+    const json = await capture([
+      'run-plan',
+      `--plan=${missing}`,
+      `--ops-root=${opsRoot}`,
+      '--json',
+    ]);
     expect(json.code).toBe(2);
     expect(json.out).toBe(''); // no artifact — the run never started
     expect(json.err).toBe(''); // machine mode: the exit code IS the verdict
@@ -551,12 +564,7 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
     );
     const execFileAsync = promisify(execFile);
     // (a) RAW fs path: the '#' fragment truncation makes the import fail…
-    const rawArgs = [
-      '--input-type=module',
-      '-e',
-      'await import(process.argv[1]);',
-      registryPath,
-    ];
+    const rawArgs = ['--input-type=module', '-e', 'await import(process.argv[1]);', registryPath];
     await expect(execFileAsync(process.execPath, rawArgs)).rejects.toThrow();
     // (b) …and the ESCAPED FILE URL — the exact specifier form scanOps
     // selects for a '#' path — imports natively: the op resolves and runs.
@@ -568,7 +576,7 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
         'const entry = mod.registry[0];',
         "if (entry.name !== 'hashop') throw new Error('wrong op: ' + entry.name);",
         'const op = await entry.importer();',
-        "console.log(JSON.stringify(await op({})));",
+        'console.log(JSON.stringify(await op({})));',
       ].join('\n'),
       pathToFileURL(registryPath).href,
     ];
@@ -612,7 +620,11 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
         { id: 'b', op: 'echo', input: { msg: 'lo' }, dependsOn: ['a'] },
       ],
     });
-    const { code, out, err } = await capture(['run-plan', `--plan=${planPath}`, `--ops-root=${opsRoot}`]);
+    const { code, out, err } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+    ]);
     expect(code).toBe(2);
     expect(out).toBe('');
     expect(err).toMatch(/invalid input for 'run-plan': topoOrder: dependency cycle among jobs/);
@@ -635,7 +647,11 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
         // Only ENOENT/ENOTDIR mean "cannot be a readable plan file" (the
         // input-defect class → 2); ANY other stat error is runtime
         // knowledge, rethrown to main.ts's catch → narrated exit 1.
-        const { code, out, err } = await capture(['run-plan', `--plan=${planPath}`, `--ops-root=${opsRoot}`]);
+        const { code, out, err } = await capture([
+          'run-plan',
+          `--plan=${planPath}`,
+          `--ops-root=${opsRoot}`,
+        ]);
         expect(code).toBe(1);
         expect(out).toBe('');
         expect(err).toMatch(/run-plan threw:/);
@@ -780,30 +796,48 @@ describe('lossless parity pin: the CLI walk and the kernel walk reject the same 
       { name: 'lossmap', expr: 'new Map()', pattern: "non-plain object of type 'Map'" },
       { name: 'lossdate', expr: 'new Date(0)', pattern: "non-plain object of type 'Date'" },
       { name: 'lossset', expr: 'new Set([1])', pattern: "non-plain object of type 'Set'" },
-      { name: 'lossnullproto', expr: 'Object.assign(Object.create(null), { m: new Map() })', pattern: "non-plain object of type 'Map'" },
+      {
+        name: 'lossnullproto',
+        expr: 'Object.assign(Object.create(null), { m: new Map() })',
+        pattern: "non-plain object of type 'Map'",
+      },
       // The hidden-key family (PR #31 review, Codex P1 + review-debt #76):
       // the member walk sees only enumerable string-keyed values, so these
       // shapes passed while JSON.stringify disagreed with the walk — a
       // symbol key is DROPPED by stringify; a non-enumerable 'toJSON' is
       // INVOKED by it (the journal/artifact would reconstruct the hook's
       // output); any non-enumerable member is invisible data.
-      { name: 'losssymbolkey', expr: "{ x: 1, [Symbol('hidden')]: 2 }", pattern: 'symbol-keyed own member' },
+      {
+        name: 'losssymbolkey',
+        expr: "{ x: 1, [Symbol('hidden')]: 2 }",
+        pattern: 'symbol-keyed own member',
+      },
       {
         name: 'losshiddentojson',
-        expr:
-          "(() => { const o = { x: 1 }; Object.defineProperty(o, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return o; })()",
+        expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return o; })()",
         pattern: "non-enumerable own 'toJSON'",
       },
       // The array-side family (PR #103 review, Codex P1): arrays carrying
       // anything but indices and length diverge from stringify the same
       // ways objects do.
-      { name: 'lossarrtojson', expr: "(() => { const a = [1]; Object.defineProperty(a, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return a; })()", pattern: "own 'toJSON' on an array" },
-      { name: 'lossarrextra', expr: "(() => { const a = [1]; a.extra = 'gone'; return a; })()", pattern: "non-index own member 'extra' on an array" },
-      { name: 'lossarrsymbol', expr: "(() => { const a = [1]; a[Symbol('leak')] = 2; return a; })()", pattern: 'symbol-keyed own member' },
+      {
+        name: 'lossarrtojson',
+        expr: "(() => { const a = [1]; Object.defineProperty(a, 'toJSON', { value: () => ({ x: 2 }), enumerable: false }); return a; })()",
+        pattern: "own 'toJSON' on an array",
+      },
+      {
+        name: 'lossarrextra',
+        expr: "(() => { const a = [1]; a.extra = 'gone'; return a; })()",
+        pattern: "non-index own member 'extra' on an array",
+      },
+      {
+        name: 'lossarrsymbol',
+        expr: "(() => { const a = [1]; a[Symbol('leak')] = 2; return a; })()",
+        pattern: 'symbol-keyed own member',
+      },
       {
         name: 'losshiddenmember',
-        expr:
-          "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",
+        expr: "(() => { const o = { x: 1 }; Object.defineProperty(o, 'hidden', { value: 3, enumerable: false }); return o; })()",
         pattern: "non-enumerable own member 'hidden'",
       },
     ];
@@ -873,7 +907,9 @@ describe('line-based narration (embedded newlines flatten to the literal escape)
     const lines = err.split('\n');
     expect(lines).toHaveLength(2); // exactly one content line + the trailing newline
     expect(lines[1]).toBe('');
-    expect(lines[0]).toBe('cq: boom: failed — boom: deliberate fixture failure\\nsecond line of the failure');
+    expect(lines[0]).toBe(
+      'cq: boom: failed — boom: deliberate fixture failure\\nsecond line of the failure',
+    );
   });
 });
 
@@ -944,16 +980,26 @@ describe('run-plan through the governed kernel', () => {
 
   test('needs-human job exits 3; op-returned budget row also exits 3', async () => {
     // needs-human row → 3 (waiting on a human).
-    const human = await capture(['run-plan', `--plan=${(await writePlanFile(singleJobPlan('needshuman'))).planPath}`, `--ops-root=${opsRoot}`]);
+    const human = await capture([
+      'run-plan',
+      `--plan=${(await writePlanFile(singleJobPlan('needshuman'))).planPath}`,
+      `--ops-root=${opsRoot}`,
+    ]);
     expect(human.code).toBe(3);
     expect(RunReportSchema.parse(JSON.parse(human.out)).jobs[0]?.result.status).toBe('needs-human');
     // The budget fixture RETURNS budget-exhausted as its op verdict — an
     // op-returned row, NOT a governor trip (no caps configured, so
     // withBudgetStop annotates nothing); exitCodeForRunReport still maps the
     // row to 3.
-    const budget = await capture(['run-plan', `--plan=${(await writePlanFile(singleJobPlan('budget'))).planPath}`, `--ops-root=${opsRoot}`]);
+    const budget = await capture([
+      'run-plan',
+      `--plan=${(await writePlanFile(singleJobPlan('budget'))).planPath}`,
+      `--ops-root=${opsRoot}`,
+    ]);
     expect(budget.code).toBe(3);
-    expect(RunReportSchema.parse(JSON.parse(budget.out)).jobs[0]?.result.status).toBe('budget-exhausted');
+    expect(RunReportSchema.parse(JSON.parse(budget.out)).jobs[0]?.result.status).toBe(
+      'budget-exhausted',
+    );
   });
 
   test('unknown op name in the plan: exit 1 with a failed row', async () => {
@@ -971,7 +1017,11 @@ describe('run-plan through the governed kernel', () => {
   test('input defects are usage errors (2): corrupt content, missing file, directory path', async () => {
     // Unparseable content = corrupted INPUT → exit 2 (arg-shaped, narrated).
     const corrupt = await writePlanFile('not json');
-    const corruptRun = await capture(['run-plan', `--plan=${corrupt.planPath}`, `--ops-root=${opsRoot}`]);
+    const corruptRun = await capture([
+      'run-plan',
+      `--plan=${corrupt.planPath}`,
+      `--ops-root=${opsRoot}`,
+    ]);
     expect(corruptRun.code).toBe(2);
     expect(corruptRun.out).toBe('');
     expect(corruptRun.err).toMatch(/invalid input for 'run-plan'/);
@@ -979,7 +1029,11 @@ describe('run-plan through the governed kernel', () => {
     // A MISSING plan file is the same input-defect class → 2 (previously a
     // thrown 1 — the stale pin this suite once carried; PR 64 r1 flipped it).
     const dir = await makeTmpDir('cq-i1-missingplan-');
-    const missingRun = await capture(['run-plan', `--plan=${join(dir, 'absent.json')}`, `--ops-root=${opsRoot}`]);
+    const missingRun = await capture([
+      'run-plan',
+      `--plan=${join(dir, 'absent.json')}`,
+      `--ops-root=${opsRoot}`,
+    ]);
     expect(missingRun.code).toBe(2);
     expect(missingRun.out).toBe('');
     expect(missingRun.err).toMatch(/invalid input for 'run-plan'/);
@@ -1032,7 +1086,11 @@ describe('run-plan through the governed kernel', () => {
     };
     expect(() => PlanSchema.parse(dupPlan)).not.toThrow();
     const { planPath } = await writePlanFile(dupPlan);
-    const { code, out, err } = await capture(['run-plan', `--plan=${planPath}`, `--ops-root=${opsRoot}`]);
+    const { code, out, err } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+    ]);
     expect(code).toBe(2);
     expect(out).toBe('');
     expect(err).toMatch(/invalid input for 'run-plan': runPlan: duplicate job id 'same'/);
@@ -1085,19 +1143,24 @@ describe('exit-code unit mapping (mechanical, no interpretation)', () => {
   });
 
   test('exitCodeForRunReport: all-ok → 0; failed-only → 1', () => {
-    expect(exitCodeForRunReport(reportWith({ status: 'ok', value: 1 }, { status: 'ok', value: 2 }))).toBe(0);
+    expect(
+      exitCodeForRunReport(reportWith({ status: 'ok', value: 1 }, { status: 'ok', value: 2 })),
+    ).toBe(0);
     expect(exitCodeForRunReport(reportWith({ status: 'failed', error: 'x' }))).toBe(1);
   });
 
   test('exitCodeForRunReport: needs-human dominates failed (→ 3)', () => {
-    const mixed = reportWith({ status: 'failed', error: 'x' }, { status: 'needs-human', reason: 'y' });
+    const mixed = reportWith(
+      { status: 'failed', error: 'x' },
+      { status: 'needs-human', reason: 'y' },
+    );
     expect(exitCodeForRunReport(mixed)).toBe(3);
     // …and dominates an UNKNOWN status too — the thrown-class default branch
     // (defense against a taxonomy the CLI predates) never outranks row 3.
-    const unknownMixed = reportWith(
-      { status: 'nope' } as unknown as OpResult<unknown>,
-      { status: 'needs-human', reason: 'y' },
-    );
+    const unknownMixed = reportWith({ status: 'nope' } as unknown as OpResult<unknown>, {
+      status: 'needs-human',
+      reason: 'y',
+    });
     expect(exitCodeForRunReport(unknownMixed)).toBe(3);
   });
 
@@ -1107,7 +1170,9 @@ describe('exit-code unit mapping (mechanical, no interpretation)', () => {
     // frozen union, which is exactly why the defense exists).
     expect(exitCodeForOpResult({ status: 'nope' } as unknown as OpResult<unknown>)).toBe(1);
     // exitCodeForRunReport's unknown-status row → 1 as well.
-    expect(exitCodeForRunReport(reportWith({ status: 'nope' } as unknown as OpResult<unknown>))).toBe(1);
+    expect(
+      exitCodeForRunReport(reportWith({ status: 'nope' } as unknown as OpResult<unknown>)),
+    ).toBe(1);
   });
 
   test('exitCodeForRunReport: honest budget stop with no such rows → 3', () => {
@@ -1124,7 +1189,7 @@ describe('flag parsing + round-trip parity', () => {
   test('parseFlags: JSON-parsed values, verbatim keys, positionals, duplicate rejection', () => {
     expect(parseFlags(['--msg=hello'])).toEqual({ flags: { msg: 'hello' }, unknown: [] });
     expect(parseFlags(['--max-usd=2'])).toEqual({ flags: { 'max-usd': 2 }, unknown: [] });
-    expect(parseFlags(['--tags=["a","b"]'])).toEqual({ flags: { tags: ['a', 'b'], }, unknown: [] });
+    expect(parseFlags(['--tags=["a","b"]'])).toEqual({ flags: { tags: ['a', 'b'] }, unknown: [] });
     expect(parseFlags(['--flag'])).toEqual({ flags: { flag: true }, unknown: [] });
     expect(parseFlags(['positional'])).toEqual({ flags: {}, unknown: ['positional'] });
     expect(() => parseFlags(['--a=1', '--a=2'])).toThrow(/duplicate flag/);

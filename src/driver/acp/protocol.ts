@@ -105,7 +105,11 @@ export interface JsonRpcErrorResponse {
   error: JsonRpcErrorObject;
 }
 
-export type JsonRpcOutboundFrame = JsonRpcRequest | JsonRpcNotification | JsonRpcSuccessResponse | JsonRpcErrorResponse;
+export type JsonRpcOutboundFrame =
+  | JsonRpcRequest
+  | JsonRpcNotification
+  | JsonRpcSuccessResponse
+  | JsonRpcErrorResponse;
 
 /**
  * Any inbound line, parsed defensively. A frame is a RESPONSE when it has
@@ -238,7 +242,14 @@ const UsageContextUpdateSchema = z.looseObject({
 export type AcpUpdate =
   | { kind: 'agent_message_chunk'; text: string }
   | { kind: 'agent_thought_chunk'; text: string }
-  | { kind: 'tool_call'; toolCallId: string; title?: string; toolKind?: string; status?: string; rawInput?: unknown }
+  | {
+      kind: 'tool_call';
+      toolCallId: string;
+      title?: string;
+      toolKind?: string;
+      status?: string;
+      rawInput?: unknown;
+    }
   | {
       kind: 'tool_call_update';
       toolCallId: string;
@@ -290,7 +301,9 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
         kind: 'tool_call_update',
         toolCallId: parsed.data.toolCallId,
         ...(parsed.data.status !== undefined ? { status: parsed.data.status } : {}),
-        ...(parsed.data.rawOutput !== undefined ? { rawOutput: rawOutputToText(parsed.data.rawOutput) } : {}),
+        ...(parsed.data.rawOutput !== undefined
+          ? { rawOutput: rawOutputToText(parsed.data.rawOutput) }
+          : {}),
         ...(contentText !== '' ? { contentText } : {}),
       };
     }
@@ -299,19 +312,28 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
       return parsed.success
         ? {
             kind: 'config_option_update',
-            ...(parsed.data.configOptions !== undefined ? { configOptions: parsed.data.configOptions } : {}),
+            ...(parsed.data.configOptions !== undefined
+              ? { configOptions: parsed.data.configOptions }
+              : {}),
           }
         : undefined;
     }
     case 'current_mode_update': {
       const parsed = CurrentModeUpdateSchema.safeParse(update);
       return parsed.success
-        ? { kind: 'current_mode_update', ...(parsed.data.currentModeId !== undefined ? { currentModeId: parsed.data.currentModeId } : {}) }
+        ? {
+            kind: 'current_mode_update',
+            ...(parsed.data.currentModeId !== undefined
+              ? { currentModeId: parsed.data.currentModeId }
+              : {}),
+          }
         : undefined;
     }
     case 'usage_update': {
       // Context occupancy telemetry, NOT turn tokens (strategy §1.3) — consumed and dropped.
-      return UsageContextUpdateSchema.safeParse(update).success ? { kind: 'usage_update' } : undefined;
+      return UsageContextUpdateSchema.safeParse(update).success
+        ? { kind: 'usage_update' }
+        : undefined;
     }
     // Known union members the frozen seam cannot carry — parse as
     // known-unconsumed (dropped silently), never narration.
@@ -320,6 +342,7 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
     case 'session_info_update':
     case 'available_commands_update':
       return { kind: 'known-unconsumed', sessionUpdate: kind };
+    case undefined:
     default:
       return undefined; // unknown or unshapeable — the caller narrates
   }
@@ -329,7 +352,12 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
 // Inbound: session/request_permission — options + the FULL answer table
 // ---------------------------------------------------------------------------
 
-export const PermissionOptionKindSchema = z.enum(['allow_once', 'allow_always', 'reject_once', 'reject_always']);
+export const PermissionOptionKindSchema = z.enum([
+  'allow_once',
+  'allow_always',
+  'reject_once',
+  'reject_always',
+]);
 
 export type PermissionOptionKind = z.infer<typeof PermissionOptionKindSchema>;
 
@@ -417,12 +445,15 @@ export type PermissionDecision = 'allow' | 'deny';
 export function selectPermissionAnswer(
   decision: PermissionDecision,
   options: readonly PermissionOption[],
-): { ok: true; answer: PermissionAnswer } | { ok: false; offered: readonly PermissionOption[]; side: PermissionDecision } {
-  const optionId = decision === 'allow' ? selectAllowOptionId(options) : selectRejectOptionId(options);
+):
+  | { ok: true; answer: PermissionAnswer }
+  | { ok: false; offered: readonly PermissionOption[]; side: PermissionDecision } {
+  const optionId =
+    decision === 'allow' ? selectAllowOptionId(options) : selectRejectOptionId(options);
   if (optionId === undefined) {
     return { ok: false, offered: options, side: decision };
   }
-  return { ok: true, answer: { outcome: { outcome: 'selected', optionId } }};
+  return { ok: true, answer: { outcome: { outcome: 'selected', optionId } } };
 }
 
 /**
@@ -433,7 +464,10 @@ export function selectPermissionAnswer(
  * leading token of the title; an empty title falls back to `kind`; both
  * absent → 'unknown' (which an allowlist never contains — fail-closed).
  */
-export function permissionToolIdentity(title: string | undefined, kind: string | undefined): string {
+export function permissionToolIdentity(
+  title: string | undefined,
+  kind: string | undefined,
+): string {
   const trimmed = title?.trim() ?? '';
   if (trimmed !== '') {
     const separator = trimmed.indexOf(': ');
@@ -450,28 +484,38 @@ export function permissionToolIdentity(title: string | undefined, kind: string |
 
 export const InitializeResultSchema = z.looseObject({
   protocolVersion: z.number(),
-  agentInfo: z.looseObject({
-    name: z.string().optional(),
-    title: z.string().optional(),
-    version: z.string().optional(),
-  }).optional(),
-  authMethods: z.array(z.looseObject({
-    id: z.string(),
-    name: z.string().optional(),
-    description: z.string().optional(),
-  })).optional(),
-  agentCapabilities: z.looseObject({
-    loadSession: z.unknown().optional(),
-    // Probe-verbatim (2026-09-15): `sessionCapabilities: { list: {},
-    // resume: {}, fork: {} }` INSIDE agentCapabilities — the §6 resume
-    // gate's middle rung reads `resume` (advertised = the member is
-    // present, however empty).
-    sessionCapabilities: z.looseObject({
-      list: z.unknown().optional(),
-      resume: z.unknown().optional(),
-      fork: z.unknown().optional(),
-    }).optional(),
-  }).optional(),
+  agentInfo: z
+    .looseObject({
+      name: z.string().optional(),
+      title: z.string().optional(),
+      version: z.string().optional(),
+    })
+    .optional(),
+  authMethods: z
+    .array(
+      z.looseObject({
+        id: z.string(),
+        name: z.string().optional(),
+        description: z.string().optional(),
+      }),
+    )
+    .optional(),
+  agentCapabilities: z
+    .looseObject({
+      loadSession: z.unknown().optional(),
+      // Probe-verbatim (2026-09-15): `sessionCapabilities: { list: {},
+      // resume: {}, fork: {} }` INSIDE agentCapabilities — the §6 resume
+      // gate's middle rung reads `resume` (advertised = the member is
+      // present, however empty).
+      sessionCapabilities: z
+        .looseObject({
+          list: z.unknown().optional(),
+          resume: z.unknown().optional(),
+          fork: z.unknown().optional(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 export type InitializeResult = z.infer<typeof InitializeResultSchema>;
@@ -488,10 +532,14 @@ export type InitializeResult = z.infer<typeof InitializeResultSchema>;
  */
 const SessionModesSchema = z.looseObject({
   currentModeId: z.string().optional(),
-  availableModes: z.array(z.looseObject({
-    id: z.string(),
-    name: z.string().optional(),
-  })).optional(),
+  availableModes: z
+    .array(
+      z.looseObject({
+        id: z.string(),
+        name: z.string().optional(),
+      }),
+    )
+    .optional(),
 });
 
 export const SessionNewResultSchema = z.looseObject({
@@ -591,7 +639,9 @@ export function mapWireUsage(raw: unknown): Usage | undefined {
  * defaults (never surfaced); only the `config_option_update` value is the
  * materialized truth (strategy §5 shape pin).
  */
-export function modelOptionValueFrom(configOptions: readonly ConfigOption[] | undefined): string | undefined {
+export function modelOptionValueFrom(
+  configOptions: readonly ConfigOption[] | undefined,
+): string | undefined {
   const option = configOptions?.find((entry) => entry.id === 'model' || entry.category === 'model');
   const value = option?.currentValue;
   return typeof value === 'string' && value !== '' ? value : undefined;
@@ -635,7 +685,7 @@ export function rawOutputToText(value: unknown): string {
  * Resource/image/audio/resource_link blocks carry no text and contribute
  * nothing; an absent or empty array yields ''.
  */
-function textOfContentBlocks(blocks: readonly { type: string; text?: string }[]): string {
+function textOfContentBlocks(blocks: readonly z.infer<typeof ContentBlockSchema>[]): string {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === 'text' && typeof block.text === 'string') parts.push(block.text);

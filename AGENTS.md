@@ -7,14 +7,23 @@ the toolkit's own quality gates run on the toolkit itself.
 
 ## Gates (green before claiming done)
 
-- `node scripts/ratchet-typecheck.mjs` — the typecheck gate (NOT
-  `npm run typecheck`; the ratchet runs tsc6 plus the baseline check)
-- `npm run lint`
+- `npm run check:static` — TS7 compiler ratchet plus typed Oxlint;
+  `npm run lint` and `npm run typecheck` are aliases (run only one)
+- `npm run format:check`
 - `npm run test`
+- `npm run knip`
 
 CI additionally runs the build, the from-source smoke plan, and the
 denylist scan + self-test. Never alter source or baselines to hide a
 failure; baselines only tighten (doctrine I5).
+
+## Agent loop
+
+Use `npm run lint:fast -- <owned-file...>` for syntactic feedback and
+`npm run fix -- <owned-file...>` for safe lint fixes, formatting and the full
+static gate. Lists must be explicit; never format the repository per turn.
+`npm run check` runs formatting checks, the static gate once, tests and Knip.
+Changed-file lint does not establish correctness of dependents.
 
 ## Code review — mandatory before every PR
 

@@ -50,21 +50,25 @@ import type { ModelSpec } from '../types.js';
  * the model names the endpoint is KNOWN to serve (`models` — the allowlist
  * the footgun rule enforces), and human notes (`notes`).
  */
-export const RoutingEndpointSchema = z.object({
-  baseUrlEnv: z.string().min(1),
-  baseUrlDefault: z.string().min(1),
-  keyEnv: z.string().min(1),
-  models: z.array(z.string().min(1)).min(1),
-  notes: z.string().min(1),
-}).strict();
+export const RoutingEndpointSchema = z
+  .object({
+    baseUrlEnv: z.string().min(1),
+    baseUrlDefault: z.string().min(1),
+    keyEnv: z.string().min(1),
+    models: z.array(z.string().min(1)).min(1),
+    notes: z.string().min(1),
+  })
+  .strict();
 
 /**
  * The whole table: endpoint name (the frozen ModelSpec.provider handle) →
  * entry. Plain serializable data.
  */
-export const RoutingTableSchema = z.object({
-  endpoints: z.record(z.string(), RoutingEndpointSchema),
-}).strict();
+export const RoutingTableSchema = z
+  .object({
+    endpoints: z.record(z.string(), RoutingEndpointSchema),
+  })
+  .strict();
 
 export type RoutingEndpoint = z.infer<typeof RoutingEndpointSchema>;
 export type RoutingTable = z.infer<typeof RoutingTableSchema>;
@@ -109,7 +113,7 @@ export function defaultRoutingTable(): RoutingTable {
         keyEnv: 'ANTHROPIC_API_KEY',
         models: ['claude-haiku-4-5', 'claude-sonnet-4-5', 'claude-opus-4-1'],
         notes:
-          'Native Anthropic endpoint (docs as-of 2026-09); base URL overridable via the CLI\'s own ' +
+          "Native Anthropic endpoint (docs as-of 2026-09); base URL overridable via the CLI's own " +
           'ANTHROPIC_BASE_URL convention. Names align with the vendored price table.',
       },
     },
@@ -194,8 +198,7 @@ export function routeFor(
     );
   }
   const override = env[endpoint.baseUrlEnv];
-  const baseUrl =
-    override !== undefined && override !== '' ? override : endpoint.baseUrlDefault;
+  const baseUrl = override !== undefined && override !== '' ? override : endpoint.baseUrlDefault;
   return {
     endpoint: endpointName,
     baseUrl,

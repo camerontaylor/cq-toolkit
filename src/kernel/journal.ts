@@ -189,12 +189,12 @@ async function readEvents(fileRunId: string, path: string): Promise<JournalEvent
   if (lines[lines.length - 1] === '') {
     lines.pop(); // file ended with a complete newline; the '' split artifact is not an event
   }
-  while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+  while (lines.at(-1)?.trim() === '') {
     lines.pop();
   }
   const events: JournalEvent[] = [];
-  for (let i = 0; i < lines.length; i++) {
-    const parsed = parseLine(lines[i]);
+  for (const [i, line] of lines.entries()) {
+    const parsed = parseLine(line);
     if (parsed !== null) {
       // The file name is the run identity (append enforces the same match at
       // write time), so a line claiming another runId is misattributed
@@ -239,9 +239,7 @@ async function listRuns(journalDir: string): Promise<string[]> {
     }),
   );
   // Oldest first; ties broken by id so the order is deterministic.
-  return runIds.sort(
-    (a, b) => (mtimeMs.get(a) ?? 0) - (mtimeMs.get(b) ?? 0) || (a < b ? -1 : 1),
-  );
+  return runIds.sort((a, b) => (mtimeMs.get(a) ?? 0) - (mtimeMs.get(b) ?? 0) || (a < b ? -1 : 1));
 }
 
 /**

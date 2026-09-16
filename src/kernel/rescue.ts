@@ -236,7 +236,9 @@ export function decideRescue(
   // the effective-cap arithmetic below into either an unbounded or a
   // silent never-retry decision. Reject the row loudly instead.
   if (!Number.isInteger(rowMax) || rowMax < 1) {
-    throw new Error(`rescue: policy row '${row.id}' maxAttempts must be an integer >= 1, got ${rowMax}`);
+    throw new Error(
+      `rescue: policy row '${row.id}' maxAttempts must be an integer >= 1, got ${rowMax}`,
+    );
   }
   const jobCap = caps?.maxAttemptsPerJob;
   // The LIMITS half gets the identical validation (review round 3): a NaN/
@@ -258,9 +260,7 @@ export function decideRescue(
     kind: 'retry',
     attempt: attemptsSoFar + 1,
     rowId: row.id,
-    ...(row.action.escalate !== undefined
-      ? { escalate: { ...row.action.escalate } }
-      : {}),
+    ...(row.action.escalate !== undefined ? { escalate: { ...row.action.escalate } } : {}),
     ...(row.action.carrySessionRef === true && latest.sessionRef !== undefined
       ? { sessionRef: latest.sessionRef }
       : {}),
@@ -276,6 +276,8 @@ function detailOf(result: OpResult<unknown>): string | undefined {
       return result.reason;
     case 'indeterminate':
       return result.detail;
+    case 'budget-exhausted':
+    case 'ok':
     default:
       return undefined;
   }
@@ -318,10 +320,11 @@ export function attemptsFromJournal(
     if (event.type === 'job-finished' && event.jobId === jobId) {
       const last = attempts[attempts.length - 1];
       if (last !== undefined) {
+        const detail = detailOf(event.result);
         attempts[attempts.length - 1] = {
           ...last,
           outcome: event.result.status,
-          ...(detailOf(event.result) !== undefined ? { detail: detailOf(event.result) } : {}),
+          ...(detail !== undefined ? { detail } : {}),
         };
       }
     }

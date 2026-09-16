@@ -12,11 +12,11 @@ public npm registry (https://registry.npmjs.org) and GitHub repository search.
 
 ## Registry status of names checked
 
-| candidate | npm status | GitHub name collisions | decision |
-| --- | --- | --- | --- |
-| `cq-toolkit` | free (404) — see below | 17 repos match `cq-toolkit in:name`; only exact-name hit besides ours is `csiberlin/CQ-Toolkit` (unrelated personal repo) | chosen |
-| `@camerontaylor/cq-toolkit` | free (404) at T0.5 check time — published by the owner later the same day, see the decision at the foot | not checked — fallback only | fallback; not needed, kept on record |
-| `cq` | taken — 0.0.1 exists (see legacy note below) | not applicable | never a candidate (legacy note below) |
+| candidate                   | npm status                                                                                              | GitHub name collisions                                                                                                    | decision                              |
+| --------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
+| `cq-toolkit`                | free (404) — see below                                                                                  | 17 repos match `cq-toolkit in:name`; only exact-name hit besides ours is `csiberlin/CQ-Toolkit` (unrelated personal repo) | chosen                                |
+| `@camerontaylor/cq-toolkit` | free (404) at T0.5 check time — published by the owner later the same day, see the decision at the foot | not checked — fallback only                                                                                               | fallback; not needed, kept on record  |
+| `cq`                        | taken — 0.0.1 exists (see legacy note below)                                                            | not applicable                                                                                                            | never a candidate (legacy note below) |
 
 ## Legacy note: the bare short name was taken
 
@@ -96,7 +96,6 @@ package name.
 - https://registry.npmjs.org/cq — exists, version 0.0.1
 - https://api.github.com/search/repositories?q=cq-toolkit+in:name — 17 results
 - package.json of this repository — `"name": "@camerontaylor/cq-toolkit"`, `"version": "0.0.0"` (unscoped `cq-toolkit` was the T0.5-era name; see the owner decision above)
-
 
 ## Owner decision 2026-09-14 — scoped name adopted
 

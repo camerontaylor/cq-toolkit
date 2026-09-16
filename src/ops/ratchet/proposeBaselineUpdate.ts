@@ -71,7 +71,13 @@ import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { resolveBaselinesDir } from './captureBaseline.js';
-import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline, tightens } from './format.js';
+import {
+  baselineRelPath,
+  isIso8601Instant,
+  parseBaseline,
+  renderBaseline,
+  tightens,
+} from './format.js';
 import type { BaselineFile, Direction } from './format.js';
 
 function isEnoent(err: unknown): boolean {
@@ -160,7 +166,13 @@ export interface ProposeOutcome {
   /** The deterministic head branch, e.g. 'ratchet/propose-1a2b3c4d5e6f'; null when 'none'. */
   head: string | null;
   /** The tightenings that went into the proposal (deterministic sorted order). */
-  applied: Array<{ path: string; target: string; metric: string; oldValue: number; newValue: number }>;
+  applied: Array<{
+    path: string;
+    target: string;
+    metric: string;
+    oldValue: number;
+    newValue: number;
+  }>;
   /** Improvements that produced no proposal, each with the reason naming why. */
   skipped: Array<{ target: string; metric: string; reason: string }>;
 }
@@ -189,7 +201,10 @@ const REF_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
  * exist as a git ref at all — and could not ride clean markdown into the
  * PR body either.
  */
-function violatesRefShapeRules(value: string, opts?: { finalComponentMayEndLock?: boolean }): boolean {
+function violatesRefShapeRules(
+  value: string,
+  opts?: { finalComponentMayEndLock?: boolean },
+): boolean {
   const segments = value.split('/');
   return (
     REF_PATTERN.test(value) === false ||
@@ -208,7 +223,8 @@ function violatesRefShapeRules(value: string, opts?: { finalComponentMayEndLock?
         // composed head instead ('release.lock' → 'release.lock-<digest>'
         // is valid; 'ratchet.lock/nightly' — an INNER .lock component —
         // is not).
-        (segment.endsWith('.lock') && !(opts?.finalComponentMayEndLock === true && i === segments.length - 1)),
+        (segment.endsWith('.lock') &&
+          !(opts?.finalComponentMayEndLock === true && i === segments.length - 1)),
     )
   );
 }
@@ -292,7 +308,10 @@ export function createProposeBaselineUpdate(
     }
     if (input.headPrefix !== undefined) {
       if (typeof input.headPrefix !== 'string') {
-        return { status: 'failed', error: "ratchet: invalid input — 'headPrefix' must be a string" };
+        return {
+          status: 'failed',
+          error: "ratchet: invalid input — 'headPrefix' must be a string",
+        };
       }
       // A git ref, not free text (see violatesRefShapeRules) — else the head
       // could not exist at all.
@@ -313,7 +332,10 @@ export function createProposeBaselineUpdate(
       };
     }
     if (Array.isArray(input.improvements) === false) {
-      return { status: 'failed', error: "ratchet: invalid input — 'improvements' must be an array" };
+      return {
+        status: 'failed',
+        error: "ratchet: invalid input — 'improvements' must be an array",
+      };
     }
     // Per-improvement arg validation: baselineRelPath would throw on a
     // non-string target/metric, and a non-finite value would render a
@@ -328,7 +350,12 @@ export function createProposeBaselineUpdate(
           error: `ratchet: invalid input — improvements[${i}] must be an object`,
         };
       }
-      const rec = imp as { target?: unknown; metric?: unknown; value?: unknown; capturedAt?: unknown };
+      const rec = imp as {
+        target?: unknown;
+        metric?: unknown;
+        value?: unknown;
+        capturedAt?: unknown;
+      };
       for (const [name, value] of [
         ['target', rec.target],
         ['metric', rec.metric],
@@ -390,9 +417,7 @@ export function createProposeBaselineUpdate(
         skipped.push({
           target: imp.target,
           metric: imp.metric,
-          reason: containment.missing
-            ? noUsableBaseline(relPath, imp.metric)
-            : containment.error,
+          reason: containment.missing ? noUsableBaseline(relPath, imp.metric) : containment.error,
         });
       }
     } else {
@@ -491,7 +516,7 @@ export function createProposeBaselineUpdate(
           metric: baseline.metric,
           direction: baseline.direction,
           value: imp.value,
-          unit: baseline.unit,
+          ...(baseline.unit === undefined ? {} : { unit: baseline.unit }),
           capturedAt: imp.capturedAt ?? new Date().toISOString(),
         });
         applied.push({

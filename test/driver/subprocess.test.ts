@@ -26,12 +26,21 @@ import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, onTestFinished, test } from 'vitest';
 import { z } from 'zod';
-import { SubprocessDriver, buildArgs, stopReasonOf, usageFromCli } from '../../src/driver/subprocess/index.js';
+import {
+  SubprocessDriver,
+  buildArgs,
+  stopReasonOf,
+  usageFromCli,
+} from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
-import { RoutingTableSchema, defaultRoutingTable, routeFor } from '../../src/driver/subprocess/routing.js';
+import {
+  RoutingTableSchema,
+  defaultRoutingTable,
+  routeFor,
+} from '../../src/driver/subprocess/routing.js';
 import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
 import { DEFAULT_MAX_RETAINED_BYTES, spawnManaged } from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
@@ -39,7 +48,7 @@ import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
-import { runLadder } from '../../src/kernel/governor.js';
+import { realClock, runLadder } from '../../src/kernel/governor.js';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
 
 // The fake CLI: node + the fixture script, spawned through the driver's
@@ -104,6 +113,7 @@ function directiveEnv(directive: ModelDirective | undefined): Record<string, str
       };
     case 'reply':
       return { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: directive.text };
+    case undefined:
     default:
       return { FAKE_AGENT_MODE: 'ok' };
   }
@@ -142,7 +152,11 @@ function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {
 }
 
 /** Base driver options shared by every test: fake binary, conformance routes, scratch dirs. */
-function baseOptions(scratchDir: string, extraEnv: Record<string, string>, calls: SpawnCall[]): SubprocessDriverOptions {
+function baseOptions(
+  scratchDir: string,
+  extraEnv: Record<string, string>,
+  calls: SpawnCall[],
+): SubprocessDriverOptions {
   return {
     binary: ['node', FAKE_CLI],
     routingTable: conformanceRoutingTable(),
@@ -194,7 +208,9 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 }
 
 /** Fresh scratch dir + store; cleaned up by the test's finally block. */
-async function withScratch(body: (scratchDir: string, store: SessionStore) => Promise<void>): Promise<void> {
+async function withScratch(
+  body: (scratchDir: string, store: SessionStore) => Promise<void>,
+): Promise<void> {
   const scratchDir = await mkdtemp(join(tmpdir(), 'subdrv-'));
   const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
   try {
@@ -213,19 +229,22 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
 
 describe('subprocess driver specifics (fake agent CLI)', () => {
   test('routeFor rejects prototype keys — constructor/toString are not providers (mirror of the claude-agent guard)', () => {
-    expect(() => routeFor({ provider: 'constructor', model: 'deepseek-chat' }, defaultRoutingTable())).toThrow(
-      /unknown provider 'constructor'/,
-    );
-    expect(() => routeFor({ provider: 'toString', model: 'deepseek-chat' }, defaultRoutingTable())).toThrow(
-      /unknown provider 'toString'/,
-    );
+    expect(() =>
+      routeFor({ provider: 'constructor', model: 'deepseek-chat' }, defaultRoutingTable()),
+    ).toThrow(/unknown provider 'constructor'/);
+    expect(() =>
+      routeFor({ provider: 'toString', model: 'deepseek-chat' }, defaultRoutingTable()),
+    ).toThrow(/unknown provider 'toString'/);
   });
 
   test('buildArgs: the exact headless argv — undocumented flags removed (#19-8)', () => {
     const route = {
       endpoint: 'conformance',
       baseUrl: 'http://127.0.0.1:1/anthropic',
-      env: { ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY', ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY' },
+      env: {
+        ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY',
+        ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY',
+      },
       model: 'conformance-1',
     };
     const args = buildArgs({
@@ -236,12 +255,17 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
     expect(args).toEqual([
       '-p',
-      '--output-format', 'stream-json',
+      '--output-format',
+      'stream-json',
       '--verbose', // the real CLI refuses stream-json print mode without it (found live, T1.6)
-      '--json-schema', '{"type":"object"}',
-      '--allowedTools', 'read edit',
-      '--model', 'conformance-1',
-      '--resume', 'cli-9',
+      '--json-schema',
+      '{"type":"object"}',
+      '--allowedTools',
+      'read edit',
+      '--model',
+      'conformance-1',
+      '--resume',
+      'cli-9',
     ]);
     // ToolPolicy mode 'none' shape: --allowedTools ALWAYS present with an
     // EMPTY value (nothing pre-approved; headless -p cannot prompt, so a
@@ -253,9 +277,14 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       resumeCliSessionId: undefined,
     });
     expect(none).toEqual([
-      '-p', '--output-format', 'stream-json', '--verbose',
-      '--allowedTools', '',
-      '--model', 'conformance-1',
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--allowedTools',
+      '',
+      '--model',
+      'conformance-1',
     ]);
     expect(none).not.toContain('--permission-prompts'); // undocumented — removed (issue #19)
     expect(none).not.toContain('--bare'); // undocumented — removed (issue #19)
@@ -274,7 +303,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // model name; the driver refuses to dispatch an unknown name instead.
       await expect(
         driver.run(invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } })),
-      ).rejects.toThrow(/not on the deepseek allowlist .* silently remap unknown model names; refusing to dispatch/);
+      ).rejects.toThrow(
+        /not on the deepseek allowlist .* silently remap unknown model names; refusing to dispatch/,
+      );
       // The same rule is table-wide: unknown names on ANY endpoint refuse.
       await expect(
         driver.run(invocation({ modelSpec: { provider: 'zai', model: 'gpt-9-imaginary' } })),
@@ -285,7 +316,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // Pre-dispatch means PRE-dispatch: zero spawns — the sessions dir is
       // never even created (store.create would have mkdir'd it).
       expect(calls).toEqual([]);
-      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({
+        code: 'ENOENT',
+      });
 
       // The routeFor throw is only the OUTER guard; a gateway can still remap
       // an ALLOWED name server-side. The driver therefore surfaces the model
@@ -293,9 +326,15 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // observed-model check (leg m) keys on — and a remapped run fails that
       // check loudly.
       const remapping = new SubprocessDriver(
-        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' }, []),
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' },
+          [],
+        ),
       );
-      const remapped = await remapping.run(invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL } }));
+      const remapped = await remapping.run(
+        invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL } }),
+      );
       expect(remapped.model).toBe('actually-served-model'); // the honest observation
       expect(remapped.model).not.toBe(CONFORMANCE_MODEL); // the suite's leg m fails this run loudly
     });
@@ -304,18 +343,44 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   test('grace ladder: a SIGTERM-ignoring child escalates to SIGKILL — both rungs observed in order', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
+      let deadline: (() => void) | undefined;
+      const deadlineHandle = Symbol('readiness-gated deadline');
+      const spawn = recordingSpawn(calls, { FAKE_AGENT_MODE: 'ignore-sigterm' });
       const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ignore-sigterm' }, calls),
+        ...baseOptions(scratchDir, {}, calls),
+        spawn: (options) => {
+          const child = spawn(options);
+          onTestFinished(() => {
+            child.kill('SIGKILL');
+          });
+          child.onStdoutLine((line) => {
+            // Init is emitted only after the fixture installs its SIGTERM handler.
+            if (line.includes('"subtype":"init"')) queueMicrotask(() => deadline?.());
+          });
+          return child;
+        },
         termGraceMs: 200,
         killGraceMs: 200,
       });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'stubborn run' })),
-        // > node startup: the fixture's ignore handler is installed before
-        // the SIGTERM arrives (a 100ms budget raced node boot and killed the
-        // child by default disposition)
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-ladder', attempt: 1 },
+        {
+          clock: {
+            now: realClock.now,
+            setTimeout: (fn, ms) => {
+              if (deadline === undefined) {
+                deadline = fn;
+                return deadlineHandle;
+              }
+              return realClock.setTimeout(fn, ms);
+            },
+            clearTimeout: (handle) => {
+              if (handle !== deadlineHandle) realClock.clearTimeout(handle);
+            },
+          },
+        },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
@@ -375,7 +440,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('complete');
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
       const record = await store.load(result.sessionId as string);
-      const narration = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'cli-narration');
+      const narration = record?.messages.find(
+        (m) => m.role === 'tool' && m.toolName === 'cli-narration',
+      );
       expect(narration?.content).toContain('transient bootstrapping noise');
       // The non-contract system event is narration too — unknown subtypes
       // never crash the fold.
@@ -392,7 +459,11 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The sidecar is RELOCATED (issue #26, design (b)): beside the session
       // records, keyed by sessionId — never in the model-visible workspace.
       const workspace = (await store.load(run1.sessionId as string))?.workspace as string;
-      const sidecarPath = join(scratchDir, SESSIONS_DIR, `${run1.sessionId as string}${CLI_SESSION_FILE}`);
+      const sidecarPath = join(
+        scratchDir,
+        SESSIONS_DIR,
+        `${run1.sessionId as string}${CLI_SESSION_FILE}`,
+      );
       const cliId = (await readFile(sidecarPath, 'utf8')).trim();
       expect(cliId).toMatch(/^fake-cli-/);
       // 0o600 — the sidecar is evidence like the records it sits beside,
@@ -410,7 +481,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const second = new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'resume-echo' }, calls2),
       );
-      const run2 = await second.run(invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }));
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
+      const run2 = await second.run(
+        invocation({ prompt: 'resume run two', sessionRef: run1.sessionId }),
+      );
       expect(run2.sessionId).toBe(run1.sessionId);
       expect(run2.stopReason).toBe('complete');
       expect(calls2[0]?.args).toContain('--resume');
@@ -420,10 +494,16 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // ONE session record carries both runs' turns; the store sidecar is
       // stable, and the workspace still carries NO resume handle.
       const record = await store.load(run1.sessionId as string);
-      expect(record?.messages.some((m) => m.role === 'user' && m.content === 'resume run one')).toBe(true);
-      expect(record?.messages.some((m) => m.role === 'user' && m.content === 'resume run two')).toBe(true);
       expect(
-        record?.messages.some((m) => m.role === 'assistant' && m.content.includes(`resumed from cli session ${cliId}`)),
+        record?.messages.some((m) => m.role === 'user' && m.content === 'resume run one'),
+      ).toBe(true);
+      expect(
+        record?.messages.some((m) => m.role === 'user' && m.content === 'resume run two'),
+      ).toBe(true);
+      expect(
+        record?.messages.some(
+          (m) => m.role === 'assistant' && m.content.includes(`resumed from cli session ${cliId}`),
+        ),
       ).toBe(true);
       expect((await readFile(sidecarPath, 'utf8')).trim()).toBe(cliId);
       await noSidecarInWorkspace();
@@ -520,7 +600,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const driver = new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'budget-usage' }, []),
       );
-      const result = await driver.run(invocation({ prompt: 'budget run', budget: { maxTokens: 1000 } }));
+      const result = await driver.run(
+        invocation({ prompt: 'budget run', budget: { maxTokens: 1000 } }),
+      );
       expect(result.stopReason).toBe('budget');
       expect(result.usage.input).toBe(120_000);
     });
@@ -547,8 +629,13 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       await writeFile(join(workspace, 'note.txt'), 'hello note', 'utf8');
 
       const second = new SubprocessDriver(
-        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'echo-workspace', FAKE_AGENT_PATH: 'note.txt' }, []),
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'echo-workspace', FAKE_AGENT_PATH: 'note.txt' },
+          [],
+        ),
       );
+      if (run1.sessionId === undefined) throw new Error('first run must create a session');
       const run2 = await second.run(invocation({ prompt: 'echo run', sessionRef: run1.sessionId }));
       expect(run2.stopReason).toBe('complete');
       expect(run2.denials).toEqual([]); // the file is really there
@@ -587,7 +674,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.model).toBe('actually-served-model');
       // …and the price lookup was keyed on the SERVED id with the REQUESTED
       // provider (pricing the requested id would attribute the wrong rates).
-      expect(pricedKeys).toEqual([{ provider: CONFORMANCE_PROVIDER, model: 'actually-served-model' }]);
+      expect(pricedKeys).toEqual([
+        { provider: CONFORMANCE_PROVIDER, model: 'actually-served-model' },
+      ]);
       // usage {10,5,2,3} at 2/2 per million (cache terms 0) = 30 / 1e6.
       expect(result.costUSD).toBeCloseTo(0.00003, 12);
       // The mismatch is OBSERVABLE, not silent (issue #19): a narration
@@ -616,7 +705,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     const lying = usageFromCli({ input_tokens: -200_000, output_tokens: 150_000 });
     expect(lying).toBeDefined();
     if (lying === undefined) return;
-    expect(stopReasonOf({ aborted: false, maxTokens: 1000, usage: lying, resultStatus: 'success' })).toBe('budget');
+    expect(
+      stopReasonOf({ aborted: false, maxTokens: 1000, usage: lying, resultStatus: 'success' }),
+    ).toBe('budget');
   });
 
   test('binary validation: an empty template throws at construction, never at spawn (#19-4)', () => {
@@ -656,13 +747,21 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   });
 
   test('grace validation: negative/NaN/Infinity/fractional graces throw at construction (#19-6)', () => {
-    expect(() => new SubprocessDriver({ termGraceMs: -1 })).toThrow(/termGraceMs must be an integer >= 0/);
-    expect(() => new SubprocessDriver({ termGraceMs: Number.NaN })).toThrow(/termGraceMs must be an integer >= 0/);
+    expect(() => new SubprocessDriver({ termGraceMs: -1 })).toThrow(
+      /termGraceMs must be an integer >= 0/,
+    );
+    expect(() => new SubprocessDriver({ termGraceMs: Number.NaN })).toThrow(
+      /termGraceMs must be an integer >= 0/,
+    );
     expect(() => new SubprocessDriver({ termGraceMs: Number.POSITIVE_INFINITY })).toThrow(
       /termGraceMs must be an integer >= 0/,
     );
-    expect(() => new SubprocessDriver({ termGraceMs: 0.5 })).toThrow(/termGraceMs must be an integer >= 0/);
-    expect(() => new SubprocessDriver({ killGraceMs: -5 })).toThrow(/killGraceMs must be an integer >= 0/);
+    expect(() => new SubprocessDriver({ termGraceMs: 0.5 })).toThrow(
+      /termGraceMs must be an integer >= 0/,
+    );
+    expect(() => new SubprocessDriver({ killGraceMs: -5 })).toThrow(
+      /killGraceMs must be an integer >= 0/,
+    );
     // Zero and positive integers are legitimate.
     expect(() => new SubprocessDriver({ killGraceMs: 0 })).not.toThrow();
     expect(() => new SubprocessDriver({ termGraceMs: 100, killGraceMs: 200 })).not.toThrow();
@@ -681,7 +780,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
       // level 'none' asks for nothing extra → no marker…
       const noneDriver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
-      const noneResult = await noneDriver.run(invocation({ prompt: 'no sandbox run', sandboxPolicy: { level: 'none' } }));
+      const noneResult = await noneDriver.run(
+        invocation({ prompt: 'no sandbox run', sandboxPolicy: { level: 'none' } }),
+      );
       const noneNarration = await narrationOf(store, noneResult.sessionId as string);
       expect(noneNarration.some((line) => line.includes('"sandbox-level-unenforced"'))).toBe(false);
       // …and a level over an EMPTY tool surface (mode 'none': nothing
@@ -693,7 +794,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         invocation({ prompt: 'empty surface run', toolPolicy: { allow: [], mode: 'none' } }),
       );
       const emptyNarration = await narrationOf(store, emptyResult.sessionId as string);
-      expect(emptyNarration.some((line) => line.includes('"sandbox-level-unenforced"'))).toBe(false);
+      expect(emptyNarration.some((line) => line.includes('"sandbox-level-unenforced"'))).toBe(
+        false,
+      );
     });
   });
 
@@ -801,7 +904,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     await withScratch(async (scratchDir) => {
       const child = spawnManaged({
         command: process.execPath,
-        args: ['-e', `process.stdout.write('complete line\\n'); process.stdout.write('final-fragment');`],
+        args: [
+          '-e',
+          `process.stdout.write('complete line\\n'); process.stdout.write('final-fragment');`,
+        ],
         cwd: scratchDir,
         maxRetainedBytes: 64 * 1024,
       });

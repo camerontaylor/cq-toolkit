@@ -8,6 +8,7 @@
 > the reference carries a `file:line` citation.
 >
 > **Sources of truth, and which one backs what:**
+>
 > - **Reference implementation** — paseo's generic ACP client, READ-ONLY,
 >   at commit `b86df6ce6` (2026-09-14). Cited below as `generic-acp-agent.ts:NN`
 >   and `acp-agent.ts:NN` (both under
@@ -35,7 +36,7 @@ daemon, no pooling, no retries: the same R2 posture as every other lane.
 The architectural difference from the three existing lanes: the ai-sdk and
 claude-agent lanes execute OUR harness tools (read/edit/run,
 `src/harness/tools.ts`) inside OUR workspace. An ACP run executes the
-VENDOR harness's own tools in ITS process; our role is the ACP *client*
+VENDOR harness's own tools in ITS process; our role is the ACP _client_
 (and the permission authority). The vendor's tool surface, sandbox, and
 model wiring are the vendor's — the seam mapping below is honest about
 what that leaves us unable to enforce.
@@ -51,11 +52,11 @@ Its live message flow, in order:
 
 1. **Spawn + initialize.** `initializeTransport` calls
    `connection.initialize({ protocolVersion: PROTOCOL_VERSION,
-   clientCapabilities, clientInfo: { name: "Paseo", version: "dev" } })`,
+clientCapabilities, clientInfo: { name: "Paseo", version: "dev" } })`,
    raced against a spawn-error channel and a caller-supplied timeout
    ("ACP initialize timed out after …ms", acp-agent.ts:1394-1425). Client
    capabilities baseline: `fs: { readTextFile: false, writeTextFile:
-   false }, terminal: true` (acp-agent.ts:249-256), mergeable per provider
+false }, terminal: true` (acp-agent.ts:249-256), mergeable per provider
    (acp-agent.ts:260-274). Spec: the client sends the latest version it
    supports; the agent MUST answer with the same version if supported,
    else its own latest; a client that cannot live with the agent's answer
@@ -68,7 +69,7 @@ Its live message flow, in order:
    `session/prompt`, `session/cancel`, `session/update` (spec
    initialization page, "Baseline").
 3. **session/prompt.** `connection.prompt({ sessionId, messageId, prompt
-   })`, fire-and-settle: the response resolves through
+})`, fire-and-settle: the response resolves through
    `handlePromptResponse`, a rejection finishes the turn as failed
    (acp-agent.ts:2076-2096). Spec: params are `sessionId` + a
    ContentBlock[] `prompt`; the response carries a `stopReason` of
@@ -96,7 +97,7 @@ Its live message flow, in order:
    issued on the close path, acp-agent.ts:3163).
 7. **Usage.** The reference folds usage ONLY from the prompt response:
    `mapACPUsage(response.usage)` → `{ inputTokens, outputTokens,
-   cachedInputTokens: cachedReadTokens }` (acp-agent.ts:3846, mapper at
+cachedInputTokens: cachedReadTokens }` (acp-agent.ts:3846, mapper at
    677-684). The `usage_update` session update is consumed and dropped:
    `handleUsageUpdate` is literally `void update;` (acp-agent.ts:3841-3843).
 8. **Resume (sessionRef), capability-gated.** `loadSession` when
@@ -378,7 +379,7 @@ touch. Therefore:
   earlier "`cacheWrite` is 0-by-protocol" claim is wrong on this lane and
   the field FOLDS instead of hardcoding 0 — and **round-3 CORRECTION**:
   `input` is DERIVED, never mapped straight — `input = inputTokens −
-  cachedReadTokens − cachedWriteTokens`, floored at 0. The wire's
+cachedReadTokens − cachedWriteTokens`, floored at 0. The wire's
   `inputTokens` is INCLUSIVE of the cached tokens (the live sample:
   `totalTokens 15722 = inputTokens 15719 + outputTokens 3`, with
   `cachedReadTokens 11648` inside the 15719), so the old
@@ -428,7 +429,7 @@ touch. Therefore:
 - **Absent binary: pre-dispatch throw.** If the argv's binary does not
   resolve on PATH (and is not absolute), `run()` throws BEFORE any
   spawn, naming the binary and the install hint (e.g. `npm install -g
-  zcode-acp-server`) — the same posture as the claude-agent lane's
+zcode-acp-server`) — the same posture as the claude-agent lane's
   absent optional peer: fail loudly before any session exists, never a
   crash mid-run (src/driver/README.md, "Optional-peer semantics"). Once
   spawned, `run()` never throws past the seam.
@@ -674,14 +675,15 @@ unimplemented.
 
 **OQ-2 (model reporting) — ANSWERED, trigger (c) CLEARED on the model leg.**
 The model id is reported in TWO places, both verbatim on the wire:
+
 1. `session/new` response: `result.configOptions[]` entry
    `{ id: "model", name: "Model", category: "model", type: "select",
-   currentValue: "builtin:zai\\GLM-5.3", options: [...] }` — but sessions are
+currentValue: "builtin:zai\\GLM-5.3", options: [...] }` — but sessions are
    LAZY: these are defaults, not the materialized session's state.
 2. `session/update` → `params.update.configOptions` (a
    `config_option_update`), emitted once the session materializes on first
    use, carrying the REAL served model: `currentValue:
-   "builtin:bigmodel\\GLM-5.3"`. Note the providerId CHANGES between the lazy
+"builtin:bigmodel\\GLM-5.3"`. Note the providerId CHANGES between the lazy
    default (`builtin:zai`) and the materialized value (`builtin:bigmodel`) —
    the observed-model check (§5, leg m) must read the POST-materialization
    value, never the session/new defaults. Value format is

@@ -120,10 +120,8 @@ export interface WorktreeRegistry {
    * sections (a resolution's registry-consult → scan → create) MUST hold
    * this for the whole section — serialized mutations alone cannot stop
    * two jobs from interleaving the steps BETWEEN their writes (both scan,
-   * both create, one wedges). save/update are themselves locked, and
-   * withLock is REENTRANT for the owning call flow (the held flag is
-   * instance-local), so a critical section calls the locked mutators
-   * freely.
+   * both create, one wedges). save/update are unlocked primitives to call
+   * inside this section. withLock is not reentrant; do not nest it.
    */
   withLock<T>(fn: () => Promise<T>): Promise<T>;
 }
@@ -272,7 +270,9 @@ const SANITIZE_OK = /[^A-Za-z0-9._-]/g;
 const gitFail = (why: string, code: number, stderr: string, args: string[]): Error => {
   const argv = args.map((arg) => JSON.stringify(arg)).join(' ');
   const trimmed = stderr.trim();
-  return new Error(`git ${why} (exit ${code}): git ${argv}${trimmed === '' ? '' : `\nstderr: ${trimmed}`}`);
+  return new Error(
+    `git ${why} (exit ${code}): git ${argv}${trimmed === '' ? '' : `\nstderr: ${trimmed}`}`,
+  );
 };
 
 /** One parsed `worktree list --porcelain` block. */
@@ -369,7 +369,10 @@ const isInsideRoot = async (path: string, root: string): Promise<boolean> => {
   while (trimmed.length > 1 && trimmed.endsWith(sep)) {
     trimmed = trimmed.slice(0, -1);
   }
-  const [canonicalPath, canonicalRoot] = await Promise.all([canonicalize(path), canonicalize(trimmed)]);
+  const [canonicalPath, canonicalRoot] = await Promise.all([
+    canonicalize(path),
+    canonicalize(trimmed),
+  ]);
   return canonicalPath.startsWith(`${canonicalRoot}${sep}`);
 };
 
@@ -382,7 +385,9 @@ const validateOpts = (opts: PrWorktreeOpts): void => {
     throw new Error('resolvePrWorktree: repoRoot must be a non-empty string');
   }
   if (!Number.isSafeInteger(opts.pr) || opts.pr <= 0) {
-    throw new Error(`resolvePrWorktree: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`);
+    throw new Error(
+      `resolvePrWorktree: pr must be a positive safe integer — got ${JSON.stringify(opts.pr)}`,
+    );
   }
   if (opts.headRefName === '' || opts.headRefName.startsWith('-')) {
     throw new Error(
@@ -402,9 +407,12 @@ const validateOpts = (opts: PrWorktreeOpts): void => {
  * is pinned by a test. `reused` distinguishes an existing tree (true) from
  * one this call created (false).
  */
-export async function resolvePrWorktree(
-  opts: PrWorktreeOpts,
-): Promise<{ path: string; reused: boolean; branch: string; foreign: Array<{ path: string; branch: string }> }> {
+export async function resolvePrWorktree(opts: PrWorktreeOpts): Promise<{
+  path: string;
+  reused: boolean;
+  branch: string;
+  foreign: Array<{ path: string; branch: string }>;
+}> {
   validateOpts(opts);
   // ALL paths are resolved ABSOLUTE before use: mkdir() resolves from the
   // process cwd while `git -C <repoRoot> <relative-path>` resolves from
@@ -426,9 +434,10 @@ export async function resolvePrWorktree(
       gitDirArgs,
     );
   }
-  const worktreeRoot = opts.worktreeRoot !== undefined
-    ? pathResolve(opts.worktreeRoot)
-    : join(gitDir.stdout.trim(), 'cq-review-worktrees');
+  const worktreeRoot =
+    opts.worktreeRoot !== undefined
+      ? pathResolve(opts.worktreeRoot)
+      : join(gitDir.stdout.trim(), 'cq-review-worktrees');
   const key = String(opts.pr);
 
   // (a) THE PR'S HEAD REF IS TRUTH — fetched from the BASE repo before any
@@ -476,149 +485,161 @@ export async function resolvePrWorktree(
   // calls inside are the registry's UNLOCKED primitives. The fetch above
   // is per-PR and stays outside.
   return opts.registry.withLock(async () => {
-  const expectedSha = fetchHead.stdout.trim();
-  // The LOCAL branch label we own (keyed by PR) — see reviewBranchFor.
-  const reviewBranch = reviewBranchFor(opts.pr);
+    const expectedSha = fetchHead.stdout.trim();
+    // The LOCAL branch label we own (keyed by PR) — see reviewBranchFor.
+    const reviewBranch = reviewBranchFor(opts.pr);
 
-  const map = await opts.registry.load();
+    const map = await opts.registry.load();
 
-  // (b) Registry consult — the entry must still POINT AT TRUTH: the
-  // directory exists AND git says OUR LABEL (reviewBranch) is checked out
-  // there AND that checkout sits AT the fetched sha (a round-1 tree at a
-  // stale commit is exactly what this check exists to catch). A STALE entry is NOT pruned
-  // here: the prune is the successful re-registration at the end (the
-  // overwrite) — pruning up-front would destroy the machine-readable
-  // pointer precisely when the run is about to wedge on a refused add.
-  const entry = map[key];
-  if (entry !== undefined) {
-    const valid =
-      (await directoryExists(entry.path)) &&
-      // OWNERSHIP applies to the registry too: an entry pointing outside
-      // the CURRENT worktreeRoot describes a tree this module no longer
-      // owns (the root moved, or the entry predates the boundary) — stale
-      // by definition, resolution proceeds to (re)create inside the root.
-      (await isInsideRoot(entry.path, worktreeRoot)) &&
-      (await (async () => {
-        const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
-        const branch = await opts.run(branchArgs);
-        if (branch.code !== 0 || branch.stdout.trim() !== reviewBranch) {
-          return false;
-        }
-        const headArgs = ['-C', entry.path, 'rev-parse', 'HEAD'];
-        const head = await opts.run(headArgs);
-        return head.code === 0 && head.stdout.trim() === expectedSha;
-      })());
-    if (valid) {
-      return { path: entry.path, reused: true, branch: reviewBranch, foreign: [] };
-    }
-  }
-
-  // (c) Existing-worktree scan — with the OWNERSHIP RULE and the refresh
-  // rule. A candidate carrying OUR LABEL is probed for the fetched sha (a
-  // foreign tree never carries the label, so it can never match):
-  //   - INSIDE worktreeRoot + at sha  → OURS: reuse (register, return).
-  //   - INSIDE worktreeRoot + stale   → OUR round-1 leftovers: remove them
-  //     NON-FORCED so the create can converge onto the same spot (a dirty
-  //     tree refuses; its stderr propagates as the throw — a human looks at
-  //     it, never a silent --force).
-  //   - OUTSIDE worktreeRoot + at sha → FOREIGN: never claimed, never
-  //     removed — surfaced in `foreign`.
-  //   - OUTSIDE worktreeRoot + stale  → not ours, not fresh: skipped
-  //     entirely (it still holds the branch and will refuse the create;
-  //     freeing it is the human's call — see the module doc).
-  //   - AT THIS PR's target path (pr-<pr>-<sanitized>), ANY branch →
-  //     RECLAIMABLE: the path is the PR's slot, not the branch's — a tree
-  //     left there by a branch rename is removed non-forced exactly like
-  //     the stale-sha case, and the create lands in the freed slot.
-  const listArgs = ['-C', repoRoot, 'worktree', 'list', '--porcelain'];
-  const list = await opts.run(listArgs);
-  if (list.code !== 0) {
-    throw gitFail('worktree list failed', list.code, list.stderr, listArgs);
-  }
-  const targetPath = join(worktreeRoot, `pr-${opts.pr}-${opts.headRefName.replace(SANITIZE_OK, '-')}`);
-  const foreign: Array<{ path: string; branch: string }> = [];
-  let existing: PorcelainWorktree | null = null;
-  for (const candidate of parseWorktreeList(list.stdout)) {
-    // RECLAIM RULE: a tree sitting at THIS PR key's target path is ours to
-    // reclaim regardless of its checked-out branch (the path is the PR's
-    // slot, not the branch's).
-    const atTargetPath =
-      (await canonicalize(candidate.path)) === (await canonicalize(targetPath));
-    if (candidate.branch !== reviewBranch && !atTargetPath) {
-      continue;
-    }
-    const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
-    const head = await opts.run(headArgs);
-    const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
-    if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
-      if (candidate.branch === reviewBranch && atSha) {
-        foreign.push({ path: candidate.path, branch: candidate.branch });
+    // (b) Registry consult — the entry must still POINT AT TRUTH: the
+    // directory exists AND git says OUR LABEL (reviewBranch) is checked out
+    // there AND that checkout sits AT the fetched sha (a round-1 tree at a
+    // stale commit is exactly what this check exists to catch). A STALE entry is NOT pruned
+    // here: the prune is the successful re-registration at the end (the
+    // overwrite) — pruning up-front would destroy the machine-readable
+    // pointer precisely when the run is about to wedge on a refused add.
+    const entry = map[key];
+    if (entry !== undefined) {
+      const valid =
+        (await directoryExists(entry.path)) &&
+        // OWNERSHIP applies to the registry too: an entry pointing outside
+        // the CURRENT worktreeRoot describes a tree this module no longer
+        // owns (the root moved, or the entry predates the boundary) — stale
+        // by definition, resolution proceeds to (re)create inside the root.
+        (await isInsideRoot(entry.path, worktreeRoot)) &&
+        (await (async () => {
+          const branchArgs = ['-C', entry.path, 'rev-parse', '--abbrev-ref', 'HEAD'];
+          const branch = await opts.run(branchArgs);
+          if (branch.code !== 0 || branch.stdout.trim() !== reviewBranch) {
+            return false;
+          }
+          const headArgs = ['-C', entry.path, 'rev-parse', 'HEAD'];
+          const head = await opts.run(headArgs);
+          return head.code === 0 && head.stdout.trim() === expectedSha;
+        })());
+      if (valid) {
+        return { path: entry.path, reused: true, branch: reviewBranch, foreign: [] };
       }
-      continue;
     }
-    if (candidate.branch === reviewBranch && atSha) {
-      existing = candidate;
-      break;
-    }
-    // UNPUSHED-WORK GUARD: commits on HEAD that the fetched PR head does
-    // not contain are fixer work a failed push left behind — removing the
-    // tree would orphan them (the branch label is reset by the next add).
-    // Refuse loudly with the count; a human resolves it by hand.
-    const unpushedArgs = ['-C', candidate.path, 'rev-list', '--count', `${expectedSha}..HEAD`];
-    const unpushed = await opts.run(unpushedArgs);
-    if (unpushed.code !== 0) {
-      throw gitFail(
-        `rev-list --count on ${candidate.path} failed — the tree's relation to the fetched head is unknown`,
-        unpushed.code,
-        unpushed.stderr,
-        unpushedArgs,
-      );
-    }
-    if (Number.parseInt(unpushed.stdout.trim(), 10) > 0) {
-      throw gitFail(
-        `worktree remove ${candidate.path} withheld: HEAD carries ${unpushed.stdout.trim()} commit(s) not in the fetched PR head (unpushed fixer work would be orphaned) — resolve by hand`,
-        1,
-        `HEAD is ${unpushed.stdout.trim()} commit(s) ahead of ${expectedSha}`,
-        unpushedArgs,
-      );
-    }
-    const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
-    const remove = await opts.run(removeArgs);
-    if (remove.code !== 0) {
-      throw gitFail(
-        `worktree remove ${candidate.path} failed (a dirty stale tree cannot be refreshed away — resolve it by hand)`,
-        remove.code,
-        remove.stderr,
-        removeArgs,
-      );
-    }
-  }
-  if (existing !== null) {
-    await opts.registry.update(key, { path: existing.path, branch: reviewBranch, createdAt: opts.nowMs });
-    return { path: existing.path, reused: true, branch: reviewBranch, foreign };
-  }
 
-  // (d) Create: one directory per PR, `pr-<pr>-<sanitized-branch>` (the PR
-  // prefix disambiguates sanitize collisions like feat/x vs feat-x — see
-  // the module doc), sanitized to a single boring path segment; the root is
-  // created on demand. `-B <reviewBranch> … <expectedSha>` (re)points OUR
-  // LABEL at the FETCHED COMMIT, so the new tree sits AT TRUTH rather than
-  // at whatever the local ref last remembered (the label is pr-keyed — two
-  // PRs sharing a headRefName can never collide). Nonzero add → throw with
-  // stderr (git's refusal names any foreign branch-holder) — nothing is
-  // registered for a tree that does not exist, and any stale registry
-  // entry was never pruned, so the pointer survives for the next run.
-  await mkdir(worktreeRoot, { recursive: true });
-  const wtPath = targetPath;
-  const addArgs = ['-C', repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
-  const add = await opts.run(addArgs);
-  if (add.code !== 0) {
-    throw gitFail(`worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed`, add.code, add.stderr, addArgs);
-  }
-  // The post-success prune: registering the fresh tree OVERWRITES any stale
-  // entry — only now, with the new truth on disk, is the old pointer retired
-  // (the update is a per-key load-merge-save: concurrent resolves for other
-  // PRs never lose their entries to this write).
+    // (c) Existing-worktree scan — with the OWNERSHIP RULE and the refresh
+    // rule. A candidate carrying OUR LABEL is probed for the fetched sha (a
+    // foreign tree never carries the label, so it can never match):
+    //   - INSIDE worktreeRoot + at sha  → OURS: reuse (register, return).
+    //   - INSIDE worktreeRoot + stale   → OUR round-1 leftovers: remove them
+    //     NON-FORCED so the create can converge onto the same spot (a dirty
+    //     tree refuses; its stderr propagates as the throw — a human looks at
+    //     it, never a silent --force).
+    //   - OUTSIDE worktreeRoot + at sha → FOREIGN: never claimed, never
+    //     removed — surfaced in `foreign`.
+    //   - OUTSIDE worktreeRoot + stale  → not ours, not fresh: skipped
+    //     entirely (it still holds the branch and will refuse the create;
+    //     freeing it is the human's call — see the module doc).
+    //   - AT THIS PR's target path (pr-<pr>-<sanitized>), ANY branch →
+    //     RECLAIMABLE: the path is the PR's slot, not the branch's — a tree
+    //     left there by a branch rename is removed non-forced exactly like
+    //     the stale-sha case, and the create lands in the freed slot.
+    const listArgs = ['-C', repoRoot, 'worktree', 'list', '--porcelain'];
+    const list = await opts.run(listArgs);
+    if (list.code !== 0) {
+      throw gitFail('worktree list failed', list.code, list.stderr, listArgs);
+    }
+    const targetPath = join(
+      worktreeRoot,
+      `pr-${opts.pr}-${opts.headRefName.replace(SANITIZE_OK, '-')}`,
+    );
+    const foreign: Array<{ path: string; branch: string }> = [];
+    let existing: PorcelainWorktree | null = null;
+    for (const candidate of parseWorktreeList(list.stdout)) {
+      // RECLAIM RULE: a tree sitting at THIS PR key's target path is ours to
+      // reclaim regardless of its checked-out branch (the path is the PR's
+      // slot, not the branch's).
+      const atTargetPath =
+        (await canonicalize(candidate.path)) === (await canonicalize(targetPath));
+      if (candidate.branch !== reviewBranch && !atTargetPath) {
+        continue;
+      }
+      const headArgs = ['-C', candidate.path, 'rev-parse', 'HEAD'];
+      const head = await opts.run(headArgs);
+      const atSha = head.code === 0 && head.stdout.trim() === expectedSha;
+      if (!(await isInsideRoot(candidate.path, worktreeRoot))) {
+        if (candidate.branch === reviewBranch && atSha) {
+          foreign.push({ path: candidate.path, branch: candidate.branch });
+        }
+        continue;
+      }
+      if (candidate.branch === reviewBranch && atSha) {
+        existing = candidate;
+        break;
+      }
+      // UNPUSHED-WORK GUARD: commits on HEAD that the fetched PR head does
+      // not contain are fixer work a failed push left behind — removing the
+      // tree would orphan them (the branch label is reset by the next add).
+      // Refuse loudly with the count; a human resolves it by hand.
+      const unpushedArgs = ['-C', candidate.path, 'rev-list', '--count', `${expectedSha}..HEAD`];
+      const unpushed = await opts.run(unpushedArgs);
+      if (unpushed.code !== 0) {
+        throw gitFail(
+          `rev-list --count on ${candidate.path} failed — the tree's relation to the fetched head is unknown`,
+          unpushed.code,
+          unpushed.stderr,
+          unpushedArgs,
+        );
+      }
+      if (Number.parseInt(unpushed.stdout.trim(), 10) > 0) {
+        throw gitFail(
+          `worktree remove ${candidate.path} withheld: HEAD carries ${unpushed.stdout.trim()} commit(s) not in the fetched PR head (unpushed fixer work would be orphaned) — resolve by hand`,
+          1,
+          `HEAD is ${unpushed.stdout.trim()} commit(s) ahead of ${expectedSha}`,
+          unpushedArgs,
+        );
+      }
+      const removeArgs = ['-C', repoRoot, 'worktree', 'remove', candidate.path];
+      const remove = await opts.run(removeArgs);
+      if (remove.code !== 0) {
+        throw gitFail(
+          `worktree remove ${candidate.path} failed (a dirty stale tree cannot be refreshed away — resolve it by hand)`,
+          remove.code,
+          remove.stderr,
+          removeArgs,
+        );
+      }
+    }
+    if (existing !== null) {
+      await opts.registry.update(key, {
+        path: existing.path,
+        branch: reviewBranch,
+        createdAt: opts.nowMs,
+      });
+      return { path: existing.path, reused: true, branch: reviewBranch, foreign };
+    }
+
+    // (d) Create: one directory per PR, `pr-<pr>-<sanitized-branch>` (the PR
+    // prefix disambiguates sanitize collisions like feat/x vs feat-x — see
+    // the module doc), sanitized to a single boring path segment; the root is
+    // created on demand. `-B <reviewBranch> … <expectedSha>` (re)points OUR
+    // LABEL at the FETCHED COMMIT, so the new tree sits AT TRUTH rather than
+    // at whatever the local ref last remembered (the label is pr-keyed — two
+    // PRs sharing a headRefName can never collide). Nonzero add → throw with
+    // stderr (git's refusal names any foreign branch-holder) — nothing is
+    // registered for a tree that does not exist, and any stale registry
+    // entry was never pruned, so the pointer survives for the next run.
+    await mkdir(worktreeRoot, { recursive: true });
+    const wtPath = targetPath;
+    const addArgs = ['-C', repoRoot, 'worktree', 'add', '-B', reviewBranch, wtPath, expectedSha];
+    const add = await opts.run(addArgs);
+    if (add.code !== 0) {
+      throw gitFail(
+        `worktree add -B ${reviewBranch} ${wtPath} ${expectedSha} failed`,
+        add.code,
+        add.stderr,
+        addArgs,
+      );
+    }
+    // The post-success prune: registering the fresh tree OVERWRITES any stale
+    // entry — only now, with the new truth on disk, is the old pointer retired
+    // (the update is a per-key load-merge-save: concurrent resolves for other
+    // PRs never lose their entries to this write).
     await opts.registry.update(key, { path: wtPath, branch: reviewBranch, createdAt: opts.nowMs });
     return { path: wtPath, reused: false, branch: reviewBranch, foreign };
   });

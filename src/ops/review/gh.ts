@@ -157,7 +157,8 @@ export const GH_NAME_OK = /^[A-Za-z0-9_.-]+$/;
  * the module that refused); this predicate is the single source of the
  * accept/reject decision.
  */
-export const ghNameOk = (value: string): boolean => GH_NAME_OK.test(value) && value !== '.' && value !== '..';
+export const ghNameOk = (value: string): boolean =>
+  GH_NAME_OK.test(value) && value !== '.' && value !== '..';
 
 /**
  * Normalize a `--paginate --slurp` REST payload to PAGES. THREE shapes

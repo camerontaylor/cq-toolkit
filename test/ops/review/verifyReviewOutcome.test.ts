@@ -32,7 +32,10 @@
 // process, no network, no real clocks.
 import { describe, expect, test } from 'vitest';
 import { snapshotPrState, verifyPrOutcome } from '../../../src/ops/review/verifyReviewOutcome.js';
-import type { PrSnapshot, SnapshotPrStateOpts } from '../../../src/ops/review/verifyReviewOutcome.js';
+import type {
+  PrSnapshot,
+  SnapshotPrStateOpts,
+} from '../../../src/ops/review/verifyReviewOutcome.js';
 import type { GhFn, GhResult } from '../../../src/ops/review/gh.js';
 
 // ---------------------------------------------------------------------------
@@ -65,19 +68,23 @@ const labelsOf = (calls: string[][]): string[] =>
   calls.map((args) => {
     if (args.includes('graphql')) return 'graphql';
     const path = args.find((a) => a.startsWith('repos/')) ?? '';
-    if (path.includes('/comments')) return path.includes('/issues/') ? 'issue-comments' : 'review-comments';
+    if (path.includes('/comments'))
+      return path.includes('/issues/') ? 'issue-comments' : 'review-comments';
     return 'pr-object';
   });
 
 /** Build an injected GhFn that routes on argv and records every argv. */
-const fakeGh = (fixture: FakeGhFixture, calls?: string[][]): GhFn =>
+const fakeGh =
+  (fixture: FakeGhFixture, calls?: string[][]): GhFn =>
   async (args: string[]): Promise<GhResult> => {
     calls?.push(args);
     if (args.includes('graphql')) {
       return {
         code: 0,
         stdout: JSON.stringify({
-          data: { repository: { pullRequest: { reviewThreads: { nodes: fixture.threads ?? [] } } } },
+          data: {
+            repository: { pullRequest: { reviewThreads: { nodes: fixture.threads ?? [] } } },
+          },
         }),
         stderr: '',
       };
@@ -528,7 +535,11 @@ describe('untrustworthy fetches throw loudly', () => {
           ...COORDS,
           run: async (args) => {
             if (args.includes('graphql')) {
-              return { code: 0, stdout: JSON.stringify({ errors: [{ message: 'Bad credentials' }] }), stderr: '' };
+              return {
+                code: 0,
+                stdout: JSON.stringify({ errors: [{ message: 'Bad credentials' }] }),
+                stderr: '',
+              };
             }
             return run(args);
           },
@@ -542,7 +553,12 @@ describe('untrustworthy fetches throw loudly', () => {
         snapshotPrState({
           ...COORDS,
           run: async (args) => {
-            if (args.includes('graphql')) return { code: 0, stdout: JSON.stringify({ data: { repository: { pullRequest: {} } } }), stderr: '' };
+            if (args.includes('graphql'))
+              return {
+                code: 0,
+                stdout: JSON.stringify({ data: { repository: { pullRequest: {} } } }),
+                stderr: '',
+              };
             return run(args);
           },
           nowMs: NOW,
@@ -556,7 +572,8 @@ describe('untrustworthy fetches throw loudly', () => {
           ...COORDS,
           run: async (args) => {
             const path = args.find((a) => a.startsWith('repos/')) ?? '';
-            if (path.includes('/comments')) return { code: 0, stdout: JSON.stringify({ oops: true }), stderr: '' };
+            if (path.includes('/comments'))
+              return { code: 0, stdout: JSON.stringify({ oops: true }), stderr: '' };
             return run(args);
           },
           nowMs: NOW,
@@ -645,7 +662,11 @@ describe('untrustworthy fetches throw loudly', () => {
     const base = fakeGh({ headSha: 'abc123' });
     const run: GhFn = async (args) => {
       if (args.includes('graphql')) {
-        return { code: 0, stdout: JSON.stringify({ errors: { message: 'not an array' } }), stderr: '' };
+        return {
+          code: 0,
+          stdout: JSON.stringify({ errors: { message: 'not an array' } }),
+          stderr: '',
+        };
       }
       return base(args);
     };
@@ -685,9 +706,15 @@ describe('untrustworthy fetches throw loudly', () => {
     );
     // DOT SEGMENTS: "." and ".." pass the charset but ride into the request
     // path as relative segments — rejected like any other bad spelling.
-    await expect(snapshotPrState({ ...COORDS, owner: '.', run, nowMs: NOW })).rejects.toThrow(/snapshotPrState:/);
-    await expect(snapshotPrState({ ...COORDS, repo: '..', run, nowMs: NOW })).rejects.toThrow(/snapshotPrState:/);
-    await expect(snapshotPrState({ ...COORDS, pr: 0, run, nowMs: NOW })).rejects.toThrow(/snapshotPrState:/);
+    await expect(snapshotPrState({ ...COORDS, owner: '.', run, nowMs: NOW })).rejects.toThrow(
+      /snapshotPrState:/,
+    );
+    await expect(snapshotPrState({ ...COORDS, repo: '..', run, nowMs: NOW })).rejects.toThrow(
+      /snapshotPrState:/,
+    );
+    await expect(snapshotPrState({ ...COORDS, pr: 0, run, nowMs: NOW })).rejects.toThrow(
+      /snapshotPrState:/,
+    );
     expect(calls).toEqual([]);
   });
 });

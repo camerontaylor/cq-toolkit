@@ -80,6 +80,7 @@ export interface SuppressionPattern {
 export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Object.freeze(
   [
     { name: 'eslint-disable', pattern: '\\beslint-disable\\b' },
+    { name: 'oxlint-disable', pattern: '\\boxlint-disable\\b' },
     { name: '@ts-ignore', pattern: '@ts-ignore\\b' },
     { name: '@ts-expect-error', pattern: '@ts-expect-error\\b', requiresReason: true },
     { name: 'istanbul ignore', pattern: '\\bistanbul\\s+ignore\\b' },
@@ -230,14 +231,16 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
           }))
         : [],
       detectDeletedTests,
-      skipOnly:
-        tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
+      skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
       detectTautologies: tamper.detectTautologies ?? true,
     };
   } catch (err) {
     if (err instanceof SyntaxError) {
-      return { status: 'failed', error: `invalid pattern config for hackDetector: ${messageOf(err)}` };
+      return {
+        status: 'failed',
+        error: `invalid pattern config for hackDetector: ${messageOf(err)}`,
+      };
     }
     throw err;
   }
@@ -410,7 +413,11 @@ function scanAddedLine(
   }
   if (config.detectTautologies) {
     for (const tautology of content.matchAll(TAUTOLOGY_RE)) {
-      if (tautology[1].trim() === tautology[2].trim()) {
+      const [, left, right] = tautology;
+      if (left === undefined || right === undefined) {
+        throw new Error('tautology pattern must capture both expressions');
+      }
+      if (left.trim() === right.trim()) {
         findings.push({
           kind: 'tautological-assertion',
           file,
