@@ -61,3 +61,17 @@ export type {
   WorktreeRegistryEntry,
 } from './prWorktree.js';
 export { fileWorktreeRegistry, removePrWorktree, resolvePrWorktree } from './prWorktree.js';
+// E4 — the agentic fix half of the loop: fixReviewItem drives ONE worker
+// over ONE review item in the resolved per-PR worktree through the injected
+// Driver seam (conservative harness-derived tool allowlist, head-capped
+// system prompt, single-line JSON contract). fix.default.md/fix.default.ts
+// is the shipped conservative default prompt — the canonical artifact R3
+// later replaces as data (the .ts constant is the runtime copy; the parity
+// test pins the two byte-equal).
+export type {
+  FixableReviewItem,
+  FixReviewItemInput,
+  FixReviewItemResult,
+} from './fixReviewItem.js';
+export { makeFixReviewItem } from './fixReviewItem.js';
+export { defaultFixPrompt } from './prompts/fix.default.js';

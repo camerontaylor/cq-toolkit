@@ -577,26 +577,30 @@ export async function replyAndResolve(
   // are unrecorded failures: they retry once the reply lands.
   const replyFailed = failed.some((f) => f.action.kind === 'review_reply');
   for (const action of resolves) {
-    // An already-dispatched resolve is DONE regardless of any failed reply
-    // — the dedupe check must run first, or a converged action counts as
-    // withheld forever.
-    if (seen.has(action.actionId)) {
-      skippedAlreadyDispatched += 1;
-      continue;
-    }
-    if (replyFailed) {
-      failed.push({
-        action,
-        error:
-          'withheld: a review_reply in this batch failed — resolving would hide the unanswered thread',
-      });
-      withheld += 1;
-      continue;
-    }
+    // review-debt #122 (round-1 reviewer restructure): the WHOLE per-resolve
+    // decision — seen refresh, dedupe check, withhold classification,
+    // mutation, record — runs inside ONE runExclusive critical section. The
+    // previous shape refreshed OUTSIDE the lock (and re-checked inside), so
+    // a record landing between that refresh and the check could still
+    // misclassify a converged resolve as withheld/failed instead of
+    // skippedAlreadyDispatched. In-memory logs (no withLogLock) keep the
+    // unlocked fast path via runExclusive.
     await runExclusive(async () => {
       await refreshSeenUnderLock();
+      // An already-dispatched resolve is DONE regardless of any failed reply
+      // — the dedupe check must run first, or a converged action counts as
+      // withheld forever.
       if (seen.has(action.actionId)) {
         skippedAlreadyDispatched += 1;
+        return;
+      }
+      if (replyFailed) {
+        failed.push({
+          action,
+          error:
+            'withheld: a review_reply in this batch failed — resolving would hide the unanswered thread',
+        });
+        withheld += 1;
         return;
       }
       const args = [

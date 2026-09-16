@@ -700,10 +700,20 @@ export async function removePrWorktree(opts: PrWorktreeOpts & { path: string }):
     );
   }
   const key = String(opts.pr);
-  const map = await opts.registry.load();
-  if (map[key]?.path === opts.path) {
-    // Per-key merge-on-write: other PRs' entries are re-read fresh and
-    // preserved (a whole-map delete+save would drop them).
-    await opts.registry.update(key, null);
-  }
+  // The registry tail is a read-modify-write, so it runs UNDER THE LOCK
+  // (review-debt #121): update() is the documented UNLOCKED primitive, and
+  // unlocked, two overlapping cleanups — or a cleanup racing
+  // resolvePrWorktree's critical section — can interleave the steps BETWEEN
+  // their writes and drop or resurrect entries. The check RE-LOADS inside
+  // the lock so it reads post-other-writer state; per-key merge-on-write is
+  // unchanged (update() still merges), and the prune stays conditional on
+  // the entry still pointing at THE removed path.
+  await opts.registry.withLock(async () => {
+    const map = await opts.registry.load();
+    if (map[key]?.path === opts.path) {
+      // Per-key merge-on-write: other PRs' entries are re-read fresh and
+      // preserved (a whole-map delete+save would drop them).
+      await opts.registry.update(key, null);
+    }
+  });
 }
