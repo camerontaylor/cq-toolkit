@@ -7,6 +7,7 @@
 // the same failure set in any presentation order yields identical cluster
 // ids, confidences, and membership. All pure — zero I/O.
 import { describe, expect, test } from 'vitest';
+import { failureIdentity } from '../../../src/ops/analyze/collectFailures.js';
 import {
   clusterErrors,
   clusterErrorsOp,
@@ -14,6 +15,7 @@ import {
   messageTemplate,
 } from '../../../src/ops/analyze/clusterErrors.js';
 import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
+import { SIGNATURE_MAX_CHARS } from '../../../src/ops/ledger/ledger.js';
 import type { LedgerView } from '../../../src/ops/ledger/index.js';
 import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
 
@@ -88,6 +90,36 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
   test('the coarseness is deliberate: a slash in prose also abstracts (documented)', () => {
     expect(messageTemplate('true and/or false')).toBe('true <path> false');
   });
+
+  test('contraction apostrophes never open a quoted span; a real quoted span still abstracts', () => {
+    expect(messageTemplate("The option doesn't accept 'foo'")).toBe(
+      'The option doesn’t accept <str>',
+    );
+    // The over-split trap: changing the quoted word must NOT change the
+    // signature — the contraction's apostrophe is not a quote-pair opener.
+    const withFoo = clusterSignature(
+      failureOf({ message: "The option doesn't accept 'foo'" }),
+      'eslint',
+    );
+    const withBar = clusterSignature(
+      failureOf({ message: "The option doesn't accept 'bar'" }),
+      'eslint',
+    );
+    expect(withFoo).toBe(withBar);
+    // A genuine quoted span (no contraction involved) still abstracts.
+    expect(messageTemplate("'baz' is defined but never used")).toBe(
+      '<str> is defined but never used',
+    );
+  });
+
+  test('pathological tokens normalize with correct output (token-wise scan, unbounded messages)', () => {
+    const longToken = 'a'.repeat(200_000);
+    // With a separator: the whole maximal non-space run is one <path>.
+    expect(messageTemplate(`${longToken}/x`)).toBe('<path>');
+    // Without a separator: passed through unchanged — the case a
+    // backtracking path regex makes quadratic on adversarial input.
+    expect(messageTemplate(longToken)).toBe(longToken);
+  });
 });
 
 describe('clusterSignature (the ledger-matching form)', () => {
@@ -107,6 +139,20 @@ describe('clusterSignature (the ledger-matching form)', () => {
     expect(
       clusterSignature(failureOf({ ruleId: 'other', message: "'a' used at line 3" }), 'eslint'),
     ).not.toBe(base);
+  });
+
+  test('a very long message yields a bounded, deterministic signature (ledger record seam)', () => {
+    const long = 'x'.repeat(5000);
+    const signature = clusterSignature(failureOf({ message: long }), 'eslint');
+    expect(signature.length).toBeLessThanOrEqual(SIGNATURE_MAX_CHARS);
+    expect(clusterSignature(failureOf({ message: long }), 'eslint')).toBe(signature);
+    // Distinct long messages stay distinct when they differ BEFORE the cut…
+    expect(clusterSignature(failureOf({ message: 'y'.repeat(5000) }), 'eslint')).not.toBe(
+      signature,
+    );
+    // …and the DOCUMENTED coarseness: messages differing only after the
+    // truncation point sign ONE signature (accepted prefix-collision class).
+    expect(clusterSignature(failureOf({ message: `${long}suffix` }), 'eslint')).toBe(signature);
   });
 });
 
@@ -243,8 +289,9 @@ describe('clusterErrors decision table', () => {
       const first = cluster.failures[0];
       const last = cluster.failures[cluster.failures.length - 1];
       if (first === undefined || last === undefined) throw new Error('empty cluster');
-      const firstIdentity = JSON.stringify(first);
-      const lastIdentity = JSON.stringify(last);
+      // The REAL sort key — failureIdentity — not a stringify proxy.
+      const firstIdentity = failureIdentity(first, 'eslint');
+      const lastIdentity = failureIdentity(last, 'eslint');
       expect(firstIdentity <= lastIdentity).toBe(true);
     }
   });
@@ -292,6 +339,16 @@ describe('clusterErrors × ledger (known noise never clusters as signal)', () =>
     const report = clusterErrors(setOf([noisy]), ledger);
     expect(report.noise).toEqual([noisy]);
     expect(report.clusters).toEqual([]);
+  });
+
+  test('a hand-built view violating needsHuman ⊆ knownNoise throws (enforced, not assumed)', () => {
+    const signature = clusterSignature(noisy, 'eslint');
+    const badView: LedgerView = {
+      entries: [{ signature, count: 3 }],
+      knownNoise: [],
+      needsHuman: [signature],
+    };
+    expect(() => clusterErrors(setOf([noisy]), badView)).toThrow(/needsHuman.*knownNoise/);
   });
 
   test('no ledger (or an empty view) suppresses nothing', () => {
@@ -414,8 +471,21 @@ describe('clusterErrorsOp', () => {
     });
   });
 
-  test('ok on an empty set (total over valid typed input — no failure path)', async () => {
+  test('ok on an empty set (an empty report asserts nothing)', async () => {
     const result = await clusterErrorsOp({ set: setOf([], 'eslint', 0) });
     expect(result).toEqual({ status: 'ok', value: { clusters: [], noise: [] } });
+  });
+
+  test('an invariant-violating ledger view maps the policy throw to failed', async () => {
+    const escalated = failureOf({ message: 'escalated but unsuppressed' });
+    const signature = clusterSignature(escalated, 'eslint');
+    const result = await clusterErrorsOp({
+      set: setOf([escalated]),
+      ledger: { entries: [], knownNoise: [], needsHuman: [signature] },
+    });
+    expect(result.status).toBe('failed');
+    if (result.status !== 'failed') return;
+    expect(result.error).toContain('needsHuman');
+    expect(result.error).toContain(signature);
   });
 });
