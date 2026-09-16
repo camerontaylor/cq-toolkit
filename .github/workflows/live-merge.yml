@@ -1,0 +1,91 @@
+# The F5 LIVE merge drill — the merge-prs integration acceptance's only
+# scheduled home (test/e2e/merge/live.test.ts).
+#
+# MANUAL DISPATCH ONLY (never on pull_request, never on push): a live run
+# creates a real private repository on github.com and drives it through the
+# shipped merge-prs composition (classify → plan → execute → conflict
+# agent → re-plan), so nothing automatic may fire it — and a dispatch
+# therefore never affects CI or the repo's required checks. No path or
+# branch filters are used anywhere in this file.
+#
+# WHAT A DISPATCH DOES: builds a fresh 3-PR stack in a private scratch repo
+# (`cq-scratch-f5-p3f-<run>`) with one seeded conflict, resolves it through
+# the REAL SubprocessDriver via a scripted union agent, and asserts the
+# whole stack landed via merge commits only — no squash, no force. The
+# scratch repo is LEFT IN PLACE by design (the run token has no
+# delete_repo scope); docs/drills/2026-09-f5.md records past runs and the
+# repos to delete by hand.
+#
+# SECRETS: this file carries a NAME only. PROMOTE_TOKEN must be a classic
+# token holding the 'repo' scope PLUS 'read:org' — proven live, `gh pr edit`
+# (the retarget-self effect's exact argv shape) fails its GraphQL lookup
+# without read:org, which fails every retarget-self action in the drill.
+# The value reaches the drill through env indirection and is never echoed.
+name: live-merge
+
+on:
+  workflow_dispatch:
+    inputs:
+      testFilter:
+        description: optional vitest -t name filter for the drill test (default runs the whole drill)
+        required: false
+        default: ''
+
+# One live run at a time: a second dispatch queues behind the in-flight one
+# (cancel-in-progress: false — a cancelled drill still leaves its scratch
+# repo behind; queueing avoids duplicated forge work). Fixed group, not
+# per-ref: this workflow never fires on PRs, so there is nothing per-ref to
+# isolate.
+concurrency:
+  group: live-merge
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-merge:
+    runs-on: ubuntu-latest
+    # The drill's own vitest budget is 20 minutes; 30 covers setup plus the
+    # drill with headroom.
+    timeout-minutes: 30
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # The drill pushes only to ITS OWN scratch repo with its own
+          # credential helper; the checkout token must not survive checkout
+          # (persist-credentials: false).
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # The drill's preflight asserts a git identity is configured
+      # (`git config user.email`) before any local commit; hosted runners
+      # ship none, so give the RUNNER one (the drill still sets its own
+      # identity locally inside the scratch clone).
+      - name: Configure a runner git identity (the drill preflight asserts one)
+        run: |
+          git config --global user.email 'f5-live-drill@example.invalid'
+          git config --global user.name 'F5 Live Drill'
+      # Env indirection end to end — the filter and the token are NEVER
+      # textually interpolated into the script. The filter reaches vitest's
+      # -t flag quoted; an empty filter runs the whole drill. The token is
+      # read by `gh` and the drill's git credential helper directly from the
+      # environment and is never printed.
+      - name: Run the live merge drill
+        env:
+          LIVE_GH: '1'
+          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          TEST_FILTER: ${{ inputs.testFilter || '' }}
+        run: |
+          set -euo pipefail
+          if [ -n "${TEST_FILTER}" ]; then
+            npx vitest run test/e2e/merge/live.test.ts -t "${TEST_FILTER}"
+          else
+            npx vitest run test/e2e/merge/live.test.ts
+          fi
