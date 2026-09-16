@@ -138,8 +138,10 @@ import type { ReviewSummary } from '../../../src/ops/review/threads.js';
 /** The suite runs ONLY when the caller explicitly asked for the live drill. */
 const LIVE = process.env.LIVE_GH === '1';
 
-/** The scratch repo's owner (the drill creates repos only under it). */
-const OWNER = 'camerontaylor';
+/** The scratch repo's owner (the drill creates repos only under it) —
+ * environment-overridable so a fork operator can run the drill under their
+ * own account; the default is this repository's owner. */
+const OWNER = process.env.CQ_DRILL_OWNER ?? 'camerontaylor';
 
 /** The drill's branch names — conservative refnames by design (they must
  * pass resolveConflict's refname gate and the composition's dispatch
