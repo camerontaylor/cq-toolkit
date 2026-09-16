@@ -1148,6 +1148,25 @@ describe('formatViolations', () => {
     expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
+  test('a MINIFIED one-line baseline: real keys still match the key check (PR #126 review, Codex P2)', () => {
+    // A hand-edited baseline placing properties on ONE line: the unit key
+    // follows '{' or ',' instead of a line start — the line-start-only
+    // anchor missed it, both sides read unit-less, and the guard passed a
+    // file parseBaseline would reject. The delimiter-aware anchor matches.
+    const minified = (value: number, unit?: string): string =>
+      `{"schemaVersion":1,"target":"typecheck","metric":"typecheck-count","direction":"lower-is-better","value":${value}${unit === undefined ? '' : `,"unit":"${unit}"`},"capturedAt":"2026-09-15T00:00:00.000Z"}`;
+    // A unit change on a minified baseline is caught (key after ',').
+    const diff = fullRewrite(REL, minified(5, 'errors'), minified(3, 'failures'));
+    const verdict = checkDiffMonotonicity(diff);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) {
+      expect(verdict.violations[0]?.why).toBe('unit changed');
+    }
+    // Same unit on both sides still passes.
+    const same = fullRewrite(REL, minified(5, 'errors'), minified(3, 'errors'));
+    expect(checkDiffMonotonicity(same)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+  });
+
   test('key-like text never fires the key check — escaped in rendered values, raw mid-line in hand-crafted diffs (PR #118/#123 reviews)', () => {
     // Two layers, both pinned (PR #123 review caught the earlier version
     // of this test being vacuous — the fixture passed against the

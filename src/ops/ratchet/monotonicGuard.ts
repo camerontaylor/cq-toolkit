@@ -125,18 +125,22 @@ const VALUE_RE = /"value"\s*:\s*(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=
 // nothing, so the field read as absent. Key presence is tracked
 // separately: a key the side carries whose value cannot be captured is
 // malformed committed evidence — fail closed, never a lucky pass.
-// ANCHORED to the property position (PR #123 review, Codex P2 — the
-// PR #118 finding's hardening, landed for real this time): keys match
-// only at a line's leading-whitespace property position. In RENDERED
-// baselines quotes inside values are always JSON-escaped (\"), so an
-// unanchored regex could not match them either — but a HAND-CRAFTED or
-// hostile diff line can carry the raw sequence mid-line, and the anchor
-// makes the property-position intent structural instead of incidental.
-const DIRECTION_KEY_RE = /^\s*"direction"\s*:/g;
+// ANCHORED to property positions (PR #123/#126 reviews, Codex P2): a key
+// matches at a line's leading-whitespace position (rendered baselines put
+// one property per line) OR after a JSON object delimiter (`{` or `,`) —
+// a hand-edited MINIFIED baseline places properties on one line, and the
+// line-start-only anchor missed them (PR #126 review). Key-like text
+// inside STRING values stays excluded: rendered files escape their quotes
+// (\" defeats any spelling), and the delimiter forms require the sequence
+// to follow a structural boundary — a `,`/`{` INSIDE a string value
+// remains a theoretical residual, documented here rather than guessed at
+// (parse-level validation is parseBaseline's business; the guard judges
+// diff text).
+const DIRECTION_KEY_RE = /(?:^|[,{])\s*"direction"\s*:/g;
 const DIRECTION_RE = /"direction"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const METRIC_RE = /"metric"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 const TARGET_RE = /"target"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
-const UNIT_KEY_RE = /^\s*"unit"\s*:/g;
+const UNIT_KEY_RE = /(?:^|[,{])\s*"unit"\s*:/g;
 const UNIT_RE = /"unit"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
 
 /**
