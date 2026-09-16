@@ -45,24 +45,29 @@ export interface ClassifyPrConfig {
    * all-clear bypasses ONLY the settle wait; it never substitutes for
    * row 6's review-of-the-last-commit requirement. Conservative default,
    * built to be negation- AND caveat-proof:
-   *   - EVERY alternative is anchored at LINE START (`m` flag): a
-   *     mid-sentence mention can never match — "this is not all clear
-   *     yet" and "… so it's not lgtm-worthy" carry the phrase mid-line,
-   *     and the anchor refuses them without needing to understand the
-   *     sentence;
+   *   - EVERY alternative is anchored at the WHOLE BODY's start AND end
+   *     — NO multiline flag: `^` matches only the body's first character
+   *     (`^\s*` still admits leading blank lines — `\s` spans newlines)
+   *     and `$` only the body's end. A caveat continuation on the NEXT
+   *     line therefore cannot resurrect a match: "LGTM\nbut fix the
+   *     retry loop first" is a rejection of the head state, not an
+   *     all-clear (with a multiline flag, "LGTM" alone on line 1 would
+   *     have matched — round 3 closed that hole).
    *   - a `not` IMMEDIATELY BEFORE the phrase kills the match ((?!not\b)
    *     right after the anchor) — "Not LGTM …" at line start is a
    *     rejection, not an approval;
-   *   - EVERY alternative must reach END OF LINE (modulo ONE trailing
-   *     !/,/.): any continuation after the phrase is a caveat or a coda
-   *     that changes its meaning — "lgtm but fix the retry loop first",
-   *     "all clear, but the retry loop is still broken", "no further
-   *     issues, but the tests are red", and courteous codas alike ("all
-   *     clear, thanks", "LGTM — ship it") do NOT match. Strict on
-   *     purpose: where a short coda would have been harmless, the miss
-   *     fails toward awaiting (a longer settle), never toward merging
-   *     unchecked. (Round 1 anchored only "looks good" to end-of-line;
-   *     round 2 extends the caveat guard to all four alternatives.)
+   *   - EVERY alternative must reach END OF BODY (modulo ONE trailing
+   *     !/,/.): any continuation after the phrase — on the same line or
+   *     the next — is a caveat or a coda that changes its meaning — "lgtm
+   *     but fix the retry loop first", "all clear, but the retry loop is
+   *     still broken", "no further issues, but the tests are red", and
+   *     courteous codas alike ("all clear, thanks", "LGTM — ship it") do
+   *     NOT match. Strict on purpose: where a short coda would have been
+   *     harmless, the miss fails toward awaiting (a longer settle), never
+   *     toward merging unchecked. (Round 1 anchored only "looks good" to
+   *     end-of-line; round 2 extended the guard to all four alternatives;
+   *     round 3 lifted it to the whole body by dropping the multiline
+   *     flag.)
    * A null or unparseable timestamp never qualifies: an un-timestamped
    * all-clear cannot be shown to postdate the commit, so it fails closed
    * (falls through to the settle rows). R3 tunes this AS DATA (structure
@@ -96,34 +101,41 @@ export const defaultClassifyPrConfig: ClassifyPrConfig = {
   // The I2 doctrine number: a clean PR merges once ten quiet minutes have
   // passed since its last commit. R3 tunes AS DATA.
   settleWindowMs: REVIEW_ACCEPT_SETTLE_MS,
-  // Line-start-anchored, end-of-line-anchored, negation-proof approval
-  // phrasing, case-insensitive — the three anchoring rules (line-start
-  // alternatives, the not-lookahead, end-of-line for EVERY alternative
-  // modulo one trailing !/,/.) are documented on the interface field.
-  // R3 tunes AS DATA.
+  // Anchored to the WHOLE body (no multiline flag — `^`/`$` bind the
+  // body's start/end; `^\s*` still admits leading blank lines),
+  // negation-proof, end-of-body-anchored approval phrasing,
+  // case-insensitive — the anchoring rules are documented on the
+  // interface field. R3 tunes AS DATA.
   allClearPattern:
-    /^\s*(?:(?!not\b)(?:all\s*clear|lgtm\b|no\s+further\s+(?:issues|changes)|looks\s+good[!,.]?))\s*[!,.]?\s*$/im,
+    /^\s*(?:(?!not\b)(?:all\s*clear|lgtm\b|no\s+further\s+(?:issues|changes)|looks\s+good[!,.]?))\s*[!,.]?\s*$/i,
   // Bot skip/failure notices are not reviews (I2) — deliberate duplicate of
-  // ws-e's list, kept under ws-e's anchoring rule; see the file header.
-  // R3 refines AS DATA.
+  // ws-e's list (src/ops/review/classify.config.ts), kept IN SYNC with it
+  // by hand (the lane contract forbids cross-family imports, so the
+  // duplication is two-directional: a window/anchor change lands in BOTH
+  // files in the same commit). R3 refines AS DATA.
   skipPatterns: [
     // "CodeRabbit ... skipped ..." — the bot punted on this PR. Identity at
     // LINE START (every line, `m`), the `(?!-)` hyphenated-mention guard,
-    // and a bounded [^\n]{0,80} window before the skip verb.
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\bskipped\b/im,
-    // A known bot/tool identity at LINE START followed within one line by
-    // "failed"/"error" — the tool's own failure notice. The `(?!-)` guard
-    // keeps a HYPHENATED tool-name MENTION ("Codex-style tooling failed us
-    // here") reading as the tool speaking.
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:failed|error)\b/im,
+    // and a bounded [\s\S]{0,80} window before the skip verb. The window
+    // spans line breaks (round 3: [^\n] → [\s\S]) so a notice rendered as
+    // "CodeRabbit" alone on its line — verb on the next — still reads as
+    // the tool's verdict; it stays bounded so a distant human "skipped"
+    // can never be swallowed.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[\s\S]{0,80}\bskipped\b/im,
+    // A known bot/tool identity at LINE START followed within a bounded
+    // 80-char window (line breaks allowed) by "failed"/"error" — the
+    // tool's own failure notice. The `(?!-)` guard keeps a HYPHENATED
+    // tool-name MENTION ("Codex-style tooling failed us here") reading as
+    // the tool speaking.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[\s\S]{0,80}\b(?:failed|error)\b/im,
     // Tooling self-skip caused by a configuration/setup problem — same
     // identity-at-line-start anchoring: a human's "This configuration error
     // makes skipping validation unsafe" is exactly how real feedback reads.
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/im,
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[\s\S]{0,80}\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/im,
     // A bot/tool identity LEADING the line delivering its self-skip verdict
     // ("CodeRabbit is skipping this PR", "Codex: not reviewing until CI
     // settles") — identity-anchored on every line, so a human's "I'm not
     // reviewing the migrations this pass, but …" is never eaten.
-    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b(?!-)[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
+    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b(?!-)[\s\S]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
   ],
 };

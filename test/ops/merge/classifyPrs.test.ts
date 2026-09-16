@@ -33,15 +33,26 @@
 //      no matter when it was resubmitted; a null/unparseable submittedAt
 //      never qualifies. The row-7 comment all-clear cannot stand in for
 //      the review-of-head requirement.
-//   7. THE SHIPPED allClearPattern is line-start anchored, negation-
-//      proof, and end-of-line-anchored for EVERY alternative: a leading
-//      "not" kills the match, mid-sentence mentions cannot match, and any
-//      continuation after the phrase ("lgtm but fix …", "all clear,
-//      thanks", "LGTM — ship it") fails toward awaiting.
+//   7. THE SHIPPED allClearPattern anchors the WHOLE body (no multiline
+//      flag: `^`/`$` bind the body's start and end; `^\s*` still admits
+//      leading blank lines) and is negation-proof: a leading "not" kills
+//      the match, mid-sentence mentions cannot match, and any continuation
+//      after the phrase — on the same line or the NEXT ("LGTM\nbut fix
+//      …") — fails toward awaiting.
 //   8. CONFIG OVERRIDES are honored (settleWindowMs, allClearPattern)
-//      without mutating defaultClassifyPrConfig.
-//   9. Only DIRTY is the conflict lane: the five non-DIRTY merge states
-//      all reach the evidence rows.
+//      without mutating defaultClassifyPrConfig, and /g-flagged patterns
+//      classify identically across consecutive calls (g/y stripped at the
+//      read site).
+//   9. MERGE STATES: DIRTY is the conflict lane; UNKNOWN
+//      (merge_state_ambiguous) and BLOCKED (merge_state_blocked) fail
+//      closed to awaiting; only BEHIND/CLEAN/HAS_HOOKS reach the evidence
+//      rows.
+//  10. AN OUTSTANDING OBJECTION blocks (merge_objection_outstanding): a
+//      non-author post-commit CHANGES_REQUESTED must be resolved or
+//      withdrawn before the settle or an all-clear can carry the PR.
+//  11. A SPLIT-LINE bot notice ("CodeRabbit" alone on its line, verb on
+//      the next) is still skip-screened — the bounded window spans line
+//      breaks ([\s\S]{0,80}), kept in sync with ws-e's copy.
 //
 // Pure data tests: no I/O, no clocks — instant by construction.
 import { describe, expect, test } from 'vitest';
@@ -367,6 +378,19 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     expect(result.reason).toBe('settle_window_pending');
   });
 
+  test('a SPLIT-LINE caveat ("LGTM" alone on its line, objection on the next) falls through', () => {
+    // The whole-body anchor (round 3): with a multiline flag, "LGTM" alone
+    // on line 1 would have matched; now the next-line objection kills it.
+    const result = classifyPr(
+      settleCandidate({
+        issueComments: [comment({ body: 'LGTM\nbut fix the retry loop first' })],
+      }),
+      PENDING_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('settle_window_pending');
+  });
+
   test('a bot skip notice is never all-clear evidence, even with a bare all-clear phrase on its own line', () => {
     // The skip guard in isAllClearAfter fires BEFORE the pattern: without
     // it, line 2 ("no further issues") is a bare line-start/end pattern
@@ -406,7 +430,7 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     expect(result.reason).toBe('settle_window_pending');
   });
 
-  test('a CHANGES_REQUESTED review with an "LGTM" body is not all-clear evidence either', () => {
+  test('a CHANGES_REQUESTED review with an "LGTM" body never reaches the all-clear row — the objection row fires first', () => {
     const result = classifyPr(
       settleCandidate({
         reviews: [
@@ -417,7 +441,7 @@ describe('classifyPr — the explicit all-clear is strict', () => {
       PENDING_MS,
     );
     expect(result.verdict).toBe('awaiting');
-    expect(result.reason).toBe('settle_window_pending');
+    expect(result.reason).toBe('merge_objection_outstanding');
   });
 });
 
@@ -547,6 +571,23 @@ describe('defaultClassifyPrConfig.allClearPattern — shipped data', () => {
       body: 'all clear, thanks',
       matches: false,
     },
+    // Round 3: the anchors bind the WHOLE body (no multiline flag) — a
+    // caveat on the NEXT line cannot resurrect a match.
+    {
+      name: '"LGTM\\nbut fix the retry loop first" does not match (split-line caveat)',
+      body: 'LGTM\nbut fix the retry loop first',
+      matches: false,
+    },
+    {
+      name: '"all clear\\nbut the tests are red" does not match (split-line caveat)',
+      body: 'all clear\nbut the tests are red',
+      matches: false,
+    },
+    {
+      name: 'leading blank lines are admitted (^\\s* spans newlines)',
+      body: '\n\nlgtm',
+      matches: true,
+    },
     // Bare forms and the single allowed trailing punctuation.
     {
       name: 'a bare "lgtm" matches',
@@ -592,7 +633,7 @@ describe('classifyPr — acceptable-review rules (row 6)', () => {
     expect(result.reason).toBe('no_acceptable_review');
   });
 
-  test('a bot skip/failure notice does not satisfy row 6 (skipPatterns)', () => {
+  test('a bot skip/failure notice does not satisfy row 7 (skipPatterns)', () => {
     const result = classifyPr(
       candidate({
         reviews: [
@@ -605,6 +646,26 @@ describe('classifyPr — acceptable-review rules (row 6)', () => {
       }),
       SETTLED_MS,
     );
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a SPLIT-LINE bot notice ("CodeRabbit" alone on its line, verb on the next) is not a review', () => {
+    // Round 3: the bounded window spans line breaks ([\s\S]{0,80}, kept in
+    // sync with ws-e's copy) — the split rendering does not dodge the skip
+    // screen.
+    const result = classifyPr(
+      candidate({
+        reviews: [
+          approved({
+            authorLogin: 'coderabbitai[bot]',
+            state: 'COMMENTED',
+            body: 'CodeRabbit\nskipped this run',
+          }),
+        ],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('no_acceptable_review');
   });
 
@@ -656,25 +717,7 @@ describe('classifyPr — acceptable-review rules (row 6)', () => {
 // Acceptance VERDICTS (row 6) — only APPROVED/COMMENTED carry evidence
 // ---------------------------------------------------------------------------
 
-describe('classifyPr — acceptance states (row 6)', () => {
-  test('a post-commit CHANGES_REQUESTED review alone → awaiting (an objection is not acceptance)', () => {
-    const result = classifyPr(
-      candidate({ reviews: [approved({ state: 'CHANGES_REQUESTED' })] }),
-      SETTLED_MS,
-    );
-    expect(result.verdict).toBe('awaiting');
-    expect(result.reason).toBe('no_acceptable_review');
-  });
-
-  test('CHANGES_REQUESTED + settle fully elapsed → STILL awaiting (never eligible)', () => {
-    const result = classifyPr(
-      candidate({ reviews: [approved({ state: 'CHANGES_REQUESTED' })] }),
-      SETTLED_MS + REVIEW_ACCEPT_SETTLE_MS,
-    );
-    expect(result.verdict).toBe('awaiting');
-    expect(result.reason).toBe('no_acceptable_review');
-  });
-
+describe('classifyPr — acceptance states (row 7)', () => {
   test('a post-commit COMMENTED review IS acceptable (control: the settle flow works)', () => {
     const result = classifyPr(
       candidate({ reviews: [approved({ state: 'COMMENTED' })] }),
@@ -716,6 +759,22 @@ describe('classifyPr — config overrides (the R3 seam)', () => {
     expect(overridden.reason).toBe('explicit_all_clear');
   });
 
+  test('a /g-flagged allClearPattern override classifies identically across three consecutive calls', () => {
+    // A /g RegExp keeps lastIndex across .test() calls; the read site must
+    // strip it (evalPattern) so repeated classification stays pure. The
+    // pattern keeps its `i` flag — stripping removes only g/y.
+    const c = settleCandidate({ reviews: [approved({ body: 'SHIPIT' })] });
+    const overridden = { ...defaultClassifyPrConfig, allClearPattern: /shipit/gi };
+    const expected = {
+      verdict: 'eligible',
+      reason: 'explicit_all_clear',
+      unresolvedExternalThreads: 0,
+    };
+    for (let i = 0; i < 3; i++) {
+      expect(classifyPr(c, PENDING_MS, overridden)).toEqual(expected);
+    }
+  });
+
   test('an override call does not mutate defaultClassifyPrConfig', () => {
     const snapshot = (): string =>
       JSON.stringify({
@@ -735,17 +794,101 @@ describe('classifyPr — config overrides (the R3 seam)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Row 2 scope — only DIRTY is the conflict lane
+// Row 2 scope — DIRTY conflicts; UNKNOWN/BLOCKED fail closed; only
+// CLEAN/BEHIND/HAS_HOOKS reach the evidence rows
 // ---------------------------------------------------------------------------
 
-describe('classifyPr — the five non-DIRTY merge states pass row 2', () => {
-  test.each(['BEHIND', 'BLOCKED', 'HAS_HOOKS', 'UNKNOWN', 'CLEAN'] as const)(
-    'mergeState %s reaches the evidence rows (eligible, never merge_conflicts)',
+describe('classifyPr — merge states (row 2)', () => {
+  test.each(['BEHIND', 'CLEAN', 'HAS_HOOKS'] as const)(
+    'mergeState %s reaches the evidence rows (eligible via settle, never a state row)',
     (mergeState) => {
       const result = classifyPr(settleCandidate({ mergeState }), SETTLED_MS);
       expect(result.verdict).toBe('eligible');
       expect(result.reason).toBe('settle_window_elapsed');
-      expect(result.reason).not.toBe('merge_conflicts');
     },
   );
+
+  test.each([
+    { state: 'UNKNOWN', reason: 'merge_state_ambiguous' },
+    { state: 'BLOCKED', reason: 'merge_state_blocked' },
+  ] as const)('mergeState $state fails closed to awaiting', ({ state, reason }) => {
+    // GitHub could not determine mergeability / branch protection unmet —
+    // neither may ever be read as mergeable, whatever the reviews say.
+    const result = classifyPr(settleCandidate({ mergeState: state }), SETTLED_MS);
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe(reason);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Row 6 — an outstanding objection is not silence (NOTHING MERGES UNINVITED)
+// ---------------------------------------------------------------------------
+
+describe('classifyPr — outstanding objections (row 6, merge_objection_outstanding)', () => {
+  test('post-commit CHANGES_REQUESTED + post-commit APPROVED + settle elapsed → awaiting', () => {
+    // The exact mixed case: an approval cannot carry a PR that also
+    // carries an open objection — the objection must be resolved first.
+    const result = classifyPr(
+      candidate({
+        reviews: [
+          approved({ state: 'CHANGES_REQUESTED', body: 'the retry loop can spin forever' }),
+          approved({ id: 'PRR_2' }),
+        ],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('merge_objection_outstanding');
+  });
+
+  test('a post-commit CHANGES_REQUESTED review alone → awaiting (merge_objection_outstanding)', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ state: 'CHANGES_REQUESTED' })] }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('merge_objection_outstanding');
+  });
+
+  test('CHANGES_REQUESTED + settle fully elapsed → STILL awaiting (settle never cures an open objection)', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ state: 'CHANGES_REQUESTED' })] }),
+      SETTLED_MS + REVIEW_ACCEPT_SETTLE_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('merge_objection_outstanding');
+  });
+
+  test('a CHANGES_REQUESTED submitted pre-commit does NOT trigger (same temporal screen)', () => {
+    const result = classifyPr(
+      candidate({
+        reviews: [approved({ state: 'CHANGES_REQUESTED', submittedAt: BEFORE_COMMIT })],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a CHANGES_REQUESTED by the PR author does not trigger (non-author rule)', () => {
+    const result = classifyPr(
+      candidate({
+        reviews: [approved({ state: 'CHANGES_REQUESTED', authorLogin: 'pr-author' })],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('withdrawn — the verdict flips to APPROVED and the objection stops blocking', () => {
+    const result = classifyPr(
+      candidate({
+        reviews: [approved({ body: 'withdrawing my objection — resolved upstream' })],
+      }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('eligible');
+    expect(result.reason).toBe('settle_window_elapsed');
+  });
 });

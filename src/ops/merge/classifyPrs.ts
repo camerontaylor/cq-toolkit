@@ -9,17 +9,23 @@
 // I2 — NOTHING MERGES UNINVITED. Every candidate PR is offered to exactly
 // one of five words, in this order, FIRST MATCH WINS:
 //   1. draft                                  → `never`       (is_draft)
-//   2. merge state DIRTY                      → `conflicting` (merge_conflicts)
+//   2. merge state DIRTY                      → `conflicting` (merge_conflicts);
+//      UNKNOWN → `awaiting` (merge_state_ambiguous — GitHub could not
+//      determine mergeability: fail closed); BLOCKED → `awaiting`
+//      (merge_state_blocked — branch protection unmet: fail closed);
+//      only CLEAN, BEHIND, and HAS_HOOKS reach the evidence rows
 //   3. truncated review data                  → `awaiting`    (review_data_truncated)
 //   4. last-commit-time unknown               → `awaiting`    (last_commit_unknown)
 //   5. unresolved external threads > 0        → `has-issues`  (unresolved_external_threads)
-//   6. no acceptable review OF THE LAST
-//      COMMIT's head state                     → `awaiting`    (no_acceptable_review)
-//   7. explicit all-clear postdating the
+//   6. outstanding post-commit objection
+//      (a non-author CHANGES_REQUESTED)       → `awaiting`    (merge_objection_outstanding)
+//   7. no acceptable review OF THE LAST
+//      COMMIT's head state                    → `awaiting`    (no_acceptable_review)
+//   8. explicit all-clear postdating the
 //      last commit — bypasses ONLY the settle
 //      wait; the review-of-head requirement
-//      holds regardless                        → `eligible`    (explicit_all_clear)
-//   8. last commit ≥ settle window ago
+//      holds regardless                       → `eligible`    (explicit_all_clear)
+//   9. last commit ≥ settle window ago
 //      (with an acceptable review)            → `eligible`    (settle_window_elapsed)
 //      else (settle not reached)              → `awaiting`    (settle_window_pending)
 // Rows 3 and 4 FAIL CLOSED on purpose: truncated data means verdicts are
@@ -44,9 +50,15 @@
 //     (fail toward awaiting). The lane brief's simplified row table
 //     omitted this qualifier; the implementation aligns to canonical
 //     doctrine — that alignment is recorded in the PR body, NOT a
-//     deviation from I2. The row-7 all-clear (review body or top-level
+//     deviation from I2. The row-8 all-clear (review body or top-level
 //     conversation comment) bypasses ONLY the settle wait — it can never
 //     stand in for the review-of-head requirement.
+//   - AN OUTSTANDING OBJECTION IS NOT SILENCE (row 6, deliberate
+//     strictness under NOTHING MERGES UNINVITED): a non-author
+//     CHANGES_REQUESTED against the head state must be resolved or
+//     withdrawn before the quiet window can carry the PR — it blocks
+//     ahead of the all-clear and settle rows, no matter how long the
+//     settle runs.
 //   - Row 5's externality is ROOT-only, inherited deliberately from the
 //     shared countUnresolvedThreads (the ws-f single-shared-module
 //     constraint): an author-rooted thread carrying an external reply does
@@ -87,9 +99,12 @@ export interface PrClassification {
   reason:
     | 'is_draft'
     | 'merge_conflicts'
+    | 'merge_state_ambiguous'
+    | 'merge_state_blocked'
     | 'review_data_truncated'
     | 'last_commit_unknown'
     | 'unresolved_external_threads'
+    | 'merge_objection_outstanding'
     | 'no_acceptable_review'
     | 'explicit_all_clear'
     | 'settle_window_elapsed'
@@ -114,7 +129,9 @@ export interface PrCandidate {
   /**
    * GraphQL mergeState enum (uppercase); a future REST-fed boundary must
    * normalize case to this union before calling. DIRTY = merge conflicts
-   * (row 2); every other value passes row 2.
+   * (row 2, conflicting); UNKNOWN (mergeability undeterminable) and
+   * BLOCKED (branch protection unmet) fail closed to awaiting (row 2);
+   * CLEAN, BEHIND, and HAS_HOOKS reach the evidence rows.
    */
   mergeState: 'DIRTY' | 'BEHIND' | 'CLEAN' | 'UNKNOWN' | 'HAS_HOOKS' | 'BLOCKED';
   /** The fail-closed truncation flag from the fetch layer (row 3). */
@@ -142,59 +159,94 @@ const parseMs = (iso: string | null): number | null => {
 };
 
 /**
- * Whether a review's VERDICT can carry acceptance evidence (row 6) or
- * all-clear evidence (row 7): only APPROVED or COMMENTED. A
- * CHANGES_REQUESTED verdict is an OBJECTION, not acceptance — the
- * cross-family reading agrees (classifyThreads treats a
- * changes-requested review as actionable feedback to answer); DISMISSED
+ * Evaluate a config pattern with any STICKY/GLOBAL flag stripped (the E2
+ * approach in classifyThreads, mirrored): a /g or /y RegExp keeps
+ * `lastIndex` across .test() calls, so the Nth classification would
+ * depend on the N-1 before it — a nondeterministic table. The caller's
+ * RegExp objects are never mutated; a fresh flag-stripped expression is
+ * rebuilt per read.
+ */
+const evalPattern = (pattern: RegExp, body: string): boolean =>
+  new RegExp(pattern.source, pattern.flags.replace(/[gy]/g, '')).test(body);
+
+/**
+ * True when the body matches any configured bot skip/failure pattern — a
+ * bot notice is neither acceptance evidence, nor an objection, nor an
+ * all-clear, however it is phrased. Evaluated flag-stripped (evalPattern).
+ */
+const matchesSkipPattern = (body: string, config: ClassifyPrConfig): boolean =>
+  config.skipPatterns.some((pattern) => evalPattern(pattern, body));
+
+/**
+ * The context the review-evidence predicates read: who the PR author is,
+ * the last commit's parsed ms (null only before row 4 has failed closed),
+ * and the config.
+ */
+interface ReviewContext {
+  authorLogin: string | null;
+  lastCommitMs: number | null;
+  config: ClassifyPrConfig;
+}
+
+/**
+ * The shared SCREEN every review must pass before its verdict can mean
+ * anything to the table: a non-author (a null reviewer login is not the
+ * author — external, counts, mirroring countUnresolvedThreads' exact
+ * comparison), a body that is not a bot skip/failure notice
+ * (matchesSkipPattern), and the TEMPORAL QUALIFIER — submitted STRICTLY
+ * AFTER the last commit (evidence covering an earlier commit never
+ * qualifies; a null/unparseable submittedAt never qualifies — fail
+ * toward awaiting). `lastCommitMs` is typed nullable only so the
+ * predicate stays total: the table has already failed closed on an
+ * unknown commit by row 4, before any evidence row can call.
+ */
+const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolean => {
+  if (ctx.authorLogin !== null && review.authorLogin === ctx.authorLogin) return false;
+  if (matchesSkipPattern(review.body, ctx.config)) return false;
+  const submittedMs = parseMs(review.submittedAt);
+  return submittedMs !== null && ctx.lastCommitMs !== null && submittedMs > ctx.lastCommitMs;
+};
+
+/**
+ * Whether a review's VERDICT can carry acceptance evidence (row 7) or
+ * all-clear evidence (row 8): only APPROVED or COMMENTED. A
+ * CHANGES_REQUESTED verdict is handled by its own row (isObjection — an
+ * objection, not acceptance; the cross-family reading agrees:
+ * classifyThreads treats it as actionable feedback to answer). DISMISSED
  * is void; a null/unknown state never counts (fail toward awaiting).
  */
 const stateCounts = (state: ReviewSummary['state']): boolean =>
   state === 'APPROVED' || state === 'COMMENTED';
 
 /**
- * An ACCEPTABLE review for row 6: a real reviewer's look at the PR AS IT
- * STANDS — the last commit's exact head state. The author must not be the
- * PR author (self-reviews never count; a null reviewer login is not the
- * author — external, counts), the verdict must be APPROVED or COMMENTED
- * (stateCounts: a CHANGES_REQUESTED verdict is an objection, DISMISSED is
- * void, null/unknown never counts), and the body must not be a bot
- * skip/failure notice (skipPatterns — "CodeRabbit skipped this run"
- * carries no judgement). THE TEMPORAL QUALIFIER: the review must have been
- * submitted STRICTLY AFTER the last commit — evidence covering an earlier
- * commit never qualifies, no matter how long the settle, and no matter
- * when it was resubmitted; a null/unparseable submittedAt never qualifies
- * (fail toward awaiting). `lastCommitMs` is typed nullable only so this
- * helper stays total — the table has already failed closed on an unknown
- * commit by row 4, before row 6 can call. No reviewer is privileged: bots
- * and humans count identically.
+ * An ACCEPTABLE review for row 7: reviewable evidence whose verdict
+ * carries acceptance (stateCounts). No reviewer is privileged: bots and
+ * humans count identically.
  */
-const isAcceptableReview = (
-  review: ReviewSummary,
-  authorLogin: string | null,
-  lastCommitMs: number | null,
-  config: ClassifyPrConfig,
-): boolean => {
-  // Mirror countUnresolvedThreads' external-author comparison exactly: the
-  // exclusion fires only when the author login is KNOWN, so null review
-  // authors always count (fail toward accepting evidence).
-  if (authorLogin !== null && review.authorLogin === authorLogin) return false;
-  if (!stateCounts(review.state)) return false;
-  if (config.skipPatterns.some((pattern) => pattern.test(review.body))) return false;
-  const submittedMs = parseMs(review.submittedAt);
-  return submittedMs !== null && lastCommitMs !== null && submittedMs > lastCommitMs;
-};
+const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
+  isReviewableEvidence(review, ctx) && stateCounts(review.state);
+
+/**
+ * An OUTSTANDING OBJECTION for row 6: reviewable evidence (non-author,
+ * non-skip-notice body, postdating the last commit) whose verdict is
+ * CHANGES_REQUESTED — an open objection to the head state. An objection
+ * is not silence: under NOTHING MERGES UNINVITED it must be resolved or
+ * withdrawn (the verdict moves off CHANGES_REQUESTED) before the quiet
+ * window can carry the PR, no matter how long the settle.
+ */
+const isObjection = (review: ReviewSummary, ctx: ReviewContext): boolean =>
+  isReviewableEvidence(review, ctx) && review.state === 'CHANGES_REQUESTED';
 
 /**
  * Whether one piece of evidence (a review, or a top-level conversation
- * comment) is an explicit all-clear for row 7. A BOT SKIP/FAILURE NOTICE
+ * comment) is an explicit all-clear for row 8. A BOT SKIP/FAILURE NOTICE
  * is never all-clear evidence, however it is phrased (skipPatterns fire
  * first — "… No further changes will be made." appended to a bot's skip
  * line must not read as approval). Otherwise: body matches
  * config.allClearPattern, authored by a non-author (null counts as
  * non-author, per the house rule), and timestamped STRICTLY AFTER
  * lastCommitMs. The all-clear bypasses ONLY the settle wait — it can
- * never substitute for row 6's review-of-head requirement. Evidence with
+ * never substitute for row 7's review-of-head requirement. Evidence with
  * an absent/unparseable timestamp cannot be shown to postdate the commit
  * and never qualifies — fail closed.
  */
@@ -206,9 +258,9 @@ const isAllClearAfter = (
   lastCommitMs: number,
   config: ClassifyPrConfig,
 ): boolean => {
-  if (config.skipPatterns.some((pattern) => pattern.test(body))) return false;
+  if (matchesSkipPattern(body, config)) return false;
   if (prAuthorLogin !== null && evidenceAuthorLogin === prAuthorLogin) return false;
-  if (!config.allClearPattern.test(body)) return false;
+  if (!evalPattern(config.allClearPattern, body)) return false;
   const atMs = parseMs(createdAt);
   if (atMs === null) return false;
   return atMs > lastCommitMs;
@@ -239,10 +291,23 @@ export function classifyPr(
   if (candidate.draft) {
     return { verdict: 'never', reason: 'is_draft', unresolvedExternalThreads };
   }
-  // Row 2 — merge conflicts: the conflict lane, ahead of every review row
-  // (a conflicted PR's reviews describe code that cannot merge as-is).
-  if (candidate.mergeState === 'DIRTY') {
-    return { verdict: 'conflicting', reason: 'merge_conflicts', unresolvedExternalThreads };
+  // Row 2 — the branch's own merge state, ahead of every review row (a
+  // conflicted PR's reviews describe code that cannot merge as-is). DIRTY
+  // is the conflict lane; UNKNOWN and BLOCKED fail closed to awaiting
+  // (GitHub could not determine mergeability / branch protection unmet —
+  // neither may be read as mergeable). Only CLEAN, BEHIND, and HAS_HOOKS
+  // continue to the evidence rows.
+  switch (candidate.mergeState) {
+    case 'DIRTY':
+      return { verdict: 'conflicting', reason: 'merge_conflicts', unresolvedExternalThreads };
+    case 'UNKNOWN':
+      return { verdict: 'awaiting', reason: 'merge_state_ambiguous', unresolvedExternalThreads };
+    case 'BLOCKED':
+      return { verdict: 'awaiting', reason: 'merge_state_blocked', unresolvedExternalThreads };
+    case 'CLEAN':
+    case 'BEHIND':
+    case 'HAS_HOOKS':
+      break; // mergeable states — the evidence rows decide
   }
   // Row 3 — truncated review data: verdicts may be MISSING from the set,
   // so "no threads, no reviews" proves nothing. Fail closed ahead of every
@@ -262,22 +327,34 @@ export function classifyPr(
   if (unresolvedExternalThreads > 0) {
     return { verdict: 'has-issues', reason: 'unresolved_external_threads', unresolvedExternalThreads };
   }
-  // Row 6 — nobody has looked AT THIS CODE: no acceptable review of the
-  // last commit's exact head state exists (non-author, non-dismissed,
-  // non-skip-notice, submitted STRICTLY AFTER the last commit). Quiet is
-  // not acceptance until someone qualified has spoken about the head
-  // state at least once — and no amount of settle time cures evidence
-  // that predates the commit.
-  const hasAcceptableReview = candidate.reviews.some((review) =>
-    isAcceptableReview(review, candidate.authorLogin, lastCommitMs, config),
-  );
+  // Rows 6–9 read review evidence; they share one screening context.
+  const ctx: ReviewContext = { authorLogin: candidate.authorLogin, lastCommitMs, config };
+  // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
+  // CHANGES_REQUESTED against the last commit's head state, not yet
+  // withdrawn (verdict moved off CHANGES_REQUESTED). An objection is not
+  // silence (DOCTRINE: NOTHING MERGES UNINVITED) — it blocks ahead of the
+  // all-clear and settle rows, no matter how long the settle runs.
+  if (candidate.reviews.some((review) => isObjection(review, ctx))) {
+    return {
+      verdict: 'awaiting',
+      reason: 'merge_objection_outstanding',
+      unresolvedExternalThreads,
+    };
+  }
+  // Row 7 — nobody has looked AT THIS CODE: no acceptable review of the
+  // last commit's exact head state exists (non-author, verdict
+  // APPROVED/COMMENTED, non-skip-notice, submitted STRICTLY AFTER the
+  // last commit). Quiet is not acceptance until someone qualified has
+  // spoken about the head state at least once — and no amount of settle
+  // time cures evidence that predates the commit.
+  const hasAcceptableReview = candidate.reviews.some((review) => isAcceptableReview(review, ctx));
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };
   }
-  // Row 7 — an explicit all-clear STRICTLY AFTER the last commit: a
+  // Row 8 — an explicit all-clear STRICTLY AFTER the last commit: a
   // non-author said the final code is fine (review body or top-level
   // conversation comment), so the settle wait is unnecessary. This
-  // bypasses ONLY the settle wait — row 6's review-of-head requirement
+  // bypasses ONLY the settle wait — row 7's review-of-head requirement
   // already held before we got here. An all-clear at-or-before the commit
   // speaks about earlier code and falls through.
   const allClearAfterLastCommit =
@@ -312,10 +389,10 @@ export function classifyPr(
   if (allClearAfterLastCommit) {
     return { verdict: 'eligible', reason: 'explicit_all_clear', unresolvedExternalThreads };
   }
-  // Row 8 — the settle window: an acceptable review exists (row 6 passed),
-  // so the question is only whether the PR has sat untouched long enough
-  // for quiet to count as acceptance. Exactly AT the window is elapsed
-  // (>=): the boundary belongs to eligible.
+  // Row 9 — the settle window: an acceptable review exists (row 7
+  // passed), so the question is only whether the PR has sat untouched
+  // long enough for quiet to count as acceptance. Exactly AT the window
+  // is elapsed (>=): the boundary belongs to eligible.
   if (nowMs - lastCommitMs >= config.settleWindowMs) {
     return { verdict: 'eligible', reason: 'settle_window_elapsed', unresolvedExternalThreads };
   }

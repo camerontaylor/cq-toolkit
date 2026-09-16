@@ -28,7 +28,10 @@ export interface ClassifyConfig {
    * the migrations this pass, but …" is exactly how real feedback reads,
    * so an unanchored pattern would eat human comments. R3 refines the
    * pattern list AS DATA (structure frozen) — under the same anchoring
-   * rule.
+   * rule. KEPT IN SYNC BY HAND with the merge family's deliberate
+   * duplicate (src/ops/merge/classify.config.ts): the lane contract
+   * forbids cross-family imports, so the duplication is two-directional —
+   * a window/anchor change lands in BOTH files in the same commit.
    */
   skipPatterns: RegExp[];
   /**
@@ -110,20 +113,24 @@ export const defaultClassifyConfig: ClassifyConfig = {
     // SAME family form as its siblings (it used to be the one unanchored,
     // unbounded pattern, and a human mentioning CodeRabbit mid-sentence
     // alongside "skipped" was eaten): identity at LINE START (every line,
-    // `m`), the `(?!-)` hyphenated-mention guard, and a bounded [^\n]{0,80}
-    // window before the skip verb.
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\bskipped\b/im,
-    // A known bot/tool identity at LINE START followed within one line by
-    // "failed"/"error" — the tool's own failure notice. The `m` flag makes
-    // ^ match at EVERY line start, so a notice landing on line 2+ of a
-    // multi-line comment (a bot that appends its failure below a preamble)
-    // still fires. The trailing \b after the identity mirrors the
-    // `\bCodeRabbit\b` shape, and the `(?!-)` guard keeps a HYPHENATED
-    // tool-name MENTION from reading as the tool speaking ("Codex-style
-    // tooling failed us here — please fix the harness manually." is a
-    // human's sentence; \b alone is satisfied before the hyphen and would
-    // eat it).
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:failed|error)\b/im,
+    // `m`), the `(?!-)` hyphenated-mention guard, and a bounded
+    // [\s\S]{0,80} window before the skip verb. The window spans line
+    // breaks (round 3: [^\n] → [\s\S], in sync with the merge family's
+    // copy) so a notice rendered as "CodeRabbit" alone on its line — verb
+    // on the next — still reads as the tool's verdict; it stays bounded so
+    // a distant human "skipped" can never be swallowed.
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[\s\S]{0,80}\bskipped\b/im,
+    // A known bot/tool identity at LINE START followed within a bounded
+    // 80-char window (line breaks allowed) by "failed"/"error" — the
+    // tool's own failure notice. The `m` flag makes ^ match at EVERY line
+    // start, so a notice landing on line 2+ of a multi-line comment (a bot
+    // that appends its failure below a preamble) still fires. The trailing
+    // \b after the identity mirrors the `\bCodeRabbit\b` shape, and the
+    // `(?!-)` guard keeps a HYPHENATED tool-name MENTION from reading as
+    // the tool speaking ("Codex-style tooling failed us here — please fix
+    // the harness manually." is a human's sentence; \b alone is satisfied
+    // before the hyphen and would eat it).
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[\s\S]{0,80}\b(?:failed|error)\b/im,
     // Tooling self-skip caused by a configuration/setup problem — a known
     // bot/tool identity at LINE START (every line, via `m`), same anchoring
     // as its siblings: a human's "This configuration error makes skipping
@@ -132,7 +139,7 @@ export const defaultClassifyConfig: ClassifyConfig = {
     // the identity mirrors the failure-notice pattern above — a hyphenated
     // tool-name MENTION ("Codex-style tooling hit a configuration problem,
     // so we're skipping …") is a human's sentence, not the tool speaking.
-    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[^\n]{0,80}\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/im,
+    /^\s*(?:(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b)(?!-)[\s\S]{0,80}\b(?:configuration|setup)\s+(?:error|problem)[^\n]{0,40}\bskipping\b/im,
     // A bot/tool identity LEADING the line delivering its self-skip
     // verdict ("CodeRabbit is skipping this PR", "Codex: not reviewing
     // until CI settles") — identity-anchored, on EVERY line (`m`), so a
@@ -141,7 +148,7 @@ export const defaultClassifyConfig: ClassifyConfig = {
     // hyphenated tool-name MENTION ("Codex-style tooling is not reviewing
     // generated files correctly") is a human's sentence, not the tool
     // speaking.
-    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b(?!-)[^\n]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
+    /^\s*(?:CodeRabbit|coderabbitai|Codex|chatgpt-codex-connector)\b(?!-)[\s\S]{0,80}\b(?:is\s+)?(?:skipping|not reviewing)\b/im,
   ],
   responderIs: 'pr-author',
   // Unknown timestamp = brand-new for ordering purposes: an un-timestamped

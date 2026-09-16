@@ -1075,6 +1075,21 @@ describe('default skipPatterns', () => {
     ).toEqual([{ kind: 'comment', id: '626', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
   });
 
+  test('a SPLIT-LINE notice (identity and skip verb on different lines) skips — the bounded window spans the break', () => {
+    // Round 3: the window between the identity and the verb is
+    // [\s\S]{0,80} (kept in sync with the merge family's copy of the
+    // patterns — src/ops/merge/classify.config.ts): a notice rendered as
+    // "CodeRabbit" alone on its line, verb on the next, is still the
+    // tool's verdict, never actionable feedback.
+    expect(
+      itemsOf(
+        baseState({
+          restIssueComments: [restComment({ id: 627, body: 'CodeRabbit\nskipped this run' })],
+        }),
+      ),
+    ).toEqual([{ kind: 'comment', id: '627', verdict: 'skip', path: null, reason: 'bot_skip_notice' }]);
+  });
+
   test('a HUMAN mid-body sentence (line 2, no bot identity) stays actionable even with the `m` flag', () => {
     // The `m` flag widens WHERE the anchors can match, never WHAT counts as
     // a bot: line 2 opening with generic human "failed to consider…"
