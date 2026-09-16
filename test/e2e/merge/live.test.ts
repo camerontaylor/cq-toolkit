@@ -52,9 +52,11 @@
 //                    full: APPROVED, external (null author — the house
 //                    rule: null is never the author), submitted strictly
 //                    after the head commit. The tail rung's (pr 3) overlay
-//                    is GATED on its parent rung reporting closed — a
-//                    reviewer approves the tail of a stack after the parent
-//                    landed — which pins the drill deterministically to the
+//                    is GATED on its parent rung reporting closed — EVERY
+//                    non-root rung's overlay unlocks only once its parent
+//                    rung closed (pr 2's on pr 1, pr 3's on pr 2): a
+//                    reviewer approves a rung after its parent landed —
+//                    which pins the drill deterministically to the
 //                    retarget path (pr 3 is never eligible while pr 2 is
 //                    open, so it can only land after the retarget, on the
 //                    trunk; forge mergeability-recompute races can delay
@@ -667,6 +669,17 @@ const reportSummary = (report: ExecutionReport): string =>
         ] as const) {
           observeHead(branch, sha);
         }
+        // The trunk is observed too (r1 review): each loop iteration records
+        // origin/main's current tip, so the no-force evidence covers main's
+        // intermediate shas as well — a rewritten main could not silently
+        // disconnect an observed tip from the final history (the 7b
+        // seed-exclusion and content checks stay as the second net).
+        const observeMainTip = async (): Promise<void> => {
+          const tip = asString(
+            (await ghApiObject(`repos/${repo}/commits/main`))['sha'],
+          );
+          observeHead('main', tip);
+        };
         const fetchCandidates = makeCandidateFetcher(repo, drillPrs, observeHead);
 
         const agentDir = join(scratchDir, 'agent');
@@ -704,6 +717,7 @@ const reportSummary = (report: ExecutionReport): string =>
           converged = await allThreeMerged();
           if (converged) break;
           runs += 1;
+          await observeMainTip();
           const candidates = await fetchCandidates();
           const outcome = await runMergePrs(
             {
@@ -845,7 +859,7 @@ const reportSummary = (report: ExecutionReport): string =>
           fetched,
           'git fetch --prune origin must succeed before the tip checks',
         ).toBeDefined();
-        for (const branch of DRILL_BRANCHES) {
+        for (const branch of [...DRILL_BRANCHES, 'main'] as const) {
           const tip = await revParse(`origin/${branch}`);
           const seen = observedHeads.get(branch);
           if (seen !== undefined) {
@@ -861,11 +875,16 @@ const reportSummary = (report: ExecutionReport): string =>
         log('step 7c no force: every observed head sha survives in its branch final history');
 
         // (d) DESCENDANTS RETARGETED: the closed-ancestor retarget-self action
-        // must have provably run somewhere in the collected outcomes.
+        // must have provably run somewhere in the collected outcomes — and it
+        // must be a DESCENDANT rung (pr 2 or pr 3), not merely any drill pr:
+        // the root's base is the trunk itself, so a retargeted root would be
+        // meaningless. Stronger than size ≥ 1: the intersection with
+        // {pr 2, pr 3} must be non-empty.
+        const [, pr2, pr3] = drillPrNumbers;
         expect(
-          collectedRetargeted.size,
-          'at least one retarget-self action must have run (a closed rung re-anchors its child onto the trunk)',
-        ).toBeGreaterThanOrEqual(1);
+          collectedRetargeted.has(pr2) || collectedRetargeted.has(pr3),
+          `a descendant rung (pr 2 or pr 3) must have been retargeted; got ${[...collectedRetargeted].sort((a, b) => a - b).map(String).join(', ')}`,
+        ).toBe(true);
         for (const pr of collectedRetargeted) {
           expect(
             drillPrNumbers.includes(pr),
