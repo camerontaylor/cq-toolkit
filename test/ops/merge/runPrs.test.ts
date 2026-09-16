@@ -128,10 +128,14 @@ class FakeMergeEffects implements MergeEffects {
   fetchCode = 0;
   fetchStderr = '';
   readonly mergeFailures = new Set<number>();
+  /** Prs whose FIRST mergePr fails and later ones succeed — the pass-2
+   * retry scripting hook (a pass-1 failure that pass 2 can recover). */
+  readonly mergeFailOnce = new Set<number>();
   /** Refs whose head MOVES between the baseline validate (call 1) and any
    * later validate — the plan→run drift-stale scripting hook. */
   readonly driftRefs = new Set<string>();
   private validateCounts = new Map<string, number>();
+  private mergeCallCounts = new Map<number, number>();
 
   async validateRef(ref: string): Promise<{ ok: boolean; sha?: string }> {
     this.calls.push(`validate:${ref}`);
@@ -157,7 +161,9 @@ class FakeMergeEffects implements MergeEffects {
 
   async mergePr(pr: number, opts: { method: 'merge' }): Promise<GhResult> {
     this.calls.push(`merge:${String(pr)}:${opts.method}`);
-    if (this.mergeFailures.has(pr)) {
+    const mergeCall = (this.mergeCallCounts.get(pr) ?? 0) + 1;
+    this.mergeCallCounts.set(pr, mergeCall);
+    if (this.mergeFailures.has(pr) || (this.mergeFailOnce.has(pr) && mergeCall === 1)) {
       return { code: 1, stdout: '', stderr: 'refused by the forge' };
     }
     return OK;
@@ -366,6 +372,70 @@ describe('runMergePrs', () => {
     expect(outcome.needsHuman).toEqual([]);
   });
 
+  test('refetch pass 2 RE-ENTERS a retargeted pr whose refreshed row names the new base', async () => {
+    const effects = new FakeMergeEffects();
+    // pr 43 is a CLOSED rung; pr 44 stacked on it → pass 1 plans 44 as
+    // retarget-self (a forge base-edit — the pr stays open) and merges
+    // nothing; pr 45 is conflicting and acted.
+    const candidates = [
+      { ...eligible(43), state: 'closed' as const, headRefName: 'old-rung' },
+      eligible(44, { baseRefName: 'old-rung' }),
+      conflicting(45),
+    ];
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
+    // The refreshed forge view: 44's base is NOW the trunk (the retarget
+    // moved it) and 45 is CLEAN — so pass 2 replans 44 as an ordinary root
+    // (F3's retarget-self contract) and merges both.
+    const { refetch, callCount } = fakeRefetch([eligible(44), eligible(45)]);
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    // Pass 1: the retarget-self base-edit ran once; nothing merged (45 was
+    // conflicting).
+    expect(outcome.firstPass.retargeted).toEqual([44]);
+    expect(outcome.firstPass.merged).toEqual([]);
+    expect(effects.calls.filter((call) => call.startsWith('retarget:'))).toEqual([
+      'retarget:44:base=main',
+    ]);
+    expect(callCount()).toBe(1);
+    // Pass 2 re-planned the retargeted pr from its refreshed row and
+    // merged BOTH.
+    expect(outcome.secondPass).not.toBeNull();
+    expect(outcome.secondPass?.merged).toEqual([44, 45]);
+    expect(outcome.needsHuman).toEqual([]);
+  });
+
+  test('no-refetch pass 2 EXCLUDES a retargeted pr (its in-memory row names the stale old base)', async () => {
+    const candidates = [
+      { ...eligible(43), state: 'closed' as const, headRefName: 'old-rung' },
+      eligible(44, { baseRefName: 'old-rung' }),
+      conflicting(45),
+    ];
+    const effects = new FakeMergeEffects();
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'), (input) => {
+      const target = candidates.find((candidate) => candidate.pr === input.pr);
+      if (target !== undefined) target.mergeState = 'CLEAN';
+    });
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    // Pass 1: the retarget-self edit ran exactly once.
+    expect(outcome.firstPass.retargeted).toEqual([44]);
+    expect(effects.calls.filter((call) => call.startsWith('retarget:'))).toEqual([
+      'retarget:44:base=main',
+    ]);
+    // Pass 2 (in-memory) excludes the retargeted pr — its row still names
+    // the OLD base — so it is NOT re-retargeted and NOT re-processed; only
+    // the flipped 45 merges.
+    expect(effects.calls.filter((call) => call.startsWith('retarget:'))).toHaveLength(1);
+    expect(outcome.secondPass?.merged).toEqual([45]);
+    expect(outcome.needsHuman).toEqual([]);
+  });
+
   test('conflict → acted WITH refetch: pass 2 classifies the REFRESHED set and merges there', async () => {
     const effects = new FakeMergeEffects();
     // The resolve fake does NOT touch the candidates: the in-memory
@@ -475,6 +545,51 @@ describe('runMergePrs', () => {
     expect(outcome.secondPass).not.toBeNull();
     expect(outcome.secondPass?.merged).toEqual([]);
     expect(outcome.needsHuman).toEqual([{ pr: 45, reason: 'duplicate_pr' }]);
+  });
+
+  test('the pass-1 safety net: a refetch that omits a pass-1-failed pr keeps its row', async () => {
+    const effects = new FakeMergeEffects();
+    effects.mergeFailures.add(44); // 44 fails in pass 1
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'));
+    // The refreshed set OMITS 44 entirely (say it was closed after the
+    // failure): pass 2 never re-examines it, so its pass-1 failure must
+    // not vanish from the union.
+    const { refetch } = fakeRefetch([eligible(45)]);
+
+    const outcome = await runMergePrs(baseInput([eligible(44), conflicting(45)], MODEL_SPEC), {
+      effects,
+      resolve,
+      refetch,
+    });
+
+    // Pass 2 re-examined only 45 and merged it.
+    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44]);
+    expect(outcome.secondPass?.merged).toEqual([45]);
+    // The pass-1 failure row survives (lowest priority — but nothing
+    // supersedes it, because pass 2 never touched 44).
+    expect(outcome.needsHuman).toEqual([
+      { pr: 44, reason: 'gh pr merge 44 --merge failed (exit 1): refused by the forge' },
+    ]);
+  });
+
+  test('a pass-1-failed pr that pass 2 retries and MERGES leaves NO needsHuman row', async () => {
+    const candidates = [eligible(44), conflicting(45)];
+    const effects = new FakeMergeEffects();
+    effects.mergeFailOnce.add(44); // the first attempt fails; the retry lands
+    const { resolve } = fakeResolve(acted(45, 'union merge pushed'), (input) => {
+      const target = candidates.find((candidate) => candidate.pr === input.pr);
+      if (target !== undefined) target.mergeState = 'CLEAN';
+    });
+
+    const outcome = await runMergePrs(baseInput(candidates, MODEL_SPEC), { effects, resolve });
+
+    // Pass 1 failed 44; pass 2 (no refetch: failed prs are NOT excluded —
+    // their in-memory state allows a replan) retried 44 successfully and
+    // merged the flipped 45.
+    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44]);
+    expect(outcome.secondPass?.merged).toEqual([44, 45]);
+    // Merged in pass 2 wins: the resolved failure leaves no row.
+    expect(outcome.needsHuman).toEqual([]);
   });
 
   test('refetch THROW fails closed: no re-plan, secondPass null, every acted pr owed a row', async () => {

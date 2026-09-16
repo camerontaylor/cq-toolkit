@@ -20,12 +20,15 @@
 // therefore classifies `deps.refetch()` when the caller supplies the seam.
 // The refreshed set carries the same MergePrsCandidate shape; closed/merged
 // prs MAY be omitted — classifyStage nulls closed classifications and
-// absent prs simply do not re-plan, which is the honest live view. In BOTH
-// branches the prs already merged or retargeted in pass 1 are EXCLUDED
-// from pass 2 (see the guarded-pass-2 doc below). A refetch THROW fails
-// closed: no re-plan, secondPass stays null, and every acted pr gets a
-// needsHuman row 'pass-2 refresh failed: …' — the resolution happened, but
-// re-entry is unproven; never a silent success.
+// absent prs simply do not re-plan, which is the honest live view. The
+// pass-1 exclusion is asymmetric: MERGED prs are excluded from pass 2 in
+// BOTH branches, while RETARGETED prs are excluded only on the no-refetch
+// branch — on the refetch branch the refreshed row carries the NEW base
+// (baseRefName = the trunk) and re-enters the plan as a root (F3's
+// retarget-self contract); see the guarded-pass-2 doc below. A refetch
+// THROW fails closed: no re-plan, secondPass stays null, and every acted
+// pr gets a needsHuman row 'pass-2 refresh failed: …' — the resolution
+// happened, but re-entry is unproven; never a silent success.
 //
 // WHY THE NO-REFETCH PASS 2 IS GUARDED (not merely "safe"): plain staleness
 // is NOT self-correcting on the in-memory branch. A server-side merge does
@@ -33,14 +36,17 @@
 // cannot withhold an already-merged pr — an unguarded pass 2 would merge it
 // AGAIN and fail it into a false needsHuman row (the earlier
 // "revalidation withholds stale rows" reading was refuted in review). The
-// guard is therefore structural: every pr in firstPass.merged ∪
-// firstPass.retargeted is EXCLUDED from the pass-2 candidate set, on the
-// in-memory branch AND on the refreshed branch (a fetch that raced a merge
-// must not resurrect a merged pr). What staleness remains is bounded: a
-// conflict still DIRTY in memory can only re-withhold — never re-merge,
-// never fabricate. Callers wanting a live second pass pass refetch; the
-// function-valued seam (not an input field) keeps the op's JSON input
-// boundary plain data.
+// merge guard is therefore structural: every pr in firstPass.merged is
+// EXCLUDED from the pass-2 candidate set in BOTH branches (a fetch that
+// raced a merge must not resurrect a merged pr). The retargeted half is
+// branch-dependent: on the no-refetch branch the in-memory retargeted row
+// still names the OLD base, so replanning it there would target a stale
+// base — retargeted prs are excluded too; on the refetch branch the
+// refreshed row carries the new base and replans normally. What staleness
+// remains is bounded: a conflict still DIRTY in memory can only
+// re-withhold — never re-merge, never fabricate. Callers wanting a live
+// second pass pass refetch; the function-valued seam (not an input field)
+// keeps the op's JSON input boundary plain data.
 //
 // WHY THE needsHuman ROWS ARE DATA: every row is plain { pr, reason } —
 // the CLI layer owns any exit-code mapping (I1: the op never sees exit
@@ -383,15 +389,22 @@ export async function runMergePrs(
       }
     }
     if (!refreshFailed) {
-      // Pass-1 outcomes are FINAL for this run: a server-side merge does
-      // not delete refs/pull/N/head, so re-planning a merged pr would
-      // merge it AGAIN (per-action revalidation cannot withhold it) and
-      // fail it into a false needsHuman row. Merged and retargeted prs are
-      // excluded from pass 2 — on the in-memory branch and on the
-      // refreshed branch alike (a fetch that raced a merge must not
-      // resurrect a merged pr).
-      const doneInPass1 = new Set<number>([...firstPass.merged, ...firstPass.retargeted]);
-      const pass2Set = pass2Candidates.filter((candidate) => !doneInPass1.has(candidate.pr));
+      // Pass-1 MERGED prs are final for this run in BOTH branches: a
+      // server-side merge does not delete refs/pull/N/head, so re-planning
+      // a merged pr would merge it AGAIN (per-action revalidation cannot
+      // withhold it) and fail it into a false needsHuman row. The
+      // RETARGETED half is asymmetric: a retarget-self result is a forge
+      // base-edit — the pr stays open and must re-enter the next plan as a
+      // root (F3's retarget-self contract) — but only the REFRESHED view
+      // knows its new base (baseRefName = the trunk). So the no-refetch
+      // branch excludes retargeted prs too (its in-memory rows still name
+      // the stale old base), while the refetch branch excludes MERGED prs
+      // only and lets the refreshed retargeted rows replan normally.
+      const excludedInPass2 =
+        deps.refetch !== undefined
+          ? new Set<number>(firstPass.merged)
+          : new Set<number>([...firstPass.merged, ...firstPass.retargeted]);
+      const pass2Set = pass2Candidates.filter((candidate) => !excludedInPass2.has(candidate.pr));
       const planned2 = classifyStage(pass2Set, nowMs);
       const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
       const second = await execute(plan2);
@@ -406,8 +419,9 @@ export async function runMergePrs(
   // they were never resolved — then decided escalations, then pass-2
   // refresh failures — all escalation-class: the composition refused or
   // could not confirm the re-entry), then the final plan's withheld prs,
-  // then the final report's execution outcomes; a pr keeps its FIRST
-  // reason.
+  // then the final report's execution outcomes, then — ONLY when a second
+  // pass ran — the PASS-1 report's execution outcomes as the SAFETY NET; a
+  // pr keeps its FIRST reason.
   const byPr = new Map<number, string>();
   const addRow = (pr: number, reason: string): void => {
     if (!byPr.has(pr)) byPr.set(pr, reason);
@@ -421,6 +435,27 @@ export async function runMergePrs(
   for (const entry of finalReport.stale) addRow(entry.pr, entry.detail);
   for (const entry of finalReport.failed) addRow(entry.pr, entry.error);
   for (const entry of finalReport.blocked) addRow(entry.pr, entry.reason);
+  // The pass-1 safety net (lowest priority): when a second pass ran, ITS
+  // report is the verdict for every pr it re-examined — the retry rules
+  // deliberately let a pass-1 failed/stale/blocked pr be re-tried there,
+  // and a retry that MERGED (or retargeted) resolves the pass-1 outcome:
+  // its row is dropped (merged wins). A pass-1 outcome for a pr the second
+  // pass never re-examined (omitted from the refresh, dropped by the
+  // exclusion) would otherwise VANISH — so the surviving pass-1 rows
+  // re-enter last, and addRow's first-reason rule makes any pass-2 row
+  // win.
+  if (secondPass !== null) {
+    const resolvedInPass2 = new Set<number>([...secondPass.merged, ...secondPass.retargeted]);
+    for (const entry of firstPass.stale) {
+      if (!resolvedInPass2.has(entry.pr)) addRow(entry.pr, entry.detail);
+    }
+    for (const entry of firstPass.failed) {
+      if (!resolvedInPass2.has(entry.pr)) addRow(entry.pr, entry.error);
+    }
+    for (const entry of firstPass.blocked) {
+      if (!resolvedInPass2.has(entry.pr)) addRow(entry.pr, entry.reason);
+    }
+  }
   const needsHuman = [...byPr.entries()]
     .map(([pr, reason]) => ({ pr, reason }))
     .sort((a, b) => a.pr - b.pr);

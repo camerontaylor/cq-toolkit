@@ -221,6 +221,27 @@ export function parseMergeConflictDecision(raw: unknown): MergeConflictDecision 
 // Input — the registry-time mirror + the runtime input
 // ---------------------------------------------------------------------------
 
+/**
+ * A CONSERVATIVE git refname (project branch names), enforced at the JSON
+ * boundary on headBranch/baseBranch: must start with a letter, digit, '_',
+ * or '.', continue with only [A-Za-z0-9._/-], contain no '..' sequence, and
+ * stay within 250 characters. Conservative BY DESIGN — legal-but-exotic
+ * refnames are rejected (fail closed). The injection class this kills is
+ * shell metacharacters interpolated into the prompt's example commands
+ * (topic$(touch x)); the guarded-seam push alternative is deferred
+ * (review-debt #141).
+ */
+const REFNAME_REASON = 'must be a conservative git refname (project branch names)';
+const conservativeRefname = (): z.ZodString =>
+  z
+    .string()
+    .max(250, `${REFNAME_REASON}: longer than 250 characters`)
+    .regex(
+      /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/,
+      `${REFNAME_REASON}: must start with a letter, digit, '_' or '.', and use only [A-Za-z0-9._/-] — never a leading '-', a space, or a shell metacharacter ('~', '^', ':', '?', '*', '[', '\\', '$', '@{')`,
+    )
+    .regex(/^(?!.*\.\.).*$/, `${REFNAME_REASON}: must not contain the '..' sequence`);
+
 /** The conflict agent's input (UC row 44). */
 export interface ResolveConflictInput {
   /** The PR whose conflict is resolved (the worktree checks out
@@ -229,10 +250,12 @@ export interface ResolveConflictInput {
   /** Absolute path of the checked-out repository (the effects target). */
   repoRoot: string;
   /** The PR's head branch name — the push destination for the resolved
-   * branch. */
+   * branch. A conservative git refname (schema-gated; see
+   * conservativeRefname). */
   headBranch: string;
   /** The branch the PR stacks onto — what the agent merges INTO the
-   * worktree. */
+   * worktree. A conservative git refname (schema-gated; see
+   * conservativeRefname). */
   baseBranch: string;
   /** Optional seeded conflict file list surfaced to the agent. */
   conflictFiles?: string[];
@@ -263,8 +286,8 @@ export const MergeConflictInputSchema: z.ZodType<ResolveConflictInput> = z
   .object({
     pr: z.number().int().positive(),
     repoRoot: z.string().min(1),
-    headBranch: z.string().min(1),
-    baseBranch: z.string().min(1),
+    headBranch: conservativeRefname(),
+    baseBranch: conservativeRefname(),
     conflictFiles: z.array(z.string().min(1)).exactOptional(),
     modelSpec: ModelSpecSchema.exactOptional(),
     wallClockMs: z.number().int().positive().exactOptional(),

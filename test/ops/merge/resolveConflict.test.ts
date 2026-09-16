@@ -54,6 +54,7 @@ import { headRefFor } from '../../../src/ops/merge/effects.js';
 import {
   DEFAULT_RESOLVE_WALL_CLOCK_MS,
   MergeConflictContractError,
+  MergeConflictInputSchema,
   renderConflictPrompt,
   parseMergeConflictDecision,
 } from '../../../src/ops/merge/resolveConflict.js';
@@ -393,6 +394,49 @@ describe('renderConflictPrompt', () => {
     expect(renderConflictPrompt('keep {{unknown}} as-is', { pr: '1', unused: 'x' })).toBe(
       'keep {{unknown}} as-is',
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The conservative git-refname gate (the prompt-interpolation boundary)
+// ---------------------------------------------------------------------------
+
+describe('the conservative git-refname gate', () => {
+  /** Parse a schema input whose headBranch/baseBranch are overridden. */
+  const parses = (over: Record<string, unknown>): boolean =>
+    MergeConflictInputSchema.safeParse({ ...baseInput(), ...over }).success;
+
+  test('project branch names parse; hostile and exotic ones fail closed', () => {
+    // Ordinary project branch names.
+    expect(parses({ headBranch: 'feature/x-2.0' })).toBe(true);
+    expect(parses({ baseBranch: 'release/2.0_hotfix' })).toBe(true);
+    // THE injection class: shell metacharacters in prompt-interpolated
+    // commands.
+    expect(parses({ headBranch: 'topic$(touch x)' })).toBe(false);
+    expect(parses({ baseBranch: 'topic$(touch x)' })).toBe(false);
+    // Git-refname hygiene: no leading dash, no '..' sequence, no spaces,
+    // non-empty.
+    expect(parses({ headBranch: '-leading' })).toBe(false);
+    expect(parses({ baseBranch: 'a..b' })).toBe(false);
+    expect(parses({ headBranch: 'a b' })).toBe(false);
+    expect(parses({ headBranch: '' })).toBe(false);
+    expect(parses({ baseBranch: '' })).toBe(false);
+    // Bounded at 250 characters.
+    expect(parses({ headBranch: `f/${'x'.repeat(250)}` })).toBe(false);
+    expect(parses({ headBranch: `f/${'x'.repeat(240)}` })).toBe(true);
+  });
+
+  test('rejections name the conservative-refname contract', () => {
+    const parsed = MergeConflictInputSchema.safeParse({
+      ...baseInput(),
+      headBranch: 'topic$(touch x)',
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(
+        parsed.error.issues.some((issue) => issue.message.includes('conservative git refname')),
+      ).toBe(true);
+    }
   });
 });
 
@@ -978,6 +1022,17 @@ describe('the shipped conflict prompt', () => {
     expect(rendered).toContain('git merge FETCH_HEAD');
     // The output contract sentence, verbatim.
     expect(rendered).toContain('{"decision":"acted|escalate","summary":"…"}');
+    // The protected-branch constraint is push/destination semantics — NOT
+    // a merge-source ban (merging the base when it IS the protected
+    // branch is required), and the merge source is FETCH_HEAD.
+    // (Whitespace-collapsed so markdown line wrapping cannot split the
+    // asserted phrases.)
+    const collapsed = rendered.replace(/\s+/g, ' ');
+    expect(collapsed).toContain('it is NEVER a push destination');
+    expect(collapsed).toContain(
+      'Using it as a merge SOURCE is correct and required when it is the base',
+    );
+    expect(collapsed).toContain('git merge FETCH_HEAD');
   });
 
   test('the DEFAULT loader reads the same file: the default op renders it verbatim', async () => {

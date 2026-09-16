@@ -265,19 +265,39 @@ export const ExecuteMergesInputSchema: z.ZodType<ExecuteMergesInput> = z
 // ---------------------------------------------------------------------------
 
 /**
+ * The conservative git-refname gate — the REGISTRY-TIME TWIN of
+ * resolveConflict.ts's conservativeRefname. A value import of the op
+ * module's builder would eagerly load the op module (the lazy rule), so
+ * the SAME regex chain is inlined here; both are type-pinned and the
+ * twin-parity test in test/plans/mergePrs.test.ts pins the behavioral
+ * parity (same accept/reject set on both fields).
+ */
+const REFNAME_REASON = 'must be a conservative git refname (project branch names)';
+const conservativeRefname = (): z.ZodString =>
+  z
+    .string()
+    .max(250, `${REFNAME_REASON}: longer than 250 characters`)
+    .regex(
+      /^[A-Za-z0-9._][A-Za-z0-9._/-]*$/,
+      `${REFNAME_REASON}: must start with a letter, digit, '_' or '.', and use only [A-Za-z0-9._/-] — never a leading '-', a space, or a shell metacharacter ('~', '^', ':', '?', '*', '[', '\\', '$', '@{')`,
+    )
+    .regex(/^(?!.*\.\.).*$/, `${REFNAME_REASON}: must not contain the '..' sequence`);
+
+/**
  * The registry-time twin of the conflict agent's input (the op module's own
  * MergeConflictInputSchema cannot be imported here — a schema VALUE import
  * would eagerly load the op module, breaking the lazy rule). The `z.ZodType`
  * annotation pins the twin to `ResolveConflictInput`: drift is a typecheck
  * failure, and the dispatch seam re-validates through THIS schema before the
- * op ever runs.
+ * op ever runs — which is why the headBranch/baseBranch gate is mirrored
+ * HERE (see conservativeRefname above).
  */
 export const ResolveConflictInputSchema: z.ZodType<ResolveConflictInput> = z
   .object({
     pr: z.number().int().positive(),
     repoRoot: z.string().min(1),
-    headBranch: z.string().min(1),
-    baseBranch: z.string().min(1),
+    headBranch: conservativeRefname(),
+    baseBranch: conservativeRefname(),
     conflictFiles: z.array(z.string().min(1)).exactOptional(),
     modelSpec: ModelSpecSchema.exactOptional(),
     wallClockMs: z.number().int().positive().exactOptional(),

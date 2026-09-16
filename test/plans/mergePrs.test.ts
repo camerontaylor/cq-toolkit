@@ -27,6 +27,7 @@ import type { MergePrsOutcome } from '../../src/ops/merge/runPrs.js';
 import {
   ExecuteMergesInputSchema,
   PlanMergeOrderInputSchema,
+  ResolveConflictInputSchema,
   RunMergePrsInputSchema,
 } from '../../src/ops/merge/registry.js';
 import { MERGE_PRS_PLAN_ID, makeMergePrsPlan, plan } from '../../src/plans/merge-prs.js';
@@ -184,5 +185,30 @@ describe('registry mirror fidelity (spot-checks)', () => {
     expect(
       ExecuteMergesInputSchema.safeParse({ plan: retargeted, repoRoot: '/repo' }).success,
     ).toBe(true);
+  });
+
+  // TWIN PARITY REQUIREMENT: the registry's ResolveConflictInputSchema is a
+  // hand-inlined twin of resolveConflict.ts's conservativeRefname gate (the
+  // lazy rule forbids importing the op module's builder) — this test pins
+  // the SAME accept/reject set on BOTH fields, so the dispatch boundary
+  // never loosens behind the op's back.
+  test('conflict agent twin: the SAME conservative refname gate as the op module', () => {
+    const parses = (over: Record<string, unknown>): boolean =>
+      ResolveConflictInputSchema.safeParse({
+        pr: 7,
+        repoRoot: '/repo',
+        headBranch: 'feat/7',
+        baseBranch: 'main',
+        ...over,
+      }).success;
+
+    expect(parses({ headBranch: 'feature/x-2.0' })).toBe(true);
+    expect(parses({ baseBranch: 'feature/x-2.0' })).toBe(true);
+    // The injection class.
+    expect(parses({ headBranch: 'topic$(touch x)' })).toBe(false);
+    expect(parses({ baseBranch: 'topic$(touch x)' })).toBe(false);
+    // Refname hygiene: leading dash and '..' sequence.
+    expect(parses({ headBranch: '-lead' })).toBe(false);
+    expect(parses({ baseBranch: 'a..b' })).toBe(false);
   });
 });
