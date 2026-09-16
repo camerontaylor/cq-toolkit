@@ -217,20 +217,17 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
     }
     case 'pr':
       // The two gh shapes: the merge (I3's only method) and the retarget.
-      if (
-        rest.length === 4 &&
-        rest[1] === 'merge' &&
-        /^\d+$/.test(rest[2]) &&
-        rest[3] === '--merge'
-      ) {
+      const [verb, prNum, flag, base] = rest;
+      if (verb === 'merge' && typeof prNum === 'string' && /^\d+$/.test(prNum) && flag === '--merge') {
         return args;
       }
       if (
-        rest.length === 5 &&
-        rest[1] === 'edit' &&
-        /^\d+$/.test(rest[2]) &&
-        rest[3] === '--base' &&
-        rest[4] !== ''
+        verb === 'edit' &&
+        typeof prNum === 'string' &&
+        /^\d+$/.test(prNum) &&
+        flag === '--base' &&
+        typeof base === 'string' &&
+        base !== ''
       ) {
         return args;
       }
@@ -400,12 +397,19 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   // process cwd while `-C` resolves from inside repoRoot — a relative root
   // would split one repo across two resolvers.
   const repoRoot = pathResolve(opts.repoRoot);
-  const guardOpts = { protectedBranch: opts.protectedBranch };
-  const gh = safeRunner(opts.run ?? makeGhRunner({ bin: opts.ghBin, timeoutMs: opts.timeoutMs }), guardOpts);
-  const git = safeRunner(
-    opts.gitRun ?? makeGhRunner({ bin: opts.gitBin ?? 'git', timeoutMs: opts.timeoutMs }),
-    guardOpts,
-  );
+  // exactOptionalPropertyTypes: absent options are OMITTED, never passed
+  // as explicit undefined.
+  const guardOpts = opts.protectedBranch !== undefined ? { protectedBranch: opts.protectedBranch } : {};
+  const ghRunnerOpts = {
+    ...(opts.ghBin !== undefined ? { bin: opts.ghBin } : {}),
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  };
+  const gitRunnerOpts = {
+    ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  };
+  const gh = safeRunner(opts.run ?? makeGhRunner(ghRunnerOpts), guardOpts);
+  const git = safeRunner(opts.gitRun ?? makeGhRunner({ bin: opts.gitBin ?? 'git', ...gitRunnerOpts }), guardOpts);
 
   const validateRef = async (ref: string): Promise<{ ok: boolean; sha?: string }> => {
     const result = await git(['-C', repoRoot, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`]);
