@@ -138,23 +138,31 @@ const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
 
 /**
  * The loop's shipped classify DEFAULT: defaultClassifyConfig plus the
- * auto-generated PR sticky-comment patterns — platform/bot tooling
- * housekeeping, never review feedback. FOUND LIVE, growing AS DATA (R3's
- * designated mechanism: the patterns ride the frozen ClassifyConfig shape,
- * never a code branch):
- *   - drill 6: the GitHub housekeeping shape, body opens
+ * GENERATION-SIGNATURE skip patterns — platform/bot tooling housekeeping,
+ * never review feedback. FOUND LIVE, growing AS DATA (R3's designated
+ * mechanism: the patterns ride the frozen ClassifyConfig shape, never a
+ * code branch):
+ *   - drill 6: GitHub's housekeeping shape, body opens
  *     `<!-- This is an auto-generated comment …`;
- *   - drill 7 (comment id 5705054746, a top-level summary): the SAME
- *     housekeeping WITHOUT the marker — body opens
- *     `This comment shows the latest checks …`;
- *   - drill 8: the Codex review bot's sticky PR summary, body opens
+ *   - drills 7–8: the Codex review bot's sticky PR summary, body opens
  *     `<!-- codex-pull-request-review-summary …` (then "## Codex Review
  *     Summary / This comment shows the latest Codex review activity…").
+ *     Drill 7's comment id 5705054746 — first read as a markerless
+ *     "This comment shows the latest checks…" shape — was THIS summary all
+ *     along; the drill-7 diagnostic misread a length-truncated body, and
+ *     the codex marker above covers it.
  * Without the suppression every real-PR run fixer-runs on the platform's
  * own comments.
  *
+ * REJECTED AS DATA (cycle 2): bare-text suppression ("This comment shows
+ * the latest checks…"). Author-blind and spoofable — a human OPENING a
+ * comment with that phrase would have real feedback suppressed. Body-only
+ * config patterns anchor on GENERATION SIGNATURES (the HTML markers
+ * above): the right trust level for content that carries no author
+ * identity, and the standard every future pattern here must meet.
+ *
  * And the loop's OWN reply signature (drill 8, {@link REPLY_SIGNATURE}):
- * `/^<!-- cq-review-loop</`. Issue comments do not thread, so every reply
+ * `/^<!-- cq-review-loop:/`. Issue comments do not thread, so every reply
  * the loop posts would otherwise re-fetch as a NEW actionable item and the
  * loop would consume its own words forever. This is the classify
  * vocabulary's 'responder's own words' class made DETERMINISTIC under the
@@ -168,18 +176,18 @@ const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
  * or mentions them mid-body must never skip (conservative bias: ambiguous
  * cases fail toward actionable, a human looks at them). The set grows as
  * data: a new live-observed housekeeping shape appends one anchored
- * pattern here, documented with its drill. Callers may still replace the
- * config WHOLESALE (ReviewLoopOpts.classifyConfig) — a replacement
- * replaces this default INCLUDING the suppression, so a custom config that
- * wants it re-adds the patterns. Frozen: config data the loop reads, never
- * a caller-mutable surface.
+ * pattern here, documented with its drill — and stays
+ * generation-signature anchored per the rejection above. Callers may
+ * still replace the config WHOLESALE (ReviewLoopOpts.classifyConfig) — a
+ * replacement replaces this default INCLUDING the suppression, so a
+ * custom config that wants it re-adds the patterns. Frozen: config data
+ * the loop reads, never a caller-mutable surface.
  */
 export const defaultLoopClassifyConfig: ClassifyConfig = deepFreeze({
   ...defaultClassifyConfig,
   skipPatterns: [
     ...defaultClassifyConfig.skipPatterns,
     /^<!-- This is an auto-generated comment/,
-    /^This comment shows the latest checks/,
     /^<!-- codex-pull-request-review-summary/,
     REPLY_SIGNATURE_PATTERN,
   ],

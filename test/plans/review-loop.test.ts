@@ -1280,17 +1280,17 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
 // may classify this skip.
 // ---------------------------------------------------------------------------
 
-describe('auto-generated sticky comment skip + self-reply marker (drills 6-8)', () => {
-  test('housekeeping comments skip under the loop DEFAULT; a real human comment stays actionable; a marker-led loop reply plans no job; the posted reply LEADS with the signature', async () => {
-    // ALL THREE live-observed housekeeping shapes (drill 6: the GitHub
-    // HTML-marker sticky; drill 7: the markerless checks summary, comment id
-    // 5705054746; drill 8: the Codex review bot's sticky PR summary), one
-    // REAL human comment, and ONE previously posted loop reply (marker-led,
-    // exactly the body the loop composes). Authors are deliberately plain
-    // reviewer identities — NEVER the responder — so ONLY the BODY patterns
-    // can classify the skips: the signature mechanism must hold on content
-    // alone, independent of the authorship knob (the single-identity
-    // scenario flips that knob off).
+describe('auto-generated sticky comment skip + self-reply marker (drills 6-8, cycle 2)', () => {
+  test('generation-signature stickies skip; a marker-led loop reply plans no job; bare-text and human comments PLAN JOBS; posted replies LEAD with the signature', async () => {
+    // The SUPPRESSION patterns anchor on generation signatures only (drill
+    // 6: GitHub's auto-generated marker; drills 7-8: the Codex review bot's
+    // sticky PR summary — drill 7's comment 5705054746 was that codex
+    // summary all along; the diagnostic misread a length-truncated body).
+    // The BARE-TEXT suppression ("This comment shows the latest checks")
+    // was REMOVED in cycle 2 — author-blind and spoofable — so the same
+    // phrase on a HUMAN comment (302) must plan a job, never suppress.
+    // Authors are deliberately plain reviewer identities — NEVER the
+    // responder — so ONLY body content decides.
     const world = defaultWorld();
     world.threads = []; // ONLY the five issue comments ride the fetched state
     world.issueComments = [
@@ -1301,6 +1301,8 @@ describe('auto-generated sticky comment skip + self-reply marker (drills 6-8)', 
         iso(ROOT_AGE),
         null,
       ),
+      // THE ANTI-SUPPRESSION PIN (cycle 2 major): bare housekeeping-sounding
+      // text, no generation signature, human-authored — actionable.
       restComment(
         302,
         'reviewer',
@@ -1329,23 +1331,33 @@ describe('auto-generated sticky comment skip + self-reply marker (drills 6-8)', 
     ];
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
-      driverResults: [completeWorker(fixLine(false, 'Noted; nothing to change in code.', []))],
+      driverResults: [
+        completeWorker(fixLine(false, 'The checks comment: noted.', [])),
+        completeWorker(fixLine(false, 'Noted; nothing to change in code.', [])),
+      ],
       ghLog,
     });
-    // ONLY the human comment plans a job — the three sticky shapes AND the
-    // marker-led loop reply skip.
-    expect(outcome.plan.jobs).toHaveLength(1);
-    expect((outcome.plan.jobs[0] as { input: { item: { id: string } } }).input.item.id).toBe('304');
+    // EXACTLY the human comments plan jobs — 302 (the bare-text anti-
+    // suppression pin) and 304 — never the marker-led shapes (301, 303,
+    // 305).
+    expect(outcome.plan.jobs).toHaveLength(2);
+    expect(outcome.plan.jobs.map((job) => (job.input as { item: { id: string } }).item.id)).toEqual(
+      ['302', '304'],
+    );
     expect(outcome.skipped).toEqual([]);
     expect(outcome.status).toBe('ok');
-    expect(outcome.actionsPosted).toBe(1);
-    // SELF-REPLY MARKER (drill 8, cycle-1 major): the reply body OPENS with
-    // the loop's signature line — the skip pattern is START-anchored, so a
-    // trailing marker would never match the reply it was posted on.
-    const post = ghLog.find((args) => args.includes('-X'));
+    expect(outcome.actionsPosted).toBe(2);
+    // SELF-REPLY MARKER (drill 8, cycle-1 major): EVERY posted reply body
+    // OPENS with the loop's signature line — the skip pattern is
+    // START-anchored, so a trailing marker would never match the reply it
+    // was posted on.
+    const posts = ghLog.filter((args) => args.includes('-X'));
+    expect(posts, `post argv ${JSON.stringify(posts)}`).toHaveLength(2);
     expect(
-      post?.some((arg) => arg.startsWith('body=<!-- cq-review-loop:octo/widget#7 -->')),
-      `posted argv ${JSON.stringify(post)}`,
+      posts.every((args) =>
+        args.some((arg) => arg.startsWith('body=<!-- cq-review-loop:octo/widget#7 -->')),
+      ),
+      `post argv ${JSON.stringify(posts)}`,
     ).toBe(true);
   });
 });
