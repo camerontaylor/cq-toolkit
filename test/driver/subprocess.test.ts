@@ -113,6 +113,7 @@ function directiveEnv(directive: ModelDirective | undefined): Record<string, str
       };
     case 'reply':
       return { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: directive.text };
+    case undefined:
     default:
       return { FAKE_AGENT_MODE: 'ok' };
   }

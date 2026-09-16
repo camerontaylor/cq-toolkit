@@ -71,7 +71,8 @@ export function isIso8601Instant(iso: string): boolean {
   const expected = iso
     .replace(
       /(\.\d{1,9})?(?=Z$|[+-]\d{2}:\d{2}$)/,
-      (_, frac) => `.${(frac ?? '.000').slice(1, 4).padEnd(3, '0')}`,
+      (_: string, frac: unknown) =>
+        `.${(typeof frac === 'string' ? frac : '.000').slice(1, 4).padEnd(3, '0')}`,
     )
     .replace(/[+-]\d{2}:\d{2}$/, 'Z');
   return rebuilt === expected;

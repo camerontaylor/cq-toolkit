@@ -147,7 +147,7 @@ export async function runPlanCommand(
   // ACCESSOR — the key would never become an own property (the strict schema
   // would silently stop seeing it) and the parsed value would re-point this
   // record's prototype instead.
-  const normalizedFlags: Record<string, unknown> = Object.create(null);
+  const normalizedFlags: Record<string, unknown> = { __proto__: null };
   for (const [rawKey, value] of Object.entries(flags)) {
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
     if (key === 'json' || key === 'help' || key === 'h') continue;

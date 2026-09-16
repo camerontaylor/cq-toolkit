@@ -72,7 +72,7 @@ describe('real pinned compiler and lint conformance', () => {
     const root = fixture();
     writeFileSync(
       join(root, 'src/main.ts'),
-      '// oxlint-disable\nimport "./dependency.js";\nexport const value: string = 42;\n',
+      '// oxlint-disable\ndebugger;\nimport "./dependency.js";\nexport const value: string = 42;\n',
     );
     writeFileSync(join(root, 'src/dependency.ts'), 'export const dependency: number = "bad";\n');
     writeFileSync(join(root, 'vitest.config.ts'), 'export const config: boolean = "bad";\n');

@@ -112,3 +112,72 @@ with Reflect.apply instead of pretending invalid input satisfies the interface.
 Validation: 1,378 tests passed (four skipped, one todo), using one Vitest worker;
 static gate, formatting, declaration emit and an external strict NodeNext consumer
 passed. Published declarations are compared with the native-compiler snapshot.
+
+## Typed policy and fixture classification
+
+| Rule                                                                                                          | Correctness purpose                                                                 |
+| ------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `no-floating-promises` (`ignoreVoid: false`)                                                                  | Every promise has an accountable caller or rejection handler.                       |
+| `no-misused-promises`                                                                                         | A synchronous callback contract cannot silently discard async failures.             |
+| `await-thenable`                                                                                              | Awaited values actually represent asynchronous work.                                |
+| `no-unsafe-assignment`, `no-unsafe-argument`, `no-unsafe-call`, `no-unsafe-member-access`, `no-unsafe-return` | Prevent `any` from bypassing validation and typed contracts.                        |
+| `switch-exhaustiveness-check`                                                                                 | All known union cases appear explicitly; a defensive default cannot hide omissions. |
+
+The one-time probe found 161 typed diagnostics. Most test assignments were Vitest
+asymmetric expectation data: `test/helpers/matchers.ts` exposes those values as
+`unknown`, without weakening application types or exempting tests. Typed mock
+signatures replace erased mock call contracts. The standalone selection helper
+has a `.d.mts` contract instead of a TS7016 suppression. A promise-returning
+`finally` fixture now uses explicit awaited try/finally cleanup (the pinned
+standard library declares that callback as returning void).
+
+Two preservation exceptions apply to newly enabled rules only:
+
+- `src/ops/gates/adapters/eslint.ts`: unsafe assignment/member access remain off.
+  The plan freezes this public compatibility adapter; its existing JSON shape,
+  severity and field validation and its negative corpus remain unchanged.
+  `Array.isArray` introduces the `any[]` that triggers these two rules.
+- `test/ops/gates/adapters.test.ts`: unsafe assignment remains off for its Vitest
+  asymmetric matcher, preserving the frozen public-adapter test corpus.
+
+Other typed rules still apply to these files. There is no test-directory waiver.
+The governor's private worker guard now exposes only the usage/cost projection
+it validates and consumes, retaining its existing denial-array and stop-reason
+checks. `JobCancelPort` declares `void | Promise<void>`, matching its documented,
+already-tested async rejection handling. ACP exit processing and cancellation
+termination now attach rejection handlers with connection/narration evidence.
+
+The one-time `no-unnecessary-condition` report produced 47 findings:
+
+- Runtime trust checks: CLI status fallback and schema shapes; registry entries;
+  JSON serialization/constructors; SDK usage and ACP wire/process inputs;
+  adapter directions and ratchet inputs/upsert results. Keep these checks.
+- Callback-sensitive state: governor re-marking, subprocess termination, ACP
+  abort/handshake/prompt flags, and the virtual-clock fixture. Removing these
+  conditions would break concurrency behavior the analyzer cannot establish.
+- Harmless redundancy: governor usage checks, the single-member exhaustive
+  responder switch, direction presence after narrowing, optional test probes
+  and spawned-output fallbacks. These do not represent assumption bugs and
+  do not justify equivalent-expression cleanup.
+
+Leave the rule off: current scopes mix runtime boundaries and mutable callback
+state with ordinary code. No runtime validation was removed to satisfy it.
+Unused disable directives are errors in the full gate; fast mode omits that
+check because typed rules intentionally do not run there.
+
+## Agent command contract
+
+`lint:fast -- <file...>` uses the root config without type analysis. The pinned
+CLI cannot negate `--type-aware` with `=false`, so typed mode is opt-in in the
+full wrapper, never enabled in config. Both modes disable nested configs.
+Real fixtures demonstrate compiler-only, typed-only and shared syntactic
+failures. An executable failing shim at `OXLINT_TSGOLINT_PATH` is started by full
+mode and untouched by fast mode (POSIX fixture; Windows not exercised locally).
+
+`fix -- <file...>` validates the complete list before writes, runs safe Oxlint
+`--fix` (no suggestions/dangerous fixes), formats the same files with Oxfmt,
+then runs the whole static gate. Paths are argv entries, never shell fragments;
+spaces and metacharacters remain literal. Empty lists, directories, symlinks,
+repository escapes and tooling metadata are rejected; deleted files are skipped.
+An all-deleted fix still checks the package. Checks never format tracked files.
+`check` runs format, the static gate once, and tests; CI uses the same scripts.

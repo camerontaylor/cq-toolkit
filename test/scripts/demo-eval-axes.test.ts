@@ -18,12 +18,11 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-// The module is deliberately plain JS with no type declarations (standalone
-// script infrastructure; allowJs is off repo-wide), so TS7016 is expected
-// here and suppressed — the function shapes are pinned by the tests below.
-// prettier-ignore
-// @ts-expect-error TS7016: no declaration file for the plain-JS module
-import { EVAL_AXES_PROVIDER_KEYS, requiredKeys, selectCells } from '../../scripts/lib/eval-axes-select.mjs';
+import {
+  EVAL_AXES_PROVIDER_KEYS,
+  requiredKeys,
+  selectCells,
+} from '../../scripts/lib/eval-axes-select.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 

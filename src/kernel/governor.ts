@@ -166,9 +166,9 @@ export interface LadderContextInfo {
  */
 export interface JobCancelPort {
   /** Rung 2: the second, harder cancel — the subprocess-timeout placeholder (e.g. SIGTERM). */
-  hardCancel?: () => void;
+  hardCancel?: () => void | Promise<void>;
   /** Rung 3: the SIGKILL-equivalent primitive, when the op hosts a killable worker. */
-  kill?: () => void;
+  kill?: () => void | Promise<void>;
 }
 
 /**
@@ -1146,7 +1146,7 @@ function statusOfValue(value: unknown): GovernedOutcomeStatus {
  * fold never trips assertValidUsage/assertValidUsd post-record (the
  * verdict stays real evidence; the usage stays zero-evidence).
  */
-function workerResultOfValue(value: unknown): WorkerResult | undefined {
+function workerResultOfValue(value: unknown): Pick<WorkerResult, 'usage' | 'costUSD'> | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
   }
@@ -1201,8 +1201,6 @@ function workerResultOfValue(value: unknown): WorkerResult | undefined {
   }
   return {
     usage: usage as Usage,
-    denials: candidate.denials,
-    stopReason,
     ...(typeof costUSD === 'number' ? { costUSD } : {}),
   };
 }
@@ -1490,6 +1488,8 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
             caused = (depsOf.get(jobId) ?? []).every((dep) => budgetCaused(dep));
           }
           break;
+        case 'ok':
+        case 'needs-human':
         default:
           caused = false; // ok / needs-human: real verdicts
       }

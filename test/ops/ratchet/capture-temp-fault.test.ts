@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // review-debt #69 — the temp-publish OWNERSHIP window: writeFile(flag 'wx')
 // marked the temp owned only AFTER the bytes landed, so a fault mid-write
 // (ENOSPC, EIO) left the just-created ZERO-LENGTH temp behind as debris.
@@ -19,8 +20,12 @@ import { registerAdapter } from '../../../src/ops/ratchet/registry.js';
 // so the spies live here (vi.hoisted lifts this above the vi.mock call).
 const holders = vi.hoisted(() => ({
   actual: undefined as typeof import('node:fs/promises') | undefined,
-  openMock: undefined as ReturnType<typeof vi.fn> | undefined,
-  unlinkMock: undefined as ReturnType<typeof vi.fn> | undefined,
+  openMock: undefined as
+    | ReturnType<typeof vi.fn<typeof import('node:fs/promises').open>>
+    | undefined,
+  unlinkMock: undefined as
+    | ReturnType<typeof vi.fn<typeof import('node:fs/promises').unlink>>
+    | undefined,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -83,7 +88,7 @@ describe('captureBaseline temp ownership under a mid-write fault (review-debt #6
     });
     expect(result).toEqual({
       status: 'indeterminate',
-      detail: expect.stringMatching(/writing baseline.*failed.*EIO: simulated mid-write fault/s),
+      detail: match.stringMatching(/writing baseline.*failed.*EIO: simulated mid-write fault/s),
     });
     // The regression pin: cleanup RAN for the file this invocation created
     // (pre-fix, tempCreated was still false at the throw → unlink skipped).

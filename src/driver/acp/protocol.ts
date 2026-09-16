@@ -342,6 +342,7 @@ export function parseAcpUpdate(update: unknown): AcpUpdate | undefined {
     case 'session_info_update':
     case 'available_commands_update':
       return { kind: 'known-unconsumed', sessionUpdate: kind };
+    case undefined:
     default:
       return undefined; // unknown or unshapeable — the caller narrates
   }

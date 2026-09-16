@@ -168,6 +168,8 @@ function modelFor(
         ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: [toolCallResult(directive.tool, directive.input), textResult(directive.reply)],
       });
+    case 'reply':
+    case undefined:
     default:
       return new MockLanguageModelV4({
         ...(servedModel === undefined ? {} : { modelId: servedModel }),

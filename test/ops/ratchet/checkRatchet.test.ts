@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // checkRatchet tests — lane H slice 1 (goal H2), for
 // src/ops/ratchet/checkRatchet.ts.
 //
@@ -267,7 +268,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(
+          reason: match.stringMatching(
             /invalid input — '(ws|target|metric|sourceId)' must be a string/,
           ),
         },
@@ -288,7 +289,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(/invalid input — expected a non-null object/),
+          reason: match.stringMatching(/invalid input — expected a non-null object/),
         },
       });
     },
@@ -304,7 +305,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/adapter produced an unusable reading \(Infinity\)/),
+        reason: match.stringMatching(/adapter produced an unusable reading \(Infinity\)/),
       },
     });
   });
@@ -359,7 +360,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: dir.baseline,
           currentValue: dir.loosen,
-          reason: expect.stringMatching(
+          reason: match.stringMatching(
             new RegExp(
               `metric '${dir.metric}' loosened: baseline ${dir.baseline} → ` +
                 `current ${dir.loosen} \\(${dir.label}\\) — only tightening passes`,
@@ -383,7 +384,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'typecheck-count' has no metrics summary \(I5: non-passing evidence, never a pass\)/,
         ),
       },
@@ -401,7 +402,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /has no metrics summary \(I5: non-passing evidence, never a pass\)/,
         ),
       },
@@ -421,7 +422,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(
+          reason: match.stringMatching(
             new RegExp(
               `metric '${metric}' has no metrics summary \\(I5: non-passing evidence, never a pass\\)`,
             ),
@@ -441,7 +442,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           new RegExp(
             `baseline '${REL}' not found — metric 'typecheck-count' baseline not found \\(non-passing evidence\\)`,
           ),
@@ -457,7 +458,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(new RegExp(`baseline '${REL}' not found`)),
+        reason: match.stringMatching(new RegExp(`baseline '${REL}' not found`)),
       },
     });
   });
@@ -473,7 +474,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(new RegExp(`baseline '${REL}' is corrupt`)),
+        reason: match.stringMatching(new RegExp(`baseline '${REL}' is corrupt`)),
       },
     });
   });
@@ -503,7 +504,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(pattern),
+          reason: match.stringMatching(pattern),
         },
       });
     },
@@ -517,7 +518,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/unknown metric 'no-such-metric' — no registered adapter/),
+        reason: match.stringMatching(/unknown metric 'no-such-metric' — no registered adapter/),
       },
     });
   });
@@ -532,7 +533,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /unknown source 'no-such-source' for metric 'typecheck-count'/,
         ),
       },
@@ -554,7 +555,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(pattern),
+          reason: match.stringMatching(pattern),
         },
       });
     },
@@ -579,7 +580,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'throwing-direction-getter' adapter produced an unusable reading.*direction getter exploded/s,
         ),
       },
@@ -601,7 +602,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'throwing-message-getter' adapter failed.*unknown error/s,
         ),
       },
@@ -618,7 +619,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
+        reason: match.stringMatching(/metric 'throwing-adapter' adapter failed.*exploded/s),
       },
     });
   });
@@ -638,7 +639,7 @@ describe('checkRatchet', () => {
         verdict: 'fail',
         baselineValue: null,
         currentValue: null,
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /metric 'throwing-value-getter' adapter produced an unusable reading.*value getter exploded/s,
         ),
       },
@@ -675,7 +676,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(/is not a regular file — refusing to read as evidence/),
+          reason: match.stringMatching(/is not a regular file — refusing to read as evidence/),
         },
       });
       // The link was never followed — the outside bytes are untouched.
@@ -697,7 +698,7 @@ describe('checkRatchet', () => {
         currentValue: null,
         // The non-ENOENT refusal — negative lookahead pins that it is NOT
         // the missing-baseline 'not found' wording.
-        reason: expect.stringMatching(
+        reason: match.stringMatching(
           /^(?!.*not found).*is not a regular file — refusing to read as evidence/,
         ),
       },
@@ -744,7 +745,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(pattern),
+          reason: match.stringMatching(pattern),
         },
       });
     },
@@ -778,7 +779,7 @@ describe('checkRatchet', () => {
           verdict: 'fail',
           baselineValue: null,
           currentValue: null,
-          reason: expect.stringMatching(/does not resolve to a strict descendant of the workspace/),
+          reason: match.stringMatching(/does not resolve to a strict descendant of the workspace/),
         },
       });
       // Nothing outside was read as evidence and nothing was written there.

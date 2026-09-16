@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Gates lane C2 — test evidence: the baseline probe's full decision table
 // over a SCRIPTED fake runner (no subprocesses): every ProbeVerdict value —
 // clean, failing, bail (pattern and exitCode-null flavors, retry budget
@@ -260,7 +261,7 @@ describe('baselineProbe decision table (scripted fake runner)', () => {
   test('indeterminate (b): unparseable garbage → indeterminate', async () => {
     const fake = scriptedRunner({ stdout: '⟨not json at all⟩', stderr: '', exitCode: 1 });
     const result = await makeBaselineProbe(fake.run)(probeInput());
-    expect(result).toMatchObject({ status: 'indeterminate', detail: expect.any(String) });
+    expect(result).toMatchObject({ status: 'indeterminate', detail: match.any(String) });
   });
 
   test('indeterminate (c): a thrown runner crashes the probe → indeterminate with check-runner-crashed detail', async () => {

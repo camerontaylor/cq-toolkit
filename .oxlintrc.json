@@ -72,7 +72,27 @@
         "typescript/no-unsafe-declaration-merging": "error",
         "typescript/no-unsafe-function-type": "error",
         "typescript/no-unused-expressions": "error",
-        "typescript/no-wrapper-object-types": "error"
+        "typescript/no-wrapper-object-types": "error",
+        "typescript/no-misused-promises": "error",
+        "typescript/await-thenable": "error",
+        "typescript/no-unsafe-assignment": "error",
+        "typescript/no-unsafe-argument": "error",
+        "typescript/no-unsafe-call": "error",
+        "typescript/no-unsafe-member-access": "error",
+        "typescript/no-unsafe-return": "error",
+        "typescript/no-floating-promises": [
+          "error",
+          {
+            "ignoreVoid": false
+          }
+        ],
+        "typescript/switch-exhaustiveness-check": [
+          "error",
+          {
+            "considerDefaultExhaustiveForUnions": false,
+            "allowDefaultCaseForExhaustiveSwitch": true
+          }
+        ]
       }
     },
     {
@@ -112,6 +132,19 @@
             "zodFiles": ["src/cli/run-plan.ts"]
           }
         ]
+      }
+    },
+    {
+      "files": ["src/ops/gates/adapters/eslint.ts"],
+      "rules": {
+        "typescript/no-unsafe-assignment": "off",
+        "typescript/no-unsafe-member-access": "off"
+      }
+    },
+    {
+      "files": ["test/ops/gates/adapters.test.ts"],
+      "rules": {
+        "typescript/no-unsafe-assignment": "off"
       }
     }
   ]

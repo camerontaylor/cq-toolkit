@@ -23,7 +23,10 @@
     "test": "vitest run",
     "denylist": "./scripts/denylist-scan",
     "format:check": "oxfmt --check .",
-    "check:static": "node scripts/ratchet-typecheck.mjs"
+    "check:static": "node scripts/ratchet-typecheck.mjs",
+    "lint:fast": "node scripts/lint-fast.mjs",
+    "fix": "node scripts/fix.mjs",
+    "check": "npm run format:check && npm run check:static && npm run test"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.53",

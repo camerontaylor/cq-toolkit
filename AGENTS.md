@@ -16,6 +16,14 @@ CI additionally runs the build, the from-source smoke plan, and the
 denylist scan + self-test. Never alter source or baselines to hide a
 failure; baselines only tighten (doctrine I5).
 
+## Agent loop
+
+Use `npm run lint:fast -- <owned-file...>` for syntactic feedback and
+`npm run fix -- <owned-file...>` for safe lint fixes, formatting and the full
+static gate. Lists must be explicit; never format the repository per turn.
+`npm run check` runs formatting checks, the static gate once and tests.
+Changed-file lint does not establish correctness of dependents.
+
 ## Code review — mandatory before every PR
 
 Exactly TWO completed CodeRabbit CLI review-and-address cycles over the

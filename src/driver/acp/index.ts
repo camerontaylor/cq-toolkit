@@ -531,22 +531,26 @@ class AcpWire {
       if (this.stderrBuffer.length > 8000) this.stderrBuffer = this.stderrBuffer.slice(-4000);
     });
     this.exit = acpExitPromise(child);
-    void this.exit.then(() => {
-      // Trailing partial lines flush at exit ('close' fires only after
-      // stdio is flushed, so nothing can arrive after this): stderr's is
-      // often the death diagnosis; stdout's is an unterminated wire line,
-      // which still gets its parse-or-narrate chance — same symmetry.
-      const trailingStdout = this.lineBuffer;
-      this.lineBuffer = '';
-      if (trailingStdout.trim() !== '') this.onLine(trailingStdout);
-      const trailing = this.stderrBuffer;
-      this.stderrBuffer = '';
-      if (trailing.trim() !== '') this.handlers.onStderrLine(trailing);
-      for (const p of this.pending.values()) {
-        p.reject(new Error('the harness process exited before responding'));
-      }
-      this.pending.clear();
-    });
+    this.exit
+      .then(() => {
+        // Trailing partial lines flush at exit ('close' fires only after
+        // stdio is flushed, so nothing can arrive after this): stderr's is
+        // often the death diagnosis; stdout's is an unterminated wire line,
+        // which still gets its parse-or-narrate chance — same symmetry.
+        const trailingStdout = this.lineBuffer;
+        this.lineBuffer = '';
+        if (trailingStdout.trim() !== '') this.onLine(trailingStdout);
+        const trailing = this.stderrBuffer;
+        this.stderrBuffer = '';
+        if (trailing.trim() !== '') this.handlers.onStderrLine(trailing);
+        for (const p of this.pending.values()) {
+          p.reject(new Error('the harness process exited before responding'));
+        }
+        this.pending.clear();
+      })
+      .catch((error: unknown) => {
+        this.failConnection(new Error(`ACP exit processing failed: ${messageOf(error)}`));
+      });
   }
 
   /** Send one request; rejects on an error response, a dead pipe, or child exit. */
@@ -1167,20 +1171,26 @@ export class AcpDriver implements Driver {
               JSON.stringify({ cq: 'cancel-send-failed', message: messageOf(err) }),
             ),
         );
-        void raceWithGrace(cancelWrite, this.cancelWriteGraceMs).then((outcome) => {
-          if (outcome === 'stalled') {
+        raceWithGrace(cancelWrite, this.cancelWriteGraceMs)
+          .then((outcome) => {
+            if (outcome === 'stalled') {
+              observation.narration.push(
+                JSON.stringify({
+                  cq: 'cancel-write-stalled',
+                  graceMs: this.cancelWriteGraceMs,
+                  sessionId: target,
+                }),
+              );
+            }
+            // The decided kill, gated on NOTHING the child controls (the
+            // prompt-phase kill rung; Codex P1).
+            return terminateAcpProcess(child, graceOpts(), onRung);
+          })
+          .catch((error: unknown) => {
             observation.narration.push(
-              JSON.stringify({
-                cq: 'cancel-write-stalled',
-                graceMs: this.cancelWriteGraceMs,
-                sessionId: target,
-              }),
+              JSON.stringify({ cq: 'cancel-termination-failed', message: messageOf(error) }),
             );
-          }
-          // The decided kill, gated on NOTHING the child controls (the
-          // prompt-phase kill rung; Codex P1).
-          void terminateAcpProcess(child, graceOpts(), onRung).catch(() => undefined);
-        });
+          });
       } else {
         observation.narration.push(
           JSON.stringify({

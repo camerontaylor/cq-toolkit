@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Ledger lane C4 — decision-table test evidence over an IN-MEMORY fake
 // store (Map-free structuredClone-backed; no fs): every record/query
 // outcome row of the ledger, including the escalation that maps the record
@@ -235,7 +236,7 @@ describe('ledger.record — threshold overrides', () => {
       const store = memoryStore();
       await expect(record(store, { signature: 'sig-a', thresholds })).resolves.toEqual({
         status: 'failed',
-        error: expect.stringContaining('ledger: invalid thresholds'),
+        error: match.stringContaining('ledger: invalid thresholds'),
       });
     }
   });

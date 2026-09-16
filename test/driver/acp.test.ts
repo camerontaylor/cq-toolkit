@@ -97,6 +97,7 @@ function directiveEnv(directive: ModelDirective | undefined): Record<string, str
       };
     case 'reply':
       return { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: directive.text };
+    case undefined:
     default:
       return { FAKE_ACP_MODE: 'ok' };
   }

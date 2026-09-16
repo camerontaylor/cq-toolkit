@@ -93,7 +93,7 @@ export function assertJsonLossless(value: unknown): void {
           );
         }
         for (let i = 0; i < value.length; i++) {
-          const element = value[i];
+          const element: unknown = value[i];
           if (element === undefined) throw new Error(`undefined array element at [${i}]`);
           assertJsonLossless(element);
         }
@@ -133,6 +133,10 @@ export function assertJsonLossless(value: unknown): void {
       }
       return;
     }
+    case 'bigint':
+    case 'function':
+    case 'symbol':
+    case 'undefined':
     default:
       throw new Error(`non-JSON value of type '${typeof value}'`);
   }

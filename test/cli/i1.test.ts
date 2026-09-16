@@ -82,6 +82,8 @@ function countsFor(jobs: Array<OpResult<unknown>>): RunReport['counts'] {
       case 'budget-exhausted':
         counts['budget-exhausted'] += 1;
         break;
+      case 'failed':
+      case 'indeterminate':
       default:
         counts.failed += 1;
     }
@@ -160,7 +162,7 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
     for (const c of cases) {
       const { code, out, err } = await capture([c.name], { opsRoot });
       expect(code).toBe(c.code);
-      expect(JSON.parse(out).status).toBe(c.status);
+      expect(JSON.parse(out)).toMatchObject({ status: c.status });
       // Human-mode narration: one `cq: <name>: <status> — <detail>` line.
       expect(err).toContain(`cq: ${c.name}: ${c.status} — `);
     }
@@ -170,7 +172,7 @@ describe('op subcommands (I1 stream + exit-code contract)', () => {
     const { code, out, err } = await capture(['boom', '--json'], { opsRoot });
     expect(code).toBe(1);
     expect(err).toBe(''); // machine mode: stderr stays EMPTY
-    expect(JSON.parse(out).status).toBe('failed');
+    expect(JSON.parse(out)).toMatchObject({ status: 'failed' });
   });
 
   test('unknown subcommand: exit 2, no stdout, narrated to stderr', async () => {

@@ -1,3 +1,4 @@
+import { match } from '../../helpers/matchers.js';
 // Gates lane C3 — test evidence for the hack detector: every shipped
 // tamper-diff fixture round-trips to its EXACT expected findings
 // (kind/file/line/pattern/snippet/message), the must-NOT-flag fixtures
@@ -384,7 +385,7 @@ describe('hackDetector: suppression config', () => {
         `+// ${directive} no-debugger -- fixture`,
       ].join('\n');
       expect(await findingsOf(diff)).toEqual([
-        expect.objectContaining({ pattern: 'oxlint-disable' }),
+        match.objectContaining({ pattern: 'oxlint-disable' }),
       ]);
     },
   );

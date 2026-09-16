@@ -335,7 +335,7 @@ export class AiSdkDriver implements Driver {
       }
 
       // Assistant turn persisted in OUR vocabulary before the verdict.
-      const text = await result.text;
+      const text = result.text;
       await store.appendMessage(record.sessionId, {
         role: 'assistant',
         content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),

@@ -1,3 +1,4 @@
+import { match } from '../helpers/matchers.js';
 // T1.3 slice 2 — tests for the budget governor (src/kernel/governor.ts).
 //
 // THE ws-a acceptance checks, in goal order:
@@ -613,7 +614,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // governor and cannot attribute).
     expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'failed']);
     expect(raw.jobs[3]?.result).toMatchObject({
-      error: expect.stringMatching(/blocked: dependency 'c'/),
+      error: match.stringMatching(/blocked: dependency 'c'/),
     });
 
     // The governor's voice: withBudgetStop re-marks the row whose ENTIRE
@@ -1005,7 +1006,7 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
     expect(report.jobs[0]?.result.status).toBe('failed');
     expect(report.jobs[0]?.result).toMatchObject({
       status: 'failed',
-      error: expect.stringMatching(/non-serializable result/),
+      error: match.stringMatching(/non-serializable result/),
     });
     expect(governor.usage).toBeUndefined(); // folded NOTHING
     expect(governor.tripped).toBe(false);
@@ -1297,7 +1298,7 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
     );
     expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
     expect(rowStatuses(raw)).toEqual(['ok', 'ok', 'budget-exhausted', 'indeterminate']);
-    expect(raw.jobs[3]?.result).toMatchObject({ detail: expect.stringMatching(/^queued:/) });
+    expect(raw.jobs[3]?.result).toMatchObject({ detail: match.stringMatching(/^queued:/) });
 
     // …yet the run stopped for budget-family reasons: withBudgetStop
     // annotates and re-marks the queued row even though no trip fired.

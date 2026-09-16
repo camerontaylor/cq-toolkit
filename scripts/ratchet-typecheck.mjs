@@ -65,7 +65,19 @@ if (res.status !== 0 && count === 0) {
 // defaults to syntactic mode so lint:fast need not negate unsupported flags.
 const lint = spawnSync(
   resolve(ROOT, 'node_modules', '.bin', process.platform === 'win32' ? 'oxlint.cmd' : 'oxlint'),
-  ['--type-aware', 'src', 'test', 'lint', 'scripts', 'vitest.config.ts'],
+  [
+    '--config',
+    resolve(ROOT, '.oxlintrc.json'),
+    '--disable-nested-config',
+    '--type-aware',
+    '--report-unused-disable-directives-severity',
+    'error',
+    'src',
+    'test',
+    'lint',
+    'scripts',
+    'vitest.config.ts',
+  ],
   { cwd: ROOT, encoding: 'utf8', shell: process.platform === 'win32' },
 );
 if (lint.stdout) process.stdout.write(lint.stdout);

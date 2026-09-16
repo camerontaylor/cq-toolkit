@@ -276,6 +276,8 @@ function detailOf(result: OpResult<unknown>): string | undefined {
       return result.reason;
     case 'indeterminate':
       return result.detail;
+    case 'budget-exhausted':
+    case 'ok':
     default:
       return undefined;
   }
