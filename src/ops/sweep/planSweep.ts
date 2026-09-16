@@ -505,7 +505,14 @@ function inputFaultOf(input: PlanSweepInput): string | null {
 
 /** The known file-set for a package name; an absent entry is an empty file-set. */
 function fileSetOf(name: string, packageFiles?: Record<string, string[]>): string[] {
-  return packageFiles?.[name] ?? [];
+  // OWNERSHIP check (jFLC3): a package literally named 'constructor' or
+  // 'toString' would otherwise inherit the Object.prototype member as its
+  // file-set — a function would land in unit.files and break the report's
+  // JSON losslessness. Only an OWN property counts.
+  if (packageFiles === undefined || !Object.hasOwn(packageFiles, name)) {
+    return [];
+  }
+  return packageFiles[name] ?? [];
 }
 
 /**

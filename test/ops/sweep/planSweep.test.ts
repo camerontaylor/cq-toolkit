@@ -308,6 +308,19 @@ describe('planSweep selection', () => {
     expect(report.units.find((u) => u.package === 'cli')?.files).toEqual([]);
   });
 
+  test("a package named 'constructor' inherits NO prototype member — file-set [] and JSON-lossless (jFLC3)", async () => {
+    const report = await okPlan(
+      makePlanner(),
+      baseInput({
+        packages: [{ name: 'constructor', path: 'packages/ctor' }],
+        packageFiles: {},
+      }),
+    );
+    expect(report.units).toEqual([{ package: 'constructor', fixer: 'lint', files: [] }]);
+    // A function-valued file-set would break the report's JSON round trip.
+    expect(JSON.parse(JSON.stringify(report))).toEqual(report);
+  });
+
   test('an empty manifest plans an honest empty sweep (ok, zero jobs)', async () => {
     const report = await okPlan(makePlanner(), baseInput({ packages: [] }));
     expect(report.units).toEqual([]);

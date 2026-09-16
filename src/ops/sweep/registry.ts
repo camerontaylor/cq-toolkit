@@ -110,12 +110,20 @@ export const PlanSweepInputSchema: z.ZodType<PlanSweepInput> = z
  * only — gitMutex itself is a library utility and is never registered).
  * The mutex bounds mirror {@link makeGitMutex}'s construction preconditions
  * (staleMs ≥ 2000 — proper-lockfile's clamp floor; retries ≥ 0;
- * retryBaseMs ≥ 1): the schema rejects what the mutex would throw on, at
- * the arg-error boundary instead of mid-dispatch. The worktree segment /
- * traversal rules (kind, slug, runPrefix) stay the op's library-level
- * contract (`failed` results) — they are path-SAFETY rules about DERIVED
- * values, not plain-JSON shape.
+ * retryBaseMs ≥ 1) AND its crash-recovery cross-field invariant: the backoff
+ * floor (retryBaseMs × (2^retries − 1)) must reach the stale window, using
+ * the factory's shipped defaults for absent fields (30_000 / 9 / 100 — a
+ * literal mirror; importing the constants would load the mutex module at
+ * registry scope). The schema rejects an individually-valid but
+ * collectively-insufficient triple at the arg-error boundary (exit 2)
+ * instead of mid-dispatch. The worktree segment / traversal rules (kind,
+ * slug, runPrefix) stay the op's library-level contract (`failed` results)
+ * — they are path-SAFETY rules about DERIVED values, not plain-JSON shape.
  */
+const MUTEX_DEFAULT_STALE_MS = 30_000;
+const MUTEX_DEFAULT_RETRIES = 9;
+const MUTEX_DEFAULT_RETRY_BASE_MS = 100;
+
 export const WorktreeForInputSchema: z.ZodType<WorktreeForInput> = z
   .object({
     repoRoot: z.string().min(1),
@@ -132,6 +140,18 @@ export const WorktreeForInputSchema: z.ZodType<WorktreeForInput> = z
         retryBaseMs: z.number().int().min(1).exactOptional(),
       })
       .strict()
+      .refine(
+        (m) => {
+          const staleMs = m.staleMs ?? MUTEX_DEFAULT_STALE_MS;
+          const retries = m.retries ?? MUTEX_DEFAULT_RETRIES;
+          const retryBaseMs = m.retryBaseMs ?? MUTEX_DEFAULT_RETRY_BASE_MS;
+          return retryBaseMs * (2 ** retries - 1) >= staleMs;
+        },
+        {
+          message:
+            'the mutex timings are individually valid but collectively insufficient — the retry backoff floor (retryBaseMs × (2^retries − 1), on the factory defaults for absent fields) must reach the stale window, or a crashed holder wedges the run',
+        },
+      )
       .exactOptional(),
     baselineCacheDirs: z.array(z.string().min(1)).exactOptional(),
   })

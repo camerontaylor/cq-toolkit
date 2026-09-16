@@ -582,7 +582,12 @@ function inputFaultOf(input: WorktreeForInput): string | null {
   // `-z` form is the recorded follow-up surface; for now the values that
   // feed comparisons and derivations are rejected outright. kind/slug and
   // every runPrefix segment are covered by SEGMENT_RE below (it admits no
-  // control characters); worktreesDir gets its own check.
+  // control characters); worktreesDir and repoRoot get their own checks —
+  // a RELATIVE worktreesDir resolves against repoRoot, so a newline-bearing
+  // repoRoot yields a newline path all the same.
+  if (CONTROL_CHARS_RE.test(input.repoRoot)) {
+    return `sweep: repoRoot must not contain control characters (newline/carriage return) — a relative worktreesDir resolves against it, and the porcelain lists it feeds are line-oriented`;
+  }
   if (CONTROL_CHARS_RE.test(input.worktreesDir)) {
     return `sweep: worktreesDir must not contain control characters (newline/carriage return) — the porcelain lists it is compared against are line-oriented`;
   }

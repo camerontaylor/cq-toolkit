@@ -144,6 +144,38 @@ describe('sweep registry surface', () => {
       }).success,
     ).toBe(false);
   });
+
+  test('the mutex retry budget is cross-checked at the schema boundary (jFLDD, exit 2 not runtime-failed)', () => {
+    const input = {
+      repoRoot: '/repo',
+      worktreesDir: '/runs/wt',
+      runPrefix: 'cq/09-16a',
+      kind: 'fix',
+      slug: 'core',
+      base: 'origin/main',
+    };
+    const entry = sweepEntry('sweep.worktreeFor');
+    // Individually valid, collectively insufficient: floor 1×(2^0−1) = 0 ms
+    // < the 2000 ms stale window — makeGitMutex would reject at construction.
+    expect(
+      entry.inputSchema.safeParse({
+        ...input,
+        mutex: { lockPath: '/repo/.cq/git-mutex.lock', staleMs: 2000, retries: 0, retryBaseMs: 1 },
+      }).success,
+    ).toBe(false);
+    // A satisfying triple passes the same boundary.
+    expect(
+      entry.inputSchema.safeParse({
+        ...input,
+        mutex: {
+          lockPath: '/repo/.cq/git-mutex.lock',
+          staleMs: 60_000,
+          retries: 10,
+          retryBaseMs: 100,
+        },
+      }).success,
+    ).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

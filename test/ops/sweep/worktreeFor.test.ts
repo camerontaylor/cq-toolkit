@@ -674,6 +674,16 @@ describe('sweep.worktreeFor path safety', () => {
     expect(error).toMatch(/control characters/);
   });
 
+  test('a control character in repoRoot is refused — a relative worktreesDir resolves against it (jFLC9)', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      repoRoot: '/re\npo',
+    });
+    expect(error).toMatch(/repoRoot/);
+    expect(error).toMatch(/control characters/);
+  });
+
   test('a control character in runPrefix is refused', async () => {
     const repo = fakeRepo();
     const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
