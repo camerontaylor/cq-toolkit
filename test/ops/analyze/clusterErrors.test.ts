@@ -1,0 +1,406 @@
+// Analyze lane G1 — test evidence for signature clustering: the exact
+// normalization pipeline (what is abstracted, what is preserved, rule
+// order), content-derived stable ids, the confidence decision table
+// (high/low; v1 never merges, never emits 'medium'), the ledger noise seam
+// (knownNoise excludes BY CLUSTER SIGNATURE — any other recorded form never
+// matches), and a seeded PROPERTY test proving the acceptance constraint:
+// the same failure set in any presentation order yields identical cluster
+// ids, confidences, and membership. All pure — zero I/O.
+import { describe, expect, test } from 'vitest';
+import {
+  clusterErrors,
+  clusterErrorsOp,
+  clusterSignature,
+  messageTemplate,
+} from '../../../src/ops/analyze/clusterErrors.js';
+import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
+import type { LedgerView } from '../../../src/ops/ledger/index.js';
+import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
+
+/** A failure with only the fields under test (the gates test idiom). */
+function failureOf(overrides: Partial<CheckFailure>): CheckFailure {
+  return {
+    file: 'src/a.ts',
+    line: 1,
+    column: 1,
+    ruleId: 'rule',
+    message: 'message text',
+    severity: 'error',
+    ...overrides,
+  };
+}
+
+/** A FailureSet over the given failures, tool configurable. */
+function setOf(failures: CheckFailure[], tool = 'eslint', exitCode: number | null = 1): FailureSet {
+  return { tool, failures, exitCode };
+}
+
+/** An in-memory ledger view whose knownNoise carries the given signature strings. */
+function ledgerOf(knownNoise: string[]): LedgerView {
+  return {
+    entries:
+      knownNoise.length > 0
+        ? [{ signature: knownNoise[0] as string, count: 2, component: 'src/ops/analyze' }]
+        : [],
+    knownNoise,
+    needsHuman: [],
+  };
+}
+
+describe('messageTemplate normalization pipeline (the documented contract)', () => {
+  test('numbers abstract to <num>: counts, decimals, line refs, codes', () => {
+    expect(messageTemplate('Expected 2 arguments, but got 3.')).toBe(
+      'Expected <num> arguments, but got <num>.',
+    );
+    expect(messageTemplate('line 42 col 7.5')).toBe('line <num> col <num>');
+    expect(messageTemplate('error TS2551 occurred')).toBe('error TS<num> occurred');
+  });
+
+  test('quoted spans abstract to <str> before any other rule', () => {
+    expect(messageTemplate("'foo' is defined but never used")).toBe(
+      '<str> is defined but never used',
+    );
+    expect(messageTemplate('Cannot find module "../utils/date"')).toBe('Cannot find module <str>');
+  });
+
+  test('unquoted path-like runs abstract to <path>: posix, windows, URLs', () => {
+    expect(messageTemplate('Cannot open file src/utils/date.ts for reading')).toBe(
+      'Cannot open file <path> for reading',
+    );
+    expect(messageTemplate('no such directory C:\\work\\repo\\src')).toBe(
+      'no such directory <path>',
+    );
+    expect(messageTemplate('fetch of https://example.test/api failed')).toBe(
+      'fetch of <path> failed',
+    );
+  });
+
+  test('rule order: a quoted path is <str>; a number inside a path stays inside <path>', () => {
+    expect(messageTemplate("could not read 'C:\\data\\2024.json'")).toBe('could not read <str>');
+    expect(messageTemplate('missing src/v2/config.json')).toBe('missing <path>');
+  });
+
+  test('whitespace runs collapse and trim; case is preserved', () => {
+    expect(messageTemplate('  too   much\t\twhitespace\nhere  ')).toBe('too much whitespace here');
+    expect(messageTemplate('Foo and foo differ')).toBe('Foo and foo differ');
+  });
+
+  test('the coarseness is deliberate: a slash in prose also abstracts (documented)', () => {
+    expect(messageTemplate('true and/or false')).toBe('true <path> false');
+  });
+});
+
+describe('clusterSignature (the ledger-matching form)', () => {
+  test('is the canonical JSON tuple: tool, ruleId (null → empty), template', () => {
+    expect(
+      clusterSignature(failureOf({ ruleId: 'prefer-const', message: 'x is 3' }), 'eslint'),
+    ).toBe(JSON.stringify(['eslint', 'prefer-const', 'x is <num>']));
+    expect(clusterSignature(failureOf({ ruleId: null, message: 'a' }), 'vitest')).toBe(
+      JSON.stringify(['vitest', '', 'a']),
+    );
+  });
+
+  test('volatile fragments do not change the signature; ANY other change does', () => {
+    const base = clusterSignature(failureOf({ message: "'a' used at line 3" }), 'eslint');
+    expect(clusterSignature(failureOf({ message: "'b' used at line 99" }), 'eslint')).toBe(base);
+    expect(clusterSignature(failureOf({ message: "'a' used at line 3" }), 'tsc')).not.toBe(base);
+    expect(
+      clusterSignature(failureOf({ ruleId: 'other', message: "'a' used at line 3" }), 'eslint'),
+    ).not.toBe(base);
+  });
+});
+
+describe('clusterErrors decision table', () => {
+  test('same rule + same shape across files → ONE high-confidence cluster with all members', () => {
+    const set = setOf([
+      failureOf({ file: 'src/a.ts', line: 3, message: "'a' is defined but never used" }),
+      failureOf({ file: 'src/b.ts', line: 8, message: "'b' is defined but never used" }),
+      failureOf({ file: 'src/c.ts', line: 13, message: "'c' is defined but never used" }),
+    ]);
+    const report = clusterErrors(set);
+    expect(report.noise).toEqual([]);
+    expect(report.clusters).toHaveLength(1);
+    const cluster = report.clusters[0];
+    if (cluster === undefined) throw new Error('expected one cluster');
+    expect(cluster.confidence).toBe('high');
+    expect(cluster.size).toBe(3);
+    expect(cluster.tool).toBe('eslint');
+    expect(cluster.ruleId).toBe('rule');
+    expect(cluster.id).toBe(fnv1a32Hex(cluster.signature));
+    expect(cluster.signature).toBe(clusterSignature(cluster.failures[0] as CheckFailure, 'eslint'));
+  });
+
+  test('singletons are low-confidence and stay in their OWN cluster (never silently merged)', () => {
+    const burstA = failureOf({ file: 'src/a.ts', message: "'x' is defined but never used" });
+    const burstB = failureOf({ file: 'src/b.ts', message: "'y' is defined but never used" });
+    // A same-rule NEAR-TWIN: its template ('…never used here') differs from
+    // the burst's ('…never used') by more than volatile fragments, so v1
+    // keeps it a separate low-confidence cluster instead of absorbing it.
+    const odd = failureOf({ file: 'src/odd.ts', message: "'z' is defined but never used here" });
+    const report = clusterErrors(setOf([burstA, burstB, odd]));
+    expect(report.clusters).toHaveLength(2);
+    const high = report.clusters.find((cluster) => cluster.size === 2);
+    const low = report.clusters.find((cluster) => cluster.size === 1);
+    if (high === undefined || low === undefined) throw new Error('expected 2 + 1 split');
+    expect(high.confidence).toBe('high');
+    expect(high.failures).toEqual([burstA, burstB]);
+    expect(low.confidence).toBe('low');
+    expect(low.failures).toEqual([odd]);
+    // No emitted cluster ever carries the v1-unreachable 'medium'.
+    for (const cluster of report.clusters) {
+      expect(cluster.confidence).not.toBe('medium');
+    }
+  });
+
+  test('different shapes of the same rule stay separate (no similarity merging in v1)', () => {
+    const set = setOf([
+      failureOf({ message: "'a' is defined but never used" }),
+      failureOf({ message: 'a is assigned a value but never used' }),
+    ]);
+    expect(clusterErrors(set).clusters).toHaveLength(2);
+  });
+
+  test('severity is NOT part of the signature: the same shape clusters across error/warning', () => {
+    const set = setOf([
+      failureOf({ severity: 'error', message: "'a' is defined but never used" }),
+      failureOf({ severity: 'warning', message: "'b' is defined but never used" }),
+    ]);
+    const report = clusterErrors(set);
+    expect(report.clusters).toHaveLength(1);
+    expect(report.clusters[0]?.size).toBe(2);
+  });
+
+  test('ruleId is identity: identical messages under different rules never cluster together', () => {
+    const set = setOf([
+      failureOf({ ruleId: 'no-unused-vars', message: 'unused' }),
+      failureOf({ ruleId: 'prefer-const', message: 'unused' }),
+    ]);
+    expect(clusterErrors(set).clusters).toHaveLength(2);
+  });
+
+  test('exact duplicates are preserved as members (occurrence count is signal)', () => {
+    const same = failureOf({ file: 'src/dup.ts', line: 4 });
+    const report = clusterErrors(setOf([same, { ...same }]));
+    expect(report.clusters[0]?.size).toBe(2);
+  });
+
+  test('location-less failures (vitest shape) cluster by test-name shape', () => {
+    const set = setOf(
+      [
+        failureOf({
+          file: null,
+          line: null,
+          column: null,
+          ruleId: null,
+          message: 'dates > handles 3 cases',
+        }),
+        failureOf({
+          file: null,
+          line: null,
+          column: null,
+          ruleId: null,
+          message: 'dates > handles 9 cases',
+        }),
+      ],
+      'vitest',
+    );
+    const report = clusterErrors(set);
+    expect(report.clusters).toHaveLength(1); // shape-identical names merge — documented
+    expect(report.clusters[0]?.signature).toBe(
+      JSON.stringify(['vitest', '', 'dates > handles <num> cases']),
+    );
+  });
+
+  test('empty set → empty report (clustering nothing asserts nothing)', () => {
+    expect(clusterErrors(setOf([], 'eslint', 0))).toEqual({ clusters: [], noise: [] });
+  });
+
+  test('deterministic ordering: clusters by id, members and noise by exact identity', () => {
+    const set = setOf([
+      failureOf({ file: 'src/z.ts', line: 1, ruleId: 'rule-b', message: 'shape one 1' }),
+      failureOf({ file: 'src/a.ts', line: 2, ruleId: 'rule-b', message: 'shape one 2' }),
+      failureOf({ file: 'src/m.ts', line: 3, ruleId: 'rule-a', message: 'shape two' }),
+    ]);
+    const report = clusterErrors(set);
+    const ids = report.clusters.map((cluster) => cluster.id);
+    expect([...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))).toEqual(ids);
+    for (const cluster of report.clusters) {
+      const first = cluster.failures[0];
+      const last = cluster.failures[cluster.failures.length - 1];
+      if (first === undefined || last === undefined) throw new Error('empty cluster');
+      const firstIdentity = JSON.stringify(first);
+      const lastIdentity = JSON.stringify(last);
+      expect(firstIdentity <= lastIdentity).toBe(true);
+    }
+  });
+});
+
+describe('clusterErrors × ledger (known noise never clusters as signal)', () => {
+  const noisy = failureOf({
+    file: 'src/noisy.ts',
+    line: 5,
+    message: "'n' is defined but never used",
+  });
+  // A different message SHAPE, so it does not share noisy's signature and
+  // genuinely tests that suppression is per-signature, not global.
+  const signal = failureOf({
+    file: 'src/signal.ts',
+    line: 7,
+    message: "'s' is assigned a value but never used",
+  });
+
+  test('a failure whose CLUSTER SIGNATURE is in knownNoise goes to noise, not clusters', () => {
+    const signature = clusterSignature(noisy, 'eslint');
+    const report = clusterErrors(setOf([noisy, signal]), ledgerOf([signature]));
+    expect(report.clusters).toHaveLength(1);
+    expect(report.clusters[0]?.failures).toEqual([signal]);
+    expect(report.noise).toEqual([noisy]);
+    // Noise never leaks into any cluster, by identity.
+    for (const cluster of report.clusters) {
+      expect(cluster.failures).not.toContainEqual(noisy);
+    }
+  });
+
+  test('the seam is signature-form: a ledger entry recorded as the RAW message never matches', () => {
+    const report = clusterErrors(setOf([noisy]), ledgerOf([noisy.message]));
+    expect(report.noise).toEqual([]);
+    expect(report.clusters).toHaveLength(1);
+  });
+
+  test('a needsHuman escalation (count ≥ escalateAt) is inside knownNoise and is excluded', () => {
+    const signature = clusterSignature(noisy, 'eslint');
+    const ledger: LedgerView = {
+      entries: [{ signature, count: 3 }],
+      knownNoise: [signature],
+      needsHuman: [signature],
+    };
+    const report = clusterErrors(setOf([noisy]), ledger);
+    expect(report.noise).toEqual([noisy]);
+    expect(report.clusters).toEqual([]);
+  });
+
+  test('no ledger (or an empty view) suppresses nothing', () => {
+    expect(clusterErrors(setOf([noisy])).noise).toEqual([]);
+    expect(clusterErrors(setOf([noisy]), ledgerOf([])).noise).toEqual([]);
+  });
+
+  test('a ledger recorded under a DIFFERENT tool namespace does not match', () => {
+    const signature = clusterSignature(noisy, 'tsc'); // wrong tool in the signature
+    const report = clusterErrors(setOf([noisy]), ledgerOf([signature]));
+    expect(report.noise).toEqual([]);
+  });
+});
+
+describe('clusterErrors order-invariance property (seeded, deterministic)', () => {
+  /** mulberry32 — tiny seeded PRNG; a fixed seed makes the property deterministic. */
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  /** Fisher-Yates over a copy; the input array is never mutated. */
+  function shuffled<T>(items: readonly T[], rng: () => number): T[] {
+    const copy = [...items];
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(rng() * (i + 1));
+      const swap = copy[i];
+      const other = copy[j];
+      if (swap === undefined || other === undefined) throw new Error('shuffle index out of range');
+      copy[i] = other;
+      copy[j] = swap;
+    }
+    return copy;
+  }
+
+  // Four signatures: two multi-member bursts (shape-identical messages that
+  // differ only in volatile fragments), one singleton, one known-noise
+  // signature — so the property covers ids, confidence, membership, AND the
+  // noise split.
+  const fixture: CheckFailure[] = [
+    failureOf({
+      file: 'src/a.ts',
+      line: 1,
+      ruleId: 'no-unused-vars',
+      message: "'a' unused at line 1",
+    }),
+    failureOf({
+      file: 'src/b.ts',
+      line: 2,
+      ruleId: 'no-unused-vars',
+      message: "'b' unused at line 22",
+    }),
+    failureOf({
+      file: 'src/c.ts',
+      line: 3,
+      ruleId: 'no-unused-vars',
+      message: "'c' unused at line 333",
+    }),
+    failureOf({
+      file: 'src/d.ts',
+      line: 4,
+      ruleId: 'prefer-const',
+      message: 'expected 2 args, got 3',
+    }),
+    failureOf({
+      file: 'src/e.ts',
+      line: 5,
+      ruleId: 'prefer-const',
+      message: 'expected 7 args, got 1',
+    }),
+    failureOf({ file: 'src/f.ts', line: 6, ruleId: 'lonely-rule', message: 'one of a kind' }),
+    failureOf({ file: 'src/g.ts', line: 7, ruleId: 'noisy-rule', message: 'noise burst 1' }),
+    failureOf({ file: 'src/h.ts', line: 8, ruleId: 'noisy-rule', message: 'noise burst 2' }),
+  ];
+  const noiseSignature = clusterSignature(fixture[6] as CheckFailure, 'eslint');
+  const ledger = ledgerOf([noiseSignature]);
+
+  test('every permutation yields identical ids, confidence, membership, and noise (40 iterations)', () => {
+    const rng = mulberry32(0xc1a57e8);
+    const reference = clusterErrors(setOf(fixture), ledger);
+    expect(reference.clusters).toHaveLength(3);
+    expect(reference.noise).toHaveLength(2);
+    expect(reference.clusters.map((cluster) => cluster.confidence).sort()).toEqual([
+      'high',
+      'high',
+      'low',
+    ]);
+    for (let i = 0; i < 40; i++) {
+      expect(clusterErrors(setOf(shuffled(fixture, rng)), ledger)).toEqual(reference);
+    }
+  });
+
+  test('the ids are content-derived: the same failures under a different tool namespace re-key', () => {
+    const reference = clusterErrors(setOf(fixture), ledger);
+    const otherTool = clusterErrors(setOf(fixture, 'tsc'));
+    expect(otherTool.clusters).toHaveLength(4); // the suppressed noise pair clusters as tsc signal
+    for (const cluster of reference.clusters) {
+      expect(cluster.tool).toBe('eslint');
+      // Every signature embeds its tool, so no tsc signature equals an eslint one.
+      for (const other of otherTool.clusters) {
+        expect(other.signature).not.toBe(cluster.signature);
+      }
+    }
+  });
+});
+
+describe('clusterErrorsOp', () => {
+  test('ok with the report, including the optional ledger input', async () => {
+    const noisy = failureOf({ message: 'known noise' });
+    const signature = clusterSignature(noisy, 'eslint');
+    const result = await clusterErrorsOp({ set: setOf([noisy]), ledger: ledgerOf([signature]) });
+    expect(result).toEqual({
+      status: 'ok',
+      value: { clusters: [], noise: [noisy] },
+    });
+  });
+
+  test('ok on an empty set (total over valid typed input — no failure path)', async () => {
+    const result = await clusterErrorsOp({ set: setOf([], 'eslint', 0) });
+    expect(result).toEqual({ status: 'ok', value: { clusters: [], noise: [] } });
+  });
+});
