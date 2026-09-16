@@ -299,11 +299,14 @@ describe('review.fixItem dispatched worktree (round-2 finding 1)', () => {
       const sessionsDir = join(scratch, 'sessions');
       // The importer's EXACT binding expression, with an injectable session
       // dir so the record is observable (the default inner driver refuses
-      // the unknown test model pre-dispatch — nothing spawns).
+      // the unknown test model pre-dispatch — nothing spawns). retainSessions
+      // keeps the record readable after the run (round-3 item 14 default is
+      // removal; retention doesn't alter the workspace semantics pinned here).
       const driver = worktreeFixDriver({
         harnessConfig: defaultHarnessConfig,
         worktreePath,
         sessionsDir,
+        retainSessions: true,
       });
       await expect(
         driver.run({

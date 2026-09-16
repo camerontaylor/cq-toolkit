@@ -49,10 +49,11 @@
 //   7. replyAndResolve         — push-before-post (its push argv is the
 //      same composed worktree push: an idempotent re-assertion against
 //      origin races between the two moments), dispatch-log deduped.
-//   8. outcome                 — any fix row not ok, a NO PROGRESS verify
-//      (when fixes were attempted), reply failures/withheld, or the step-2
-//      refusal → needs-human with reasons[]; a clean loop → ok. Unexpected
-//      throws PROPAGATE — never swallowed into ok (I5).
+//   8. outcome                 — any fix row not ok, reply failures /
+//      withheld resolves / a failed dispatch push, or the step-2 refusal →
+//      needs-human with reasons[]; a clean loop → ok. The PR-wide
+//      VerifyOutcome does NOT feed reasons (observability only, stage 6).
+//      Unexpected throws PROPAGATE — never swallowed into ok (I5).
 //
 // WHY A BUILDER + THIS WIRING (the src/plans convention, recorded for lane
 // E): the frozen Job schema has no cross-job data channel — a Job's input is
@@ -99,6 +100,7 @@ import type {
   FixReviewItemInput,
   FixReviewItemResult,
 } from '../ops/review/fixReviewItem.js';
+import { reviewFixHarness } from '../ops/review/fixReviewItem.js';
 import type { PlanBatchConfig, PlannedBatch } from '../ops/review/planReviewBatch.js';
 import { defaultPlanBatchConfig, planReviewBatch } from '../ops/review/planReviewBatch.js';
 import type { WorktreeRegistry } from '../ops/review/prWorktree.js';
@@ -121,6 +123,13 @@ export interface ReviewLoopOpts {
   pr: number;
   /** The PR's head branch name (origin truth, from the fetch upstream). */
   headRefName: string;
+  /**
+   * The PR head repository as "owner/name" — REQUIRED for FORK PRs (the
+   * PR head lives in the fork; the worktree's 'origin' remote is the BASE
+   * repo, so pushing to it would strand the fix on a base-repo branch).
+   * Same-repo callers omit it: the push targets 'origin' as before.
+   */
+  headRepo?: string;
   /** The checked-out repository root resolvePrWorktree anchors to. */
   repoRoot: string;
   /** The gh transport — review reads, replies, and resolves ride it. */
@@ -338,23 +347,24 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
  * The composed worktree push — the git argv that publishes the fix,
  * mirroring prWorktree's argv composition exactly: a leading `-C <path>`
  * (the runner spawns with the process cwd; effect comes only from the
- * explicit prefix), then `push origin HEAD:<headRefName>` — the PR'S REAL
+ * explicit prefix), then `push <target> HEAD:<headRefName>` — the PR'S REAL
  * HEAD (finding: the internal `cq-review/pr-<n>` worktree label would leave
  * origin's PR untouched, so the verifier could never see the fix, and a
- * stray branch accumulates on origin). The worktree branch sits AT the
- * fetched origin sha, so the push is a fast-forward; a raced origin refuses
+ * stray branch accumulates on origin). The target is 'origin' for same-repo
+ * PRs; FORK PRs push straight to the head repository URL
+ * (`https://github.com/<headRepo>.git`) — the worktree's 'origin' remote is
+ * the base repo, which must never receive the fix. The worktree branch sits
+ * AT the fetched sha, so the push is a fast-forward; a raced head refuses
  * it — the push failure feeds the existing push-before-post retriable path.
  * Used BOTH for the fix-stage publish (so the verifier can see the fix's
  * own commit) and as replyAndResolve's push-before-post args (an idempotent
  * re-assertion).
  */
-const worktreePushArgs = (worktreePath: string, headRefName: string): string[] => [
-  '-C',
-  worktreePath,
-  'push',
-  'origin',
-  `HEAD:${headRefName}`,
-];
+const worktreePushArgs = (
+  worktreePath: string,
+  headRefName: string,
+  pushTarget: string,
+): string[] => ['-C', worktreePath, 'push', pushTarget, `HEAD:${headRefName}`];
 
 /**
  * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
@@ -385,6 +395,7 @@ const commitInPushedHead = async (
   worktreePath: string,
   sha: string,
   baseSha: string,
+  itemId: string,
 ): Promise<boolean> => {
   if (!COMMIT_SHA_RE.test(sha)) {
     return false;
@@ -401,7 +412,15 @@ const commitInPushedHead = async (
     return false;
   }
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
-  return ancestor.code === 0;
+  if (ancestor.code !== 0) {
+    return false;
+  }
+  // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
+  // worktree, so a sibling's strict-new commit would otherwise satisfy this
+  // item's gate. The commit MESSAGE must name THIS item's id — the shipped
+  // prompt requires it verbatim in the commit subject.
+  const message = await git(['-C', worktreePath, 'log', '-1', '--format=%B', sha]);
+  return message.code === 0 && message.stdout.includes(itemId);
 };
 
 /**
@@ -414,6 +433,10 @@ const commitInPushedHead = async (
 export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> {
   const reasons: string[] = [];
   const skipped: Array<{ id: string; reason: string }> = [];
+  // The push target: 'origin' for same-repo PRs; the head repository URL
+  // for forks (opts.headRepo — see ReviewLoopOpts.headRepo).
+  const pushTarget =
+    opts.headRepo === undefined ? 'origin' : `https://github.com/${opts.headRepo}.git`;
 
   // (1) THE per-PR worktree — origin head is truth, re-verified inside.
   const worktree = await resolvePrWorktree({
@@ -458,6 +481,15 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       actionsPosted: 0,
     };
   }
+  // Blocked items are needs-human BY CLASSIFICATION (e.g. an outdated
+  // unresolved thread): planReviewBatch filters them out silently, so the
+  // loop records them as reasons FIRST — a blocked-only run is needs-human
+  // with zero work, never a silent ok (Codex 3D).
+  for (const item of classification.items) {
+    if (item.verdict === 'blocked') {
+      reasons.push(`blocked: ${item.id} requires human decision`);
+    }
+  }
   const batches = planReviewBatch(classification, opts.planBatchConfig ?? defaultPlanBatchConfig);
 
   // (3) Enrich every planned item into the fixer payload. One job per ITEM
@@ -475,7 +507,9 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       item: entry.item,
       worktree: { path: worktree.path, branch: worktree.branch },
       driver: opts.driver,
-      ...(opts.harness !== undefined ? { harness: opts.harness } : {}),
+      // The PLAN ships the fixer harness (git-commit-capable run allowlist)
+      // as data; the OP's own default stays defaultHarnessConfig (R4).
+      harness: opts.harness ?? reviewFixHarness,
       ...(opts.promptOverride !== undefined ? { promptOverride: opts.promptOverride } : {}),
       ...(opts.fixBudget !== undefined ? { budget: opts.fixBudget } : {}),
     });
@@ -513,8 +547,24 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const commits = fixReport.jobs.flatMap((row) =>
     row.result.status === 'ok' ? (row.result.value as FixReviewItemResult).commits : [],
   );
-  if (commits.length > 0) {
-    const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName));
+  // MIXED-WORKTREE GUARD (Codex D2iM): sequential jobs share one worktree —
+  // pushing HEAD when a sibling row failed would publish that sibling's
+  // unreported commit. Publication requires EVERY fix row to be ok; a
+  // failed/indeterminate/needs-human sibling withholds the push, and every
+  // changed item is recorded (its commit stays local-unpublished).
+  const allRowsOk = fixReport.jobs.every((row) => row.result.status === 'ok');
+  const publishWithheld = commits.length > 0 && !allRowsOk;
+  if (publishWithheld) {
+    for (const row of fixReport.jobs) {
+      if (row.result.status === 'ok' && (row.result.value as FixReviewItemResult).changed) {
+        reasons.push(
+          `item ${sources.get(row.jobId)?.itemId ?? row.jobId}: publish-withheld-mixed-worktree — a sibling fix row failed; the local commit is not published`,
+        );
+      }
+    }
+  }
+  if (commits.length > 0 && allRowsOk) {
+    const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
     if (push.code !== 0) {
       const stderr = push.stderr.trim();
       reasons.push(
@@ -567,7 +617,11 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     const value = row.result.value as FixReviewItemResult;
     const body =
       value.changed && value.commits.length > 0
-        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
+        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${
+            publishWithheld
+              ? '\n\nNote: the fix is committed locally but publication was withheld; it is not yet on the remote.'
+              : ''
+          }`
         : value.summary;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
@@ -592,10 +646,24 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // snapshot alone: a hallucinated sha must not hide its thread (the
       // reply still posts — the summary reports what the worker claimed),
       // and the withheld resolve is recorded as a per-item failure reason.
-      if (value.changed && value.commits.length > 0) {
+      if (publishWithheld) {
+        // Publication was withheld (a sibling failed): nothing is on the
+        // remote, so the thread must stay open regardless of local state.
+        continue;
+      }
+      if (value.changed && value.commits.length > 0 && value.truncated === true) {
+        // Round-3 item 13: a CONTEXT-truncated worker saw a clipped tail and
+        // may have missed the actual constraint — the reply reports the
+        // claim, but the resolve is withheld.
+        reasons.push(
+          `thread ${source.itemId}: truncated-context — the worker saw a clipped prompt; resolve withheld, reply posted`,
+        );
+      } else if (value.changed && value.commits.length > 0) {
         let verified = false;
         for (const sha of value.commits) {
-          if (await commitInPushedHead(opts.git, worktree.path, sha, before.headSha)) {
+          if (
+            await commitInPushedHead(opts.git, worktree.path, sha, before.headSha, source.itemId)
+          ) {
             verified = true;
             break;
           }
@@ -636,8 +704,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       pr: opts.pr,
       run: opts.gh,
       push:
-        commits.length > 0
-          ? { run: opts.git, args: worktreePushArgs(worktree.path, opts.headRefName) }
+        commits.length > 0 && allRowsOk
+          ? { run: opts.git, args: worktreePushArgs(worktree.path, opts.headRefName, pushTarget) }
           : null,
       dispatchLog: fileDispatchLog(opts.dispatchLogPath),
       nowMs: opts.nowMs,

@@ -24,8 +24,9 @@ How to work:
 Commits:
 
 - Commit your change in the worktree.
-- Reference the pull request number and the review item id in the commit
-  message, so the fix stays traceable to its thread.
+- Reference the pull request number in the commit message, and put the
+  review item id VERBATIM in the commit subject (first line) — the loop
+  verifies that the fix belongs to the thread by it.
 
 Reply contract:
 

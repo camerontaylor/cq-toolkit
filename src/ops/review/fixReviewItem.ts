@@ -57,9 +57,11 @@
 //   through verbatim; on every other status the worker's evidence has no
 //   result to ride (the frozen OpResult carries none).
 import { mkdtempSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { defaultHarnessConfig } from '../../harness/config.js';
+import { z } from 'zod';
+import { deepFreeze, defaultHarnessConfig, HarnessConfigSchema } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
@@ -139,9 +141,13 @@ export interface FixReviewItemInput {
  * The fix report for an `ok` run: the contract triple (changed / summary /
  * commits) parsed from the worker's structured output, plus the worker
  * evidence that rides along. `truncated` is present (true) only when the
- * op clipped the system prompt, the item body, or a prior comment while
- * composing — absent otherwise (exactOptionalPropertyTypes: never an
- * explicit undefined).
+ * CONTEXT was clipped while composing — the system prompt, the item body,
+ * or a prior comment — and is the loop's resolve-gate signal: a worker
+ * that saw a clipped tail may have missed the actual constraint.
+ * `summaryTruncated` reports the summary head-cap separately (the summary
+ * is the loop's own output; its cap never clips worker context). Both
+ * absent otherwise (exactOptionalPropertyTypes: never an explicit
+ * undefined).
  */
 export interface FixReviewItemResult {
   /** True only when the worker committed a fix. */
@@ -150,8 +156,10 @@ export interface FixReviewItemResult {
   summary: string;
   /** Full shas of the commits the worker created, in worker-reported order. */
   commits: string[];
-  /** Present (true) only when ANY prompt-composition truncation fired. */
+  /** Present (true) only when the CONTEXT (system prompt / body / comments) was clipped. */
   truncated?: boolean;
+  /** Present (true) only when the worker SUMMARY hit its own head-cap. */
+  summaryTruncated?: boolean;
   /** Worker-reported tool denials, verbatim. */
   denials: ToolDenial[];
   /** Worker-reported token usage, verbatim (never driver-trusted for USD — callers price it). */
@@ -183,11 +191,67 @@ export const MAX_ITEM_BODY_CHARS = 8_000;
  */
 export const MAX_SUMMARY_CHARS = 1_000;
 
+/**
+ * The commits array's dispatch-boundary bounds (round-3 item 2): at most
+ * ten shas per fix, each a string of at most 64 chars — the loop verifies
+ * them against git anyway, so these bounds only cap the worker's claim
+ * surface and the composed reply.
+ */
+export const MAX_FIX_COMMITS = 10;
+
+/** A full git commit sha — the only commit-reference shape the contract accepts. */
+export const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
+
+/**
+ * The structured-output schema the DISPATCHED inner driver hands the CLI
+ * (`--json-schema`, Codex 2j): without it a worker that prints the fix
+ * contract as a text line never populates structured_output and every
+ * honest run would fail the parse. parseFixOutput stays as defense in
+ * depth (exact keys, changed↔commits tie, bounds) — the schema is the
+ * vendor-boundary contract, the parse is the loop's own gate.
+ */
+export const FixReviewItemOutputSchema = z
+  .object({
+    changed: z.boolean(),
+    summary: z.string(),
+    commits: z.array(z.string()),
+  })
+  .strict();
+
 /** Head-truncate text to maxChars; reports whether the cap fired. */
 const headCapped = (text: string, maxChars: number): { text: string; truncated: boolean } =>
   text.length > maxChars
     ? { text: text.slice(0, maxChars), truncated: true }
     : { text, truncated: false };
+
+/**
+ * The shipped fixer harness (round-3 item 9): defaultHarnessConfig with the
+ * run allowlist narrowed to the git plumbing a fixer needs — add, commit,
+ * status, diff, log, rev-parse — and NOTHING else (token-prefix patterns:
+ * any other git subcommand, and any non-git command, is denied). The OP's
+ * own default stays `defaultHarnessConfig` (conservative); the PLAN ships
+ * this as data so the shipped loop can honestly produce a commit (R4).
+ * Deep-frozen and schema-parsed like the shipped default.
+ */
+export const reviewFixHarness: HarnessConfig = deepFreeze(
+  HarnessConfigSchema.parse({
+    ...defaultHarnessConfig,
+    tools: {
+      ...defaultHarnessConfig.tools,
+      run: {
+        ...defaultHarnessConfig.tools.run,
+        commandPatterns: [
+          'git add',
+          'git commit',
+          'git status',
+          'git diff',
+          'git log',
+          'git rev-parse',
+        ],
+      },
+    },
+  }),
+);
 
 /**
  * Defang fence-forgery inside untrusted content: any line whose trimmed
@@ -197,7 +261,7 @@ const headCapped = (text: string, maxChars: number): { text: string; truncated: 
  * applied AFTER the head caps (a truncated '[defanged' fragment still
  * cannot start a fence line).
  */
-const defangFenceLines = (text: string): string =>
+export const defangFenceLines = (text: string): string =>
   text
     .split('\n')
     .map((line) =>
@@ -245,13 +309,21 @@ const composeUserPrompt = (input: FixReviewItemInput): { text: string; truncated
     lines.push(`Repository: ${input.repo}`);
   }
   lines.push(`Pull request: #${input.pr}`);
-  lines.push(`Review item: ${input.item.id}`);
+  // id/path are FETCHED strings composed OUTSIDE the untrusted-content
+  // fences — strip line breaks and defang fence lines so neither can forge
+  // a fence or smuggle a second line into the composed context (round-3
+  // item 4).
+  const singleLine = (text: string): string =>
+    // Defang PER LINE first (the marker check is line-anchored), then
+    // collapse to one line.
+    defangFenceLines(text).replace(/[\r\n]+/g, ' ');
+  lines.push(`Review item: ${singleLine(input.item.id)}`);
   const anchor =
     input.item.path === null
       ? 'unanchored (no file/line)'
       : input.item.line === null
-        ? input.item.path
-        : `${input.item.path}:${input.item.line}`;
+        ? singleLine(input.item.path)
+        : `${singleLine(input.item.path)}:${input.item.line}`;
   lines.push(`Location: ${anchor}`);
   lines.push(`Worktree: ${input.worktree.path} (branch: ${input.worktree.branch})`);
   lines.push('');
@@ -348,10 +420,18 @@ const parseFixOutput = (
   }
   // Element-wise validation over `unknown` (an Array.isArray narrow alone
   // leaves `any[]` — the exact hole a lying worker could slip a non-string
-  // sha through): every entry must be a non-empty string.
+  // sha through): every entry must be a FULL 40-hex sha (round-3 item 15 —
+  // an abbreviated sha can resolve in git and must not pass the parse),
+  // the array bounded at MAX_FIX_COMMITS entries and each sha at 64 chars
+  // (round-3 item 2 — bounds the worker claim surface and the composed
+  // reply). Violations are contract violations, consistent with the
+  // changed↔commits tie.
   const shas: string[] = [];
   for (const entry of commits as unknown[]) {
-    if (typeof entry !== 'string' || entry === '') {
+    if (typeof entry !== 'string' || !COMMIT_SHA_RE.test(entry)) {
+      return null;
+    }
+    if (entry.length > 64 || shas.length >= MAX_FIX_COMMITS) {
       return null;
     }
     shas.push(entry);
@@ -409,8 +489,15 @@ export interface WorktreeFixDriverOptions {
   worktreePath: string;
   /** Injectable for tests; default: mkdtemp under os.tmpdir(). */
   sessionsDir?: string;
-  /** Injectable inner-driver seam; default: `new SubprocessDriver({ harnessConfig, sessionsDir })`. */
+  /** Injectable inner-driver seam; default: `new SubprocessDriver({ harnessConfig, sessionsDir, outputSchema })`. */
   makeInner?: (sessionsDir: string) => Driver;
+  /**
+   * Keep the per-adapter sessions dir after runs (default FALSE: it is
+   * removed best-effort, recursively, once the inner run settles). The
+   * audit trail for a loop run is the run JOURNAL, not raw session files;
+   * retention is an explicit debugging opt-out.
+   */
+  retainSessions?: boolean;
 }
 
 /**
@@ -439,12 +526,24 @@ export function worktreeFixDriver(
     : new SubprocessDriver({
         harnessConfig: opts.harnessConfig,
         sessionsDir,
+        outputSchema: FixReviewItemOutputSchema,
       });
   const driver: Driver = {
     run: async (invocation) => {
       const store = new SessionStore(sessionsDir);
       const record = await store.create(opts.worktreePath);
-      return inner.run({ ...invocation, sessionRef: record.sessionId });
+      try {
+        return await inner.run({ ...invocation, sessionRef: record.sessionId });
+      } finally {
+        // The session record is not the audit trail (the run journal is) —
+        // the dir is reaped once the run settles unless retention was
+        // explicitly requested (round-3 item 14; revises the earlier
+        // evidence-only disposition: one adapter per item would otherwise
+        // accumulate un-reaped dirs of untrusted prompt content).
+        if (opts.retainSessions !== true) {
+          await rm(sessionsDir, { recursive: true, force: true }).catch(() => undefined);
+        }
+      }
     },
   };
   return Object.assign(driver, { sessionsDir });
@@ -515,7 +614,8 @@ export function makeFixReviewItem(deps: {
         changed: parsed.changed,
         summary: parsed.summary,
         commits: parsed.commits,
-        ...(truncated || parsed.summaryTruncated ? { truncated: true } : {}),
+        ...(truncated ? { truncated: true } : {}),
+        ...(parsed.summaryTruncated ? { summaryTruncated: true } : {}),
         denials: worker.denials,
         usage: worker.usage,
       },

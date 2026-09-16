@@ -55,6 +55,8 @@ import type { RegistryMap, WorktreeRegistry } from '../../src/ops/review/prWorkt
 import type { ReviewThread } from '../../src/ops/review/threads.js';
 import { listPlans } from '../../src/plans/registry.js';
 import { enrichBatches, runReviewLoop } from '../../src/plans/review-loop.js';
+import { MAX_ITEM_BODY_CHARS } from '../../src/ops/review/fixReviewItem.js';
+import { reviewFixHarness } from '../../src/ops/review/fixReviewItem.js';
 import type { ReviewLoopOutcome } from '../../src/plans/review-loop.js';
 
 // ---------------------------------------------------------------------------
@@ -112,6 +114,8 @@ interface LoopWorld {
    * the PR-wide verdict is observability only).
    */
   laggingOrigin?: boolean;
+  /** Commit messages the fake git answers for `log -1 --format=%B <sha>`. */
+  commitMessages: Record<string, string>;
   /** GraphQL thread nodes served to fetchReviewState. */
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
@@ -143,6 +147,7 @@ const defaultWorld = (): LoopWorld => ({
   sha: BEFORE_SHA,
   advanceOnPush: true,
   knownShas: [SHA, NEW_SHA],
+  commitMessages: { [NEW_SHA]: 'Fix review item T1 in src/a.ts' },
   threads: [
     actionableThread('T1', 'src/a.ts', 3, 101),
     {
@@ -310,6 +315,11 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       }
       return { code: 128, stdout: '', stderr: 'fatal: not an ancestor relation in this world' };
     }
+    if (rest[0] === 'log' && rest[1] === '-1') {
+      // Per-item attribution (round-3 finding 3): the commit message the
+      // world carries for this sha.
+      return ok(world.commitMessages[rest[3] ?? ''] ?? '');
+    }
     if (rest[0] === 'worktree' && rest[1] === 'list') {
       return ok(`worktree ${worktreePath}\nHEAD ${SHA}\nbranch refs/heads/${LABEL}\n\n`);
     }
@@ -392,6 +402,7 @@ const runLoop = async (
     ghLog?: string[][];
     gitLog?: string[][];
     invocations?: OpInvocation[];
+    headRepo?: string;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -431,6 +442,7 @@ const runLoop = async (
     repo: COORDS.repo,
     pr: COORDS.pr,
     headRefName: HEAD_REF,
+    ...(o.headRepo !== undefined ? { headRepo: o.headRepo } : {}),
     repoRoot: '/fake/repo',
     gh: fakeGh(world, ghLog),
     git: fakeGit(world, gitLog, worktreePath),
@@ -467,11 +479,11 @@ const firstMutationIndex = (ghLog: string[][]): number =>
   ghLog.findIndex((args) => isGhMutation(args));
 
 /** The composed worktree push argv the loop must use (clarified pattern). */
-const expectedPushArgs = (worktreePath: string): string[] => [
+const expectedPushArgs = (worktreePath: string, target = 'origin'): string[] => [
   '-C',
   worktreePath,
   'push',
-  'origin',
+  target,
   `HEAD:${HEAD_REF}`,
 ];
 
@@ -573,13 +585,14 @@ describe('review-loop failure handling', () => {
     expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
   });
 
-  test('a malformed worker answer fails its row; the other thread still gets reply + resolve', async () => {
+  test('a malformed worker answer fails its row; the other thread still gets its reply (publication withheld)', async () => {
     const world = defaultWorld();
     world.threads = [
       actionableThread('T1', 'src/a.ts', 3, 101),
       actionableThread('T2', 'src/b.ts', 8, 102),
     ];
     world.knownShas = [SHA, BEEF_SHA]; // T2's commit is real; T1's answer is malformed
+    world.commitMessages = { [BEEF_SHA]: 'Fix review item T2 in src/b.ts' };
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
@@ -594,19 +607,15 @@ describe('review-loop failure handling', () => {
     );
     expect(outcome.fixReport?.counts.done).toBe(1);
     expect(outcome.fixReport?.counts.failed).toBe(1);
-    expect(outcome.verify?.progress).toBe(true);
-    expect(outcome.actionsPosted).toBe(2);
+    // Nothing was published (mixed-worktree guard): the after-snapshot lags.
+    expect(outcome.verify?.progress).toBe(false);
+    expect(outcome.actionsPosted).toBe(1); // T2's reply; the resolve is withheld
     expect(outcome.reply?.posted.map((record) => record.actionId)).toEqual([
       'review-loop:7:reply:T2',
-      'review-loop:7:resolve:T2',
     ]);
-    // The resolve mutation targets T2 SPECIFICALLY — the fake echoes the
-    // requested thread and would fail loudly on any other id.
-    const resolveArgs = ghLog.find((args) =>
-      flagValue(args, 'query').includes('resolveReviewThread'),
-    );
-    expect(resolveArgs).toBeDefined();
-    expect(flagValue(resolveArgs ?? [], 'threadId')).toBe('T2');
+    expect(
+      outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
+    ).toBe(true);
   });
 });
 
@@ -877,17 +886,33 @@ describe('fail-toward-human paths (finding 6 + Codex P1)', () => {
 describe('resolve-gate spoofing (round-2 finding 2)', () => {
   test.each([
     ['the before-snapshot (base) sha', BEFORE_SHA],
-    ['the literal HEAD', 'HEAD'],
     ['a fabricated unknown 40-hex sha', 'abcd'.repeat(10)],
-  ])('%s is rejected — reply posts, no resolve, unverified-commits reason', async (_name, sha) => {
+  ])(
+    '%s is rejected by the loop gate — reply posts, no resolve, unverified-commits reason',
+    async (_name, sha) => {
+      const { outcome } = await runLoop(defaultWorld(), {
+        driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [sha]))],
+      });
+      expect(outcome.status).toBe('needs-human');
+      expect(outcome.reasons.some((reason) => reason.includes('unverified-commits'))).toBe(true);
+      expect(outcome.actionsPosted).toBe(1);
+      expect(outcome.reply?.posted[0]?.kind).toBe('review_reply');
+      expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+    },
+  );
+
+  test('the literal HEAD never survives the op parse — the fix row fails instead', async () => {
+    // Defense in depth: the 40-hex contract rejects 'HEAD' at the op, so
+    // the loop sees a FAILED row (never a gate-eligible claim).
     const { outcome } = await runLoop(defaultWorld(), {
-      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [sha]))],
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', ['HEAD']))],
     });
     expect(outcome.status).toBe('needs-human');
-    expect(outcome.reasons.some((reason) => reason.includes('unverified-commits'))).toBe(true);
-    expect(outcome.actionsPosted).toBe(1);
-    expect(outcome.reply?.posted[0]?.kind).toBe('review_reply');
-    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+    expect(outcome.reasons.some((reason) => reason.includes('fix job fix-1 ended failed'))).toBe(
+      true,
+    );
+    expect(outcome.reasons.some((reason) => reason.includes('unverified-commits'))).toBe(false);
+    expect(outcome.actionsPosted).toBe(0);
   });
 
   test('a real new commit is accepted — the resolve posts', async () => {
@@ -917,5 +942,208 @@ describe('VerifyOutcome is observability only (round-2 finding 6)', () => {
       'review_reply',
       'resolve_thread',
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Round-3 — fork push target, per-item attribution, blocked escalation,
+// mixed-worktree publication, truncated context, package surface
+// ---------------------------------------------------------------------------
+
+describe('fork push target (round-3 item 1)', () => {
+  test('a same-repo PR pushes to origin; a fork PR pushes to the head repository URL', async () => {
+    const sameRepo = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 's', [NEW_SHA]))],
+    });
+    const sameRepoPushes = sameRepo.gitLog.filter((args) => args[2] === 'push');
+    expect(sameRepoPushes.length).toBeGreaterThanOrEqual(1);
+    for (const args of sameRepoPushes) {
+      expect(args).toEqual(expectedPushArgs(sameRepo.worktreePath));
+    }
+    expect(sameRepo.outcome.status).toBe('ok'); // the keyed fake advanced: the push reached the PR
+
+    const forked = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 's', [NEW_SHA]))],
+      headRepo: 'octo/widget-fork',
+    });
+    const forkPushes = forked.gitLog.filter((args) => args[2] === 'push');
+    expect(forkPushes.length).toBeGreaterThanOrEqual(1);
+    for (const args of forkPushes) {
+      expect(args).toEqual(
+        expectedPushArgs(forked.worktreePath, 'https://github.com/octo/widget-fork.git'),
+      );
+    }
+    // The keyed fake advances for EITHER form — the refspec is what carries
+    // the PR head, the target only carries the destination.
+    expect(forked.outcome.status).toBe('ok');
+  });
+});
+
+describe('per-item commit attribution (round-3 item 3)', () => {
+  test('a commit naming only item A resolves A; item B gets the attribution reason', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/b.ts', 8, 102),
+    ];
+    world.knownShas = [SHA, NEW_SHA, BEEF_SHA];
+    // BOTH commits exist, but only T1's is named.
+    world.commitMessages = {
+      [NEW_SHA]: 'Fix review item T1 in src/a.ts',
+      [BEEF_SHA]: 'Fix review item T1 in src/b.ts too',
+    };
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(true, 'Fixed.', [NEW_SHA])),
+        completeWorker(fixLine(true, 'Fixed.', [BEEF_SHA])),
+      ],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(
+      outcome.reasons.some(
+        (reason) => reason.includes('T2') && reason.includes('unverified-commits'),
+      ),
+    ).toBe(true);
+    expect(outcome.actionsPosted).toBe(3); // reply+resolve for T1, bare reply for T2
+    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(true);
+  });
+
+  test('a commit naming item B resolves B', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/b.ts', 8, 102),
+    ];
+    world.knownShas = [SHA, NEW_SHA, BEEF_SHA];
+    world.commitMessages = {
+      [NEW_SHA]: 'Fix review item T1 in src/a.ts',
+      [BEEF_SHA]: 'Fix review item T2 in src/b.ts',
+    };
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(true, 'Fixed A.', [NEW_SHA])),
+        completeWorker(fixLine(true, 'Fixed B.', [BEEF_SHA])),
+      ],
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.actionsPosted).toBe(4);
+  });
+});
+
+describe('blocked classification escalation (round-3 item 10)', () => {
+  const outdatedThread = (): Record<string, unknown> => ({
+    ...(actionableThread('T-b', 'src/c.ts', 1, 103) as Record<string, unknown>),
+    isOutdated: true,
+  });
+
+  test('blocked-only → needs-human with the reason, zero mutations, driver uncalled', async () => {
+    const world = defaultWorld();
+    world.threads = [outdatedThread()];
+    const ghLog: string[][] = [];
+    const invocations: OpInvocation[] = [];
+    const { outcome } = await runLoop(world, { driverResults: [], invocations, ghLog });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toEqual(['blocked: T-b requires human decision']);
+    expect(outcome.fixReport?.counts.done).toBe(0);
+    expect(invocations).toHaveLength(0);
+    expect(ghLog.some((args) => isGhMutation(args))).toBe(false);
+  });
+
+  test('blocked + actionable → the actionable item fixes, outcome stays needs-human', async () => {
+    const world = defaultWorld();
+    world.threads = [outdatedThread(), actionableThread('T1', 'src/a.ts', 3, 101)];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toEqual(['blocked: T-b requires human decision']);
+    expect(outcome.actionsPosted).toBe(2);
+  });
+});
+
+describe('mixed-worktree publication (round-3 item 11)', () => {
+  test('a failed sibling withholds the push — no push argv, no resolves, reasons present', async () => {
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/b.ts', 8, 102),
+    ];
+    world.knownShas = [SHA, BEEF_SHA];
+    world.commitMessages = { [BEEF_SHA]: 'Fix review item T2 in src/b.ts' };
+    const gitLog: string[][] = [];
+    // A's worker answer is malformed (its worktree state is unknown); B is ok.
+    const { outcome, gitLog: log } = await runLoop(world, {
+      driverResults: [
+        completeWorker('not json at all'),
+        completeWorker(fixLine(true, 'Fixed B.', [BEEF_SHA])),
+      ],
+      gitLog,
+    });
+    void log;
+    expect(outcome.status).toBe('needs-human');
+    expect(
+      outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
+    ).toBe(true);
+    expect(gitLog.some((args) => args[2] === 'push')).toBe(false);
+    expect(outcome.actionsPosted).toBe(1); // B's reply; NO resolve
+    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+  });
+});
+
+describe('truncated-context resolve gate (round-3 item 13)', () => {
+  test('a context-truncated worker → reply posts, resolve withheld, needs-human', async () => {
+    const world = defaultWorld();
+    const threadNode = actionableThread('T1', 'src/a.ts', 3, 101) as {
+      comments: { nodes: Array<{ body: string }> };
+    };
+    // The ROOT COMMENT's body is what the fetch maps to item.body — an
+    // oversized one trips the op's context cap (round-3 item 13).
+    const root = threadNode.comments.nodes[0];
+    if (root === undefined) {
+      throw new Error('fixture: root comment missing');
+    }
+    root.body = 'x'.repeat(MAX_ITEM_BODY_CHARS + 1);
+    world.threads = [threadNode];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed what I saw.', [NEW_SHA]))],
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons.some((reason) => reason.includes('truncated-context'))).toBe(true);
+    expect(outcome.actionsPosted).toBe(1);
+    expect(outcome.reply?.posted[0]?.kind).toBe('review_reply');
+    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+  });
+});
+
+describe('shipped fixer harness rides the plan (round-3 item 9)', () => {
+  test('the plan default IS the shipped reviewFixHarness value', () => {
+    expect(reviewFixHarness.tools.run.enabled).toBe(true);
+    expect(reviewFixHarness.tools.run.commandPatterns[0]).toBe('git add');
+  });
+
+  test('the fix job input carries the git-commit-capable harness by default', async () => {
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 's', [NEW_SHA]))],
+    });
+    const job = outcome.plan.jobs[0] as {
+      input: { harness: { tools: { run: { commandPatterns: string[] } } } };
+    };
+    expect(job.input.harness.tools.run.commandPatterns).toEqual([
+      'git add',
+      'git commit',
+      'git status',
+      'git diff',
+      'git log',
+      'git rev-parse',
+    ]);
+  });
+});
+
+describe('package surface (round-3 item 12)', () => {
+  test('src/index.js resolves the review-loop wiring, builder, and registry entry', async () => {
+    const surface = (await import('../../src/index.js')) as Record<string, unknown>;
+    expect(typeof surface['runReviewLoop']).toBe('function');
+    expect(typeof surface['buildReviewLoopPlan']).toBe('function');
+    expect(surface['plan']).toBeDefined();
   });
 });
