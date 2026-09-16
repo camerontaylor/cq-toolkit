@@ -794,9 +794,7 @@ const reportSummary = (report: ExecutionReport): string =>
               (outcome.secondPass.merged.length > 0 || outcome.secondPass.retargeted.length > 0));
           if (!dispatched) await sleep(MERGE_RECOMPUTE_SETTLE_MS);
         }
-        log(
-          `step 6 ${converged ? 'converged' : 'DID NOT converge (step 7a fails below)'} after ${String(runs)} run(s)`,
-        );
+        log(`step 6 loop finished: converged=${String(converged)} after ${String(runs)} run(s)`);
 
         // --- STEP 7: THE ASSERTIONS ---------------------------------------------
         await gitOk('git fetch --prune origin', ['fetch', '--prune', 'origin']);
@@ -856,8 +854,8 @@ const reportSummary = (report: ExecutionReport): string =>
         );
         expect(
           allDrillCommits.length,
-          'main must carry the root merge and the stacked rung merge (the tail rung merges below main in the expected flow)',
-        ).toBeGreaterThanOrEqual(2);
+          'main must carry exactly the three rung merges (the per-PR containment loop above requires every merge commit on this chain)',
+        ).toBe(3);
         // Each PR's forge merge commit must be ON main's first-parent drill
         // range — the acceptance is not merely that a merge exists somewhere,
         // but that EVERY rung landed ON the trunk (r2 review: a landing where

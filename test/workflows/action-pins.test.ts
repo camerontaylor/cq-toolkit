@@ -95,7 +95,7 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
   });
 
   it('generated ci.yml, denylist.yml, and install-matrix.yml drop the token on EVERY checkout step', () => {
-    for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml']) {
+    for (const name of ['ci.yml', 'denylist.yml', 'install-matrix.yml', 'live-merge.yml']) {
       const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
       const checkoutBlocks = stepBlocks(text).filter((block) =>
         block.includes('actions/checkout@'),

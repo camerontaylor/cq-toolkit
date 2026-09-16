@@ -89,6 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${TEST_FILTER}" ]; then
+            case "${TEST_FILTER}" in *[!A-Za-z0-9_ .-]*) echo "TEST_FILTER contains disallowed characters" >&2; exit 2;; esac
             npx vitest run test/e2e/merge/live.test.ts -t "${TEST_FILTER}"
           else
             npx vitest run test/e2e/merge/live.test.ts
