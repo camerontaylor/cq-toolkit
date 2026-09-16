@@ -82,6 +82,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import { match } from '../../helpers/matchers.js';
 import { DEFAULT_MAX_RETRIES, executeMerges } from '../../../src/ops/merge/executeMerges.js';
 import type { ExecutionReport } from '../../../src/ops/merge/executeMerges.js';
 import { diagnoseMergeFailure } from '../../../src/ops/merge/diagnoseMergeFailure.js';
@@ -152,7 +153,8 @@ const sha = (seed: string): string => seed.repeat(40);
 const PR_REF = /^refs\/pull\/(\d+)\/head$/;
 const prOfRef = (ref: string): number | null => {
   const match = PR_REF.exec(ref);
-  return match === null ? null : Number.parseInt(match[1], 10);
+  const num = match?.[1];
+  return num === undefined ? null : Number.parseInt(num, 10);
 };
 
 /**
@@ -338,7 +340,7 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
 
     expect(report.merged).toEqual([]);
     expect(report.stale).toEqual([
-      { pr: 7, detail: expect.stringContaining('moved between plan and run') },
+      { pr: 7, detail: match.stringContaining('moved between plan and run') },
     ]);
     expect(report.failed).toEqual([]);
     // The exact calls prove it: baseline fetch → baseline (sha a) → action
@@ -396,13 +398,13 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
       failed: [
         {
           pr: 7,
-          error: expect.stringContaining(
+          error: match.stringContaining(
             'baseline sweep aborted during fetchRef (first failure at pr 7): network down',
           ),
         },
         {
           pr: 8,
-          error: expect.stringContaining(
+          error: match.stringContaining(
             'baseline sweep aborted during fetchRef (first failure at pr 7): network down',
           ),
         },
@@ -421,7 +423,7 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
 
     const report = await executeMerges({ plan, effects: fake });
 
-    expect(report.stale).toEqual([{ pr: 7, detail: expect.any(String) }]);
+    expect(report.stale).toEqual([{ pr: 7, detail: match.any(String) }]);
     expect(report.blocked).toEqual([{ pr: 8, reason: 'blocked_by_ancestor' }]);
     expect(report.merged).toEqual([]);
     // Pr 8 was NEVER executed: the sweep fetched + validated its head
@@ -473,7 +475,7 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
 
     expect(report.merged).toEqual([]);
     expect(report.failed).toEqual([
-      { pr: 7, error: expect.stringContaining('base branch was modified') },
+      { pr: 7, error: match.stringContaining('base branch was modified') },
     ]);
     expect(mergeCalls(fake).length).toBe(4); // 1 attempt + 3 retries, never a 5th
   });
@@ -485,7 +487,7 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
 
     const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake, maxRetries: 1 });
     expect(mergeCalls(fake).length).toBe(2); // 1 attempt + 1 retry
-    expect(report.failed).toEqual([{ pr: 7, error: expect.any(String) }]);
+    expect(report.failed).toEqual([{ pr: 7, error: match.any(String) }]);
   });
 
   test('a non-retryable failure is recorded immediately, never retried', async () => {
@@ -497,7 +499,7 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
 
     expect(report.merged).toEqual([]);
     expect(report.failed).toEqual([
-      { pr: 7, error: expect.stringContaining('Merge blocked by branch protection') },
+      { pr: 7, error: match.stringContaining('Merge blocked by branch protection') },
     ]);
     expect(mergeCalls(fake)).toEqual(['merge:7:merge']); // exactly one attempt
     // No between-attempt revalidation ever ran (2 validations: baseline +
@@ -519,7 +521,7 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
 
     expect(report.merged).toEqual([]);
     expect(report.stale).toEqual([
-      { pr: 7, detail: expect.stringContaining('moved while revalidating') },
+      { pr: 7, detail: match.stringContaining('moved while revalidating') },
     ]);
     expect(mergeCalls(fake).length).toBe(1);
   });
@@ -537,7 +539,7 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
 
     expect(report.merged).toEqual([]);
     expect(report.stale).toEqual([
-      { pr: 7, detail: expect.stringContaining('moved while revalidating') },
+      { pr: 7, detail: match.stringContaining('moved while revalidating') },
     ]);
     expect(mergeCalls(fake)).toEqual(['merge:7:merge']); // never a blind second attempt
     // The between-attempt check FETCHED first — the fetch is what the
@@ -559,7 +561,7 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
     expect(report.merged).toEqual([]);
     expect(report.stale).toEqual([]);
     expect(report.failed).toEqual([
-      { pr: 7, error: expect.stringContaining('retry revalidation: fetch') },
+      { pr: 7, error: match.stringContaining('retry revalidation: fetch') },
     ]);
     expect(mergeCalls(fake)).toEqual(['merge:7:merge']);
   });
@@ -582,7 +584,7 @@ describe('executeMerges — (c) failed ancestor blocks descendants, independent 
 
     const report = await executeMerges({ plan, effects: fake });
 
-    expect(report.failed).toEqual([{ pr: 7, error: expect.stringContaining('required statuses missing') }]);
+    expect(report.failed).toEqual([{ pr: 7, error: match.stringContaining('required statuses missing') }]);
     expect(report.merged).toEqual([9]);
     expect(report.blocked).toEqual([{ pr: 8, reason: 'blocked_by_ancestor' }]);
     expect(report.stale).toEqual([]);
@@ -707,7 +709,7 @@ describe('executeMerges — the plan is the only source of actions', () => {
 
     expect(report.retargeted).toEqual([]);
     expect(report.failed).toEqual([
-      { pr: 5, error: expect.stringContaining('gh pr edit 5 --base main') },
+      { pr: 5, error: match.stringContaining('gh pr edit 5 --base main') },
     ]);
     expect(fake.calls.some((call) => call.startsWith('prepare:') || call.startsWith('remove:'))).toBe(
       false,
@@ -725,7 +727,7 @@ describe('executeMerges — the plan is the only source of actions', () => {
     // still saw the locally-known head); the ACTION fetch failing is fatal
     // to the action: failed, never merged.
     expect(report.failed).toEqual([
-      { pr: 7, error: expect.stringContaining('fatal: could not read from remote repository') },
+      { pr: 7, error: match.stringContaining('fatal: could not read from remote repository') },
     ]);
     expect(report.merged).toEqual([]);
     expect(mergeCalls(fake)).toEqual([]);
@@ -741,7 +743,7 @@ describe('executeMerges — the plan is the only source of actions', () => {
 
     expect(report.retargeted).toEqual([]);
     expect(report.stale).toEqual([
-      { pr: 5, detail: expect.stringContaining('moved between plan and run') },
+      { pr: 5, detail: match.stringContaining('moved between plan and run') },
     ]);
     expect(fake.calls.some((call) => call.startsWith('retarget:'))).toBe(false);
   });
@@ -759,7 +761,8 @@ describe('executeMerges — the plan is the only source of actions', () => {
     // pull-ref or otherwise; the retarget rides the forge base edit only.
     const pushedRefs = fake.calls
       .filter((call) => call.startsWith('push:'))
-      .map((call) => call.slice('push:'.length).split('@')[0]);
+      .map((call) => call.slice('push:'.length).split('@')[0])
+      .filter((ref): ref is string => ref !== undefined);
     expect(pushedRefs).toEqual([]);
     expect(pushedRefs.some((ref) => ref.startsWith('refs/pull/'))).toBe(false);
     expect(fake.calls).toContain('retarget:5:base=main');
@@ -782,13 +785,13 @@ describe('executeMerges — the plan is the only source of actions', () => {
       failed: [
         {
           pr: 7,
-          error: expect.stringContaining(
+          error: match.stringContaining(
             'baseline sweep aborted during validateRef (first failure at pr 7): spawn boom',
           ),
         },
         {
           pr: 8,
-          error: expect.stringContaining(
+          error: match.stringContaining(
             'baseline sweep aborted during validateRef (first failure at pr 7): spawn boom',
           ),
         },
@@ -1201,7 +1204,7 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
     const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
 
     expect(report.failed).toEqual([
-      { pr: 7, error: expect.stringContaining('mergePr for pr 7 threw: spawn enoent') },
+      { pr: 7, error: match.stringContaining('mergePr for pr 7 threw: spawn enoent') },
     ]);
     expect(report.merged).toEqual([]);
   });
@@ -1214,7 +1217,7 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
     const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
 
     expect(report.failed).toEqual([
-      { pr: 5, error: expect.stringContaining('retargetBase for pr 5 threw: gh went away') },
+      { pr: 5, error: match.stringContaining('retargetBase for pr 5 threw: gh went away') },
     ]);
     expect(report.retargeted).toEqual([]);
   });
@@ -1231,7 +1234,7 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
 
     const report = await executeMerges({ plan, effects: fake });
 
-    expect(report.failed).toEqual([{ pr: 7, error: expect.any(String) }]);
+    expect(report.failed).toEqual([{ pr: 7, error: match.any(String) }]);
     expect(report.blocked).toEqual([
       { pr: 8, reason: 'blocked_by_ancestor' },
       { pr: 9, reason: 'blocked_by_ancestor' },
@@ -1264,7 +1267,7 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
     const report = await executeMerges({ plan, effects: fake });
 
     expect(report.failed).toEqual([
-      { pr: 5, error: expect.stringContaining('gh pr edit 5 --base main') },
+      { pr: 5, error: match.stringContaining('gh pr edit 5 --base main') },
     ]);
     expect(report.blocked).toEqual([{ pr: 6, reason: 'blocked_by_ancestor' }]);
     expect(report.retargeted).toEqual([]);

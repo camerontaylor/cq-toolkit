@@ -215,9 +215,11 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       }
       return args;
     }
-    case 'pr':
+    case 'pr': {
       // The two gh shapes: the merge (I3's only method) and the retarget.
-      const [verb, prNum, flag, base] = rest;
+      // rest[0] is 'pr' itself — the gh runner's argv starts at the
+      // subcommand (the binary is the runner), so skip it.
+      const [, verb, prNum, flag, base] = rest;
       if (verb === 'merge' && typeof prNum === 'string' && /^\d+$/.test(prNum) && flag === '--merge') {
         return args;
       }
@@ -231,6 +233,9 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       ) {
         return args;
       }
+      throw unknown();
+    }
+    case undefined:
       throw unknown();
     default:
       throw unknown();
