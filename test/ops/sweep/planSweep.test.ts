@@ -201,6 +201,33 @@ describe('planSweep library input boundary (reachable past any schema)', () => {
     await expect(failedPlan(makePlanner(), input)).resolves.toMatch(/selector is required/);
     await expect(failedPlan(makePlanner(), input)).resolves.toMatch(/NO default selector/);
   });
+
+  test('a null packages ELEMENT is a failed result naming the index', async () => {
+    const input = baseInput({
+      packages: [null as unknown as PlanSweepPackage, PACKAGES[0] as PlanSweepPackage],
+    });
+    const error = await failedPlan(makePlanner(), input);
+    expect(error).toMatch(/packages\[0\]/);
+  });
+
+  test('a non-array baselineSignatures is a failed result — the packages-guard mirror', async () => {
+    const input = baseInput({
+      baselineSignatures: 'sig-noise' as unknown as NonNullable<
+        PlanSweepInput['baselineSignatures']
+      >,
+    });
+    await expect(failedPlan(makePlanner(), input)).resolves.toMatch(
+      /baselineSignatures must be an array/,
+    );
+  });
+
+  test('a null ledger is a failed result, not a TypeError at the root read', async () => {
+    const input = baseInput({
+      ledger: null as unknown as NonNullable<PlanSweepInput['ledger']>,
+    });
+    const error = await failedPlan(makePlanner(), input);
+    expect(error).toMatch(/ledger must be an object/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -297,6 +324,32 @@ describe('planSweep selection', () => {
     expect(report.units).toEqual([
       { package: 'cli', fixer: 'lint', files: ['packages/cli/main.ts'] },
     ]);
+  });
+
+  test("a '.' package path names the repo ROOT: it owns everything no nested prefix claims", async () => {
+    const report = await okPlan(
+      makePlanner({
+        changedFiles: async () => ['packages/core/src/a.ts', 'README.md', 'docs/guide.md'],
+      }),
+      baseInput({
+        packages: [
+          { name: 'monorepo', path: '.' },
+          { name: 'core', path: 'packages/core' },
+        ],
+        selector: { mode: 'changed-vs-base', base: 'origin/main' },
+      }),
+    );
+    // The nested prefix beats the root package under `packages/core`; the
+    // root package sweeps the rest — and nothing is an orphan.
+    expect(report.units).toEqual([
+      {
+        package: 'monorepo',
+        fixer: 'lint',
+        files: ['README.md', 'docs/guide.md'],
+      },
+      { package: 'core', fixer: 'lint', files: ['packages/core/src/a.ts'] },
+    ]);
+    expect(report.orphans).toBeUndefined();
   });
 
   test('explicit selects exactly the named manifest packages (deduplicated)', async () => {
@@ -442,6 +495,31 @@ describe('planSweep ledger suppression (UC §1 row 8 / R2 D6)', () => {
     );
     expect(report.suppressed).toEqual([]);
     expect(report.units).toHaveLength(PACKAGES.length);
+  });
+
+  test('needsHuman routing is SELECTOR-INDEPENDENT: an escalated package changed-vs-base does not select still routes', async () => {
+    // Only cli has a changed file; core is NOT selected — its escalated
+    // baseline signature must still route to the report's needsHuman rows.
+    const planner = makePlanSweep({
+      changedFiles: async () => ['packages/cli/main.ts'],
+      queryLedger: makeLedgerQuery(() => memoryStore(LEDGER)),
+    });
+    const report = await okPlan(
+      planner,
+      baseInput({
+        selector: { mode: 'changed-vs-base', base: 'origin/main' },
+        ledger: LEDGER_CONFIG,
+        baselineSignatures: [
+          { package: 'core', signature: 'sig-human' }, // escalated, NOT selected
+          { package: 'cli', signature: 'sig-fresh' }, // fresh, selected
+        ],
+      }),
+    );
+    expect(report.needsHuman).toEqual([{ package: 'core', signature: 'sig-human' }]);
+    // Suppression logic is unchanged: unselected packages produce no
+    // suppression entries, and the selected fresh package plans.
+    expect(report.suppressed).toEqual([]);
+    expect(report.units.map((u) => u.package)).toEqual(['cli']);
   });
 
   test('the query receives exactly the configured root, storePath and thresholds', async () => {

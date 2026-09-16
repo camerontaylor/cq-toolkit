@@ -27,6 +27,7 @@
 //     also keeps them out of git's flag namespace in the args array).
 import { execFile } from 'node:child_process';
 import { rm, stat } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex, GitMutexConfig } from './gitMutex.js';
@@ -38,6 +39,11 @@ export interface WorktreeForInput {
   /**
    * Parent dir for worktree checkouts — CONFIG-GRADE: the legacy
    * `<repo>/../worktrees/cq` layout is an assumption, not a constant.
+   * ABSOLUTE or REPO-ROOT-RELATIVE: a relative dir is resolved against
+   * `repoRoot`, and the derived `Workspace.path` is always ABSOLUTE —
+   * `git worktree list --porcelain` reports absolute paths, so the
+   * resolution is what makes a re-invoke reuse its own worktree instead of
+   * colliding with itself.
    */
   worktreesDir: string;
   /** Reserved run prefix (e.g. `cq/09-16a`); may itself carry `/` segments. Naming is the caller's scheme. */
@@ -53,9 +59,13 @@ export interface WorktreeForInput {
   /**
    * Repo-root-relative cache dirs (e.g. `.cq/baseline`) evicted from a
    * REUSED tree — I7: the baseline is never cached on reuse; the caller
-   * re-probes. Only ignored/untracked tool state should live here: a
-   * TRACKED file under one of these paths would make the tree dirty long
-   * before eviction, and dirty reuse is refused (UC row 20).
+   * re-probes. Each entry must be a NORMALIZED non-empty RELATIVE path
+   * ('' / '.' / absolute / any '..' segment refused), and its resolution
+   * against the worktree path must land STRICTLY INSIDE the tree — a
+   * refused entry is never touched on disk and is listed in the result's
+   * `refusedBaselineCaches`. Only ignored/untracked tool state should live
+   * here: a TRACKED file under one of these paths would make the tree dirty
+   * long before eviction, and dirty reuse is refused (UC row 20).
    */
   baselineCacheDirs?: string[];
 }
@@ -70,7 +80,7 @@ export interface WorktreeMutexConfig {
 
 /** The provider's report: where the tree lives and how it was obtained. Plain JSON. */
 export interface Workspace {
-  /** Absolute (as-derived) checkout path of the worktree. */
+  /** The checkout path — always ABSOLUTE (a relative worktreesDir is resolved against repoRoot). */
   path: string;
   /** The derived branch `<runPrefix>/<kind>/<slug>`. */
   branch: string;
@@ -80,6 +90,8 @@ export interface Workspace {
   reused: boolean;
   /** I7: baseline cache dirs evicted from a reused tree (input-relative names). Empty on create. */
   clearedBaselineCaches: string[];
+  /** I7 security: baseline cache entries REFUSED by containment (never touched on disk). Empty when none. */
+  refusedBaselineCaches: string[];
 }
 
 /**
@@ -151,8 +163,11 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
     const branch = `${input.runPrefix}/${input.kind}/${input.slug}`;
-    const worktreesDir = input.worktreesDir.replace(/\/+$/, '');
-    const path = `${worktreesDir}/${input.kind}/${input.slug}`;
+    // The derived path is ABSOLUTE: a relative worktreesDir resolves
+    // against repoRoot, because `git worktree list --porcelain` records
+    // absolute paths — without the resolution a re-invoke would fail to
+    // match its own worktree and collide with itself.
+    const path = resolve(input.repoRoot, input.worktreesDir, input.kind, input.slug);
     // Belt-and-braces around inputFaultOf's mutex-bound validation: a
     // makeGitMutex construction throw is a LIBRARY precondition violation,
     // and across the op seam it maps to `failed` — never an escaping
@@ -205,10 +220,18 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
         };
       }
       // I7: the baseline is never cached on reuse — evict, list, and hand
-      // the caller a tree it must re-probe.
+      // the caller a tree it must re-probe. Every entry passes the
+      // containment check FIRST: a refused entry is never touched on disk
+      // (no stat, no rm) and only listed.
       const clearedBaselineCaches: string[] = [];
+      const refusedBaselineCaches: string[] = [];
       for (const rel of input.baselineCacheDirs ?? []) {
-        const inTree = `${candidate.path}/${rel}`;
+        const containmentFault = baselineCacheContainmentFault(rel, candidate.path);
+        if (containmentFault !== null) {
+          refusedBaselineCaches.push(rel);
+          continue;
+        }
+        const inTree = resolve(candidate.path, rel);
         let exists: boolean;
         try {
           exists = await git.pathExists(inTree);
@@ -237,6 +260,7 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
           base: input.base,
           reused: true,
           clearedBaselineCaches,
+          refusedBaselineCaches,
         },
       };
     }
@@ -311,9 +335,48 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Work
     }
     return {
       status: 'ok',
-      value: { path, branch, base: input.base, reused: false, clearedBaselineCaches: [] },
+      value: {
+        path,
+        branch,
+        base: input.base,
+        reused: false,
+        clearedBaselineCaches: [],
+        refusedBaselineCaches: [],
+      },
     };
   };
+}
+
+/**
+ * Containment check for one `baselineCacheDirs` entry (the I7 security
+ * boundary): the entry must be a normalized non-empty RELATIVE path — ''
+ * / '.' / an absolute path / any '..' or empty segment is refused — and its
+ * resolution against the worktree path must land STRICTLY INSIDE the tree.
+ * The containment comparison is relative()-to-relative() with the
+ * separator-aware escape check, which is what guards the prefix-collision
+ * class ('wt' vs 'wt-x': a target under the SIBLING yields a '../' relative
+ * form and is refused). Returns null when contained, else the refusal
+ * reason — the caller lists the entry and never touches the disk for it.
+ */
+function baselineCacheContainmentFault(entry: string, worktreePath: string): string | null {
+  if (typeof entry !== 'string' || entry === '') {
+    return 'must be a non-empty string';
+  }
+  if (entry === '.') {
+    return "'.' is not a cache path";
+  }
+  if (isAbsolute(entry)) {
+    return 'absolute paths are refused';
+  }
+  const segments = entry.split('/');
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return 'must be a normalized relative path — segments non-empty, never "." or ".."';
+  }
+  const rel = relative(worktreePath, resolve(worktreePath, entry));
+  if (rel === '' || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return 'resolves outside the worktree';
+  }
+  return null;
 }
 
 /** Library-level input contract; the registry schema (next slice) mirrors it for JSON dispatch. */
@@ -354,6 +417,12 @@ function inputFaultOf(input: WorktreeForInput): string | null {
     return `sweep: worktreesDir '${input.worktreesDir}' must not start with '-' — the derived path is a positional git argument, never a flag`;
   }
   if (input.mutex !== undefined) {
+    // A null/non-object mutex is reachable from an untyped caller past any
+    // schema — a `failed` result at this boundary, never a TypeError at the
+    // lockPath read.
+    if (input.mutex === null || typeof input.mutex !== 'object') {
+      return 'sweep: mutex must be an object with a non-empty lockPath';
+    }
     if (typeof input.mutex.lockPath !== 'string' || input.mutex.lockPath === '') {
       return 'sweep: mutex.lockPath must be a non-empty string';
     }

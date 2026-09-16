@@ -102,6 +102,27 @@ describe('gitMutex release discipline', () => {
     const mutex = makeGitMutex({ lockPath });
     await expect(mutex.withLock(() => 42)).resolves.toBe(42);
   });
+
+  test('a throwing onEvent is swallowed by contract: fn runs, the lock releases, nothing surfaces', async () => {
+    // Observer isolation (Codex round-1): the events are diagnostics — an
+    // 'acquired' hook that throws mid-critical-section must never skip fn
+    // or the release, and the throw never surfaces to the withLock caller.
+    const lockPath = join(newDir(), 'git-mutex.lock');
+    const events: string[] = [];
+    const mutex = makeGitMutex({
+      lockPath,
+      retries: 20,
+      retryBaseMs: 10,
+      onEvent: (event) => {
+        events.push(event.type);
+        if (event.type === 'acquired') throw new Error('observer exploded');
+      },
+    });
+    await expect(mutex.withLock(() => 'ran')).resolves.toBe('ran');
+    expect(events).toEqual(['acquired', 'released']); // acquired fired (and threw); release STILL ran
+    // The lock is genuinely free: the next acquire is immediate.
+    await expect(mutex.withLock(() => 'again')).resolves.toBe('again');
+  });
 });
 
 describe('gitMutex staleness (the UC row 32 wedge recovery)', () => {

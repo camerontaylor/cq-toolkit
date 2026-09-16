@@ -307,19 +307,29 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
       humanSignatures = view.value.needsHuman;
     }
 
+    // needsHuman routing is SELECTOR-INDEPENDENT (fresh#3): every
+    // view.needsHuman signature some package baselines routes to the
+    // report's rows, whether or not the selector selected that package —
+    // a changed-vs-base sweep must not silently drop an escalated package
+    // just because no changed file touches it. Suppression is unchanged.
+    const needsHuman: Array<{ package: string; signature: string }> = [];
+    if (input.ledger !== undefined) {
+      for (const [pkgName, signatures] of baselinesByPackage) {
+        for (const signature of signatures) {
+          if (humanSignatures.includes(signature)) {
+            needsHuman.push({ package: pkgName, signature });
+          }
+        }
+      }
+    }
+
     const units: WorkUnit[] = [];
     const jobs: Job[] = [];
     const suppressed: Array<{ package: string; reason: string }> = [];
-    const needsHuman: Array<{ package: string; signature: string }> = [];
     const usedIds = new Set<string>();
     for (const { pkg, files } of selected) {
       const signatures = baselinesByPackage.get(pkg.name);
       if (input.ledger !== undefined && signatures !== undefined && signatures.length > 0) {
-        for (const signature of signatures) {
-          if (humanSignatures.includes(signature)) {
-            needsHuman.push({ package: pkg.name, signature });
-          }
-        }
         if (signatures.every((s) => knownNoise.includes(s))) {
           suppressed.push({
             package: pkg.name,
@@ -366,14 +376,19 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     return 'sweep: packages must be an array of manifest entries';
   }
   const seen: string[] = [];
-  for (const pkg of input.packages) {
+  for (const [index, pkg] of input.packages.entries()) {
+    // A null/garbage ELEMENT is reachable from an untyped caller too — the
+    // fault names the index so the manifest defect is locatable.
+    if (pkg === null || typeof pkg !== 'object') {
+      return `sweep: packages[${String(index)}] must be a manifest entry with a non-empty name and path`;
+    }
     if (
       typeof pkg.name !== 'string' ||
       pkg.name === '' ||
       typeof pkg.path !== 'string' ||
       pkg.path === ''
     ) {
-      return 'sweep: every manifest package needs a non-empty name and path';
+      return `sweep: packages[${String(index)}] must have a non-empty name and path`;
     }
     if (seen.includes(pkg.name)) {
       return `sweep: duplicate package name in the manifest: ${pkg.name}`;
@@ -385,6 +400,9 @@ function inputFaultOf(input: PlanSweepInput): string | null {
   }
   if (input.fixers.some((fixer) => typeof fixer !== 'string' || fixer === '')) {
     return 'sweep: every requested fixer label must be a non-empty string';
+  }
+  if (input.baselineSignatures !== undefined && !Array.isArray(input.baselineSignatures)) {
+    return 'sweep: baselineSignatures must be an array of {package, signature} entries';
   }
   if (
     input.selector === undefined ||
@@ -413,6 +431,9 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     }
   }
   if (input.ledger !== undefined) {
+    if (input.ledger === null || typeof input.ledger !== 'object') {
+      return 'sweep: ledger must be an object with a non-empty root and storePath — the query-bound store is built from them';
+    }
     if (
       typeof input.ledger.root !== 'string' ||
       input.ledger.root === '' ||
@@ -434,10 +455,12 @@ function fileSetOf(name: string, packageFiles?: Record<string, string[]>): strin
  * LONGEST-PREFIX package match of a repo-relative posix file path,
  * path-boundary aware: a package owns its path exactly and everything under
  * `path + '/'` — never a sibling sharing a string prefix (`packages/core`
- * does not own `packages/corex/x.ts`). Ties (two manifest entries with the
- * same path — a manifest defect short of a duplicate name) keep the FIRST
- * entry, so the mapping is stable under manifest reordering only where the
- * data is genuinely ambiguous.
+ * does not own `packages/corex/x.ts`). A package whose path is `.` names the
+ * REPO ROOT: it owns every repo-relative file with prefix length 0, so any
+ * real directory prefix outranks it in the longest-prefix match. Ties (two
+ * manifest entries with the same path — a manifest defect short of a
+ * duplicate name) keep the FIRST entry, so the mapping is stable under
+ * manifest reordering only where the data is genuinely ambiguous.
  */
 function longestPrefixPackage(
   file: string,
@@ -447,10 +470,13 @@ function longestPrefixPackage(
   let bestLength = -1;
   for (const pkg of packages) {
     const dir = pkg.path.replace(/\/+$/, '');
-    if (file === dir || file.startsWith(`${dir}/`)) {
-      if (dir.length > bestLength) {
+    const isRoot = dir === '.';
+    const owned = isRoot || file === dir || file.startsWith(`${dir}/`);
+    if (owned) {
+      const prefixLength = isRoot ? 0 : dir.length;
+      if (prefixLength > bestLength) {
         best = pkg;
-        bestLength = dir.length;
+        bestLength = prefixLength;
       }
     }
   }
@@ -504,6 +530,14 @@ export function parseNullDelimitedPaths(text: string): string[] {
 }
 
 /**
+ * Auto-maintenance suppression, copied VERBATIM from the worktreeFor
+ * sibling's runGit (its GIT_NO_AUTO_MAINTENANCE const and prepend — the
+ * proven treatment for the detached background `gc --auto` /
+ * `maintenance run --auto` hang class that inherits our stdio pipes).
+ */
+const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false'];
+
+/**
  * Run git with an execFile ARGS ARRAY — never a shell string, so no config
  * value can be re-parsed as shell syntax (the repo's tooling convention).
  * A non-zero exit, a spawn failure, or a run exceeding the timeout
@@ -513,7 +547,7 @@ function runSweepGit(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
-      args,
+      [...GIT_NO_AUTO_MAINTENANCE, ...args],
       {
         cwd,
         maxBuffer: SWEEP_GIT_MAX_BUFFER_BYTES,

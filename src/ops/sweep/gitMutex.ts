@@ -51,7 +51,10 @@ const MIN_STALE_MS = 2_000;
 
 /**
  * Observability events, emitted synchronously, best-effort — never
- * load-bearing for correctness:
+ * load-bearing for correctness. An OBSERVER THAT THROWS is swallowed, by
+ * contract: the events are diagnostics, and a throwing hook (especially
+ * `acquired`, mid-critical-section) must never skip fn, the release, or the
+ * value/fault the withLock caller receives:
  *   - `stale-recovered` — the pre-acquire mtime probe saw an artifact
  *     older than staleMs and the acquire path is about to steal it (the
  *     probe is observational: a racing thief may have refreshed or removed
@@ -128,6 +131,20 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
   }
   const onEvent = config.onEvent;
   const budgetMs = retryBaseMs * (2 ** retries - 1);
+  // OBSERVER ISOLATION: events are best-effort diagnostics — an observer
+  // that throws is a fault in the OBSERVER, and it is swallowed here so it
+  // can never alter the critical section (an 'acquired' hook throwing
+  // mid-flight must not skip fn or the release; a 'released' hook throwing
+  // must not mask fn's value or fault).
+  const emit = (event: GitMutexEvent): void => {
+    if (onEvent === undefined) return;
+    try {
+      onEvent(event);
+    } catch {
+      // Swallowed by contract (see GitMutexEvent): diagnostics never
+      // propagate into the mutex's own control flow.
+    }
+  };
   // The artifact proper-lockfile derives from the guarded path (mkdir
   // strategy); the probe reads only its mtime, mirroring the library's own
   // isLockStale comparison.
@@ -142,9 +159,7 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
         const ageMs = Date.now() - stat.mtime.getTime();
         if (ageMs > staleMs) {
           steal = true;
-          if (onEvent !== undefined) {
-            onEvent({ type: 'stale-recovered', lockPath: config.lockPath, ageMs });
-          }
+          emit({ type: 'stale-recovered', lockPath: config.lockPath, ageMs });
         }
       } catch {
         // No artifact (or unreadable): nothing stale to report — the
@@ -171,9 +186,7 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
           { cause: err },
         );
       }
-      if (onEvent !== undefined) {
-        onEvent({ type: 'acquired', lockPath: config.lockPath, steal });
-      }
+      emit({ type: 'acquired', lockPath: config.lockPath, steal });
       let value: T;
       try {
         value = await Promise.resolve().then(fn);
@@ -196,9 +209,7 @@ export function makeGitMutex(config: GitMutexConfig): GitMutex {
           { cause: compromised },
         );
       }
-      if (onEvent !== undefined) {
-        onEvent({ type: 'released', lockPath: config.lockPath });
-      }
+      emit({ type: 'released', lockPath: config.lockPath });
       return value;
     },
   };

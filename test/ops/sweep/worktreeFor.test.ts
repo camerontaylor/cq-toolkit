@@ -202,6 +202,7 @@ describe('sweep.worktreeFor reuse (UC row 20)', () => {
       base: 'origin/main',
       reused: true,
       clearedBaselineCaches: [],
+      refusedBaselineCaches: [],
     });
     expect(repo.addCalls).toHaveLength(0);
     expect(repo.prunes).toHaveLength(0);
@@ -231,6 +232,7 @@ describe('sweep.worktreeFor create', () => {
       base: 'origin/main',
       reused: false,
       clearedBaselineCaches: [],
+      refusedBaselineCaches: [],
     });
     expect(repo.addCalls).toEqual([
       { repoRoot: REPO_ROOT, path: PATH, branch: BRANCH, base: 'origin/main' },
@@ -296,6 +298,37 @@ describe('sweep.worktreeFor baseline-cache eviction (I7)', () => {
     expect(workspace.reused).toBe(false);
     expect(workspace.clearedBaselineCaches).toEqual([]);
     expect(repo.removed).toHaveLength(0);
+  });
+
+  test('containment: traversal, dot, absolute, and prefix-trap entries are refused — never touched on disk', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    const hostile = ['../outside', '.', '/etc/tool-cache', '../wt-sibling/cache'];
+    const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      baselineCacheDirs: hostile,
+    });
+    // Every hostile entry lands in the refused field, nothing is removed…
+    expect(workspace.refusedBaselineCaches).toEqual(hostile);
+    expect(workspace.clearedBaselineCaches).toEqual([]);
+    expect(repo.removed).toHaveLength(0);
+    // …and the refusal is total: not even an existence probe runs outside.
+    expect(repo.calls.some((call) => call.startsWith('pathExists:'))).toBe(false);
+  });
+
+  test('containment spares nothing legitimate: a real subdir is still evicted alongside refusals', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    repo.dirs.add(`${PATH}/.cq/baseline`);
+    const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      baselineCacheDirs: ['.cq/baseline', '../outside'],
+    });
+    expect(workspace.clearedBaselineCaches).toEqual(['.cq/baseline']);
+    expect(workspace.refusedBaselineCaches).toEqual(['../outside']);
+    expect(repo.removed).toEqual([`${PATH}/.cq/baseline`]);
   });
 });
 
@@ -438,6 +471,16 @@ describe('sweep.worktreeFor mutex config boundary', () => {
     expect(repo.addCalls).toHaveLength(0);
   });
 
+  test('a null mutex is a failed result, not a TypeError at the lockPath read', async () => {
+    const repo = fakeRepo();
+    const error = await failedAt(makeWorktreeFor(effectsOf(repo)), {
+      ...INPUT,
+      mutex: null,
+    } as unknown as WorktreeForInput);
+    expect(error).toMatch(/mutex must be an object/);
+    expect(repo.addCalls).toHaveLength(0);
+  });
+
   test('a well-formed mutex config passes the boundary and the create still plans', async () => {
     // The well-formed config reaches the REAL makeGitMutex — whose acquire
     // mkdir -p's the lock's parent — so the lockPath needs a real tmpdir.
@@ -453,6 +496,32 @@ describe('sweep.worktreeFor mutex config boundary', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6c. Relative worktreesDir normalization (the self-collision fix)
+// ---------------------------------------------------------------------------
+
+describe('sweep.worktreeFor relative worktreesDir (resolved against repoRoot)', () => {
+  test('relative dir in, create, then a re-invoke sees the exact-match worktree and REUSES', async () => {
+    const repo = fakeRepo();
+    const input = { ...INPUT, worktreesDir: 'wt' };
+    const first = await okWorkspace(makeWorktreeFor(effectsOf(repo)), input);
+    // The derived path is ABSOLUTE — resolved against repoRoot.
+    expect(first.path).toBe('/repo/wt/fix/core');
+    expect(first.reused).toBe(false);
+    expect(repo.addCalls).toHaveLength(1);
+
+    // A real `git worktree add` records the ABSOLUTE path; the re-invoke
+    // with the same RELATIVE input must match it and reuse — not collide
+    // with itself.
+    repo.worktrees = [{ path: '/repo/wt/fix/core', branch: BRANCH }];
+    repo.clean.add('/repo/wt/fix/core');
+    const second = await okWorkspace(makeWorktreeFor(effectsOf(repo)), input);
+    expect(second.reused).toBe(true);
+    expect(second.path).toBe('/repo/wt/fix/core');
+    expect(repo.addCalls).toHaveLength(1); // only the first call created
   });
 });
 
