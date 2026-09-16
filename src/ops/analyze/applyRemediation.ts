@@ -35,7 +35,10 @@
 //   4. Remediation — scan the cluster's target files (planned edits) →
 //      collision check (any overlap blocks the WHOLE apply) → dryRun ?
 //      { diffs, planned edit count, no writes } : apply and report the
-//      per-file results with their after-digests. An EMPTY planned-edit set
+//      per-file results with their after-digests. Splices are PREFLIGHTED
+//      (pure byte computations before the write phase), so splice failures
+//      strand nothing; only store write faults can strand, and the write
+//      phase rolls those back. An EMPTY planned-edit set
 //      is an honest `ok` with `plannedEdits: 0` and a `note` saying nothing
 //      matched — an empty plan is a real outcome, never a silent success
 //      story (the fields that are zero are right there in the result).
@@ -336,24 +339,35 @@ export function makeApplyRemediation(
         },
       };
     }
-    const appliedFiles: RemediationFileApplied[] = [];
+    // SPLICING IS PREFLIGHTED: every target's remediated bytes (and diffs)
+    // are computed — pure, no writes — before the write phase begins, so a
+    // splice failure (stale offsets, out-of-bounds plan) happens with
+    // NOTHING written and strands nothing. Only store WRITE faults can
+    // strand files, and the write phase below rolls those back.
+    const pending: Array<{ file: string; edits: number; after: Uint8Array; diff: string }> = [];
     for (const file of targets) {
       const edits = plannedEdits.filter((edit) => edit.file === file);
       if (edits.length === 0) continue; // nothing to rewrite — the file is not part of the applied set
       const before = current.get(file) as Uint8Array;
-      let after: Uint8Array;
-      let diff: string;
       try {
-        after = applyEditsToBytes(before, edits);
-        diff = renderUnifiedDiff(file, before, edits);
+        pending.push({
+          file,
+          edits: edits.length,
+          after: applyEditsToBytes(before, edits),
+          diff: renderUnifiedDiff(file, before, edits),
+        });
       } catch (err) {
         return {
           status: 'failed',
           error: `remediation: could not apply the plan to '${file}' — ${messageOf(err)}`,
         };
       }
+    }
+    const appliedFiles: RemediationFileApplied[] = [];
+    for (const item of pending) {
+      const file = item.file;
       try {
-        await store.writeBytes(file, after);
+        await store.writeBytes(file, item.after);
       } catch (err) {
         // BEST-EFFORT ROLLBACK: partial multi-file apply is never stranded.
         // The faulted file itself may hold a PARTIAL write (the store's
@@ -393,9 +407,12 @@ export function makeApplyRemediation(
           };
         }
         // BOTH lists, verbatim: what was restored AND what is stranded —
-        // the exact on-disk state, stated in one fault.
+        // stranded means an applied file the rollback could NOT restore
+        // (a restored file is listed only under restored).
         const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
-        const stranded = appliedFiles.map((applied) => applied.file);
+        const stranded = appliedFiles
+          .map((applied) => applied.file)
+          .filter((file) => !rolledBack.includes(file));
         return {
           status: 'failed',
           error: `remediation: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
@@ -403,9 +420,9 @@ export function makeApplyRemediation(
       }
       appliedFiles.push({
         file,
-        edits: edits.length,
-        diff,
-        digestAfter: contentDigest(Buffer.from(after).toString('utf8')),
+        edits: item.edits,
+        diff: item.diff,
+        digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
       });
     }
     return {

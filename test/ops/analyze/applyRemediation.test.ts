@@ -739,7 +739,10 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
       // succeeded (c's own partial-write restore also succeeded silently).
       expect(result.error).toContain('rollback FAILED for src/b.ts');
       expect(result.error).toContain('restored: src/a.ts');
-      expect(result.error).toContain('already written (stranded): src/a.ts, src/b.ts');
+      // Y1: a restored file is listed ONLY under restored — b (whose
+      // restore failed) is the one stranded entry.
+      expect(result.error).toContain('already written (stranded): src/b.ts');
+      expect(result.error).not.toContain('stranded): src/a.ts');
     }
     // The verbatim on-disk state: a and c carry their ORIGINAL bytes; b
     // holds its remediated form (stranded, as stated).
@@ -752,6 +755,41 @@ describe('applyRemediation acceptance: dry-run, collision block, honest apply', 
     expect(
       Buffer.from(store.written.get(resolve('/ws', 'src/b.ts')) as Uint8Array).toString('utf8'),
     ).toBe('fooBar_b();\n');
+  });
+
+  test('a SPLICE fault on a later target happens in preflight: NOTHING written, no rollback needed (Y2)', async () => {
+    const store = memoryStore('/ws', {
+      ...FIXTURE_FILES,
+      [SIDECAR_PATH]: sidecarTextFor(fixtureReport(), FIXTURE_FILES),
+    });
+    // Valid offsets for the FIRST target, out-of-bounds offsets for the
+    // SECOND — pre-Y2 the first file was written (and rolled back); with
+    // the preflight the fault happens before any write.
+    const mixedRunner: RunCheck = async () => ({
+      stdout: JSON.stringify([
+        {
+          file: 'src/a.ts',
+          replacement: 'fooBar',
+          replacementOffsets: { start: 6, end: 13 },
+        },
+        {
+          file: 'src/b.ts',
+          replacement: 'fooBar',
+          replacementOffsets: { start: 100, end: 200 },
+        },
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const result = await makeOp(store, mixedRunner)(baseInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not apply the plan to 'src/b.ts'");
+      // No rollback message: nothing had been written to roll back.
+      expect(result.error).not.toContain('rolled back');
+      expect(result.error).not.toContain('already written');
+    }
+    expect(store.written.size).toBe(0);
   });
 
   test('an EMPTY planned-edit set is the honest ok: zero counts plus the note — not a silent success', async () => {
