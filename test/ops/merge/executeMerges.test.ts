@@ -226,7 +226,8 @@ class FakeMergeEffects implements MergeEffects {
     if (live === undefined) return { ok: false };
     // A fresh-clone head does not exist locally until its fetch happened.
     if (this.headsBehindFetch.has(pr) && !this.fetchedRefs.has(ref)) return { ok: false };
-    if (this.driftSha !== null && seen >= this.driftFromCall) return { ok: true, sha: this.driftSha };
+    if (this.driftSha !== null && seen >= this.driftFromCall)
+      return { ok: true, sha: this.driftSha };
     return { ok: true, sha: live };
   }
 
@@ -434,12 +435,20 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
 });
 
 describe('executeMerges — (e) bounded retry on "base branch was modified"', () => {
-  const baseModified = { code: 1, stdout: '', stderr: 'error: base branch was modified. Please try again.' };
+  const baseModified = {
+    code: 1,
+    stdout: '',
+    stderr: 'error: base branch was modified. Please try again.',
+  };
 
   test('fails twice then succeeds → merged, revalidation between attempts', async () => {
     const fake = new FakeMergeEffects();
     fake.heads.set(7, sha('a'));
-    fake.mergeQueue.set(7, [baseModified, { ...baseModified, stderr: 'Base branch was modified — retry' }, OK]);
+    fake.mergeQueue.set(7, [
+      baseModified,
+      { ...baseModified, stderr: 'Base branch was modified — retry' },
+      OK,
+    ]);
 
     const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
 
@@ -485,7 +494,11 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
     fake.heads.set(7, sha('a'));
     fake.mergeQueue.set(7, [baseModified, baseModified, baseModified]);
 
-    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake, maxRetries: 1 });
+    const report = await executeMerges({
+      plan: handPlan([entry(7)]),
+      effects: fake,
+      maxRetries: 1,
+    });
     expect(mergeCalls(fake).length).toBe(2); // 1 attempt + 1 retry
     expect(report.failed).toEqual([{ pr: 7, error: match.any(String) }]);
   });
@@ -584,7 +597,9 @@ describe('executeMerges — (c) failed ancestor blocks descendants, independent 
 
     const report = await executeMerges({ plan, effects: fake });
 
-    expect(report.failed).toEqual([{ pr: 7, error: match.stringContaining('required statuses missing') }]);
+    expect(report.failed).toEqual([
+      { pr: 7, error: match.stringContaining('required statuses missing') },
+    ]);
     expect(report.merged).toEqual([9]);
     expect(report.blocked).toEqual([{ pr: 8, reason: 'blocked_by_ancestor' }]);
     expect(report.stale).toEqual([]);
@@ -598,7 +613,7 @@ describe('executeMerges — (c) failed ancestor blocks descendants, independent 
 });
 
 describe('withPreparedWorktree — the worktree lifecycle seam helper (round 1, finding 3)', () => {
-  test('prepare → fn(path) → remove, in order; fn\'s value resolves', async () => {
+  test("prepare → fn(path) → remove, in order; fn's value resolves", async () => {
     const fake = new FakeMergeEffects();
     const fnPaths: string[] = [];
     const result = await withPreparedWorktree(fake, 7, headRefFor(7), async (path) => {
@@ -632,7 +647,7 @@ describe('withPreparedWorktree — the worktree lifecycle seam helper (round 1, 
     expect(fake.calls).toEqual(['prepare:7@refs/pull/7/head', 'remove:/wt/pr-7']);
   });
 
-  test('fn resolves but the removal fails → the caller\'s result still stands (never masked)', async () => {
+  test("fn resolves but the removal fails → the caller's result still stands (never masked)", async () => {
     const fake = new FakeMergeEffects();
     fake.removeFailures.add('/wt/pr-7');
     const result = await withPreparedWorktree(fake, 7, headRefFor(7), async () => 'ok');
@@ -705,15 +720,18 @@ describe('executeMerges — the plan is the only source of actions', () => {
     fake.heads.set(5, sha('a'));
     fake.retargetFailures.add(5);
 
-    const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
+    const report = await executeMerges({
+      plan: handPlan([entry(5, 'retarget-self')]),
+      effects: fake,
+    });
 
     expect(report.retargeted).toEqual([]);
     expect(report.failed).toEqual([
       { pr: 5, error: match.stringContaining('gh pr edit 5 --base main') },
     ]);
-    expect(fake.calls.some((call) => call.startsWith('prepare:') || call.startsWith('remove:'))).toBe(
-      false,
-    );
+    expect(
+      fake.calls.some((call) => call.startsWith('prepare:') || call.startsWith('remove:')),
+    ).toBe(false);
   });
 
   test('round-1 finding 6: an action-time fetch failure → failed with the error, never merged', async () => {
@@ -739,7 +757,10 @@ describe('executeMerges — the plan is the only source of actions', () => {
     fake.heads.set(5, sha('a'));
     fake.driftSha = sha('b'); // every validation after the baseline sees the moved head
 
-    const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
+    const report = await executeMerges({
+      plan: handPlan([entry(5, 'retarget-self')]),
+      effects: fake,
+    });
 
     expect(report.retargeted).toEqual([]);
     expect(report.stale).toEqual([
@@ -753,7 +774,10 @@ describe('executeMerges — the plan is the only source of actions', () => {
     fake.heads.set(5, sha('a'));
     fake.pushFailures.add(5); // the hostile forge: any push would be recorded AND rejected
 
-    const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
+    const report = await executeMerges({
+      plan: handPlan([entry(5, 'retarget-self')]),
+      effects: fake,
+    });
 
     expect(report.retargeted).toEqual([5]);
     // The OLD shape pushed the read-only refs/pull/<n>/head — GitHub rejects
@@ -852,7 +876,7 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     );
   });
 
-  test("-f throws", () => {
+  test('-f throws', () => {
     expect(() => safeArgs(['worktree', 'add', '-f', '/wt/pr-7'])).toThrow(UnsafeMergeArgsError);
   });
 
@@ -868,8 +892,12 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
   test('push-to-main throws in every spelling', () => {
     expect(() => safeArgs(['push', 'origin', 'main'])).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['push', 'origin', 'HEAD:main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/main'])).toThrow(UnsafeMergeArgsError);
-    expect(() => safeArgs(['-C', '/repo', 'push', 'origin', ':main'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['push', 'origin', 'feat:refs/heads/main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['-C', '/repo', 'push', 'origin', ':main'])).toThrow(
+      UnsafeMergeArgsError,
+    );
   });
 
   test('round-1: a push with NO explicit refspec is refused (push.default could pick the protected branch)', () => {
@@ -887,14 +915,9 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['push', '-qf', 'origin', 'feat'])).toThrow(UnsafeMergeArgsError);
     // An f-free bundle in a documented shape stays legal (the exact
     // worktree-add prepare form — allowlist, round 2).
-    expect(safeArgs(['worktree', 'add', '-B', 'cq-merge/pr-7', '/wt/pr-7', 'refs/pull/7/head'])).toEqual([
-      'worktree',
-      'add',
-      '-B',
-      'cq-merge/pr-7',
-      '/wt/pr-7',
-      'refs/pull/7/head',
-    ]);
+    expect(
+      safeArgs(['worktree', 'add', '-B', 'cq-merge/pr-7', '/wt/pr-7', 'refs/pull/7/head']),
+    ).toEqual(['worktree', 'add', '-B', 'cq-merge/pr-7', '/wt/pr-7', 'refs/pull/7/head']);
   });
 
   test("round-1: '--amend' is a forbidden token (history rewrite)", () => {
@@ -910,16 +933,30 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       '--base',
       'main',
     ]);
-    expect(safeArgs(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head'])).toEqual([
+    expect(
+      safeArgs(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head']),
+    ).toEqual(['-C', '/repo', 'fetch', 'origin', '+refs/pull/7/head:refs/pull/7/head']);
+    expect(
+      safeArgs([
+        '-C',
+        '/repo',
+        'worktree',
+        'add',
+        '-B',
+        'cq-merge/pr-7',
+        '/wt/pr-7',
+        'refs/pull/7/head',
+      ]),
+    ).toEqual([
       '-C',
       '/repo',
-      'fetch',
-      'origin',
-      '+refs/pull/7/head:refs/pull/7/head',
+      'worktree',
+      'add',
+      '-B',
+      'cq-merge/pr-7',
+      '/wt/pr-7',
+      'refs/pull/7/head',
     ]);
-    expect(
-      safeArgs(['-C', '/repo', 'worktree', 'add', '-B', 'cq-merge/pr-7', '/wt/pr-7', 'refs/pull/7/head']),
-    ).toEqual(['-C', '/repo', 'worktree', 'add', '-B', 'cq-merge/pr-7', '/wt/pr-7', 'refs/pull/7/head']);
     expect(safeArgs(['-C', '/wt/pr-7', 'push', 'origin', 'HEAD:refs/heads/feat-7'])).toEqual([
       '-C',
       '/wt/pr-7',
@@ -944,23 +981,19 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['push', 'origin', 'deliver'], { protectedBranch: 'deliver' })).toThrow(
       UnsafeMergeArgsError,
     );
-    expect(() => safeArgs(['push', 'origin', 'HEAD:deliver'], { protectedBranch: 'deliver' })).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() =>
+      safeArgs(['push', 'origin', 'HEAD:deliver'], { protectedBranch: 'deliver' }),
+    ).toThrow(UnsafeMergeArgsError);
     expect(() =>
       safeArgs(['push', 'origin', 'feat:refs/heads/deliver'], { protectedBranch: 'deliver' }),
     ).toThrow(UnsafeMergeArgsError);
     // Under 'deliver' protection, main is an ordinary branch.
-    expect(safeArgs(['push', 'origin', 'main:refs/heads/main'], { protectedBranch: 'deliver' })).toEqual([
-      'push',
-      'origin',
-      'main:refs/heads/main',
-    ]);
-    expect(safeArgs(['push', 'origin', 'feat:refs/heads/main'], { protectedBranch: 'deliver' })).toEqual([
-      'push',
-      'origin',
-      'feat:refs/heads/main',
-    ]);
+    expect(
+      safeArgs(['push', 'origin', 'main:refs/heads/main'], { protectedBranch: 'deliver' }),
+    ).toEqual(['push', 'origin', 'main:refs/heads/main']);
+    expect(
+      safeArgs(['push', 'origin', 'feat:refs/heads/main'], { protectedBranch: 'deliver' }),
+    ).toEqual(['push', 'origin', 'feat:refs/heads/main']);
   });
 
   test('CR-5: the default protected branch is still main (existing callers unchanged)', () => {
@@ -999,7 +1032,9 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['push', 'origin', '+refs/heads/main'])).toThrow(UnsafeMergeArgsError);
     // I3 forbids force outright — even a non-protected destination may not
     // ride the marker through the guard.
-    expect(() => safeArgs(['push', 'origin', '+feat:refs/heads/feat'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['push', 'origin', '+feat:refs/heads/feat'])).toThrow(
+      UnsafeMergeArgsError,
+    );
   });
 
   test('round-2: a FETCH refspec forcing the protected branch is refused; the legal fetch stays legal', () => {
@@ -1050,9 +1085,9 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(() => safeArgs(['push', 'origin', '--force', 'feat:refs/heads/feat'])).toThrow(
       /flags are not part of the documented push shape/,
     );
-    expect(() => safeArgs(['push', 'origin', '--force-with-lease', 'feat:refs/heads/feat'])).toThrow(
-      UnsafeMergeArgsError,
-    );
+    expect(() =>
+      safeArgs(['push', 'origin', '--force-with-lease', 'feat:refs/heads/feat']),
+    ).toThrow(UnsafeMergeArgsError);
     expect(() => safeArgs(['push', 'origin', '-qf', 'feat:refs/heads/feat'])).toThrow(
       UnsafeMergeArgsError,
     );
@@ -1081,7 +1116,11 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     // The documented flag-free shapes stay legal (the real impl's
     // worktreeRemove builds exactly the -C form below; it deliberately
     // omits --force).
-    expect(safeArgs(['worktree', 'remove', '/wt/pr-7'])).toEqual(['worktree', 'remove', '/wt/pr-7']);
+    expect(safeArgs(['worktree', 'remove', '/wt/pr-7'])).toEqual([
+      'worktree',
+      'remove',
+      '/wt/pr-7',
+    ]);
     expect(safeArgs(['-C', '/repo', 'worktree', 'remove', '/wt/pr-7'])).toEqual([
       '-C',
       '/repo',
@@ -1214,7 +1253,10 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
     fake.heads.set(5, sha('a'));
     fake.retargetThrows = new Error('gh went away');
 
-    const report = await executeMerges({ plan: handPlan([entry(5, 'retarget-self')]), effects: fake });
+    const report = await executeMerges({
+      plan: handPlan([entry(5, 'retarget-self')]),
+      effects: fake,
+    });
 
     expect(report.failed).toEqual([
       { pr: 5, error: match.stringContaining('retargetBase for pr 5 threw: gh went away') },

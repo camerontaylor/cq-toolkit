@@ -156,7 +156,13 @@ const RETRYABLE_MERGE_FAILURE = /base branch was modified/i;
 export async function executeMerges(input: ExecuteMergeInput): Promise<ExecutionReport> {
   const maxRetries = input.maxRetries ?? DEFAULT_MAX_RETRIES;
   const { plan, effects } = input;
-  const report: ExecutionReport = { merged: [], retargeted: [], stale: [], failed: [], blocked: [] };
+  const report: ExecutionReport = {
+    merged: [],
+    retargeted: [],
+    stale: [],
+    failed: [],
+    blocked: [],
+  };
 
   // (d) the per-effective-base mutexes: a base PR is a key of its own,
   // the plan's base branch is the key for root-position entries.

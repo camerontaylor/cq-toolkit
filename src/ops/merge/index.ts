@@ -29,11 +29,7 @@ export {
   safeRunner,
   withPreparedWorktree,
 } from './effects.js';
-export type {
-  ExecuteMergeInput,
-  ExecutionBlockReason,
-  ExecutionReport,
-} from './executeMerges.js';
+export type { ExecuteMergeInput, ExecutionBlockReason, ExecutionReport } from './executeMerges.js';
 export { DEFAULT_MAX_RETRIES, executeMerges } from './executeMerges.js';
 export type { MergeFailureCause, MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 export { diagnoseMergeFailure } from './diagnoseMergeFailure.js';
