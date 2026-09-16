@@ -230,6 +230,40 @@ describe('clusterErrors decision table', () => {
     expect(report.clusters[0]?.size).toBe(2);
   });
 
+  test('member order is the identity key: same-signature pair differing in severity AND message', () => {
+    // Everything but severity and the raw message is identical, so the two
+    // orderings DISAGREE: the identity tuple orders severity BEFORE message
+    // ('error' sorts first), while a JSON.stringify proxy over the fixture
+    // literal (message before severity) would pick the warning. Same
+    // normalized template → same signature → one cluster, either way.
+    const errorVariant = failureOf({
+      file: 'src/same.ts',
+      line: 5,
+      ruleId: 'prefer-const',
+      severity: 'error',
+      message: "'zz' is assigned a value but never used",
+    });
+    const warningVariant = failureOf({
+      file: 'src/same.ts',
+      line: 5,
+      ruleId: 'prefer-const',
+      severity: 'warning',
+      message: "'aa' is assigned a value but never used",
+    });
+    const report = clusterErrors(setOf([warningVariant, errorVariant]));
+    expect(report.clusters).toHaveLength(1);
+    const cluster = report.clusters[0];
+    if (cluster === undefined) throw new Error('expected one cluster');
+    expect(cluster.size).toBe(2);
+    // severity ('error' < 'warning' in the identity tuple) decides — the
+    // error variant leads despite its later message and later input position.
+    expect(cluster.failures).toEqual([errorVariant, warningVariant]);
+    // Monotonicity under the IMPLEMENTATION key, not a stringify proxy.
+    const firstIdentity = failureIdentity(cluster.failures[0] as CheckFailure, 'eslint');
+    const secondIdentity = failureIdentity(cluster.failures[1] as CheckFailure, 'eslint');
+    expect(firstIdentity <= secondIdentity).toBe(true);
+  });
+
   test('location-less failures (vitest shape) cluster by test-name shape', () => {
     const set = setOf(
       [

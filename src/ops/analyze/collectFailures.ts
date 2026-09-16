@@ -152,3 +152,8 @@ export const collectFailuresOp: Op<CollectFailuresInput, FailureSet> = async (in
     return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
   }
 };
+
+// The family-registry seam (src/ops/README.md): the op function DEFAULT-
+// exported for the importer's `.default` resolution; the named export above
+// stays for library, barrel, and test consumers.
+export default collectFailuresOp;

@@ -89,15 +89,16 @@ export const registry: OpRegistryEntry[] = [
     name: 'analyze.collectFailures',
     inputSchema: CollectFailuresInputSchema,
     // The dispatch seam re-validates input through inputSchema.parseAsync
-    // before invoking the op, so the erased op typing is safe here.
-    importer: () =>
-      import('./collectFailures.js').then((m) => m.collectFailuresOp as Op<unknown, unknown>),
+    // before invoking the op, so the erased op typing is safe here. The
+    // importer resolves the op module's DEFAULT export — the documented
+    // family-registry seam (src/ops/README.md).
+    importer: () => import('./collectFailures.js').then((m) => m.default as Op<unknown, unknown>),
   },
   {
     name: 'analyze.clusterErrors',
     inputSchema: ClusterErrorsInputSchema,
-    // Pure decision op — no injected wiring, the importer IS the op.
-    importer: () =>
-      import('./clusterErrors.js').then((m) => m.clusterErrorsOp as Op<unknown, unknown>),
+    // Pure decision op — no injected wiring; the `.default` resolution is
+    // the documented family-registry seam (src/ops/README.md).
+    importer: () => import('./clusterErrors.js').then((m) => m.default as Op<unknown, unknown>),
   },
 ];
