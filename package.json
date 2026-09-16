@@ -17,7 +17,7 @@
     "cq": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-prompt-assets.mjs",
     "typecheck": "npm run check:static",
     "lint": "npm run check:static",
     "test": "vitest run",
