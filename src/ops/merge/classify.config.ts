@@ -44,7 +44,7 @@ export interface ClassifyPrConfig {
    * final code and said so, so the settle wait is unnecessary. The
    * all-clear bypasses ONLY the settle wait; it never substitutes for
    * row 6's review-of-the-last-commit requirement. Conservative default,
-   * built to be negation-proof:
+   * built to be negation- AND caveat-proof:
    *   - EVERY alternative is anchored at LINE START (`m` flag): a
    *     mid-sentence mention can never match — "this is not all clear
    *     yet" and "… so it's not lgtm-worthy" carry the phrase mid-line,
@@ -53,9 +53,16 @@ export interface ClassifyPrConfig {
    *   - a `not` IMMEDIATELY BEFORE the phrase kills the match ((?!not\b)
    *     right after the anchor) — "Not LGTM …" at line start is a
    *     rejection, not an approval;
-   *   - "looks good" must END its line (one optional trailing !/,/.):
-   *     "looks good, but fix the retry loop first" is a caveat sentence,
-   *     not an all-clear.
+   *   - EVERY alternative must reach END OF LINE (modulo ONE trailing
+   *     !/,/.): any continuation after the phrase is a caveat or a coda
+   *     that changes its meaning — "lgtm but fix the retry loop first",
+   *     "all clear, but the retry loop is still broken", "no further
+   *     issues, but the tests are red", and courteous codas alike ("all
+   *     clear, thanks", "LGTM — ship it") do NOT match. Strict on
+   *     purpose: where a short coda would have been harmless, the miss
+   *     fails toward awaiting (a longer settle), never toward merging
+   *     unchecked. (Round 1 anchored only "looks good" to end-of-line;
+   *     round 2 extends the caveat guard to all four alternatives.)
    * A null or unparseable timestamp never qualifies: an un-timestamped
    * all-clear cannot be shown to postdate the commit, so it fails closed
    * (falls through to the settle rows). R3 tunes this AS DATA (structure
@@ -89,12 +96,13 @@ export const defaultClassifyPrConfig: ClassifyPrConfig = {
   // The I2 doctrine number: a clean PR merges once ten quiet minutes have
   // passed since its last commit. R3 tunes AS DATA.
   settleWindowMs: REVIEW_ACCEPT_SETTLE_MS,
-  // Line-start-anchored, negation-proof approval phrasing,
-  // case-insensitive — the three anchoring rules (line-start alternatives,
-  // the not-lookahead, the looks-good end-of-line requirement) are
-  // documented on the interface field. R3 tunes AS DATA.
+  // Line-start-anchored, end-of-line-anchored, negation-proof approval
+  // phrasing, case-insensitive — the three anchoring rules (line-start
+  // alternatives, the not-lookahead, end-of-line for EVERY alternative
+  // modulo one trailing !/,/.) are documented on the interface field.
+  // R3 tunes AS DATA.
   allClearPattern:
-    /^\s*(?:(?!not\b)(?:all\s*clear|lgtm\b|no\s+further\s+(?:issues|changes)|looks\s+good[!,.]?\s*$))/im,
+    /^\s*(?:(?!not\b)(?:all\s*clear|lgtm\b|no\s+further\s+(?:issues|changes)|looks\s+good[!,.]?))\s*[!,.]?\s*$/im,
   // Bot skip/failure notices are not reviews (I2) — deliberate duplicate of
   // ws-e's list, kept under ws-e's anchoring rule; see the file header.
   // R3 refines AS DATA.

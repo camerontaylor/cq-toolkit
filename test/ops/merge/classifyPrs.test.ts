@@ -22,18 +22,26 @@
 //      and a bot skip notice is never all-clear evidence even when
 //      phrased "No further changes".
 //   5. WHAT COUNTS AS A REVIEW (row 6): author self-reviews, bot
-//      skip/failure notices, and DISMISSED reviews never count; non-author
-//      bot reviews and null-authorLogin reviews DO (no reviewer privileged;
-//      fail toward accepting evidence).
+//      skip/failure notices, DISMISSED and CHANGES_REQUESTED verdicts,
+//      and null/unknown states never count; non-author bot reviews and
+//      null-authorLogin reviews DO (no reviewer privileged; fail toward
+//      accepting evidence). Only APPROVED/COMMENTED carry evidence —
+//      and row 7's review-body scan applies the same verdict filter.
 //   6. THE TEMPORAL QUALIFIER (DOCTRINE §I2, canonical): an acceptable
 //      review must postdate the LAST COMMIT — evidence covering an
 //      earlier commit never qualifies, no matter how long the settle, and
 //      no matter when it was resubmitted; a null/unparseable submittedAt
 //      never qualifies. The row-7 comment all-clear cannot stand in for
 //      the review-of-head requirement.
-//   7. THE SHIPPED allClearPattern is line-start anchored and negation-
-//      proof: a leading "not" kills the match, mid-sentence mentions
-//      cannot match, and "looks good" must end its line.
+//   7. THE SHIPPED allClearPattern is line-start anchored, negation-
+//      proof, and end-of-line-anchored for EVERY alternative: a leading
+//      "not" kills the match, mid-sentence mentions cannot match, and any
+//      continuation after the phrase ("lgtm but fix …", "all clear,
+//      thanks", "LGTM — ship it") fails toward awaiting.
+//   8. CONFIG OVERRIDES are honored (settleWindowMs, allClearPattern)
+//      without mutating defaultClassifyPrConfig.
+//   9. Only DIRTY is the conflict lane: the five non-DIRTY merge states
+//      all reach the evidence rows.
 //
 // Pure data tests: no I/O, no clocks — instant by construction.
 import { describe, expect, test } from 'vitest';
@@ -85,12 +93,14 @@ const thread = (extra?: Partial<ReviewThread>): ReviewThread => ({
   ...extra,
 });
 
-/** A top-level conversation comment, by a human non-author. */
+/** A top-level conversation comment, by a human non-author. The body is a
+ * bare line-end all-clear (the shipped pattern requires every phrase to
+ * END its line — "all clear — merging" would not match). */
 const comment = (extra?: Partial<RestComment>): RestComment => ({
   id: 900,
   nodeId: 'IC_900',
   authorLogin: 'bob',
-  body: 'all clear — merging',
+  body: 'all clear',
   createdAt: AFTER_COMMIT,
   inReplyToId: null,
   ...extra,
@@ -357,15 +367,15 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     expect(result.reason).toBe('settle_window_pending');
   });
 
-  test('a bot skip notice is never all-clear evidence, even with "No further changes" on its own line', () => {
+  test('a bot skip notice is never all-clear evidence, even with a bare all-clear phrase on its own line', () => {
     // The skip guard in isAllClearAfter fires BEFORE the pattern: without
-    // it, line 2 ("No further changes will be made.") is a line-start
-    // pattern match and a punted review would read as approval.
+    // it, line 2 ("no further issues") is a bare line-start/end pattern
+    // match, and a punted review would read as approval.
     const result = classifyPr(
       settleCandidate({
         issueComments: [
           comment({
-            body: 'CodeRabbit skipped this run due to a configuration error.\nNo further changes will be made.',
+            body: 'CodeRabbit skipped this run due to a configuration error.\nno further issues',
           }),
         ],
       }),
@@ -381,6 +391,33 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     const result = classifyPr(candidate({ issueComments: [comment()] }), SETTLED_MS);
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a DISMISSED review with an "LGTM" body is not all-clear evidence (row 7 state filter)', () => {
+    // Row 6 passes on the live review; the retracted "LGTM" must not
+    // bypass the settle wait — it falls through to settle logic.
+    const result = classifyPr(
+      settleCandidate({
+        reviews: [approved(), approved({ id: 'PRR_2', state: 'DISMISSED', body: 'LGTM' })],
+      }),
+      PENDING_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('settle_window_pending');
+  });
+
+  test('a CHANGES_REQUESTED review with an "LGTM" body is not all-clear evidence either', () => {
+    const result = classifyPr(
+      settleCandidate({
+        reviews: [
+          approved(),
+          approved({ id: 'PRR_2', state: 'CHANGES_REQUESTED', body: 'LGTM' }),
+        ],
+      }),
+      PENDING_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('settle_window_pending');
   });
 });
 
@@ -461,6 +498,7 @@ describe('classifyPr — an acceptable review must postdate the last commit (DOC
 
 describe('defaultClassifyPrConfig.allClearPattern — shipped data', () => {
   test.each([
+    // Negation pins (round 1).
     {
       name: 'a line-leading "Not LGTM" is killed by the not-lookahead',
       body: 'Not LGTM — the retry loop is broken',
@@ -476,25 +514,64 @@ describe('defaultClassifyPrConfig.allClearPattern — shipped data', () => {
       body: 'not lgtm-worthy',
       matches: false,
     },
+    // Caveat-continuation NOs — round 2 extends end-of-line to ALL alternatives.
     {
-      name: 'a line-leading "LGTM — ship it" matches',
+      name: '"lgtm but fix the retry loop first" does not match (caveat continues the line)',
+      body: 'lgtm but fix the retry loop first',
+      matches: false,
+    },
+    {
+      name: '"all clear, but the retry loop is still broken" does not match (caveat)',
+      body: 'all clear, but the retry loop is still broken',
+      matches: false,
+    },
+    {
+      name: '"no further issues, but the tests are red" does not match (caveat)',
+      body: 'no further issues, but the tests are red',
+      matches: false,
+    },
+    {
+      name: '"looks good, but fix the retry loop first" does not match (kept from round 1)',
+      body: 'looks good, but fix the retry loop first',
+      matches: false,
+    },
+    // Decided (round 2): ANY continuation — even a courteous coda — is a
+    // continuation; strict end-of-line fails toward awaiting.
+    {
+      name: '"LGTM — ship it" does not match (a coda is a continuation)',
       body: 'LGTM — ship it',
+      matches: false,
+    },
+    {
+      name: '"all clear, thanks" does not match (a courteous coda is a continuation too)',
+      body: 'all clear, thanks',
+      matches: false,
+    },
+    // Bare forms and the single allowed trailing punctuation.
+    {
+      name: 'a bare "lgtm" matches',
+      body: 'lgtm',
       matches: true,
     },
     {
-      name: 'a line-leading "all clear, thanks" matches (trailing comma is fine)',
-      body: 'all clear, thanks',
+      name: 'a bare "no further issues" matches',
+      body: 'no further issues',
+      matches: true,
+    },
+    {
+      name: 'a bare "all clear," matches (one trailing comma is the allowed modulo)',
+      body: 'all clear,',
+      matches: true,
+    },
+    {
+      name: 'a bare "all clear" matches',
+      body: 'all clear',
       matches: true,
     },
     {
       name: 'a bare "looks good" ending its line matches',
       body: 'looks good',
       matches: true,
-    },
-    {
-      name: '"looks good, but fix the retry loop first" does not match (caveat continues the line)',
-      body: 'looks good, but fix the retry loop first',
-      matches: false,
     },
   ])('$name', ({ body, matches }) => {
     expect(defaultClassifyPrConfig.allClearPattern.test(body)).toBe(matches);
@@ -573,4 +650,102 @@ describe('classifyPr — acceptable-review rules (row 6)', () => {
     expect(result.unresolvedExternalThreads).toBe(0);
     expect(result.reason).toBe('settle_window_elapsed');
   });
+});
+
+// ---------------------------------------------------------------------------
+// Acceptance VERDICTS (row 6) — only APPROVED/COMMENTED carry evidence
+// ---------------------------------------------------------------------------
+
+describe('classifyPr — acceptance states (row 6)', () => {
+  test('a post-commit CHANGES_REQUESTED review alone → awaiting (an objection is not acceptance)', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ state: 'CHANGES_REQUESTED' })] }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('CHANGES_REQUESTED + settle fully elapsed → STILL awaiting (never eligible)', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ state: 'CHANGES_REQUESTED' })] }),
+      SETTLED_MS + REVIEW_ACCEPT_SETTLE_MS,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a post-commit COMMENTED review IS acceptable (control: the settle flow works)', () => {
+    const result = classifyPr(
+      candidate({ reviews: [approved({ state: 'COMMENTED' })] }),
+      SETTLED_MS,
+    );
+    expect(result.verdict).toBe('eligible');
+    expect(result.reason).toBe('settle_window_elapsed');
+  });
+
+  test('a null-state review never counts (fail toward awaiting)', () => {
+    const result = classifyPr(candidate({ reviews: [approved({ state: null })] }), SETTLED_MS);
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Config overrides — policy is data; the defaults stay untouched
+// ---------------------------------------------------------------------------
+
+describe('classifyPr — config overrides (the R3 seam)', () => {
+  test('settleWindowMs: 1 flips pending→eligible at a nowMs where the default is still pending', () => {
+    const c = settleCandidate();
+    const nowMs = LAST_COMMIT_MS + 1;
+    expect(classifyPr(c, nowMs).reason).toBe('settle_window_pending');
+    const overridden = classifyPr(c, nowMs, { ...defaultClassifyPrConfig, settleWindowMs: 1 });
+    expect(overridden.verdict).toBe('eligible');
+    expect(overridden.reason).toBe('settle_window_elapsed');
+  });
+
+  test('a custom allClearPattern matches a body the default ignores', () => {
+    const c = settleCandidate({ reviews: [approved({ body: 'SHIPIT' })] });
+    expect(classifyPr(c, PENDING_MS).reason).toBe('settle_window_pending');
+    const overridden = classifyPr(c, PENDING_MS, {
+      ...defaultClassifyPrConfig,
+      allClearPattern: /shipit/i,
+    });
+    expect(overridden.verdict).toBe('eligible');
+    expect(overridden.reason).toBe('explicit_all_clear');
+  });
+
+  test('an override call does not mutate defaultClassifyPrConfig', () => {
+    const snapshot = (): string =>
+      JSON.stringify({
+        settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+        allClearPattern: defaultClassifyPrConfig.allClearPattern.source,
+        skipPatterns: defaultClassifyPrConfig.skipPatterns.map((p) => p.source),
+      });
+    const before = snapshot();
+    classifyPr(settleCandidate(), PENDING_MS, {
+      ...defaultClassifyPrConfig,
+      settleWindowMs: 1,
+      allClearPattern: /shipit/i,
+    });
+    expect(snapshot()).toBe(before);
+    expect(defaultClassifyPrConfig.settleWindowMs).toBe(REVIEW_ACCEPT_SETTLE_MS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Row 2 scope — only DIRTY is the conflict lane
+// ---------------------------------------------------------------------------
+
+describe('classifyPr — the five non-DIRTY merge states pass row 2', () => {
+  test.each(['BEHIND', 'BLOCKED', 'HAS_HOOKS', 'UNKNOWN', 'CLEAN'] as const)(
+    'mergeState %s reaches the evidence rows (eligible, never merge_conflicts)',
+    (mergeState) => {
+      const result = classifyPr(settleCandidate({ mergeState }), SETTLED_MS);
+      expect(result.verdict).toBe('eligible');
+      expect(result.reason).toBe('settle_window_elapsed');
+      expect(result.reason).not.toBe('merge_conflicts');
+    },
+  );
 });

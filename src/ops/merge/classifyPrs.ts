@@ -31,7 +31,11 @@
 //   - "No reviewer privileged": an ACCEPTABLE review is ANY review whose
 //     author ≠ the PR author (bots count, humans count — no identity is
 //     special), whose body is not a bot skip/failure notice (skipPatterns),
-//     and whose state is not DISMISSED. Author self-reviews never count.
+//     and whose VERDICT is APPROVED or COMMENTED — a CHANGES_REQUESTED
+//     verdict is an objection, not acceptance (the cross-family reading
+//     agrees: classifyThreads treats it as actionable); DISMISSED is
+//     void; a null/unknown verdict never counts. Author self-reviews
+//     never count.
 //   - THE TEMPORAL QUALIFIER (DOCTRINE §I2, canonical): an acceptable
 //     review is a review of the LAST COMMIT's exact head state — submitted
 //     STRICTLY AFTER the last commit. Evidence covering an earlier commit
@@ -138,11 +142,23 @@ const parseMs = (iso: string | null): number | null => {
 };
 
 /**
+ * Whether a review's VERDICT can carry acceptance evidence (row 6) or
+ * all-clear evidence (row 7): only APPROVED or COMMENTED. A
+ * CHANGES_REQUESTED verdict is an OBJECTION, not acceptance — the
+ * cross-family reading agrees (classifyThreads treats a
+ * changes-requested review as actionable feedback to answer); DISMISSED
+ * is void; a null/unknown state never counts (fail toward awaiting).
+ */
+const stateCounts = (state: ReviewSummary['state']): boolean =>
+  state === 'APPROVED' || state === 'COMMENTED';
+
+/**
  * An ACCEPTABLE review for row 6: a real reviewer's look at the PR AS IT
  * STANDS — the last commit's exact head state. The author must not be the
  * PR author (self-reviews never count; a null reviewer login is not the
- * author — external, counts), the state must not be DISMISSED (a voided
- * verdict is not acceptance evidence), and the body must not be a bot
+ * author — external, counts), the verdict must be APPROVED or COMMENTED
+ * (stateCounts: a CHANGES_REQUESTED verdict is an objection, DISMISSED is
+ * void, null/unknown never counts), and the body must not be a bot
  * skip/failure notice (skipPatterns — "CodeRabbit skipped this run"
  * carries no judgement). THE TEMPORAL QUALIFIER: the review must have been
  * submitted STRICTLY AFTER the last commit — evidence covering an earlier
@@ -163,7 +179,7 @@ const isAcceptableReview = (
   // exclusion fires only when the author login is KNOWN, so null review
   // authors always count (fail toward accepting evidence).
   if (authorLogin !== null && review.authorLogin === authorLogin) return false;
-  if (review.state === 'DISMISSED') return false;
+  if (!stateCounts(review.state)) return false;
   if (config.skipPatterns.some((pattern) => pattern.test(review.body))) return false;
   const submittedMs = parseMs(review.submittedAt);
   return submittedMs !== null && lastCommitMs !== null && submittedMs > lastCommitMs;
@@ -266,6 +282,11 @@ export function classifyPr(
   // speaks about earlier code and falls through.
   const allClearAfterLastCommit =
     candidate.reviews.some((review) =>
+      // A review body is all-clear evidence only when its VERDICT can
+      // carry evidence at all (stateCounts — a DISMISSED or
+      // CHANGES_REQUESTED "LGTM" body is a retracted note or an
+      // objection, not an all-clear).
+      stateCounts(review.state) &&
       isAllClearAfter(
         review.body,
         review.authorLogin,
