@@ -723,16 +723,45 @@ export function makeAstGrepCodemod(
       try {
         await store.writeBytes(file, after);
       } catch (err) {
-        // Partial multi-file apply is never silent: the fault names the
-        // files ALREADY on disk in their new form, so the caller knows the
-        // exact on-disk state this failure leaves behind.
-        const alreadyWritten =
-          appliedFiles.length === 0
-            ? ''
-            : `; already written: ${appliedFiles.map((applied) => applied.file).join(', ')}`;
+        // BEST-EFFORT ROLLBACK (mirrors applyRemediation's): partial
+        // multi-file apply is never stranded. The faulted file itself may
+        // hold a PARTIAL write (writeFileSync is not atomic) and every
+        // already-written file's ORIGINAL bytes are still in `current`
+        // (freshness-verified pre-scan), so both are restored newest-first
+        // through the same store before faulting. When a rollback restore
+        // faults, the stranded naming survives and the restore failure is
+        // named — the caller always knows the exact on-disk state.
+        const rolledBack: string[] = [];
+        const rollbackFaults: string[] = [];
+        let faultedFileRestoreFailed = '';
+        try {
+          await store.writeBytes(file, current.get(file) as Uint8Array);
+        } catch (restoreErr) {
+          faultedFileRestoreFailed = `; the faulted file's partial-write restore failed: ${messageOf(restoreErr)}`;
+        }
+        for (const applied of [...appliedFiles].reverse()) {
+          try {
+            await store.writeBytes(applied.file, current.get(applied.file) as Uint8Array);
+            rolledBack.push(applied.file);
+          } catch (rollbackErr) {
+            rollbackFaults.push(`${applied.file} (${messageOf(rollbackErr)})`);
+          }
+        }
+        if (rollbackFaults.length === 0) {
+          const rolledBackNote =
+            rolledBack.length === 0
+              ? 'no earlier files to roll back'
+              : `rolled back ${rolledBack.join(', ')} (original bytes restored)`;
+          return {
+            status: 'failed',
+            error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; ${rolledBackNote}${faultedFileRestoreFailed}`,
+          };
+        }
+        const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
+        const stranded = appliedFiles.map((applied) => applied.file);
         return {
           status: 'failed',
-          error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}${alreadyWritten}`,
+          error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
         };
       }
       appliedFiles.push({

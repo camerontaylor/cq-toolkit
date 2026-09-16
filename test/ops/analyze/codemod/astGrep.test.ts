@@ -543,10 +543,50 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
       expect(result.error).toContain("could not write 'src/b.ts'");
-      expect(result.error).toContain('already written: src/a.ts');
+      // Z2: the first file was RESTORED (best-effort rollback), not stranded.
+      expect(result.error).toContain('rolled back src/a.ts');
+      expect(result.error).toContain('original bytes restored');
     }
-    // The first file really is on disk in its new form (both its matches
-    // applied — the runner derives offsets from the full fixture).
+    // The first file's ORIGINAL bytes are back on disk.
+    expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
+      'const foo_bar = 1;\nconst other = foo_bar;\n',
+    );
+  });
+
+  test('when the codemod ROLLBACK itself faults, the stranded naming survives (Z2)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    // Faults on the second file's write AND on every subsequent restore.
+    let writeCount = 0;
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        writeCount += 1;
+        if (writeCount >= 2) {
+          throw new AnalysisStoreError(`analysis store: disk full on write ${writeCount}`);
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(flaky)({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts', 'src/b.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/b.ts'");
+      expect(result.error).toContain('rollback FAILED for src/a.ts');
+      expect(result.error).toContain('restored: none');
+      expect(result.error).toContain('already written (stranded): src/a.ts');
+    }
+    // The stranded remediated form is what is on disk — named, not hidden.
     expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
       'const fooBar = 1;\nconst other = fooBar;\n',
     );

@@ -287,6 +287,10 @@ export const ApplyRemediationInputSchema: z.ZodType<ApplyRemediationInput> = z
     sidecarPath: z.string().min(1),
     dir: z.string().min(1).exactOptional(),
     clusterId: z.string().min(1).exactOptional(),
+    // The FNV-id-collision disambiguator (F2), mirroring the library input's
+    // optionality: required by the OP only when the sidecar carries more
+    // than one cluster with the requested id.
+    signature: z.string().min(1).exactOptional(),
     approved: z.boolean().exactOptional(),
     rule: z.string().min(1),
     dryRun: z.boolean(),
