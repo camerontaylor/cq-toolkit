@@ -44,7 +44,7 @@
     }
   },
   "devDependencies": {
-    "@types/node": "26.5.1",
+    "@types/node": "24.13.5",
     "oxfmt": "0.68.0",
     "oxlint": "1.83.0",
     "typescript": "npm:@typescript/typescript6@6.0.2",
