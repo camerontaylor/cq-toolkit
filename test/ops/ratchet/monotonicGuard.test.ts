@@ -1148,6 +1148,23 @@ describe('formatViolations', () => {
     expect(sameUnit).toEqual({ ok: true, violations: [], filesChecked: 1 });
   });
 
+  test('a MINIFIED malformed DIRECTION at equal values fails closed — the direction-key delimiter path pinned (PR #129 review, Codex P2)', () => {
+    // The UNIT row pins UNIT_KEY_RE; this row pins DIRECTION_KEY_RE alone:
+    // a minified baseline whose direction value is undecodable after a
+    // ',' — reverting ONLY the direction anchor to line-start-only lets
+    // equal values take the same-value path on a file parseBaseline
+    // rejects. (The existing malformed-direction case is pretty-printed,
+    // so the old anchor matched it — this row is the minified twin.)
+    const bad = (value: number): string =>
+      `{"schemaVersion":1,"target":"typecheck","metric":"typecheck-count","direction":"lower-is-\\x","value":${value},"capturedAt":"2026-09-15T00:00:00.000Z"}`;
+    const diff = fullRewrite(REL, bad(3), bad(3));
+    const verdict = checkDiffMonotonicity(diff);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok === false) {
+      expect(verdict.violations[0]?.why).toBe('unparsable baseline diff');
+    }
+  });
+
   test('a MINIFIED key with an UNDECODABLE value fails closed — key presence is what the delimiter anchor buys (PR #128 review, Codex P2)', () => {
     // The behavior the delimiter-aware KEY regexes actually change: key
     // PRESENCE with an uncapturable/undecodable value. A minified
