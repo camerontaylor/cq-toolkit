@@ -58,11 +58,14 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
     expect(messageTemplate('error TS2551 occurred')).toBe('error TS<num> occurred');
   });
 
-  test('quoted spans abstract to <str> before any other rule', () => {
+  test('quoted spans abstract to <str> before any other rule (all three quote styles)', () => {
     expect(messageTemplate("'foo' is defined but never used")).toBe(
       '<str> is defined but never used',
     );
     expect(messageTemplate('Cannot find module "../utils/date"')).toBe('Cannot find module <str>');
+    // The other two QUOTED_SPAN alternatives, each on a plain word span.
+    expect(messageTemplate('"x" is not defined')).toBe('<str> is not defined');
+    expect(messageTemplate('run `npm test` now')).toBe('run <str> now');
   });
 
   test('unquoted path-like runs abstract to <path>: posix, windows, URLs', () => {
@@ -92,8 +95,10 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
   });
 
   test('contraction apostrophes never open a quoted span; a real quoted span still abstracts', () => {
+    // No curly rewrite anymore: the opener-boundary rule leaves the straight
+    // apostrophe in place, verbatim.
     expect(messageTemplate("The option doesn't accept 'foo'")).toBe(
-      'The option doesn’t accept <str>',
+      "The option doesn't accept <str>",
     );
     // The over-split trap: changing the quoted word must NOT change the
     // signature — the contraction's apostrophe is not a quote-pair opener.
@@ -110,6 +115,21 @@ describe('messageTemplate normalization pipeline (the documented contract)', () 
     expect(messageTemplate("'baz' is defined but never used")).toBe(
       '<str> is defined but never used',
     );
+  });
+
+  test('possessive apostrophes never open a quoted span either (space after the apostrophe)', () => {
+    expect(messageTemplate("Users' setting rejects 'foo'")).toBe("Users' setting rejects <str>");
+    // Same over-split discipline: the quoted word is volatile, the
+    // possessive is not — both messages share one signature.
+    const withFoo = clusterSignature(
+      failureOf({ message: "Users' setting rejects 'foo'" }),
+      'eslint',
+    );
+    const withBar = clusterSignature(
+      failureOf({ message: "Users' setting rejects 'bar'" }),
+      'eslint',
+    );
+    expect(withFoo).toBe(withBar);
   });
 
   test('pathological tokens normalize with correct output (token-wise scan, unbounded messages)', () => {
@@ -328,6 +348,41 @@ describe('clusterErrors decision table', () => {
       const lastIdentity = failureIdentity(last, 'eslint');
       expect(firstIdentity <= lastIdentity).toBe(true);
     }
+  });
+
+  test('distinct signatures colliding on the 32-bit id still sort deterministically (pinned pair)', () => {
+    // A GENUINE FNV-1a-32 collision, found by an offline brute-force search
+    // over random letter-only template candidates (236,728 tried; the pair
+    // is hard-coded so this test executes the signature tiebreak in the
+    // cluster sort). Both templates are pure letters, so messageTemplate
+    // leaves them unchanged and the failures' computed signatures equal
+    // these strings verbatim.
+    const sigA = JSON.stringify(['eslint', 'r', 'tjivlzyj']);
+    const sigB = JSON.stringify(['eslint', 'r', 'qcmqx']);
+    expect(sigA).not.toBe(sigB);
+    expect(fnv1a32Hex(sigA)).toBe('e6854fd8');
+    expect(fnv1a32Hex(sigB)).toBe('e6854fd8');
+    const a = failureOf({ file: 'src/a.ts', ruleId: 'r', message: 'tjivlzyj' });
+    const b = failureOf({ file: 'src/b.ts', ruleId: 'r', message: 'qcmqx' });
+    const forward = clusterErrors(setOf([a, b]));
+    const backward = clusterErrors(setOf([b, a]));
+    expect(forward.clusters).toHaveLength(2); // distinct signatures: never merged
+    const first = forward.clusters[0];
+    const second = forward.clusters[1];
+    if (first === undefined || second === undefined) throw new Error('expected two clusters');
+    // The tie is REAL: two distinct signatures, one 32-bit id — both
+    // singleton clusters report low confidence.
+    expect(first.id).toBe(second.id);
+    expect(first.id).toBe('e6854fd8');
+    expect(first.confidence).toBe('low');
+    expect(second.confidence).toBe('low');
+    // Sorted by SIGNATURE within the tie (sigB < sigA code-unit-wise),
+    // identically for both input orders — never by insertion order.
+    expect(first.signature).toBe(sigB);
+    expect(second.signature).toBe(sigA);
+    expect(first.failures).toEqual([b]);
+    expect(second.failures).toEqual([a]);
+    expect(forward.clusters).toEqual(backward.clusters);
   });
 });
 

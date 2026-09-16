@@ -16,9 +16,9 @@
 //     the comparison unit carried on each cluster; the 8-hex id is its
 //     compact stable handle.
 //   - Template normalization is EXACTLY this pipeline, in this order:
-//       0. straight apostrophes between word chars → curly (’), so a
-//          contraction ("doesn't") can never open a quoted span
-//       1. quoted spans ('…', "…", `…`)          → <str>
+//       1. quoted spans ('…', "…", `…`)          → <str> — an OPENING
+//          delimiter must not be preceded by a word char, so a contraction
+//          ("doesn't") or a possessive ("Users'") can never open a span
 //       2. non-space runs containing / or \      → <path>  (posix + windows paths, URLs)
 //       3. numbers (optional decimal part)       → <num>   (counts, line:col refs)
 //       4. whitespace runs collapsed, trimmed
@@ -29,7 +29,10 @@
 //     to <path>, and a message LITERALLY containing '<num>' could collide
 //     with an abstracted digit — an accepted placeholder-collision class,
 //     harmless to grouping-by-shape and impossible to hit without a same-rule
-//     near-twin message.
+//     near-twin message. A quote abutting word chars on BOTH sides
+//     (said'foo') can never open a span, so such content stays literal —
+//     an accepted over-split class; an UNPAIRED quote also passes through
+//     conservatively.
 //   - Confidence honesty: a cluster of ≥ 2 members agreeing on the exact
 //     signature is 'high'; a singleton is 'low' — one sample cannot
 //     distinguish signal from noise, and v1 NEVER merges clusters (so a
@@ -80,7 +83,6 @@ import { sortByIdentity } from './collectFailures.js';
  */
 export function messageTemplate(message: string): string {
   return message
-    .replace(CONTRACTION_APOSTROPHE, '$1’$2')
     .replace(QUOTED_SPAN, '<str>')
     .replace(/\S+/g, (token) => (token.includes('/') || token.includes('\\') ? '<path>' : token))
     .replace(NUMBER_LIKE, '<num>')
@@ -89,16 +91,16 @@ export function messageTemplate(message: string): string {
 }
 
 /**
- * A straight apostrophe between two word chars is a CONTRACTION ("doesn't"),
- * never a quote-pair opener — rewritten to the curly form first so
- * {@link QUOTED_SPAN} cannot pair it with a LATER opening quote (which would
- * make the template depend on text after the contraction: an over-split
- * signature contract violation).
+ * Quoted spans of all three JS quote styles, non-greedy within one pair.
+ * The OPENER is boundary-aware: it must NOT be preceded by a word char, so
+ * a straight apostrophe inside a word — a contraction ("doesn't") or a
+ * possessive ("Users'") — can never open a span and pair with a LATER
+ * opening quote (which would make the template depend on text after the
+ * apostrophe: an over-split signature contract violation). A quote abutting
+ * word chars on BOTH sides can therefore never open: such content stays
+ * literal, and an unpaired quote passes through conservatively.
  */
-const CONTRACTION_APOSTROPHE = /(\w)'(\w)/g;
-
-/** Quoted spans of all three JS quote styles, non-greedy within one pair. */
-const QUOTED_SPAN = /'[^']*'|"[^"]*"|`[^`]*`/g;
+const QUOTED_SPAN = /(?<!\w)'[^']*'|(?<!\w)"[^"]*"|(?<!\w)`[^`]*`/g;
 
 /** Numbers with an optional decimal part (codes, counts, line:col refs). */
 const NUMBER_LIKE = /\d+(?:\.\d+)?/g;
@@ -126,12 +128,17 @@ export function clusterSignature(failure: CheckFailure, tool: string): string {
   // The template is the only unbounded component: cut it until the
   // canonical form fits. The budget starts at the fixed overhead's share
   // and shrinks by the observed overage — an escaped character (a
-  // surviving unpaired quote, say) costs more than one code unit, so a raw
-  // cut of exactly the overage can still overflow; the loop terminates
-  // because every removed character contributes at least one code unit.
-  // Residual, documented: a tool+ruleId pair whose OWN JSON exceeds the
-  // bound cannot be fitted by truncating the message — such a signature
-  // stays over-bound and cannot pass the ledger record boundary.
+  // surviving double quote or backslash, say) costs more than one code
+  // unit, so a raw cut of exactly the overage can still overflow; the loop
+  // terminates because every removed character contributes at least one
+  // code unit.
+  // Reachability of the residual: the analyze registry bounds tool and
+  // ruleId to the ledger's COMPONENT_MAX_CHARS, so for op-dispatched input
+  // the fixed JSON overhead always leaves a positive template budget and
+  // this loop always converges under the bound. An over-bound signature is
+  // only possible for a direct library call that bypasses that bound — such
+  // a signature stays over-bound and cannot pass the ledger record
+  // boundary.
   let budget =
     SIGNATURE_MAX_CHARS -
     JSON.stringify([tool, failure.ruleId, '']).length -
@@ -248,8 +255,8 @@ export function clusterErrors(set: FailureSet, ledger?: LedgerView): ClusterErro
   });
   // Ids are 32-bit FNV, so two DISTINCT signatures can collide on one id;
   // the signature breaks the tie so ordering never depends on map insertion
-  // order (determinism acceptance check). No test contrives a real
-  // collision — this comment is the pin of the documented rule.
+  // order (determinism acceptance check). A genuine pinned collision
+  // executes this tiebreak — see the id-collision test.
   clusters.sort((a, b) =>
     a.id < b.id
       ? -1
