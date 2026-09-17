@@ -99,9 +99,14 @@ export interface CleanupEffects {
   /** Hard-delete a local branch (`git branch -D <branch>`); prefix-guarded by the op. */
   branchDelete(repoRoot: string, branch: string): Promise<void>;
   /**
-   * Drop stale worktree registrations (`git worktree prune`) — the residue
-   * path for a REGISTERED worktree whose dir is already gone (rm -rf'd
-   * without `git worktree remove`).
+   * Drop stale worktree registrations (`git worktree prune`). SCOPE TRUTH:
+   * git offers NO path-scoped prune — one call unregisters stale
+   * registrations REPO-GLOBALLY, including for worktrees OUTSIDE the run
+   * prefix/dir (they are stale by definition: only registrations whose
+   * dirs are already gone are dropped, so nothing reachable is touched).
+   * Locked registrations are skipped by git, so a pruned row asserts a
+   * removal git may have silently skipped — the report row's reason says
+   * so.
    */
   worktreePrune(repoRoot: string): Promise<void>;
   /**
@@ -127,10 +132,12 @@ export interface CleanupReport {
   removed: Array<{ path: string; branch: string }>;
   /**
    * Registered-but-missing worktree dirs (the residue class): the stale
-   * registration pruned; the branch is NOT deleted here — it remains
-   * branch-only-sweep eligible.
+   * registration pruned by a REPO-GLOBAL `git worktree prune` — locked
+   * registrations are skipped by git, which the row's reason states
+   * honestly; the branch is NOT deleted here — it remains branch-only-
+   * sweep eligible.
    */
-  pruned: Array<{ path: string; branch: string }>;
+  pruned: Array<{ path: string; branch: string; reason: string }>;
   /** Aged-but-DIRTY trees not removed (no force) — the explicit --force surface. */
   skippedDirty: Array<{ path: string; reason: string }>;
   /** Every other enumerated worktree: younger than the cutoff, or outside the prefix/dir — untouchable. */
@@ -149,7 +156,9 @@ export interface CleanupReport {
  * AGE BASIS is the LATEST of the dir mtime and the branch tip commit (an
  * old dir with a recent commit is KEPT: the branch delete would destroy
  * unpushed work); a REGISTERED candidate whose dir is ABSENT is residue —
- * pruned (`git worktree prune`) and reported as pruned, its branch left to
+ * pruned (`git worktree prune` — a REPO-GLOBAL prune: git offers no
+ * path-scoped form, and locked registrations are skipped by git, which the
+ * row's reason states) and reported as pruned, its branch left to
  * the branch-only sweep, never a whole-op failure; strictly older than the
  * cutoff AND strictly clean is a removal candidate, dirty is one only under
  * `force`, younger is kept; (c) the mutation phase — only when `dryRun` is
@@ -213,7 +222,7 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
     const prefix = `${input.runPrefix}/`;
 
     const removed: Array<{ path: string; branch: string }> = [];
-    const pruned: Array<{ path: string; branch: string }> = [];
+    const pruned: Array<{ path: string; branch: string; reason: string }> = [];
     const skippedDirty: Array<{ path: string; reason: string }> = [];
     const kept: Array<{ path: string; reason: string }> = [];
     const branchOnly: string[] = [];
@@ -274,7 +283,15 @@ export function makeCleanup(git: CleanupEffects): Op<CleanupInput, CleanupReport
               };
             }
           }
-          pruned.push({ path: real, branch });
+          // Post-cap doc truth: the row asserts a removal git may silently
+          // skip for locked registrations, and prune is REPO-GLOBAL (no
+          // path-scoped prune exists) — the reason states both.
+          pruned.push({
+            path: real,
+            branch,
+            reason:
+              'registration pruned (repo-global prune; locked registrations are skipped by git)',
+          });
           continue;
         }
         return {

@@ -367,7 +367,13 @@ describe('sweep.cleanup residue, branch-aware age, in-lock revalidation', () => 
     // A healthy aged clean candidate that must still be processed.
     seedAgedClean(repo, '/runs/wt/fix/cli', 'cq/09-16a/fix/cli');
     const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
-    expect(report.pruned).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
+    expect(report.pruned).toEqual([
+      {
+        path: WT_PATH,
+        branch: WT_BRANCH,
+        reason: 'registration pruned (repo-global prune; locked registrations are skipped by git)',
+      },
+    ]);
     expect(repo.prunes).toEqual([REPO_ROOT]);
     // The healthy candidate was still removed.
     expect(report.removed).toEqual([{ path: '/runs/wt/fix/cli', branch: 'cq/09-16a/fix/cli' }]);
@@ -382,7 +388,13 @@ describe('sweep.cleanup residue, branch-aware age, in-lock revalidation', () => 
     repo.branches.push(WT_BRANCH);
     repo.branchTimes.set(WT_BRANCH, NOW - 60_000); // the stale branch is old
     const report = await okReport(makeCleanup(effectsOf(repo)), { ...INPUT, dryRun: false });
-    expect(report.pruned).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
+    expect(report.pruned).toEqual([
+      {
+        path: WT_PATH,
+        branch: WT_BRANCH,
+        reason: 'registration pruned (repo-global prune; locked registrations are skipped by git)',
+      },
+    ]);
     // After the prune the branch has no worktree → the branch-only sweep
     // (which now sees it as worktree-less) deletes it.
     expect(report.branchesRemoved).toEqual([WT_BRANCH]);
@@ -396,7 +408,13 @@ describe('sweep.cleanup residue, branch-aware age, in-lock revalidation', () => 
     repo.branchTimes.set(WT_BRANCH, NOW - 1_000); // young stale branch — probed, left alone
     const report = await okReport(makeCleanup(effectsOf(repo)), INPUT);
     expect(report.dryRun).toBe(true);
-    expect(report.pruned).toEqual([{ path: WT_PATH, branch: WT_BRANCH }]);
+    expect(report.pruned).toEqual([
+      {
+        path: WT_PATH,
+        branch: WT_BRANCH,
+        reason: 'registration pruned (repo-global prune; locked registrations are skipped by git)',
+      },
+    ]);
     expect(repo.prunes).toHaveLength(0);
     expect(repo.removes).toHaveLength(0);
     expect(repo.branchDeletes).toHaveLength(0);
