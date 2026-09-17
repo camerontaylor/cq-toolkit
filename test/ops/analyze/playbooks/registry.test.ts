@@ -464,6 +464,49 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     });
     expect(again.status).toBe('ok');
   });
+
+  test('concurrent dispatches of the SAME playbook are serialized: the second observes the first quarantine and refuses without a second engine scan', async () => {
+    const h = harness(FIXTURE, 1); // the verifier exits 1 → quarantine
+    // Defer the FIRST dispatch's verifier: the gated runner parks every
+    // non-ast-grep (verifier) command on `gate` until released.
+    let releaseVerifier: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseVerifier = resolve;
+    });
+    const gatedRun: RunCheck = async (cmd) => {
+      if (cmd.command !== 'ast-grep') await gate;
+      return h.run(cmd);
+    };
+    const serialized = makePlaybookDispatchOp({
+      playbooks: h.playbooks,
+      quarantine: h.quarantine,
+      run: gatedRun,
+      storeFor: () => h.store,
+    });
+    const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
+    // Both dispatches START concurrently; the first parks on the gate.
+    const first = serialized(input);
+    const second = serialized(input);
+    // A window for a BROKEN (unserialized) second dispatch to run its own
+    // engine scan — it may not: the second is serialized behind the first
+    // and cannot even pass the quarantine check until the first settled.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(h.run.scans).toHaveLength(1);
+    // Let the first dispatch fail its verifier and write the record; the
+    // serialized second then refuses on it — one scan, one apply, ever.
+    releaseVerifier?.();
+    const refused = await second;
+    expect(refused.status).toBe('needs-human');
+    if (refused.status === 'needs-human') {
+      expect(refused.reason).toContain('never re-dispatched automatically');
+    }
+    expect(h.run.scans).toHaveLength(1);
+    const firstResult = await first;
+    expect(firstResult.status).toBe('ok');
+    if (firstResult.status === 'ok' && firstResult.value.outcome === 'verifier-failed') {
+      expect(firstResult.value.quarantined).toBe(true);
+    }
+  }, 15_000);
 });
 
 describe('makePlaybookQuarantineListOp (the read-only lane view)', () => {

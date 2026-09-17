@@ -186,6 +186,16 @@ schema note above).
   `JSON.stringify` is lossless) and the id against a safe-token pattern;
   global id uniqueness is the playbook registry's refusal at register time,
   and every ast-grep semantic is the engine's business at dispatch.
+- **Dispatches are serialized per playbook id** (the registry's
+  `withDispatch` chain): two concurrent dispatches of the SAME playbook can
+  never both pass the quarantine check before either verifier finishes —
+  the second sees the first's record and refuses, so a non-idempotent rule
+  cannot be double-applied. Process-scoped, like the registry and ledger
+  themselves; the cross-process story is the same process-scoped cut.
+- **Post-v1 cut: a verifier-only retry op.** The indeterminate-verifier
+  outcome tells the consumer to re-run the VERIFIER on its own (never to
+  blindly re-dispatch, which would re-apply the rule); a first-class
+  verifier-only retry op is recorded here as post-v1, not built now.
 
 ### End-to-end acceptance evidence (test/e2e/analyze)
 

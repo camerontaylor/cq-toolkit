@@ -208,6 +208,11 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
         return entry as OpRegistryEntry<never, never> | undefined;
       },
     };
+    // NO-WRITE ISOLATION: the working directory is shared, so the claim is
+    // pinned as "the run adds no analysis-* artifact" — snapshot the cwd
+    // listing before and compare against it after (never absolute zero,
+    // which pre-existing artifacts would break).
+    const before = new Set(await readdir(process.cwd()));
     const floor = await plan.importer();
     const report = await runPlan(floor, { concurrency: 1, stopOnError: true }, view);
     const byId = new Map(report.jobs.map((job) => [job.jobId, job]));
@@ -227,8 +232,8 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
         expect(row.result.error).toContain('blocked:');
       }
     }
-    // And nothing was rendered: no report pair in the working directory.
-    const entries = await readdir(process.cwd());
-    expect(entries.filter((name) => name.startsWith('analysis-'))).toEqual([]);
+    // And nothing was rendered: no NEW analysis-* entry in the directory.
+    const after = await readdir(process.cwd());
+    expect(after.filter((name) => name.startsWith('analysis-') && !before.has(name))).toEqual([]);
   }, 180_000);
 });

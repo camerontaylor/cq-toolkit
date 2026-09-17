@@ -78,10 +78,19 @@ describe('PlaybookSchema (the authored format, full input and only it)', () => {
       PlaybookSchema.safeParse({ ...VALID, verifier: { command: { command: 'npm', args: 'x' } } })
         .success,
     ).toBe(false);
+    // The command carries the REQUIRED args, so the schema reaches the
+    // timeout rule: 0 (and a negative) are rejected by .positive(), not by
+    // a missing-field rejection earlier in the object.
     expect(
       PlaybookSchema.safeParse({
         ...VALID,
-        verifier: { command: { command: 'npm', timeoutMs: 0 } },
+        verifier: { command: { command: 'npm', args: [], timeoutMs: 0 } },
+      }).success,
+    ).toBe(false);
+    expect(
+      PlaybookSchema.safeParse({
+        ...VALID,
+        verifier: { command: { command: 'npm', args: [], timeoutMs: -5_000 } },
       }).success,
     ).toBe(false);
     // An explicit undefined is NOT a value (exactOptional, like the frozen type).

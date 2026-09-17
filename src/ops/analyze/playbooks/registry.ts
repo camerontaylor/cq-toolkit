@@ -59,7 +59,7 @@
 // error string — nothing was applied, nothing was quarantined, and the
 // taxonomy has no payload slot. The full `trace` query op and a durable
 // dispatch journal are post-v1 (recorded in the family NOTES.md).
-import type { Op } from '../../../kernel/types.js';
+import type { Op, OpResult } from '../../../kernel/types.js';
 import type { RunCheck } from '../../gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
 import type { CodemodFileApplied } from '../codemod/astGrep.js';
@@ -101,11 +101,27 @@ export interface PlaybookRegistry {
   get(id: string): Playbook | undefined;
   /** Copies of all registered playbooks, sorted by id. */
   list(): Playbook[];
+  /**
+   * Run `task` SERIALIZED against the playbook id: every task for the SAME
+   * id waits for its predecessor to complete (settled, either way) before
+   * starting, while tasks for DIFFERENT ids are unserialized. This is the
+   * dispatch op's race guard — the full sequence (quarantine consult →
+   * engine → verifier → record) runs to completion before the next
+   * dispatch of the SAME playbook can even pass the quarantine check, so
+   * two concurrent dispatches can never double-apply a non-idempotent
+   * rule. Process-scoped, like the registry itself (the cross-process
+   * story is the same process-scoped cut recorded in the family NOTES).
+   */
+  withDispatch<T>(id: string, task: () => Promise<T>): Promise<T>;
 }
 
 /** Build a playbook registry. Seeds are registered in order (duplicates throw). */
 export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookRegistry {
   const byId = new Map<string, Playbook>();
+  // The per-id dispatch chains: each entry is the tail of that playbook's
+  // dispatch sequence (settled, so a failed dispatch never poisons the
+  // chain for the next one).
+  const dispatchChains = new Map<string, Promise<unknown>>();
   const stored = (playbook: Playbook): Playbook => {
     const copy = structuredClone(playbook);
     byId.set(copy.id, copy);
@@ -134,6 +150,17 @@ export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookReg
       [...byId.values()]
         .sort((a, b) => (a.id < b.id ? -1 : 1))
         .map((playbook) => structuredClone(playbook)),
+    withDispatch: <T>(id: string, task: () => Promise<T>): Promise<T> => {
+      const previous = dispatchChains.get(id) ?? Promise.resolve();
+      // The task runs whether the predecessor dispatched cleanly or not;
+      // the chain tail is failure-proofed so the NEXT dispatch still runs.
+      const next = previous.then(task, task);
+      dispatchChains.set(
+        id,
+        next.catch(() => undefined),
+      );
+      return next;
+    },
   };
 }
 
@@ -265,11 +292,23 @@ export type PlaybookDispatchOutcome =
  * closed — the very next dispatch consults it and refuses), and a verifier
  * INDETERMINATE writes nothing (an unobservable verdict neither passes nor
  * punishes).
+ *
+ * SERIALIZATION (no concurrent double-apply): the whole sequence runs
+ * through the registry's per-playbook-id dispatch chain
+ * ({@link PlaybookRegistry.withDispatch}), so two concurrent dispatches of
+ * the SAME playbook cannot both pass the quarantine check before either
+ * verifier finishes — the second observes the first's record (or verdict)
+ * and refuses/fails-closed without re-running the engine. Different
+ * playbooks dispatch unserialized. The serialization is process-scoped,
+ * the same cut as the registry and ledger themselves.
  */
+/** The dispatch flow's full result type (the serialized wrapper returns it). */
+type PlaybookDispatchResult = OpResult<PlaybookDispatchOutcome>;
+
 export function makePlaybookDispatchOp(
   deps: PlaybookDispatchDeps,
 ): Op<PlaybookDispatchInput, PlaybookDispatchOutcome> {
-  return async (input) => {
+  const dispatchOnce = async (input: PlaybookDispatchInput): Promise<PlaybookDispatchResult> => {
     // ---- 1. Registry lookup (before anything runs).
     const playbook = deps.playbooks.get(input.playbookId);
     if (playbook === undefined) {
@@ -426,10 +465,16 @@ export function makePlaybookDispatchOp(
     return {
       status: 'indeterminate',
       detail:
-        `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — the remediation edits WERE applied to ${String(applied.plannedEdits)} planned edit(s) across ${String(files.length)} file(s), but their correctness is UNVERIFIED; the playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5); re-run the dispatch to re-verify. ` +
+        `playbook '${playbook.id}': the verifier's verdict is unobservable (${verifier.reason}) — the remediation edits are ALREADY ON DISK (${String(applied.plannedEdits)} planned edit(s) across ${String(files.length)} file(s)) and remain UNVERIFIED; the playbook is NOT quarantined (an unobservable verdict never punishes a playbook — I5). ` +
+        `Do NOT blindly re-run the dispatch: it would RE-APPLY the rule over the already-edited targets, which is safe only when the rule's fix is idempotent — re-run the VERIFIER on its own instead. ` +
         `Dispatch record: ${JSON.stringify(record)}`,
     };
   };
+  // SERIALIZATION (module header): each dispatch runs inside the registry's
+  // per-playbook-id chain, so a same-playbook dispatch cannot start until
+  // the previous one's full sequence (quarantine consult → engine →
+  // verifier → record) has settled — different playbooks stay unserialized.
+  return (input) => deps.playbooks.withDispatch(input.playbookId, () => dispatchOnce(input));
 }
 
 /** Error message of an unknown throwable, for `failed` results. */
