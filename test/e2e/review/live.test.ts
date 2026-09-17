@@ -42,7 +42,6 @@ import { SubprocessDriver } from '../../../src/driver/subprocess/index.js';
 import {
   FixReviewItemOutputSchema,
   makeFixReviewItem,
-  reviewFixHarness,
   worktreeFixDriver,
 } from '../../../src/ops/review/fixReviewItem.js';
 import { ghJson, makeGhRunner } from '../../../src/ops/review/gh.js';
@@ -164,7 +163,11 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
                         makeInner: (sessionsDir) =>
                           new SubprocessDriver({
                             binary: ['node', agentPath],
-                            harnessConfig: reviewFixHarness,
+                            // The caller's harness reaches the INNER driver
+                            // too — the perHarness argument is threaded, not
+                            // hardcoded (the loop passes reviewFixHarness,
+                            // so the live default is unchanged).
+                            harnessConfig: harness,
                             outputSchema: FixReviewItemOutputSchema,
                             routingTable: fixtureRoutingTable(),
                             sessionsDir,

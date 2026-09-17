@@ -177,6 +177,12 @@ interface LoopWorld {
   threads: unknown[];
   /** REST pulls-comment entries (flat shape is tolerated by the slurp guard). */
   pullsComments: unknown[];
+  /**
+   * When true, the fake gh REFUSES resolveReviewThread (drives the
+   * pending-resolve carry pin: the reply posts, the resolve stays
+   * unrecorded).
+   */
+  resolveReviewThreadFails?: boolean;
   /** Resolved-thread nodes served to the snapshot walks. */
   resolvedThreads: unknown[];
 }
@@ -272,6 +278,11 @@ const fakeGh =
             stdout: '',
             stderr: `fake gh: resolveReviewThread for unexpected threadId ${JSON.stringify(threadId)}`,
           };
+        }
+        // The pending-resolve carry pin (codex P2): run 1 refuses the
+        // resolve so it stays unrecorded behind a posted reply.
+        if (world.resolveReviewThreadFails === true) {
+          return { code: 1, stdout: '', stderr: 'resolve failed (world-driven)' };
         }
         return ok(
           JSON.stringify({
@@ -1809,6 +1820,63 @@ describe('round-versioned dispatch keys (slice 9 item 3)', () => {
     expect(run3.outcome.plan.jobs).toEqual([]);
     expect(run3.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
     expect(invocations).toHaveLength(0);
+    expect(run3.outcome.actionsPosted).toBe(0);
+    expect(run3.outcome.reply).toBeUndefined();
+  });
+});
+
+describe('pending-resolve carry (codex P2)', () => {
+  test('reply posted + resolve pending → the next run carries ONLY the resolve (no re-fix, no re-reply); then a full no-op', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-carry-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = defaultWorld();
+    world.resolveReviewThreadFails = true; // run 1: the reply posts; the resolve fails
+    const invocations1: OpInvocation[] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
+      invocations: invocations1,
+      dispatchLogPath,
+    });
+    // Run 1: the reply recorded; the resolve FAILED and stays unrecorded —
+    // the old skip-strategy would never retry it.
+    expect(run1.outcome.status).toBe('needs-human');
+    expect(
+      run1.outcome.reasons.some((reason) => reason.includes('dispatch failed (resolve_thread')),
+    ).toBe(true);
+    expect(run1.outcome.actionsPosted).toBe(1);
+    expect(run1.outcome.reply?.posted.map((record) => record.kind)).toEqual(['review_reply']);
+    expect(invocations1).toHaveLength(1);
+
+    // Run 2 (same feedback): the reply is dispatched, the resolve is not —
+    // carry ONLY the resolve: no fix job (the driver is never called), no
+    // re-reply, and the item is skipped with its reason.
+    world.resolveReviewThreadFails = false;
+    const invocations2: OpInvocation[] = [];
+    const run2 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations2,
+      dispatchLogPath,
+    });
+    expect(run2.outcome.status).toBe('ok');
+    expect(run2.outcome.reasons).toEqual([]);
+    expect(run2.outcome.plan.jobs).toEqual([]);
+    expect(run2.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
+    expect(invocations2).toHaveLength(0);
+    expect(run2.outcome.actionsPosted).toBe(1);
+    expect(run2.outcome.reply?.posted.map((record) => record.kind)).toEqual(['resolve_thread']);
+
+    // Run 3: BOTH round actions dispatched → a full no-op.
+    const invocations3: OpInvocation[] = [];
+    const run3 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations3,
+      dispatchLogPath,
+    });
+    expect(run3.outcome.status).toBe('ok');
+    expect(run3.outcome.plan.jobs).toEqual([]);
+    expect(run3.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
+    expect(invocations3).toHaveLength(0);
     expect(run3.outcome.actionsPosted).toBe(0);
     expect(run3.outcome.reply).toBeUndefined();
   });

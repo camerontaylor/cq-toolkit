@@ -676,18 +676,34 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // never silently dropped (see enrichBatches for the per-batch policy).
   const { items: correlated, skipped: vanishedRows } = enrichBatches(batches, state);
   skipped.push(...vanishedRows);
-  // (3b) ROUND-AWARE DISPATCH MEMORY (round-3 item 4): an enriched item
-  // whose round-versioned reply actionId is ALREADY dispatched was answered
-  // THIS round — skip it entirely (no fix job, no new commit, no duplicate
-  // reply); new feedback fingerprints a new round and re-opens the item.
+  // (3b) ROUND-AWARE DISPATCH MEMORY (round-3 item 4; carry fix — codex
+  // P2): an enriched item whose round-versioned REPLY actionId is already
+  // dispatched was answered THIS round — no re-fix, no re-reply. But a
+  // THREAD whose round-versioned RESOLVE has NOT dispatched still needs its
+  // thread closed: skipping the item entirely used to strand a
+  // posted-reply-unresolved thread forever (the resolve was withheld or
+  // failed in the posting run, and every later run skipped past it while
+  // reporting ok). Such an item emits ONLY the round-versioned resolve
+  // action (same actionId → posts once, dedupe-safe by the dispatch log);
+  // comment-kind items have no resolve and skip fully. New feedback
+  // fingerprints a new round and re-opens the item.
   const dispatched = new Set(
     (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
   );
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
+  const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
   for (const entry of correlated) {
     const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
     if (dispatched.has(replyActionId)) {
+      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${entry.source.roundFingerprint}`;
+      if (entry.source.kind === 'thread' && !dispatched.has(resolveActionId)) {
+        carriedResolves.push({
+          kind: 'resolve_thread',
+          actionId: resolveActionId,
+          threadId: entry.source.itemId,
+        });
+      }
       skipped.push({ id: entry.source.itemId, reason: 'already-answered-this-round' });
       continue;
     }
@@ -1057,6 +1073,13 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       });
     }
   }
+  // CARRIED RESOLVES (stage 3b): a thread whose round reply already
+  // dispatched but whose resolve did not rides THIS run's dispatch — no fix
+  // ran for it, no reply is re-posted; the resolve's own actionId dedupes.
+  // These bypass the publish-gate withholding deliberately: their round was
+  // already published when the reply recorded, and the resolve mutation
+  // pushes nothing.
+  actions.push(...carriedResolves);
 
   // (7) Reply + resolve over the gh seam — push-before-post (the same
   // composed worktree push: an idempotent re-assertion against origin races
