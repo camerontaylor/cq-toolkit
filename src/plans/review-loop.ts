@@ -948,13 +948,23 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // (REST lag, an unrelated sibling) must not condemn the whole loop.
   }
 
-  // (6) Actions from the fix rows. ok+changed+commits → reply + resolve;
-  // ok+unchanged → reply only (the honest no-change answer), never a
-  // resolve; non-ok rows → nothing, they feed hasFailures. RESOLVES ARE
-  // GATED PER ITEM on locally-verified commits (see the module doc) — the
-  // PR-wide VerifyOutcome is observability only. actionIds are stable
-  // coordinates (pr + item id) so a re-run dedupes against the dispatch
-  // log.
+  // (6) Actions from the fix rows. PUBLISH-GATE UNIFICATION (jMY2X): when
+  // the publish gate is blocked (publishable false — unaccounted range,
+  // rev-list failure, unreadable head, dirty worktree, mixed-worktree
+  // withholding), EVERY ok row produces NO action: no reply (which would
+  // cite unpublished commits or record a "nothing to fix" round over an
+  // unsane tree, making the next run treat the feedback as answered), no
+  // resolve, nothing recorded — the next run re-plans everything once the
+  // worktree/origin state is sane. This subsumes the head-unreadable reply
+  // withholding (jLtVU/jMP_C): same behavior, now for every blocked shape.
+  // The block's shape-specific reason is already in `reasons` (unreported
+  // range, dirty worktree, unreadable head, publish-withheld-mixed-worktree)
+  // and feeds hasFailures; each withheld row adds a shared per-row marker.
+  // When publishable is true: ok+changed+commits → reply + resolve (resolve
+  // gated per item on locally-verified commits); ok+unchanged → reply only
+  // (the honest no-change answer), never a resolve; non-ok rows → nothing,
+  // they feed hasFailures. actionIds are stable coordinates (pr + item id)
+  // so a re-run dedupes against the dispatch log.
   const actions: ReviewAction[] = [];
   for (const row of fixReport.jobs) {
     if (row.result.status !== 'ok') {
@@ -974,26 +984,12 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       continue; // unreachable: one source per built job, same order
     }
     const value = row.result.value as FixReviewItemResult;
-    // HEAD-UNREADABLE REPLY WITHHOLDING (jLtVU + jMP_C): under an unreadable
-    // boundary read the loop cannot establish that HEAD stayed unchanged —
-    // an unreported local commit could escape accountability — so EVERY ok
-    // row (changed and unchanged alike) produces no action. A changed row's
-    // reply would cite "Commits: <sha>" for a commit that was never
-    // published (the push is null), and an unchanged row's no-change reply
-    // would RECORD the round, making the next run skip an item it should
-    // retry. Nothing dispatches, nothing records: the next run re-plans
-    // everything and retries cleanly.
-    if (headUnreadable) {
-      reasons.push('worktree head unreadable — reply withheld until publication');
+    // Publish-gate unification (jMY2X, above): a blocked gate withholds
+    // EVERY row's reply — the shape-specific reason is already recorded.
+    if (!publishable) {
+      reasons.push(`reply withheld for ${row.jobId} — publication blocked`);
       continue;
     }
-    const notes =
-      (publishWithheld
-        ? '\n\nNote: the fix is committed locally but publication was withheld; it is not yet on the remote.'
-        : '') +
-      (unreportedCommit
-        ? `\n\nNote: the worktree advanced during the run — an unreported commit (${headAfter.stdout.trim()}) was observed; a human should check it.`
-        : '');
     // The SELF-REPLY SIGNATURE LEADS every reply body (drill 8, cycle-1
     // major — see replySignature): REPLY_SIGNATURE_PATTERN is
     // START-anchored, so the marker must be the body's FIRST line for a
@@ -1001,8 +997,8 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     const signature = replySignature(opts.owner, opts.repo, opts.pr);
     const body = `${signature}\n\n${
       value.changed && value.commits.length > 0
-        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${notes}`
-        : `${value.summary}${notes}`
+        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
+        : value.summary
     }`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
@@ -1028,12 +1024,6 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // (the reply still posts — the summary reports what the worker
       // claimed), and the withheld resolve is recorded as a per-item
       // failure reason.
-      if (publishWithheld || unreportedCommit || dirtyWorktree || headUnreadable) {
-        // Publication withheld (a sibling failed), an unreported commit, or
-        // a dirty worktree: nothing is resolved — the thread stays open
-        // regardless of local state.
-        continue;
-      }
       if (value.changed && value.commits.length > 0 && value.truncated === true) {
         // Round-3 item 13: a CONTEXT-truncated worker saw a clipped tail and
         // may have missed the actual constraint — the reply reports the

@@ -696,7 +696,7 @@ describe('review-loop failure handling', () => {
     expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
   });
 
-  test('a malformed worker answer fails its row; the other thread still gets its reply (publication withheld)', async () => {
+  test('a malformed worker answer fails its row; the ok sibling is withheld (publication blocked)', async () => {
     const world = defaultWorld();
     world.threads = [
       actionableThread('T1', 'src/a.ts', 3, 101),
@@ -720,11 +720,10 @@ describe('review-loop failure handling', () => {
     expect(outcome.fixReport?.counts.failed).toBe(1);
     // Nothing was published (mixed-worktree guard): the after-snapshot lags.
     expect(outcome.verify?.progress).toBe(false);
-    expect(outcome.actionsPosted).toBe(1); // T2's reply; the resolve is withheld
-    // Round-versioned actionId: reply:<itemId>-<round fingerprint>.
-    expect(outcome.reply?.posted.map((record) => record.actionId)).toEqual([
-      expect.stringMatching(/^review-loop:7:reply:T2-[0-9a-f]{8}$/),
-    ]);
+    // Publish-gate unification (jMY2X): the blocked gate withholds EVERY
+    // ok row — T2's reply does not post or record; the next run re-plans.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
     expect(
       outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
     ).toBe(true);
@@ -1197,8 +1196,10 @@ describe('mixed-worktree publication (round-3 item 11)', () => {
       outcome.reasons.some((reason) => reason.includes('publish-withheld-mixed-worktree')),
     ).toBe(true);
     expect(gitLog.some((args) => args[2] === 'push')).toBe(false);
-    expect(outcome.actionsPosted).toBe(1); // B's reply; NO resolve
-    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+    // Publish-gate unification (jMY2X): the blocked gate withholds B's
+    // reply too — NO resolve, and nothing records.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 });
 
@@ -1296,10 +1297,11 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
       `unreported-commit: worktree tip ${'4444'.repeat(10)} is not a claimed fix — a worker committed without reporting it`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // no publish
-    // The reply still posts and NOTES the observed commit.
-    expect(outcome.actionsPosted).toBe(1);
-    const post = ghLog.find((args) => args.includes('-X'));
-    expect(post?.some((arg) => arg.includes('unreported commit'))).toBe(true);
+    // Publish-gate unification (jMY2X): the blocked gate withholds the
+    // reply — no "nothing to change" post over an unsane tree, nothing
+    // recorded; the next run re-plans the still-actionable thread.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 
   test('HEAD-accountability (drill 6): item A commits+claims, sibling B honest no-change → publishable, A resolves, B reply-only', async () => {
@@ -1355,7 +1357,9 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
       `unreported-commit: worktree tip ${NEW_SHA} was claimed but failed verification (attribution-missing)`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
-    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
+    // Publish-gate unification (jMY2X): the blocked gate withholds the reply.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 
   test('a claimed tip failing resolvability/ancestry names those stages (round-2 low)', async () => {
@@ -1413,9 +1417,7 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.reasons).toContainEqual(
       'worktree head unreadable (post-run): fatal: unreadable HEAD',
     );
-    expect(outcome.reasons).toContainEqual(
-      'worktree head unreadable — reply withheld until publication',
-    );
+    expect(outcome.reasons).toContainEqual('reply withheld for fix-1 — publication blocked');
     expect(outcome.actionsPosted).toBe(0); // NO action of any kind: nothing records
     expect(outcome.reply).toBeUndefined();
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
@@ -1440,9 +1442,7 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.reasons).toContainEqual(
       'worktree head unreadable (pre-run): fatal: unreadable HEAD',
     );
-    expect(outcome.reasons).toContainEqual(
-      'worktree head unreadable — reply withheld until publication',
-    );
+    expect(outcome.reasons).toContainEqual('reply withheld for fix-1 — publication blocked');
     expect(outcome.actionsPosted).toBe(0); // NO action of any kind: nothing records
     expect(outcome.reply).toBeUndefined();
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
@@ -1479,9 +1479,10 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
       `unreported-commit: 1 commit(s) in ${SHA}..HEAD are not claimed fixes: ${MID_SHA}`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
-    // The replies still post (A's honest no-change answer, B's claim); the
-    // resolves are withheld by the unreported range.
-    expect(outcome.actionsPosted).toBe(2);
+    // Publish-gate unification (jMY2X): the blocked gate withholds BOTH
+    // rows' replies — nothing records; the next run re-plans everything.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 
   test('a stale PR-snapshot head does NOT block a legitimate run (codex P2): the range base is the OBSERVED head', async () => {
@@ -1538,7 +1539,10 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
       `unreported-commit: worktree head moved to ${ANCESTOR_SHA} but ${SHA}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
-    expect(outcome.actionsPosted).toBe(1); // reply-only; the resolve is withheld
+    // Publish-gate unification (jMY2X): the blocked gate withholds the
+    // changed:false row's reply too — nothing records.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 
   test('range accountability: A claims+verifies, B claims+verifies → the whole range is accounted for and publishes', async () => {
@@ -1590,8 +1594,10 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual('dirty-worktree');
     expect(gitLog.some((args) => args[2] === 'push')).toBe(false);
-    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
-    expect(outcome.reply?.posted.some((record) => record.kind === 'resolve_thread')).toBe(false);
+    // Publish-gate unification (jMY2X): the blocked gate withholds the reply
+    // — no resolve, nothing records.
+    expect(outcome.actionsPosted).toBe(0);
+    expect(outcome.reply).toBeUndefined();
   });
 });
 
