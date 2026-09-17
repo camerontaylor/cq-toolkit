@@ -88,11 +88,15 @@ interface Harness {
  * scripted runner that answers `ast-grep` scans with the correct wire-shape
  * match objects for RULE's pattern (computed against the store's live
  * bytes) and every other command with `verifierExit` (+ optional output).
+ * The registered playbook defaults to {@link playbookOf} and can be
+ * overridden (the verifier-timeout boundary test swaps in a playbook whose
+ * command omits `timeoutMs`).
  */
 function harness(
   files: Record<string, string>,
   verifierExit: number | null,
   verifierOutput = '',
+  playbook: Playbook = playbookOf(),
 ): Harness {
   const run = (async (cmd: Parameters<RunCheck>[0]): Promise<RawCheckOutput> => {
     if (cmd.command === 'ast-grep') {
@@ -130,7 +134,7 @@ function harness(
     run,
     storeFor: () => store,
   });
-  playbooks.register(playbookOf());
+  playbooks.register(playbook);
   return { run, store, quarantine, playbooks, dispatch };
 }
 
@@ -229,6 +233,34 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     expect(h.run.scans).toHaveLength(1);
     expect((h.run.scans[0] as { args: string[] }).args[3]).toBe(JSON.stringify(RULE));
     expect(h.run.verifierCalls).toEqual([
+      { command: 'verify-tool', args: ['check'], timeoutMs: 30_000 },
+    ]);
+  });
+
+  test('an authored verifier command WITHOUT timeoutMs is dispatched capped at the 600_000ms op-boundary default; an explicit timeout passes through verbatim', async () => {
+    // The authored asset omits the timeout (the format's library-level
+    // optional) — the dispatch op must cap it at the gates' op-boundary
+    // default, visible to the runner.
+    const omitted = harness(FIXTURE, 0, '', {
+      ...playbookOf(),
+      verifier: { command: { command: 'verify-tool', args: ['check'] } },
+    });
+    const result = await omitted.dispatch({
+      playbookId: 'fix-foo-bar',
+      dir: '/ws',
+      targets: ['src/a.ts'],
+    });
+    expect(result.status).toBe('ok');
+    expect(omitted.run.verifierCalls).toHaveLength(1);
+    expect(omitted.run.verifierCalls[0]).toEqual({
+      command: 'verify-tool',
+      args: ['check'],
+      timeoutMs: 600_000,
+    });
+    // And an AUTHORED explicit timeout is never overridden.
+    const explicit = harness(FIXTURE, 0);
+    await explicit.dispatch({ playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] });
+    expect(explicit.run.verifierCalls).toEqual([
       { command: 'verify-tool', args: ['check'], timeoutMs: 30_000 },
     ]);
   });

@@ -64,10 +64,18 @@ import type { RunCheck } from '../../gates/checkRunner.js';
 import type { AnalyzeFileStore } from '../analysisStore.js';
 import type { CodemodFileApplied } from '../codemod/astGrep.js';
 import { makeAstGrepCodemod } from '../codemod/astGrep.js';
-import type { Playbook } from './format.js';
+import type { Playbook, VerifierCommand } from './format.js';
 import type { QuarantineLedger, QuarantineRecord } from './quarantine.js';
 import type { PlaybookVerifierOutcome } from './verifier.js';
 import { makePlaybookVerifier } from './verifier.js';
+
+/**
+ * The op-boundary cap for a JSON-dispatched verifier whose authored command
+ * omits `timeoutMs` (the gates registry's 600_000ms op-boundary default —
+ * see the call site in {@link makePlaybookDispatchOp} for the
+ * boundary-vs-library distinction).
+ */
+const DISPATCH_VERIFIER_TIMEOUT_MS = 600_000;
 
 /**
  * The playbook registry: register (REFUSES a duplicate id — the global
@@ -297,7 +305,21 @@ export function makePlaybookDispatchOp(
     }
     const files = applied.files;
     // ---- 4. The playbook's own verifier decides the outcome.
-    const verifier = await makePlaybookVerifier(deps.run)(playbook.verifier.command);
+    // OP-BOUNDARY TIMEOUT DEFAULT (the gates registry's op-boundary
+    // precedent): the authored format keeps the verifier command's
+    // `timeoutMs` OPTIONAL at the LIBRARY level (playbooks/format.ts — a
+    // persisted consumer asset, not an op input), so a JSON-dispatched
+    // verifier whose playbook omits the timeout would otherwise run
+    // UNCAPPED. The dispatch op applies the gates' 600_000ms default HERE,
+    // at the op boundary: an authored explicit timeout passes through
+    // verbatim, an omitted one is capped at the same 10-minute default
+    // every gates op dispatch gets.
+    const authoredCommand = playbook.verifier.command;
+    const verifierCommand: VerifierCommand =
+      authoredCommand.timeoutMs === undefined
+        ? { ...authoredCommand, timeoutMs: DISPATCH_VERIFIER_TIMEOUT_MS }
+        : authoredCommand;
+    const verifier = await makePlaybookVerifier(deps.run)(verifierCommand);
     // The trace record carries the file rows in the exported SHAPE — the
     // engine's per-file diffs stay in the report, never bloat a trace line.
     const recordFiles = files.map((file) => ({

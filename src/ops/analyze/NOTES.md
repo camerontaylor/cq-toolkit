@@ -191,7 +191,7 @@ schema note above).
 
 The flagship e2e runs the real chain on a temp fixture repo: real `tsc`
 (via the typescript devDependency's own JS entry, so it does not depend on
-PATH) reports three homogeneous TS2339 diagnostics across three files →
+PATH) reports three homogeneous TS2551 diagnostics across three files →
 `gates.checkRunner` ('tsc-lines') → `analyze.collectFailures` →
 `analyze.clusterErrors` (ONE high-confidence cluster) →
 `analyze.renderAnalysisReport` (real sidecar on disk) →
