@@ -305,8 +305,11 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
     }
     await sleep(2_000);
   }
-  // If the bound above expired, the thread POST below fails loudly with
-  // GitHub's own 422 — the same signal an exhausted convergence poll gives.
+  // The poll above is NECESSARY BUT NOT SUFFICIENT (jMIdI): both
+  // back-to-back head reads can return the seeded sha while GitHub is still
+  // assembling the PR's diff, and the position-anchored POST below then 422s
+  // (drill 11's failure). The bounded retry on the POST closes that
+  // residual async-diff race.
 
   // Seed ONE review thread: a top-level PR review comment via REST, anchored
   // on the marker line at the seeded head. SAME-IDENTITY by construction —
@@ -331,7 +334,11 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
   // starting at the file top (`@@ -0,0 +1,4 @@`, every file line a `+`
   // line) — so position equals the FILE LINE NUMBER: the target line is 3
   // (MARKER_LINE), hence position=3.
-  const comment = await ghJson<{ id?: unknown }>(gh, [
+  // The POST rides a bounded retry (jMIdI): up to 3 attempts, 5s apart,
+  // retrying ONLY on an HTTP 422 from the POST — the async-diff race's
+  // signature, which the readiness poll cannot fully exclude. Every other
+  // failure (auth, 404, non-JSON output) is fatal on the spot.
+  const threadArgs = [
     'api',
     '-X',
     'POST',
@@ -344,7 +351,34 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
     `path=${MARKER_FILE}`,
     '-F',
     `position=${String(MARKER_LINE)}`,
-  ]);
+  ];
+  let comment: { id?: unknown } | undefined;
+  let last422 = '';
+  for (let attempt = 1; attempt <= 3 && comment === undefined; attempt += 1) {
+    if (attempt > 1) {
+      await sleep(5_000);
+    }
+    const result = await gh(threadArgs);
+    if (result.code !== 0) {
+      if (result.stderr.includes('422')) {
+        last422 = `attempt ${String(attempt)}/3: ${result.stderr.trim()}`;
+        continue;
+      }
+      throw new Error(`the seeded review comment POST failed: ${result.stderr}`);
+    }
+    try {
+      comment = JSON.parse(result.stdout) as { id?: unknown };
+    } catch {
+      throw new Error(
+        `the seeded review comment POST printed non-JSON output: ${result.stdout.slice(0, 200)}`,
+      );
+    }
+  }
+  if (comment === undefined) {
+    throw new Error(
+      `the position-anchored thread POST kept failing with HTTP 422 after the anchor-readiness wait and 3 attempts — GitHub's async PR diff never became computable: ${last422}`,
+    );
+  }
   if (typeof comment.id !== 'number' || !Number.isSafeInteger(comment.id)) {
     throw new Error(`the seeded review comment returned no usable id: ${JSON.stringify(comment)}`);
   }
