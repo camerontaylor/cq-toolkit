@@ -1372,12 +1372,14 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     );
   });
 
-  test('an unreadable post-run HEAD → fail-closed: head-unreadable reason, no publish (round 3)', async () => {
+  test('an unreadable post-run HEAD → fail-closed: head-unreadable reason, no publish, reply withheld (round 3 + jLtVU)', async () => {
     // The range gate cannot bound an unreadable HEAD — publication must be
     // withheld with its OWN reason, never fail-open (round 3). The loop's
     // post-run read is read 3 (reads 1-2 are resolution + the pre-fix
     // boundary); the claimed commit still verifies, so this isolates the
-    // head-read gate.
+    // head-read gate. And the CHANGED row's reply is withheld too (jLtVU):
+    // it would cite "Commits: <sha>" for a commit that was never published,
+    // and the dispatch record would dedupe the retry.
     const world = defaultWorld();
     world.headReadFailsAfter = 2;
     const ghLog: string[][] = [];
@@ -1389,16 +1391,21 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.reasons).toContainEqual(
       'worktree head unreadable (post-run): fatal: unreadable HEAD',
     );
+    expect(outcome.reasons).toContainEqual(
+      'worktree head unreadable — reply withheld until publication',
+    );
+    expect(outcome.actionsPosted).toBe(0); // NO action: nothing records, the retry stays clean
+    expect(outcome.reply).toBeUndefined();
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
-    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
   });
 
-  test('an unreadable PRE-run HEAD → fail-closed with the pre-run reason, no publish (P1)', async () => {
+  test('an unreadable PRE-run HEAD → fail-closed with the pre-run reason, no publish, reply withheld (P1 + jLtVU)', async () => {
     // The P1 shape, exactly: the PRE-run boundary read (read 2) fails while
     // resolution (read 1) and the post-run read (3) succeed. headMoved goes
     // false — with the old post-run-only gate the range check was skipped
     // and an unaccounted nonempty range could publish. Fail-closed names
-    // the failing read instead.
+    // the failing read instead — and the changed row's reply is withheld
+    // (jLtVU) exactly as in the post-run shape.
     const world = defaultWorld();
     world.headReadFailsAt = 2;
     const ghLog: string[][] = [];
@@ -1410,8 +1417,12 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.reasons).toContainEqual(
       'worktree head unreadable (pre-run): fatal: unreadable HEAD',
     );
+    expect(outcome.reasons).toContainEqual(
+      'worktree head unreadable — reply withheld until publication',
+    );
+    expect(outcome.actionsPosted).toBe(0); // NO action: nothing records, the retry stays clean
+    expect(outcome.reply).toBeUndefined();
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
-    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
   });
 
   test('range accountability (round 2): an unclaimed MID-RANGE commit blocks publication and names the sha', async () => {

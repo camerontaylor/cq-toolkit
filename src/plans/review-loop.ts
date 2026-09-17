@@ -951,6 +951,17 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       continue; // unreachable: one source per built job, same order
     }
     const value = row.result.value as FixReviewItemResult;
+    // HEAD-UNREADABLE REPLY WITHHOLDING (final bot slice, jLtVU): a changed
+    // row's reply would cite "Commits: <sha>" for a commit that was never
+    // published (the push is null under an unreadable head), and the
+    // dispatch record would dedupe the retry — the still-actionable item
+    // would never be re-answered. No action, nothing records: the next run
+    // re-plans the item and retries cleanly. Unchanged rows keep their
+    // honest no-change answer.
+    if (headUnreadable && value.changed) {
+      reasons.push('worktree head unreadable — reply withheld until publication');
+      continue;
+    }
     const notes =
       (publishWithheld
         ? '\n\nNote: the fix is committed locally but publication was withheld; it is not yet on the remote.'
