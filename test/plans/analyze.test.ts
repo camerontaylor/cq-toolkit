@@ -239,9 +239,10 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
 });
 
 describe('plans barrel surface (review-debt #167)', () => {
-  test('the analyze builder resolves through src/plans/index.js and is callable', async () => {
-    // Imported from the BARREL — the supported-API path SDK consumers take.
-    const { makeAnalyzePlan: barrelBuild } =
+  test('the analyze surface — builder, id, job ids, input type — resolves through src/plans/index.js', async () => {
+    // EVERYTHING resolved from the BARREL — the supported-API path SDK
+    // consumers take — so deleting any barrel re-export fails this test.
+    const barrel =
       (await import('../../src/plans/index.js')) as typeof import('../../src/plans/index.js');
     const inputs: AnalyzePlanInputs = {
       probe: {
@@ -252,13 +253,15 @@ describe('plans barrel surface (review-debt #167)', () => {
       cluster: { set: { tool: 'eslint', failures: [], exitCode: 0 } },
       render: { report: { clusters: [], noise: [] }, dir: '/repo' },
     };
-    const constructed = barrelBuild(inputs);
-    expect(constructed.id).toBe(ANALYZE_PLAN_ID);
+    const constructed = barrel.makeAnalyzePlan(inputs);
+    expect(barrel.ANALYZE_PLAN_ID).toBe(ANALYZE_PLAN_ID);
+    expect(constructed.id).toBe(barrel.ANALYZE_PLAN_ID);
     expect(constructed.jobs.map((j) => j.id)).toEqual([
-      ANALYZE_JOB_IDS.probe,
-      ANALYZE_JOB_IDS.collect,
-      ANALYZE_JOB_IDS.cluster,
-      ANALYZE_JOB_IDS.report,
+      barrel.ANALYZE_JOB_IDS.probe,
+      barrel.ANALYZE_JOB_IDS.collect,
+      barrel.ANALYZE_JOB_IDS.cluster,
+      barrel.ANALYZE_JOB_IDS.report,
     ]);
+    expect(barrel.ANALYZE_JOB_IDS).toEqual(ANALYZE_JOB_IDS);
   });
 });
