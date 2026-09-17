@@ -186,12 +186,16 @@ schema note above).
   `JSON.stringify` is lossless) and the id against a safe-token pattern;
   global id uniqueness is the playbook registry's refusal at register time,
   and every ast-grep semantic is the engine's business at dispatch.
-- **Dispatches are serialized per playbook id** (the registry's
-  `withDispatch` chain): two concurrent dispatches of the SAME playbook can
-  never both pass the quarantine check before either verifier finishes —
-  the second sees the first's record and refuses, so a non-idempotent rule
-  cannot be double-applied. Process-scoped, like the registry and ledger
-  themselves; the cross-process story is the same process-scoped cut.
+- **Same-playbook dispatches reject IN FLIGHT, not queue** (the registry's
+  `withDispatch` slot): a dispatch of the SAME playbook arriving while
+  another is unsettled is refused `needs-human` immediately, without
+  running the engine or verifier — so a non-idempotent rule can never be
+  double-applied, whatever the in-flight dispatch's verdict (queueing would
+  re-apply after a PASS). After settlement the slot frees and a NEW
+  dispatch proceeds normally through the quarantine check: a deliberate
+  re-dispatch of a passed playbook is an explicit consumer action. Different
+  playbooks dispatch unserialized. Process-scoped, like the registry and
+  ledger themselves; the cross-process story is the same process-scoped cut.
 - **Post-v1 cut: a verifier-only retry op.** The indeterminate-verifier
   outcome tells the consumer to re-run the VERIFIER on its own (never to
   blindly re-dispatch, which would re-apply the rule); a first-class

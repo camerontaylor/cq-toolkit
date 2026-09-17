@@ -465,7 +465,7 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
     expect(again.status).toBe('ok');
   });
 
-  test('concurrent dispatches of the SAME playbook are serialized: the second observes the first quarantine and refuses without a second engine scan', async () => {
+  test('a duplicate dispatch of an IN-FLIGHT playbook is rejected immediately (needs-human, no engine, no verifier); after settle, a new dispatch proceeds through the quarantine check', async () => {
     const h = harness(FIXTURE, 1); // the verifier exits 1 → quarantine
     // Defer the FIRST dispatch's verifier: the gated runner parks every
     // non-ast-grep (verifier) command on `gate` until released.
@@ -484,28 +484,74 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       storeFor: () => h.store,
     });
     const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
-    // Both dispatches START concurrently; the first parks on the gate.
+    // Both dispatches START concurrently; the first parks at the verifier.
     const first = serialized(input);
-    const second = serialized(input);
-    // A window for a BROKEN (unserialized) second dispatch to run its own
-    // engine scan — it may not: the second is serialized behind the first
-    // and cannot even pass the quarantine check until the first settled.
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(h.run.scans).toHaveLength(1);
-    // Let the first dispatch fail its verifier and write the record; the
-    // serialized second then refuses on it — one scan, one apply, ever.
-    releaseVerifier?.();
-    const refused = await second;
-    expect(refused.status).toBe('needs-human');
-    if (refused.status === 'needs-human') {
-      expect(refused.reason).toContain('never re-dispatched automatically');
+    const duplicate = serialized(input);
+    // The duplicate is refused IMMEDIATELY — while the first is still
+    // unsettled — WITHOUT running the engine or a verifier. (Queueing would
+    // re-apply the rule once the in-flight dispatch PASSED; rejection is
+    // unconditional.) One scan: only the in-flight dispatch's.
+    const rejected = await duplicate;
+    expect(rejected.status).toBe('needs-human');
+    if (rejected.status === 'needs-human') {
+      expect(rejected.reason).toContain('already in flight');
+      expect(rejected.reason).toContain('re-apply the rule');
+      expect(rejected.reason).toContain('re-dispatch deliberately');
     }
     expect(h.run.scans).toHaveLength(1);
+    expect(h.run.verifierCalls).toHaveLength(0); // #1 parked pre-record; #2 never invoked one
+    // Settle the in-flight dispatch (fail → quarantine). Its slot frees,
+    // and a NEW dispatch proceeds normally — through the quarantine check,
+    // which now refuses on the RECORD (a different refusal than the
+    // in-flight one).
+    releaseVerifier?.();
     const firstResult = await first;
     expect(firstResult.status).toBe('ok');
     if (firstResult.status === 'ok' && firstResult.value.outcome === 'verifier-failed') {
       expect(firstResult.value.quarantined).toBe(true);
     }
+    expect(h.quarantine.isQuarantined('fix-foo-bar')).toBe(true);
+    expect(h.run.verifierCalls).toHaveLength(1); // only the in-flight dispatch's verifier ever ran
+    const later = await serialized(input);
+    expect(later.status).toBe('needs-human');
+    if (later.status === 'needs-human') {
+      expect(later.reason).toContain('never re-dispatched automatically');
+    }
+    expect(h.run.scans).toHaveLength(1);
+  }, 15_000);
+
+  test('DIFFERENT playbooks stay unserialized: B dispatches (engine runs) while A is in flight', async () => {
+    const h = harness(FIXTURE, 0); // verifiers pass
+    let releaseVerifier: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseVerifier = resolve;
+    });
+    const gatedRun: RunCheck = async (cmd) => {
+      if (cmd.command !== 'ast-grep') await gate;
+      return h.run(cmd);
+    };
+    // A second playbook over the same fixture — a different id, so its
+    // dispatch slot is its own.
+    h.playbooks.register({
+      ...playbookOf(),
+      id: 'pb-second',
+      rule: { id: 'fix-foo-bar-2', language: 'ts', rule: { pattern: 'foo_bar' }, fix: 'fooBar' },
+    });
+    const serialized = makePlaybookDispatchOp({
+      playbooks: h.playbooks,
+      quarantine: h.quarantine,
+      run: gatedRun,
+      storeFor: () => h.store,
+    });
+    const input = { playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] };
+    const a = serialized(input); // in flight (its verifier will park)
+    const b = serialized({ ...input, playbookId: 'pb-second' });
+    // A window for B's engine to run — it must: different ids never block.
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(h.run.scans).toHaveLength(2);
+    releaseVerifier?.();
+    expect((await a).status).toBe('ok');
+    expect((await b).status).toBe('ok');
   }, 15_000);
 });
 

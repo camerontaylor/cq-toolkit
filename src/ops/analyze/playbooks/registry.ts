@@ -102,26 +102,45 @@ export interface PlaybookRegistry {
   /** Copies of all registered playbooks, sorted by id. */
   list(): Playbook[];
   /**
-   * Run `task` SERIALIZED against the playbook id: every task for the SAME
-   * id waits for its predecessor to complete (settled, either way) before
-   * starting, while tasks for DIFFERENT ids are unserialized. This is the
-   * dispatch op's race guard — the full sequence (quarantine consult →
-   * engine → verifier → record) runs to completion before the next
-   * dispatch of the SAME playbook can even pass the quarantine check, so
-   * two concurrent dispatches can never double-apply a non-idempotent
-   * rule. Process-scoped, like the registry itself (the cross-process
-   * story is the same process-scoped cut recorded in the family NOTES).
+   * Run `task` in the dispatch slot for the playbook id — with IN-FLIGHT
+   * REJECTION, not queueing: when a task for the SAME id arrives while the
+   * previous one is still unsettled, it is refused with a
+   * {@link DispatchInFlightError} WITHOUT running (a queued duplicate would
+   * re-apply the rule once the in-flight dispatch passed). Tasks for
+   * DIFFERENT ids are unserialized. When the in-flight dispatch settles
+   * (either way), the slot frees and a NEW — deliberate — dispatch proceeds
+   * normally. This is the dispatch op's double-apply guard, and it is
+   * unconditional: a same-playbook duplicate can never reach the engine.
+   * Process-scoped, like the registry itself (the cross-process story is
+   * the same process-scoped cut recorded in the family NOTES).
    */
   withDispatch<T>(id: string, task: () => Promise<T>): Promise<T>;
+}
+
+/**
+ * Thrown by {@link PlaybookRegistry.withDispatch} when a dispatch of the
+ * same playbook arrives while another is unsettled; the dispatch op maps it
+ * to `needs-human` verbatim.
+ */
+export class DispatchInFlightError extends Error {
+  readonly playbookId: string;
+  constructor(playbookId: string) {
+    super(
+      `a dispatch of playbook '${playbookId}' is already in flight; wait for it to settle — a queued duplicate would re-apply the rule`,
+    );
+    this.name = 'DispatchInFlightError';
+    this.playbookId = playbookId;
+  }
 }
 
 /** Build a playbook registry. Seeds are registered in order (duplicates throw). */
 export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookRegistry {
   const byId = new Map<string, Playbook>();
-  // The per-id dispatch chains: each entry is the tail of that playbook's
-  // dispatch sequence (settled, so a failed dispatch never poisons the
-  // chain for the next one).
-  const dispatchChains = new Map<string, Promise<unknown>>();
+  // The per-id dispatch slots: an entry exists exactly while that
+  // playbook's dispatch is UNSETTLED, and is removed on settlement so the
+  // next — deliberate — dispatch proceeds normally through the quarantine
+  // check.
+  const inFlight = new Map<string, Promise<unknown>>();
   const stored = (playbook: Playbook): Playbook => {
     const copy = structuredClone(playbook);
     byId.set(copy.id, copy);
@@ -151,14 +170,22 @@ export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookReg
         .sort((a, b) => (a.id < b.id ? -1 : 1))
         .map((playbook) => structuredClone(playbook)),
     withDispatch: <T>(id: string, task: () => Promise<T>): Promise<T> => {
-      const previous = dispatchChains.get(id) ?? Promise.resolve();
-      // The task runs whether the predecessor dispatched cleanly or not;
-      // the chain tail is failure-proofed so the NEXT dispatch still runs.
-      const next = previous.then(task, task);
-      dispatchChains.set(
-        id,
-        next.catch(() => undefined),
+      if (inFlight.has(id)) {
+        return Promise.reject(new DispatchInFlightError(id));
+      }
+      const next = task();
+      // Track the dispatch until it SETTLES (either way), then free the
+      // slot. The cleanup chain ends with a rejection handler it can never
+      // take (`settled` swallows the outcome) — the tracked-promise shape.
+      const settled = next.then(
+        () => undefined,
+        () => undefined,
       );
+      const freeSlot = (): void => {
+        if (inFlight.get(id) === settled) inFlight.delete(id);
+      };
+      void settled.then(freeSlot, freeSlot);
+      inFlight.set(id, settled);
       return next;
     },
   };
@@ -293,16 +320,21 @@ export type PlaybookDispatchOutcome =
  * INDETERMINATE writes nothing (an unobservable verdict neither passes nor
  * punishes).
  *
- * SERIALIZATION (no concurrent double-apply): the whole sequence runs
- * through the registry's per-playbook-id dispatch chain
- * ({@link PlaybookRegistry.withDispatch}), so two concurrent dispatches of
- * the SAME playbook cannot both pass the quarantine check before either
- * verifier finishes — the second observes the first's record (or verdict)
- * and refuses/fails-closed without re-running the engine. Different
- * playbooks dispatch unserialized. The serialization is process-scoped,
- * the same cut as the registry and ledger themselves.
+ * IN-FLIGHT REJECTION (the double-apply guarantee is unconditional): the
+ * whole sequence runs in the registry's per-playbook-id dispatch slot
+ * ({@link PlaybookRegistry.withDispatch}), and a dispatch of the SAME
+ * playbook that arrives while another is UNSETTLED is refused `needs-human`
+ * IMMEDIATELY — without running the engine or the verifier — so a duplicate
+ * can never re-apply a non-idempotent rule, whatever the in-flight
+ * dispatch's verdict turns out to be (serialization would merely queue the
+ * duplicate and re-apply after a PASS). After the in-flight dispatch
+ * settles, the slot frees and a NEW dispatch proceeds normally through the
+ * quarantine check: a deliberate consumer re-dispatch of a passed playbook
+ * is an explicit action, the same trust level as the first. Different
+ * playbooks dispatch unserialized. Process-scoped, the same cut as the
+ * registry and ledger themselves.
  */
-/** The dispatch flow's full result type (the serialized wrapper returns it). */
+/** The dispatch flow's full result type (the in-flight-rejecting wrapper returns it). */
 type PlaybookDispatchResult = OpResult<PlaybookDispatchOutcome>;
 
 export function makePlaybookDispatchOp(
@@ -470,11 +502,23 @@ export function makePlaybookDispatchOp(
         `Dispatch record: ${JSON.stringify(record)}`,
     };
   };
-  // SERIALIZATION (module header): each dispatch runs inside the registry's
-  // per-playbook-id chain, so a same-playbook dispatch cannot start until
-  // the previous one's full sequence (quarantine consult → engine →
-  // verifier → record) has settled — different playbooks stay unserialized.
-  return (input) => deps.playbooks.withDispatch(input.playbookId, () => dispatchOnce(input));
+  // IN-FLIGHT REJECTION (module header): each dispatch runs in the
+  // registry's per-playbook-id slot; a same-playbook dispatch arriving
+  // while another is unsettled is refused needs-human WITHOUT running —
+  // never queued — so a duplicate can never re-apply the rule after a
+  // PASS. Different playbooks stay unserialized.
+  return (input) =>
+    deps.playbooks
+      .withDispatch(input.playbookId, () => dispatchOnce(input))
+      .catch((err) => {
+        if (err instanceof DispatchInFlightError) {
+          return {
+            status: 'needs-human',
+            reason: `${err.message}; re-dispatch deliberately once the in-flight dispatch settles (a deliberate re-dispatch of a passed playbook is an explicit action, the same trust level as the first)`,
+          } satisfies PlaybookDispatchResult;
+        }
+        throw err;
+      });
 }
 
 /** Error message of an unknown throwable, for `failed` results. */
