@@ -724,33 +724,48 @@ export function makeAstGrepCodemod(
         },
       };
     }
-    const appliedFiles: CodemodFileApplied[] = [];
+    // SPLICING IS PREFLIGHTED (the applyRemediation treatment, Y1/Y2):
+    // every target's remediated bytes (and diffs) are computed — pure, no
+    // writes — before the write phase begins, so a splice/render fault
+    // (stale offsets, out-of-bounds plan) happens with NOTHING written and
+    // needs no rollback. Only store WRITE faults can strand files, and the
+    // write phase below rolls those back.
+    const pending: Array<{ file: string; edits: number; after: Uint8Array; diff: string }> = [];
     for (const file of files) {
       const edits = plannedEdits.filter((edit) => edit.file === file);
       if (edits.length === 0) continue; // nothing to rewrite — the file is not part of the applied set
       const before = current.get(file) as Uint8Array;
-      let after: Uint8Array;
-      let diff: string;
       try {
-        after = applyEditsToBytes(before, edits);
-        diff = renderUnifiedDiff(file, before, edits);
+        pending.push({
+          file,
+          edits: edits.length,
+          after: applyEditsToBytes(before, edits),
+          diff: renderUnifiedDiff(file, before, edits),
+        });
       } catch (err) {
         return {
           status: 'failed',
           error: `ast-grep codemod: could not apply the plan to '${file}' — ${messageOf(err)}`,
         };
       }
+    }
+    const appliedFiles: CodemodFileApplied[] = [];
+    for (const item of pending) {
+      const file = item.file;
       try {
-        await store.writeBytes(file, after);
+        await store.writeBytes(file, item.after);
       } catch (err) {
-        // BEST-EFFORT ROLLBACK (mirrors applyRemediation's): partial
-        // multi-file apply is never stranded. The faulted file itself may
-        // hold a PARTIAL write (writeFileSync is not atomic) and every
-        // already-written file's ORIGINAL bytes are still in `current`
-        // (freshness-verified pre-scan), so both are restored newest-first
-        // through the same store before faulting. When a rollback restore
-        // faults, the stranded naming survives and the restore failure is
-        // named — the caller always knows the exact on-disk state.
+        // BEST-EFFORT ROLLBACK, and ONLY for write-phase faults (a splice
+        // fault can never land here — the preflight above caught it with
+        // nothing written). The faulted file itself may hold a PARTIAL
+        // write (writeFileSync is not atomic) and every already-written
+        // file's ORIGINAL bytes are still in `current` (freshness-verified
+        // pre-scan), so both are restored newest-first through the same
+        // store before faulting. When a rollback restore faults, the
+        // already-written wording survives, the restore failure is named,
+        // and STRANDED is the exact disjoint complement — applied minus
+        // restored (a restored file is listed ONLY under restored; Y1) —
+        // so the caller always knows the exact on-disk state.
         const rolledBack: string[] = [];
         const rollbackFaults: string[] = [];
         let faultedFileRestoreFailed = '';
@@ -778,7 +793,9 @@ export function makeAstGrepCodemod(
           };
         }
         const restored = rolledBack.length === 0 ? 'none' : rolledBack.join(', ');
-        const stranded = appliedFiles.map((applied) => applied.file);
+        const stranded = appliedFiles
+          .map((applied) => applied.file)
+          .filter((file) => !rolledBack.includes(file));
         return {
           status: 'failed',
           error: `ast-grep codemod: could not write '${file}' — ${messageOf(err)}; rollback FAILED for ${rollbackFaults.join(', ')}; restored: ${restored}; already written (stranded): ${stranded.join(', ')}${faultedFileRestoreFailed}`,
@@ -786,9 +803,9 @@ export function makeAstGrepCodemod(
       }
       appliedFiles.push({
         file,
-        edits: edits.length,
-        diff,
-        digestAfter: contentDigest(Buffer.from(after).toString('utf8')),
+        edits: item.edits,
+        diff: item.diff,
+        digestAfter: contentDigest(Buffer.from(item.after).toString('utf8')),
       });
     }
     return {

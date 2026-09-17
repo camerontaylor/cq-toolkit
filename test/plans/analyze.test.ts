@@ -34,6 +34,7 @@ import {
   ANALYZE_PLAN_ID,
   makeAnalyzePlan,
   plan,
+  type AnalyzePlanInputs,
 } from '../../src/plans/analyze.js';
 import { getPlan } from '../../src/plans/registry.js';
 
@@ -103,6 +104,25 @@ describe('makeAnalyzePlan (the pipeline as data)', () => {
       expect(constructed.jobs.map((job) => job.op)).not.toContain(remediationOp);
     }
   });
+
+  test('SNAPSHOT discipline: two makeAnalyzePlan calls from one inputs object stay independent (no mutation aliasing)', () => {
+    const inputs: AnalyzePlanInputs = {
+      probe: { adapter: 'tsc-lines', command: { command: 'tsc', args: ['--noEmit'], cwd: '.' } },
+      collect: { sets: [] },
+      cluster: { set: { tool: 'tsc', failures: [], exitCode: 0 } },
+      render: { report: { clusters: [], noise: [] }, dir: '.' },
+    };
+    const a = makeAnalyzePlan(inputs);
+    const b = makeAnalyzePlan(inputs);
+    const jobA = a.jobs[0];
+    const jobB = b.jobs[0];
+    if (jobA === undefined || jobB === undefined) throw new Error('missing probe jobs');
+    // Mutate plan A's job input — plan B and the caller's object are
+    // untouched: the builder stored deep copies.
+    (jobA.input as { command: { command: string } }).command.command = 'mutated';
+    expect((jobB.input as { command: { command: string } }).command.command).toBe('tsc');
+    expect(inputs.probe.command.command).toBe('tsc');
+  });
 });
 
 describe('the shipped analyze plan entry (the discoverable floor)', () => {
@@ -145,6 +165,16 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
   test('the floor parses against the kernel PlanSchema (serializable plan data)', async () => {
     const resolved = await plan.importer();
     expect(PlanSchema.safeParse(resolved).success).toBe(true);
+  });
+
+  test('the floor builds FRESH inputs per importer resolution (no shared mutable module state to poison)', async () => {
+    const floorA = await plan.importer();
+    const floorB = await plan.importer();
+    const renderA = floorA.jobs[3];
+    const renderB = floorB.jobs[3];
+    if (renderA === undefined || renderB === undefined) throw new Error('missing render jobs');
+    (renderA.input as { dir: string }).dir = '/mutated';
+    expect((renderB.input as { dir: string }).dir).toBe('.');
   });
 
   test('getPlan discovers the module by file through the default plans root (no registry line)', async () => {

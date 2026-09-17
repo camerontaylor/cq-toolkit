@@ -117,22 +117,12 @@ const AnalyzeCheckFailureSchema: z.ZodType<CheckFailure> = z
  * SIGNATURE_MAX_CHARS (see {@link ANALYZE_IDENTIFIER_ENCODED_MAX}), so the
  * over-bound residual is LIBRARY-CALL-ONLY — direct clusterSignature calls
  * that bypass this boundary. The gates' shared schema itself stays
- * untouched.
+ * untouched. ONE definition for BOTH consuming inputs
+ * ({@link CollectFailuresInputSchema} and {@link ClusterErrorsInputSchema}
+ * — the former's per-set bound and the latter's set bound are the same
+ * tightening, so the collect→cluster chain can never drift apart).
  */
 const AnalyzeFailureSetSchema: z.ZodType<FailureSet> = z
-  .object({
-    tool: EncodedBoundedIdentifier,
-    failures: z.array(AnalyzeCheckFailureSchema),
-    exitCode: z.number().nullable(),
-  })
-  .strict();
-
-/**
- * The clusterErrors variant: the same tightening (tool and each failure's
- * ruleId bounded on their encoded size — ruleId is part of the cluster
- * signature's fixed overhead), pinned to the frozen FailureSet type.
- */
-const ClusterFailureSetSchema: z.ZodType<FailureSet> = z
   .object({
     tool: EncodedBoundedIdentifier,
     failures: z.array(AnalyzeCheckFailureSchema),
@@ -191,7 +181,7 @@ export const LedgerViewSchema: z.ZodType<LedgerView> = z
  */
 export const ClusterErrorsInputSchema: z.ZodType<ClusterErrorsInput> = z
   .object({
-    set: ClusterFailureSetSchema,
+    set: AnalyzeFailureSetSchema,
     ledger: LedgerViewSchema.exactOptional(),
   })
   .strict();

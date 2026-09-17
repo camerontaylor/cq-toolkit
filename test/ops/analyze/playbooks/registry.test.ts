@@ -229,18 +229,22 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       quarantined: false,
     });
     // The engine received the playbook's rule SERIALIZED (JSON is a valid
-    // YAML form) and the verifier command crossed the runner verbatim.
+    // YAML form) and the verifier command crossed the runner with the
+    // op-boundary cwd default (the authored command omits cwd — see
+    // playbookOf — so the dispatch fills it with the analysis dir).
     expect(h.run.scans).toHaveLength(1);
     expect((h.run.scans[0] as { args: string[] }).args[3]).toBe(JSON.stringify(RULE));
     expect(h.run.verifierCalls).toEqual([
-      { command: 'verify-tool', args: ['check'], timeoutMs: 30_000 },
+      { command: 'verify-tool', args: ['check'], timeoutMs: 30_000, cwd: '/ws' },
     ]);
   });
 
-  test('an authored verifier command WITHOUT timeoutMs is dispatched capped at the 600_000ms op-boundary default; an explicit timeout passes through verbatim', async () => {
-    // The authored asset omits the timeout (the format's library-level
-    // optional) — the dispatch op must cap it at the gates' op-boundary
-    // default, visible to the runner.
+  test('authored-optional verifier command fields are DISPATCH-DEFAULTED at the op boundary (cwd → input.dir; timeoutMs → 600_000); authored values pass through verbatim', async () => {
+    // The authored asset omits BOTH optional fields (the format's
+    // library-level optionals) — the dispatch op must fill them: an
+    // omitted cwd would inherit the DISPATCHING process's cwd (a vacuous
+    // pass against the wrong tree) and an omitted timeoutMs would run
+    // uncapped. The fake runner asserts exactly what it received.
     const omitted = harness(FIXTURE, 0, '', {
       ...playbookOf(),
       verifier: { command: { command: 'verify-tool', args: ['check'] } },
@@ -256,13 +260,50 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
       command: 'verify-tool',
       args: ['check'],
       timeoutMs: 600_000,
+      cwd: '/ws',
     });
-    // And an AUTHORED explicit timeout is never overridden.
-    const explicit = harness(FIXTURE, 0);
+    // And AUTHORED values are never overridden — cwd and timeout pass
+    // through verbatim.
+    const explicit = harness(FIXTURE, 0, '', {
+      ...playbookOf(),
+      verifier: {
+        command: { command: 'verify-tool', args: ['check'], cwd: 'authored/ws', timeoutMs: 30_000 },
+      },
+    });
     await explicit.dispatch({ playbookId: 'fix-foo-bar', dir: '/ws', targets: ['src/a.ts'] });
     expect(explicit.run.verifierCalls).toEqual([
-      { command: 'verify-tool', args: ['check'], timeoutMs: 30_000 },
+      { command: 'verify-tool', args: ['check'], timeoutMs: 30_000, cwd: 'authored/ws' },
     ]);
+  });
+
+  test('SNAPSHOT discipline: a caller mutation AFTER register cannot change what a later dispatch executes', async () => {
+    // The harness registers the CALLER's playbook object; mutating it (and
+    // the registered handle) afterwards must not touch what dispatch runs —
+    // the registry stores deep copies. The playbook's rule is a private
+    // CLONE of RULE so the mutation below cannot leak into other tests.
+    const playbook: Playbook = { ...playbookOf(), rule: structuredClone(RULE) };
+    const originalRuleJson = JSON.stringify(RULE);
+    const h = harness(FIXTURE, 0, '', playbook);
+    (playbook.rule as { rule: { pattern: string } }).rule.pattern = 'mutated_never';
+    (playbook.rule as { fix: string }).fix = 'mutatedNever';
+    playbook.verifier.command.command = 'mutated-never';
+    const result = await h.dispatch({
+      playbookId: 'fix-foo-bar',
+      dir: '/ws',
+      targets: ['src/a.ts'],
+    });
+    expect(result.status).toBe('ok');
+    if (result.status !== 'ok') return;
+    // The engine scanned with the REGISTERED rule (the original pattern,
+    // serialized verbatim), not the mutated one.
+    expect(h.run.scans).toHaveLength(1);
+    expect((h.run.scans[0] as { args: string[] }).args[3]).toBe(originalRuleJson);
+    // And the verifier command is the registered one.
+    expect(h.run.verifierCalls).toEqual([
+      { command: 'verify-tool', args: ['check'], timeoutMs: 30_000, cwd: '/ws' },
+    ]);
+    // The remediation still landed (the original fix).
+    expect(h.store.backing.get('src/a.ts')).toBe('const x = fooBar;\nconst y = fooBar;\n');
   });
 
   test('verifier FAIL: quarantined with the reason; the report says applied-but-failed; next dispatch refuses', async () => {

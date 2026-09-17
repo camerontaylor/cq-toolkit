@@ -13,11 +13,11 @@
 //     shape verbatim (type alias + zod mirror pinned to it): the consumer
 //     points it at ANY command (their test runner, their compiler, their
 //     script) exactly the way gates.checkRunner points at a check tool. The
-//     `timeoutMs` field stays OPTIONAL with NO default here — the playbook
-//     is a persisted consumer asset, not an op input, so the gates'
-//     op-boundary `.default(600_000)` does not apply; an absent timeout is
-//     the consumer's explicit uncapped-verifier choice (the library-level
-//     CheckCommand shape).
+//     `timeoutMs` field is OPTIONAL with NO DEFAULT at the format level —
+//     the playbook is a persisted consumer asset, not an op input; the
+//     dispatch op boundary applies the 600_000 ms cap when the authored
+//     command omits it, and an authored timeout passes through verbatim
+//     (playbooks/registry.ts).
 //   - `rule` is validated AS A JSON OBJECT and nothing more: the schema
 //     requires a non-empty JSON object (finite numbers, no undefined
 //     values — z.json() is the value schema), while every ast-grep semantic

@@ -82,27 +82,40 @@ const DISPATCH_VERIFIER_TIMEOUT_MS = 600_000;
  * uniqueness the format schema deliberately does not check), get, list.
  * In-memory, deterministic (list sorted by id); process-scoped in v1 (the
  * composition binds one instance — see quarantine.ts for the cut).
+ *
+ * SNAPSHOT DISCIPLINE (no mutation aliasing): the registry stores and
+ * returns DEEP COPIES of every playbook — a caller mutating the object it
+ * registered (or one it got back from get/list) can never change what a
+ * later dispatch executes. The playbook is the recorded remediation
+ * decision; its bytes at dispatch time must be the bytes that were
+ * registered.
  */
 export interface PlaybookRegistry {
   /**
    * Register a validated playbook. Throws (RangeError) on a duplicate id —
-   * the op boundary maps the refusal to `failed` naming the id.
+   * the op boundary maps the refusal to `failed` naming the id. Stores a
+   * deep copy; the returned value is the registered snapshot.
    */
   register(playbook: Playbook): Playbook;
-  /** The registered playbook with this id, or undefined. */
+  /** A copy of the registered playbook with this id, or undefined. */
   get(id: string): Playbook | undefined;
-  /** All registered playbooks, sorted by id. */
+  /** Copies of all registered playbooks, sorted by id. */
   list(): Playbook[];
 }
 
 /** Build a playbook registry. Seeds are registered in order (duplicates throw). */
 export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookRegistry {
   const byId = new Map<string, Playbook>();
+  const stored = (playbook: Playbook): Playbook => {
+    const copy = structuredClone(playbook);
+    byId.set(copy.id, copy);
+    return structuredClone(copy);
+  };
   for (const playbook of initial ?? []) {
     if (byId.has(playbook.id)) {
       throw new RangeError(`playbook registry: duplicate id '${playbook.id}' in seed`);
     }
-    byId.set(playbook.id, playbook);
+    stored(playbook);
   }
   return {
     register: (playbook) => {
@@ -111,11 +124,16 @@ export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookReg
           `playbook registry: a playbook with id '${playbook.id}' is already registered — ids are globally unique; pick a new id`,
         );
       }
-      byId.set(playbook.id, playbook);
-      return playbook;
+      return stored(playbook);
     },
-    get: (id) => byId.get(id),
-    list: () => [...byId.values()].sort((a, b) => (a.id < b.id ? -1 : 1)),
+    get: (id) => {
+      const playbook = byId.get(id);
+      return playbook === undefined ? undefined : structuredClone(playbook);
+    },
+    list: () =>
+      [...byId.values()]
+        .sort((a, b) => (a.id < b.id ? -1 : 1))
+        .map((playbook) => structuredClone(playbook)),
   };
 }
 

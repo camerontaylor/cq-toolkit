@@ -54,6 +54,21 @@ describe('makeQuarantineLedger (the pure quarantine state machine)', () => {
     expect(ledger.reasonOf('pb')).toBe('second reason');
   });
 
+  test('SNAPSHOT discipline: mutating a retained record (returned or listed) cannot mutate the ledger evidence', () => {
+    const ledger = makeQuarantineLedger();
+    const retained = ledger.quarantine('pb', 'the evidence');
+    // Mutate the retained handle — the stored record is a disjoint copy.
+    retained.reason = 'tampered';
+    retained.playbookId = 'other';
+    expect(ledger.reasonOf('pb')).toBe('the evidence');
+    expect(ledger.isQuarantined('pb')).toBe(true);
+    expect(ledger.isQuarantined('other')).toBe(false);
+    // Same for the records() view: copies, never the stored objects.
+    const listed = ledger.records();
+    (listed[0] as { reason: string }).reason = 'tampered too';
+    expect(ledger.records()[0]?.reason).toBe('the evidence');
+  });
+
   test('unquarantine is explicit: it removes the record; nothing else does', () => {
     const ledger = makeQuarantineLedger();
     ledger.quarantine('pb', 'r');

@@ -69,33 +69,38 @@ export interface AnalyzePlanInputs {
 }
 
 /**
- * Author an analyze plan for `inputs` (each op's input verbatim, as static
- * job data — see the dataflow contract in the module header). Job ids are
+ * Author an analyze plan for `inputs` (each op's input as static job data —
+ * see the dataflow contract in the module header). SNAPSHOT DISCIPLINE (no
+ * mutation aliasing): the builder stores DEEP COPIES of the caller's
+ * inputs, so the authored plan is frozen at authoring time — a consumer
+ * edit of the caller's objects (or of one authored plan's job inputs)
+ * cannot rewrite another plan built from the same objects. Job ids are
  * stable ({@link ANALYZE_JOB_IDS}); the chain is strictly linear:
  * probe → collect → cluster → report.
  */
 export function makeAnalyzePlan(inputs: AnalyzePlanInputs): Plan {
+  const snapshot = structuredClone(inputs);
   return {
     id: ANALYZE_PLAN_ID,
     label: 'analyze: probe → collect → cluster → report (remediation is NEVER in the plan)',
     jobs: [
-      { id: ANALYZE_JOB_IDS.probe, op: 'gates.checkRunner', input: inputs.probe },
+      { id: ANALYZE_JOB_IDS.probe, op: 'gates.checkRunner', input: snapshot.probe },
       {
         id: ANALYZE_JOB_IDS.collect,
         op: 'analyze.collectFailures',
-        input: inputs.collect,
+        input: snapshot.collect,
         dependsOn: [ANALYZE_JOB_IDS.probe],
       },
       {
         id: ANALYZE_JOB_IDS.cluster,
         op: 'analyze.clusterErrors',
-        input: inputs.cluster,
+        input: snapshot.cluster,
         dependsOn: [ANALYZE_JOB_IDS.collect],
       },
       {
         id: ANALYZE_JOB_IDS.report,
         op: 'analyze.renderAnalysisReport',
-        input: inputs.render,
+        input: snapshot.render,
         dependsOn: [ANALYZE_JOB_IDS.cluster],
       },
     ],
@@ -103,22 +108,26 @@ export function makeAnalyzePlan(inputs: AnalyzePlanInputs): Plan {
 }
 
 /**
- * The shipped floor's inputs: the placeholder tsc probe over the current
- * directory, and the schema-valid empty shapes downstream of it (`sets: []`
- * for collect; the empty tsc set for cluster; the empty report rendered into
- * the current directory for render). Run VERBATIM, the floor terminates at
- * the collect job with the honest no-input failure — see the module header.
- * These are template values for discovery, not a configured analysis.
+ * The shipped floor's inputs, built FRESH per call (never shared mutable
+ * module-level objects): the placeholder tsc probe over the current
+ * directory, and the schema-valid empty shapes downstream of it
+ * (`sets: []` for collect; the empty tsc set for cluster; the empty report
+ * rendered into the current directory for render). Run VERBATIM, the floor
+ * terminates at the collect job with the honest no-input failure — see the
+ * module header. These are template values for discovery, not a configured
+ * analysis.
  */
-const FLOOR_INPUTS: AnalyzePlanInputs = {
-  probe: {
-    adapter: 'tsc-lines',
-    command: { command: 'tsc', args: ['--noEmit', '--pretty', 'false'], cwd: '.' },
-  },
-  collect: { sets: [] },
-  cluster: { set: { tool: 'tsc', failures: [], exitCode: 0 } },
-  render: { report: { clusters: [], noise: [] }, dir: '.' },
-};
+function floorInputs(): AnalyzePlanInputs {
+  return {
+    probe: {
+      adapter: 'tsc-lines',
+      command: { command: 'tsc', args: ['--noEmit', '--pretty', 'false'], cwd: '.' },
+    },
+    collect: { sets: [] },
+    cluster: { set: { tool: 'tsc', failures: [], exitCode: 0 } },
+    render: { report: { clusters: [], noise: [] }, dir: '.' },
+  };
+}
 
 /**
  * The discovered plan entry: its importer resolves the floor above — the
@@ -127,5 +136,5 @@ const FLOOR_INPUTS: AnalyzePlanInputs = {
  */
 export const plan: PlanRegistryEntry = {
   name: ANALYZE_PLAN_ID,
-  importer: async () => makeAnalyzePlan(FLOOR_INPUTS),
+  importer: async () => makeAnalyzePlan(floorInputs()),
 };

@@ -60,7 +60,9 @@ export interface QuarantineLedger {
    * Quarantine a playbook with the given (verifier-failure) reason. Upserts
    * any live record for the id (a post-release re-quarantine replaces the
    * old reason). Throws on an empty id or reason — a quarantine without its
-   * evidence is a hole in the ledger, not a record.
+   * evidence is a hole in the ledger, not a record. Returns a SNAPSHOT
+   * disjoint from the stored record (no mutation aliasing): a caller
+   * retaining it cannot mutate the ledger's evidence.
    */
   quarantine(playbookId: string, reason: string): QuarantineRecord;
   /** True exactly when a live quarantine record exists for the playbook. */
@@ -98,7 +100,11 @@ export function makeQuarantineLedger(initial?: readonly QuarantineRecord[]): Qua
     }
     const record: QuarantineRecord = { playbookId, phase, reason };
     live.set(playbookId, record);
-    return record;
+    // SNAPSHOT DISCIPLINE (no mutation aliasing): the ledger hands out
+    // COPIES, never the stored record — a caller retaining the returned
+    // record (or one from records()) cannot mutate the evidence the
+    // fail-closed dispatch consult consults.
+    return { ...record };
   };
   for (const record of initial ?? []) {
     upsert(record.playbookId, record.reason, record.phase);
@@ -108,6 +114,9 @@ export function makeQuarantineLedger(initial?: readonly QuarantineRecord[]): Qua
     isQuarantined: (playbookId) => live.has(playbookId),
     reasonOf: (playbookId) => live.get(playbookId)?.reason,
     unquarantine: (playbookId) => live.delete(playbookId),
-    records: () => [...live.values()].sort((a, b) => (a.playbookId < b.playbookId ? -1 : 1)),
+    records: () =>
+      [...live.values()]
+        .sort((a, b) => (a.playbookId < b.playbookId ? -1 : 1))
+        .map((record) => ({ ...record })),
   };
 }
