@@ -25,7 +25,16 @@
 //      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
 //      scan and its unit fails uncommitted.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +44,7 @@ import {
   ALPHA_FIX,
   BETA_BREAK,
   BETA_BREAK_MESSAGE,
+  BETA_PACKAGE_JSON,
   generateScratchRepo,
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
@@ -58,8 +68,8 @@ import type {
 import type { WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import type { JournalEvent, RunReport } from '../../../src/kernel/types.js';
 import {
-  latestRunEvents,
   makeFakeGh,
+  runEventsAt,
   runSweepPlan,
   salvageEntriesFor,
   salvageInterruptedRun,
@@ -188,7 +198,11 @@ function unitRow(
   pkg: string,
   fixer: string = 'fix',
 ): { status: string; report?: SweepUnitReport; error?: string } {
-  const id = `sweep-${pkg}-${fixer}`;
+  // The planner's own job-id fold (sanitizedIdPart): runs of characters
+  // outside [A-Za-z0-9._-] become ONE '-' — '@scope/gamma' lands as
+  // '-scope-gamma', so the id carries a double dash.
+  const folded = pkg.replace(/[^A-Za-z0-9._-]+/g, '-');
+  const id = `sweep-${folded}-${fixer}`;
   const row = run.jobs.find((candidate) => candidate.jobId === id);
   if (row === undefined) throw new Error(`no unit row '${id}' in the run report`);
   if (row.result.status === 'ok') {
@@ -232,9 +246,13 @@ function gitOut(args: string[], cwd: string): Promise<string> {
   });
 }
 
-/** Journal assertions shared by the happy path and the re-invoke. */
-async function expectCompleteJournal(journalDir: string, expectedJobs: Array<[string, string]>) {
-  const events = await latestRunEvents(journalDir, SWEEP_PLAN_ID);
+/** Journal assertions for ONE journaled run (by index; -1 = latest). */
+async function expectCompleteJournal(
+  journalDir: string,
+  expectedJobs: Array<[string, string]>,
+  runIndex: number = -1,
+) {
+  const events = await runEventsAt(journalDir, SWEEP_PLAN_ID, runIndex);
   expect(events.length).toBeGreaterThan(0);
   const first = events[0] as JournalEvent;
   const last = events[events.length - 1] as JournalEvent;
@@ -271,23 +289,26 @@ async function expectCompleteJournal(journalDir: string, expectedJobs: Array<[st
   }
 }
 
-/** The fleet assertion: tracker-first order, 3 PRs, the manifest updated in place. */
+/** The fleet assertion: tracker-first order, tracker + the given packages' PRs, manifest updated in place. */
 function expectTrackerFirstFleet(
   scene: Scenario,
   runPrefix: string,
+  expectedBranches: string[],
   pkgRows: Array<AssemblePrsPackageReport>,
 ) {
   const calls = scene.gh.calls;
   const trackerBranch = `${runPrefix}/tracker`;
   expect(calls[0]).toBe(`searchPrByHead ${trackerBranch} -> main`);
   expect(calls[1]).toBe(`createPr ${trackerBranch} -> main`);
-  for (const [index, pkg] of SCRATCH_PACKAGES.entries()) {
-    expect(calls[2 + index * 2]).toBe(`searchPrByHead ${runPrefix}/fix/${pkg.name} -> main`);
-    expect(calls[3 + index * 2]).toBe(`createPr ${runPrefix}/fix/${pkg.name} -> main`);
+  for (const [index, branch] of expectedBranches.entries()) {
+    expect(calls[2 + index * 2]).toBe(`searchPrByHead ${branch} -> main`);
+    expect(calls[3 + index * 2]).toBe(`createPr ${branch} -> main`);
   }
-  // 3 PRs total: the tracker (#1) before both package PRs (#2, #3).
-  expect(scene.gh.created).toHaveLength(3);
-  expect(scene.gh.created.map((pr) => pr.number)).toEqual([1, 2, 3]);
+  // The tracker (#1) before every package PR; numbers allocate in order.
+  expect(scene.gh.created).toHaveLength(expectedBranches.length + 1);
+  expect(scene.gh.created.map((pr) => pr.number)).toEqual(
+    Array.from({ length: pkgRows.length + 1 }, (_, index) => index + 1),
+  );
   expect(scene.gh.created[0]?.head).toBe(trackerBranch);
   // The tracker's body is the fleet manifest, updated in place with the numbers.
   const trackerBody = scene.gh.bodies.get(1) ?? '';
@@ -315,8 +336,9 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
         { package: 'beta', fixer: 'fix', files: SCRATCH_PACKAGE_FILES['beta'] },
       ]);
 
-      // Phase B: every job done — plan, two units, assemble.
-      expect(outcome.run.counts).toMatchObject({ done: 4, failed: 0, blocked: 0, queued: 0 });
+      // Phase B: every unit job done — plan + two units (the assemble leg is
+      // the marker-filtered second dispatch, jTPa8).
+      expect(outcome.run.counts).toMatchObject({ done: 3, failed: 0, blocked: 0, queued: 0 });
 
       // Alpha: failing baseline → fixed → clean final → no-regression → committed.
       const alpha = unitRow(outcome.run, 'alpha');
@@ -352,18 +374,33 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       );
       expect(betaCommits.trim()).toBe('0');
 
-      // The fleet: tracker-first, 3 PRs, manifest updated in place.
-      const assembled = assembleReport(outcome.run);
+      // The fleet: tracker-first, manifest updated in place — and composed
+      // from the COMMITTED MARKERS (jTPa8): beta no-oped (nothing to fix →
+      // uncommitted → no marker), so the assemble covers ALPHA ONLY; a
+      // no-change unit never assembles an empty-diff PR.
+      expect(outcome.assembleRun).toBeDefined();
+      const assembled = assembleReport(outcome.assembleRun as RunReport);
       expect(assembled.tracker).toMatchObject({ number: 1, created: true });
-      expectTrackerFirstFleet(scene, 'cq/e2e-happy', assembled.packages);
+      expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
+      expectTrackerFirstFleet(
+        scene,
+        'cq/e2e-happy',
+        ['cq/e2e-happy/fix/alpha'],
+        assembled.packages,
+      );
 
-      // The journal shows every step.
-      await expectCompleteJournal(scene.journalDir, [
-        ['sweep-plan', 'sweep.planSweep'],
-        ['sweep-alpha-fix', 'sweep.unit'],
-        ['sweep-beta-fix', 'sweep.unit'],
-        ['sweep-assemble', 'pr.assemblePrs'],
-      ]);
+      // The journal shows every step: run 0 = units, run 1 = the marker-
+      // filtered assemble dispatch.
+      await expectCompleteJournal(
+        scene.journalDir,
+        [
+          ['sweep-plan', 'sweep.planSweep'],
+          ['sweep-alpha-fix', 'sweep.unit'],
+          ['sweep-beta-fix', 'sweep.unit'],
+        ],
+        0,
+      );
+      await expectCompleteJournal(scene.journalDir, [['sweep-assemble', 'pr.assemblePrs']], 1);
 
       // The failures-only DEFAULT output: a clean run names no package.
       expect(outcome.output).not.toMatch(/alpha|beta/);
@@ -393,7 +430,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       // rewritten exactly once per unit run (right after the baseline probe),
       // so a re-run's fresh mtime is the re-probe's evidence.
       const alphaSnapshot = join(
-        sweepRunStateDir(scene.repo, 'worktrees'),
+        sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-interrupt'),
         SWEEP_RUN_STATE_BASELINE_DIR,
         'fix',
         'alpha.json',
@@ -407,12 +444,8 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       const beta = unitRow(first.run, 'beta');
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/fixer worker stopped with reason 'error'/);
-      // The fleet gate: one failed unit blocks the assemble job.
-      const assembleRow = first.run.jobs.find((candidate) => candidate.jobId === 'sweep-assemble');
-      expect(assembleRow?.result.status).toBe('failed');
-      expect(assembleRow?.result.status === 'failed' && assembleRow.result.error).toContain(
-        'blocked: dependency',
-      );
+      // The fleet gate: one failed unit withholds the assemble dispatch.
+      expect(first.assembleRun).toBeUndefined();
       expect(scene.gh.created).toHaveLength(0); // no PR without its full fleet
       // The push leg (jSKJL): alpha's committed branch is on the origin;
       // beta's is not (it never committed, so it never pushed).
@@ -453,12 +486,13 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(alphaSecond.report?.committed).toBe(false);
       expect(unitRow(second.run, 'beta').report?.worktree.reused).toBe(true);
       // The tree itself: no '.cq' (or any baseline state) inside; the
-      // snapshot is in the run-state dir, keyed kind/slug.
+      // snapshot is in the RUN-PREFIX-NAMESPACED run-state dir (jTPbC),
+      // keyed kind/slug.
       expect(existsSync(resolve(scene.repo, 'worktrees', 'fix', 'alpha', '.cq'))).toBe(false);
       expect(
         existsSync(
           join(
-            sweepRunStateDir(scene.repo, 'worktrees'),
+            sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-interrupt'),
             SWEEP_RUN_STATE_BASELINE_DIR,
             'fix',
             'alpha.json',
@@ -466,20 +500,35 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         ),
       ).toBe(true);
 
-      // The fleet assembles now: tracker-first, 3 PRs.
-      const assembled = assembleReport(second.run);
+      // The fleet assembles now — from the COMMITTED MARKERS (jTPa8): alpha
+      // committed+pushed in run 1 (its marker survives); beta no-oped in run
+      // 2 (no commit, no marker) → the assemble covers ALPHA ONLY: a
+      // no-change unit never assembles an empty-diff PR.
+      expect(second.assembleRun).toBeDefined();
+      const assembled = assembleReport(second.assembleRun as RunReport);
       expect(assembled.tracker).toMatchObject({ number: 1, created: true });
-      expectTrackerFirstFleet(scene, 'cq/e2e-interrupt', assembled.packages);
+      expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
+      expectTrackerFirstFleet(
+        scene,
+        'cq/e2e-interrupt',
+        ['cq/e2e-interrupt/fix/alpha'],
+        assembled.packages,
+      );
 
-      // Two journaled runs, each complete with a run-finished frame.
+      // Three journaled runs (units 1, units 2, the marker-filtered
+      // assemble), each complete with a run-finished frame.
       const runIds = await openRunLog(scene.journalDir).runs();
-      expect(runIds).toHaveLength(2);
-      await expectCompleteJournal(scene.journalDir, [
-        ['sweep-plan', 'sweep.planSweep'],
-        ['sweep-alpha-fix', 'sweep.unit'],
-        ['sweep-beta-fix', 'sweep.unit'],
-        ['sweep-assemble', 'pr.assemblePrs'],
-      ]);
+      expect(runIds).toHaveLength(3);
+      await expectCompleteJournal(
+        scene.journalDir,
+        [
+          ['sweep-plan', 'sweep.planSweep'],
+          ['sweep-alpha-fix', 'sweep.unit'],
+          ['sweep-beta-fix', 'sweep.unit'],
+        ],
+        1,
+      );
+      await expectCompleteJournal(scene.journalDir, [['sweep-assemble', 'pr.assemblePrs']], 2);
 
       // The re-invoke's output is failures-only clean as well.
       expect(second.output).toContain('0 failing unit(s) of 2');
@@ -637,26 +686,138 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
   );
 });
 
-// The journal-file shape sanity: one NDJSON file per run, parseable lines.
+// ---------------------------------------------------------------------------
+// 5. Scoped-package slugs (jTPa1) and rename-side scope (jVgCj)
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: scoped packages and rename-side scope', () => {
+  test(
+    '@scope/gamma derives the slug scope-gamma: the unit runs, commits, and pushes on the normalized branch',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-scoped');
+      // Seed ONE scoped package with alpha's failing-suite shape.
+      const pkgDir = join(scene.repo, 'packages', '@scope', 'gamma');
+      mkdirSync(join(pkgDir, 'test'), { recursive: true });
+      writeFileSync(
+        join(pkgDir, 'package.json'),
+        `${JSON.stringify({ name: '@scope/gamma', version: '1.0.0', private: true }, null, 2)}\n`,
+      );
+      writeFileSync(
+        join(pkgDir, 'test', 'suite.test.js'),
+        [
+          "'use strict';",
+          'const sum = (a, b) => a + b;',
+          'if (sum(1, 1) !== 3) {',
+          "  throw new Error('expected 3, got ' + sum(1, 1));",
+          '}',
+          '',
+        ].join('\n'),
+      );
+      await gitOut(['-C', scene.repo, 'add', '-A'], scene.repo);
+      await gitOut(['-C', scene.repo, 'commit', '-q', '-m', 'seed: @scope/gamma'], scene.repo);
+
+      const GAMMA_FIX = {
+        file: 'packages/@scope/gamma/test/suite.test.js',
+        oldText: 'if (sum(1, 1) !== 3) {',
+        newText: 'if (sum(1, 1) !== 2) {',
+      };
+      const config: SweepPlanConfig = {
+        ...scene.config,
+        packages: [{ name: '@scope/gamma', path: 'packages/@scope/gamma' }],
+        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/test/suite.test.js'] },
+      };
+      const outcome = await runSweepPlan(
+        optsFor({ ...scene, config }, (unit) =>
+          [
+            `You are the ${unit.fixer} fixer for package ${unit.package}.`,
+            'Apply exactly the edit in the instruction line, then report.',
+            `@SWEEP-AGENT ${JSON.stringify({ edit: GAMMA_FIX })}`,
+          ].join('\n'),
+        ),
+      );
+
+      // The scoped unit RAN (the old fold derived the undeliverable
+      // `-scope-gamma`, which SEGMENT_RE refuses): fixed, committed, pushed
+      // on the normalized branch.
+      const gamma = unitRow(outcome.run, '@scope/gamma');
+      expect(gamma.status).toBe('ok');
+      expect(gamma.report?.baseline.verdict).toBe('failing');
+      expect(gamma.report?.committed).toBe(true);
+      expect(gamma.report?.pushed).toBe(true);
+      expect(gamma.report?.prBranch).toBe('cq/e2e-scoped/fix/scope-gamma');
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).toContain('cq/e2e-scoped/fix/scope-gamma');
+      // The marker-filtered assemble covers the scoped unit under its
+      // normalized branch.
+      expect(outcome.assembleRun).toBeDefined();
+      const assembled = assembleReport(outcome.assembleRun as RunReport);
+      expect(assembled.packages.map((row) => row.name)).toEqual(['@scope/gamma']);
+      expectTrackerFirstFleet(
+        scene,
+        'cq/e2e-scoped',
+        ['cq/e2e-scoped/fix/scope-gamma'],
+        assembled.packages,
+      );
+    },
+  );
+
+  test(
+    'a working-tree RENAME production → test shape: the allowlist flags the SOURCE path',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-rename');
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config: { ...scene.config, fixers: ['test-fix'] } },
+          prompts(
+            { edit: ALPHA_FIX },
+            {
+              // Same content at a test-shaped path + the original removed:
+              // git stages this as a rename whose SOURCE is production code.
+              write: { file: 'packages/beta/test/manifest.test.js', text: BETA_PACKAGE_JSON },
+              delete: 'packages/beta/package.json',
+            },
+          ),
+          { stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] } },
+        ),
+      );
+
+      // The unit failed naming the rename's SOURCE — the destination alone
+      // (test/manifest.test.js) matches the test-file patterns and would
+      // have slipped a --name-only allowlist.
+      const beta = unitRow(outcome.run, 'beta', 'test-fix');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/outside the allowlist/);
+      expect(beta.error).toContain('packages/beta/package.json');
+      expect(scene.gh.created).toHaveLength(0);
+    },
+  );
+});
+
+// The journal-file shape sanity: one NDJSON file per dispatch (units + the
+// marker-filtered assemble), every line parseable.
 describe('sweep e2e: journal evidence shape', () => {
   test('every journaled line parses as the frozen event union', { timeout: 120_000 }, async () => {
     const scene = await scenario('cq/e2e-journal');
     await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
     const files = readdirSync(scene.journalDir).filter((name) => name.endsWith('.ndjson'));
-    expect(files).toHaveLength(1);
-    const lines = readFileSync(join(scene.journalDir, files[0] as string), 'utf8')
-      .split('\n')
-      .filter((line) => line !== '');
-    for (const line of lines) {
-      // The SCHEMA validates, not a type-field sniff: a line missing required
-      // fields (or carrying an unknown discriminator) is rejected here — the
-      // same validation openRunLog.append performs before anything hits disk.
-      const parsed = JournalEventSchema.safeParse(JSON.parse(line));
-      expect(parsed.success, `line must parse as a journal event: ${line}`).toBe(true);
-      if (parsed.success) {
-        expect(['run-started', 'job-started', 'job-finished', 'run-finished']).toContain(
-          parsed.data.type,
-        );
+    expect(files).toHaveLength(2); // the units dispatch + the assemble dispatch
+    for (const file of files) {
+      const lines = readFileSync(join(scene.journalDir, file), 'utf8')
+        .split('\n')
+        .filter((line) => line !== '');
+      for (const line of lines) {
+        // The SCHEMA validates, not a type-field sniff: a line missing required
+        // fields (or carrying an unknown discriminator) is rejected here — the
+        // same validation openRunLog.append performs before anything hits disk.
+        const parsed = JournalEventSchema.safeParse(JSON.parse(line));
+        expect(parsed.success, `line must parse as a journal event: ${line}`).toBe(true);
+        if (parsed.success) {
+          expect(['run-started', 'job-started', 'job-finished', 'run-finished']).toContain(
+            parsed.data.type,
+          );
+        }
       }
     }
   });

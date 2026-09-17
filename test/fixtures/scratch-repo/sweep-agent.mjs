@@ -23,6 +23,9 @@
 //                                  alpha fix or the beta break
 //   {write:{file,text}}            ADD one new file in cwd (the worktree) —
 //                                  the tamper-guard e2e's new-file hack
+//   {delete:file}                  REMOVE one file in cwd (with {write} this
+//                                  is a working-tree rename — the
+//                                  rename-side allowlist e2e)
 //   {fault:"why"}                  stderr + exit 1 with NO result event —
 //                                  the driver's 'error' stop reason (the
 //                                  mid-run fault the interrupt test reaps)
@@ -30,7 +33,7 @@
 //
 // Fixed usage everywhere: {input_tokens:10, output_tokens:5,
 // cache_read_input_tokens:2, cache_creation_input_tokens:3}.
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import process from 'node:process';
 
@@ -101,6 +104,14 @@ async function performWrite(write) {
   return `added '${file}'`;
 }
 
+/** The one removal ({delete:file}) — the rename-side allowlist e2e's half of a working-tree rename. */
+async function performDelete(file) {
+  const abs = resolveInside(typeof file === 'string' ? file : '');
+  if (abs === undefined) return `refused: '${file}' resolves outside the checkout`;
+  await rm(abs, { force: true });
+  return `removed '${file}'`;
+}
+
 const instruction = await instructionOf();
 out({ type: 'system', subtype: 'init', session_id: sessionId, model });
 
@@ -108,12 +119,17 @@ if (typeof instruction.fault === 'string' && instruction.fault !== '') {
   process.stderr.write(`sweep-agent: ${instruction.fault}\n`);
   process.exitCode = 1; // no result event — the driver's 'error' stop reason
 } else {
-  let text = 'nothing to fix';
+  const texts = [];
   if (instruction.write !== undefined && instruction.write !== null) {
-    text = await performWrite(instruction.write);
-  } else if (instruction.edit !== undefined && instruction.edit !== null) {
-    text = await performEdit(instruction.edit);
+    texts.push(await performWrite(instruction.write));
   }
+  if (typeof instruction.delete === 'string' && instruction.delete !== '') {
+    texts.push(await performDelete(instruction.delete));
+  }
+  if (instruction.edit !== undefined && instruction.edit !== null) {
+    texts.push(await performEdit(instruction.edit));
+  }
+  const text = texts.length === 0 ? 'nothing to fix' : texts.join('; ');
   out({ type: 'assistant', message: { content: [{ type: 'text', text }], usage: USAGE } });
   out({
     type: 'result',

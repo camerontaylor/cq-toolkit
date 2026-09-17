@@ -119,6 +119,9 @@ const GITIGNORE = 'worktrees/\n';
 const PKG_JSON = (name: string): string =>
   `${JSON.stringify({ name, version: '1.0.0', private: true }, null, 2)}\n`;
 
+/** Beta's seeded package.json content — the rename-side allowlist test renames it verbatim. */
+export const BETA_PACKAGE_JSON = PKG_JSON('beta');
+
 // Auto-maintenance suppression, VERBATIM from the worktreeFor test idiom:
 // a commit's detached background `gc --auto` inheriting these pipes hangs
 // the callback past git's own exit.

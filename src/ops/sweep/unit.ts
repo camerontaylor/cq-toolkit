@@ -26,7 +26,7 @@
 //     deliberately generic — the toolkit bakes in no vendor prompt), and a
 //     custom Driver OBJECT cannot cross the JSON boundary (pass its config:
 //     binary + routing table + sessions dir).
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
@@ -49,7 +49,7 @@ import { makeGitMutex } from './gitMutex.js';
 import type { GitMutex } from './gitMutex.js';
 import { makeSubprocessWorktreeEffects, makeWorktreeFor } from './worktreeFor.js';
 import type { Op, OpResult } from '../../kernel/types.js';
-import type { SweepWorkspace, WorktreeForInput } from './worktreeFor.js';
+import type { SweepWorkspace, WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';
 
 // ---------------------------------------------------------------------------
 // Naming + run-state derivation
@@ -68,41 +68,66 @@ export interface SweepUnitSegments {
 /**
  * The ONE branch derivation shared by the sweep plan builder (the assembler's
  * static input) and this op (the worktreeFor input): kind = fixer, slug =
- * package, both folded to safe segments (`[^A-Za-z0-9._-]` runs fold to '-'
- * — the planner's own job-id fold). Names a fold cannot rescue (a leading
- * dash, a '..' run, a '.lock' suffix) are refused by the worktreeFor
- * boundary — loudly, at run time; this fold mirrors planSweep's, it does not
- * replace that boundary.
+ * package, both NORMALIZED to safe segments — every run of non-alphanumerics
+ * folds to a single '-' and leading/trailing dashes trim (so `@scope/pkg`
+ * derives `scope-pkg`, not the dispatchable-`-scope-pkg` the old fold
+ * produced). Names a normalization cannot rescue (an EMPTY segment, a '..'
+ * run, a '.lock' suffix) are refused by the worktreeFor boundary — loudly,
+ * at run time; this fold feeds that boundary, it does not replace it.
+ * Normalization can COLLIDE distinct packages (`@a/b` and `a.b` both derive
+ * `a-b`); the plan builder resolves collisions deterministically (a `-2`
+ * suffix in unit order, the planner's job-id idiom) and ships the RESOLVED
+ * kind/slug on the enriched unit job (SweepUnitDispatchInput.kind/slug) so
+ * the op, the branch, the run-state markers, and the assembler all agree.
  */
 export function sweepUnitSegments(
   runPrefix: string,
   unit: Pick<WorkUnit, 'package' | 'fixer'>,
 ): SweepUnitSegments {
-  const kind = sanitizedSegment(unit.fixer);
-  const slug = sanitizedSegment(unit.package);
+  const kind = normalizedSegment(unit.fixer);
+  const slug = normalizedSegment(unit.package);
   return { kind, slug, branch: `${runPrefix}/${kind}/${slug}` };
 }
 
-/** Fold to '-' every run of characters a git segment may not carry (planSweep's idiom). */
-function sanitizedSegment(raw: string): string {
-  return raw.replace(/[^A-Za-z0-9._-]+/g, '-');
+/** Fold every run of non-alphanumerics to one '-', then trim the dashes. */
+function normalizedSegment(raw: string): string {
+  return raw
+    .replace(/[^A-Za-z0-9]+/g, '-')
+    .replace(/^-+/, '')
+    .replace(/-+$/, '');
 }
 
 /**
  * The run-state dir of one sweep run: a SIBLING of `worktreesDir` (resolved
- * against `repoRoot`, then suffixed `-state`) — derived deterministically
- * from the config and NEVER inside any worktree. The unit op writes its
- * baseline snapshots here (`<runStateDir>/baseline/<kind>/<slug>.json`), so
- * a worktree carries no untracked tool state: a tree's strict-clean is
- * unpolluted by baseline bookkeeping, a reuse is automatically I7-clean, and
- * salvage never sees a completed unit as dirty because of it.
+ * against `repoRoot`, suffixed `-state`, then NAMESPACED by the sanitized run
+ * prefix) — derived deterministically from the config and NEVER inside any
+ * worktree. The namespace keeps sequential sweeps with different run prefixes
+ * from reading each other's baseline snapshots (a stale baseline would be
+ * fabricated evidence, I7). The unit op writes its per-unit records here —
+ * `baseline/<kind>/<slug>.json` (never read back; the probe always re-runs)
+ * and `committed/<kind>/<slug>.json` (jTPa8: written only by a unit that
+ * committed AND pushed; the assemble leg's source of truth) — so a worktree
+ * carries no untracked tool state: a tree's strict-clean is unpolluted by
+ * bookkeeping, a reuse is automatically I7-clean, and salvage never sees a
+ * completed unit as dirty because of it.
  */
-export function sweepRunStateDir(repoRoot: string, worktreesDir: string): string {
-  return `${resolve(repoRoot, worktreesDir)}-state`;
+export function sweepRunStateDir(
+  repoRoot: string,
+  worktreesDir: string,
+  runPrefix: string,
+): string {
+  const namespace = runPrefix
+    .split('/')
+    .map((segment) => normalizedSegment(segment))
+    .join('/');
+  return `${resolve(repoRoot, worktreesDir)}-state/${namespace}`;
 }
 
 /** The baseline-snapshot subdir of the run-state dir (sweepRunStateDir-scoped). */
 export const SWEEP_RUN_STATE_BASELINE_DIR = 'baseline';
+
+/** The committed-marker subdir of the run-state dir (jTPa8). */
+export const SWEEP_RUN_STATE_COMMITTED_DIR = 'committed';
 
 /** The worktreeFor family's default git wall clock (600s), for the unit op's adapter. */
 export const DEFAULT_UNIT_GIT_TIMEOUT_MS = 600_000;
@@ -123,12 +148,28 @@ export interface SweepUnitBindings {
   base: string;
   /**
    * Run-state dir for this sweep run — where the unit writes its baseline
-   * snapshot, OUTSIDE every worktree (a tree carrying untracked baseline
-   * state would never be strictly clean: reuse would break and salvage
-   * would preserve completed units). Default:
-   * sweepRunStateDir(repoRoot, worktreesDir) — derived from the config.
+   * snapshot and its committed marker, OUTSIDE every worktree (a tree
+   * carrying untracked state would never be strictly clean: reuse would
+   * break and salvage would preserve completed units). Default:
+   * sweepRunStateDir(repoRoot, worktreesDir, runPrefix) — derived from the
+   * config, namespaced by the sanitized run prefix.
    */
   runStateDir?: string;
+  /**
+   * RESOLVED branch segments (jTPa1): when the plan builder disambiguated a
+   * slug collision, it ships the resolved kind/slug here so the op's branch,
+   * worktree derivation, and committed marker agree with the assembler.
+   * Absent: derived via sweepUnitSegments.
+   */
+  segments?: SweepUnitSegments;
+  /**
+   * The git-mutex binding (jVgCc) for the unit's worktree mutations —
+   * concurrent sibling units at the caller's concurrency serialize their
+   * prune/add/ref sections on ONE lockfile instead of racing. Absent = no
+   * mutex (single-unit or caller-serialized runs); the shipped dispatch
+   * binding DEFAULTS it to a repo-level lock.
+   */
+  mutex?: WorktreeMutexConfig;
   /** The probe's wire-format adapter. */
   adapter: AdapterName;
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
@@ -229,7 +270,8 @@ export interface SweepUnitReport {
  * Pipeline contract, in order:
  *   1. worktreeFor — create or STRICT-clean reuse (the tree never carries
  *      baseline state — it lives in the run-state dir — so a reuse is
- *      automatically clean; the probe below always re-runs, I7).
+ *      automatically clean; the probe below always re-runs, I7). Mutating
+ *      sections serialize on the bindings' git mutex when configured (jVgCc).
  *   2. baseline probe — the BEFORE FailureSet; bail/indeterminate is a unit
  *      failure (no trustworthy baseline, no honest gate).
  *   3. the baseline snapshot is written to the run-state dir
@@ -241,16 +283,20 @@ export interface SweepUnitReport {
  *   6. regressionGate — tolerate the baseline's failures, block novel ones
  *      (the crown jewel, R2 D5); a regression fails the unit uncommitted.
  *   7. STAGE the fix (`git add -A`, gitignore-respected), then the staged-
- *      path allowlist, then hackDetector over the STAGED diff — a plain
- *      working-tree diff misses NEW files (untracked until staged), and the
- *      scanner must see exactly the set the commit would publish. An
- *      out-of-scope path or a tamper finding leaves the fix staged but
- *      UNCOMMITTED.
+ *      path allowlist (BOTH sides of staged renames — jVgCj), then
+ *      hackDetector over the STAGED diff — a plain working-tree diff misses
+ *      NEW files (untracked until staged), and the scanner must see exactly
+ *      the set the commit would publish. An out-of-scope path or a tamper
+ *      finding leaves the fix staged but UNCOMMITTED.
  *   8. commit — skipped when nothing is staged (an idempotent re-run's
  *      no-op fixer); commits exactly the scanned set.
  *   9. push — with a push binding and a fresh commit, publish the unit's
  *      branch (`push -u origin <branch>` in the shipped binding); skipped
  *      when nothing was committed or no binding is present.
+ *  10. the committed marker (jTPa8) — committed AND pushed units write
+ *      `<runStateDir>/committed/<kind>/<slug>.json`: the record the assemble
+ *      leg reads as its source of truth, so a no-change unit never assembles
+ *      an empty-diff PR.
  */
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
   const probe = makeBaselineProbe(bindings.runCheck);
@@ -260,7 +306,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     }),
   );
   return async (unit) => {
-    const segments = sweepUnitSegments(bindings.runPrefix, unit);
+    // The RESOLVED segments: the plan builder's collision disambiguation
+    // ships kind/slug on the dispatch input (bindings.segments); a unit run
+    // without them derives its own (the collision-free default).
+    const segments = bindings.segments ?? sweepUnitSegments(bindings.runPrefix, unit);
 
     // 1–2. The tree, then the BEFORE probe (the tree carries no baseline
     // state — the snapshot lives in the run-state dir — so a reuse arrives
@@ -393,6 +442,15 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       }
     }
 
+    // 10. The committed marker (jTPa8) — written ONLY by a unit that
+    // committed AND pushed: the run-state record the assemble leg reads as
+    // its source of truth (a no-change unit must never assemble an
+    // empty-diff PR).
+    if (commit.committed && pushed) {
+      const markerFault = await writeCommittedMarker(bindings, segments, unit);
+      if (markerFault !== null) return { status: 'failed', error: markerFault };
+    }
+
     const report: SweepUnitReport = {
       package: unit.package,
       fixer: unit.fixer,
@@ -464,9 +522,9 @@ async function probeLeg(
   return { worktree, probe: narrowed };
 }
 
-/** The unit's worktreeFor input — the bindings' naming config over the derived segments. */
+/** The unit's worktreeFor input — the bindings' naming config over the RESOLVED segments. */
 function worktreeInputOf(bindings: SweepUnitBindings, unit: WorkUnit): WorktreeForInput {
-  const segments = sweepUnitSegments(bindings.runPrefix, unit);
+  const segments = bindings.segments ?? sweepUnitSegments(bindings.runPrefix, unit);
   return {
     repoRoot: bindings.repoRoot,
     worktreesDir: bindings.worktreesDir,
@@ -474,6 +532,7 @@ function worktreeInputOf(bindings: SweepUnitBindings, unit: WorkUnit): WorktreeF
     kind: segments.kind,
     slug: segments.slug,
     base: bindings.base,
+    ...(bindings.mutex !== undefined ? { mutex: bindings.mutex } : {}),
   };
 }
 
@@ -509,11 +568,15 @@ async function stageUnitFiles(
 }
 
 /**
- * The staged-path allowlist (jSKJY): list what is staged, compile the
- * pattern sources, and fail the unit naming every staged path that matches
- * NONE of them — a scoped worker (test-fix: the test-file patterns) can
- * never commit outside its scope, however its agent phrases the edit. The
- * staged set is left as-is (staged but UNCOMMITTED). Null when clean.
+ * The staged-path allowlist (jSKJY, rename-hardened per jVgCj): enumerate
+ * what is staged with `diff --cached --name-status -z` — `--name-only` shows
+ * only a rename's DESTINATION, so a worker renaming production code into a
+ * test-shaped path would slip a scope-scoped allowlist — compile the pattern
+ * sources, and fail the unit naming every staged path that matches NONE of
+ * them. BOTH paths of an R/C (rename/copy) entry are validated (the SOURCE
+ * is the production code a rename deletes) and D (deleted) paths are
+ * validated too. The staged set is left as-is (staged but UNCOMMITTED).
+ * Null when clean.
  */
 async function enforceStagePathAllowlist(
   bindings: SweepUnitBindings,
@@ -528,12 +591,20 @@ async function enforceStagePathAllowlist(
   } catch (err) {
     return `sweep.unit ${unit.package}: invalid stage-path allowlist pattern — ${messageOf(err)}`;
   }
-  const listed = await bindings.git(['-C', worktree.path, 'diff', '--cached', '--name-only', '-z']);
+  const listed = await bindings.git([
+    '-C',
+    worktree.path,
+    'diff',
+    '--cached',
+    '--name-status',
+    '-z',
+  ]);
   if (listed.code !== 0) {
-    return `sweep.unit ${unit.package}: git diff --cached --name-only failed — ${listed.stderr.trim()}`;
+    return `sweep.unit ${unit.package}: git diff --cached --name-status failed — ${listed.stderr.trim()}`;
   }
-  const paths = listed.stdout.split('\0').filter((path) => path !== '');
-  const offenders = paths.filter((path) => !compiled.some((regex) => regex.test(path)));
+  const offenders = stagedPathsOf(listed.stdout).filter(
+    (path) => !compiled.some((regex) => regex.test(path)),
+  );
   if (offenders.length > 0) {
     return (
       `sweep.unit ${unit.package}: staged path(s) outside the allowlist [${allowlist.patterns.join(', ')}] — ` +
@@ -541,6 +612,28 @@ async function enforceStagePathAllowlist(
     );
   }
   return null;
+}
+
+/**
+ * The staged paths of one `diff --cached --name-status -z` capture: records
+ * are `<status> NUL <path> [NUL <path2>]` — an R/C (rename/copy) status
+ * carries the OLD then the NEW path, and BOTH are scope-checked (the source
+ * is the production code a rename deletes); every other status carries one.
+ */
+function stagedPathsOf(capture: string): string[] {
+  const tokens = capture.split('\0').filter((token) => token !== '');
+  const paths: string[] = [];
+  for (let index = 0; index < tokens.length;) {
+    const status = tokens[index] as string;
+    index += 1;
+    const pathCount = /^[RC]/.test(status) ? 2 : 1;
+    for (let n = 0; n < pathCount; n += 1) {
+      const path = tokens[index];
+      if (path !== undefined) paths.push(path);
+      index += 1;
+    }
+  }
+  return paths;
 }
 
 /**
@@ -591,7 +684,8 @@ async function writeBaselineSnapshot(
   baseline: UnitProbe,
 ): Promise<string | null> {
   const runStateDir =
-    bindings.runStateDir ?? sweepRunStateDir(bindings.repoRoot, bindings.worktreesDir);
+    bindings.runStateDir ??
+    sweepRunStateDir(bindings.repoRoot, bindings.worktreesDir, bindings.runPrefix);
   const baselineDir = join(runStateDir, SWEEP_RUN_STATE_BASELINE_DIR, segments.kind);
   try {
     await mkdir(baselineDir, { recursive: true });
@@ -686,15 +780,30 @@ export interface SweepUnitDispatchInput {
   package: string;
   fixer: string;
   files: string[];
+  /**
+   * RESOLVED branch segments (jTPa1): shipped by the plan builder when slug
+   * normalization collided (e.g. `@a/b` vs `a.b` → `a-b` vs `a-b-2`) so the
+   * op's branch, worktree derivation, and committed marker agree with the
+   * assembler. Absent: derived via sweepUnitSegments.
+   */
+  kind?: string;
+  slug?: string;
+  /**
+   * The git-mutex binding (jVgCc) for the unit's worktree mutations —
+   * sibling units at the caller's concurrency serialize their prune/add/ref
+   * sections on ONE lockfile. DEFAULT (when absent): a repo-level lock on
+   * the run-state dir (`<runStateDir>/git-mutex.lock`, family timings); the
+   * push shares the same lockfile.
+   */
+  mutex?: WorktreeMutexConfig;
   /** Sandbox preference; default `{level: 'none'}` (production callers set it). */
   sandboxPolicy?: SandboxPolicy;
   /** Wall-clock cap for one git subprocess; default the family's 600s. */
   gitTimeoutMs?: number;
   /**
    * Push the unit's branch after a commit (`push -u origin <branch>` inside
-   * a git mutex on the run-state dir). DEFAULT TRUE — a fleet's branches
-   * must exist on the remote before pr.assemblePrs; set false ONLY for
-   * local-only sweeps.
+   * the git mutex). DEFAULT TRUE — a fleet's branches must exist on the
+   * remote before pr.assemblePrs; set false ONLY for local-only sweeps.
    */
   push?: boolean;
   /** The staged-path allowlist (see SweepUnitBindings.stagePathAllowlist). */
@@ -776,7 +885,28 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
       'sweep.unit: the dispatch input carries no check config — the shipped dispatch requires a probe (check: {adapter, command, args})',
     );
   }
-  const runStateDir = sweepRunStateDir(input.repoRoot, input.worktreesDir);
+  const runStateDir = sweepRunStateDir(input.repoRoot, input.worktreesDir, input.runPrefix);
+  // jVgCc: the dispatch mutex DEFAULTS to a repo-level lock on the run-state
+  // dir (family timings), so sibling units dispatched concurrently serialize
+  // their worktree mutations AND their pushes on ONE lockfile; the input's
+  // mutex block overrides (the builder/overlay seam).
+  const mutex: WorktreeMutexConfig = input.mutex ?? {
+    lockPath: join(runStateDir, 'git-mutex.lock'),
+  };
+  // jTPa1: the plan builder's resolved segments win (collision-safe); a bare
+  // dispatch derives its own.
+  const derived = sweepUnitSegments(input.runPrefix, {
+    package: input.package,
+    fixer: input.fixer,
+  });
+  const segments: SweepUnitSegments =
+    input.kind !== undefined && input.slug !== undefined
+      ? {
+          kind: input.kind,
+          slug: input.slug,
+          branch: `${input.runPrefix}/${input.kind}/${input.slug}`,
+        }
+      : derived;
   const driver = new SubprocessDriver({
     binary:
       typeof input.driver.binary === 'string' ? [input.driver.binary] : [...input.driver.binary],
@@ -788,6 +918,8 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     worktreesDir: input.worktreesDir,
     runPrefix: input.runPrefix,
     base: input.base,
+    segments,
+    mutex,
     adapter: input.check.adapter,
     // The REAL probe runner (the checkRunner lane's shipped subprocess seam).
     runCheck: subprocessRunCheck,
@@ -815,13 +947,15 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
       env: { ...GIT_NO_AUTO_MAINTENANCE_ENV },
     }),
     // DEFAULT TRUE: a fleet's branches must reach the remote before
-    // assemblePrs; an explicit push:false opts into a local-only run.
+    // assemblePrs; an explicit push:false opts into a local-only run. The
+    // push shares the dispatch mutex's lockfile (jVgCc) so it cannot race a
+    // sibling's worktree add/prune.
     ...(input.push === false
       ? {}
       : {
           pushBranch: makePushBranch({
             ...(input.gitTimeoutMs !== undefined ? { timeoutMs: input.gitTimeoutMs } : {}),
-            lockPath: join(runStateDir, 'push.lock'),
+            lockPath: mutex.lockPath,
           }),
         }),
     ...(input.stagePathAllowlist !== undefined
@@ -833,4 +967,104 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
 /** The subprocess driver's own default sessions dir (kept in sync, never imported: driver-internal). */
 function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
+}
+
+// ---------------------------------------------------------------------------
+// The committed markers (jTPa8) — the assemble leg's source of truth
+// ---------------------------------------------------------------------------
+
+/**
+ * Write a unit's committed marker —
+ * `<runStateDir>/committed/<kind>/<slug>.json` — after it committed AND
+ * pushed. The assemble leg enumerates these ({@link readCommittedMarkers})
+ * and assembles ONLY the units that produced one: a no-change (uncommitted)
+ * unit must never assemble an empty-diff PR. A fault names the stage.
+ */
+async function writeCommittedMarker(
+  bindings: SweepUnitBindings,
+  segments: SweepUnitSegments,
+  unit: WorkUnit,
+): Promise<string | null> {
+  const runStateDir =
+    bindings.runStateDir ??
+    sweepRunStateDir(bindings.repoRoot, bindings.worktreesDir, bindings.runPrefix);
+  const markerDir = join(runStateDir, SWEEP_RUN_STATE_COMMITTED_DIR, segments.kind);
+  try {
+    await mkdir(markerDir, { recursive: true });
+    await writeFile(
+      join(markerDir, `${segments.slug}.json`),
+      `${JSON.stringify({ package: unit.package, fixer: unit.fixer, branch: segments.branch })}\n`,
+      'utf8',
+    );
+    return null;
+  } catch (err) {
+    return `sweep.unit: could not write the committed marker under '${markerDir}' — ${messageOf(err)}`;
+  }
+}
+
+/** One enumerated committed marker (plain JSON). */
+export interface CommittedMarker {
+  package: string;
+  fixer: string;
+  branch: string;
+}
+
+/**
+ * Enumerate the run's committed markers (jTPa8): every
+ * `<runStateDir>/committed/<kind>/<slug>.json` the fleet's units wrote.
+ * Markers from other run prefixes are not visible here (the run-state dir is
+ * namespaced per run); markers from an EARLIER invocation of the SAME run
+ * prefix are — the reference driver intersects them with the current run's
+ * units before composing the assemble input. A malformed marker is skipped,
+ * never trusted.
+ */
+export async function readCommittedMarkers(
+  repoRoot: string,
+  worktreesDir: string,
+  runPrefix: string,
+): Promise<CommittedMarker[]> {
+  const committedDir = join(
+    sweepRunStateDir(repoRoot, worktreesDir, runPrefix),
+    SWEEP_RUN_STATE_COMMITTED_DIR,
+  );
+  let kindDirs: string[];
+  try {
+    kindDirs = await readdir(committedDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') return [];
+    throw err;
+  }
+  const markers: CommittedMarker[] = [];
+  for (const kind of kindDirs.sort()) {
+    let files: string[];
+    try {
+      files = await readdir(join(committedDir, kind));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code === 'ENOENT') continue;
+      throw err;
+    }
+    for (const file of files.sort()) {
+      if (!file.endsWith('.json')) continue;
+      try {
+        const parsed: unknown = JSON.parse(await readFile(join(committedDir, kind, file), 'utf8'));
+        const record = parsed as Partial<CommittedMarker> | null;
+        if (
+          typeof record === 'object' &&
+          record !== null &&
+          typeof record.package === 'string' &&
+          record.package !== '' &&
+          typeof record.fixer === 'string' &&
+          record.fixer !== '' &&
+          typeof record.branch === 'string' &&
+          record.branch !== ''
+        ) {
+          markers.push({ package: record.package, fixer: record.fixer, branch: record.branch });
+        }
+      } catch {
+        // A malformed marker is skipped, never trusted (I9: the assemble leg
+        // composes from VERIFIED records only).
+      }
+    }
+  }
+  return markers;
 }

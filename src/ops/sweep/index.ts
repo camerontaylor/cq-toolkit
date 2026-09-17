@@ -58,6 +58,7 @@ export type {
 } from './cleanup.js';
 export { makeCleanup, makeSubprocessCleanupEffects } from './cleanup.js';
 export type {
+  CommittedMarker,
   SweepUnitBindings,
   SweepUnitCheckConfig,
   SweepUnitDispatchInput,
@@ -72,7 +73,9 @@ export {
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
   makeSweepUnitOp,
+  readCommittedMarkers,
   SWEEP_RUN_STATE_BASELINE_DIR,
+  SWEEP_RUN_STATE_COMMITTED_DIR,
   sweepRunStateDir,
   sweepUnitSegments,
 } from './unit.js';

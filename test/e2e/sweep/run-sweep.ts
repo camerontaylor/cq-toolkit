@@ -57,6 +57,7 @@ import type {
   SweepUnitDispatchInput,
   SweepUnitDriverConfig,
 } from '../../../src/ops/sweep/unit.js';
+import { readCommittedMarkers } from '../../../src/ops/sweep/unit.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import type { SalvageEntry, SalvagePlan } from '../../../src/ops/sweep/salvage.js';
 
@@ -157,6 +158,12 @@ export interface RunSweepOpts {
 export interface SweepRunOutcome {
   planner: PlanSweepReport;
   run: RunReport;
+  /**
+   * The marker-filtered assemble run (jTPa8) — present exactly when every
+   * unit succeeded AND at least one unit committed+pushed; its journal is
+   * its own run file (the plan id's LATEST).
+   */
+  assembleRun?: RunReport;
   /** The failures-only DEFAULT output (see renderSweepOutput). */
   output: string;
 }
@@ -174,9 +181,10 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   // Phase B: the expanded graph with the dispatch knobs layered on (JSON,
   // central-registry dispatchable), journaled. stopOnError:false — I9's
   // collect-all (every unit dispatches and lands a journal outcome). The
-  // assemble job's dependsOn-every-unit is the fleet gate: one failed unit
-  // withholds the PRs.
-  const plan = buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
+  // ASSEMBLE job is REMOVED from this plan: it is dispatched separately
+  // below, composed from the units' committed markers (jTPa8 — the static
+  // Job cannot know which units committed until they have run).
+  const fullPlan = buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
     driver: opts.driver,
     check: opts.check,
     push: opts.push ?? true,
@@ -184,6 +192,11 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       ? { stagePathAllowlist: opts.stagePathAllowlist }
       : {}),
   });
+  const assembleTemplate = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.assemble);
+  const plan = {
+    ...fullPlan,
+    jobs: fullPlan.jobs.filter((job) => job.id !== SWEEP_PLAN_JOB_IDS.assemble),
+  };
   for (const job of plan.jobs) {
     if (job.op !== SWEEP_UNIT_OP || opts.promptTemplate === undefined) continue;
     (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
@@ -241,7 +254,47 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       );
     }
   }
-  return { planner, run, output: renderSweepOutput(opts.config, planner, run) };
+
+  // THE ASSEMBLE LEG (jTPa8), composed post-run from the committed markers —
+  // the fleet gate first (every unit must have succeeded; a failed unit
+  // withholds the whole fleet's PRs), then the marker filter (only units
+  // that COMMITTED AND PUSHED assemble; a no-change unit never yields an
+  // empty-diff PR). An empty result assembles nothing at all.
+  const fleetOk = planner.jobs.every((job) => {
+    const row = run.jobs.find((candidate) => candidate.jobId === job.id);
+    return row?.result.status === 'ok';
+  });
+  let assembleRun: RunReport | undefined;
+  if (fleetOk && planner.units.length > 0 && assembleTemplate !== undefined) {
+    const markers = await readCommittedMarkers(
+      opts.config.repoRoot,
+      opts.config.worktreesDir,
+      opts.config.runPrefix,
+    );
+    const templateInput = assembleTemplate.input as AssemblePrsInput;
+    const assembleInput: AssemblePrsInput = {
+      ...templateInput,
+      packages: templateInput.packages.filter((pkg) =>
+        markers.some((marker) => marker.branch === pkg.branch),
+      ),
+    };
+    const assemblePlan = {
+      id: SWEEP_PLAN_ID,
+      label: 'sweep: marker-filtered fleet assembly (the committed units only)',
+      jobs: [{ id: SWEEP_PLAN_JOB_IDS.assemble, op: 'pr.assemblePrs', input: assembleInput }],
+    };
+    assembleRun = await runPlan(
+      assemblePlan,
+      { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
+      view,
+    );
+  }
+  return {
+    planner,
+    run,
+    ...(assembleRun !== undefined ? { assembleRun } : {}),
+    output: renderSweepOutput(opts.config, planner, run),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -335,12 +388,23 @@ export function salvageEntriesFor(
   }
   const entries: SalvageEntry[] = [];
   for (const unit of planner.units) {
-    const segments = sweepUnitSegments(config.runPrefix, unit);
+    // The RESOLVED segments from the enriched job input (jTPa1 collisions)
+    // when present; the derived ones otherwise — the tail must name the tree
+    // the unit ACTUALLY ran in.
     const job = planner.jobs.find(
       (candidate) =>
         (candidate.input as WorkUnit).package === unit.package &&
         (candidate.input as WorkUnit).fixer === unit.fixer,
     );
+    const dispatched = job?.input as SweepUnitDispatchInput | undefined;
+    const segments =
+      dispatched?.kind !== undefined && dispatched?.slug !== undefined
+        ? {
+            kind: dispatched.kind,
+            slug: dispatched.slug,
+            branch: `${config.runPrefix}/${dispatched.kind}/${dispatched.slug}`,
+          }
+        : sweepUnitSegments(config.runPrefix, unit);
     if (job === undefined) continue; // a unit without its job cannot be tailed
     const lastStep = finishOrder.findLast((jobId) => jobId === job.id);
     entries.push({
@@ -362,11 +426,20 @@ function absoluteWorktreePath(config: SweepPlanConfig, kind: string, slug: strin
 
 /** The event list of the plan's LATEST journaled run (runs() is oldest-first). */
 export async function latestRunEvents(journalDir: string, planId: string): Promise<JournalEvent[]> {
+  return runEventsAt(journalDir, planId, -1);
+}
+
+/** The event list of the plan's INDEXth journaled run (-1 = latest; runs() is oldest-first). */
+export async function runEventsAt(
+  journalDir: string,
+  planId: string,
+  index: number,
+): Promise<JournalEvent[]> {
   const log = openRunLog(journalDir);
   const runIds = candidateRunsForPlan(await log.runs(), planId);
-  const latest = runIds[runIds.length - 1];
-  if (latest === undefined) {
+  const selected = runIds.at(index);
+  if (selected === undefined) {
     throw new Error(`e2e: no journaled run of plan '${planId}' under '${journalDir}'`);
   }
-  return log.read(latest);
+  return log.read(selected);
 }

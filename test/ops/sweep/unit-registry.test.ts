@@ -25,6 +25,7 @@ import {
   bindingsFromDispatch,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
+  sweepRunStateDir,
 } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitDispatchInput } from '../../../src/ops/sweep/unit.js';
 
@@ -203,4 +204,33 @@ describe('makePushBranch (the shipped push binding, real git smoke)', () => {
       await expect(makePushBranch({})(orphan, 'cq/x/fix/alpha')).rejects.toThrow(/origin/);
     },
   );
+});
+
+describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
+  test('run state is namespaced by the sanitized run prefix', () => {
+    const one = sweepRunStateDir('/repo', 'worktrees', 'cq/one');
+    const two = sweepRunStateDir('/repo', 'worktrees', 'cq/two');
+    expect(one).not.toBe(two); // different prefixes → different state dirs
+    expect(sweepRunStateDir('/repo', 'worktrees', 'cq/one')).toBe(one); // same prefix → same dir (reuse intact)
+    expect(one).toContain('cq/one');
+  });
+
+  test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {
+    const bindings = bindingsFromDispatch(VALID);
+    expect(bindings.mutex).toEqual({
+      lockPath: join(sweepRunStateDir('/repo', 'worktrees', 'cq/09-16a'), 'git-mutex.lock'),
+    });
+    const overridden = bindingsFromDispatch({
+      ...VALID,
+      mutex: { lockPath: '/locks/custom.lock', staleMs: 5000 },
+    });
+    expect(overridden.mutex).toEqual({ lockPath: '/locks/custom.lock', staleMs: 5000 });
+    // The resolved segments override rides the bindings (jTPa1).
+    const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' });
+    expect(renamed.segments).toEqual({
+      kind: 'fix',
+      slug: 'a-b-2',
+      branch: 'cq/09-16a/fix/a-b-2',
+    });
+  });
 });

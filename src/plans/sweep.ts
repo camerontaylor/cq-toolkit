@@ -23,13 +23,22 @@
 //   expanded from a stale phase-A report is divergent by construction and
 //   the caller must re-run phase A), one unit job per PlanSweepReport job
 //   (embedded VERBATIM, re-rooted on the planner job, each input ENRICHED
-//   with the run context so it is dispatch-grade for the central
-//   'sweep.unit' entry), and ONE `pr.assemblePrs` job depending on every
-//   unit (the fleet assembles only when every unit succeeded — a failed
-//   unit blocks the whole fleet's PRs; per-unit isolation happened at the
-//   unit jobs). The builder's knobs (fixer wiring, probe command, push,
-//   allowlists) arrive through `unitJobOverlay` / the caller's final
-//   enrichment — see SweepUnitDispatchInput (src/ops/sweep/unit.ts).
+//   with the run context AND the RESOLVED branch segments so it is
+//   dispatch-grade for the central 'sweep.unit' entry), and ONE
+//   `pr.assemblePrs` job depending on every unit (the fleet assembles only
+//   when every unit succeeded — a failed unit blocks the whole fleet's PRs;
+//   per-unit isolation happened at the unit jobs). The builder's knobs
+//   (fixer wiring, probe command, push, allowlists) arrive through
+//   `unitJobOverlay` / the caller's final enrichment — see
+//   SweepUnitDispatchInput (src/ops/sweep/unit.ts).
+//
+// COMMITTED MARKERS ARE THE ASSEMBLE LEG'S SOURCE OF TRUTH (jTPa8): the
+// expanded plan's assemble job is the DECLARED fleet, but only a unit that
+// COMMITTED AND PUSHED writes its run-state marker
+// (`<runStateDir>/committed/<kind>/<slug>.json`, sweep.unit step 10) — so
+// the reference wiring composes the ACTUAL assemble dispatch post-run from
+// the markers (a no-change unit never assembles an empty-diff PR), and an
+// empty fleet assembles nothing at all.
 //
 // RESUME (the interrupted-run story, arm-a §4.2): a sweep re-invoke is
 // SALVAGE + REUSE, not kernel journal-replay. Replaying the journal would
@@ -59,7 +68,11 @@
 // deterministically (`<runPrefix>/<kind>/<slug>`), so the assembler's input
 // needs no runtime output — sweepUnitSegments (src/ops/sweep/unit.ts) is the
 // one derivation shared by the builder (assemble input) and the unit op
-// (worktreeFor input).
+// (worktreeFor input), and the builder ships the RESOLVED kind/slug on each
+// enriched unit job so derivation collisions (jTPa1: `@a/b` vs `a.b` both
+// normalize to `a-b`) are disambiguuated ONCE — a deterministic `-2` suffix
+// in unit order, the planner's job-id idiom — and every surface (branch,
+// worktree, committed marker, assembler) agrees.
 import type { AssemblePrsInput } from '../ops/pr/assemblePrs.js';
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
 import type {
@@ -70,7 +83,7 @@ import type {
   PlanSweepSelector,
 } from '../ops/sweep/planSweep.js';
 import { sweepUnitSegments } from '../ops/sweep/unit.js';
-import type { SweepUnitDispatchInput } from '../ops/sweep/unit.js';
+import type { SweepUnitDispatchInput, SweepUnitSegments } from '../ops/sweep/unit.js';
 
 /**
  * The shipped plan's stable id (the discovery name and the Plan.id — also
@@ -138,7 +151,11 @@ export function sweepPlannerInput(config: SweepPlanConfig): PlanSweepInput {
 }
 
 /** The assembler input a config authors — static data, no runtime output needed. */
-function assembleInputOf(config: SweepPlanConfig, report: PlanSweepReport): AssemblePrsInput {
+function assembleInputOf(
+  config: SweepPlanConfig,
+  report: PlanSweepReport,
+  resolved: SweepUnitSegments[],
+): AssemblePrsInput {
   // The tracker branch is NAMED here but not created/pushed by this lane —
   // the per-unit branches are pushed (sweep.unit's push leg); the tracker
   // branch creation/push + real-forge PR verification is the deferred
@@ -151,9 +168,9 @@ function assembleInputOf(config: SweepPlanConfig, report: PlanSweepReport): Asse
       title: config.trackerTitle ?? `Sweep run ${config.runPrefix}`,
       branch: config.trackerBranch ?? `${config.runPrefix}/tracker`,
     },
-    packages: report.units.map((unit) => ({
+    packages: report.units.map((unit, index) => ({
       name: unit.package,
-      branch: sweepUnitSegments(config.runPrefix, unit).branch,
+      branch: resolved[index]?.branch ?? sweepUnitSegments(config.runPrefix, unit).branch,
       title: `fix(${unit.package}): sweep ${unit.fixer}`,
     })),
     draft: true,
@@ -180,7 +197,26 @@ export function buildSweepPlan(
   planId: string = SWEEP_PLAN_ID,
   unitJobOverlay?: SweepUnitJobOverlay,
 ): Plan {
-  const unitJobs = report.jobs.map((job) => ({
+  // jTPa1: resolve each unit's segments ONCE, disambiguating normalization
+  // collisions deterministically (a `-2` suffix in unit order — the
+  // planner's job-id idiom) and shipping the RESOLVED kind/slug on the
+  // enriched job so the op's branch, worktree, and committed marker all
+  // agree with the assembler.
+  const usedSlugs = new Map<string, number>();
+  const resolvedSegments: SweepUnitSegments[] = report.units.map((unit) => {
+    const base = sweepUnitSegments(config.runPrefix, unit);
+    const key = `${base.kind}/${base.slug}`;
+    const ordinal = usedSlugs.get(key) ?? 0;
+    usedSlugs.set(key, ordinal + 1);
+    return ordinal === 0
+      ? base
+      : {
+          kind: base.kind,
+          slug: `${base.slug}-${ordinal + 1}`,
+          branch: `${config.runPrefix}/${base.kind}/${base.slug}-${ordinal + 1}`,
+        };
+  });
+  const unitJobs = report.jobs.map((job, index) => ({
     ...job,
     dependsOn: [SWEEP_PLAN_JOB_IDS.plan],
     input: {
@@ -189,6 +225,8 @@ export function buildSweepPlan(
       worktreesDir: config.worktreesDir,
       runPrefix: config.runPrefix,
       base: config.base,
+      kind: resolvedSegments[index]?.kind,
+      slug: resolvedSegments[index]?.slug,
       ...(unitJobOverlay ?? {}),
     },
   }));
@@ -204,13 +242,15 @@ export function buildSweepPlan(
       // The assembler exists only for a non-empty fleet: `pr.assemblePrs` is
       // TRACKER-FIRST (UC row 22) — even zero packages would search for (and
       // create) a tracker on the real forge, so the floor's empty fleet
-      // assembles nothing and stays a harmless pass.
+      // assembles nothing and stays a harmless pass. THIS job is the
+      // DECLARED fleet: the reference wiring composes the ACTUAL assemble
+      // dispatch post-run from the committed markers (jTPa8).
       ...(unitJobs.length > 0
         ? [
             {
               id: SWEEP_PLAN_JOB_IDS.assemble,
               op: 'pr.assemblePrs',
-              input: assembleInputOf(config, report),
+              input: assembleInputOf(config, report, resolvedSegments),
               dependsOn: unitJobs.map((job) => job.id),
             },
           ]
