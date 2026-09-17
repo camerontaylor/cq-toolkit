@@ -153,6 +153,12 @@ interface LoopWorld {
    * head-unreadable gate without disturbing worktree resolution.
    */
   headReadFailsAfter?: number;
+  /**
+   * The ONE worktree-path HEAD read (by count) that FAILS (final bot slice
+   * P1): `2` fails exactly the loop's PRE-run boundary read while
+   * resolution (read 1) and the post-run read (3) succeed — the P1 shape.
+   */
+  headReadFailsAt?: number;
   /** When true, `status --porcelain` reports a dirty worktree. */
   dirty?: boolean;
   /** GraphQL thread nodes served to fetchReviewState. */
@@ -387,12 +393,14 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       if (args[1] === worktreePath) {
         // The loop's per-stage worktree HEAD reads (slice 9 item 2): the
         // head advances after the configured read count. Reads after
-        // headReadFailsAfter FAIL (round 3: the loop's post-run read is
-        // read 3 — drives the fail-closed head-unreadable gate).
+        // headReadFailsAfter FAIL, as does the single headReadFailsAt read
+        // (round 3 + final bot slice P1: drives the fail-closed
+        // head-unreadable gate for both its shapes).
         worktreeHeadReads += 1;
         if (
-          world.headReadFailsAfter !== undefined &&
-          worktreeHeadReads > world.headReadFailsAfter
+          (world.headReadFailsAfter !== undefined &&
+            worktreeHeadReads > world.headReadFailsAfter) ||
+          world.headReadFailsAt === worktreeHeadReads
         ) {
           return { code: 128, stdout: '', stderr: 'fatal: unreadable HEAD' };
         }
@@ -1378,7 +1386,30 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
       ghLog,
     });
     expect(outcome.status).toBe('needs-human');
-    expect(outcome.reasons).toContainEqual('worktree head unreadable: fatal: unreadable HEAD');
+    expect(outcome.reasons).toContainEqual(
+      'worktree head unreadable (post-run): fatal: unreadable HEAD',
+    );
+    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
+    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
+  });
+
+  test('an unreadable PRE-run HEAD → fail-closed with the pre-run reason, no publish (P1)', async () => {
+    // The P1 shape, exactly: the PRE-run boundary read (read 2) fails while
+    // resolution (read 1) and the post-run read (3) succeed. headMoved goes
+    // false — with the old post-run-only gate the range check was skipped
+    // and an unaccounted nonempty range could publish. Fail-closed names
+    // the failing read instead.
+    const world = defaultWorld();
+    world.headReadFailsAt = 2;
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [NEW_SHA]))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual(
+      'worktree head unreadable (pre-run): fatal: unreadable HEAD',
+    );
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
     expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
   });

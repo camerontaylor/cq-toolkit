@@ -735,12 +735,20 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     headBefore.code === 0 &&
     headAfter.code === 0 &&
     headBefore.stdout.trim() !== headAfter.stdout.trim();
-  // FAIL-CLOSED HEAD READ (round 3): an unreadable post-run HEAD means the
-  // added range cannot be bounded — publication is withheld with its own
-  // reason and the run degrades to needs-human, never fail-open.
-  const headUnreadable = headAfter.code !== 0;
+  // FAIL-CLOSED HEAD READ (round 3; extended by the final bot slice, P1):
+  // an unreadable PRE-run OR post-run HEAD breaks the gate — a failing
+  // pre-run read makes headMoved false (it requires both reads), which
+  // would skip the range gate entirely while publishable stayed true and
+  // an unaccounted nonempty range could publish. Both reads are
+  // fail-closed: publication is withheld with its own reason naming WHICH
+  // read failed, and the run degrades to needs-human, never fail-open.
+  const headUnreadable = headAfter.code !== 0 || headBefore.code !== 0;
   if (headUnreadable) {
-    reasons.push(`worktree head unreadable: ${headAfter.stderr.trim() || 'rev-parse failed'}`);
+    const failedRead = headBefore.code !== 0 ? headBefore : headAfter;
+    const which = headBefore.code !== 0 ? 'pre-run' : 'post-run';
+    reasons.push(
+      `worktree head unreadable (${which}): ${failedRead.stderr.trim() || 'rev-parse failed'}`,
+    );
   }
   // RANGE-ACCOUNTABILITY VERIFICATION (round 2; revises drill 6's tip-only
   // rule): every ok row's claimed commits are verified HERE, through the
