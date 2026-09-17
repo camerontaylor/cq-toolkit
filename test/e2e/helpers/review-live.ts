@@ -79,6 +79,8 @@ export interface LiveScratchRepo {
   pr: number;
   /** The seeded thread ROOT comment's REST id (the reply anchor). */
   threadRestId: number;
+  /** The seeded top-level issue comment's REST id (the comment item's dedupe key). */
+  commentRestId: number;
 }
 
 const sleep = (ms: number): Promise<void> => {
@@ -106,6 +108,18 @@ const APP_JS = ['// fixture module', 'export const fruit = "apple";', ''].join('
  * arbitrary reviewer could have left on line {@link MARKER_LINE}.
  */
 const THREAD_BODY = 'Fix the misspelled fruit on this line. It should read "apple".';
+
+/**
+ * The seeded TOP-LEVEL issue comment — reviewer feedback that needs a
+ * RESPONSE but no code change (the README should mention the fruit). This
+ * is the second fixture (round-1 medium): with it, run 1 plans TWO jobs and
+ * posts THREE actions — the thread's review_reply + resolve AND the
+ * comment's issue_comment — and run 2 live-proves the leading-signature
+ * suppression (the loop's own run-1 issue_comment reply re-fetches as a
+ * top-level comment; with the old trailing-marker bug run 2 planned a job
+ * on it and failed).
+ */
+const COMMENT_BODY = 'Reviewer note: also mention in the README that the fruit is an apple.';
 
 /** The GraphQL document the setup poll (and the test's fresh assert) reads. */
 const THREADS_QUERY = `query ($owner: String!, $name: String!, $pr: Int!) {
@@ -250,6 +264,50 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
     throw new Error(`unusable PR number ${String(pr)}`);
   }
 
+  // Seed the top-level issue comment FIRST (round-1 medium): plain REST, no
+  // anchoring — it cannot 422 — and same reviewer identity. Reviewer
+  // feedback needing a response but no code change. Run 1 plans TWO jobs
+  // (thread + comment) and posts THREE actions; run 2 live-proves the
+  // leading-signature suppression on the loop's own issue_comment reply.
+  const issueComment = await ghJson<{ id?: unknown }>(gh, [
+    'api',
+    '-X',
+    'POST',
+    `repos/${fullName}/issues/${String(pr)}/comments`,
+    '-f',
+    `body=${COMMENT_BODY}`,
+  ]);
+  if (typeof issueComment.id !== 'number' || !Number.isSafeInteger(issueComment.id)) {
+    throw new Error(
+      `the seeded issue comment returned no usable id: ${JSON.stringify(issueComment)}`,
+    );
+  }
+  const commentRestId: number = issueComment.id;
+
+  // Wait for ANCHOR-READINESS before seeding the thread (drill 11's 422):
+  // position anchoring validates against the PR's COMPUTED diff, which
+  // GitHub assembles asynchronously after pr create — seeding too early
+  // races that computation. The PR object is read until its head.sha equals
+  // the seeded head sha AND is stable across one immediate re-read (the
+  // same read serving as the diff-computability signal). Bounded, same
+  // style as the convergence poll below.
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const first = await ghJson<{ head?: { sha?: unknown } | null }>(gh, [
+      'api',
+      `repos/${fullName}/pulls/${String(pr)}`,
+    ]);
+    const second = await ghJson<{ head?: { sha?: unknown } | null }>(gh, [
+      'api',
+      `repos/${fullName}/pulls/${String(pr)}`,
+    ]);
+    if (first.head?.sha === headSha && second.head?.sha === headSha) {
+      break;
+    }
+    await sleep(2_000);
+  }
+  // If the bound above expired, the thread POST below fails loudly with
+  // GitHub's own 422 — the same signal an exhausted convergence poll gives.
+
   // Seed ONE review thread: a top-level PR review comment via REST, anchored
   // on the marker line at the seeded head. SAME-IDENTITY by construction —
   // the recorded deviation (REVIEWER_ROLE_SIMULATED).
@@ -292,9 +350,10 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
   }
   const threadRestId: number = comment.id;
 
-  // Wait for GitHub's two indexes to converge: the PR head over REST and the
+  // Wait for GitHub's indexes to converge: the PR head over REST, the
   // thread over GraphQL (the loop's fetchReviewState reads BOTH and refuses
-  // on lag — the fixture must be settled before the loop runs). Bounded.
+  // on lag — the fixture must be settled before the loop runs), and the
+  // issue comment over REST. Bounded.
   for (let attempt = 0; attempt < 30; attempt += 1) {
     const head = await ghJson<{ head?: { sha?: unknown } | null }>(gh, [
       'api',
@@ -312,12 +371,17 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
       '-F',
       `pr=${pr}`,
     ]);
+    const issueComments = await ghJson<Array<{ id?: unknown }>>(gh, [
+      'api',
+      `repos/${fullName}/issues/${String(pr)}/comments?per_page=100`,
+    ]);
     const headVisible = head.head?.sha === headSha;
     const nodes = threads.data?.repository?.pullRequest?.reviewThreads?.nodes ?? [];
     const threadVisible = nodes.some(
       (node) => (node.comments?.nodes?.[0]?.databaseId ?? null) === threadRestId,
     );
-    if (headVisible && threadVisible) {
+    const commentVisible = issueComments.some((entry) => entry.id === commentRestId);
+    if (headVisible && threadVisible && commentVisible) {
       return {
         owner,
         repo,
@@ -330,12 +394,13 @@ export async function setupScratchRepo(opts: { runId: string }): Promise<LiveScr
         headSha,
         pr,
         threadRestId,
+        commentRestId,
       };
     }
     await sleep(2_000);
   }
   throw new Error(
-    `the seeded thread/PR head never became visible within the setup bound (REST head sha + GraphQL reviewThreads) — fixture setup failed`,
+    `the seeded thread/PR head/issue comment never became visible within the setup bound (REST head sha + GraphQL reviewThreads + REST issue comments) — fixture setup failed`,
   );
 }
 

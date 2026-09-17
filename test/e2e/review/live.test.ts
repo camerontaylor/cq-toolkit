@@ -220,7 +220,7 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     return nodes.find((node) => (node.comments.nodes[0]?.databaseId ?? null) === f.threadRestId);
   };
 
-  test('run 1: the seeded thread gets fixed, replied, and resolved', async () => {
+  test('run 1: the seeded thread gets fixed, replied, and resolved; the comment gets its response', async () => {
     const f = requireFixture();
     expect(REVIEWER_ROLE_SIMULATED).toBe(true); // the recorded deviation flag rides
     const outcome = await runReviewLoop(loopOpts());
@@ -230,13 +230,13 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     const run1Dump = `run-1 outcome ${JSON.stringify(outcome, null, 1)}`;
     expect(outcome.status, run1Dump).toBe('ok');
     expect(outcome.reasons, run1Dump).toEqual([]);
-    expect(outcome.fixReport?.counts.done, run1Dump).toBeGreaterThanOrEqual(1);
+    expect(outcome.fixReport?.counts.done, run1Dump).toBe(2); // thread + comment item
     expect(outcome.reply?.pushed, run1Dump).toBe(true);
-    expect(outcome.actionsPosted, run1Dump).toBeGreaterThanOrEqual(2); // reply AND resolve
+    expect(outcome.actionsPosted, run1Dump).toBe(3); // reply AND response AND resolve
     expect(
       outcome.reply?.posted.map((record) => record.kind),
       run1Dump,
-    ).toEqual(['review_reply', 'resolve_thread']);
+    ).toEqual(['review_reply', 'issue_comment', 'resolve_thread']);
 
     // FRESH evidence — the loop's own results are not the proof. The reply
     // exists on the thread (with the worker's summary), the thread reads
@@ -261,6 +261,19 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     const thread = await fetchSeededThread(gh, f);
     expect(thread).toBeDefined();
     expect(thread?.isResolved).toBe(true);
+
+    // ROUND-1 MEDIUM, fresh evidence: the loop's reply to the seeded
+    // top-level comment exists over REST and LEADS with the signature —
+    // the exact placement run 2's suppression depends on (a trailing
+    // marker would never match the re-fetched reply).
+    const issueComments = await ghJson<Array<{ id: number; body: string }>>(gh, [
+      'api',
+      `repos/${f.fullName}/issues/${String(f.pr)}/comments?per_page=100`,
+    ]);
+    const loopReply = issueComments.find((comment) =>
+      comment.body.startsWith(`<!-- cq-review-loop:${f.owner}/${f.repo}#${String(f.pr)} -->`),
+    );
+    expect(loopReply, `issue comments ${JSON.stringify(issueComments)}`).toBeDefined();
 
     const diff = await gh(['pr', 'diff', String(f.pr), '-R', f.fullName]);
     expect(diff.code).toBe(0);
@@ -288,12 +301,15 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     expect(outcome.status, run2Dump).toBe('ok');
     expect(outcome.reasons, run2Dump).toEqual([]);
     expect(outcome.fixReport?.counts.done, run2Dump).toBe(0);
-    // Zero fix jobs via ALL THREE suppression mechanisms: the thread reads
-    // resolved (classify), the housekeeping comments match the shipped
-    // sticky patterns, and the loop's own run-1 replies open with the
-    // self-reply signature — none re-plans. Zero fix jobs → the verify
-    // stage must not even run (a re-run no-op must not manufacture a
-    // NO PROGRESS verdict) and nothing is dispatched.
+    // Zero fix jobs via the suppression mechanisms, now ALL live-exercised:
+    // the thread reads resolved (classify); the seeded reviewer comment is
+    // already-answered-this-round (the shared dispatch log); the loop's OWN
+    // run-1 issue_comment reply is skipped by the LEADING signature (round-1
+    // medium — with the old trailing-marker bug run 2 planned a job on it
+    // and failed here); any platform housekeeping matches the shipped
+    // sticky patterns. Zero fix jobs → the verify stage must not even run
+    // (a re-run no-op must not manufacture a NO PROGRESS verdict) and
+    // nothing is dispatched.
     expect(outcome.verify, run2Dump).toBeUndefined();
     expect(outcome.reply, run2Dump).toBeUndefined();
     expect(outcome.actionsPosted, run2Dump).toBe(0);

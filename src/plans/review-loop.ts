@@ -129,6 +129,15 @@ const PUSH_REASON_MAX = 500;
  * deterministic under the single-identity deviation (authorship-based
  * skipping is blind when the drill holds exactly one identity — see
  * defaultLoopClassifyConfig).
+ *
+ * ACCEPTED v1 LIMITATION (round-1 low): the skip pattern is PREFIX-only, so
+ * an adversarial reviewer could LEAD their own comment with the marker to
+ * get it suppressed. That is self-defeating for them — the only feedback
+ * hidden is their own — and the signature carries no authority (nothing
+ * trusts a marker-led comment, it is merely not consumed as feedback), so
+ * the vector buys an attacker nothing but silence toward themselves. A
+ * nonce-based signature (per-PR secret compared on read) is the noted
+ * future hardening if this ever matters; v1 ships the plain marker.
  */
 const replySignature = (owner: string, repo: string, pr: number): string =>
   `<!-- cq-review-loop:${owner}/${repo}#${String(pr)} -->`;
@@ -161,7 +170,7 @@ const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
  * above): the right trust level for content that carries no author
  * identity, and the standard every future pattern here must meet.
  *
- * And the loop's OWN reply signature (drill 8, {@link REPLY_SIGNATURE}):
+ * And the loop's OWN reply signature (drill 8, {@link replySignature}):
  * `/^<!-- cq-review-loop:/`. Issue comments do not thread, so every reply
  * the loop posts would otherwise re-fetch as a NEW actionable item and the
  * loop would consume its own words forever. This is the classify
@@ -493,49 +502,71 @@ const worktreePushArgs = (
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
+ * The stage at which one claimed commit FAILED verification (round-1 low:
+ * the unreported-commit reason names it — "claimed but failed verification"
+ * is not actionable unless the human knows WHICH gate refused). Checked in
+ * order: 'not-40-hex' (shape — the literal "HEAD" and short shas are
+ * rejected before any git call), 'not-descendant' (the sha does not resolve
+ * to a commit, is the before-head itself, or is not a STRICT descendant of
+ * the before-head), 'not-ancestor' (not an ancestor of the pushed worktree
+ * HEAD), 'attribution-missing' (the commit message does not name the item).
+ */
+type CommitVerificationFailure =
+  | 'not-40-hex'
+  | 'not-descendant'
+  | 'not-ancestor'
+  | 'attribution-missing';
+
+/**
  * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
  * strictly mechanically (exit codes only), hardened against spoofing
- * (round-2 finding 2):
+ * (round-2 finding 2). Returns null when the commit verifies, else the
+ * failing stage:
  *   - the candidate must BE a full 40-hex sha — the literal "HEAD" and
- *     short shas are rejected before any git call;
- *   - `rev-parse --verify <sha>^{commit}` must succeed (it exists here);
- *   - `merge-base --is-ancestor <before.headSha> <sha>` must exit 0 with
+ *     short shas are rejected before any git call ('not-40-hex');
+ *   - `rev-parse --verify <sha>^{commit}` must succeed (it exists here) and
+ *     `merge-base --is-ancestor <before.headSha> <sha>` must exit 0 with
  *     the sha DISTINCT from the before-snapshot head — a STRICT descendant:
- *     the pre-existing base commit is not a fix;
+ *     the pre-existing base commit is not a fix ('not-descendant');
  *   - `merge-base --is-ancestor <sha> HEAD` must exit 0 (the worktree HEAD
- *     is the exact tree the stage-5 publish pushed).
+ *     is the exact tree the stage-5 publish pushed) ('not-ancestor');
+ *   - PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
+ *     worktree, so a sibling's strict-new commit would otherwise satisfy
+ *     this item's gate — the commit MESSAGE must name THIS item's id, the
+ *     shipped prompt requires it verbatim in the commit subject
+ *     ('attribution-missing').
  */
-const commitInPushedHead = async (
+const commitVerificationFailure = async (
   git: GhFn,
   worktreePath: string,
   sha: string,
   baseSha: string,
   itemId: string,
-): Promise<boolean> => {
+): Promise<CommitVerificationFailure | null> => {
   if (!COMMIT_SHA_RE.test(sha)) {
-    return false;
+    return 'not-40-hex';
   }
   if (sha.toLowerCase() === baseSha.toLowerCase()) {
-    return false; // STRICT descendant: the before-head itself is not a fix
+    return 'not-descendant'; // STRICT descendant: the before-head itself is not a fix
   }
   const verify = await git(['-C', worktreePath, 'rev-parse', '--verify', `${sha}^{commit}`]);
   if (verify.code !== 0) {
-    return false;
+    return 'not-descendant'; // unresolvable — it cannot be a strict descendant
   }
   const descendant = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', baseSha, sha]);
   if (descendant.code !== 0) {
-    return false;
+    return 'not-descendant';
   }
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
   if (ancestor.code !== 0) {
-    return false;
+    return 'not-ancestor';
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this
   // item's gate. The commit MESSAGE must name THIS item's id — the shipped
   // prompt requires it verbatim in the commit subject.
   const message = await git(['-C', worktreePath, 'log', '-1', '--format=%B', sha]);
-  return message.code === 0 && message.stdout.includes(itemId);
+  return message.code === 0 && message.stdout.includes(itemId) ? null : 'attribution-missing';
 };
 
 /**
@@ -673,10 +704,11 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     headBefore.stdout.trim() !== headAfter.stdout.trim();
   // HEAD-ACCOUNTABILITY VERIFICATION (drill 6; revises slice 9 item 2's
   // run-level delta): every ok row's claimed commits are verified HERE,
-  // through the SAME per-item gate the resolve uses (commitInPushedHead —
-  // 40-hex, strict descendant of the before-head, ancestor of the worktree
-  // HEAD, message names the item). The pass runs BEFORE the publish
-  // decision because publication keys on the TIP, not on per-row claims:
+  // through the SAME per-item gate the resolve uses
+  // (commitVerificationFailure — 40-hex, strict descendant of the
+  // before-head, ancestor of the worktree HEAD, message names the item).
+  // The pass runs BEFORE the publish decision because publication keys on
+  // the TIP, not on per-row claims:
   //   - the tip may sit past the before-head only when some item's VERIFIED
   //     commit accounts for it — a worker that commits while claiming
   //     changed:false still blocks (its commit IS the tip and unclaimed);
@@ -686,33 +718,48 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   //     and wrongly withheld publication).
   // Rows claiming changed:true whose commits fail verification keep the
   // unverified-commits path in the action stage; changed:false rows fire
-  // nothing once the tip is accounted for.
+  // nothing once the tip is accounted for. Reported-but-failed commits are
+  // remembered BY SHA so the unreported reason can name the failing stage
+  // when the tip was claimed but refused (round-1 low).
   const verifiedClaimed = new Set<string>();
+  const reportedFailures = new Map<string, CommitVerificationFailure>();
   const rowVerified = new Map<string, boolean>();
   for (const row of fixReport.jobs) {
     let verified = false;
     if (row.result.status === 'ok') {
       const source = sources.get(row.jobId);
       for (const sha of (row.result.value as FixReviewItemResult).commits) {
-        if (
-          source !== undefined &&
-          (await commitInPushedHead(opts.git, worktree.path, sha, before.headSha, source.itemId))
-        ) {
+        // The tip compare below runs over rev-parse's output; claimed shas
+        // are normalized the same way.
+        const key = sha.toLowerCase();
+        const failure =
+          source === undefined
+            ? 'attribution-missing'
+            : await commitVerificationFailure(
+                opts.git,
+                worktree.path,
+                sha,
+                before.headSha,
+                source.itemId,
+              );
+        if (failure === null) {
           verified = true;
-          // The tip compare below runs over rev-parse's output; claimed
-          // shas are normalized the same way.
-          verifiedClaimed.add(sha.toLowerCase());
+          verifiedClaimed.add(key);
+        } else {
+          reportedFailures.set(key, failure);
         }
       }
     }
     rowVerified.set(row.jobId, verified);
   }
-  const unreportedCommit =
-    headMoved &&
-    !verifiedClaimed.has(headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : '');
+  const worktreeTip = headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : '';
+  const unreportedCommit = headMoved && !verifiedClaimed.has(worktreeTip);
   if (unreportedCommit) {
+    const tipFailure = reportedFailures.get(worktreeTip);
     reasons.push(
-      `unreported-commit: worktree tip ${headAfter.stdout.trim()} is not a claimed fix — a worker committed without reporting it`,
+      tipFailure === undefined
+        ? `unreported-commit: worktree tip ${headAfter.stdout.trim()} is not a claimed fix — a worker committed without reporting it`
+        : `unreported-commit: worktree tip ${headAfter.stdout.trim()} was claimed but failed verification (${tipFailure})`,
     );
   }
 

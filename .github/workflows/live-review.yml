@@ -6,7 +6,11 @@
 #
 # SECRETS: this file carries NAMES only. GH_TOKEN must be a repo Actions
 # secret with repo scope on the dispatching user's account (it creates
-# cq-scratch-e5-<run_id>, pushes, and posts). The scratch repo is LEFT
+# cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
+# scoped to the scratch repo(s) only — not the full account token: the drill
+# needs create/push/comment on one scratch repo and nothing else (the
+# names-only rule is unchanged; this line is about the secret's SCOPE).
+# The scratch repo is LEFT
 # BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
 # run_id per drill so the seeded fixtures are unambiguous.
 #

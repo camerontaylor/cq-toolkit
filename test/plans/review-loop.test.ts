@@ -1257,6 +1257,29 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     ]);
   });
 
+  test('a claimed tip that fails verification names the failing stage (round-1 low): attribution-missing', async () => {
+    // The tip IS reported — the worker claimed NEW_SHA — but fails the
+    // per-item gate (the commit message names no item), so the reason must
+    // say WHICH stage refused, not read as "unreported". Publication is
+    // withheld, so only the unreported reason fires here (the action stage
+    // continues past withheld rows).
+    const world = defaultWorld();
+    world.commitMessages = {}; // NEW_SHA carries NO item attribution
+    world.worktreeAdvancesAt = 2; // the (claimed) commit lands during the fix stage...
+    world.worktreeAdvancesTo = NEW_SHA; // ...and IS the tip
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [NEW_SHA]))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual(
+      `unreported-commit: worktree tip ${NEW_SHA} was claimed but failed verification (attribution-missing)`,
+    );
+    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
+    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
+  });
+
   test('a dirty worktree at publish time → dirty-worktree reason, no push, no resolve', async () => {
     const world = defaultWorld();
     world.dirty = true;
