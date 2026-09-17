@@ -35,9 +35,12 @@ interface FakeGh {
   checks: Map<number, PrChecks>;
   /** Per-PR scripted review verdicts. */
   reviews: Map<number, PrReviewState>;
+  /** Per-PR scripted draft flags (absent → not a draft). */
+  drafts: Map<number, boolean>;
   /** Faults keyed by PR number, per read. */
   checkFaults: Map<number, string>;
   reviewFaults: Map<number, string>;
+  metaFaults: Map<number, string>;
   /** editPrBody bodies keyed by PR number. */
   edits: Map<number, string>;
   /** createPr invocations — the report must NEVER make one. */
@@ -48,8 +51,10 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
   const state: FakeGh = {
     checks: seed.checks ?? new Map<number, PrChecks>(),
     reviews: seed.reviews ?? new Map<number, PrReviewState>(),
+    drafts: seed.drafts ?? new Map<number, boolean>(),
     checkFaults: seed.checkFaults ?? new Map<number, string>(),
     reviewFaults: seed.reviewFaults ?? new Map<number, string>(),
+    metaFaults: seed.metaFaults ?? new Map<number, string>(),
     edits: seed.edits ?? new Map<number, string>(),
     creates: 0,
     gh: {
@@ -75,6 +80,11 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
         const verdict = state.reviews.get(number);
         if (verdict === undefined) throw new Error(`no scripted review for #${String(number)}`);
         return verdict;
+      },
+      getPrMeta: async (number) => {
+        const fault = state.metaFaults.get(number);
+        if (fault !== undefined) throw new Error(fault);
+        return { isDraft: state.drafts.get(number) === true };
       },
     },
   };
@@ -108,7 +118,24 @@ async function okReport(op: ReturnType<typeof makeRunReport>, input: RunReportIn
 describe('the three-valued readiness matrix', () => {
   const MATRIX: Array<[PrChecks, PrReviewState, 'ready' | 'blocked' | 'unknown', string]> = [
     [{ state: 'pass' }, { state: 'approved' }, 'ready', 'green checks + approval'],
-    [{ state: 'pass' }, { state: 'none' }, 'ready', 'green checks, no review decision on record'],
+    [
+      { state: 'pass' },
+      { state: 'none' },
+      'ready',
+      'green checks + NO review policy (a null decision counts toward ready)',
+    ],
+    [
+      { state: 'pass' },
+      { state: 'required' },
+      'unknown',
+      'REVIEW_REQUIRED is not none — a demanded-but-absent review is never ready (r1#1)',
+    ],
+    [
+      { state: 'pending' },
+      { state: 'required' },
+      'unknown',
+      'required review, checks still running',
+    ],
     [{ state: 'fail' }, { state: 'approved' }, 'blocked', 'failing checks beat approval'],
     [{ state: 'fail' }, { state: 'changes-requested' }, 'blocked', 'failing on both halves'],
     [
@@ -273,6 +300,80 @@ describe('effects faults land on their row (I9)', () => {
     );
     expect(report.rows[0]?.reason).toBe('checks: checks boom; review: review boom');
   });
+
+  test('a META read fault → unknown with the fault as its own reason half', async () => {
+    const fake = fakeGh({
+      checks: new Map([[11, { state: 'pass' }]]),
+      reviews: new Map([[11, { state: 'approved' }]]),
+      metaFaults: new Map([[11, 'isDraft read timed out']]),
+    });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      checks: 'pass',
+      review: 'approved',
+      readiness: 'unknown',
+      reason: 'meta: isDraft read timed out',
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Draft dominance (PR-165 r1#2, codex jLt4f): a draft can never be ready
+// ---------------------------------------------------------------------------
+
+describe('a draft PR is blocked regardless of checks and review', () => {
+  test('draft + green checks + approval → blocked, reason naming the draft', async () => {
+    const fake = fakeGh({
+      checks: new Map([[11, { state: 'pass' }]]),
+      reviews: new Map([[11, { state: 'approved' }]]),
+      drafts: new Map([[11, true]]),
+    });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'draft — not ready for review',
+    });
+    expect(report.counts).toEqual({ ready: 0, blocked: 1, unknown: 0 });
+  });
+
+  test('draft dominates even when the other reads FAULT', async () => {
+    const fake = fakeGh({
+      checkFaults: new Map([[11, 'checks boom']]),
+      reviewFaults: new Map([[11, 'review boom']]),
+      drafts: new Map([[11, true]]),
+    });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      checks: 'unknown',
+      review: 'unknown',
+      reason: 'draft — not ready for review',
+    });
+  });
+
+  test('not-a-draft changes nothing: green evidence still reports ready', async () => {
+    const fake = fakeGh({
+      checks: new Map([[11, { state: 'pass' }]]),
+      reviews: new Map([[11, { state: 'approved' }]]),
+      drafts: new Map([[11, false]]),
+    });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({ readiness: 'ready' });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -299,14 +400,27 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     expect(fake.edits.size).toBe(0);
   });
 
-  test('a tracker edit fault fails the op (a stale tracker must not pass silently)', async () => {
-    const fake = fakeGh();
+  test('a tracker edit fault fails the op AND carries the collected rows in the error (r1#5)', async () => {
+    const fake = fakeGh({
+      checks: new Map([
+        [11, { state: 'pass' }],
+        [12, { state: 'fail', failing: ['build'] }],
+      ]),
+      reviews: new Map([
+        [11, { state: 'approved' }],
+        [12, { state: 'none' }],
+      ]),
+    });
     fake.gh.editPrBody = async () => {
       throw new Error('edit refused');
     };
     const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toContain('tracker PR #7');
+    // The progressNote pattern: the fleet's evidence rides the failure text.
+    expect(result.status === 'failed' && result.error).toContain(
+      'core #11 ready; util #12 blocked (checks failing (build))',
+    );
   });
 
   test('TYPE + RUNTIME PIN: the PrEffects seam admits no merge-class member', async () => {
@@ -321,12 +435,13 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       comment: true,
       getPrChecks: true,
       getPrReviewState: true,
+      getPrMeta: true,
     };
     const names = Object.keys(seamMembers);
-    expect(names).toHaveLength(6);
+    expect(names).toHaveLength(7);
     expect(names.some((name) => /merge|rebase|squash|close/i.test(name))).toBe(false);
-    // The production adapter is pinned to the same six — no merge effect by
-    // construction there either.
+    // The production adapter is pinned to the same seven — no merge effect
+    // by construction there either.
     expect(Object.keys(makeSubprocessPrEffects('/repo')).sort()).toEqual(names.sort());
   });
 });
@@ -354,6 +469,15 @@ describe('boundary validation refuses bad inputs before any gh call', () => {
     expect(
       (await op(inputOf({ packages: 'core' as unknown as RunReportInput['packages'] }))).status,
     ).toBe('failed');
+  });
+
+  test('a control character in a package NAME is refused (it feeds the tracker body)', async () => {
+    const fake = fakeGh();
+    const op = makeRunReport(fake.gh);
+    const result = await op(inputOf({ packages: [{ name: 'util\u0000', number: 12 }] }));
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain('packages[0].name');
+    expect(fake.edits.size).toBe(0);
   });
 
   test('a non-object input never reaches the effects (zero calls)', async () => {

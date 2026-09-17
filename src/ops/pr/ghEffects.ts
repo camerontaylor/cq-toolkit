@@ -20,14 +20,30 @@
 //     markdown body is ever argv.
 //
 // Parsing is kept small and exported pure ({@link parsePrList},
-// {@link parseCreatedPr}, {@link checksOfRollup},
-// {@link reviewStateOfDecision}) — fixture-tested in
+// {@link selectPrMatch}, {@link parseCreatedPr}, {@link checksOfRollup},
+// {@link reviewStateOfDecision}, {@link metaOfIsDraft}) — fixture-tested in
 // test/ops/pr/registry.test.ts against captured gh JSON shapes.
 import { execFile } from 'node:child_process';
-import type { PrChecks, PrEffects, PrReviewState } from './assemblePrs.js';
+import type {
+  PrChecks,
+  PrEffects,
+  PrMeta,
+  PrReviewState,
+  PrSearchResult,
+  PrState,
+} from './assemblePrs.js';
 
 /** Generous capture ceiling — a big pr list must not truncate into a fault. */
 const GH_OUTPUT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The explicit search ceiling (PR-165 r1#4, I11): gh's pr list defaults to
+ * `--limit 30`, silently truncating — a search that misses its own PR
+ * because 31 PRs share the head would mint a duplicate. 200 is far past
+ * any real fleet's history for one head+base pair; the argument's presence
+ * is pinned by argv test.
+ */
+const GH_PR_LIST_LIMIT = '200';
 
 /**
  * The default wall-clock cap for one gh subprocess (the checkRunner's
@@ -121,12 +137,14 @@ function parseGhJson<T>(text: string, what: string): T {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse `gh pr list --head <head> --state all --json number,url`: a JSON
- * ARRAY of `{number, url?}` rows. A row without a numeric `number` makes
- * the whole payload untrustworthy (thrown, not skipped); a missing or
- * non-string `url` is simply absent from the result.
+ * Parse `gh pr list --head <head> --base <base> --state all --json
+ * number,url,state`: a JSON ARRAY of rows. A row without a numeric `number`
+ * makes the whole payload untrustworthy (thrown, not skipped); a missing or
+ * non-string `url` is simply absent from the result. The lifecycle `state`
+ * maps gh's OPEN/CLOSED/MERGED words onto the seam's lowercase vocabulary;
+ * anything else (a missing key, an unrecognized word) → `unknown`.
  */
-export function parsePrList(text: string): Array<{ number: number; url?: string }> {
+export function parsePrList(text: string): PrSearchResult[] {
   const payload = parseGhJson<unknown>(text, 'gh pr list');
   if (!Array.isArray(payload)) {
     throw new Error('gh pr list returned a non-array payload — payload untrustworthy');
@@ -139,10 +157,42 @@ export function parsePrList(text: string): Array<{ number: number; url?: string 
     ) {
       throw new Error('gh pr list returned a row without a numeric number — payload untrustworthy');
     }
-    const numbered = row as { number: number; url?: unknown };
+    const numbered = row as { number: number; url?: unknown; state?: unknown };
     const url = typeof numbered.url === 'string' && numbered.url !== '' ? numbered.url : undefined;
-    return url === undefined ? { number: numbered.number } : { number: numbered.number, url };
+    const base: PrSearchResult = {
+      number: numbered.number,
+      state: prStateOf(numbered.state),
+    };
+    return url === undefined ? base : { ...base, url };
   });
+}
+
+/** gh's lifecycle word → the seam's {@link PrState}; unknown words are unknown, never guessed. */
+function prStateOf(state: unknown): PrState {
+  if (state === 'OPEN') return 'open';
+  if (state === 'CLOSED') return 'closed';
+  if (state === 'MERGED') return 'merged';
+  return 'unknown';
+}
+
+/**
+ * THE DETERMINISTIC SEARCH PICK (PR-165 r1#4, I11): gh filters by head,
+ * base, and state — but nothing in the query pins ONE row, so when several
+ * matches come back the choice must not depend on gh's print order. Rule:
+ * prefer an OPEN PR (the live member of the fleet); among ties (or when
+ * none is open) the LOWEST number — the oldest, most canonical PR for the
+ * branch. Empty input → null.
+ */
+export function selectPrMatch(matches: readonly PrSearchResult[]): PrSearchResult | null {
+  if (matches.length === 0) return null;
+  const open = matches.filter((match) => match.state === 'open');
+  const pool = open.length > 0 ? open : matches;
+  let lowest = pool[0];
+  if (lowest === undefined) return null;
+  for (const match of pool) {
+    if (match.number < lowest.number) lowest = match;
+  }
+  return lowest;
 }
 
 /**
@@ -225,15 +275,28 @@ export function checksOfRollup(rollup: unknown): PrChecks {
 
 /**
  * Map gh's `reviewDecision` onto the seam's {@link PrReviewState}:
- * APPROVED → approved; CHANGES_REQUESTED → changes-requested;
- * REVIEW_REQUIRED and explicit null → none; ANYTHING else (an unrecognized
- * word, a missing key) → unknown — never a fabricated verdict.
+ * APPROVED → approved; CHANGES_REQUESTED → changes-requested; REVIEW_REQUIRED
+ * → `required` (a demanded-but-absent review is NOT `none` — collapsing the
+ * two made green-check PRs report ready on required-review repos, PR-165
+ * r1#1); an explicit null (no review policy at all) → none; ANYTHING else
+ * (an unrecognized word, a missing key) → unknown — never a fabricated
+ * verdict.
  */
 export function reviewStateOfDecision(decision: unknown): PrReviewState {
   if (decision === 'APPROVED') return { state: 'approved' };
   if (decision === 'CHANGES_REQUESTED') return { state: 'changes-requested' };
-  if (decision === 'REVIEW_REQUIRED' || decision === null) return { state: 'none' };
+  if (decision === 'REVIEW_REQUIRED') return { state: 'required' };
+  if (decision === null) return { state: 'none' };
   return { state: 'unknown' };
+}
+
+/**
+ * Map gh's `isDraft` onto the seam's {@link PrMeta}: only a literal `true`
+ * blocks (a missing/unrecognized key is read as not-draft — the ordinary
+ * fold — never as a fabricated draft).
+ */
+export function metaOfIsDraft(isDraft: unknown): PrMeta {
+  return { isDraft: isDraft === true };
 }
 
 // ---------------------------------------------------------------------------
@@ -243,13 +306,18 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
 /**
  * The shipped effects adapter (the registry importer's binding): one bound
  * `repoRoot`, every effect a fresh lazy gh call. Argv shapes:
- *   - searchPrByHead:    gh pr list --head <head> --state all --json number,url
+ *   - searchPrByHead:    gh pr list --head <head> --base <base> --state all
+ *                        --limit 200 --json number,url,state — the explicit
+ *                        generous limit (gh's default 30 truncates) and the
+ *                        deterministic {@link selectPrMatch} (prefer open,
+ *                        else lowest number) keep the adoption I11-honest
  *   - createPr:          gh pr create --head … --base … --title … [--body-file -] [--draft]
  *                        (the body, when present, travels over stdin)
  *   - editPrBody:        gh pr edit <n> --body-file -   (body over stdin)
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrChecks:       gh pr view <n> --json statusCheckRollup
  *   - getPrReviewState:  gh pr view <n> --json reviewDecision
+ *   - getPrMeta:         gh pr view <n> --json isDraft
  * The seam carries NO merge effect — the fleet run report is a
  * merge-readiness artifact; merging stays the merge family's guarded
  * business.
@@ -260,18 +328,29 @@ export function makeSubprocessPrEffects(
 ): PrEffects {
   const timeoutMs = timeouts?.timeoutMs ?? DEFAULT_GH_TIMEOUT_MS;
   return {
-    searchPrByHead: async (head) => {
-      const matches = parsePrList(
-        await runGh(
-          ['pr', 'list', '--head', head, '--state', 'all', '--json', 'number,url'],
-          repoRoot,
-          timeoutMs,
+    searchPrByHead: async (head, base) =>
+      selectPrMatch(
+        parsePrList(
+          await runGh(
+            [
+              'pr',
+              'list',
+              '--head',
+              head,
+              '--base',
+              base,
+              '--state',
+              'all',
+              '--limit',
+              GH_PR_LIST_LIMIT,
+              '--json',
+              'number,url,state',
+            ],
+            repoRoot,
+            timeoutMs,
+          ),
         ),
-      );
-      const first = matches[0];
-      if (first === undefined) return null;
-      return first;
-    },
+      ),
     createPr: async (request) => {
       const args = [
         'pr',
@@ -321,6 +400,13 @@ export function makeSubprocessPrEffects(
           ),
           'gh pr view',
         ).reviewDecision,
+      ),
+    getPrMeta: async (number) =>
+      metaOfIsDraft(
+        parseGhJson<{ isDraft?: unknown }>(
+          await runGh(['pr', 'view', String(number), '--json', 'isDraft'], repoRoot, timeoutMs),
+          'gh pr view',
+        ).isDraft,
       ),
   };
 }

@@ -23,6 +23,7 @@ import {
   type AssemblePrsInput,
   type PrCreateRequest,
   type PrEffects,
+  type PrState,
 } from '../../../src/ops/pr/assemblePrs.js';
 
 // ---------------------------------------------------------------------------
@@ -37,19 +38,23 @@ interface FakeGh {
   creates: PrCreateRequest[];
   /** editPrBody bodies keyed by PR number. */
   edits: Map<number, string>;
-  /** Existing PRs by head branch (the search index). */
-  prsByHead: Map<string, { number: number; url?: string }>;
+  /** Existing PRs by head branch (the search index); absent state means open. */
+  prsByHead: Map<string, { number: number; url?: string; state?: PrState }>;
   /** Track the next createPr number. */
   nextNumber: number;
   /** When set, createPr rejects for heads matching this exact string. */
   createFaultOnHead?: string;
+  /** Heads the fake recorded search calls FOR, with the base they were searched against. */
+  searches: Array<{ head: string; base: string }>;
 }
 
 function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
   const calls: string[] = [];
   const creates: PrCreateRequest[] = [];
   const edits = new Map<number, string>();
-  const prsByHead = seed.prsByHead ?? new Map<string, { number: number; url?: string }>();
+  const searches: Array<{ head: string; base: string }> = [];
+  const prsByHead =
+    seed.prsByHead ?? new Map<string, { number: number; url?: string; state?: PrState }>();
   let nextNumber = seed.nextNumber ?? 101;
   const state: FakeGh = {
     calls,
@@ -57,15 +62,19 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
     edits,
     prsByHead,
     nextNumber,
+    searches,
     ...(seed.createFaultOnHead !== undefined ? { createFaultOnHead: seed.createFaultOnHead } : {}),
     gh: {
-      searchPrByHead: async (head) => {
+      searchPrByHead: async (head, base) => {
         calls.push(`search:${head}`);
+        searches.push({ head, base });
         const hit = prsByHead.get(head);
         if (hit === undefined) return null;
-        return hit.url === undefined
-          ? { number: hit.number }
-          : { number: hit.number, url: hit.url };
+        return {
+          number: hit.number,
+          state: hit.state ?? 'open',
+          ...(hit.url === undefined ? {} : { url: hit.url }),
+        };
       },
       createPr: async (request) => {
         calls.push(`create:${request.head}`);
@@ -88,6 +97,7 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
       },
       getPrChecks: async () => ({ state: 'pass' }),
       getPrReviewState: async () => ({ state: 'none' }),
+      getPrMeta: async () => ({ isDraft: false }),
     },
   };
   return state;
@@ -210,13 +220,28 @@ describe('an existing tracker is reused in place', () => {
     expect(body).not.toContain('pending');
   });
 
-  test('a tracker whose PR was merged/closed still reuses the same number (search --state all semantics)', async () => {
+  test('a MERGED or CLOSED tracker is REFUSED — a landed record is never rewritten (zero package PRs)', async () => {
+    // PR-165 r1#7 flip: search --state all still FINDS a non-open tracker,
+    // but adoption would rewrite a merged PR's body. The op refuses,
+    // naming the state and the branch, BEFORE any package PR is attempted.
+    for (const closedState of ['merged', 'closed', 'unknown'] as const) {
+      const fake = fakeGh({
+        prsByHead: new Map([[TRACKER_BRANCH, { number: 3, state: closedState }]]),
+      });
+      const error = await failedAt(makeAssemblePrs(fake.gh), inputOf());
+      expect(error).toContain(`state '${closedState}'`);
+      expect(error).toContain(TRACKER_BRANCH);
+      expect(error).toContain('pick a fresh run prefix');
+      expect(fake.calls).toEqual([`search:${TRACKER_BRANCH}`]);
+    }
+  });
+
+  test('an OPEN tracker is adopted in place (the r1#7 positive pole)', async () => {
     const fake = fakeGh({
-      prsByHead: new Map([[TRACKER_BRANCH, { number: 3 }]]),
+      prsByHead: new Map([[TRACKER_BRANCH, { number: 3, state: 'open' }]]),
     });
     const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
     expect(result.tracker).toEqual({ number: 3, created: false });
-    expect(fake.calls.filter((call) => call === `create:${TRACKER_BRANCH}`)).toHaveLength(0);
   });
 });
 
@@ -311,9 +336,9 @@ describe('per-package rows isolate their outcomes', () => {
   test('a per-package search fault isolates to its row too', async () => {
     const fake = fakeGh();
     const baseSearch = fake.gh.searchPrByHead;
-    fake.gh.searchPrByHead = async (head) => {
+    fake.gh.searchPrByHead = async (head, base) => {
       if (head === PKG_CORE) throw new Error('search timed out');
-      return baseSearch(head);
+      return baseSearch(head, base);
     };
     const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
     expect(result.packages[0]).toMatchObject({
@@ -384,6 +409,57 @@ describe('boundary validation refuses bad inputs before any gh call', () => {
     );
     expect(error).toContain('tracker.title');
     expect(fake.calls).toEqual([]);
+  });
+
+  test('a control character in a package NAME is refused (it feeds the tracker markdown)', async () => {
+    const fake = fakeGh();
+    const error = await failedAt(
+      makeAssemblePrs(fake.gh),
+      inputOf({ packages: [{ name: 'core\n---', branch: PKG_CORE, title: 'x' }] }),
+    );
+    expect(error).toContain('packages[0].name');
+    expect(error).toContain('control characters');
+    expect(fake.calls).toEqual([]);
+  });
+
+  test('two packages sharing a branch are refused, naming both entries', async () => {
+    const fake = fakeGh();
+    const error = await failedAt(
+      makeAssemblePrs(fake.gh),
+      inputOf({
+        packages: [
+          { name: 'core', branch: PKG_CORE, title: 'core fixes' },
+          { name: 'core-two', branch: PKG_CORE, title: 'another core PR' },
+        ],
+      }),
+    );
+    expect(error).toContain('packages[0] and packages[1]');
+    expect(error).toContain(PKG_CORE);
+    expect(fake.calls).toEqual([]);
+  });
+
+  test('a package on the tracker’s own branch is refused', async () => {
+    const fake = fakeGh();
+    const error = await failedAt(
+      makeAssemblePrs(fake.gh),
+      inputOf({ packages: [{ name: 'core', branch: TRACKER_BRANCH, title: 'x' }] }),
+    );
+    expect(error).toContain('packages[0].branch');
+    expect(error).toContain("is the tracker's own branch");
+    expect(fake.calls).toEqual([]);
+  });
+
+  test('every search is base-threaded — the PR identity is head AND base', async () => {
+    // PR-165 r1#2: a PR from an earlier run against a DIFFERENT base must
+    // never be adopted as this fleet's member, so the op passes its own
+    // base on every search.
+    const fake = fakeGh();
+    await okReport(makeAssemblePrs(fake.gh), inputOf());
+    expect(fake.searches).toEqual([
+      { head: TRACKER_BRANCH, base: 'origin/merge-queue' },
+      { head: PKG_CORE, base: 'origin/merge-queue' },
+      { head: PKG_UTIL, base: 'origin/merge-queue' },
+    ]);
   });
 });
 

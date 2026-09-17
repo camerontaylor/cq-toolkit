@@ -16,7 +16,10 @@ export type {
   PrCreateRequest,
   PrCreateResult,
   PrEffects,
+  PrMeta,
   PrReviewState,
+  PrSearchResult,
+  PrState,
 } from './assemblePrs.js';
 export { makeAssemblePrs } from './assemblePrs.js';
 // The run report's value type is exported ALIASED: the kernel's frozen
@@ -31,9 +34,11 @@ export {
   checksOfRollup,
   makeSubprocessPrEffects,
   mapGhFault,
+  metaOfIsDraft,
   parseCreatedPr,
   parsePrList,
   reviewStateOfDecision,
+  selectPrMatch,
 } from './ghEffects.js';
 export {
   AssemblePrsInputSchema,

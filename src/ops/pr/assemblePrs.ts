@@ -32,16 +32,22 @@ import type { Op } from '../../kernel/types.js';
  * inject recording fakes, production binds {@link makeSubprocessPrEffects}.
  *
  * NO MERGE EFFECT BY CONSTRUCTION: the seam is the family's whole GitHub
- * vocabulary — search, create, edit-body, comment, and the two readiness
- * reads — and it deliberately admits no merge/rebase/close member. The
- * fleet run report (runReport.ts) is a merge-READINESS artifact; merging is
- * the merge family's guarded business (MergeEffects + safeArgs), never this
- * seam's. The key-set pin in test/ops/pr/runReport.test.ts fails the build
- * the moment a merge-class member is added.
+ * vocabulary — search, create, edit-body, comment, and the readiness reads
+ * (checks, review decision, draft status) — and it deliberately admits no
+ * merge/rebase/close member. The fleet run report (runReport.ts) is a
+ * merge-READINESS artifact; merging is the merge family's guarded business
+ * (MergeEffects + safeArgs), never this seam's. The key-set pin in
+ * test/ops/pr/runReport.test.ts fails the build the moment a merge-class
+ * member is added.
  */
 export interface PrEffects {
-  /** The open/closed PR whose head branch is `head`, or null when none exists. */
-  searchPrByHead(head: string): Promise<{ number: number; url?: string } | null>;
+  /**
+   * The PR whose head branch is `head` targeting `base` (any state), or
+   * null when none exists. `base` is part of the identity: a PR from an
+   * earlier run targeting a different base must never be adopted as this
+   * fleet's member.
+   */
+  searchPrByHead(head: string, base: string): Promise<PrSearchResult | null>;
   /** Open a new PR; `draft` is the caller's explicit choice (the op's default is true). */
   createPr(request: PrCreateRequest): Promise<PrCreateResult>;
   /** Replace a PR's body — the tracker's update-in-place mechanism. */
@@ -52,6 +58,24 @@ export interface PrEffects {
   getPrChecks(number: number): Promise<PrChecks>;
   /** The review-decision verdict for one PR (runReport). */
   getPrReviewState(number: number): Promise<PrReviewState>;
+  /**
+   * The PR's draft flag (runReport): a draft PR can carry green checks and
+   * an approval, yet GitHub cannot merge it — the report must not call it
+   * ready. A dedicated single-purpose read (kept apart from
+   * getPrChecks/getPrReviewState so every seam member answers exactly one
+   * question).
+   */
+  getPrMeta(number: number): Promise<PrMeta>;
+}
+
+/** A PR's lifecycle state, as the search reports it. */
+export type PrState = 'open' | 'closed' | 'merged' | 'unknown';
+
+/** The search's hit: number, URL when reported, lifecycle state. */
+export interface PrSearchResult {
+  number: number;
+  url?: string;
+  state: PrState;
 }
 
 /** Request of {@link PrEffects.createPr}: open one PR head onto base. */
@@ -77,10 +101,23 @@ export interface PrChecks {
   failing?: string[];
 }
 
-/** The review half of the merge-readiness evidence, read off one PR. */
+/**
+ * The review half of the merge-readiness evidence, read off one PR.
+ * `none` and `required` are OPPOSITES that a naive mapping collapses:
+ *   - `none`    — the forge reports NO review policy on the PR (a null
+ *                 decision): nobody is waiting on a review, so it counts
+ *                 toward ready.
+ *   - `required`— the forge reports a review IS required and none has been
+ *                 given (gh's REVIEW_REQUIRED): calling that ready would
+ *                 fabricate merge-readiness on every required-review repo.
+ */
 export interface PrReviewState {
-  /** `none` = no review decision on record (e.g. REVIEW_REQUIRED). */
-  state: 'approved' | 'changes-requested' | 'none' | 'unknown';
+  state: 'approved' | 'changes-requested' | 'none' | 'required' | 'unknown';
+}
+
+/** The draft half of the merge-readiness evidence: GitHub cannot merge a draft, whatever the checks say. */
+export interface PrMeta {
+  isDraft: boolean;
 }
 
 /** JSON-serializable input of the `pr.assemblePrs` op: one fleet run's PR plan. */
@@ -150,11 +187,13 @@ function refnameUnsafeSegment(segment: string): boolean {
 
 /**
  * Build the `pr.assemblePrs` op over injected gh effects. Per call, in
- * order: (a) TRACKER-FIRST — search by the tracker's head branch; reuse the
- * hit's number, else create the draft tracker with a pending-fleet manifest
- * body; any fault here is a whole-op `failed` BEFORE any package PR is
- * attempted (UC row 22). (b) PER-PACKAGE — the same search-then-create per
- * package branch, in input order; a fault lands on that row alone. (c)
+ * order: (a) TRACKER-FIRST — search by the tracker's head branch AND base;
+ * reuse the hit's number only when it is OPEN (a non-open tracker is a
+ * landed record — refused, never rewritten), else create the draft tracker
+ * with a pending-fleet manifest body; any fault here is a whole-op `failed`
+ * BEFORE any package PR is attempted (UC row 22). (b) PER-PACKAGE — the
+ * same base-threaded search-then-create per package branch, in input order;
+ * a fault lands on that row alone. (c)
  * UPDATE-IN-PLACE — editPrBody on the tracker with the refreshed fleet
  * manifest (per-package numbers, or the row faults); this is the ONLY way a
  * reused tracker is touched, so a run never duplicates its tracker. The
@@ -168,15 +207,23 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
     const draft = input.draft ?? true;
 
     // TRACKER-FIRST (UC row 22): the tracker exists before the first
-    // per-package PR. Search by head branch across ALL states — a merged or
-    // closed tracker from an earlier pass is still the run's tracker (its
-    // number is reused; a second one is never opened).
+    // per-package PR. Search by head branch AND base across ALL states —
+    // but only an OPEN tracker may be adopted: a merged or closed tracker
+    // from an earlier pass is history, and rewriting its body would corrupt
+    // a landed record; the caller picks a fresh run prefix instead. The
+    // refusal happens BEFORE any package PR is attempted.
     let trackerNumber: number;
     let trackerUrl: string | undefined;
     let trackerCreated: boolean;
     try {
-      const existing = await gh.searchPrByHead(input.tracker.branch);
+      const existing = await gh.searchPrByHead(input.tracker.branch, input.base);
       if (existing !== null) {
+        if (existing.state !== 'open') {
+          return {
+            status: 'failed',
+            error: `pr: a tracker PR for branch '${input.tracker.branch}' already exists in state '${existing.state}' (PR #${String(existing.number)}) — refusing adoption: a non-open tracker is a landed record, never rewritten; pick a fresh run prefix (UC row 22: one tracker per run, never a second)`,
+          };
+        }
         trackerNumber = existing.number;
         if (existing.url !== undefined) trackerUrl = existing.url;
         trackerCreated = false;
@@ -207,7 +254,7 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
     const manifestRows: ManifestRow[] = [];
     for (const pkg of input.packages) {
       try {
-        const existing = await gh.searchPrByHead(pkg.branch);
+        const existing = await gh.searchPrByHead(pkg.branch, input.base);
         if (existing !== null) {
           rows.push(
             withUrl({ name: pkg.name, number: existing.number, created: false }, existing.url),
@@ -386,6 +433,9 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
     if (typeof pkg.name !== 'string' || pkg.name === '') {
       return `pr: packages[${String(index)}].name must be a non-empty string`;
     }
+    if (CONTROL_CHARS_RE.test(pkg.name)) {
+      return `pr: packages[${String(index)}].name must not contain control characters — the name is written into the tracker manifest`;
+    }
     if (typeof pkg.title !== 'string' || pkg.title.trim() === '') {
       return `pr: packages[${String(index)}].title must be a non-empty (not whitespace-only) string`;
     }
@@ -406,6 +456,25 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
   }
   if (input.draft !== undefined && typeof input.draft !== 'boolean') {
     return `pr: draft (${String(input.draft)}) must be a boolean (absent means true)`;
+  }
+  // THE BRANCH NAMESPACE IS 1:1 (UC row 22): two packages sharing a branch
+  // would search-adopt the SAME PR into two fleet rows, and a package on
+  // the tracker's own branch would race the tracker-first ordering (the
+  // package search would adopt the tracker PR as a fleet member). Both are
+  // refused at the boundary, naming the colliding entries.
+  if (input.tracker.branch !== undefined) {
+    const collision = input.packages.findIndex((pkg) => pkg.branch === input.tracker.branch);
+    if (collision !== -1) {
+      return `pr: packages[${String(collision)}].branch '${input.tracker.branch}' is the tracker's own branch — a package PR and the tracker cannot share a head`;
+    }
+  }
+  const branchOwners = new Map<string, number>();
+  for (const [index, pkg] of input.packages.entries()) {
+    const firstOwner = branchOwners.get(pkg.branch);
+    if (firstOwner !== undefined) {
+      return `pr: packages[${String(firstOwner)}] and packages[${String(index)}] share branch '${pkg.branch}' — each package PR needs its own head under the run prefix`;
+    }
+    branchOwners.set(pkg.branch, index);
   }
   return null;
 }

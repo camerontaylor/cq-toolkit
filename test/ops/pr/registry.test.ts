@@ -26,13 +26,17 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import type { PrSearchResult, PrState } from '../../../src/ops/pr/assemblePrs.js';
 import {
+  checksOfRollup,
   makeSubprocessPrEffects,
   mapGhFault,
+  metaOfIsDraft,
   parseCreatedPr,
   parsePrList,
+  reviewStateOfDecision,
+  selectPrMatch,
 } from '../../../src/ops/pr/ghEffects.js';
-import { checksOfRollup, reviewStateOfDecision } from '../../../src/ops/pr/ghEffects.js';
 import { registry } from '../../../src/ops/pr/registry.js';
 
 const ENTRY_NAMES = ['pr.assemblePrs', 'pr.runReport'];
@@ -204,15 +208,22 @@ describe('the run-prefix refinements', () => {
 // The real gh adapter's pure parsers — captured-shape fixtures
 // ---------------------------------------------------------------------------
 
-describe('parsePrList (gh pr list --json number,url)', () => {
+describe('parsePrList (gh pr list --json number,url,state)', () => {
   test('an empty fleet has no PR on the head', () => {
     expect(parsePrList('[]')).toEqual([]);
   });
 
-  test('rows keep the number and the URL when gh reported one', () => {
+  test('rows keep the number, the URL, and the lifecycle state (r1#7)', () => {
     expect(
-      parsePrList('[{"number":7,"url":"https://github.test/owner/repo/pull/7"},{"number":8}]'),
-    ).toEqual([{ number: 7, url: 'https://github.test/owner/repo/pull/7' }, { number: 8 }]);
+      parsePrList(
+        '[{"number":7,"url":"https://github.test/owner/repo/pull/7","state":"OPEN"},{"number":8,"state":"MERGED"},{"number":9,"state":"CLOSED"},{"number":10}]',
+      ),
+    ).toEqual([
+      { number: 7, url: 'https://github.test/owner/repo/pull/7', state: 'open' },
+      { number: 8, state: 'merged' },
+      { number: 9, state: 'closed' },
+      { number: 10, state: 'unknown' },
+    ]);
   });
 
   test('a non-array payload and a row without a number are untrustworthy (thrown)', () => {
@@ -224,6 +235,34 @@ describe('parsePrList (gh pr list --json number,url)', () => {
 
   test('non-JSON output is a fault, never a guess', () => {
     expect(() => parsePrList('gh: (GitHub) API rate limit exceeded')).toThrow(/non-JSON output/);
+  });
+});
+
+describe('selectPrMatch (the deterministic adoption pick, r1#4/I11)', () => {
+  const row = (number: number, state: PrState): PrSearchResult => ({ number, state });
+
+  test('no matches → null', () => {
+    expect(selectPrMatch([])).toBeNull();
+  });
+
+  test('a single match passes through', () => {
+    expect(selectPrMatch([row(5, 'open')])).toEqual(row(5, 'open'));
+  });
+
+  test('several matches prefer the OPEN PR, regardless of print order', () => {
+    expect(selectPrMatch([row(3, 'closed'), row(9, 'open'), row(12, 'open')])).toEqual(
+      row(9, 'open'),
+    );
+    expect(selectPrMatch([row(12, 'open'), row(9, 'open'), row(3, 'closed')])).toEqual(
+      row(9, 'open'),
+    );
+  });
+
+  test('no open match → the LOWEST number (the oldest, most canonical PR)', () => {
+    expect(selectPrMatch([row(21, 'merged'), row(4, 'closed'), row(17, 'merged')])).toEqual(
+      row(4, 'closed'),
+    );
+    expect(selectPrMatch([row(21, 'unknown'), row(17, 'unknown')])).toEqual(row(17, 'unknown'));
   });
 });
 
@@ -305,16 +344,27 @@ describe('checksOfRollup (gh pr view --json statusCheckRollup)', () => {
 });
 
 describe('reviewStateOfDecision (gh pr view --json reviewDecision)', () => {
-  test('the three real words and null map onto the seam vocabulary', () => {
+  test('the real words and null map onto the seam vocabulary', () => {
     expect(reviewStateOfDecision('APPROVED')).toEqual({ state: 'approved' });
     expect(reviewStateOfDecision('CHANGES_REQUESTED')).toEqual({ state: 'changes-requested' });
-    expect(reviewStateOfDecision('REVIEW_REQUIRED')).toEqual({ state: 'none' });
     expect(reviewStateOfDecision(null)).toEqual({ state: 'none' });
+  });
+
+  test('REVIEW_REQUIRED is `required`, NOT `none` — the r1#1 flip (a demanded-but-absent review is never ready)', () => {
+    expect(reviewStateOfDecision('REVIEW_REQUIRED')).toEqual({ state: 'required' });
   });
 
   test('an unrecognized word is unknown — never a fabricated verdict', () => {
     expect(reviewStateOfDecision('REQUIRED')).toEqual({ state: 'unknown' });
     expect(reviewStateOfDecision(undefined)).toEqual({ state: 'unknown' });
+  });
+});
+
+describe('metaOfIsDraft (gh pr view --json isDraft)', () => {
+  test('a literal true is a draft; false and a missing key are not (never a fabricated draft)', () => {
+    expect(metaOfIsDraft(true)).toEqual({ isDraft: true });
+    expect(metaOfIsDraft(false)).toEqual({ isDraft: false });
+    expect(metaOfIsDraft(undefined)).toEqual({ isDraft: false });
   });
 });
 
@@ -458,6 +508,51 @@ describe('createPr carries the body over stdin, never argv', () => {
       expect(argv).not.toContain('--body');
       expect(argv).not.toContain('--body-file');
       expect(argv).not.toContain('--draft');
+    } finally {
+      if (originalPath === undefined) delete process.env['PATH'];
+      else process.env['PATH'] = originalPath;
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('searchPrByHead argv pins (r1#3 + r1#4/I11)', () => {
+  test('the search passes --base, and an explicit generous --limit (gh would default to 30)', async () => {
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-pr-list-'));
+    const binDir = join(scratch, 'bin');
+    const repoDir = join(scratch, 'repo');
+    const argsFile = join(scratch, 'argv');
+    await mkdir(binDir, { recursive: true });
+    await mkdir(repoDir, { recursive: true });
+    // The list shim records argv and prints one row — it never reads stdin
+    // (the search effect writes none, and a reading shim would block).
+    await writeFile(
+      join(binDir, 'gh'),
+      [
+        '#!/bin/sh',
+        `printf '%s\\n' "$@" > '${argsFile}'`,
+        'echo \'[{"number":9,"state":"OPEN"}]\'',
+        '',
+      ].join('\n'),
+    );
+    await chmod(join(binDir, 'gh'), 0o755);
+    const originalPath = process.env['PATH'];
+    process.env['PATH'] = `${binDir}:${originalPath ?? ''}`;
+    try {
+      const effects = makeSubprocessPrEffects(repoDir);
+      const hit = await effects.searchPrByHead('cq/09-16a/fix/core', 'origin/merge-queue');
+      expect(hit).toEqual({ number: 9, state: 'open' });
+      const argv = (await readFile(argsFile, 'utf8')).split('\n').filter((line) => line !== '');
+      // The base is part of the PR identity (r1#2): it MUST reach the query.
+      const baseIndex = argv.indexOf('--base');
+      expect(baseIndex).toBeGreaterThan(-1);
+      expect(argv[baseIndex + 1]).toBe('origin/merge-queue');
+      const headIndex = argv.indexOf('--head');
+      expect(argv[headIndex + 1]).toBe('cq/09-16a/fix/core');
+      // The truncation guard (r1#4): the limit is EXPLICIT, never gh's 30.
+      const limitIndex = argv.indexOf('--limit');
+      expect(limitIndex).toBeGreaterThan(-1);
+      expect(argv[limitIndex + 1]).toBe('200');
     } finally {
       if (originalPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = originalPath;
