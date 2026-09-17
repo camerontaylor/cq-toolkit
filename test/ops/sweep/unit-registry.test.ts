@@ -29,6 +29,7 @@ import {
   sweepRunStateDir,
 } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitDispatchInput } from '../../../src/ops/sweep/unit.js';
+import { generateScratchRepo } from '../../fixtures/scratch-repo/generate.js';
 
 const CLEANUP: string[] = [];
 afterAll(() => {
@@ -158,9 +159,10 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(entry).toBeDefined();
     const op = await entry?.importer();
     expect(typeof op).toBe('function');
+    if (op === undefined) throw new Error('importer resolved undefined');
     // No driver config: the binding refuses, the dispatch seam folds it into
     // an honest `failed` naming the field.
-    const driverless = await op?.({
+    const driverless = await op({
       repoRoot: '/repo',
       worktreesDir: 'worktrees',
       runPrefix: 'cq/x',
@@ -173,7 +175,7 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(driverless?.status).toBe('failed');
     expect(driverless?.status === 'failed' && driverless.error).toMatch(/no driver config/);
     // No check config: the same refusal, naming check.
-    const checkless = await op?.({
+    const checkless = await op({
       repoRoot: '/repo',
       worktreesDir: 'worktrees',
       runPrefix: 'cq/x',
@@ -190,19 +192,133 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     expect(() => bindingsFromDispatch(driverlessInput)).toThrow(/no driver config/);
   });
 
+  test(
+    'jhDjC: a PREP dispatch needs only the check binding and returns prep evidence',
+    { timeout: 120_000 },
+    async () => {
+      // A prep dispatch input with NO driver section binds (the requirement is
+      // mode-conditional) and the op runs the probe leg alone.
+      const entry = sweepRegistry.find((candidate) => candidate.name === 'sweep.unit');
+      const op = await entry?.importer();
+      if (op === undefined) throw new Error('importer resolved undefined');
+      const prepDispatch: Record<string, unknown> = {
+        repoRoot: VALID.repoRoot,
+        worktreesDir: VALID.worktreesDir,
+        runPrefix: VALID.runPrefix,
+        base: VALID.base,
+        package: VALID.package,
+        fixer: VALID.fixer,
+        files: VALID.files,
+        mode: 'prep',
+        check: VALID.check,
+      };
+      // Registry-schema admission WITHOUT a driver section.
+      expect(SweepUnitDispatchInputSchema.safeParse(prepDispatch).success).toBe(true);
+      // The op needs a REAL worktree to probe, so run it against a scratch repo
+      // generated into a tmpdir (the prep evidence is the pin).
+      const { mkdtempSync } = await import('node:fs');
+      const root = mkdtempSync(join(tmpdir(), 'd4-prep-dispatch-'));
+      CLEANUP.push(root);
+      const repo = join(root, 'repo');
+      await generateScratchRepo(repo);
+      prepDispatch.repoRoot = repo;
+      const result = await op(prepDispatch);
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') return;
+      const report = result.value as {
+        mode?: string;
+        baseline?: { verdict?: string };
+        final?: unknown;
+      };
+      expect(report.mode).toBe('prep');
+      expect(report.baseline?.verdict).toBe('failing'); // alpha's seeded failure
+      expect(report.final).toBeUndefined(); // no AFTER probe in prep
+      // Fix-mode dispatch WITHOUT driver: the binding refusal is unchanged.
+      const fixWithoutDriver = await op({
+        repoRoot: VALID.repoRoot,
+        worktreesDir: VALID.worktreesDir,
+        runPrefix: VALID.runPrefix,
+        base: VALID.base,
+        package: VALID.package,
+        fixer: VALID.fixer,
+        files: VALID.files,
+        check: VALID.check,
+      });
+      expect(fixWithoutDriver.status).toBe('failed');
+      expect(fixWithoutDriver.status === 'failed' && fixWithoutDriver.error).toMatch(
+        /no driver config/,
+      );
+    },
+  );
+
+  test('jhDi6: an omitted check timeoutMs binds the advertised 600s default', () => {
+    const noTimeout = bindingsFromDispatch({
+      ...VALID,
+      check: {
+        adapter: 'tsc-lines' as const,
+        command: 'node',
+        args: ['scripts/check.js', '{package}'],
+      },
+    });
+    const command = noTimeout.checkCommand(
+      { package: 'alpha', fixer: 'fix', files: [] },
+      '/worktrees/fix/alpha',
+    );
+    expect(command.timeoutMs).toBe(600_000);
+    // An explicit timeout still wins.
+    const explicit = bindingsFromDispatch({
+      ...VALID,
+      check: {
+        adapter: 'tsc-lines',
+        command: 'node',
+        args: ['scripts/check.js', '{package}'],
+        timeoutMs: 5000,
+      },
+    });
+    expect(
+      explicit.checkCommand({ package: 'alpha', fixer: 'fix', files: [] }, '/wt').timeoutMs,
+    ).toBe(5000);
+  });
+
+  test('jhDjZ: {package} interpolation uses replacement CALLBACKS (a $& package stays literal)', () => {
+    const hostile = bindingsFromDispatch({
+      ...VALID,
+      package: '$&',
+      check: {
+        adapter: 'tsc-lines',
+        command: 'node',
+        args: ['scripts/check.js', '{package}'],
+      },
+      promptTemplate: 'fix {package} in {worktree} as {fixer}',
+    });
+    const command = hostile.checkCommand({ package: '$&', fixer: 'fix', files: [] }, '/wt');
+    // Replacement-STRING semantics would turn '$&' into the whole match
+    // ('{package}') — the callback keeps the package name literal.
+    expect(command.args).toEqual(['scripts/check.js', '$&']);
+    const prompt = hostile.prompt?.({ package: '$&', fixer: 'fix', files: [] }, {
+      path: '/wt',
+    } as never);
+    expect(prompt).toContain('fix $& in /wt');
+  });
+
   test('bindingsFromDispatch defaults the push leg ON (push:false opts out)', () => {
     expect(bindingsFromDispatch(VALID).pushBranch).toBeDefined();
     expect(bindingsFromDispatch({ ...VALID, push: false }).pushBranch).toBeUndefined();
-    // The prompt template: the shipped default, placeholders substituted.
+    // The prompt template: the shipped default, placeholders substituted
+    // (fix-mode bindings carry the prompt; prep omits it).
     const bindings = bindingsFromDispatch(VALID);
+    expect(bindings.prompt).toBeDefined();
     const expected = DEFAULT_UNIT_PROMPT_TEMPLATE.replaceAll('{package}', 'alpha')
       .replaceAll('{fixer}', 'fix')
       .replaceAll('{worktree}', '/worktrees/fix/alpha');
     expect(
-      bindings.prompt({ package: 'alpha', fixer: 'fix', files: [] }, {
+      bindings.prompt?.({ package: 'alpha', fixer: 'fix', files: [] }, {
         path: '/worktrees/fix/alpha',
       } as never),
     ).toBe(expected);
+    const prepBindings = bindingsFromDispatch({ ...VALID, mode: 'prep' });
+    expect(prepBindings.prompt).toBeUndefined();
+    expect(prepBindings.driver).toBeUndefined();
   });
 });
 

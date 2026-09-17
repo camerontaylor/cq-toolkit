@@ -136,6 +136,13 @@ export const SWEEP_RUN_STATE_COMMITTED_DIR = 'committed';
 /** The worktreeFor family's default git wall clock (600s), for the unit op's adapter. */
 export const DEFAULT_UNIT_GIT_TIMEOUT_MS = 600_000;
 
+/**
+ * The check binding's default wall clock (jhDi6): the gates.checkRunner
+ * registry default — an omitted `check.timeoutMs` must not leave the probe
+ * unbounded.
+ */
+export const DEFAULT_UNIT_CHECK_TIMEOUT_MS = 600_000;
+
 // ---------------------------------------------------------------------------
 // The SDK binding surface
 // ---------------------------------------------------------------------------
@@ -186,12 +193,17 @@ export interface SweepUnitBindings {
   runCheck: RunCheck;
   /** The per-package check command, resolved against the unit's worktree. */
   checkCommand: (unit: WorkUnit, worktreePath: string) => CheckCommand;
-  /** The fixer worker, on the frozen Driver seam (vendor-neutral, I1). */
-  driver: Driver;
-  /** Model identity for the fixer invocation (plain data, never a vendor handle). */
-  modelSpec: ModelSpec;
-  /** Sessions dir backing the per-unit session record (the workspace IS the worktree). */
-  sessionsDir: string;
+  /**
+   * The fixer worker, on the frozen Driver seam (vendor-neutral, I1).
+   * OPTIONAL: PREP mode (probes only) omits the driver bindings entirely —
+   * the op's fixer leg refuses a driver-less binding with an honest [INFRA]
+   * failure, so a regression that reaches it can never silently "fix".
+   */
+  driver?: Driver;
+  /** Model identity for the fixer invocation (plain data, never a vendor handle). Present iff `driver` is. */
+  modelSpec?: ModelSpec;
+  /** Sessions dir backing the per-unit session record (the workspace IS the worktree). Present iff `driver` is. */
+  sessionsDir?: string;
   /** Tool policy for the fixer invocation; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
   /**
@@ -209,8 +221,8 @@ export interface SweepUnitBindings {
   gitTimeoutMs?: number;
   /** Budget caps for the fixer invocation; default uncapped. */
   budget?: Budget;
-  /** The fixer prompt — caller-composed data (the toolkit bakes in no vendor prompt). */
-  prompt: (unit: WorkUnit, worktree: SweepWorkspace) => string;
+  /** The fixer prompt — caller-composed data (the toolkit bakes in no vendor prompt). Present iff `driver` is. */
+  prompt?: (unit: WorkUnit, worktree: SweepWorkspace) => string;
   /** The git transport for the stage, diff, and commit steps. */
   git: GhFn;
   /**
@@ -403,15 +415,26 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
 
     // 5. The fixer: one Driver run whose workspace IS the worktree (a fresh
     // session record in the caller's sessions dir; the record's messages
-    // never touch the tree).
+    // never touch the tree). A driver-less binding reaching this leg is a
+    // binding-contract violation (prep stops at step 4; fix dispatches carry
+    // a driver) — an honest [INFRA] failure, never a silent "fix".
+    if (bindings.driver === undefined || bindings.prompt === undefined) {
+      return {
+        status: 'failed',
+        error: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: the binding carries no fixer driver — a fix-mode dispatch requires driver bindings (prep mode never reaches this leg)`,
+        ),
+      };
+    }
     let stopReason: string;
     let denial: string | undefined;
     try {
-      const store = new SessionStore(bindings.sessionsDir);
+      const store = new SessionStore(bindings.sessionsDir ?? defaultSessionsDir());
       const record = await store.create(worktree.path);
       const worker = await bindings.driver.run({
         prompt: bindings.prompt(unit, worktree),
-        modelSpec: bindings.modelSpec,
+        modelSpec: bindings.modelSpec ?? { model: '', provider: '' },
         toolPolicy: bindings.toolPolicy ?? { allow: ['edit'], mode: 'allowlist' },
         sandboxPolicy: bindings.sandboxPolicy ?? { level: 'none' },
         sessionRef: record.sessionId,
@@ -1067,9 +1090,13 @@ export function pushLockOptions(
  * misconfiguration, never a silent no-op.
  */
 export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBindings {
-  if (input.driver === undefined) {
+  // jhDjC: the binding requirement is MODE-CONDITIONAL — prep runs no
+  // fixer/driver, so a prep dispatch needs only the probe config; fix
+  // (default) requires driver + check as before.
+  const prep = input.mode === 'prep';
+  if (!prep && input.driver === undefined) {
     throw new Error(
-      'sweep.unit: the dispatch input carries no driver config — the shipped dispatch requires a fixer (driver: {binary, provider, model})',
+      'sweep.unit: the dispatch input carries no driver config — the shipped fix dispatch requires a fixer (driver: {binary, provider, model}); prep dispatches (mode: prep) need only check',
     );
   }
   if (input.check === undefined) {
@@ -1099,12 +1126,30 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
           branch: `${input.runPrefix}/${input.kind}/${input.slug}`,
         }
       : derived;
-  const driver = new SubprocessDriver({
-    binary:
-      typeof input.driver.binary === 'string' ? [input.driver.binary] : [...input.driver.binary],
-    routingTable: input.driver.routingTable ?? defaultRoutingTable(),
-    ...(input.driver.sessionsDir !== undefined ? { sessionsDir: input.driver.sessionsDir } : {}),
-  });
+  // jhDjC: the SubprocessDriver (and the driver-derived bindings) exist only
+  // for FIX dispatches; prep carries the probe binding alone.
+  const driverBindings = !prep
+    ? (() => {
+        const cfg = input.driver as SweepUnitDriverConfig; // safe: !prep ⇒ driver present
+        const driver = new SubprocessDriver({
+          binary: typeof cfg.binary === 'string' ? [cfg.binary] : [...cfg.binary],
+          routingTable: cfg.routingTable ?? defaultRoutingTable(),
+          ...(cfg.sessionsDir !== undefined ? { sessionsDir: cfg.sessionsDir } : {}),
+        });
+        return {
+          driver,
+          modelSpec: { model: cfg.model, provider: cfg.provider } as ModelSpec,
+          sessionsDir: cfg.sessionsDir ?? defaultSessionsDir(),
+          toolPolicy: cfg.toolPolicy,
+          budget: cfg.budget,
+          prompt: (unit: WorkUnit, worktree: SweepWorkspace) =>
+            (input.promptTemplate ?? DEFAULT_UNIT_PROMPT_TEMPLATE)
+              .replaceAll('{package}', () => unit.package)
+              .replaceAll('{fixer}', () => unit.fixer)
+              .replaceAll('{worktree}', () => worktree.path),
+        };
+      })()
+    : undefined;
   return {
     repoRoot: input.repoRoot,
     worktreesDir: input.worktreesDir,
@@ -1118,22 +1163,20 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     runCheck: subprocessRunCheck,
     checkCommand: (unit, worktreePath) => ({
       command: input.check?.command ?? '',
-      args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', unit.package)),
+      // jhDjZ: replacement CALLBACKS, not replacement strings — a package
+      // name containing '$&' would otherwise corrupt the substituted argv.
+      args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', () => unit.package)),
       cwd: worktreePath,
-      ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
+      // jhDi6: the advertised 600s default — an omitted timeoutMs must not
+      // leave the probe unbounded.
+      timeoutMs: input.check?.timeoutMs ?? DEFAULT_UNIT_CHECK_TIMEOUT_MS,
     }),
-    driver,
-    modelSpec: { model: input.driver.model, provider: input.driver.provider },
-    sessionsDir: input.driver.sessionsDir ?? defaultSessionsDir(),
-    ...(input.driver.toolPolicy !== undefined ? { toolPolicy: input.driver.toolPolicy } : {}),
+    // jhDjC: PREP omits the driver bindings entirely (no fixer runs); the
+    // op's fixer leg refuses a driver-less binding with an honest [INFRA]
+    // failure, so a regression that reaches it can never silently "fix".
+    ...(driverBindings ?? {}),
     ...(input.sandboxPolicy !== undefined ? { sandboxPolicy: input.sandboxPolicy } : {}),
     ...(input.gitTimeoutMs !== undefined ? { gitTimeoutMs: input.gitTimeoutMs } : {}),
-    ...(input.driver.budget !== undefined ? { budget: input.driver.budget } : {}),
-    prompt: (unit, worktree) =>
-      (input.promptTemplate ?? DEFAULT_UNIT_PROMPT_TEMPLATE)
-        .replaceAll('{package}', unit.package)
-        .replaceAll('{fixer}', unit.fixer)
-        .replaceAll('{worktree}', worktree.path),
     git: makeGhRunner({
       bin: 'git',
       timeoutMs: input.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
