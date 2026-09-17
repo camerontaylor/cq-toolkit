@@ -380,6 +380,23 @@ describe('lifecycle and mergeability dominate the fold', () => {
     expect(report.rows[0]).toMatchObject({ readiness: 'blocked', reason: 'state: merged' });
   });
 
+  test('an UNKNOWN PR state FAILS CLOSED → unknown, not a fabricated block (final jONi0)', async () => {
+    // An undetermined lifecycle state is unreadable evidence, not a hard
+    // verdict either way — `unknown`, never `blocked`, never `ready`.
+    const fake = fakeGh({ ...greenSeed, metas: new Map([[11, 'unknown']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'unknown',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'PR state not determined by GitHub',
+    });
+    expect(report.counts).toEqual({ ready: 0, blocked: 0, unknown: 1 });
+  });
+
   test('merge CONFLICTS with green checks and approval → blocked, reason merge conflicts', async () => {
     const fake = fakeGh({ ...greenSeed, mergeables: new Map([[11, 'conflicting']]) });
     const report = await okReport(

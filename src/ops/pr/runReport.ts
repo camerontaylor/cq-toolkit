@@ -12,13 +12,15 @@
 //
 // Invariants honored here:
 //   - META READS FIRST (lifecycle/mergeability dominance, codex jMJpD): a
-//     draft, a non-open state, or merge conflicts is `blocked` regardless
+//     draft, a definitive non-open state (closed/merged), merge conflicts,
+//     or a protection-blocked/behind merge state is `blocked` regardless
 //     of checks/review — green evidence on an unmergeable PR is a
-//     fabricated ready. BOTH `mergeable: 'unknown'` AND
-//     `mergeStateStatus: 'unknown'` FAIL CLOSED (D2 adjudications jNf_h +
-//     jOEDe): GitHub has not determined mergeability yet, so `ready` there
-//     would be a verdict ahead of evidence — the row is `unknown` naming
-//     the half that is not yet computed.
+//     fabricated ready. UNDETERMINED halves FAIL CLOSED to `unknown`, not
+//     `blocked` (D2 adjudications jNf_h + jOEDe + jONi0): `mergeable` and
+//     `mergeStateStatus` unknown mean GitHub has not computed mergeability,
+//     and an `unknown` lifecycle state is unreadable evidence — `ready`
+//     there would be a verdict ahead of evidence, and `blocked` would be
+//     one fabricated the other way.
 //   - DRAFT DOMINATES: a draft PR is `blocked` regardless of checks/review
 //     — GitHub cannot merge a draft, however green its evidence.
 //   - REVIEW_REQUIRED is not `none`: a demanded-but-absent review is
@@ -131,17 +133,18 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
       // META READS FIRST (PR-165 r3 codex jMJpD + final jNTyP; mergeable
       // AND mergeStateStatus unknown fail-closed per D2 adjudications
       // jNf_h/jOEDe): the lifecycle and mergeability halves dominate the
-      // fold — a draft, a non-open PR, a conflicting PR, or a
-      // protection-blocked/behind merge state is `blocked` however green
-      // its checks and review, and the evidence halves still show on the
-      // row. DRAFT first (the fleet's own PRs open as drafts and GitHub
-      // cannot merge a draft); then STATE (a closed/merged PR is history,
-      // not a merge candidate); then MERGEABILITY (conflicts). BOTH
-      // `mergeable: 'unknown'` AND `mergeStateStatus: 'unknown'` mean
-      // GitHub has not determined mergeability — calling that ready would
-      // be a verdict ahead of evidence, so both are `unknown` (jNf_h,
-      // jOEDe), NOT tolerated; only a settled CLEAN merge state continues
-      // to the checks/review halves.
+      // fold — a draft, a conflicting PR, or a protection-blocked/behind
+      // merge state is `blocked` however green its checks and review, and
+      // the evidence halves still show on the row. DRAFT first (the
+      // fleet's own PRs open as drafts and GitHub cannot merge a draft);
+      // then STATE (a closed/merged PR is DEFINITIVELY history — blocked;
+      // an UNDETERMINED state is not a verdict — `unknown`, jONi0); then
+      // MERGEABILITY (conflicts). BOTH `mergeable: 'unknown'` AND
+      // `mergeStateStatus: 'unknown'` mean GitHub has not determined
+      // mergeability — calling that ready would be a verdict ahead of
+      // evidence, so both are `unknown` (jNf_h, jOEDe), NOT tolerated;
+      // only a settled CLEAN merge state continues to the checks/review
+      // halves.
       if (meta.isDraft) {
         rows.push({
           name: pkg.name,
@@ -153,7 +156,7 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
         });
         continue;
       }
-      if (meta.state !== 'open') {
+      if (meta.state === 'closed' || meta.state === 'merged') {
         rows.push({
           name: pkg.name,
           number: pkg.number,
@@ -161,6 +164,19 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
           checks: observedChecks,
           review: observedReview,
           reason: `state: ${meta.state}`,
+        });
+        continue;
+      }
+      if (meta.state === 'unknown') {
+        // jONi0: an undetermined lifecycle state is unreadable evidence,
+        // not a hard verdict — fail closed to `unknown`, never `blocked`.
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'PR state not determined by GitHub',
         });
         continue;
       }
