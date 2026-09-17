@@ -14,6 +14,7 @@ import type { AnalyzeFileStore } from '../../../../src/ops/analyze/analysisStore
 import { AnalysisStoreError } from '../../../../src/ops/analyze/analysisStore.js';
 import type { Playbook } from '../../../../src/ops/analyze/playbooks/format.js';
 import {
+  DispatchInFlightError,
   makePlaybookDispatchOp,
   makePlaybookQuarantineListOp,
   makePlaybookRegisterOp,
@@ -595,6 +596,27 @@ describe('withDispatch (the direct SDK slot path)', () => {
     expect(b).toBe('b');
     releaseA?.();
     expect(await a).toBe('a');
+  });
+
+  test('a task that SYNCHRONOUSLY re-enters withDispatch for its own id is refused in flight — the nested call never runs, the outer completes normally', async () => {
+    const playbooks = makePlaybookRegistry();
+    const nested: unknown[] = [];
+    // The outer task re-enters for the SAME id BEFORE returning its
+    // promise. Pre-fix the slot was installed only after task() returned,
+    // so the nested dispatch double-ran and its slot overwrote the outer's.
+    const outer = await playbooks.withDispatch('pb', () => {
+      void playbooks
+        .withDispatch('pb', async () => 'nested')
+        .catch((err: unknown) => {
+          nested.push(err);
+        });
+      return Promise.resolve('outer');
+    });
+    expect(outer).toBe('outer');
+    expect(nested).toHaveLength(1);
+    expect(nested[0]).toBeInstanceOf(DispatchInFlightError);
+    // The slot freed with the outer: a follow-up dispatch proceeds.
+    expect(await playbooks.withDispatch('pb', async () => 'after')).toBe('after');
   });
 });
 
