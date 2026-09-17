@@ -555,6 +555,49 @@ describe('makePlaybookDispatchOp (the acceptance flow, fail-closed at every step
   }, 15_000);
 });
 
+describe('withDispatch (the direct SDK slot path)', () => {
+  test('the slot frees BEFORE the caller continuation: a sequential second dispatch never sees DispatchInFlightError', async () => {
+    const playbooks = makePlaybookRegistry();
+    // Await the FIRST promise, then dispatch again through the SAME
+    // registry — the direct SDK shape (no op wrapper). Pre-fix, the
+    // free-slot reaction lost the microtask race against the caller's
+    // continuation and this second call threw DispatchInFlightError.
+    const first = await playbooks.withDispatch('pb', async () => 'one');
+    expect(first).toBe('one');
+    const second = await playbooks.withDispatch('pb', async () => 'two');
+    expect(second).toBe('two');
+    // ...and a third, proving the slot keeps cycling.
+    expect(await playbooks.withDispatch('pb', async () => 'three')).toBe('three');
+  });
+
+  test('the outcome and rejection ride verbatim; the slot frees after a rejection too', async () => {
+    const playbooks = makePlaybookRegistry();
+    const payload = { edits: 2 };
+    expect(await playbooks.withDispatch('pb', async () => payload)).toBe(payload);
+    await expect(
+      playbooks.withDispatch('pb', () => Promise.reject(new Error('boom'))),
+    ).rejects.toThrow('boom');
+    // The rejection freed the slot: the next dispatch proceeds normally.
+    expect(await playbooks.withDispatch('pb', async () => 'after-rejection')).toBe(
+      'after-rejection',
+    );
+  });
+
+  test('different ids stay independent slots', async () => {
+    const playbooks = makePlaybookRegistry();
+    let releaseA: (() => void) | undefined;
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+    const a = playbooks.withDispatch('a', () => gateA.then(() => 'a'));
+    // B is a different id — it proceeds while A is parked in flight.
+    const b = await playbooks.withDispatch('b', async () => 'b');
+    expect(b).toBe('b');
+    releaseA?.();
+    expect(await a).toBe('a');
+  });
+});
+
 describe('makePlaybookQuarantineListOp (the read-only lane view)', () => {
   test('lists the live records, sorted, and mutates nothing', async () => {
     const ledger = makeQuarantineLedger();

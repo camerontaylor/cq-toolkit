@@ -113,6 +113,12 @@ export interface PlaybookRegistry {
    * unconditional: a same-playbook duplicate can never reach the engine.
    * Process-scoped, like the registry itself (the cross-process story is
    * the same process-scoped cut recorded in the family NOTES).
+   *
+   * FREE-BEFORE-CONTINUATION: the slot is freed on the SAME chain the
+   * caller awaits (the returned promise settles only after the free), so a
+   * SEQUENTIAL second dispatch — the direct SDK caller that awaits the
+   * first promise and then dispatches again — can never observe the slot
+   * as still occupied. The outcome (or rejection reason) rides verbatim.
    */
   withDispatch<T>(id: string, task: () => Promise<T>): Promise<T>;
 }
@@ -173,20 +179,29 @@ export function makePlaybookRegistry(initial?: readonly Playbook[]): PlaybookReg
       if (inFlight.has(id)) {
         return Promise.reject(new DispatchInFlightError(id));
       }
-      const next = task();
-      // Track the dispatch until it SETTLES (either way), then free the
-      // slot. The cleanup chain ends with a rejection handler it can never
-      // take (`settled` swallows the outcome) — the tracked-promise shape.
-      const settled = next.then(
-        () => undefined,
-        () => undefined,
+      // FREE-BEFORE-CONTINUATION: the slot is freed ON the chain the caller
+      // awaits. The task's outcome is captured as a never-rejecting
+      // envelope (`settled` — the tracked slot); the RETURNED promise is
+      // derived from it with freeSlot FIRST, so freeSlot always runs before
+      // any caller continuation, and the value/reason is then re-delivered
+      // verbatim. (Freeing on a SIDE chain — `void settled.then(freeSlot,
+      // freeSlot)` — let the caller's continuation win the microtask race,
+      // spuriously rejecting the next sequential dispatch.)
+      const settled = task().then(
+        (value) => ({ ok: true as const, value }),
+        (reason: unknown) => ({ ok: false as const, reason }),
       );
       const freeSlot = (): void => {
         if (inFlight.get(id) === settled) inFlight.delete(id);
       };
-      void settled.then(freeSlot, freeSlot);
       inFlight.set(id, settled);
-      return next;
+      return settled.then((outcome) => {
+        freeSlot();
+        if (outcome.ok) {
+          return outcome.value;
+        }
+        throw outcome.reason;
+      });
     },
   };
 }
