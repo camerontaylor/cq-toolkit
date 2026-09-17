@@ -1,5 +1,6 @@
-// Sweep lane (WS-D, goals D1+D2) — registry slice: the `sweep.planSweep`,
-// `sweep.worktreeFor`, `sweep.salvage` and `sweep.cleanup` op entries, typed
+// Sweep lane (WS-D, goals D1+D2+D4) — registry slice: the `sweep.planSweep`,
+// `sweep.worktreeFor`, `sweep.unit`, `sweep.salvage` and `sweep.cleanup` op
+// entries, typed
 // against the FROZEN OpRegistryEntry (src/kernel/types.ts). gitMutex is a
 // library utility, NOT an op — it must never appear here. The importers bind
 // the REAL effects INPUT-DRIVEN — repoRoot (and, for the planner's ledger
@@ -20,11 +21,14 @@
 // same condition: the schema is the JSON/CLI boundary, the op-level check
 // is the library boundary, and neither is allowed to default.
 import { z } from 'zod';
+import { BudgetSchema, SandboxPolicySchema, ToolPolicySchema } from '../../kernel/schema.js';
+import { RoutingTableSchema } from '../../driver/subprocess/routing.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
 import type { CleanupInput } from './cleanup.js';
-import type { PlanSweepInput } from './planSweep.js';
+import type { PlanSweepInput, WorkUnit } from './planSweep.js';
 import type { SalvageInput } from './salvage.js';
+import type { SweepUnitDispatchInput, SweepUnitReport } from './unit.js';
 import type { WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';
 
 // TYPE-ONLY re-export of the git-mutation mutex's config type: gitMutex.ts
@@ -213,7 +217,63 @@ export const CleanupInputSchema: z.ZodType<CleanupInput> = z
   })
   .strict();
 
-/** Sweep-lane op registry (planSweep, worktreeFor, salvage, cleanup). */
+/**
+ * Registry-time mirror of {@link SweepUnitDispatchInput} — the registered
+ * 'sweep.unit' op's dispatch input (the enriched plan job's input): the unit
+ * (package/fixer/files) plus the run context plus the JSON-serializable
+ * binding knobs. `driver` and `check` are OPTIONAL here (a plan can be
+ * authored before its fixer/probe wiring is chosen — the sweep floor and the
+ * builder's context-only enrichment parse) and REQUIRED at binding time:
+ * bindingsFromDispatch refuses without them, and the dispatch seam folds the
+ * refusal into an honest `failed` naming the field. Strict: an unknown key
+ * must fail loudly.
+ */
+export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    worktreesDir: z.string().min(1),
+    runPrefix: z.string().min(1),
+    base: z.string().min(1),
+    package: z.string().min(1),
+    fixer: z.string().min(1),
+    files: z.array(z.string()),
+    kind: z.string().min(1).exactOptional(),
+    slug: z.string().min(1).exactOptional(),
+    mode: z.enum(['fix', 'prep']).exactOptional(),
+    mutex: GitMutexBindingSchema.exactOptional(),
+    sandboxPolicy: SandboxPolicySchema.exactOptional(),
+    gitTimeoutMs: z.number().int().min(1).exactOptional(),
+    push: z.boolean().exactOptional(),
+    stagePathAllowlist: z
+      .object({ patterns: z.array(z.string().min(1)).min(1) })
+      .strict()
+      .exactOptional(),
+    driver: z
+      .object({
+        binary: z.union([z.string().min(1), z.array(z.string().min(1)).min(1)]),
+        provider: z.string().min(1),
+        model: z.string().min(1),
+        sessionsDir: z.string().min(1).exactOptional(),
+        routingTable: RoutingTableSchema.exactOptional(),
+        toolPolicy: ToolPolicySchema.exactOptional(),
+        budget: BudgetSchema.exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
+    check: z
+      .object({
+        adapter: z.enum(['vitest-json', 'eslint-json', 'tsc-lines']),
+        command: z.string().min(1),
+        args: z.array(z.string()),
+        timeoutMs: z.number().int().min(1).exactOptional(),
+      })
+      .strict()
+      .exactOptional(),
+    promptTemplate: z.string().min(1).exactOptional(),
+  })
+  .strict();
+
+/** Sweep-lane op registry (planSweep, worktreeFor, unit, salvage, cleanup). */
 export const registry: OpRegistryEntry[] = [
   {
     name: 'sweep.planSweep',
@@ -248,6 +308,47 @@ export const registry: OpRegistryEntry[] = [
             unknown,
             unknown
           >,
+      ),
+  },
+  {
+    name: 'sweep.unit',
+    inputSchema: SweepUnitDispatchInputSchema,
+    // The dispatch seam re-validates input through inputSchema.parseAsync
+    // before invoking the op, so the erased op typing is safe here. The
+    // importer resolves the unit-composition module and binds the REAL
+    // effects INPUT-DRIVEN (the worktreeFor precedent): the subprocess
+    // worktree adapter, the REAL subprocess driver over the input's driver
+    // section (binary/provider/model over a plain-data routing table; key
+    // VALUES read from env at dispatch), the real probe runner, and the real
+    // git push — all constructed per dispatch from the dispatched input; the
+    // registry entry carries no run state. A binding refusal (no driver or
+    // check config) is an honest `failed` naming the field.
+    importer: () =>
+      import('./unit.js').then(
+        (m) =>
+          (async (input: SweepUnitDispatchInput) => {
+            try {
+              // Bindings are built PER DISPATCH from the dispatched input
+              // (input-driven, the worktreeFor precedent); the binding
+              // refusal (no driver or check config) is folded into an honest
+              // `failed` HERE — never a throw across the op seam. The dispatch
+              // seam re-validates input through inputSchema.parseAsync, so
+              // the erased op typing is safe here (the registry precedent).
+              const unitOp: Op<WorkUnit, SweepUnitReport> = m.makeSweepUnitOp(
+                m.bindingsFromDispatch(input),
+              );
+              return await unitOp({
+                package: input.package,
+                fixer: input.fixer,
+                files: input.files,
+              });
+            } catch (err) {
+              return {
+                status: 'failed',
+                error: err instanceof Error ? err.message : String(err),
+              };
+            }
+          }) as Op<unknown, unknown>,
       ),
   },
   {

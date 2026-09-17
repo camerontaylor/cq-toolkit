@@ -1,10 +1,12 @@
-// Sweep lane (WS-D, goals D1+D2) — public surface. Re-export only, no logic:
+// Sweep lane (WS-D, goals D1+D2+D4) — public surface. Re-export only, no logic:
 // the planner (decision factory + subprocess effects binding + THE
 // gates→ledger signature recipe), the git-mutation mutex (library utility —
 // deliberately NOT a registry op), the worktree provider (decision factory
 // + subprocess effects binding + its wire-format parsers), the salvage
-// classifier for interrupted sweep worktrees, and the age-based cleanup op
-// (both D2: decision factory + subprocess effects binding), plus the family
+// classifier for interrupted sweep worktrees, the age-based cleanup op
+// (both D2: decision factory + subprocess effects binding), and the D4
+// per-unit composition ('sweep.unit': the pipeline op + its SDK bindings and
+// its JSON dispatch binding), plus the family
 // registry with its registry-time input schemas. Names stay sweep-prefixed
 // or domain-specific: star exports are COLLISION-SILENT across the root
 // barrel (src/ops/README.md), so no generic `list`/`get`-class names leave
@@ -56,6 +58,31 @@ export type {
 } from './cleanup.js';
 export { makeCleanup, makeSubprocessCleanupEffects } from './cleanup.js';
 export type {
+  CommittedMarker,
+  SweepUnitFaultClass,
+  SweepUnitBindings,
+  SweepUnitCheckConfig,
+  SweepUnitDispatchInput,
+  SweepUnitDriverConfig,
+  SweepUnitReport,
+  SweepUnitSegments,
+  UnitProbe,
+} from './unit.js';
+export {
+  RETRYABLE_FAULT_CLASSES,
+  bindingsFromDispatch,
+  DEFAULT_UNIT_GIT_TIMEOUT_MS,
+  DEFAULT_UNIT_PROMPT_TEMPLATE,
+  makePushBranch,
+  makeSweepUnitOp,
+  readCommittedMarkers,
+  SWEEP_RUN_STATE_BASELINE_DIR,
+  SWEEP_RUN_STATE_COMMITTED_DIR,
+  sweepRunStateDir,
+  sweepUnitFaultClass,
+  sweepUnitSegments,
+} from './unit.js';
+export type {
   SalvageClass,
   SalvageEffects,
   SalvageEntry,
@@ -71,6 +98,7 @@ export {
   PlanSweepInputSchema,
   registry as sweepRegistry,
   SalvageInputSchema,
+  SweepUnitDispatchInputSchema,
   WorktreeForInputSchema,
 } from './registry.js';
 // The registry re-export is ALIASED: the ledger family barrel already sends
