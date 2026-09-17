@@ -266,3 +266,15 @@ describe('registry mirror fidelity (spot-checks)', () => {
     expect(parses({ baseRefName: 'a..b' })).toBe(false);
   });
 });
+
+describe('plans barrel surface (review-debt #147)', () => {
+  test('the merge-prs builder resolves through src/plans/index.js and is callable', async () => {
+    // Imported from the BARREL — the supported-API path SDK consumers take.
+    const { makeMergePrsPlan: barrelBuild } =
+      (await import('../../src/plans/index.js')) as typeof import('../../src/plans/index.js');
+    const input = { baseBranch: 'trunk', repoRoot: '/repo', prs: [], nowMs: 0 };
+    const constructed = barrelBuild(input);
+    expect(constructed.id).toBe(MERGE_PRS_PLAN_ID);
+    expect(constructed.jobs).toEqual([{ id: 'merge-prs-run', op: 'merge.runPrs', input }]);
+  });
+});

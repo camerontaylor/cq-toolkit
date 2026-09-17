@@ -237,3 +237,28 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
     expect(after.filter((name) => name.startsWith('analysis-') && !before.has(name))).toEqual([]);
   }, 180_000);
 });
+
+describe('plans barrel surface (review-debt #167)', () => {
+  test('the analyze builder resolves through src/plans/index.js and is callable', async () => {
+    // Imported from the BARREL — the supported-API path SDK consumers take.
+    const { makeAnalyzePlan: barrelBuild } =
+      (await import('../../src/plans/index.js')) as typeof import('../../src/plans/index.js');
+    const inputs: AnalyzePlanInputs = {
+      probe: {
+        adapter: 'eslint-json' as const,
+        command: { command: 'my-linter', args: ['--my-flag'], cwd: '/repo' },
+      },
+      collect: { sets: [{ tool: 'eslint', failures: [], exitCode: 0 }] },
+      cluster: { set: { tool: 'eslint', failures: [], exitCode: 0 } },
+      render: { report: { clusters: [], noise: [] }, dir: '/repo' },
+    };
+    const constructed = barrelBuild(inputs);
+    expect(constructed.id).toBe(ANALYZE_PLAN_ID);
+    expect(constructed.jobs.map((j) => j.id)).toEqual([
+      ANALYZE_JOB_IDS.probe,
+      ANALYZE_JOB_IDS.collect,
+      ANALYZE_JOB_IDS.cluster,
+      ANALYZE_JOB_IDS.report,
+    ]);
+  });
+});

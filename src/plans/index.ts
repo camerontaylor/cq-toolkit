@@ -26,3 +26,15 @@ export type { TestFixPlanConfig } from './test-fix.js';
 // is deliberately NOT re-exported: the ops barrel already exports it, and a
 // second path to the same name is a root-barrel TS2308 collision.
 export { sweepUnitSegments } from '../ops/sweep/unit.js';
+// The merge-prs + analyze builders are PACKAGE SURFACE too (review-debt
+// #147 #167): SDK consumers author these plans via the factories (the
+// registry entries carry only the degenerate floor instances). NAMED
+// exports, never star: merge-prs.ts and analyze.ts each export a `plan`
+// PlanRegistryEntry, and colliding star exports are a TS2308 build error.
+export { MERGE_PRS_PLAN_ID, makeMergePrsPlan } from './merge-prs.js';
+export { ANALYZE_PLAN_ID, ANALYZE_JOB_IDS, makeAnalyzePlan } from './analyze.js';
+export type { AnalyzePlanInputs } from './analyze.js';
+// The factory's input type rides the barrel so the plans surface is
+// self-contained; it is the SAME declaration ops/merge exports (one
+// binding), so the root barrel's two `export *` paths do not collide.
+export type { RunMergePrsInput } from '../ops/merge/runPrs.js';
