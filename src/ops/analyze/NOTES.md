@@ -118,3 +118,88 @@ deterministic, no dependency needed — the metric is ~15 lines and keeping it
 in-tree beats a 2022-era micro-package), then gate the merged cluster at
 `medium` confidence. Nothing in this survey changes the default: exact
 signatures only, until evidence shows the split-cluster cost is real.
+
+## G3 addendum — playbooks: format, verifier, quarantine, dispatch; the trace cut
+
+Recorded: 2026-09-16 (phase 3, lane G, scope items 5–6). The playbook lane is
+the authored-asset remediation path: a PLAYBOOK binds an ast-grep rule (the
+codemod engine's rule, as a JSON object) to a VERIFIER command (the gates
+CheckCommand shape), dispatch applies the rule over explicit targets and then
+lets the playbook's OWN verifier decide whether the playbook remains
+dispatchable.
+
+### The trace cut (dispatch records vs the kernel journal)
+
+The kernel journal seam (src/kernel/journal.ts) is PLAN-RUN-SHAPED: the frozen
+`JournalEventSchema` union has no standalone dispatch event, and `append()`
+requires `event.runId` to match the file's run. Faking a `runId`/`jobId` to
+shoehorn a playbook dispatch into a run journal would inject false per-job
+facts into the resume fold — disqualified. Decision: the dispatch RETURNS its
+trace instead of persisting it. The exported `PlaybookDispatchRecord` shape
+(discriminated by `kind: 'playbook-dispatch'`) rides `value.record` on the two
+`ok` outcomes; the frozen OpResult taxonomy gives `indeterminate` no value
+slot, so there the record rides `detail` as serialized JSON of the same shape;
+an early `failed` termination (unknown id, containment fault, engine fault)
+records no trace beyond the error string — nothing was applied, nothing was
+quarantined. The full `trace` query op and a durable dispatch journal are
+post-v1 (per the breakdown, this cut is recorded here and in the run journal
+schema note above).
+
+### Quarantine lane cuts
+
+- **Process-scoped state.** The playbook registry and the quarantine ledger
+  are in-memory singletons shared by all three playbook ops' importers. No
+  file persistence in v1: registering a playbook and quarantining one are
+  coherent within a process (one CLI invocation composing multiple
+  dispatches, one SDK session, one test), not across processes.
+- **No timestamps.** Records are exactly `{ playbookId, phase, reason }` and
+  the ledger presents them sorted by id — the determinism contract. When a
+  playbook entered quarantine is derivable, if a consumer needs it, from the
+  dispatch trace records, not from the ledger.
+- **`unquarantine` is deliberately library-only.** No op exposes it, so no
+  autonomous path (plan or agent loop) can lift a quarantine; it is an
+  explicit consumer action on the injected ledger, and nothing in the
+  codebase calls it.
+- **Phase tag.** `phase: 'verifier-failed'` is the only entry path in v1
+  (an observed numeric non-zero verifier exit); the tag exists so a future
+  entry path cannot masquerade as a verifier failure.
+
+### Dispatch decisions worth recording
+
+- **Verifier-failed maps to `ok`, not `failed`** (the regressionGate
+  precedent): the dispatch ran to a DEFINITIVE verdict, and the verdict is the
+  op's decision output — `outcome: 'verifier-failed'` with `quarantined: true`
+  and the full per-file evidence. A bare `failed` error string could not carry
+  the evidence, and the playbook's remediation WAS applied.
+- **Verifier-indeterminate maps to `indeterminate` and quarantines NOTHING**
+  (I5 in both directions): an unobservable verdict must not pass the
+  remediation, and must not punish the playbook. The detail says plainly that
+  edits are on disk but unverified.
+- **The engine primitive's `approved: true` is satisfied inside dispatch.**
+  Not a bypass: the gates that matter live around the engine — the quarantine
+  consult before, the playbook's own verifier after — and dispatch is a
+  consumer-invoked op (authored asset, registered by id, dispatched by id)
+  that is NEVER in the shipped analyze plan (see src/plans/analyze.ts), so the
+  plan runner's autonomous path cannot reach it (UC §1 row 9).
+- **Schema split of labor.** The playbook format validates the rule as a
+  non-empty JSON object (finite JSON values only, so the dispatch-time
+  `JSON.stringify` is lossless) and the id against a safe-token pattern;
+  global id uniqueness is the playbook registry's refusal at register time,
+  and every ast-grep semantic is the engine's business at dispatch.
+
+### End-to-end acceptance evidence (test/e2e/analyze)
+
+The flagship e2e runs the real chain on a temp fixture repo: real `tsc`
+(via the typescript devDependency's own JS entry, so it does not depend on
+PATH) reports three homogeneous TS2339 diagnostics across three files →
+`gates.checkRunner` ('tsc-lines') → `analyze.collectFailures` →
+`analyze.clusterErrors` (ONE high-confidence cluster) →
+`analyze.renderAnalysisReport` (real sidecar on disk) →
+`analyze.applyRemediation` (cluster id + approved + the consumer rule) →
+re-run tsc clean → `gates.regressionGate` verdict 'no-regression'. The codemod
+step runs the REAL ast-grep binary when it is on PATH (vitest runIf) and a
+scripted runner returning the correct wire-shape plan for the same rule
+otherwise (and always as a second, deterministic leg); the test logs which
+mode ran. The quarantine miniature in the same file dispatches a playbook
+whose verifier fails, asserts the quarantine record, and asserts the second
+dispatch is refused.

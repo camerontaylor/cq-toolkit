@@ -36,6 +36,9 @@ describe('analyze registry: the lane entries', () => {
       'analyze.astGrepCodemod',
       'analyze.agenticRemediation',
       'analyze.applyRemediation',
+      'analyze.playbookRegister',
+      'analyze.playbookDispatch',
+      'analyze.playbookQuarantineList',
     ]);
   });
 });

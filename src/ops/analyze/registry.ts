@@ -1,7 +1,9 @@
 // Analyze lane G1+G2+G3 — registry slice: the `analyze.collectFailures`,
 // `analyze.clusterErrors`, `analyze.renderAnalysisReport`,
-// `analyze.astGrepCodemod`, `analyze.agenticRemediation`, and
-// `analyze.applyRemediation` op entries,
+// `analyze.astGrepCodemod`, `analyze.agenticRemediation`,
+// `analyze.applyRemediation`, and the G3 playbook entries
+// (`analyze.playbookRegister`, `analyze.playbookDispatch`,
+// `analyze.playbookQuarantineList`),
 // typed against the FROZEN OpRegistryEntry (src/kernel/types.ts). All
 // importers resolve through DYNAMIC imports, so loading the registry never
 // loads an op module: module scope imports only zod, `dirname` from
@@ -45,6 +47,20 @@ import type { AgenticRemediationInput } from './agenticRemediation.js';
 import type { ApplyRemediationInput } from './applyRemediation.js';
 import type { AstGrepCodemodInput } from './codemod/astGrep.js';
 import type { RenderAnalysisReportInput } from './renderAnalysisReport.js';
+// The G3 playbook format's schema is EAGERLY imported (the registry's
+// documented eager class: zod + types only — format.ts imports nothing but
+// zod at runtime), because `inputSchema` must exist while the ops may not.
+import { PlaybookSchema } from './playbooks/format.js';
+// The playbook ops and the quarantine ledger are composed at the importers
+// through DYNAMIC imports (the lazy-import discipline); only their TYPES
+// ride at module scope.
+import type {
+  PlaybookDispatchInput,
+  PlaybookQuarantineListInput,
+  PlaybookRegisterInput,
+  PlaybookRegistry,
+} from './playbooks/registry.js';
+import type { QuarantineLedger } from './playbooks/quarantine.js';
 
 /**
  * ENCODED-size cap for the identifiers that flow into the cluster
@@ -298,6 +314,56 @@ export const ApplyRemediationInputSchema: z.ZodType<ApplyRemediationInput> = z
   })
   .strict();
 
+/**
+ * Registry-time mirror of {@link PlaybookRegisterInput}: the full input, and
+ * only it — the playbook asset itself, validated by the format's strict
+ * {@link PlaybookSchema}. Id UNIQUENESS is not a schema matter: a duplicate
+ * registers as a `failed` refusal from the op (the registry sees the
+ * population, the schema cannot).
+ */
+export const PlaybookRegisterInputSchema: z.ZodType<PlaybookRegisterInput> = z
+  .object({
+    playbook: PlaybookSchema,
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link PlaybookDispatchInput}: the full input, and
+ * only it. `targets` requires at least one entry — an unscoped sweep is the
+ * blast radius the family refuses at every boundary (the codemod engine
+ * re-checks this at the op level too). `timeoutMs` defaults to 600_000 at
+ * this boundary (the gates' op-boundary precedent, a zod `.default`).
+ */
+export const PlaybookDispatchInputSchema: z.ZodType<PlaybookDispatchInput> = z
+  .object({
+    playbookId: z.string().min(1),
+    dir: z.string().min(1),
+    targets: z.array(z.string().min(1)).min(1),
+    timeoutMs: z.number().int().positive().default(600_000),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link PlaybookQuarantineListInput}: the empty
+ * object, strictly — the op takes no input and carries no option a cached
+ * or filtered view could hide behind (the ledger's read surface is
+ * unparameterized by design).
+ */
+export const PlaybookQuarantineListInputSchema: z.ZodType<PlaybookQuarantineListInput> = z
+  .object({})
+  .strict();
+
+// Process-scoped v1 state for the playbook lane (the documented cut — see
+// playbooks/quarantine.ts and the family NOTES.md): the playbook registry
+// and the quarantine ledger are IN-MEMORY, so every playbook op composed
+// below MUST bind the SAME instances — a playbook registered through one
+// entry has to be dispatchable through another, and a quarantine recorded
+// by one dispatch has to fail-close every later dispatch. The lazy ??=
+// bindings inside the importers create them on first playbook dispatch;
+// they live for the process lifetime (no file persistence in v1).
+let sharedPlaybooks: PlaybookRegistry | undefined;
+let sharedQuarantine: QuarantineLedger | undefined;
+
 /** Analyze-lane op registry (G1: failure-set aggregation; signature clustering). */
 export const registry: OpRegistryEntry[] = [
   {
@@ -389,6 +455,63 @@ export const registry: OpRegistryEntry[] = [
             (input) => s.pathAnalysisFileStore(input.dir ?? dirname(input.sidecarPath)),
             runner.subprocessRunCheck,
           ) as Op<unknown, unknown>,
+      ),
+  },
+  {
+    name: 'analyze.playbookRegister',
+    inputSchema: PlaybookRegisterInputSchema,
+    // The playbook registry + quarantine ledger are SHARED, process-scoped
+    // singletons (see the binding note above the array): a playbook
+    // registered through THIS entry must be dispatchable through the
+    // dispatch entry below, and both lazy bindings create-or-reuse the same
+    // instances.
+    importer: () =>
+      Promise.all([import('./playbooks/registry.js'), import('./playbooks/quarantine.js')]).then(
+        ([r, q]) => {
+          sharedPlaybooks ??= r.makePlaybookRegistry();
+          sharedQuarantine ??= q.makeQuarantineLedger();
+          return r.makePlaybookRegisterOp(sharedPlaybooks) as Op<unknown, unknown>;
+        },
+      ),
+  },
+  {
+    name: 'analyze.playbookDispatch',
+    inputSchema: PlaybookDispatchInputSchema,
+    // The shared registry + ledger (the quarantine consult MUST see what a
+    // sibling dispatch recorded), the gates' subprocess runner (engine
+    // scans AND verifier commands), and the containment-checked path store
+    // over `input.dir` — composed at the importer. NEVER in the shipped
+    // analyze plan: the plan runner's autonomous path cannot dispatch a
+    // playbook (UC §1 row 9; see src/plans/analyze.ts).
+    importer: () =>
+      Promise.all([
+        import('./playbooks/registry.js'),
+        import('./playbooks/quarantine.js'),
+        import('./analysisStore.js'),
+        import('../gates/checkRunner.js'),
+      ]).then(([r, q, s, runner]) => {
+        sharedPlaybooks ??= r.makePlaybookRegistry();
+        sharedQuarantine ??= q.makeQuarantineLedger();
+        return r.makePlaybookDispatchOp({
+          playbooks: sharedPlaybooks,
+          quarantine: sharedQuarantine,
+          run: runner.subprocessRunCheck,
+          storeFor: (input) => s.pathAnalysisFileStore(input.dir),
+        }) as Op<unknown, unknown>;
+      }),
+  },
+  {
+    name: 'analyze.playbookQuarantineList',
+    inputSchema: PlaybookQuarantineListInputSchema,
+    // The shared ledger's read-only view — the same instance the dispatch
+    // entry writes through, so the list is exactly what fail-closed
+    // dispatch consults.
+    importer: () =>
+      Promise.all([import('./playbooks/registry.js'), import('./playbooks/quarantine.js')]).then(
+        ([r, q]) => {
+          sharedQuarantine ??= q.makeQuarantineLedger();
+          return r.makePlaybookQuarantineListOp(sharedQuarantine) as Op<unknown, unknown>;
+        },
       ),
   },
 ];
