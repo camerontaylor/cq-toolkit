@@ -111,15 +111,21 @@ const THREAD_BODY = 'Fix the misspelled fruit on this line. It should read "appl
 
 /**
  * The seeded TOP-LEVEL issue comment — reviewer feedback that needs a
- * RESPONSE but no code change (the README should mention the fruit). This
- * is the second fixture (round-1 medium): with it, run 1 plans TWO jobs and
- * posts THREE actions — the thread's review_reply + resolve AND the
- * comment's issue_comment — and run 2 live-proves the leading-signature
- * suppression (the loop's own run-1 issue_comment reply re-fetches as a
- * top-level comment; with the old trailing-marker bug run 2 planned a job
- * on it and failed).
+ * RESPONSE but NO code change: the loop's signed issue-comment reply IS the
+ * complete correct resolution. FIXTURE RULE (jMwRU): the drill's comment
+ * fixture asks for a response, never a code change — the fake worker only
+ * performs the marker fix; a change-requiring comment belongs to the thread
+ * fixture, where the worker handles it (a change-asking comment here would
+ * be "addressed" by a reply that makes no change). This is the second
+ * fixture (round-1 medium): with it, run 1 plans TWO jobs and posts THREE
+ * actions — the thread's review_reply + resolve AND the comment's
+ * issue_comment — and run 2 live-proves the leading-signature suppression
+ * (the loop's own run-1 issue_comment reply re-fetches as a top-level
+ * comment; with the old trailing-marker bug run 2 planned a job on it and
+ * failed).
  */
-const COMMENT_BODY = 'Reviewer note: also mention in the README that the fruit is an apple.';
+const COMMENT_BODY =
+  'Reviewer question: what is the intended reading of the marker line on this path? Please confirm in your reply.';
 
 /** The GraphQL document the setup poll (and the test's fresh assert) reads. */
 const THREADS_QUERY = `query ($owner: String!, $name: String!, $pr: Int!) {

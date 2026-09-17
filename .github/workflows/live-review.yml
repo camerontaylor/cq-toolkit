@@ -3,6 +3,8 @@
 # the run seeds a real scratch repo, opens a real PR, and posts real review
 # replies/resolutions with the caller's GH_TOKEN — nothing automatic may
 # fire it. (Mirrors .github/workflows/live-drivers.yml's discipline.)
+# Dispatch always checks out MAIN — the drill validates branches LOCALLY
+# pre-merge — so only main's trusted code ever executes under GH_TOKEN.
 # PROVENANCE: a repo-owned CI workflow modeled on live-drivers.yml — NOT
 # instantiated from policy/templates (that set owns the merge-queue doctrine
 # workflows; this repo's other CI workflows — ci.yml, denylist.yml,
@@ -56,6 +58,12 @@ jobs:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
+          # PINNED TO MAIN (jM88Y): workflow_dispatch accepts any
+          # write-collaborator's branch as ref — without this pin, that
+          # branch's test code would execute under the repo GH_TOKEN. The
+          # drill validates branches LOCALLY pre-merge; dispatch always runs
+          # main's trusted code.
+          ref: main
           # npm runs repo code below, so the checkout token must not
           # survive checkout (persist-credentials: false); gh rides
           # GH_TOKEN, not the checkout credential.
