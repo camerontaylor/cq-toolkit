@@ -395,13 +395,21 @@ describe('lifecycle and mergeability dominate the fold', () => {
     expect(report.counts).toEqual({ ready: 0, blocked: 1, unknown: 0 });
   });
 
-  test('an UNKNOWN mergeable word is unknown-tolerant: the row stays for the other halves', async () => {
+  test('an UNKNOWN mergeable word FAILS CLOSED → unknown, reason naming the uncomputed mergeability (jNf_h)', async () => {
+    // GitHub has not computed mergeability yet — green evidence cannot
+    // make that `ready` (ready would be a verdict ahead of evidence).
     const fake = fakeGh({ ...greenSeed, mergeables: new Map([[11, 'unknown']]) });
     const report = await okReport(
       makeRunReport(fake.gh),
       inputOf({ packages: [{ name: 'core', number: 11 }] }),
     );
-    expect(report.rows[0]).toMatchObject({ readiness: 'ready' });
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'unknown',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'mergeability not yet computed by GitHub',
+    });
+    expect(report.counts).toEqual({ ready: 0, blocked: 0, unknown: 1 });
   });
 
   test('merge state BLOCKED → blocked, reason naming the branch protection requirement (final jNTyP)', async () => {

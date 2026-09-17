@@ -14,8 +14,12 @@
 //   - META READS FIRST (lifecycle/mergeability dominance, codex jMJpD): a
 //     draft, a non-open state, or merge conflicts is `blocked` regardless
 //     of checks/review — green evidence on an unmergeable PR is a
-//     fabricated ready; an UNKNOWN mergeable word is unknown-tolerant and
-//     leaves the row to the other halves.
+//     fabricated ready. `mergeable: 'unknown'` FAILS CLOSED (D2
+//     adjudication jNf_h): GitHub has not computed mergeability yet, so
+//     `ready` there would be a verdict ahead of evidence — the row is
+//     `unknown` naming it. mergeStateStatus UNKNOWN stays unknown-tolerant
+//     (the checks/review halves already cover what UNSTABLE/DRAFT would
+//     say).
 //   - DRAFT DOMINATES: a draft PR is `blocked` regardless of checks/review
 //     — GitHub cannot merge a draft, however green its evidence.
 //   - REVIEW_REQUIRED is not `none`: a demanded-but-absent review is
@@ -125,17 +129,20 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
       const { checks, review, meta } = snapshot.value;
       const observedChecks = checks.state;
       const observedReview = review.state;
-      // META READS FIRST (PR-165 r3 codex jMJpD + final jNTyP): the
-      // lifecycle and mergeability halves dominate the fold — a draft, a
-      // non-open PR, a conflicting PR, or a protection-blocked/behind
-      // merge state is `blocked` however green its checks and review, and
-      // the evidence halves still show on the row. DRAFT first (the
-      // fleet's own PRs open as drafts and GitHub cannot merge a draft);
-      // then STATE (a closed/merged PR is history, not a merge candidate);
-      // then MERGEABILITY (conflicts); then MERGE STATE STATUS. UNKNOWN
-      // words are unknown-TOLERANT — GitHub is still computing, so the row
-      // stays for the checks/review halves instead of being blocked on
-      // unreadable evidence.
+      // META READS FIRST (PR-165 r3 codex jMJpD + final jNTyP; mergeable
+      // unknown fail-closed per D2 adjudication jNf_h): the lifecycle and
+      // mergeability halves dominate the fold — a draft, a non-open PR, a
+      // conflicting PR, or a protection-blocked/behind merge state is
+      // `blocked` however green its checks and review, and the evidence
+      // halves still show on the row. DRAFT first (the fleet's own PRs open
+      // as drafts and GitHub cannot merge a draft); then STATE (a
+      // closed/merged PR is history, not a merge candidate); then
+      // MERGEABILITY (conflicts). `mergeable: 'unknown'` means GitHub has
+      // NOT yet determined mergeability — calling that ready would be a
+      // verdict ahead of evidence, so it is `unknown` (jNf_h), NOT
+      // tolerated; only a settled `mergeable` continues to MERGE STATE
+      // STATUS, whose UNKNOWN word remains unknown-tolerant (the checks and
+      // review halves already cover what UNSTABLE/DRAFT would say).
       if (meta.isDraft) {
         rows.push({
           name: pkg.name,
@@ -166,6 +173,17 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
           checks: observedChecks,
           review: observedReview,
           reason: 'merge conflicts',
+        });
+        continue;
+      }
+      if (meta.mergeable === 'unknown') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'mergeability not yet computed by GitHub',
         });
         continue;
       }
