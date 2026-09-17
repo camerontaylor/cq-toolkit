@@ -42,7 +42,10 @@ interface FakeGh {
   /** editPrBody bodies keyed by PR number. */
   edits: Map<number, string>;
   /** Existing PRs by head branch (the search index); absent state means open. */
-  prsByHead: Map<string, { number: number; url?: string; state?: PrState }>;
+  prsByHead: Map<
+    string,
+    { number: number; url?: string; state?: PrState; isCrossRepository?: boolean }
+  >;
   /** Track the next createPr number. */
   nextNumber: number;
   /** When set, createPr rejects for heads matching this exact string. */
@@ -57,7 +60,11 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
   const edits = new Map<number, string>();
   const searches: Array<{ head: string; base: string }> = [];
   const prsByHead =
-    seed.prsByHead ?? new Map<string, { number: number; url?: string; state?: PrState }>();
+    seed.prsByHead ??
+    new Map<
+      string,
+      { number: number; url?: string; state?: PrState; isCrossRepository?: boolean }
+    >();
   let nextNumber = seed.nextNumber ?? 101;
   const state: FakeGh = {
     calls,
@@ -76,6 +83,7 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
         return {
           number: hit.number,
           state: hit.state ?? 'open',
+          isCrossRepository: hit.isCrossRepository === true,
           ...(hit.url === undefined ? {} : { url: hit.url }),
         };
       },
@@ -98,10 +106,12 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
       comment: async (number) => {
         calls.push(`comment:${String(number)}`);
       },
-      getPrChecks: async () => ({ state: 'pass' }),
-      getPrReviewState: async () => ({ state: 'none' }),
-      getPrMeta: async () => ({ isDraft: false, state: 'open', mergeable: 'mergeable' }),
       getPrBody: async () => '',
+      getPrReadiness: async () => ({
+        checks: { state: 'pass' },
+        review: { state: 'none' },
+        meta: { isDraft: false, state: 'open', mergeable: 'mergeable', mergeStateStatus: 'clean' },
+      }),
     },
   };
   return state;
@@ -522,6 +532,34 @@ describe('a non-open package PR is refused as a ROW fault, never adopted', () =>
     });
     const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
     expect(result.packages[0]).toEqual({ name: 'core', number: 55, created: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-repository adoption refusal (final jNTyU)
+// ---------------------------------------------------------------------------
+
+describe('a FOREIGN fork PR is never adopted', () => {
+  test('a cross-repository package PR → row fault naming the foreign head; sibling still assembles', async () => {
+    const fake = fakeGh({
+      prsByHead: new Map([[PKG_CORE, { number: 55, state: 'open', isCrossRepository: true }]]),
+    });
+    const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
+    expect(result.packages[0]).toMatchObject({ name: 'core', created: false });
+    expect(result.packages[0]?.fault).toContain('FOREIGN fork (cross-repository)');
+    expect(result.packages[0]?.fault).toContain('#55');
+    expect(result.packages[0]?.number).toBeUndefined();
+    expect(result.packages[1]).toMatchObject({ name: 'util', created: true });
+  });
+
+  test('a cross-repository TRACKER → whole-op failed before any package PR', async () => {
+    const fake = fakeGh({
+      prsByHead: new Map([[TRACKER_BRANCH, { number: 7, state: 'open', isCrossRepository: true }]]),
+    });
+    const error = await failedAt(makeAssemblePrs(fake.gh), inputOf());
+    expect(error).toContain('FOREIGN fork');
+    expect(error).toContain('#7');
+    expect(fake.calls).toEqual([`search:${TRACKER_BRANCH}`]);
   });
 });
 

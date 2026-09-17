@@ -35,13 +35,13 @@ import type { Op } from '../../kernel/types.js';
  * inject recording fakes, production binds {@link makeSubprocessPrEffects}.
  *
  * NO MERGE EFFECT BY CONSTRUCTION: the seam is the family's whole GitHub
- * vocabulary — search, create, body read/edit, comment, and the readiness
- * reads (checks, review decision, draft/lifecycle meta) — and it
- * deliberately admits no merge/rebase/close member. The fleet run report
- * (runReport.ts) is a merge-READINESS artifact; merging is the merge
- * family's guarded business (MergeEffects + safeArgs), never this seam's.
- * The key-set pin in test/ops/pr/runReport.test.ts fails the build the
- * moment a merge-class member is added.
+ * vocabulary — search, create, body read/edit, comment, and the ONE
+ * consolidated readiness snapshot — and it deliberately admits no
+ * merge/rebase/close member. The fleet run report (runReport.ts) is a
+ * merge-READINESS artifact; merging is the merge family's guarded business
+ * (MergeEffects + safeArgs), never this seam's. The key-set pin in
+ * test/ops/pr/runReport.test.ts fails the build the moment a merge-class
+ * member is added.
  */
 export interface PrEffects {
   /**
@@ -64,30 +64,28 @@ export interface PrEffects {
   getPrBody(number: number): Promise<string>;
   /** Append a comment to a PR (reserved for tracker annotations). */
   comment(number: number, body: string): Promise<void>;
-  /** The check-rollup verdict for one PR (three-valued sources; runReport). */
-  getPrChecks(number: number): Promise<PrChecks>;
-  /** The review-decision verdict for one PR (runReport). */
-  getPrReviewState(number: number): Promise<PrReviewState>;
   /**
-   * The PR's draft flag AND lifecycle state (runReport): a draft PR can
-   * carry green checks and an approval, yet GitHub cannot merge it — the
-   * report must not call it ready; and a non-open tracker must never be
-   * rewritten, so the report lifecycle-guards its tracker edit. One
-   * read answering both writer-guard questions (kept apart from
-   * getPrChecks/getPrReviewState so every seam member answers exactly one
-   * question).
+   * ONE consolidated readiness snapshot per PR (final, jNTyS): checks,
+   * review decision, and meta (draft/lifecycle/mergeability) come from a
+   * single `gh pr view` JSON document — one subprocess, inherently coherent
+   * evidence. The run report's whole fold reads THIS.
    */
-  getPrMeta(number: number): Promise<PrMeta>;
+  getPrReadiness(number: number): Promise<PrReadinessSnapshot>;
 }
 
 /** A PR's lifecycle state, as the search reports it. */
 export type PrState = 'open' | 'closed' | 'merged' | 'unknown';
 
-/** The search's hit: number, URL when reported, lifecycle state. */
+/** The search's hit: number, URL when reported, lifecycle state, fork flag. */
 export interface PrSearchResult {
   number: number;
   url?: string;
   state: PrState;
+  /**
+   * true when the PR lives in a FOREIGN repo (a fork whose same-branch-name
+   * PR must never be adopted as this fleet's member — final jNTyU).
+   */
+  isCrossRepository: boolean;
 }
 
 /** Request of {@link PrEffects.createPr}: open one PR head onto base. */
@@ -131,16 +129,34 @@ export interface PrReviewState {
  * The meta half of the merge-readiness evidence: `isDraft` — GitHub cannot
  * merge a draft, whatever the checks say; the lifecycle `state` — which
  * lifecycle-guards the tracker writers (a non-open tracker is a landed
- * record, never rewritten) and blocks readiness on a non-open PR; and
+ * record, never rewritten) and blocks readiness on a non-open PR;
  * `mergeable` — a PR with merge conflicts is not mergeable however green
- * its checks.
+ * its checks; and `mergeStateStatus` — gh's mergeability verdict
+ * (branch-protection requirements and the like), folded AFTER `mergeable`
+ * and unknown-tolerant.
  */
 export type PrMergeable = 'mergeable' | 'conflicting' | 'unknown';
+
+/**
+ * gh's mergeStateStatus, mapped conservatively (final jNTyP): CLEAN → clean,
+ * BLOCKED/BEHIND (and DIRTY-class words) → blocked/behind; anything the
+ * checks/review halves already cover (UNSTABLE, DRAFT) or cannot resolve
+ * (UNKNOWN, missing) → `unknown` — the fold tolerates it.
+ */
+export type PrMergeStateStatus = 'clean' | 'blocked' | 'behind' | 'unknown';
 
 export interface PrMeta {
   isDraft: boolean;
   state: PrState;
   mergeable: PrMergeable;
+  mergeStateStatus: PrMergeStateStatus;
+}
+
+/** ONE coherent readiness snapshot off a single `gh pr view` document (final jNTyS). */
+export interface PrReadinessSnapshot {
+  checks: PrChecks;
+  review: PrReviewState;
+  meta: PrMeta;
 }
 
 /** JSON-serializable input of the `pr.assemblePrs` op: one fleet run's PR plan. */
@@ -247,6 +263,12 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
     try {
       const existing = await gh.searchPrByHead(input.tracker.branch, input.base);
       if (existing !== null) {
+        if (existing.isCrossRepository) {
+          return {
+            status: 'failed',
+            error: `pr: tracker branch '${input.tracker.branch}' resolves to a FOREIGN fork's PR #${String(existing.number)} (cross-repository) — refusing adoption: a fork's same-branch-name PR must never become this run's tracker`,
+          };
+        }
         if (existing.state !== 'open') {
           return {
             status: 'failed',
@@ -289,6 +311,12 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
       try {
         const existing = await gh.searchPrByHead(pkg.branch, input.base);
         if (existing !== null) {
+          if (existing.isCrossRepository) {
+            const fault = `PR #${String(existing.number)} for branch '${pkg.branch}' comes from a FOREIGN fork (cross-repository) — refusing adoption: a fork's same-branch-name PR must never become a fleet member`;
+            rows.push({ name: pkg.name, created: false, fault });
+            manifestRows.push({ name: pkg.name, branch: pkg.branch, fault });
+            continue;
+          }
           if (existing.state !== 'open') {
             const fault = `PR #${String(existing.number)} for branch '${pkg.branch}' is in state '${existing.state}' — refusing adoption: a non-open PR is a landed record, never a live fleet member`;
             rows.push({ name: pkg.name, created: false, fault });

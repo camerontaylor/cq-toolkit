@@ -25,6 +25,7 @@ import { READINESS_SECTION_MARKER } from '../../../src/ops/pr/assemblePrs.js';
 import type {
   PrChecks,
   PrEffects,
+  PrMergeStateStatus,
   PrMergeable,
   PrReviewState,
   PrState,
@@ -48,10 +49,10 @@ interface FakeGh {
   metas: Map<number, PrState>;
   /** Per-PR scripted mergeability (absent → mergeable). */
   mergeables: Map<number, PrMergeable>;
-  /** Faults keyed by PR number, per read. */
-  checkFaults: Map<number, string>;
-  reviewFaults: Map<number, string>;
-  metaFaults: Map<number, string>;
+  /** Per-PR scripted merge state status (absent → clean). */
+  statuses: Map<number, PrMergeStateStatus>;
+  /** Snapshot faults keyed by PR number (ONE consolidated read → whole-snapshot faults). */
+  readinessFaults: Map<number, string>;
   /** editPrBody bodies keyed by PR number. */
   edits: Map<number, string>;
   /** Existing bodies keyed by PR number (the getPrBody read). */
@@ -67,9 +68,8 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
     drafts: seed.drafts ?? new Map<number, boolean>(),
     metas: seed.metas ?? new Map<number, PrState>(),
     mergeables: seed.mergeables ?? new Map<number, PrMergeable>(),
-    checkFaults: seed.checkFaults ?? new Map<number, string>(),
-    reviewFaults: seed.reviewFaults ?? new Map<number, string>(),
-    metaFaults: seed.metaFaults ?? new Map<number, string>(),
+    statuses: seed.statuses ?? new Map<number, PrMergeStateStatus>(),
+    readinessFaults: seed.readinessFaults ?? new Map<number, string>(),
     edits: seed.edits ?? new Map<number, string>(),
     bodies: seed.bodies ?? new Map<number, string>(),
     creates: 0,
@@ -83,27 +83,20 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
         state.edits.set(number, body);
       },
       comment: async () => {},
-      getPrChecks: async (number) => {
-        const fault = state.checkFaults.get(number);
+      getPrReadiness: async (number) => {
+        const fault = state.readinessFaults.get(number);
         if (fault !== undefined) throw new Error(fault);
-        const verdict = state.checks.get(number);
-        if (verdict === undefined) throw new Error(`no scripted checks for #${String(number)}`);
-        return verdict;
-      },
-      getPrReviewState: async (number) => {
-        const fault = state.reviewFaults.get(number);
-        if (fault !== undefined) throw new Error(fault);
-        const verdict = state.reviews.get(number);
-        if (verdict === undefined) throw new Error(`no scripted review for #${String(number)}`);
-        return verdict;
-      },
-      getPrMeta: async (number) => {
-        const fault = state.metaFaults.get(number);
-        if (fault !== undefined) throw new Error(fault);
+        // Unscripted PRs default to the ordinary fold (not draft, open,
+        // mergeable, clean) — tests script only the halves they pin.
         return {
-          isDraft: state.drafts.get(number) === true,
-          state: state.metas.get(number) ?? 'open',
-          mergeable: state.mergeables.get(number) ?? 'mergeable',
+          checks: state.checks.get(number) ?? { state: 'none' },
+          review: state.reviews.get(number) ?? { state: 'none' },
+          meta: {
+            isDraft: state.drafts.get(number) === true,
+            state: state.metas.get(number) ?? 'open',
+            mergeable: state.mergeables.get(number) ?? 'mergeable',
+            mergeStateStatus: state.statuses.get(number) ?? 'clean',
+          },
         };
       },
       getPrBody: async (number) => state.bodies.get(number) ?? '',
@@ -271,14 +264,17 @@ describe('counts and shape', () => {
 // ---------------------------------------------------------------------------
 
 describe('effects faults land on their row (I9)', () => {
-  test('a checks fault → unknown row with the fault as reason; the other package still reports ready', async () => {
+  test('a SNAPSHOT fault → unknown row with the fault as reason; the other package still reports ready', async () => {
+    // ONE consolidated read (final jNTyS): the snapshot resolves fully or
+    // faults fully — a faulted snapshot is an unknown row, never half-stale
+    // evidence, and the sibling package still reports.
     const fake = fakeGh({
       checks: new Map([[12, { state: 'pass' }]]),
       reviews: new Map([
         [11, { state: 'none' }],
         [12, { state: 'none' }],
       ]),
-      checkFaults: new Map([[11, 'gh pr view exited 4']]),
+      readinessFaults: new Map([[11, 'gh pr view exited 4']]),
     });
     const report = await okReport(makeRunReport(fake.gh), inputOf());
     expect(report.rows[0]).toMatchObject({
@@ -286,58 +282,11 @@ describe('effects faults land on their row (I9)', () => {
       number: 11,
       readiness: 'unknown',
       checks: 'unknown',
-      review: 'none',
-      reason: 'checks: gh pr view exited 4',
+      review: 'unknown',
+      reason: 'readiness: gh pr view exited 4',
     });
     expect(report.rows[1]).toMatchObject({ name: 'util', readiness: 'ready' });
     expect(report.counts).toEqual({ ready: 1, blocked: 0, unknown: 1 });
-  });
-
-  test('a review fault after clean checks → unknown with the fault; the checks evidence still shows', async () => {
-    const fake = fakeGh({
-      checks: new Map([[11, { state: 'pass' }]]),
-      reviewFaults: new Map([[11, 'review read rate-limited']]),
-    });
-    const report = await okReport(
-      makeRunReport(fake.gh),
-      inputOf({ packages: [{ name: 'core', number: 11 }] }),
-    );
-    expect(report.rows[0]).toMatchObject({
-      checks: 'pass',
-      review: 'unknown',
-      readiness: 'unknown',
-      reason: 'review: review read rate-limited',
-    });
-  });
-
-  test('both reads faulting → one unknown row carrying BOTH faults', async () => {
-    const fake = fakeGh({
-      checkFaults: new Map([[11, 'checks boom']]),
-      reviewFaults: new Map([[11, 'review boom']]),
-    });
-    const report = await okReport(
-      makeRunReport(fake.gh),
-      inputOf({ packages: [{ name: 'core', number: 11 }] }),
-    );
-    expect(report.rows[0]?.reason).toBe('checks: checks boom; review: review boom');
-  });
-
-  test('a META read fault → unknown with the fault as its own reason half', async () => {
-    const fake = fakeGh({
-      checks: new Map([[11, { state: 'pass' }]]),
-      reviews: new Map([[11, { state: 'approved' }]]),
-      metaFaults: new Map([[11, 'isDraft read timed out']]),
-    });
-    const report = await okReport(
-      makeRunReport(fake.gh),
-      inputOf({ packages: [{ name: 'core', number: 11 }] }),
-    );
-    expect(report.rows[0]).toMatchObject({
-      checks: 'pass',
-      review: 'approved',
-      readiness: 'unknown',
-      reason: 'meta: isDraft read timed out',
-    });
   });
 });
 
@@ -365,10 +314,10 @@ describe('a draft PR is blocked regardless of checks and review', () => {
     expect(report.counts).toEqual({ ready: 0, blocked: 1, unknown: 0 });
   });
 
-  test('draft dominates even when the other reads FAULT', async () => {
+  test('draft dominates UNRESOLVABLE evidence halves (pending checks, unreadable review)', async () => {
     const fake = fakeGh({
-      checkFaults: new Map([[11, 'checks boom']]),
-      reviewFaults: new Map([[11, 'review boom']]),
+      checks: new Map([[11, { state: 'pending' }]]),
+      reviews: new Map([[11, { state: 'unknown' }]]),
       drafts: new Map([[11, true]]),
     });
     const report = await okReport(
@@ -377,7 +326,7 @@ describe('a draft PR is blocked regardless of checks and review', () => {
     );
     expect(report.rows[0]).toMatchObject({
       readiness: 'blocked',
-      checks: 'unknown',
+      checks: 'pending',
       review: 'unknown',
       reason: 'draft — not ready for review',
     });
@@ -454,6 +403,57 @@ describe('lifecycle and mergeability dominate the fold', () => {
     );
     expect(report.rows[0]).toMatchObject({ readiness: 'ready' });
   });
+
+  test('merge state BLOCKED → blocked, reason naming the branch protection requirement (final jNTyP)', async () => {
+    const fake = fakeGh({ ...greenSeed, statuses: new Map([[11, 'blocked']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'merge state: blocked — branch protection requirement',
+    });
+  });
+
+  test('merge state BEHIND → blocked (final jNTyP)', async () => {
+    const fake = fakeGh({ ...greenSeed, statuses: new Map([[11, 'behind']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      reason: 'merge state: behind — branch protection requirement',
+    });
+  });
+
+  test('merge state CLEAN → the halves decide: green evidence reports ready (final jNTyP)', async () => {
+    const fake = fakeGh({ ...greenSeed, statuses: new Map([[11, 'clean']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({ readiness: 'ready' });
+  });
+
+  test('an UNKNOWN merge state is unknown-tolerant — but a failing checks half still blocks it', async () => {
+    const fake = fakeGh({
+      checks: new Map([[11, { state: 'fail', failing: ['build'] }]]),
+      reviews: new Map([[11, { state: 'approved' }]]),
+      statuses: new Map([[11, 'unknown']]),
+    });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      reason: 'checks failing (build)',
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -515,7 +515,7 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
   });
 
   test('a tracker META-read fault fails the op with the rows (the lifecycle guard needs the read)', async () => {
-    const fake = fakeGh({ metaFaults: new Map([[7, 'meta read boom']]) });
+    const fake = fakeGh({ readinessFaults: new Map([[7, 'meta read boom']]) });
     const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
     expect(result.status).toBe('failed');
     expect(result.status === 'failed' && result.error).toContain('lifecycle state');
@@ -570,22 +570,22 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     // The record annotation below fails to COMPILE the moment a member is
     // added to (or removed from) PrEffects — the type-level pin that the
     // seam cannot grow a merge effect unnoticed. The runtime assertions
-    // then prove no member name even CONTAINS a merge verb.
+    // then prove no member name even CONTAINS a merge verb. getPrReadiness
+    // is the ONE consolidated readiness read (final jNTyS) — the three
+    // per-half reads it replaced are gone, no dead surface.
     const seamMembers: Record<keyof PrEffects, true> = {
       searchPrByHead: true,
       createPr: true,
       editPrBody: true,
       getPrBody: true,
       comment: true,
-      getPrChecks: true,
-      getPrReviewState: true,
-      getPrMeta: true,
+      getPrReadiness: true,
     };
     const names = Object.keys(seamMembers);
-    expect(names).toHaveLength(8);
+    expect(names).toHaveLength(6);
     expect(names.some((name) => /merge|rebase|squash|close/i.test(name))).toBe(false);
-    // The production adapter is pinned to the same seven — no merge effect
-    // by construction there either.
+    // The production adapter is pinned to the same six — no merge effect by
+    // construction there either.
     expect(Object.keys(makeSubprocessPrEffects('/repo')).sort()).toEqual(names.sort());
   });
 });

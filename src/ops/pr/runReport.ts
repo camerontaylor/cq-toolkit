@@ -107,23 +107,36 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
 
     const rows: RunReportRow[] = [];
     for (const pkg of input.packages) {
-      // I9: every read settles independently — a faulting read becomes the
-      // row's reason while the other reads' evidence still shows.
-      const checks = await settled(() => gh.getPrChecks(pkg.number));
-      const review = await settled(() => gh.getPrReviewState(pkg.number));
-      const meta = await settled(() => gh.getPrMeta(pkg.number));
-      const observedChecks = checks.outcome === 'settled' ? checks.value.state : 'unknown';
-      const observedReview = review.outcome === 'settled' ? review.value.state : 'unknown';
-      // META READS FIRST (PR-165 r3 codex jMJpD): the lifecycle and
-      // mergeability halves dominate the fold — a draft, a non-open PR, or
-      // a conflicting PR is `blocked` however green its checks and review,
-      // and the evidence halves still show on the row. DRAFT first (the
+      // ONE consolidated readiness snapshot per package (final, jNTyS): a
+      // faulting snapshot becomes the row's reason — the evidence is either
+      // fully coherent or fully absent, never half-stale.
+      const snapshot = await settled(() => gh.getPrReadiness(pkg.number));
+      if (snapshot.outcome === 'fault') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: 'unknown',
+          review: 'unknown',
+          reason: `readiness: ${snapshot.message}`,
+        });
+        continue;
+      }
+      const { checks, review, meta } = snapshot.value;
+      const observedChecks = checks.state;
+      const observedReview = review.state;
+      // META READS FIRST (PR-165 r3 codex jMJpD + final jNTyP): the
+      // lifecycle and mergeability halves dominate the fold — a draft, a
+      // non-open PR, a conflicting PR, or a protection-blocked/behind
+      // merge state is `blocked` however green its checks and review, and
+      // the evidence halves still show on the row. DRAFT first (the
       // fleet's own PRs open as drafts and GitHub cannot merge a draft);
       // then STATE (a closed/merged PR is history, not a merge candidate);
-      // then MERGEABILITY. An UNKNOWN mergeable word is unknown-TOLERANT —
-      // GitHub is still computing, so the row stays for the other halves
-      // instead of being blocked on unreadable evidence.
-      if (meta.outcome === 'settled' && meta.value.isDraft) {
+      // then MERGEABILITY (conflicts); then MERGE STATE STATUS. UNKNOWN
+      // words are unknown-TOLERANT — GitHub is still computing, so the row
+      // stays for the checks/review halves instead of being blocked on
+      // unreadable evidence.
+      if (meta.isDraft) {
         rows.push({
           name: pkg.name,
           number: pkg.number,
@@ -134,18 +147,18 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
         });
         continue;
       }
-      if (meta.outcome === 'settled' && meta.value.state !== 'open') {
+      if (meta.state !== 'open') {
         rows.push({
           name: pkg.name,
           number: pkg.number,
           readiness: 'blocked',
           checks: observedChecks,
           review: observedReview,
-          reason: `state: ${meta.value.state}`,
+          reason: `state: ${meta.state}`,
         });
         continue;
       }
-      if (meta.outcome === 'settled' && meta.value.mergeable === 'conflicting') {
+      if (meta.mergeable === 'conflicting') {
         rows.push({
           name: pkg.name,
           number: pkg.number,
@@ -156,22 +169,18 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
         });
         continue;
       }
-      if (checks.outcome === 'fault' || review.outcome === 'fault' || meta.outcome === 'fault') {
-        const reasons: string[] = [];
-        if (checks.outcome === 'fault') reasons.push(`checks: ${checks.message}`);
-        if (review.outcome === 'fault') reasons.push(`review: ${review.message}`);
-        if (meta.outcome === 'fault') reasons.push(`meta: ${meta.message}`);
+      if (meta.mergeStateStatus === 'blocked' || meta.mergeStateStatus === 'behind') {
         rows.push({
           name: pkg.name,
           number: pkg.number,
-          readiness: 'unknown',
+          readiness: 'blocked',
           checks: observedChecks,
           review: observedReview,
-          reason: reasons.join('; '),
+          reason: `merge state: ${meta.mergeStateStatus} — branch protection requirement`,
         });
         continue;
       }
-      const verdict = readinessOf(checks.value, review.value);
+      const verdict = readinessOf(checks, review);
       rows.push({
         name: pkg.name,
         number: pkg.number,
@@ -193,7 +202,7 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
       // collected rows, since a `failed` result carries no value.
       let trackerState: string;
       try {
-        trackerState = (await gh.getPrMeta(input.tracker.number)).state;
+        trackerState = (await gh.getPrReadiness(input.tracker.number)).meta.state;
       } catch (err) {
         return {
           status: 'failed',

@@ -32,6 +32,7 @@ import type {
   PrChecks,
   PrEffects,
   PrMeta,
+  PrReadinessSnapshot,
   PrReviewState,
   PrSearchResult,
   PrState,
@@ -142,11 +143,13 @@ function parseGhJson<T>(text: string, what: string): T {
 
 /**
  * Parse `gh pr list --head <head> --base <base> --state all --json
- * number,url,state`: a JSON ARRAY of rows. A row without a numeric `number`
- * makes the whole payload untrustworthy (thrown, not skipped); a missing or
- * non-string `url` is simply absent from the result. The lifecycle `state`
- * maps gh's OPEN/CLOSED/MERGED words onto the seam's lowercase vocabulary;
- * anything else (a missing key, an unrecognized word) → `unknown`.
+ * number,url,state,isCrossRepository`: a JSON ARRAY of rows. A row without
+ * a numeric `number` makes the whole payload untrustworthy (thrown, not
+ * skipped); a missing or non-string `url` is simply absent from the result.
+ * The lifecycle `state` maps gh's OPEN/CLOSED/MERGED words onto the seam's
+ * lowercase vocabulary; anything else (a missing key, an unrecognized word)
+ * → `unknown`. `isCrossRepository` is true only on a literal true — a fork
+ * PR the op must never adopt (final jNTyU).
  */
 export function parsePrList(text: string): PrSearchResult[] {
   const payload = parseGhJson<unknown>(text, 'gh pr list');
@@ -161,11 +164,17 @@ export function parsePrList(text: string): PrSearchResult[] {
         'gh pr list returned a row without a positive-integer number — payload untrustworthy',
       );
     }
-    const numbered = row as { number: number; url?: unknown; state?: unknown };
+    const numbered = row as {
+      number: number;
+      url?: unknown;
+      state?: unknown;
+      isCrossRepository?: unknown;
+    };
     const url = typeof numbered.url === 'string' && numbered.url !== '' ? numbered.url : undefined;
     const base: PrSearchResult = {
       number: numbered.number,
       state: prStateOf(numbered.state),
+      isCrossRepository: numbered.isCrossRepository === true,
     };
     return url === undefined ? base : { ...base, url };
   });
@@ -180,17 +189,20 @@ function prStateOf(state: unknown): PrState {
 }
 
 /**
- * THE DETERMINISTIC SEARCH PICK (PR-165 r1#4, I11): gh filters by head,
- * base, and state — but nothing in the query pins ONE row, so when several
- * matches come back the choice must not depend on gh's print order. Rule:
- * prefer an OPEN PR (the live member of the fleet); among ties (or when
- * none is open) the LOWEST number — the oldest, most canonical PR for the
- * branch. Empty input → null.
+ * THE DETERMINISTIC SEARCH PICK (PR-165 r1#4, I11; fork rule final jNTyU):
+ * gh filters by head, base, and state — but nothing in the query pins ONE
+ * row, so the choice must not depend on gh's print order. Preference order:
+ * a SAME-REPO open PR (the live fleet member), then any same-repo PR
+ * (lowest number — the oldest, most canonical); a FORK's PR is returned
+ * ONLY when it is the sole candidate, so the op can name it in its
+ * cross-repository adoption refusal. Empty input → null.
  */
 export function selectPrMatch(matches: readonly PrSearchResult[]): PrSearchResult | null {
   if (matches.length === 0) return null;
-  const open = matches.filter((match) => match.state === 'open');
-  const pool = open.length > 0 ? open : matches;
+  const sameRepo = matches.filter((match) => !match.isCrossRepository);
+  const base = sameRepo.length > 0 ? sameRepo : matches;
+  const open = base.filter((match) => match.state === 'open');
+  const pool = open.length > 0 ? open : base;
   let lowest = pool[0];
   if (lowest === undefined) return null;
   for (const match of pool) {
@@ -295,20 +307,22 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
 }
 
 /**
- * Map gh's `isDraft`+`state` onto the seam's {@link PrMeta}. FAIL-CLOSED on
- * the draft half (r2#3): a non-boolean/missing `isDraft` THROWS — reading a
- * corrupt draft flag as "not a draft" is the one fold that could still
- * yield a fabricated `ready`, so it faults into the row's `unknown` like
- * any sibling read. The lifecycle half maps through {@link prStateOf}
- * (unknown words → `unknown`, which the tracker guard treats as non-open);
- * `mergeable` maps gh's MERGEABLE/CONFLICTING words, anything else (an
- * unrecognized word, a missing key — GitHub still computing) → `unknown`,
- * which readiness treats as unknown-tolerant rather than a block.
+ * Map gh's `isDraft`+`state`+`mergeable`+`mergeStateStatus` onto the seam's
+ * {@link PrMeta}. FAIL-CLOSED on the draft half (r2#3): a non-boolean/
+ * missing `isDraft` THROWS — reading a corrupt draft flag as "not a draft"
+ * is the one fold that could still yield a fabricated `ready`, so it faults
+ * into the row's `unknown` like any sibling read. The lifecycle half maps
+ * through {@link prStateOf} (unknown words → `unknown`, which the tracker
+ * guard treats as non-open); `mergeable` maps gh's MERGEABLE/CONFLICTING
+ * words; `mergeStateStatus` maps CLEAN/BLOCKED/BEHIND (DIRTY folds to
+ * `blocked` — it IS a conflicts verdict) with UNSTABLE/DRAFT/UNKNOWN and
+ * missing keys → `unknown`, which the fold tolerates.
  */
 export function metaOf(payload: {
   isDraft?: unknown;
   state?: unknown;
   mergeable?: unknown;
+  mergeStateStatus?: unknown;
 }): PrMeta {
   if (typeof payload.isDraft !== 'boolean') {
     throw new Error('gh pr view printed an unreadable isDraft — payload untrustworthy');
@@ -316,7 +330,49 @@ export function metaOf(payload: {
   let mergeable: PrMeta['mergeable'] = 'unknown';
   if (payload.mergeable === 'MERGEABLE') mergeable = 'mergeable';
   else if (payload.mergeable === 'CONFLICTING') mergeable = 'conflicting';
-  return { isDraft: payload.isDraft, state: prStateOf(payload.state), mergeable };
+  return {
+    isDraft: payload.isDraft,
+    state: prStateOf(payload.state),
+    mergeable,
+    mergeStateStatus: mergeStateStatusOf(payload.mergeStateStatus),
+  };
+}
+
+/**
+ * gh's mergeStateStatus word → the seam's {@link PrMergeStateStatus}
+ * (final jNTyP): CLEAN → clean, BLOCKED → blocked, BEHIND → behind, DIRTY →
+ * blocked (it is a conflicts verdict), and EVERYTHING else — UNSTABLE
+ * (covered by the checks half), DRAFT (covered by the draft half),
+ * UNKNOWN, missing keys, unrecognized words — → `unknown`, which the fold
+ * tolerates rather than blocking on evidence it cannot read.
+ */
+export function mergeStateStatusOf(word: unknown): PrMeta['mergeStateStatus'] {
+  if (word === 'CLEAN') return 'clean';
+  if (word === 'BLOCKED') return 'blocked';
+  if (word === 'BEHIND') return 'behind';
+  if (word === 'DIRTY') return 'blocked';
+  return 'unknown';
+}
+
+/**
+ * THE CONSOLIDATED READINESS SNAPSHOT (final jNTyS): fold ONE `gh pr view
+ * --json statusCheckRollup,reviewDecision,isDraft,state,mergeable,
+ * mergeStateStatus` document into the seam's {@link PrReadinessSnapshot} —
+ * one subprocess, one JSON document, inherently coherent evidence.
+ */
+export function readinessSnapshotOf(payload: {
+  statusCheckRollup?: unknown;
+  reviewDecision?: unknown;
+  isDraft?: unknown;
+  state?: unknown;
+  mergeable?: unknown;
+  mergeStateStatus?: unknown;
+}): PrReadinessSnapshot {
+  return {
+    checks: checksOfRollup(payload.statusCheckRollup),
+    review: reviewStateOfDecision(payload.reviewDecision),
+    meta: metaOf(payload),
+  };
 }
 
 /**
@@ -340,10 +396,11 @@ export function bodyOf(payload: { body?: unknown }): string {
  * The shipped effects adapter (the registry importer's binding): one bound
  * `repoRoot`, every effect a fresh lazy gh call. Argv shapes:
  *   - searchPrByHead:    gh pr list --head <head> --base <base> --state all
- *                        --limit 200 --json number,url,state — the explicit
- *                        generous limit (gh's default 30 truncates) and the
- *                        deterministic {@link selectPrMatch} (prefer open,
- *                        else lowest number) keep the adoption I11-honest
+ *                        --limit 200 --json number,url,state,isCrossRepository
+ *                        — the explicit generous limit (gh's default 30
+ *                        truncates), the deterministic {@link selectPrMatch}
+ *                        (same-repo open first, else lowest number) and the
+ *                        op's cross-repository refusal keep adoption I11-honest
  *   - createPr:          gh pr create --head … --base … --title … --body-file - [--draft]
  *                        (the body ALWAYS travels over stdin; an absent
  *                        request body is an honest empty body — with
@@ -352,10 +409,10 @@ export function bodyOf(payload: { body?: unknown }): string {
  *                        title AND body. REVERSES the cycle-2 rejection.)
  *   - editPrBody:        gh pr edit <n> --body-file -   (body over stdin)
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
- *   - getPrChecks:       gh pr view <n> --json statusCheckRollup
- *   - getPrReviewState:  gh pr view <n> --json reviewDecision
- *   - getPrMeta:         gh pr view <n> --json isDraft,state,mergeable
- *                        (fail-closed on an unreadable draft flag)
+ *   - getPrReadiness:    gh pr view <n> --json statusCheckRollup,
+ *                        reviewDecision,isDraft,state,mergeable,
+ *                        mergeStateStatus — ONE subprocess, ONE coherent
+ *                        snapshot (fail-closed on an unreadable draft flag)
  *   - getPrBody:         gh pr view <n> --json body (the compose protocol's
  *                        read half)
  * The seam carries NO merge effect — the fleet run report is a
@@ -384,7 +441,7 @@ export function makeSubprocessPrEffects(
               '--limit',
               GH_PR_LIST_LIMIT,
               '--json',
-              'number,url,state',
+              'number,url,state,isCrossRepository',
             ],
             repoRoot,
             timeoutMs,
@@ -418,33 +475,24 @@ export function makeSubprocessPrEffects(
     comment: async (number, body) => {
       await runGh(['pr', 'comment', String(number), '--body-file', '-'], repoRoot, timeoutMs, body);
     },
-    getPrChecks: async (number) =>
-      checksOfRollup(
-        parseGhJson<{ statusCheckRollup?: unknown }>(
+    getPrReadiness: async (number) =>
+      readinessSnapshotOf(
+        parseGhJson<{
+          statusCheckRollup?: unknown;
+          reviewDecision?: unknown;
+          isDraft?: unknown;
+          state?: unknown;
+          mergeable?: unknown;
+          mergeStateStatus?: unknown;
+        }>(
           await runGh(
-            ['pr', 'view', String(number), '--json', 'statusCheckRollup'],
-            repoRoot,
-            timeoutMs,
-          ),
-          'gh pr view',
-        ).statusCheckRollup,
-      ),
-    getPrReviewState: async (number) =>
-      reviewStateOfDecision(
-        parseGhJson<{ reviewDecision?: unknown }>(
-          await runGh(
-            ['pr', 'view', String(number), '--json', 'reviewDecision'],
-            repoRoot,
-            timeoutMs,
-          ),
-          'gh pr view',
-        ).reviewDecision,
-      ),
-    getPrMeta: async (number) =>
-      metaOf(
-        parseGhJson<{ isDraft?: unknown; state?: unknown; mergeable?: unknown }>(
-          await runGh(
-            ['pr', 'view', String(number), '--json', 'isDraft,state,mergeable'],
+            [
+              'pr',
+              'view',
+              String(number),
+              '--json',
+              'statusCheckRollup,reviewDecision,isDraft,state,mergeable,mergeStateStatus',
+            ],
             repoRoot,
             timeoutMs,
           ),

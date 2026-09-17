@@ -39,9 +39,11 @@ import {
   checksOfRollup,
   makeSubprocessPrEffects,
   mapGhFault,
+  mergeStateStatusOf,
   metaOf,
   parseCreatedPr,
   parsePrList,
+  readinessSnapshotOf,
   reviewStateOfDecision,
   selectPrMatch,
 } from '../../../src/ops/pr/ghEffects.js';
@@ -216,21 +218,27 @@ describe('the run-prefix refinements', () => {
 // The real gh adapter's pure parsers — captured-shape fixtures
 // ---------------------------------------------------------------------------
 
-describe('parsePrList (gh pr list --json number,url,state)', () => {
+describe('parsePrList (gh pr list --json number,url,state,isCrossRepository)', () => {
   test('an empty fleet has no PR on the head', () => {
     expect(parsePrList('[]')).toEqual([]);
   });
 
-  test('rows keep the number, the URL, and the lifecycle state (r1#7)', () => {
+  test('rows keep the number, the URL, the lifecycle state, and the fork flag (r1#7 + final jNTyU)', () => {
     expect(
       parsePrList(
-        '[{"number":7,"url":"https://github.test/owner/repo/pull/7","state":"OPEN"},{"number":8,"state":"MERGED"},{"number":9,"state":"CLOSED"},{"number":10}]',
+        '[{"number":7,"url":"https://github.test/owner/repo/pull/7","state":"OPEN"},{"number":8,"state":"MERGED"},{"number":9,"state":"CLOSED"},{"number":10},{"number":11,"isCrossRepository":true}]',
       ),
     ).toEqual([
-      { number: 7, url: 'https://github.test/owner/repo/pull/7', state: 'open' },
-      { number: 8, state: 'merged' },
-      { number: 9, state: 'closed' },
-      { number: 10, state: 'unknown' },
+      {
+        number: 7,
+        url: 'https://github.test/owner/repo/pull/7',
+        state: 'open',
+        isCrossRepository: false,
+      },
+      { number: 8, state: 'merged', isCrossRepository: false },
+      { number: 9, state: 'closed', isCrossRepository: false },
+      { number: 10, state: 'unknown', isCrossRepository: false },
+      { number: 11, state: 'unknown', isCrossRepository: true },
     ]);
   });
 
@@ -250,8 +258,12 @@ describe('parsePrList (gh pr list --json number,url,state)', () => {
   });
 });
 
-describe('selectPrMatch (the deterministic adoption pick, r1#4/I11)', () => {
-  const row = (number: number, state: PrState): PrSearchResult => ({ number, state });
+describe('selectPrMatch (the deterministic adoption pick, r1#4/I11 + final jNTyU)', () => {
+  const row = (number: number, state: PrState, isCrossRepository = false): PrSearchResult => ({
+    number,
+    state,
+    isCrossRepository,
+  });
 
   test('no matches → null', () => {
     expect(selectPrMatch([])).toBeNull();
@@ -275,6 +287,16 @@ describe('selectPrMatch (the deterministic adoption pick, r1#4/I11)', () => {
       row(4, 'closed'),
     );
     expect(selectPrMatch([row(21, 'unknown'), row(17, 'unknown')])).toEqual(row(17, 'unknown'));
+  });
+
+  test('a FORK match is returned only when it is the sole candidate — the op refuses it (final jNTyU)', () => {
+    const fork = row(33, 'open', true);
+    expect(selectPrMatch([fork])).toEqual(fork);
+  });
+
+  test('a same-repo candidate always beats a fork match, whatever the numbers', () => {
+    expect(selectPrMatch([row(3, 'open', true), row(99, 'open')])).toEqual(row(99, 'open'));
+    expect(selectPrMatch([row(3, 'open', true), row(99, 'closed')])).toEqual(row(99, 'closed'));
   });
 });
 
@@ -372,17 +394,33 @@ describe('reviewStateOfDecision (gh pr view --json reviewDecision)', () => {
   });
 });
 
-describe('metaOf (gh pr view --json isDraft,state,mergeable)', () => {
+describe('metaOf (gh pr view --json isDraft,state,mergeable,mergeStateStatus)', () => {
   test('the literal words map onto the seam vocabulary', () => {
-    expect(metaOf({ isDraft: true, state: 'OPEN', mergeable: 'MERGEABLE' })).toEqual({
+    expect(
+      metaOf({
+        isDraft: true,
+        state: 'OPEN',
+        mergeable: 'MERGEABLE',
+        mergeStateStatus: 'CLEAN',
+      }),
+    ).toEqual({
       isDraft: true,
       state: 'open',
       mergeable: 'mergeable',
+      mergeStateStatus: 'clean',
     });
-    expect(metaOf({ isDraft: false, state: 'MERGED', mergeable: 'CONFLICTING' })).toEqual({
+    expect(
+      metaOf({
+        isDraft: false,
+        state: 'MERGED',
+        mergeable: 'CONFLICTING',
+        mergeStateStatus: 'BEHIND',
+      }),
+    ).toEqual({
       isDraft: false,
       state: 'merged',
       mergeable: 'conflicting',
+      mergeStateStatus: 'behind',
     });
   });
 
@@ -397,12 +435,81 @@ describe('metaOf (gh pr view --json isDraft,state,mergeable)', () => {
       isDraft: false,
       state: 'unknown',
       mergeable: 'unknown',
+      mergeStateStatus: 'unknown',
     });
     expect(metaOf({ isDraft: false })).toEqual({
       isDraft: false,
       state: 'unknown',
       mergeable: 'unknown',
+      mergeStateStatus: 'unknown',
     });
+  });
+
+  test('mergeStateStatus: DIRTY folds to blocked; UNSTABLE/DRAFT/UNKNOWN stay unknown-tolerant (final jNTyP)', () => {
+    expect(metaOf({ isDraft: false, mergeStateStatus: 'DIRTY' }).mergeStateStatus).toBe('blocked');
+    expect(metaOf({ isDraft: false, mergeStateStatus: 'BLOCKED' }).mergeStateStatus).toBe(
+      'blocked',
+    );
+    expect(metaOf({ isDraft: false, mergeStateStatus: 'UNSTABLE' }).mergeStateStatus).toBe(
+      'unknown',
+    );
+    expect(metaOf({ isDraft: false, mergeStateStatus: 'DRAFT' }).mergeStateStatus).toBe('unknown');
+    expect(metaOf({ isDraft: false, mergeStateStatus: 'UNKNOWN' }).mergeStateStatus).toBe(
+      'unknown',
+    );
+  });
+});
+
+describe('mergeStateStatusOf (final jNTyP — the conservative merge-state mapping)', () => {
+  test('CLEAN/BLOCKED/BEHIND map to their states; DIRTY is a conflicts verdict (blocked)', () => {
+    expect(mergeStateStatusOf('CLEAN')).toBe('clean');
+    expect(mergeStateStatusOf('BLOCKED')).toBe('blocked');
+    expect(mergeStateStatusOf('BEHIND')).toBe('behind');
+    expect(mergeStateStatusOf('DIRTY')).toBe('blocked');
+  });
+
+  test('everything the other halves already cover, plus the unreadable, stays unknown-tolerant', () => {
+    expect(mergeStateStatusOf('UNSTABLE')).toBe('unknown');
+    expect(mergeStateStatusOf('DRAFT')).toBe('unknown');
+    expect(mergeStateStatusOf('UNKNOWN')).toBe('unknown');
+    expect(mergeStateStatusOf('HAS_HOOKS')).toBe('unknown');
+    expect(mergeStateStatusOf(undefined)).toBe('unknown');
+    expect(mergeStateStatusOf('SURE')).toBe('unknown');
+  });
+});
+
+describe('readinessSnapshotOf (the ONE consolidated gh pr view document, final jNTyS)', () => {
+  test('one payload folds into the coherent three-half snapshot', () => {
+    const payload = {
+      statusCheckRollup: [
+        { __typename: 'CheckRun', name: 'build', status: 'COMPLETED', conclusion: 'SUCCESS' },
+      ],
+      reviewDecision: 'APPROVED',
+      isDraft: false,
+      state: 'OPEN',
+      mergeable: 'MERGEABLE',
+      mergeStateStatus: 'CLEAN',
+    };
+    expect(readinessSnapshotOf(payload)).toEqual({
+      checks: { state: 'pass' },
+      review: { state: 'approved' },
+      meta: {
+        isDraft: false,
+        state: 'open',
+        mergeable: 'mergeable',
+        mergeStateStatus: 'clean',
+      },
+    });
+  });
+
+  test('an unreadable isDraft faults the WHOLE snapshot (fail-closed, no half-stale evidence)', () => {
+    expect(() =>
+      readinessSnapshotOf({
+        statusCheckRollup: [],
+        reviewDecision: 'APPROVED',
+        state: 'OPEN',
+      }),
+    ).toThrow(/unreadable isDraft/);
   });
 });
 
@@ -715,7 +822,7 @@ describe('searchPrByHead argv pins (r1#3 + r1#4/I11)', () => {
     try {
       const effects = makeSubprocessPrEffects(repoDir);
       const hit = await effects.searchPrByHead('cq/09-16a/fix/core', 'origin/merge-queue');
-      expect(hit).toEqual({ number: 9, state: 'open' });
+      expect(hit).toEqual({ number: 9, state: 'open', isCrossRepository: false });
       const argv = (await readFile(argsFile, 'utf8')).split('\n').filter((line) => line !== '');
       // The base is part of the PR identity (r1#2): it MUST reach the query.
       const baseIndex = argv.indexOf('--base');
