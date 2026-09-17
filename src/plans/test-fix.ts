@@ -12,6 +12,7 @@
 // tamper scan are what keep the restricted fixer honest (a "fix" that
 // breaks a passing suite or games the checks fails its unit uncommitted).
 import type { PlanRegistryEntry } from '../kernel/types.js';
+import { DEFAULT_TEST_FILE_PATTERNS } from '../ops/gates/hackDetector.js';
 import { buildSweepPlan, type SweepPlanConfig } from './sweep.js';
 
 /** The shipped plan's stable id (the discovery name and the Plan.id). */
@@ -28,14 +29,26 @@ export const TEST_FIX_FIXER = 'test-fix';
 export type TestFixPlanConfig = Omit<SweepPlanConfig, 'fixers'> & { fixers?: string[] };
 
 /**
+ * The shipped stage-path allowlist of the test-only worker: the gates lane's
+ * OWN test-file shapes (one definition — the hackDetector default). Every
+ * staged path must match one of these patterns, or the unit fails naming the
+ * offender: a test-fix worker can never commit production code, however its
+ * agent phrases the edit.
+ */
+export const TEST_FIX_STAGE_PATH_ALLOWLIST: { patterns: string[] } = {
+  patterns: [...DEFAULT_TEST_FILE_PATTERNS],
+};
+
+/**
  * Author the EXPANDED test-fix plan (phase B) — buildSweepPlan under the
- * test-fix id with `fixers` pinned to the one test-only label. A caller
+ * test-fix id with `fixers` pinned to the one test-only label AND the
+ * test-file stage allowlist layered onto every unit job (the restriction is
+ * ENFORCED at the staged set, not just declared by the label). A caller
  * passing `fixers` here gets it REPLACED, never merged: the plan's identity
- * is the restriction, so no extra fixer can ride in through the config.
- * The phase-A report must agree EVERYWHERE: a report whose units OR whose
- * embedded unit-job inputs carry a fixer outside the test-only set is a
- * caller/planner mismatch — plan corruption, thrown here before foreign
- * units can be embedded.
+ * is the test-only restriction. The phase-A report must agree EVERYWHERE: a
+ * report whose units OR whose embedded unit-job inputs carry a fixer outside
+ * the test-only set is a caller/planner mismatch — plan corruption, thrown
+ * here before foreign units can be embedded.
  */
 export function buildTestFixPlan(
   config: TestFixPlanConfig,
@@ -57,7 +70,9 @@ export function buildTestFixPlan(
       `buildTestFixPlan: the phase-A report's unit job(s) ${JSON.stringify(foreignJobs)} embed inputs outside the test-only set ['${TEST_FIX_FIXER}'] — the report must come from a planner run of THIS plan's config`,
     );
   }
-  return buildSweepPlan({ ...config, fixers: [TEST_FIX_FIXER] }, report, TEST_FIX_PLAN_ID);
+  return buildSweepPlan({ ...config, fixers: [TEST_FIX_FIXER] }, report, TEST_FIX_PLAN_ID, {
+    stagePathAllowlist: TEST_FIX_STAGE_PATH_ALLOWLIST,
+  });
 }
 
 /**

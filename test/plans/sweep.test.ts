@@ -30,18 +30,15 @@ import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, Plan } from '../../src/kernel/types.js';
 import { registry as prRegistry } from '../../src/ops/pr/registry.js';
 import { AssemblePrsInputSchema } from '../../src/ops/pr/registry.js';
-import { PlanSweepInputSchema } from '../../src/ops/sweep/registry.js';
+import {
+  PlanSweepInputSchema,
+  SweepUnitDispatchInputSchema,
+} from '../../src/ops/sweep/registry.js';
 import type { PlanSweepReport, WorkUnit } from '../../src/ops/sweep/planSweep.js';
 import { SWEEP_UNIT_OP } from '../../src/ops/sweep/planSweep.js';
 import { registry as sweepRegistry } from '../../src/ops/sweep/registry.js';
-import {
-  buildSweepPlan,
-  makeSweepUnitOp,
-  SWEEP_PLAN_ID,
-  SweepUnitInputSchema,
-  sweepUnitSegments,
-  type SweepPlanConfig,
-} from '../../src/plans/sweep.js';
+import { makeSweepUnitOp, sweepUnitSegments } from '../../src/ops/sweep/unit.js';
+import { buildSweepPlan, SWEEP_PLAN_ID, type SweepPlanConfig } from '../../src/plans/sweep.js';
 import { buildTestFixPlan, TEST_FIX_FIXER, TEST_FIX_PLAN_ID } from '../../src/plans/test-fix.js';
 import { getPlan } from '../../src/plans/registry.js';
 
@@ -124,7 +121,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     for (const job of plan.jobs.slice(1, 3)) {
       expect(job.op).toBe(SWEEP_UNIT_OP);
       expect(job.dependsOn).toEqual(['sweep-plan']);
-      expect(() => SweepUnitInputSchema.parse(job.input)).not.toThrow();
+      expect(() => SweepUnitDispatchInputSchema.parse(job.input)).not.toThrow();
     }
     // The assembler: static data, derived branches, every unit a dependency.
     const assemble = plan.jobs[3] as {
@@ -154,7 +151,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(plannerInput.fixers).toEqual([TEST_FIX_FIXER]);
     // Every unit job carries the test-only fixer (the plan's identity).
     for (const job of plan.jobs.slice(1, 3)) {
-      expect(SweepUnitInputSchema.parse((job as { input: unknown }).input).fixer).toBe(
+      expect(SweepUnitDispatchInputSchema.parse((job as { input: unknown }).input).fixer).toBe(
         TEST_FIX_FIXER,
       );
     }

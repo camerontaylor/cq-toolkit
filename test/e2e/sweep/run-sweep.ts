@@ -4,30 +4,27 @@
 //
 //   phase A  run the planner (sweep.planSweep, REAL subprocess deps) and
 //            keep its report — the fan-out data;
-//   phase B  buildSweepPlan(config, report) → runPlan through an
-//            OpRegistryView that binds: the CENTRAL registry's real
-//            `sweep.planSweep` entry (the plan's producer job), the D4
-//            `sweep.unit` composition (makeSweepUnitOp — the op the central
-//            registry does not carry yet; see the FLAG in src/plans/sweep.ts),
-//            and `pr.assemblePrs` over the INJECTED fake gh (makeAssemblePrs
-//            + this module's makeFakeGh — no forge is contacted).
+//   phase B  buildSweepPlan(config, report) → runPlan through the CENTRAL
+//            registry: 'sweep.unit' dispatches through its REGISTERED entry
+//            (bindingsFromDispatch → real subprocess worktree effects, the
+//            REAL subprocess driver over the input's driver section — the
+//            fake agent CLI fixture IS that driver's binary — real probes,
+//            the real git push against the scratch repo's LOCAL bare
+//            origin), and `pr.assemblePrs` is the ONE override (the injected
+//            fake gh — no forge is contacted; tracker-branch creation on a
+//            real forge is the deferred WS-K surface, review-debt #144).
 //
-// The fixer driver leg is the REAL SubprocessDriver spawning the fake agent
-// CLI fixture (test/fixtures/scratch-repo/sweep-agent.mjs); every git leg
-// (worktrees, probes' check.js, diffs, commits) is real, in tmpdirs. The
-// journal is the runner's own NDJSON (one file per run invocation under
-// journalDir) — the tests read it back as evidence.
+// Every git leg (worktrees, check.js probes, diffs, commits, pushes) is
+// real, in tmpdirs. The journal is the runner's own NDJSON (one file per run
+// invocation under journalDir) — the tests read it back as evidence.
 //
 // Sweep-layer resume is salvage + reuse, never kernel journal-replay (the
 // rationale lives in src/plans/sweep.ts): salvageInterruptedRun scans the
-// LATEST run of the plan id, derives each package's SalvageEntry journal
-// tail (allTerminal = every unit job of the package finished ok), and runs
-// the REAL salvage op over the inventory.
-import { spawn } from 'node:child_process';
+// LATEST run of the plan id, derives each UNIT's SalvageEntry journal tail
+// (one entry per unit tree; lastStep = the LAST job-finished event in
+// journal order), and runs the REAL salvage op over the inventory.
 import { resolve } from 'node:path';
-import { SubprocessDriver } from '../../../src/driver/subprocess/index.js';
-import type { RoutingTable } from '../../../src/driver/subprocess/routing.js';
-import { openRunLog, candidateRunsForPlan } from '../../../src/kernel/journal.js';
+import { candidateRunsForPlan, openRunLog } from '../../../src/kernel/journal.js';
 import type { JournalEvent, Op, OpRegistryEntry, RunReport } from '../../../src/kernel/types.js';
 import { runPlan, type OpRegistryView } from '../../../src/kernel/runner.js';
 import { makeAssemblePrs } from '../../../src/ops/pr/assemblePrs.js';
@@ -40,16 +37,11 @@ import type {
   PrSearchResult,
 } from '../../../src/ops/pr/assemblePrs.js';
 import { AssemblePrsInputSchema } from '../../../src/ops/pr/registry.js';
-import type { CheckCommand, RunCheck } from '../../../src/ops/gates/checkRunner.js';
-import { subprocessRunCheck } from '../../../src/ops/gates/checkRunner.js';
-import type { GhFn } from '../../../src/ops/review/gh.js';
 import { list } from '../../../src/registry/index.js';
 import {
   buildSweepPlan,
-  makeSweepUnitOp,
   sweepPlannerInput,
-  sweepUnitSegments,
-  SweepUnitInputSchema,
+  SWEEP_PLAN_ID,
   SWEEP_PLAN_JOB_IDS,
   type SweepPlanConfig,
 } from '../../../src/plans/sweep.js';
@@ -59,6 +51,12 @@ import {
   SWEEP_UNIT_OP,
 } from '../../../src/ops/sweep/planSweep.js';
 import type { PlanSweepReport, WorkUnit } from '../../../src/ops/sweep/planSweep.js';
+import { sweepUnitSegments } from '../../../src/ops/sweep/unit.js';
+import type {
+  SweepUnitCheckConfig,
+  SweepUnitDispatchInput,
+  SweepUnitDriverConfig,
+} from '../../../src/ops/sweep/unit.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import type { SalvageEntry, SalvagePlan } from '../../../src/ops/sweep/salvage.js';
 
@@ -141,24 +139,18 @@ export interface RunSweepOpts {
   config: SweepPlanConfig;
   /** NDJSON journal dir — one run file per invocation, shared across re-invokes. */
   journalDir: string;
-  /** Sessions dir for the fixer workers' session records. */
-  sessionsDir: string;
-  /** The fake agent CLI argv (e.g. [node, sweep-agent.mjs]) — the driver's binary. */
-  agentCli: readonly string[];
-  /** The fake endpoint's provider handle + model (both plain data). */
-  provider: string;
-  model: string;
-  /** Host env var NAMES the fake routing table reads (values live in process.env). */
-  keyEnv: string;
-  baseUrlEnv: string;
-  /** The per-unit fixer prompt — the scenario steering (faults ride here). */
-  prompt: (unit: WorkUnit, worktreePath: string) => string;
-  /** The per-package probe command, resolved against the unit's worktree. */
-  checkCommand: (unit: WorkUnit, worktreePath: string) => CheckCommand;
   /** The injected forge (makeFakeGh) — no real gh is ever spawned. */
   gh: PrEffects;
-  /** Probe observation hook — the I7 re-probe assertion counts through this. */
-  onProbe?: (packageName: string) => void;
+  /** The JSON driver binding (the fake agent CLI + fake endpoint), per unit job. */
+  driver: SweepUnitDriverConfig;
+  /** The JSON probe binding (the scratch check.js command template), per unit job. */
+  check: SweepUnitCheckConfig;
+  /** The per-unit fixer prompt TEMPLATE — the scenario steering (faults ride here). */
+  promptTemplate?: (unit: WorkUnit) => string;
+  /** Push committed branches to the scratch repo's origin; default true. */
+  push?: boolean;
+  /** Optional staged-path allowlist overlay (the test-fix scope pin). */
+  stagePathAllowlist?: { patterns: string[] };
 }
 
 /** One sweep invocation's outcome: the phase-A report, the phase-B run, the default output. */
@@ -179,51 +171,34 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   }
   const planner = planned.value;
 
-  // The probe runner: the REAL subprocess check, observed per package.
-  const runCheck: RunCheck = async (cmd) => {
-    const pkg = cmd.args[cmd.args.length - 1];
-    opts.onProbe?.(typeof pkg === 'string' ? pkg : '');
-    return subprocessRunCheck(cmd);
-  };
-
-  // The unit composition, bound per run (every seam injected).
-  const git: GhFn = makeGitRunner();
-  const driver = new SubprocessDriver({
-    binary: [...opts.agentCli],
-    routingTable: fakeRoutingTable(opts),
-    sessionsDir: opts.sessionsDir,
+  // Phase B: the expanded graph with the dispatch knobs layered on (JSON,
+  // central-registry dispatchable), journaled. stopOnError:false — I9's
+  // collect-all (every unit dispatches and lands a journal outcome). The
+  // assemble job's dependsOn-every-unit is the fleet gate: one failed unit
+  // withholds the PRs.
+  const plan = buildSweepPlan(opts.config, planner, SWEEP_PLAN_ID, {
+    driver: opts.driver,
+    check: opts.check,
+    push: opts.push ?? true,
+    ...(opts.stagePathAllowlist !== undefined
+      ? { stagePathAllowlist: opts.stagePathAllowlist }
+      : {}),
   });
-  const unitOp = makeSweepUnitOp({
-    repoRoot: opts.config.repoRoot,
-    worktreesDir: opts.config.worktreesDir,
-    runPrefix: opts.config.runPrefix,
-    base: opts.config.base,
-    adapter: 'tsc-lines',
-    runCheck,
-    checkCommand: opts.checkCommand,
-    driver,
-    modelSpec: { model: opts.model, provider: opts.provider },
-    sessionsDir: opts.sessionsDir,
-    prompt: (unit, worktree) => opts.prompt(unit, worktree.path),
-    git,
-  });
+  for (const job of plan.jobs) {
+    if (job.op !== SWEEP_UNIT_OP || opts.promptTemplate === undefined) continue;
+    (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
+      job.input as WorkUnit,
+    );
+  }
 
-  // The dispatch view: central registry for the real ops (planSweep), the D4
-  // composition for sweep.unit, the fake forge for pr.assemblePrs.
+  // The dispatch view: the CENTRAL registry (sweep.planSweep AND the
+  // registered sweep.unit — the e2e exercises the real dispatch path), with
+  // the ONE injected seam: pr.assemblePrs over the fake forge.
   const central = new Map((await list()).map((entry) => [entry.name, entry] as const));
+  if (!central.has('sweep.unit')) throw new Error('e2e setup: sweep.unit is not registered');
   if (!central.has('pr.assemblePrs'))
     throw new Error('e2e setup: pr.assemblePrs is not registered');
   const overridden = new Map<string, OpRegistryEntry>([
-    [
-      SWEEP_UNIT_OP,
-      {
-        name: SWEEP_UNIT_OP,
-        inputSchema: SweepUnitInputSchema,
-        // The dispatch seam re-validates input through inputSchema.parseAsync,
-        // so the erased op typing is safe here (the registry precedent).
-        importer: async () => (async (input: WorkUnit) => unitOp(input)) as Op<unknown, unknown>,
-      },
-    ],
     [
       'pr.assemblePrs',
       {
@@ -243,17 +218,12 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     get: (name) =>
       (overridden.get(name) ?? central.get(name)) as OpRegistryEntry<never, never> | undefined,
   };
-
-  // Phase B: the expanded graph, journaled. stopOnError:false — I9's
-  // collect-all (every unit dispatches and lands a journal outcome; nothing
-  // fails by never having run). The assemble job's dependsOn-every-unit is
-  // the fleet gate: one failed unit withholds the PRs.
-  const plan = buildSweepPlan(opts.config, planner);
   const run = await runPlan(
     plan,
     { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
     view,
   );
+
   // The in-plan planner job must re-derive the SAME fan-out the caller
   // expanded from — job ids and units (workspace-all/explicit are
   // deterministic over the static input; changed-vs-base re-derives from
@@ -272,26 +242,6 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     }
   }
   return { planner, run, output: renderSweepOutput(opts.config, planner, run) };
-}
-
-/** The fake endpoint table: a provider whose key never leaves the test's env var. */
-function fakeRoutingTable(opts: RunSweepOpts): RoutingTable {
-  return {
-    endpoints: {
-      [opts.provider]: {
-        baseUrlEnv: opts.baseUrlEnv,
-        baseUrlDefault: 'http://127.0.0.1:9',
-        keyEnv: opts.keyEnv,
-        models: [opts.model],
-        notes: 'D4 e2e fake endpoint — the agent fixture is the model; nothing is contacted',
-      },
-    },
-  };
-}
-
-/** The unit op's git transport (the review-loop's makeGhRunner posture, bin git). */
-function makeGitRunner(): GhFn {
-  return (args) => gitRun(args);
 }
 
 // ---------------------------------------------------------------------------
@@ -419,41 +369,4 @@ export async function latestRunEvents(journalDir: string, planId: string): Promi
     throw new Error(`e2e: no journaled run of plan '${planId}' under '${journalDir}'`);
   }
   return log.read(latest);
-}
-
-// ---------------------------------------------------------------------------
-// Small local seams
-// ---------------------------------------------------------------------------
-
-/** The unit op's git runner result shape (the GhFn vocabulary). */
-interface GitResult {
-  code: number;
-  stdout: string;
-  stderr: string;
-}
-
-/** Bounded real git for the unit op's diff/status/add/commit steps. */
-function gitRun(args: string[], timeoutMs = 30_000): Promise<GitResult> {
-  return new Promise((resolve) => {
-    const child = spawn('git', ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args], {
-      shell: false,
-    });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-    child.on('error', (err: Error) => {
-      clearTimeout(timer);
-      resolve({ code: 127, stdout: '', stderr: String(err) });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({
-        code: code ?? 127,
-        stdout: Buffer.concat(stdout).toString('utf8'),
-        stderr: Buffer.concat(stderr).toString('utf8'),
-      });
-    });
-  });
 }

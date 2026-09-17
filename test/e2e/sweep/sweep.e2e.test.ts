@@ -25,7 +25,7 @@
 //      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
 //      scan and its unit fails uncommitted.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,14 +39,17 @@ import {
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
 } from '../../fixtures/scratch-repo/generate.js';
+import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
+import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
+import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
 import {
-  SWEEP_PLAN_ID,
   SWEEP_RUN_STATE_BASELINE_DIR,
   sweepRunStateDir,
-} from '../../../src/plans/sweep.js';
-import type { SweepPlanConfig, SweepUnitReport } from '../../../src/plans/sweep.js';
+  type SweepUnitReport,
+} from '../../../src/ops/sweep/unit.js';
+import type { SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import type {
   AssemblePrsPackageReport,
@@ -92,20 +95,29 @@ afterAll(() => {
 
 interface Scenario {
   repo: string;
+  /** The scratch repo's LOCAL BARE origin — the push leg's recorder (jSKJL). */
+  origin: string;
   journalDir: string;
   sessionsDir: string;
   config: SweepPlanConfig;
   gh: ReturnType<typeof makeFakeGh>;
 }
 
-/** A fresh scratch repo + dirs; the run prefix names the scenario. */
+/** A fresh scratch repo (with a local bare origin) + dirs; the run prefix names the scenario. */
 async function scenario(runPrefix: string): Promise<Scenario> {
   const root = mkdtempSync(join(tmpdir(), `d4-e2e-${runPrefix.replaceAll('/', '-')}-`));
   CLEANUP.push(root);
   const repo = join(root, 'repo');
   await generateScratchRepo(repo);
+  // The push recorder: a LOCAL BARE origin — the real `git push -u origin`
+  // binding works offline against it, and the tests read its refs back as
+  // evidence of what was pushed (and what correctly was not).
+  const origin = join(root, 'origin.git');
+  await gitOut(['init', '-q', '--bare', origin], root);
+  await gitOut(['-C', repo, 'remote', 'add', 'origin', origin], root);
   return {
     repo,
+    origin,
     journalDir: join(root, 'journal'),
     sessionsDir: join(root, 'sessions'),
     config: {
@@ -122,18 +134,8 @@ async function scenario(runPrefix: string): Promise<Scenario> {
   };
 }
 
-/** The probe command: the scratch check script, scoped to the unit's package. */
-function checkCommand(unit: WorkUnit, worktreePath: string) {
-  return {
-    command: process.execPath,
-    args: ['scripts/check.js', unit.package],
-    cwd: worktreePath,
-    timeoutMs: 30_000,
-  };
-}
-
 /** Per-unit prompt steering — the scenario's faults ride the instruction line. */
-function prompts(alpha: object, beta: object): RunSweepOpts['prompt'] {
+function prompts(alpha: object, beta: object): RunSweepOpts['promptTemplate'] {
   return (unit) =>
     [
       `You are the ${unit.fixer} fixer for package ${unit.package}.`,
@@ -142,33 +144,51 @@ function prompts(alpha: object, beta: object): RunSweepOpts['prompt'] {
     ].join('\n');
 }
 
+/** The dispatch-grade unit-job knobs of every e2e run (JSON, central-registry dispatchable). */
 function optsFor(
   scene: Scenario,
-  prompt: RunSweepOpts['prompt'],
-  onProbe?: RunSweepOpts['onProbe'],
+  promptTemplate?: RunSweepOpts['promptTemplate'],
+  extra?: { push?: boolean; stagePathAllowlist?: { patterns: string[] } },
 ): RunSweepOpts {
   return {
     config: scene.config,
     journalDir: scene.journalDir,
-    sessionsDir: scene.sessionsDir,
-    agentCli: AGENT_CLI,
-    provider: 'cq-d4-e2e',
-    model: 'sweep-fake',
-    keyEnv: 'CQ_D4_E2E_KEY',
-    baseUrlEnv: 'CQ_D4_E2E_URL',
-    prompt,
-    checkCommand,
     gh: scene.gh.effects,
-    ...(onProbe !== undefined ? { onProbe } : {}),
+    driver: {
+      binary: AGENT_CLI,
+      provider: 'cq-d4-e2e',
+      model: 'sweep-fake',
+      sessionsDir: scene.sessionsDir,
+      routingTable: {
+        endpoints: {
+          'cq-d4-e2e': {
+            baseUrlEnv: 'CQ_D4_E2E_URL',
+            baseUrlDefault: 'http://127.0.0.1:9',
+            keyEnv: 'CQ_D4_E2E_KEY',
+            models: ['sweep-fake'],
+            notes: 'D4 e2e fake endpoint — the agent fixture is the model; nothing is contacted',
+          },
+        },
+      },
+    } satisfies SweepUnitDriverConfig,
+    check: {
+      adapter: 'tsc-lines',
+      command: process.execPath,
+      args: ['scripts/check.js', '{package}'],
+      timeoutMs: 30_000,
+    },
+    ...(promptTemplate !== undefined ? { promptTemplate } : {}),
+    ...extra,
   };
 }
 
-/** The unit job's report row (by package), unwrapped as SweepUnitReport. */
+/** The unit job's report row (by package + fixer), unwrapped as SweepUnitReport. */
 function unitRow(
   run: RunReport,
   pkg: string,
+  fixer: string = 'fix',
 ): { status: string; report?: SweepUnitReport; error?: string } {
-  const id = `sweep-${pkg}-fix`;
+  const id = `sweep-${pkg}-${fixer}`;
   const row = run.jobs.find((candidate) => candidate.jobId === id);
   if (row === undefined) throw new Error(`no unit row '${id}' in the run report`);
   if (row.result.status === 'ok') {
@@ -348,6 +368,13 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       // The failures-only DEFAULT output: a clean run names no package.
       expect(outcome.output).not.toMatch(/alpha|beta/);
       expect(outcome.output).toContain('0 failing unit(s) of 2');
+
+      // The push leg (jSKJL): the committed unit's branch reached the origin
+      // BEFORE the fleet assembled; the no-commit unit pushed nothing (a PR
+      // head without a commit would be a fabricated deliverable).
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).toContain('cq/e2e-happy/fix/alpha');
+      expect(originHeads).not.toContain('cq/e2e-happy/fix/beta');
     },
   );
 });
@@ -362,21 +389,21 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
     { timeout: 180_000 },
     async () => {
       const scene = await scenario('cq/e2e-interrupt');
-      const probes = new Map<string, number>();
-      const countProbe = (pkg: string): void => {
-        probes.set(pkg, (probes.get(pkg) ?? 0) + 1);
-      };
-
-      // Run 1: alpha completes (fix committed); the fake agent faults on
-      // beta (exit 1, no edit) — the mid-run interrupt.
-      const first = await runSweepPlan(
-        optsFor(
-          scene,
-          prompts({ edit: ALPHA_FIX }, { fault: 'simulated crash on beta' }),
-          countProbe,
-        ),
+      // The I7 re-probe observable: the run-state baseline snapshot is
+      // rewritten exactly once per unit run (right after the baseline probe),
+      // so a re-run's fresh mtime is the re-probe's evidence.
+      const alphaSnapshot = join(
+        sweepRunStateDir(scene.repo, 'worktrees'),
+        SWEEP_RUN_STATE_BASELINE_DIR,
+        'fix',
+        'alpha.json',
       );
-      expect(probes.get('alpha')).toBe(2); // baseline + final
+
+      // Run 1: alpha completes (fix committed + pushed); the fake agent
+      // faults on beta (exit 1, no edit) — the mid-run interrupt.
+      const first = await runSweepPlan(
+        optsFor(scene, prompts({ edit: ALPHA_FIX }, { fault: 'simulated crash on beta' })),
+      );
       const beta = unitRow(first.run, 'beta');
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/fixer worker stopped with reason 'error'/);
@@ -387,6 +414,11 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         'blocked: dependency',
       );
       expect(scene.gh.created).toHaveLength(0); // no PR without its full fleet
+      // The push leg (jSKJL): alpha's committed branch is on the origin;
+      // beta's is not (it never committed, so it never pushed).
+      const originHeadsAfterRun1 = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeadsAfterRun1).toContain('cq/e2e-interrupt/fix/alpha');
+      expect(originHeadsAfterRun1).not.toContain('cq/e2e-interrupt/fix/beta');
 
       // SALVAGE over run 1's journal tail: alpha clean+done → reuse;
       // beta clean but NOT done → resume. Both trees exist.
@@ -405,12 +437,10 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       // RE-INVOKE (same plan id, same journalDir — a second run file; the
       // sweep-layer resume is salvage + reuse, not journal replay, so the
       // unit jobs re-execute and the reused trees must RE-PROBE, I7).
-      probes.clear();
-      const second = await runSweepPlan(
-        optsFor(scene, prompts({ edit: ALPHA_FIX }, {}), countProbe),
-      );
-      expect(probes.get('alpha')).toBe(2); // the reused tree re-probed baseline + final
-      expect(probes.get('beta')).toBe(2);
+      const snapshotMtimeBefore = statSync(alphaSnapshot).mtimeMs;
+      const second = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
+      // The reused tree RE-PROBED its baseline: the snapshot was rewritten.
+      expect(statSync(alphaSnapshot).mtimeMs).toBeGreaterThan(snapshotMtimeBefore);
 
       // Alpha's unit: REUSED tree — and the reuse is clean WITHOUT any cache
       // eviction, because the tree carries NO baseline state (the snapshot
@@ -546,6 +576,61 @@ describe('sweep e2e: tamper guard on new files', () => {
         scene.repo,
       );
       expect(staged).toContain('packages/beta/test/added.test.js');
+      // No PR exists: the fleet never assembled.
+      expect(scene.gh.created).toHaveLength(0);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 4. The test-fix scope, enforced on the staged set (jSKJY)
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: test-fix stage-path allowlist', () => {
+  test(
+    'a test-fix worker editing production code: failed naming the path; the legitimate test fix commits and pushes',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-scope');
+      // The test-fix run: the planner's units carry the test-only fixer, and
+      // the staged set is held to the test-file patterns (the plan overlay
+      // buildTestFixPlan ships — wired here explicitly).
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config: { ...scene.config, fixers: ['test-fix'] } },
+          prompts(
+            { edit: ALPHA_FIX }, // the legitimate test fix
+            { write: { file: 'packages/beta/index.js', text: "export const beta = 'prod';\n" } }, // production code
+          ),
+          { stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] } },
+        ),
+      );
+
+      // Alpha: the test-only edit is IN scope — fixed, committed, pushed.
+      const alpha = unitRow(outcome.run, 'alpha', 'test-fix');
+      expect(alpha.status).toBe('ok');
+      expect(alpha.report?.committed).toBe(true);
+      expect(alpha.report?.pushed).toBe(true);
+
+      // Beta: the production-code file is OUT of scope — the unit failed
+      // naming the path, and nothing was committed or pushed.
+      const beta = unitRow(outcome.run, 'beta', 'test-fix');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/outside the allowlist/);
+      expect(beta.error).toContain('packages/beta/index.js');
+      expect(
+        await makeSubprocessWorktreeEffects(scene.repo).isStrictClean(
+          resolve(scene.repo, 'worktrees', 'test-fix', 'beta'),
+        ),
+      ).toBe(false);
+      const betaCommits = await gitOut(
+        ['rev-list', '--count', 'main..cq/e2e-scope/test-fix/beta'],
+        scene.repo,
+      );
+      expect(betaCommits.trim()).toBe('0');
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).toContain('cq/e2e-scope/test-fix/alpha');
+      expect(originHeads).not.toContain('cq/e2e-scope/test-fix/beta');
       // No PR exists: the fleet never assembled.
       expect(scene.gh.created).toHaveLength(0);
     },
