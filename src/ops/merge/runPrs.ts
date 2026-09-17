@@ -82,6 +82,7 @@
 // outcome, always.
 import pLimit from 'p-limit';
 import type { Driver, ModelSpec } from '../../driver/types.js';
+import type { HarnessConfig } from '../../harness/config.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { classifyPr } from './classifyPrs.js';
 import type { PrCandidate } from './classifyPrs.js';
@@ -129,7 +130,13 @@ export interface MergePrsCandidate extends PrCandidate {
 export interface RunMergePrsInput {
   /** The trunk/queue branch — configuration at the call site. */
   baseBranch: string;
-  /** Absolute path of the checked-out repository (the effects target). */
+  /**
+   * Absolute path of the checked-out repository (the effects target). The
+   * caller must aim gh at the target repository (GH_REPO env or process
+   * cwd) — the effects layer scopes git via this path but never gh: the
+   * gh runner spawns without a repo cwd and without `-R`, so gh resolves
+   * its repository from the environment, not from this path.
+   */
   repoRoot: string;
   /** The fetched candidates, in any array order (planning sorts). */
   prs: MergePrsCandidate[];
@@ -543,6 +550,13 @@ export interface MakeRunMergePrsOpDeps {
   effects?: MergeEffects;
   /** Default: the resolve op builds its own default SubprocessDriver. */
   driver?: Driver;
+  /**
+   * resolveConflict passthrough — threads into the resolve binding and
+   * reaches the resolve op's DEFAULT SubprocessDriver construction (inert
+   * when `driver` is supplied: an explicit driver IS the harness surface).
+   * Default: the resolve op's own `defaultHarnessConfig`.
+   */
+  harnessConfig?: HarnessConfig;
   /** Default: input.sessionsDir, else the resolve op's own default. */
   sessionsDir?: string;
 }
@@ -582,6 +596,7 @@ export function makeRunMergePrsOp(
     const resolve = makeResolveConflictOp({
       effects,
       ...(deps?.driver !== undefined ? { driver: deps.driver } : {}),
+      ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
       ...(sessionsDir !== undefined ? { sessionsDir } : {}),
     });
     const outcome = await runMergePrs(input, {

@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
+import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type { OpResult } from '../../../src/kernel/types.js';
 import { REVIEW_ACCEPT_SETTLE_MS } from '../../../src/ops/merge/classify.config.js';
 import { headRefFor } from '../../../src/ops/merge/effects.js';
@@ -120,8 +121,9 @@ const baseInput = (prs: MergePrsCandidate[], modelSpec?: typeof MODEL_SPEC): Run
 /**
  * THE FAKE EFFECTS — an in-memory MergeEffects, zero real git/gh. Records
  * every call; scriptable failures: a nonzero fetchRef and per-pr mergePr
- * failures (the union test's failed-merge surface). validateRef always
- * answers the same sha, so no drift ever fires.
+ * failures (the union test's failed-merge surface). validateRef answers
+ * the same sha EXCEPT for refs listed in driftRefs, which drift after
+ * their first validate (the acted-verification surface).
  */
 class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
@@ -1042,6 +1044,62 @@ describe('runMergePrs', () => {
       // Nothing conflicted, so the resolve path — and the driver behind it
       // — never ran.
       expect(runs).toHaveLength(0);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('makeRunMergePrsOp accepts harnessConfig and dispatches identically (type-level threading; behavioral pin is dispatch parity)', async () => {
+    // Mirror of resolveConflict.test.ts's harnessConfig test. HONESTY NOTE
+    // (PR162 r1): with driver SUPPLIED the config is inert — this test pins
+    // dispatch parity + binding, not the forwarding spread itself (a silent
+    // drop of the spread would stay green here; the spread is type-checked
+    // and the LIVE proof of a config's effect is F5's scripted-agent path,
+    // which supplies deps.driver). Behaviorally: a dispatch with a
+    // harnessConfig present behaves identically — the conflicting pr is
+    // dispatched, the acted self-report is verified against a MOVING head,
+    // and the resolution lands; and the op binds with the config alone (an
+    // empty run dispatches nothing).
+    const dir = await mkdtemp(join(tmpdir(), 'runprs-harness-'));
+    try {
+      const effects = new FakeMergeEffects();
+      effects.driftRefs.add(headRefFor(45)); // the acted verification must see the head MOVE
+      const runs: OpInvocation[] = [];
+      const driver: Driver = {
+        run: async (invocation: OpInvocation): Promise<WorkerResult> => {
+          runs.push(invocation);
+          return {
+            structuredOutput: { decision: 'acted', summary: 'config rode along' },
+            usage: ZERO_USAGE,
+            denials: [],
+            stopReason: 'complete',
+          };
+        },
+      };
+      const op = makeRunMergePrsOp({ effects, driver, harnessConfig: defaultHarnessConfig });
+      const sessionsDir = join(dir, 'sessions');
+      const result = await op({
+        ...baseInput([conflicting(45)], MODEL_SPEC),
+        repoRoot: dir,
+        sessionsDir,
+      });
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') throw new Error('expected an ok result');
+      expect(result.value.resolutions).toEqual([
+        { pr: 45, decision: 'acted', summary: 'config rode along' },
+      ]);
+      expect(runs).toHaveLength(1);
+
+      // Build-only: the config alone binds fine (an empty run dispatches
+      // nothing).
+      const empty = makeRunMergePrsOp({ harnessConfig: defaultHarnessConfig });
+      const emptyResult = await empty({
+        baseBranch: 'main',
+        repoRoot: dir,
+        prs: [],
+        nowMs: NOW_MS,
+      });
+      expect(emptyResult.status).toBe('ok');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

@@ -180,7 +180,18 @@ export const PrClassificationSchema: z.ZodType<PrClassification> = z
   })
   .strict();
 
-/** Twin of PlannedPr (planMergeOrder.ts). */
+/**
+ * Twin of PlannedPr (planMergeOrder.ts).
+ *
+ * REFNAME ASYMMETRY, deliberate: `headRefName`/`baseRefName` are plain
+ * non-empty strings here — NOT the conservative-refname gate the F4
+ * dispatch surfaces enforce (MergePrsCandidateSchema +
+ * ResolveConflictInputSchema). planMergeOrder is PURE — it interpolates no
+ * refname anywhere (ordering is number/graph math), so a hostile refname
+ * has no execution surface on this schema; and F2's frozen type predates
+ * the gate. The gate lives exactly where a refname can become a command:
+ * the F4 dispatch boundary.
+ */
 export const PlannedPrSchema: z.ZodType<PlannedPr> = z
   .object({
     pr: z.number().int().positive(),

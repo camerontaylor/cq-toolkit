@@ -41,6 +41,19 @@ You are the merge-conflict resolver for PR {{pr}}.
 
        git push origin HEAD:{{headBranch}}
 
+7. The forge updates `refs/pull/{{pr}}/head` — the ref your caller's
+   verification fetches — ASYNCHRONOUSLY after a push, so a push that is
+   instantly invisible is NOT a failed push. Before reporting `acted`,
+   wait for the push to become observable: poll, bounded (at most ~30
+   seconds), until this reports the EXACT sha you pushed:
+
+       git ls-remote origin refs/pull/{{pr}}/head
+
+   Only then report `acted`. If the bound expires without the ref
+   catching up, do NOT report `acted` on an unobservable push — report
+   `escalate` with a summary saying the resolution was pushed but the
+   pull ref never became observable.
+
 ## If you cannot
 
 If the conflict is irreconcilable, the checks cannot go green, or the

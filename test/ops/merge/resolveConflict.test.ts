@@ -34,7 +34,9 @@
 //      short-circuits BEFORE the verification (no extra validate call).
 //   6. THE SHIPPED PROMPT (the real asset): the actual
 //      prompts/conflict.default.md renders with no placeholder left, the
-//      fetch-before-merge instruction, and the JSON-line contract — and
+//      fetch-before-merge instruction, the push-then-propagation-wait
+//      instruction (bounded refs/pull/<pr>/head poll before acting — the
+//      F5 drill's live finding), and the JSON-line contract — and
 //      the op's DEFAULT loader reads that same file (the source-side half
 //      of the dist-shipping regression guard).
 import { readFile } from 'node:fs/promises';
@@ -1107,6 +1109,19 @@ describe('the shipped conflict prompt', () => {
       'Using it as a merge SOURCE is correct and required when it is the base',
     );
     expect(collapsed).toContain('git merge FETCH_HEAD');
+    // The acted-verification propagation wait (found live in F5's drill:
+    // refs/pull/N/head moves ASYNCHRONOUSLY after a push, so an agent that
+    // reports acted on an instantaneous verification reads as a false
+    // indeterminate). The prompt must carry the bounded poll, the exact
+    // ls-remote shape with the RENDERED pr number, and the fail-closed
+    // bound-expiry behavior — and it must come AFTER the push step.
+    expect(collapsed).toContain('git ls-remote origin refs/pull/44/head');
+    expect(collapsed).toContain('poll, bounded (at most ~30 seconds)');
+    expect(collapsed).toContain('do NOT report `acted` on an unobservable push');
+    const pushAt = collapsed.indexOf('git push origin HEAD:feat/topic');
+    const lsRemoteAt = collapsed.indexOf('git ls-remote origin refs/pull/44/head');
+    expect(pushAt).toBeGreaterThanOrEqual(0);
+    expect(lsRemoteAt).toBeGreaterThan(pushAt);
   });
 
   test('the DEFAULT loader reads the same file: the default op renders it verbatim', async () => {
