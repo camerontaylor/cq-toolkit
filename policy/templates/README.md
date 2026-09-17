@@ -13,6 +13,7 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | `init-merge-queue.yml` | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD                                                                                              |
 | `merge-queue-gate.yml` | on push to `merge-queue`: wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind a merge-queue-tip guard and two merge-base guards |
 | `sync-merge-queue.yml` | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate                 |
+| `live-merge.yml`       | dispatch-only live drill: runs the F5 merge-prs integration test against a fresh private scratch repo on github.com (records its runs in `docs/drills/2026-09-f5.md`)              |
 | `required-check.md`    | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                         |
 | `affected-tests.md`    | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay                                                                                         |
 | `ratchet.yml`          | required type and coverage baseline checks on pushes and pull requests                                                                                                             |
@@ -79,7 +80,8 @@ engine-based runners `scripts/ratchet-typecheck.mjs` and
 (one schemaVersion-1 file per (target, metric), written by
 `createCaptureBaseline`). Concretely, in this repo: `.github/workflows/ci.yml`
 is `required-check.md` instantiated, the three queue workflows are the three
-`.yml` templates instantiated, the two ratchet workflows are their matching
+queue `.yml` templates instantiated, the live-merge drill workflow is
+`live-merge.yml` instantiated, the two ratchet workflows are their matching
 `.yml` templates instantiated, and `denylist.yml` (which predates the
 templates) carries the required-check trigger shape with the denylist job
 body and a provenance comment pointing back at `required-check.md`. If you
