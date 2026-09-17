@@ -13,9 +13,10 @@
 # Constrained format: top-level keys `rules` and `clean_probes`; rule keys
 # `id`, `description`, `regex`, `sample`, optional `path`, and optional
 # `probe_path` (where the self-test places this rule's probe file, for path
-# rules a flat root probe can never match; repo-relative only — absolute or
-# `..`-segment values are rejected at parse time so probes can never be
-# placed outside the fixture directory); values are single-quoted or
+# rules a flat root probe can never match; repo-relative only — plain
+# '/'-separated segments, since absolute, backslash-separated, and non-plain
+# segment values are rejected at parse time so probes can never be placed
+# outside the fixture directory); values are single-quoted or
 # plain scalars. scripts/denylist-scan parses this with a fail-closed
 # hand-written parser and rejects any deviation.
 #
