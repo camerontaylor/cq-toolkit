@@ -236,7 +236,7 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     base: z.string().min(1),
     package: z.string().min(1),
     fixer: z.string().min(1),
-    files: z.array(z.string()),
+    files: z.array(z.string().min(1)),
     kind: z.string().min(1).exactOptional(),
     slug: z.string().min(1).exactOptional(),
     mode: z.enum(['fix', 'prep']).exactOptional(),

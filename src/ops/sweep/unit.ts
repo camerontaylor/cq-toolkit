@@ -357,27 +357,6 @@ function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): 
  *  Every `failed` error carries a stable `[CLASS]` prefix (PROBE, INFRA,
  *  REGRESSION, TAMPER, SCOPE — see sweepUnitFaultClass): the rescue lane's
  *  classification seam.
- *   5. final probe — the AFTER FailureSet, same verdict guards.
- *   6. regressionGate — tolerate the baseline's failures, block novel ones
- *      (the crown jewel, R2 D5); a regression fails the unit uncommitted.
- *   7. STAGE the fix (`git add -A`, gitignore-respected), then the staged-
- *      path allowlist (BOTH sides of staged renames — jVgCj), then
- *      hackDetector over the STAGED diff — a plain working-tree diff misses
- *      NEW files (untracked until staged), and the scanner must see exactly
- *      the set the commit would publish. An out-of-scope path or a tamper
- *      finding leaves the fix staged but UNCOMMITTED.
- *   8. commit — skipped when nothing is staged (an idempotent re-run's
- *      no-op fixer); commits exactly the scanned set.
- *   9. push — with a push binding and a fresh commit, publish the unit's
- *      branch (`push -u origin <branch>` in the shipped binding); skipped
- *      when nothing was committed or no binding is present. On the
- *      no-commit leg, a branch carrying commits beyond the base is an
- *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
- *      and an unreadable ahead-count fails the unit fail-closed.
- *  10. the committed marker (jTPa8) — written by a unit whose fix is ON
- *      THE REMOTE (pushed): `<runStateDir>/committed/<kind>/<slug>.json`: the
- *      record the assemble leg reads as its source of truth, so a no-change
- *      unit with nothing on the remote never assembles an empty-diff PR.
  */
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
   const probe = makeBaselineProbe(bindings.runCheck);
@@ -1177,8 +1156,14 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
   };
 }
 
-/** The subprocess driver's own default sessions dir (kept in sync, never imported: driver-internal). */
-function defaultSessionsDir(): string {
+/**
+ * The subprocess driver's own default sessions dir — the recipe the driver
+ * layer applies when constructed WITHOUT a sessionsDir
+ * (`<os.tmpdir()>/cq-harness/sessions`); exported so the equality pin
+ * (VB3D F10) can hold the dispatch binding's default and the driver's
+ * default in one assertion.
+ */
+export function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
 }
 

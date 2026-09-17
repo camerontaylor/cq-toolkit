@@ -263,6 +263,14 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       kind: 'overridden',
     };
     void overridden;
+    const modeOverlay: SweepUnitJobOverlay = {
+      push: false,
+      // @ts-expect-error — mode is builder-owned via config.mode (VB3D F5):
+      // an overlay {mode:'fix'} under a prep plan would silently run the fix
+      // pipeline with no assemble.
+      mode: 'fix',
+    };
+    void modeOverlay;
     // RUNTIME pin: the enrichment ships the RESOLVED segments regardless.
     const plan = buildSweepPlan(CONFIG, twoUnitReport(), SWEEP_PLAN_ID, { push: false });
     const inputs = plan.jobs

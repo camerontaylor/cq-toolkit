@@ -111,10 +111,11 @@ export interface WorkUnit {
 }
 
 /**
- * The planner's report: the plan as data. `jobs` is dispatch-ready (kernel
- * Job shape, JSON-serializable); `units` is the same work in planning terms;
- * `suppressed` and `needsHuman` are the ledger consult's auditable outcome;
- * `orphans` is present only when changed-vs-base saw files no package owns.
+ * The planner's report: the plan as data. `jobs` is plan-graph-ready (kernel
+ * Job shape, JSON-serializable) — enrich via buildSweepPlan before central
+ * dispatch; `units` is the same work in planning terms; `suppressed` and
+ * `needsHuman` are the ledger consult's auditable outcome; `orphans` is
+ * present only when changed-vs-base saw files no package owns.
  */
 export interface PlanSweepReport {
   jobs: Job[];

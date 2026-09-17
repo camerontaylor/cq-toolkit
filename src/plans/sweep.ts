@@ -110,11 +110,12 @@ export const SWEEP_PLAN_JOB_IDS = {
 /**
  * The unit-job knobs a caller layers OVER the run context the builder
  * enriches with — everything that makes an enriched unit job fully
- * dispatchable (see SweepUnitDispatchInput). `kind`, `slug` and `package`
- * are deliberately EXCLUDED: the segments are the builder's collision
- * resolution (jcqEl) — an overlay overriding them would desync the unit's
- * branch/worktree/marker from the assembler's resolvedSegments — and the
- * unit identity names the work the planner selected.
+ * dispatchable (see SweepUnitDispatchInput). `kind`/`slug`/`package` are
+ * deliberately EXCLUDED (jcqEl — the segments are the builder's collision
+ * resolution; an overlay overriding them would desync the unit's branch/
+ * worktree/marker from the assembler's resolvedSegments), and `mode` too:
+ * the builder owns it via config.mode (an overlay {mode:'fix'} under a prep
+ * plan would silently run the fix pipeline with no assemble — VB3D F5).
  */
 export type SweepUnitJobOverlay = Partial<
   Omit<
@@ -128,6 +129,7 @@ export type SweepUnitJobOverlay = Partial<
     | 'files'
     | 'kind'
     | 'slug'
+    | 'mode'
   >
 >;
 

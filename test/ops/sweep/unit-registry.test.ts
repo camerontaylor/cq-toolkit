@@ -58,6 +58,51 @@ const VALID: SweepUnitDispatchInput = {
   },
 };
 
+describe('sweep registry drift pins (VB3D F1)', () => {
+  test('GitMutexBindingSchema mirrors the gitMutex family defaults verbatim', async () => {
+    // The registry module must stay lazy (zod + types only), so this pin
+    // lives in a TEST: the schema's mirrored default literals must equal the
+    // family's shipped defaults (gitMutex.ts) — a drift on either side
+    // changes the collectively-insufficient rejection at the arg boundary.
+    const gitMutex = await import('../../../src/ops/sweep/gitMutex.js');
+    const { registry } = await import('../../../src/ops/sweep/registry.js');
+    const worktreeForEntry = registry.find((entry) => entry.name === 'sweep.worktreeFor');
+    expect(worktreeForEntry).toBeDefined();
+    // No explicit timings: the schema-level refine accepts (family defaults
+    // are collectively sufficient).
+    const bare = worktreeForEntry?.inputSchema.safeParse({
+      repoRoot: '/repo',
+      worktreesDir: 'wt',
+      runPrefix: 'cq/x',
+      kind: 'fix',
+      slug: 'a',
+      base: 'main',
+      mutex: { lockPath: '/locks/m.lock' },
+    });
+    expect(bare?.success).toBe(true);
+    // Below the backoff floor WITH the mirrored defaults: rejected.
+    const under = worktreeForEntry?.inputSchema.safeParse({
+      repoRoot: '/repo',
+      worktreesDir: 'wt',
+      runPrefix: 'cq/x',
+      kind: 'fix',
+      slug: 'a',
+      base: 'main',
+      mutex: { lockPath: '/locks/m.lock', staleMs: 60_000, retries: 1, retryBaseMs: 100 },
+    });
+    expect(under?.success).toBe(false);
+    // The exact floor WITH the mirrored defaults: accepted — and the floor
+    // arithmetic (retryBaseMs × (2^retries − 1) ≥ staleMs) is expressed in
+    // the family's default constants:
+    expect(gitMutex.DEFAULT_GIT_MUTEX_STALE_MS).toBe(30_000);
+    expect(gitMutex.DEFAULT_GIT_MUTEX_RETRIES).toBe(9);
+    expect(gitMutex.DEFAULT_GIT_MUTEX_RETRY_BASE_MS).toBe(100);
+    expect(
+      gitMutex.DEFAULT_GIT_MUTEX_RETRY_BASE_MS * (2 ** gitMutex.DEFAULT_GIT_MUTEX_RETRIES - 1),
+    ).toBeGreaterThanOrEqual(gitMutex.DEFAULT_GIT_MUTEX_STALE_MS);
+  });
+});
+
 describe('sweep.unit registry entry (jSKJF)', () => {
   test('the sweep registry surface: five ops, sweep.unit dispatchable by name', () => {
     expect(sweepRegistry.map((entry) => entry.name)).toEqual([
@@ -98,6 +143,13 @@ describe('sweep.unit registry entry (jSKJF)', () => {
         ...VALID,
         driver: { binary: 'agent', provider: 'cq-e2e' },
       } as unknown).success,
+    ).toBe(false);
+    // An EMPTY-STRING file path is refused (files min(1) — VB3D F7).
+    expect(
+      SweepUnitDispatchInputSchema.safeParse({
+        ...VALID,
+        files: ['packages/alpha/test/suite.test.js', ''],
+      }).success,
     ).toBe(false);
   });
 
@@ -157,6 +209,18 @@ describe('sweep.unit registry entry (jSKJF)', () => {
 // ---------------------------------------------------------------------------
 // The push leg on a real (local, offline) origin
 // ---------------------------------------------------------------------------
+
+describe('sweep.unit dispatch defaults (VB3D F10)', () => {
+  test('the unit op sessions-dir default equals the driver layer’s own default', async () => {
+    const { defaultSessionsDir } = await import('../../../src/ops/sweep/unit.js');
+    const os = await import('node:os');
+    // The driver layer's documented default (src/driver/subprocess/index.ts):
+    // a driver constructed WITHOUT sessionsDir creates its records under
+    // <os.tmpdir()>/cq-harness/sessions — the shipped binding must agree.
+    const driverDefault = join(os.tmpdir(), 'cq-harness', 'sessions');
+    expect(defaultSessionsDir()).toBe(driverDefault);
+  });
+});
 
 describe('makePushBranch (the shipped push binding, real git smoke)', () => {
   test(

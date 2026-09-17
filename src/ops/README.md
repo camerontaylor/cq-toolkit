@@ -20,6 +20,18 @@ follows this; the central registry and the CLI discover families through it):
   (exit 2), never data.
 - The op module `src/ops/<family>/<name>.ts` DEFAULT-exports the op
   function (`async (input) => OpResult`).
+- FACTORY-BINDING IMPORTER (the EFFECT-DRIVEN variant — every lane op that
+  composes injected effects uses it, e.g. the ledger C4 and the sweep
+  family): an op whose real effects must bind INPUT-DRIVEN (repoRoot, env
+  config, sessions dirs crossing the plain-JSON boundary at dispatch)
+  names its op module as a NAMED export (`export function make<Op>(
+bindings)`) and the registry importer binds per dispatch:
+  `importer: () => import('./unit.js').then((m) => (async (input) =>
+m.makeOp(m.bindingsFromDispatch(input))) as Op<unknown, unknown>)`. Same
+  lazy rule — the importer dynamically imports the factory module and the
+  dispatcher awaits the RESULTING op — plus one rule: a binding refusal
+  (missing wiring) folds into an honest `failed` inside the wrapper, never
+  a throw across the op seam.
 - `OpRegistryEntry` is the FROZEN kernel type: import it from the kernel
   types (src/kernel/types.js). src/registry/types.ts only RE-EXPORTS it —
   the registry layer defines no new types.
