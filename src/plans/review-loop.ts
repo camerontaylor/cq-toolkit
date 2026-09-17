@@ -732,7 +732,11 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // (no fix job, no reply — the reply already posted; the resolve pushes
   // nothing). Deduped against the planned carry by thread id; the
   // fingerprint is computed over the thread's fetched data exactly the way
-  // stage 6 computes it.
+  // stage 6 computes it. AUTHORIZATION (jNfip): the carry fires only when
+  // the thread's LATEST reply opens with the loop's own signature — the
+  // signature-led reply is the evidence that a resolve was queued by THIS
+  // loop; any other latest reply is not carried, and the feedback stays
+  // outstanding instead of being closed without a verified fix.
   const carriedIds = new Set(carriedResolves.map((resolve) => resolve.threadId));
   for (const item of classification.items) {
     if (item.kind !== 'thread' || item.verdict !== 'responded') {
@@ -744,6 +748,14 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     const thread = state.threads.find((candidate) => candidate.id === item.id);
     if (thread === undefined) {
       continue; // vanished between fetch and classify — nothing to resolve
+    }
+    // AUTHORIZATION (jNfip): the thread's LATEST reply must open with the
+    // loop's own signature — the signature-led reply is the evidence that a
+    // resolve was queued by this loop. Any other latest reply (a PR-author
+    // or third-party reply) is not carried; the feedback stays outstanding.
+    const latestReply = thread.replies[thread.replies.length - 1];
+    if (latestReply === undefined || !REPLY_SIGNATURE_PATTERN.test(latestReply.body)) {
+      continue;
     }
     // Same shape enrichItem builds (body + replies) — identical fingerprint
     // to the stage-6 resolve of the posting run.

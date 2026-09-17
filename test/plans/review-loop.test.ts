@@ -1930,7 +1930,15 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     world.resolveReviewThreadFails = false;
     world.pullsComments = [
       restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
-      restComment(201, 'prauthor', 'Fixed with a pushed commit.', iso(REPLY_AGE), 101),
+      // The loop's OWN reply, exactly as it composed it: the signature
+      // LEADS the body — that is the carry's authorization (jNfip).
+      restComment(
+        201,
+        'prauthor',
+        '<!-- cq-review-loop:octo/widget#7 -->\n\nFixed with a pushed commit.',
+        iso(REPLY_AGE),
+        101,
+      ),
     ];
     const invocations2: OpInvocation[] = [];
     const run2 = await runLoop(world, {
@@ -1957,6 +1965,35 @@ describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
     expect(invocations3).toHaveLength(0);
     expect(run3.outcome.actionsPosted).toBe(0);
     expect(run3.outcome.reply).toBeUndefined();
+  });
+});
+
+describe('carried-resolve authorization (jNfip)', () => {
+  test('a responded thread whose latest reply is NOT signature-led is NOT carried — nothing dispatches', async () => {
+    // The spoof/shape pin for jNfip: a responder-authored plain reply (no
+    // leading signature) makes the thread 'responded', but the carry is
+    // authorized only by the loop's OWN signature-led reply. Without it the
+    // walk refuses — no resolve posts, nothing records; the feedback stays
+    // outstanding instead of being closed without a verified fix.
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-auth-'));
+    scratchDirs.push(scratch);
+    const world = defaultWorld();
+    world.resolveReviewThreadFails = false;
+    world.pullsComments = [
+      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
+      restComment(202, 'prauthor', 'Addressed in the pushed commit.', iso(REPLY_AGE), 101),
+    ];
+    const invocations: OpInvocation[] = [];
+    const run = await runLoop(world, {
+      driverResults: [],
+      invocations,
+      dispatchLogPath: join(scratch, 'dispatch.jsonl'),
+    });
+    expect(run.outcome.status).toBe('ok');
+    expect(run.outcome.plan.jobs).toEqual([]);
+    expect(invocations).toHaveLength(0);
+    expect(run.outcome.actionsPosted).toBe(0);
+    expect(run.outcome.reply).toBeUndefined();
   });
 });
 
