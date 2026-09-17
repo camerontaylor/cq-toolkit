@@ -1,0 +1,484 @@
+// PR lane (goal D3; R2 D9) — the fleet run report: a merge-READINESS
+// artifact over the injected {@link PrEffects} seam. Per package the op
+// reads the check rollup, the review decision, and the draft flag, and
+// folds them into a THREE-VALUED verdict — `ready` | `blocked` | `unknown`
+// — where any unresolvable state (pending checks, a required-but-absent
+// review, an unreadable review decision, an effects fault) lands on
+// `unknown` rather than being fabricated into a pass or a fail. The report
+// NEVER merges anything: {@link PrEffects} admits no merge member by
+// construction (the seam-type pin lives on the interface doc + the key-set
+// test), and this op's only write is the optional in-place tracker body
+// refresh when `tracker` is present.
+//
+// Invariants honored here:
+//   - META READS FIRST (lifecycle/mergeability dominance, codex jMJpD): a
+//     draft, a definitive non-open state (closed/merged), merge conflicts,
+//     or a protection-blocked/behind merge state is `blocked` regardless
+//     of checks/review — green evidence on an unmergeable PR is a
+//     fabricated ready. UNDETERMINED halves FAIL CLOSED to `unknown`, not
+//     `blocked` (D2 adjudications jNf_h + jOEDe + jONi0): `mergeable` and
+//     `mergeStateStatus` unknown mean GitHub has not computed mergeability,
+//     and an `unknown` lifecycle state is unreadable evidence — `ready`
+//     there would be a verdict ahead of evidence, and `blocked` would be
+//     one fabricated the other way.
+//   - DRAFT DOMINATES: a draft PR is `blocked` regardless of checks/review
+//     — GitHub cannot merge a draft, however green its evidence.
+//   - REVIEW_REQUIRED is not `none`: a demanded-but-absent review is
+//     `unknown` (a fabricated ready on required-review repos was PR-165
+//     r1#1); only a NULL decision (no review policy) counts toward ready.
+//   - I9 — fleet runs collect all results: a per-package effects fault
+//     lands on that row as `unknown` with the fault as the reason; the op
+//     never fails because ONE package's evidence could not be read.
+//   - A tracker update fault IS an op failure (a run report that claims
+//     `trackerUpdated` while the tracker kept its stale body would be a
+//     silently lying merge-readiness artifact) — and the failure text
+//     carries the collected rows, since a `failed` result carries no value.
+//   - No throws across the op seam; counts include zeros; the report is
+//     plain JSON.
+import type { Op } from '../../kernel/types.js';
+import {
+  composeSection,
+  READINESS_SECTION_END_MARKER,
+  READINESS_SECTION_MARKER,
+  runPrefixFault,
+  type PrChecks,
+  type PrEffects,
+  type PrReviewState,
+} from './assemblePrs.js';
+
+/** JSON-serializable input of the `pr.runReport` op. */
+export interface RunReportInput {
+  /** Repository the PRs live in (the subprocess effects bind `gh` to it). */
+  repoRoot: string;
+  /** The run's reserved branch prefix — labels the report, matching the assembled fleet. */
+  runPrefix: string;
+  /** When present, the report refreshes this tracker PR's body in place (editPrBody, never a new PR). */
+  tracker?: { number: number };
+  /** One entry per package PR: the package name and its PR number. */
+  packages: Array<{ name: string; number: number }>;
+}
+
+/** The three-valued merge-readiness verdict (R2 D9): unknown is honest, never fabricated. */
+export type PrReadiness = 'ready' | 'blocked' | 'unknown';
+
+/** One per-package row of the run report. */
+export interface RunReportRow {
+  name: string;
+  number: number;
+  readiness: PrReadiness;
+  /** The observed check-rollup state, or `unknown` when it could not be read. */
+  checks: PrChecks['state'] | 'unknown';
+  /** The observed review state, or `unknown` when it could not be read. */
+  review: PrReviewState['state'] | 'unknown';
+  /** Why the row is `blocked`/`unknown` — a checks/review deadlock explanation or the effects fault. */
+  reason?: string;
+}
+
+/**
+ * The fleet run report: the merge-readiness artifact. Plain JSON; counts
+ * include zeros; `trackerUpdated` is true only when a tracker body edit was
+ * requested AND landed.
+ */
+export interface PrRunReport {
+  runPrefix: string;
+  rows: RunReportRow[];
+  counts: Record<PrReadiness, number>;
+  trackerUpdated: boolean;
+}
+
+/**
+ * Control characters (Unicode Cc) — refused on the strings this op feeds
+ * gh or writes into the tracker body (the boundary style of the family).
+ */
+const CONTROL_CHARS_RE = /[\p{Cc}]/u;
+
+/**
+ * Build the `pr.runReport` op over injected gh effects. Per package, in
+ * input order, the THREE readiness reads are consulted (each in its own
+ * try — a fault on one read must not blank the others' evidence): a draft
+ * PR is `blocked` outright (GitHub cannot merge a draft); readiness is
+ * checks pass AND review approved-or-null-policy → `ready`; checks fail OR
+ * review changes-requested → `blocked`; a required-but-absent review and
+ * everything else unresolvable (pending/none checks, unknown review,
+ * effects faults) → `unknown` with the reason spelled out. When `tracker`
+ * is present the rows are rendered into the tracker manifest style and
+ * written in place via editPrBody — the report never opens a PR and never
+ * merges.
+ */
+export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
+  return async (input) => {
+    const fault = inputFaultOf(input);
+    if (fault !== null) return { status: 'failed', error: fault };
+
+    const rows: RunReportRow[] = [];
+    for (const pkg of input.packages) {
+      // ONE consolidated readiness snapshot per package (final, jNTyS): a
+      // faulting snapshot becomes the row's reason — the evidence is either
+      // fully coherent or fully absent, never half-stale.
+      const snapshot = await settled(() => gh.getPrReadiness(pkg.number));
+      if (snapshot.outcome === 'fault') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: 'unknown',
+          review: 'unknown',
+          reason: `readiness: ${snapshot.message}`,
+        });
+        continue;
+      }
+      const { checks, review, meta } = snapshot.value;
+      const observedChecks = checks.state;
+      const observedReview = review.state;
+      // META READS FIRST (PR-165 r3 codex jMJpD + final jNTyP; mergeable
+      // AND mergeStateStatus unknown fail-closed per D2 adjudications
+      // jNf_h/jOEDe): the lifecycle and mergeability halves dominate the
+      // fold — a draft, a conflicting PR, or a protection-blocked/behind
+      // merge state is `blocked` however green its checks and review, and
+      // the evidence halves still show on the row. DRAFT first (the
+      // fleet's own PRs open as drafts and GitHub cannot merge a draft);
+      // then STATE (a closed/merged PR is DEFINITIVELY history — blocked;
+      // an UNDETERMINED state is not a verdict — `unknown`, jONi0); then
+      // MERGEABILITY (conflicts). BOTH `mergeable: 'unknown'` AND
+      // `mergeStateStatus: 'unknown'` mean GitHub has not determined
+      // mergeability — calling that ready would be a verdict ahead of
+      // evidence, so both are `unknown` (jNf_h, jOEDe), NOT tolerated;
+      // only a settled CLEAN merge state continues to the checks/review
+      // halves.
+      if (meta.isDraft) {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'blocked',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'draft — not ready for review',
+        });
+        continue;
+      }
+      if (meta.state === 'closed' || meta.state === 'merged') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'blocked',
+          checks: observedChecks,
+          review: observedReview,
+          reason: `state: ${meta.state}`,
+        });
+        continue;
+      }
+      if (meta.state === 'unknown') {
+        // jONi0: an undetermined lifecycle state is unreadable evidence,
+        // not a hard verdict — fail closed to `unknown`, never `blocked`.
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'PR state not determined by GitHub',
+        });
+        continue;
+      }
+      if (meta.mergeable === 'conflicting') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'blocked',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'merge conflicts',
+        });
+        continue;
+      }
+      if (meta.mergeable === 'unknown') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'mergeability not yet computed by GitHub',
+        });
+        continue;
+      }
+      if (meta.mergeStateStatus === 'blocked' || meta.mergeStateStatus === 'behind') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'blocked',
+          checks: observedChecks,
+          review: observedReview,
+          reason: `merge state: ${meta.mergeStateStatus} — branch protection requirement`,
+        });
+        continue;
+      }
+      if (meta.mergeStateStatus === 'unknown') {
+        // jOEDe: an undetermined merge state cannot support a merge-ready
+        // verdict either — fail closed exactly like `mergeable: 'unknown'`.
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'merge state not yet determined by GitHub',
+        });
+        continue;
+      }
+      const verdict = readinessOf(checks, review);
+      rows.push({
+        name: pkg.name,
+        number: pkg.number,
+        readiness: verdict.readiness,
+        checks: observedChecks,
+        review: observedReview,
+        ...(verdict.reason !== undefined ? { reason: verdict.reason } : {}),
+      });
+    }
+
+    const counts: Record<PrReadiness, number> = { ready: 0, blocked: 0, unknown: 0 };
+    for (const row of rows) counts[row.readiness] += 1;
+
+    let trackerUpdated = false;
+    if (input.tracker !== undefined) {
+      // THE LIFECYCLE GUARD (PR-165 r2#2): a stale/merged tracker number is
+      // a landed record — the report refuses to rewrite it (same rule as
+      // the assembler's adoption refusal), and the failure carries the
+      // collected rows, since a `failed` result carries no value.
+      let trackerState: string;
+      try {
+        trackerState = (await gh.getPrReadiness(input.tracker.number)).meta.state;
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `pr: could not read tracker PR #${String(input.tracker.number)}'s lifecycle state — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+        };
+      }
+      if (trackerState !== 'open') {
+        return {
+          status: 'failed',
+          error: `pr: tracker PR #${String(input.tracker.number)} is in state '${trackerState}' — refusing to write the run report into a non-open tracker; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+        };
+      }
+      // THE COMPOSE PROTOCOL (r2#4): the report upserts ONLY its readiness
+      // section into the tracker's CURRENT body — the assembler's manifest
+      // section is preserved verbatim.
+      try {
+        const current = await gh.getPrBody(input.tracker.number);
+        await gh.editPrBody(
+          input.tracker.number,
+          composeSection(current, reportSection(input.runPrefix, rows)),
+        );
+        trackerUpdated = true;
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `pr: could not update tracker PR #${String(input.tracker.number)} with the run report — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+        };
+      }
+    }
+
+    return {
+      status: 'ok',
+      value: { runPrefix: input.runPrefix, rows, counts, trackerUpdated },
+    };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The three-valued fold — checks × review → readiness
+// ---------------------------------------------------------------------------
+
+/**
+ * The readiness decision table (R2 D9). `blocked` wins over everything
+ * (a failing check, an outstanding changes-requested, or a draft is a hard
+ * no — drafts fold before this table); `ready` requires BOTH halves green
+ * (checks pass, review approved — or `none`, the NULL decision meaning no
+ * review policy exists on the PR); a required-but-absent review is NOT
+ * ready and NOT a hard block — it is `unknown` naming the missing review;
+ * every other unresolvable combination is `unknown` with the reason naming
+ * the half that could not resolve. Never fabricated into pass/fail.
+ */
+function readinessOf(
+  checks: PrChecks,
+  review: PrReviewState,
+): { readiness: PrReadiness; reason?: string } {
+  if (checks.state === 'fail') {
+    const failing = checks.failing === undefined ? '' : ` (${checks.failing.join(', ')})`;
+    return { readiness: 'blocked', reason: `checks failing${failing}` };
+  }
+  if (review.state === 'changes-requested') {
+    return { readiness: 'blocked', reason: 'changes requested on the review' };
+  }
+  if (review.state === 'required') {
+    // REVIEW_REQUIRED is not `none`: a review is demanded and none has
+    // been given — calling that ready fabricated merge-readiness on every
+    // required-review repo (PR-165 r1#1). Unresolvable, honestly.
+    return { readiness: 'unknown', reason: 'review required, none given' };
+  }
+  if (checks.state === 'pass' && (review.state === 'approved' || review.state === 'none')) {
+    return { readiness: 'ready' };
+  }
+  if (checks.state === 'pending') {
+    return { readiness: 'unknown', reason: 'checks pending — no verdict yet' };
+  }
+  if (checks.state === 'none') {
+    return { readiness: 'unknown', reason: 'no checks configured on the PR' };
+  }
+  return { readiness: 'unknown', reason: `review state unreadable (${review.state})` };
+}
+
+// ---------------------------------------------------------------------------
+// The report body — the tracker manifest style, three-valued
+// ---------------------------------------------------------------------------
+
+/**
+ * The run report rendered in the tracker manifest style: one bullet per
+ * package with its PR number, the observed evidence, and the verdict;
+ * blocked/unknown rows carry their reason. Plain markdown, upserted into
+ * the tracker body under {@link READINESS_SECTION_MARKER} (r2#4 — the
+ * assembler's manifest section is never touched); every interpolation is
+ * markdown-safe (backticks escaped, angle brackets stripped, Cc runs
+ * flattened).
+ */
+function reportSection(runPrefix: string, rows: readonly RunReportRow[]): string {
+  const lines: string[] = [
+    READINESS_SECTION_MARKER,
+    `<!-- cq-toolkit fleet-run report: runPrefix ${mdSafe(runPrefix)} (generated; merge-readiness, never auto-merges) -->`,
+    `# Fleet run \`${mdSafe(runPrefix)}\` — merge readiness`,
+    '',
+    'Three-valued readiness per package: `ready` / `blocked` / `unknown`. This report is evidence only — nothing is merged by it.',
+    '',
+    '## Packages',
+  ];
+  if (rows.length === 0) {
+    lines.push('- (no package PRs in this run)');
+  }
+  for (const row of rows) {
+    const verdict = row.readiness.toUpperCase();
+    const why = row.reason === undefined ? '' : ` — ${mdSafe(singleLine(row.reason))}`;
+    lines.push(
+      `- \`${mdSafe(row.name)}\` — #${String(row.number)} — checks: ${row.checks}; review: ${row.review} — ${verdict}${why}`,
+    );
+  }
+  lines.push(READINESS_SECTION_END_MARKER);
+  return lines.join('\n');
+}
+
+/**
+ * Markdown-safe interpolation (r2#7; backtick substitution per final
+ * jN7cZ): backticks are REPLACED with the typographic apostrophe U+2019 —
+ * never backslash-escaped, because CommonMark does not process backslash
+ * escapes inside code spans, so a `\`` would still close the generated
+ * span and inject formatting. Replacement makes closing it impossible.
+ * Angle brackets are stripped so nothing interpolated can smuggle HTML
+ * into the tracker body.
+ */
+function mdSafe(text: string): string {
+  return text.replace(/`/g, '’').replace(/[<>]/g, '');
+}
+
+/** Flatten a reason to one safe markdown line (Cc runs become spaces). */
+function singleLine(text: string): string {
+  return text
+    .split(/[\p{Cc}]/u)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** One-line progress note over the rows, for a `failed` result's error text. */
+function rowSummary(rows: readonly RunReportRow[]): string {
+  if (rows.length === 0) return '(none)';
+  return rows
+    .map((row) => {
+      const why = row.reason === undefined ? '' : ` (${singleLine(row.reason)})`;
+      return `${row.name} #${String(row.number)} ${row.readiness}${why}`;
+    })
+    .join('; ');
+}
+
+// ---------------------------------------------------------------------------
+// Boundary validation — `failed` naming the field, before any gh call
+// ---------------------------------------------------------------------------
+
+/** Library-level input contract; the registry schema mirrors the JSON shape. */
+function inputFaultOf(input: RunReportInput): string | null {
+  // TOP-LEVEL GUARD FIRST: a null/non-object input is a `failed` result
+  // here, never a TypeError at the field reads.
+  if (input === null || typeof input !== 'object') {
+    return 'pr: input must be an object (repoRoot, runPrefix, tracker?, packages)';
+  }
+  for (const [field, value] of [
+    ['repoRoot', input.repoRoot],
+    ['runPrefix', input.runPrefix],
+  ] as const) {
+    if (typeof value !== 'string' || value === '') {
+      return `pr: ${field} must be a non-empty string`;
+    }
+  }
+  if (CONTROL_CHARS_RE.test(input.repoRoot)) {
+    return 'pr: repoRoot must not contain control characters — the subprocess effects run gh with it as the working directory';
+  }
+  if (CONTROL_CHARS_RE.test(input.runPrefix)) {
+    return 'pr: runPrefix must not contain control characters — it labels the report and the tracker body';
+  }
+  // BOUNDARY PARITY (round 3): the run prefix labels the tracker body and
+  // the report, so it is held to the SAME '/'-joined safe-segment rule as
+  // the assembler's — one shared validator, no drift.
+  const prefixFault = runPrefixFault(input.runPrefix);
+  if (prefixFault !== null) return prefixFault;
+  if (input.tracker !== undefined) {
+    if (input.tracker === null || typeof input.tracker !== 'object') {
+      return 'pr: tracker must be an object with a positive-integer number';
+    }
+    const trackerFault = prNumberFault(input.tracker.number, 'tracker.number');
+    if (trackerFault !== null) return trackerFault;
+  }
+  if (!Array.isArray(input.packages)) {
+    return 'pr: packages must be an array of { name, number }';
+  }
+  for (const [index, pkg] of input.packages.entries()) {
+    if (pkg === null || typeof pkg !== 'object') {
+      return `pr: packages[${String(index)}] must be an object with name and number`;
+    }
+    if (typeof pkg.name !== 'string' || pkg.name === '') {
+      return `pr: packages[${String(index)}].name must be a non-empty string`;
+    }
+    if (CONTROL_CHARS_RE.test(pkg.name)) {
+      return `pr: packages[${String(index)}].name must not contain control characters — the name is written into the tracker body`;
+    }
+    const numberFault = prNumberFault(pkg.number, `packages[${String(index)}].number`);
+    if (numberFault !== null) return numberFault;
+  }
+  return null;
+}
+
+/** PR numbers are positive integers (they start at 1); a fault names the field. */
+function prNumberFault(value: unknown, field: string): string | null {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+    return `pr: ${field} must be a positive integer (a PR number), got ${typeof value === 'number' ? String(value) : typeof value}`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Settling — the effects fault boundary
+// ---------------------------------------------------------------------------
+
+/** A settled effect read: the value, or the fault message — never a throw. */
+type Settled<T> = { outcome: 'settled'; value: T } | { outcome: 'fault'; message: string };
+
+async function settled<T>(read: () => Promise<T>): Promise<Settled<T>> {
+  try {
+    return { outcome: 'settled', value: await read() };
+  } catch (err) {
+    return { outcome: 'fault', message: messageOf(err) };
+  }
+}
+
+/** Error message of an unknown throwable, for `failed` results. */
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
