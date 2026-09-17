@@ -24,6 +24,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { OpResult } from '../../src/kernel/types.js';
 import type { MergePrsOutcome } from '../../src/ops/merge/runPrs.js';
+import type { RunMergePrsInput } from '../../src/plans/index.js';
 import {
   ExecuteMergesInputSchema,
   PlanMergeOrderInputSchema,
@@ -264,5 +265,19 @@ describe('registry mirror fidelity (spot-checks)', () => {
     expect(parses({})).toBe(true);
     expect(parses({ headRefName: 'topic$(touch x)' })).toBe(false);
     expect(parses({ baseRefName: 'a..b' })).toBe(false);
+  });
+});
+
+describe('plans barrel surface (review-debt #147)', () => {
+  test('the merge-prs surface — builder, id, input type — resolves through src/plans/index.js', async () => {
+    // EVERYTHING resolved from the BARREL — the supported-API path SDK
+    // consumers take — so deleting any barrel re-export fails this test.
+    const barrel =
+      (await import('../../src/plans/index.js')) as typeof import('../../src/plans/index.js');
+    const input: RunMergePrsInput = { baseBranch: 'trunk', repoRoot: '/repo', prs: [], nowMs: 0 };
+    const constructed = barrel.makeMergePrsPlan(input);
+    expect(constructed.id).toBe(barrel.MERGE_PRS_PLAN_ID);
+    expect(barrel.MERGE_PRS_PLAN_ID).toBe(MERGE_PRS_PLAN_ID);
+    expect(constructed.jobs).toEqual([{ id: 'merge-prs-run', op: 'merge.runPrs', input }]);
   });
 });

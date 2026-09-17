@@ -34,8 +34,11 @@ import {
   ANALYZE_PLAN_ID,
   makeAnalyzePlan,
   plan,
-  type AnalyzePlanInputs,
 } from '../../src/plans/analyze.js';
+// The input type resolves through the BARREL (review-debt #167): if the
+// barrel's `export type { AnalyzePlanInputs }` line is dropped, this file
+// fails to compile — the re-export stays pinned by the suite.
+import type { AnalyzePlanInputs } from '../../src/plans/index.js';
 import { getPlan } from '../../src/plans/registry.js';
 
 /** The remediation ops that must NEVER appear in the shipped plan. */
@@ -236,4 +239,32 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
     const after = await readdir(process.cwd());
     expect(after.filter((name) => name.startsWith('analysis-') && !before.has(name))).toEqual([]);
   }, 180_000);
+});
+
+describe('plans barrel surface (review-debt #167)', () => {
+  test('the analyze surface — builder, id, job ids, input type — resolves through src/plans/index.js', async () => {
+    // EVERYTHING resolved from the BARREL — the supported-API path SDK
+    // consumers take — so deleting any barrel re-export fails this test.
+    const barrel =
+      (await import('../../src/plans/index.js')) as typeof import('../../src/plans/index.js');
+    const inputs: AnalyzePlanInputs = {
+      probe: {
+        adapter: 'eslint-json' as const,
+        command: { command: 'my-linter', args: ['--my-flag'], cwd: '/repo' },
+      },
+      collect: { sets: [{ tool: 'eslint', failures: [], exitCode: 0 }] },
+      cluster: { set: { tool: 'eslint', failures: [], exitCode: 0 } },
+      render: { report: { clusters: [], noise: [] }, dir: '/repo' },
+    };
+    const constructed = barrel.makeAnalyzePlan(inputs);
+    expect(barrel.ANALYZE_PLAN_ID).toBe(ANALYZE_PLAN_ID);
+    expect(constructed.id).toBe(barrel.ANALYZE_PLAN_ID);
+    expect(constructed.jobs.map((j) => j.id)).toEqual([
+      barrel.ANALYZE_JOB_IDS.probe,
+      barrel.ANALYZE_JOB_IDS.collect,
+      barrel.ANALYZE_JOB_IDS.cluster,
+      barrel.ANALYZE_JOB_IDS.report,
+    ]);
+    expect(barrel.ANALYZE_JOB_IDS).toEqual(ANALYZE_JOB_IDS);
+  });
 });
