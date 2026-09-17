@@ -28,15 +28,23 @@ export const ALPHA_FIX = {
   newText: 'if (sum(1, 1) !== 2) {',
 } as const;
 
-/** The one edit that BREAKS beta's passing suite (the dirty-tree scenario). */
+/**
+ * The one edit that BREAKS beta's passing suite (the dirty-tree scenario):
+ * it shifts beta's expectation constant, so the broken suite's assertion AND
+ * its thrown message move together — the failure text stays internally
+ * consistent with the assertion that produced it.
+ */
 export const BETA_BREAK = {
   file: 'packages/beta/test/suite.test.js',
-  oldText: 'if (sum(2, 2) !== 4) {',
-  newText: 'if (sum(2, 2) !== 5) {',
+  oldText: 'const expected = 4;',
+  newText: 'const expected = 5;',
 } as const;
 
-/** The beta failure message a breaking edit produces (novel vs its clean baseline). */
-export const BETA_BREAK_MESSAGE = 'expected 4, got 5';
+/**
+ * The beta failure message a breaking edit produces (novel vs its clean
+ * baseline): the assertion then expects 5 while sum(2, 2) computes 4.
+ */
+export const BETA_BREAK_MESSAGE = 'expected 5, got 4';
 
 /** The workspace manifest the e2e sweeps — two packages, git's own path form. */
 export const SCRATCH_PACKAGES: Array<{ name: string; path: string }> = [
@@ -63,10 +71,13 @@ const ALPHA_SUITE = [
 
 const BETA_SUITE = [
   "'use strict';",
-  '// beta: passing suite — a correct fixer leaves this file untouched.',
+  '// beta: passing suite — a correct fixer leaves this file untouched. The',
+  '// expectation lives on its OWN line so the breaking edit shifts the',
+  '// assertion and its message together (consistent failure text).',
   'const sum = (a, b) => a + b;',
-  'if (sum(2, 2) !== 4) {',
-  "  throw new Error('expected 4, got ' + sum(2, 2));",
+  'const expected = 4;',
+  'if (sum(2, 2) !== expected) {',
+  "  throw new Error('expected ' + expected + ', got ' + sum(2, 2));",
   '}',
   '',
 ].join('\n');

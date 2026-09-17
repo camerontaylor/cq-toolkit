@@ -325,17 +325,45 @@ export async function salvageInterruptedRun(opts: {
   planner: PlanSweepReport;
 }): Promise<SalvagePlan> {
   const events = await latestRunEvents(opts.journalDir, opts.planId);
+  const salvaged = await makeSalvage(makeSubprocessSalvageEffects())({
+    repoRoot: opts.config.repoRoot,
+    entries: salvageEntriesFor(opts.config, opts.planner, events),
+  });
+  if (salvaged.status !== 'ok') {
+    throw new Error(`e2e: salvage failed — ${JSON.stringify(salvaged)}`);
+  }
+  return salvaged.value;
+}
+
+/**
+ * The journal-tail derivation: one SalvageEntry per manifest package, its
+ * tail read from the run's events IN JOURNAL ORDER.
+ *
+ * Per package (allTerminal = EVERY unit job of the package finished ok — a
+ * failed unit is terminal but NOT done: the work did not happen, so the tree
+ * is not clean-done; salvage must see it as pending, not done):
+ *   - allTerminal — every unit job's LAST finish is ok;
+ *   - lastStep    — the job ID of the LAST matching job-finished event in
+ *     journal order (jobs can finish out of plan order; the tail is the
+ *     journal's last word, not the plan's). No terminal event for the
+ *     package → NO lastStep (a run interrupted before its first write
+ *     carries no done evidence — salvage's absent-evidence branch, I9).
+ */
+export function salvageEntriesFor(
+  config: SweepPlanConfig,
+  planner: PlanSweepReport,
+  events: readonly JournalEvent[],
+): SalvageEntry[] {
   const finishes = new Map<string, string | undefined>(); // jobId → last terminal status
+  const finishOrder: Array<{ jobId: string; status: string }> = []; // journal order
   for (const event of events) {
     if (event.type === 'job-finished') {
       finishes.set(event.jobId, event.result.status);
+      finishOrder.push({ jobId: event.jobId, status: event.result.status });
     }
   }
-  // Per package: allTerminal = EVERY unit job of the package finished ok
-  // (a failed unit is terminal but NOT done — the work did not happen, so
-  // the tree is not clean-done; salvage must see it as pending, not done).
   const byPackage = new Map<string, string[]>();
-  for (const job of opts.planner.jobs) {
+  for (const job of planner.jobs) {
     const unit = job.input as WorkUnit;
     const jobIds = byPackage.get(unit.package) ?? [];
     jobIds.push(job.id);
@@ -343,29 +371,20 @@ export async function salvageInterruptedRun(opts: {
   }
   const entries: SalvageEntry[] = [];
   for (const [packageName, jobIds] of byPackage) {
-    const first = opts.planner.jobs.find((job) => (job.input as WorkUnit).package === packageName);
+    const first = planner.jobs.find((job) => (job.input as WorkUnit).package === packageName);
     const unit = first?.input as WorkUnit;
-    const segments = sweepUnitSegments(opts.config.runPrefix, unit);
-    const terminal = jobIds
-      .map((jobId) => finishes.get(jobId))
-      .filter((status): status is string => status !== undefined);
+    const segments = sweepUnitSegments(config.runPrefix, unit);
+    const lastTerminal = finishOrder.findLast((finish) => jobIds.includes(finish.jobId));
     entries.push({
-      path: absoluteWorktreePath(opts.config, segments.kind, segments.slug),
+      path: absoluteWorktreePath(config, segments.kind, segments.slug),
       branch: segments.branch,
       journal: {
-        ...(terminal.length > 0 ? { lastStep: jobIds[jobIds.length - 1] } : {}),
+        ...(lastTerminal !== undefined ? { lastStep: lastTerminal.jobId } : {}),
         allTerminal: jobIds.every((jobId) => finishes.get(jobId) === 'ok'),
       },
     });
   }
-  const salvaged = await makeSalvage(makeSubprocessSalvageEffects())({
-    repoRoot: opts.config.repoRoot,
-    entries,
-  });
-  if (salvaged.status !== 'ok') {
-    throw new Error(`e2e: salvage failed — ${JSON.stringify(salvaged)}`);
-  }
-  return salvaged.value;
+  return entries;
 }
 
 /** The lexical worktree path (salvage canonicalizes it itself). */

@@ -16,6 +16,10 @@
 //   3. DIRTY TREES ARE PRESERVED: the breaking-edit fault makes beta's fix a
 //      REGRESSION — the unit fails uncommitted, the tree stays dirty, and
 //      salvage classifies it `preserve` while alpha stays `reuse`.
+//   4. EVIDENCE QUALITY: every journaled line parses through the frozen
+//      JournalEventSchema (not just a type-field sniff), and the salvage
+//      journal tail takes lastStep from the LAST job-finished event in
+//      journal order — jobs can finish out of plan order.
 import { execFile } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -26,11 +30,13 @@ import {
   ALPHA_FAILURE_MESSAGE,
   ALPHA_FIX,
   BETA_BREAK,
+  BETA_BREAK_MESSAGE,
   generateScratchRepo,
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
 } from '../../fixtures/scratch-repo/generate.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
+import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
 import type { SweepPlanConfig, SweepUnitReport } from '../../../src/plans/sweep.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
@@ -44,6 +50,7 @@ import {
   latestRunEvents,
   makeFakeGh,
   runSweepPlan,
+  salvageEntriesFor,
   salvageInterruptedRun,
   type RunSweepOpts,
   type SweepRunOutcome,
@@ -443,6 +450,8 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/REGRESSION/);
       expect(beta.error).toMatch(/novel failure/);
+      // The novel failure is exactly the broken suite's own consistent text.
+      expect(beta.error).toContain(BETA_BREAK_MESSAGE);
 
       // The fix was withheld: beta's tree is DIRTY (the breaking edit is
       // still sitting uncommitted in the worktree).
@@ -478,8 +487,117 @@ describe('sweep e2e: journal evidence shape', () => {
       .split('\n')
       .filter((line) => line !== '');
     for (const line of lines) {
-      const event = JSON.parse(line) as JournalEvent;
-      expect(['run-started', 'job-started', 'job-finished', 'run-finished']).toContain(event.type);
+      // The SCHEMA validates, not a type-field sniff: a line missing required
+      // fields (or carrying an unknown discriminator) is rejected here — the
+      // same validation openRunLog.append performs before anything hits disk.
+      const parsed = JournalEventSchema.safeParse(JSON.parse(line));
+      expect(parsed.success, `line must parse as a journal event: ${line}`).toBe(true);
+      if (parsed.success) {
+        expect(['run-started', 'job-started', 'job-finished', 'run-finished']).toContain(
+          parsed.data.type,
+        );
+      }
+    }
+  });
+
+  test('salvage journal tail: lastStep is the LAST journal-order finish, never the plan-order last job', () => {
+    const config = sceneLessConfig();
+    const planner = twoUnitPlanner();
+    const runId = 'sweep--tail--000000';
+    const at = (tick: number): string => new Date(1_700_000_000_000 + tick).toISOString();
+    const started = (jobId: string, tick: number): JournalEvent => ({
+      type: 'job-started',
+      runId,
+      at: at(tick),
+      jobId,
+      op: 'sweep.unit',
+      attempt: 1,
+    });
+    const finishedOk = (jobId: string, tick: number): JournalEvent => ({
+      type: 'job-finished',
+      runId,
+      at: at(tick),
+      jobId,
+      opId: 'sweep.unit',
+      inputsHash: 'h',
+      result: { status: 'ok', value: {} },
+    });
+    const finishedFailed = (jobId: string, tick: number): JournalEvent => ({
+      type: 'job-finished',
+      runId,
+      at: at(tick),
+      jobId,
+      opId: 'sweep.unit',
+      inputsHash: 'h',
+      result: { status: 'failed', error: 'boom' },
+    });
+
+    // OUT OF PLAN ORDER: beta (failed) finishes BEFORE alpha; alpha then
+    // re-finishes ok (a retry). The journal's last word per package:
+    const events: JournalEvent[] = [
+      { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
+      started('sweep-alpha-fix', 1),
+      started('sweep-beta-fix', 2),
+      finishedFailed('sweep-beta-fix', 3), // beta terminal FIRST ...
+      finishedFailed('sweep-alpha-fix', 4), // ... alpha's first attempt fails ...
+      finishedOk('sweep-alpha-fix', 5), // ... and its retry lands LAST
+    ];
+    const entries = salvageEntriesFor(config, planner, events);
+    const alpha = entries.find((entry) => entry.branch?.endsWith('fix/alpha'));
+    const beta = entries.find((entry) => entry.branch?.endsWith('fix/beta'));
+    // alpha: lastStep is ITS OWN last finish — the old plan-order fallback
+    // (`jobIds[jobIds.length - 1]`) would have named beta's job here.
+    expect(alpha?.journal?.lastStep).toBe('sweep-alpha-fix');
+    expect(alpha?.journal?.allTerminal).toBe(true); // the retry ended ok
+    // beta: failed terminal — pending work, never clean-done.
+    expect(beta?.journal?.lastStep).toBe('sweep-beta-fix');
+    expect(beta?.journal?.allTerminal).toBe(false);
+
+    // NO terminal event at all (interrupted before any finish): the entry
+    // carries NO lastStep — salvage's absent-evidence branch (I9).
+    const unfinished = salvageEntriesFor(config, planner, [
+      { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
+      started('sweep-alpha-fix', 1),
+      started('sweep-beta-fix', 2),
+    ]);
+    for (const entry of unfinished) {
+      expect(entry.journal?.lastStep).toBeUndefined();
+      expect(entry.journal?.allTerminal).toBe(false);
     }
   });
 });
+
+/** Minimal config for the tail-derivation tests (only the naming fields are read). */
+function sceneLessConfig(): SweepPlanConfig {
+  return {
+    repoRoot: '/repo',
+    worktreesDir: 'worktrees',
+    runPrefix: 'cq/tail',
+    base: 'main',
+    packages: [
+      { name: 'alpha', path: 'packages/alpha' },
+      { name: 'beta', path: 'packages/beta' },
+    ],
+    selector: { mode: 'workspace-all' },
+    fixers: ['fix'],
+  };
+}
+
+/** The two-unit planner shape the expanded plan embeds (plan order: alpha, beta). */
+function twoUnitPlanner(): SweepRunOutcome['planner'] {
+  const units: Array<WorkUnit> = [
+    { package: 'alpha', fixer: 'fix', files: [] },
+    { package: 'beta', fixer: 'fix', files: [] },
+  ];
+  return {
+    jobs: units.map((unit) => ({
+      id: `sweep-${unit.package}-fix`,
+      op: 'sweep.unit',
+      input: unit,
+      dependsOn: [],
+    })),
+    units,
+    suppressed: [],
+    needsHuman: [],
+  };
+}
