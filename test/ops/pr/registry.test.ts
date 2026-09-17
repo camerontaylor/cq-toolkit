@@ -9,14 +9,14 @@
 //   3. THE PREFIX REFINEMENTS: a tracker.branch or packages[].branch
 //      outside `<runPrefix>/` fails schema validation (exit-2 class at the
 //      CLI boundary, before any op runs).
-//   4. The importer RESOLVES to a callable async op WITHOUT being invoked
-//      and WITHOUT env/network/filesystem contact: the binding constructs
-//      makeSubprocessPrEffects, which is closure-only at construction
-//      (execFile spawns only when an effect is CALLED). assemblePrs is
-//      never CALLED here — any dispatch would run real gh. runReport IS
-//      dispatched once over an EMPTY fleet with no tracker — the one
-//      input whose execution performs zero gh calls — proving the full
-//      registry wiring end-to-end, hermetically.
+//   4. The importer RESOLVES to an op WITHOUT env/network/filesystem
+//      contact: the binding constructs makeSubprocessPrEffects, which is
+//      closure-only at construction (execFile spawns only when an effect is
+//      CALLED). The op is then CALLED once with a boundary-failing input
+//      (required field deleted → `failed` before any effect), proving the
+//      promise contract hermetically; no dispatch that would run gh ever
+//      happens (runReport's one real dispatch below is the empty-fleet,
+//      no-tracker input whose execution performs zero gh calls).
 // Plus the real gh adapter's pure parsers, fixture-tested against captured
 // gh JSON shapes (they live here because this file is the family's
 // registry-surface suite and the adapter is the importer's binding):
@@ -109,18 +109,25 @@ describe('pr family registry entries', () => {
   });
 
   test.each(ENTRY_NAMES)(
-    '%s: importer resolves to a callable async op (and is NOT invoked)',
+    '%s: importer resolves to an op; calling it returns the OpResult promise',
     async (name) => {
       // Resolving constructs makeSubprocessPrEffects — closure-only, inert:
       // execFile spawns only when an effect is CALLED, so resolution touches
-      // no env, network, or filesystem. The op is deliberately not invoked:
-      // any assemblePrs dispatch (and any runReport dispatch over a
-      // non-empty fleet) would run real gh.
-      const op = await entryByName(name).importer();
+      // no env, network, or filesystem. The op IS called, but with an input
+      // that fails the boundary contract FIRST (repoRoot deleted — the first
+      // field both ops' inputFaultOf checks), so the promise contract is
+      // proven with ZERO gh calls: an Op invocation returns a thenable that
+      // resolves to a `failed` OpResult — never a thrown error, never a
+      // synchronous value. (The implementation-detail constructor name is
+      // deliberately not asserted — the CONTRACT is the promise.)
+      const op = (await entryByName(name).importer()) as (i: unknown) => Promise<unknown>;
       expect(typeof op).toBe('function');
-      expect((op as unknown as { constructor: { name: string } }).constructor.name).toContain(
-        'AsyncFunction',
-      );
+      const badInput: Record<string, unknown> = { ...minimalInput(name) };
+      delete badInput['repoRoot'];
+      const pending = op(badInput);
+      expect(typeof (pending as { then?: unknown }).then).toBe('function');
+      const result = (await pending) as { status: string };
+      expect(result.status).toBe('failed');
     },
   );
 
