@@ -98,15 +98,19 @@ function normalizedSegment(raw: string): string {
 }
 
 /**
- * The run-state dir of one sweep run: a SIBLING of `worktreesDir` (resolved
- * against `repoRoot`, suffixed `-state`, then NAMESPACED by the sanitized run
- * prefix) — derived deterministically from the config and NEVER inside any
- * worktree. The namespace keeps sequential sweeps with different run prefixes
- * from reading each other's baseline snapshots (a stale baseline would be
- * fabricated evidence, I7). The unit op writes its per-unit records here —
+ * The run-state dir of one sweep run: NESTED under `worktreesDir` as
+ * `<worktreesDir>/.cq-state/<sanitized run prefix>` — one gitignore rule
+ * (worktreesDir) covers the worktrees AND the state, and the dot-prefixed
+ * `.cq-state` sibling of the kind dirs cannot collide with a derived tree
+ * (worktreeFor's path-occupant reservation check only tests the exact
+ * `<dir>/<kind>/<slug>` paths, and kind/slug must start alphanumeric).
+ * Derived deterministically from the config, NEVER inside any worktree. The
+ * namespace keeps sequential sweeps with different run prefixes from reading
+ * each other's baseline snapshots (a stale baseline would be fabricated
+ * evidence, I7). The unit op writes its per-unit records here —
  * `baseline/<kind>/<slug>.json` (never read back; the probe always re-runs)
- * and `committed/<kind>/<slug>.json` (jTPa8: written only by a unit that
- * committed AND pushed; the assemble leg's source of truth) — so a worktree
+ * and `committed/<kind>/<slug>.json` (jTPa8: written only by a unit whose
+ * fix is on the remote; the assemble leg's source of truth) — so a worktree
  * carries no untracked tool state: a tree's strict-clean is unpolluted by
  * bookkeeping, a reuse is automatically I7-clean, and salvage never sees a
  * completed unit as dirty because of it.
@@ -120,7 +124,7 @@ export function sweepRunStateDir(
     .split('/')
     .map((segment) => normalizedSegment(segment))
     .join('/');
-  return `${resolve(repoRoot, worktreesDir)}-state/${namespace}`;
+  return resolve(repoRoot, worktreesDir, '.cq-state', namespace);
 }
 
 /** The baseline-snapshot subdir of the run-state dir (sweepRunStateDir-scoped). */
@@ -292,11 +296,14 @@ export interface SweepUnitReport {
  *      no-op fixer); commits exactly the scanned set.
  *   9. push — with a push binding and a fresh commit, publish the unit's
  *      branch (`push -u origin <branch>` in the shipped binding); skipped
- *      when nothing was committed or no binding is present.
- *  10. the committed marker (jTPa8) — committed AND pushed units write
- *      `<runStateDir>/committed/<kind>/<slug>.json`: the record the assemble
- *      leg reads as its source of truth, so a no-change unit never assembles
- *      an empty-diff PR.
+ *      when nothing was committed or no binding is present. On the
+ *      no-commit leg, a branch carrying commits beyond the base is an
+ *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
+ *      and an unreadable ahead-count fails the unit fail-closed.
+ *  10. the committed marker (jTPa8) — written by a unit whose fix is ON
+ *      THE REMOTE (pushed): `<runStateDir>/committed/<kind>/<slug>.json`: the
+ *      record the assemble leg reads as its source of truth, so a no-change
+ *      unit with nothing on the remote never assembles an empty-diff PR.
  */
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
   const probe = makeBaselineProbe(bindings.runCheck);
@@ -442,11 +449,48 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       }
     }
 
-    // 10. The committed marker (jTPa8) — written ONLY by a unit that
-    // committed AND pushed: the run-state record the assemble leg reads as
-    // its source of truth (a no-change unit must never assemble an
+    // 9b. The STRANDED-COMMIT RETRY (resume completeness): on the
+    // no-commit leg (this run's fixer no-oped on an already-fixed tree) with
+    // a push binding, a branch carrying commits beyond the base is an
+    // EARLIER run's verified fix whose push failed — re-attempt the push
+    // (idempotent: an up-to-date remote is a no-op). Without this, the
+    // stranded local commit would be silently omitted from the fleet's PRs.
+    if (!commit.committed && bindings.pushBranch !== undefined) {
+      const counted = await bindings.git([
+        '-C',
+        worktree.path,
+        'rev-list',
+        '--count',
+        `${bindings.base}..HEAD`,
+      ]);
+      if (counted.code !== 0) {
+        // Fail-closed: an unreadable ahead-count means we cannot know
+        // whether a commit is stranded — never silently omit one.
+        return {
+          status: 'failed',
+          error: `sweep.unit ${unit.package}: git rev-list --count failed — ${counted.stderr.trim()}`,
+        };
+      }
+      const aheadCommits = Number.parseInt(counted.stdout.trim(), 10);
+      if (Number.isFinite(aheadCommits) && aheadCommits > 0) {
+        try {
+          await bindings.pushBranch(bindings.repoRoot, segments.branch);
+          pushed = true;
+        } catch (err) {
+          return {
+            status: 'failed',
+            error: `sweep.unit ${unit.package}: git push of stranded commit(s) on '${segments.branch}' failed — ${messageOf(err)}`,
+          };
+        }
+      }
+    }
+
+    // 10. The committed marker (jTPa8) — written by a unit whose fix is ON
+    // THE REMOTE (pushed): a fresh commit+push this run, or the stranded-
+    // commit retry above. The assemble leg reads these as its source of
+    // truth (a no-change unit with nothing on the remote never assembles an
     // empty-diff PR).
-    if (commit.committed && pushed) {
+    if (pushed) {
       const markerFault = await writeCommittedMarker(bindings, segments, unit);
       if (markerFault !== null) return { status: 'failed', error: markerFault };
     }

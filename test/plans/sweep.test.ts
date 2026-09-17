@@ -179,6 +179,20 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     );
   });
 
+  test('a hand-built report with misaligned jobs/units is plan corruption (jTPa1-era guard)', () => {
+    const units: Array<WorkUnit> = [
+      { package: 'alpha', fixer: 'fix', files: [] },
+      { package: 'beta', fixer: 'fix', files: [] },
+    ];
+    const misaligned: PlanSweepReport = {
+      jobs: [{ id: 'sweep-alpha-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      units,
+      suppressed: [],
+      needsHuman: [],
+    };
+    expect(() => buildSweepPlan(CONFIG, misaligned)).toThrow(/misaligned/);
+  });
+
   test('slug normalization and deterministic collision disambiguation (jTPa1)', () => {
     // '@scope/pkg' normalizes to the DISPATCHABLE slug 'scope-pkg' (the old
     // fold produced '-scope-pkg', which SEGMENT_RE refuses).

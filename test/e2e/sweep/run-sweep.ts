@@ -12,7 +12,7 @@
 //            the real git push against the scratch repo's LOCAL bare
 //            origin), and `pr.assemblePrs` is the ONE override (the injected
 //            fake gh — no forge is contacted; tracker-branch creation on a
-//            real forge is the deferred WS-K surface, review-debt #144).
+//            real forge is the deferred WS-K surface, review-debt #173).
 //
 // Every git leg (worktrees, check.js probes, diffs, commits, pushes) is
 // real, in tmpdirs. The journal is the runner's own NDJSON (one file per run
@@ -25,7 +25,14 @@
 // journal order), and runs the REAL salvage op over the inventory.
 import { resolve } from 'node:path';
 import { candidateRunsForPlan, openRunLog } from '../../../src/kernel/journal.js';
-import type { JournalEvent, Op, OpRegistryEntry, RunReport } from '../../../src/kernel/types.js';
+import type {
+  JournalEvent,
+  Job,
+  Op,
+  OpRegistryEntry,
+  Plan,
+  RunReport,
+} from '../../../src/kernel/types.js';
 import { runPlan, type OpRegistryView } from '../../../src/kernel/runner.js';
 import { makeAssemblePrs } from '../../../src/ops/pr/assemblePrs.js';
 import type {
@@ -152,12 +159,16 @@ export interface RunSweepOpts {
   push?: boolean;
   /** Optional staged-path allowlist overlay (the test-fix scope pin). */
   stagePathAllowlist?: { patterns: string[] };
+  /** The units dispatch's concurrency; default 1 (the e2e's serial default). */
+  concurrency?: number;
 }
 
 /** One sweep invocation's outcome: the phase-A report, the phase-B run, the default output. */
 export interface SweepRunOutcome {
   planner: PlanSweepReport;
   run: RunReport;
+  /** The EXPANDED units plan (its job inputs carry the resolved kind/slug — the salvage-tail source). */
+  plan: Plan;
   /**
    * The marker-filtered assemble run (jTPa8) — present exactly when every
    * unit succeeded AND at least one unit committed+pushed; its journal is
@@ -233,7 +244,11 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
   };
   const run = await runPlan(
     plan,
-    { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
+    {
+      concurrency: opts.concurrency ?? 1,
+      stopOnError: false,
+      journalDir: opts.journalDir,
+    },
     view,
   );
 
@@ -257,9 +272,10 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
 
   // THE ASSEMBLE LEG (jTPa8), composed post-run from the committed markers —
   // the fleet gate first (every unit must have succeeded; a failed unit
-  // withholds the whole fleet's PRs), then the marker filter (only units
-  // that COMMITTED AND PUSHED assemble; a no-change unit never yields an
-  // empty-diff PR). An empty result assembles nothing at all.
+  // withholds the whole fleet's PRs), then the marker filter (a package
+  // assembles only when its unit COMMITTED AND PUSHED — matched by branch
+  // AND package name; a no-change unit never yields an empty-diff PR). An
+  // empty filtered fleet dispatches NO assemble at all (no empty tracker).
   const fleetOk = planner.jobs.every((job) => {
     const row = run.jobs.find((candidate) => candidate.jobId === job.id);
     return row?.result.status === 'ok';
@@ -275,23 +291,26 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     const assembleInput: AssemblePrsInput = {
       ...templateInput,
       packages: templateInput.packages.filter((pkg) =>
-        markers.some((marker) => marker.branch === pkg.branch),
+        markers.some((marker) => marker.branch === pkg.branch && marker.package === pkg.name),
       ),
     };
-    const assemblePlan = {
-      id: SWEEP_PLAN_ID,
-      label: 'sweep: marker-filtered fleet assembly (the committed units only)',
-      jobs: [{ id: SWEEP_PLAN_JOB_IDS.assemble, op: 'pr.assemblePrs', input: assembleInput }],
-    };
-    assembleRun = await runPlan(
-      assemblePlan,
-      { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
-      view,
-    );
+    if (assembleInput.packages.length > 0) {
+      const assemblePlan = {
+        id: SWEEP_PLAN_ID,
+        label: 'sweep: marker-filtered fleet assembly (the committed units only)',
+        jobs: [{ id: SWEEP_PLAN_JOB_IDS.assemble, op: 'pr.assemblePrs', input: assembleInput }],
+      };
+      assembleRun = await runPlan(
+        assemblePlan,
+        { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
+        view,
+      );
+    }
   }
   return {
     planner,
     run,
+    plan,
     ...(assembleRun !== undefined ? { assembleRun } : {}),
     output: renderSweepOutput(opts.config, planner, run),
   };
@@ -345,11 +364,17 @@ export async function salvageInterruptedRun(opts: {
   planId: string;
   config: SweepPlanConfig;
   planner: PlanSweepReport;
+  /**
+   * The ENRICHED expanded-plan jobs (SweepRunOutcome.plan.jobs) — the
+   * resolved kind/slug source (jTPa1 collisions). Absent: segments are
+   * derived, which mis-derives a collision fleet's `-2` tree.
+   */
+  enrichedJobs?: Job[];
 }): Promise<SalvagePlan> {
   const events = await latestRunEvents(opts.journalDir, opts.planId);
   const salvaged = await makeSalvage(makeSubprocessSalvageEffects())({
     repoRoot: opts.config.repoRoot,
-    entries: salvageEntriesFor(opts.config, opts.planner, events),
+    entries: salvageEntriesFor(opts.config, opts.planner, events, opts.enrichedJobs),
   });
   if (salvaged.status !== 'ok') {
     throw new Error(`e2e: salvage failed — ${JSON.stringify(salvaged)}`);
@@ -372,11 +397,18 @@ export async function salvageInterruptedRun(opts: {
  *     journal's last word, not the plan's). No terminal event for the unit
  *     → NO lastStep (a run interrupted before its first write carries no
  *     done evidence — salvage's absent-evidence branch, I9).
+ *
+ * SEGMENTS come from `enrichedJobs` — the EXPANDED plan's unit-job inputs
+ * carry the builder's RESOLVED kind/slug (jTPa1 collisions: without them a
+ * collision fleet salvages the first tree twice and the `-2` tree is never
+ * classified). Absent enrichedJobs: derived from the raw unit (the
+ * collision-free default).
  */
 export function salvageEntriesFor(
   config: SweepPlanConfig,
   planner: PlanSweepReport,
   events: readonly JournalEvent[],
+  enrichedJobs?: readonly Job[],
 ): SalvageEntry[] {
   const finishes = new Map<string, string | undefined>(); // jobId → last terminal status
   const finishOrder: string[] = []; // jobIds in journal finish order
@@ -388,15 +420,15 @@ export function salvageEntriesFor(
   }
   const entries: SalvageEntry[] = [];
   for (const unit of planner.units) {
-    // The RESOLVED segments from the enriched job input (jTPa1 collisions)
-    // when present; the derived ones otherwise — the tail must name the tree
-    // the unit ACTUALLY ran in.
     const job = planner.jobs.find(
       (candidate) =>
         (candidate.input as WorkUnit).package === unit.package &&
         (candidate.input as WorkUnit).fixer === unit.fixer,
     );
-    const dispatched = job?.input as SweepUnitDispatchInput | undefined;
+    if (job === undefined) continue; // a unit without its job cannot be tailed
+    const dispatched = (enrichedJobs?.find((candidate) => candidate.id === job.id) ?? job).input as
+      | SweepUnitDispatchInput
+      | undefined;
     const segments =
       dispatched?.kind !== undefined && dispatched?.slug !== undefined
         ? {
@@ -405,7 +437,6 @@ export function salvageEntriesFor(
             branch: `${config.runPrefix}/${dispatched.kind}/${dispatched.slug}`,
           }
         : sweepUnitSegments(config.runPrefix, unit);
-    if (job === undefined) continue; // a unit without its job cannot be tailed
     const lastStep = finishOrder.findLast((jobId) => jobId === job.id);
     entries.push({
       path: absoluteWorktreePath(config, segments.kind, segments.slug),

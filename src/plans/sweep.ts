@@ -33,12 +33,12 @@
 //   SweepUnitDispatchInput (src/ops/sweep/unit.ts).
 //
 // COMMITTED MARKERS ARE THE ASSEMBLE LEG'S SOURCE OF TRUTH (jTPa8): the
-// expanded plan's assemble job is the DECLARED fleet, but only a unit that
-// COMMITTED AND PUSHED writes its run-state marker
+// expanded plan's assemble job is the DECLARED fleet, but only a unit whose
+// fix is ON THE REMOTE writes its run-state marker
 // (`<runStateDir>/committed/<kind>/<slug>.json`, sweep.unit step 10) — so
 // the reference wiring composes the ACTUAL assemble dispatch post-run from
 // the markers (a no-change unit never assembles an empty-diff PR), and an
-// empty fleet assembles nothing at all.
+// empty filtered fleet dispatches no assemble at all.
 //
 // RESUME (the interrupted-run story, arm-a §4.2): a sweep re-invoke is
 // SALVAGE + REUSE, not kernel journal-replay. Replaying the journal would
@@ -51,9 +51,10 @@
 // again), the fixer no-ops on an already-fixed tree, and the commit step
 // skips when nothing is staged. Idempotency lives in the ops, not in a skip.
 // BASELINE STATE NEVER TOUCHES THE TREE: the unit's baseline snapshot is
-// written to the run-state dir (sweepRunStateDir — a SIBLING of
-// worktreesDir), so a tree carries no untracked tool state and a reuse is
-// automatically strictly clean.
+// written to the run-state dir (sweepRunStateDir — NESTED under
+// worktreesDir as `<worktreesDir>/.cq-state/<run-prefix>`), so a tree
+// carries no untracked tool state and a reuse is automatically strictly
+// clean.
 //
 // THE FLOOR (the registry entry): an EMPTY fleet run of the same builder —
 // a schema-valid plan whose planner job plans nothing (empty manifest) and
@@ -109,8 +110,7 @@ export type SweepUnitJobOverlay = Partial<
     SweepUnitDispatchInput,
     'repoRoot' | 'worktreesDir' | 'runPrefix' | 'base' | 'package' | 'fixer' | 'files'
   >
-> &
-  Record<string, unknown>;
+>;
 
 /** Config-grade inputs of one sweep run — everything EXCEPT the fan-out data. */
 export interface SweepPlanConfig {
@@ -202,6 +202,14 @@ export function buildSweepPlan(
   // planner's job-id idiom) and shipping the RESOLVED kind/slug on the
   // enriched job so the op's branch, worktree, and committed marker all
   // agree with the assembler.
+  // Alignment guard for hand-built reports: planSweep emits EXACTLY one job
+  // per unit (same loop, index-aligned) — a report whose jobs and units
+  // diverge would silently mis-resolve segments or drop units below.
+  if (report.jobs.length !== report.units.length) {
+    throw new Error(
+      `buildSweepPlan: the phase-A report is misaligned — ${String(report.jobs.length)} job(s) vs ${String(report.units.length)} unit(s); planSweep emits exactly one job per unit`,
+    );
+  }
   const usedSlugs = new Map<string, number>();
   const resolvedSegments: SweepUnitSegments[] = report.units.map((unit) => {
     const base = sweepUnitSegments(config.runPrefix, unit);

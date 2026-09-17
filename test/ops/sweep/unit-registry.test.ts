@@ -212,7 +212,10 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
     const two = sweepRunStateDir('/repo', 'worktrees', 'cq/two');
     expect(one).not.toBe(two); // different prefixes → different state dirs
     expect(sweepRunStateDir('/repo', 'worktrees', 'cq/one')).toBe(one); // same prefix → same dir (reuse intact)
-    expect(one).toContain('cq/one');
+    // NESTED under worktreesDir as `.cq-state/<prefix>` (one gitignore rule
+    // covers the trees AND the state; a dot-prefixed sibling of the kind
+    // dirs cannot collide with a derived `<dir>/<kind>/<slug>` tree).
+    expect(one).toBe('/repo/worktrees/.cq-state/cq/one');
   });
 
   test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {

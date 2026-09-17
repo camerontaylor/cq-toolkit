@@ -164,7 +164,7 @@ async function resilient<T>(step: () => Promise<T>): Promise<T> {
 /**
  * Generate the scratch repo at `root` (created recursively): the two
  * packages, the probe check, the ignore rules, then git init -b main +
-// one seed commit. Deterministic content; runs offline.
+ * one seed commit. Deterministic content; runs offline.
  */
 export async function generateScratchRepo(root: string): Promise<void> {
   mkdirSync(join(root, 'scripts'), { recursive: true });
