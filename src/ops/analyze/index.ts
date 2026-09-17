@@ -86,3 +86,8 @@ export {
 } from './registry.js';
 export type { AnalyzeFileStore } from './analysisStore.js';
 export { AnalysisStoreError, pathAnalysisFileStore } from './analysisStore.js';
+// The G3 playbook lane (authored remediation playbooks: format, verifier,
+// quarantine state machine, playbook registry + dispatch op factory) —
+// re-exported wholesale from the playbooks barrel (its exports are
+// explicit and collision-checked there).
+export * from './playbooks/index.js';

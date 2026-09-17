@@ -603,6 +603,112 @@ describe('makeAstGrepCodemod (the op: approval gate first, then scan → collisi
     );
   });
 
+  test('a SPLICE fault on a later target happens in preflight: NOTHING written, no rollback needed (Y2)', async () => {
+    const store = memoryStore(FIXTURE_FILES);
+    // Valid offsets for the FIRST target, out-of-bounds offsets for the
+    // SECOND — pre-Y2 the first file was written (and rolled back); with
+    // the preflight the fault happens before any write.
+    const mixedRunner = fakeRunner({
+      stdout: JSON.stringify([
+        matchOf('src/a.ts', 6, 13, 'fooBar'),
+        matchOf('src/b.ts', 100, 200, 'bazQux'),
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const result = await makeOp(
+      store,
+      mixedRunner,
+    )({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts', 'src/b.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not apply the plan to 'src/b.ts'");
+      // No rollback wording: nothing had been written to roll back.
+      expect(result.error).not.toContain('rolled back');
+      expect(result.error).not.toContain('already written');
+    }
+    expect(store.written.size).toBe(0);
+  });
+
+  test('a PARTIAL rollback states both lists, and stranded is the exact complement of restored (Y1)', async () => {
+    // Three targets; the store faults on c's first write, allows c's own
+    // restore, but faults b's restore — so a and c come back, b is stranded.
+    const three = {
+      'src/a.ts': 'foo_bar_a();\n',
+      'src/b.ts': 'foo_bar_b();\n',
+      'src/c.ts': 'foo_bar_c();\n',
+    };
+    const store = memoryStore(three);
+    const scan = fakeRunner({
+      stdout: JSON.stringify([
+        matchOf('src/a.ts', 0, 7, 'fooBarA'),
+        matchOf('src/b.ts', 0, 7, 'fooBarB'),
+        matchOf('src/c.ts', 0, 7, 'fooBarC'),
+      ]),
+      stderr: '',
+      exitCode: 0,
+    });
+    const writeCounts = new Map<string, number>();
+    const flaky: AnalyzeFileStore & { written: Map<string, Uint8Array> } = {
+      get written() {
+        return store.written;
+      },
+      readBytes: (path) => store.readBytes(path),
+      readText: (path) => store.readText(path),
+      writeBytes: async (path, bytes) => {
+        const count = (writeCounts.get(path) ?? 0) + 1;
+        writeCounts.set(path, count);
+        if (path === 'src/c.ts' && count === 1) {
+          throw new AnalysisStoreError('analysis store: disk full on c');
+        }
+        if (path === 'src/b.ts' && count === 2) {
+          throw new AnalysisStoreError('analysis store: disk full restoring b');
+        }
+        return store.writeBytes(path, bytes);
+      },
+      isDirectory: (path) => store.isDirectory(path),
+    };
+    const result = await makeOp(
+      flaky,
+      scan,
+    )({
+      dir: '/ws',
+      rule: 'r',
+      files: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
+      dryRun: false,
+      approved: true,
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toContain("could not write 'src/c.ts'");
+      // BOTH lists, verbatim: b's restore failed (stranded), a's restore
+      // succeeded (c's own partial-write restore succeeded silently).
+      expect(result.error).toContain('rollback FAILED for src/b.ts');
+      expect(result.error).toContain('restored: src/a.ts');
+      // Y1: a restored file is listed ONLY under restored — b (whose
+      // restore failed) is the one stranded entry.
+      expect(result.error).toContain('already written (stranded): src/b.ts');
+      expect(result.error).not.toContain('stranded): src/a.ts');
+    }
+    // The verbatim on-disk state: a and c carry their ORIGINAL bytes; b
+    // holds its remediated form (stranded, as stated).
+    expect(Buffer.from(store.written.get('src/a.ts') as Uint8Array).toString('utf8')).toBe(
+      'foo_bar_a();\n',
+    );
+    expect(Buffer.from(store.written.get('src/c.ts') as Uint8Array).toString('utf8')).toBe(
+      'foo_bar_c();\n',
+    );
+    expect(Buffer.from(store.written.get('src/b.ts') as Uint8Array).toString('utf8')).toBe(
+      'fooBarB_b();\n',
+    );
+  });
+
   test('a file mutated between read and scan fails the apply — the offsets are stale, nothing written (R2-5)', async () => {
     const store = memoryStore(FIXTURE_FILES);
     // The fake runner performs the drift ITSELF at scan time (ast-grep
