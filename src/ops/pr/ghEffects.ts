@@ -244,7 +244,8 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
  * The shipped effects adapter (the registry importer's binding): one bound
  * `repoRoot`, every effect a fresh lazy gh call. Argv shapes:
  *   - searchPrByHead:    gh pr list --head <head> --state all --json number,url
- *   - createPr:          gh pr create --head … --base … --title … [--body …] [--draft]
+ *   - createPr:          gh pr create --head … --base … --title … [--body-file -] [--draft]
+ *                        (the body, when present, travels over stdin)
  *   - editPrBody:        gh pr edit <n> --body-file -   (body over stdin)
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrChecks:       gh pr view <n> --json statusCheckRollup
@@ -282,9 +283,16 @@ export function makeSubprocessPrEffects(
         '--title',
         request.title,
       ];
-      if (request.body !== undefined) args.push('--body', request.body);
+      // The body travels over STDIN (`--body-file -`), never argv — the
+      // same transport discipline as editPrBody/comment, so no markdown
+      // body is ever a process argument.
+      let body: string | undefined;
+      if (request.body !== undefined) {
+        args.push('--body-file', '-');
+        body = request.body;
+      }
       if (request.draft) args.push('--draft');
-      return parseCreatedPr(await runGh(args, repoRoot, timeoutMs));
+      return parseCreatedPr(await runGh(args, repoRoot, timeoutMs, body));
     },
     editPrBody: async (number, body) => {
       await runGh(['pr', 'edit', String(number), '--body-file', '-'], repoRoot, timeoutMs, body);
