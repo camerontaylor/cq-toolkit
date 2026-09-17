@@ -59,7 +59,7 @@ import {
   sweepRunStateDir,
   type SweepUnitReport,
 } from '../../../src/ops/sweep/unit.js';
-import type { SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
+import type { SweepUnitDispatchInput, SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import type {
   AssemblePrsPackageReport,
@@ -894,6 +894,35 @@ describe('sweep e2e: assemble guard, stranded commits, concurrency', () => {
     },
   );
 });
+
+test(
+  'the default per-unit scope: an alpha worker editing beta fails naming the path (jZ59w)',
+  { timeout: 120_000 },
+  async () => {
+    const scene = await scenario('cq/e2e-uniscope');
+    // Alpha's worker crosses the package boundary: edits BETA's suite
+    // inside ALPHA's worktree. The enriched job carries the per-unit
+    // default (^packages/alpha/ + the declared file), so the staged
+    // cross-package content fails the unit naming the path.
+    const CROSS = {
+      file: 'packages/beta/test/suite.test.js',
+      oldText: 'const expected = 4;',
+      newText: 'const expected = 4; // touched by the alpha worker',
+    };
+    const outcome = await runSweepPlan(optsFor(scene, prompts({ edit: CROSS }, {})));
+    // The enriched job carried the per-unit default scope.
+    const alphaInput = outcome.plan.jobs.find((job) => job.id === 'sweep-alpha-fix')
+      ?.input as SweepUnitDispatchInput;
+    expect(alphaInput.stagePathAllowlist?.patterns).toContain('^packages/alpha/');
+    const alpha = unitRow(outcome.run, 'alpha');
+    expect(alpha.status).toBe('failed');
+    expect(alpha.error).toMatch(/outside the allowlist/);
+    expect(alpha.error).toContain('packages/beta/test/suite.test.js');
+    // The fleet gate: the failed unit withholds the assemble dispatch.
+    expect(outcome.assembleRun).toBeUndefined();
+    expect(scene.gh.created).toHaveLength(0);
+  },
+);
 
 // The journal-file shape sanity: one NDJSON file per dispatch (units + the
 // marker-filtered assemble), every line parseable.

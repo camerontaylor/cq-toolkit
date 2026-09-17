@@ -39,7 +39,12 @@ import { SWEEP_UNIT_OP } from '../../src/ops/sweep/planSweep.js';
 import { registry as sweepRegistry } from '../../src/ops/sweep/registry.js';
 import { makeSweepUnitOp, sweepUnitSegments } from '../../src/ops/sweep/unit.js';
 import { buildSweepPlan, SWEEP_PLAN_ID, type SweepPlanConfig } from '../../src/plans/sweep.js';
-import { buildTestFixPlan, TEST_FIX_FIXER, TEST_FIX_PLAN_ID } from '../../src/plans/test-fix.js';
+import {
+  buildTestFixPlan,
+  TEST_FIX_FIXER,
+  TEST_FIX_PLAN_ID,
+  TEST_FIX_STAGE_PATH_ALLOWLIST,
+} from '../../src/plans/test-fix.js';
 import { getPlan } from '../../src/plans/registry.js';
 
 /** A two-unit planner report as planSweep would have produced it. */
@@ -74,6 +79,28 @@ const CONFIG: SweepPlanConfig = {
   fixers: ['fix'],
   packageFiles: { alpha: ['packages/alpha/test/suite.test.js'] },
 };
+
+describe('plans barrel surface (jZ59o)', () => {
+  test('the builder surface resolves through src/plans/index.js and is callable', async () => {
+    // Imported from the BARREL — the supported-API path SDK consumers take.
+    const {
+      buildSweepPlan: barrelBuild,
+      buildTestFixPlan: barrelBuildTestFixPlan,
+      sweepPlannerInput: barrelPlannerInput,
+    } = (await import('../../src/plans/index.js')) as typeof import('../../src/plans/index.js');
+    const plan = barrelBuild(CONFIG, twoUnitReport());
+    expect(plan.id).toBe(SWEEP_PLAN_ID);
+    expect(plan.jobs[0]?.op).toBe('sweep.planSweep');
+    expect(() => PlanSweepInputSchema.parse(barrelPlannerInput(CONFIG))).not.toThrow();
+    const testFixPlan = barrelBuildTestFixPlan(CONFIG, twoUnitReport(TEST_FIX_FIXER));
+    expect(testFixPlan.id).toBe(TEST_FIX_PLAN_ID);
+    // The naming contract + the test-fix scope constant ride the barrel too.
+    expect(sweepUnitSegments('cq/x', { package: '@scope/pkg', fixer: 'fix' }).slug).toBe(
+      'scope-pkg',
+    );
+    expect(TEST_FIX_STAGE_PATH_ALLOWLIST.patterns.length).toBeGreaterThan(0);
+  });
+});
 
 describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
   test('both plans are discovered by file and their importers resolve', async () => {

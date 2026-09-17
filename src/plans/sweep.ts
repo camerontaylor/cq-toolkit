@@ -82,6 +82,7 @@ import type {
   PlanSweepPackage,
   PlanSweepReport,
   PlanSweepSelector,
+  WorkUnit,
 } from '../ops/sweep/planSweep.js';
 import { sweepUnitSegments } from '../ops/sweep/unit.js';
 import type { SweepUnitDispatchInput, SweepUnitSegments } from '../ops/sweep/unit.js';
@@ -148,6 +149,41 @@ export function sweepPlannerInput(config: SweepPlanConfig): PlanSweepInput {
     ...(config.packageFiles !== undefined ? { packageFiles: config.packageFiles } : {}),
     ...(config.ledger !== undefined ? { ledger: config.ledger } : {}),
   };
+}
+
+/**
+ * The DEFAULT stage-path scope of a regular sweep unit (jZ59w), derived from
+ * the unit itself: everything under the unit package's manifest path plus
+ * the unit's own declared files (both regex-escaped, `^`-anchored). An alpha
+ * worker committing outside packages/alpha/ fails the unit naming the path —
+ * the scope travels with the unit instead of trusting the fixer's discipline.
+ * A package whose manifest path is '.' owns the repo root and gets NO path
+ * pattern (only its declared files constrain it). Wire order in
+ * buildSweepPlan: the `unitJobOverlay`'s explicit stagePathAllowlist WINS —
+ * a caller who genuinely wants fleet-wide scope overrides the default (the
+ * test-fix plan does exactly that with the test-file patterns).
+ */
+export function unitStagePathAllowlist(
+  config: SweepPlanConfig,
+  unit: Pick<WorkUnit, 'package' | 'files'>,
+): { patterns: string[] } | undefined {
+  const patterns: string[] = [];
+  // planSweep normalizes a leading './' off manifest paths; mirror that so
+  // the anchor matches the paths git reports.
+  const manifestPath =
+    config.packages.find((pkg) => pkg.name === unit.package)?.path.replace(/^\.\//, '') ?? '';
+  if (manifestPath !== '' && manifestPath !== '.') {
+    patterns.push(`^${escapeRegex(manifestPath)}/`);
+  }
+  for (const file of unit.files) {
+    patterns.push(`^${escapeRegex(file)}$`);
+  }
+  return patterns.length === 0 ? undefined : { patterns };
+}
+
+/** Escape a literal path for interpolation into an allowlist regex source. */
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /** The assembler input a config authors — static data, no runtime output needed. */
@@ -224,20 +260,31 @@ export function buildSweepPlan(
           branch: `${config.runPrefix}/${base.kind}/${base.slug}-${ordinal + 1}`,
         };
   });
-  const unitJobs = report.jobs.map((job, index) => ({
-    ...job,
-    dependsOn: [SWEEP_PLAN_JOB_IDS.plan],
-    input: {
-      ...(job.input as object),
-      repoRoot: config.repoRoot,
-      worktreesDir: config.worktreesDir,
-      runPrefix: config.runPrefix,
-      base: config.base,
-      kind: resolvedSegments[index]?.kind,
-      slug: resolvedSegments[index]?.slug,
-      ...(unitJobOverlay ?? {}),
-    },
-  }));
+  const overlay = unitJobOverlay ?? {};
+  const unitJobs = report.jobs.map((job, index) => {
+    const unit = job.input as WorkUnit;
+    // jZ59w: the default per-unit scope applies unless the overlay
+    // explicitly carries one (the test-fix plan overrides with the
+    // fleet-wide test-file patterns). ABSENT (never undefined-valued —
+    // the registry schema's exactOptional keys reject undefined).
+    const defaultScope =
+      overlay.stagePathAllowlist === undefined ? unitStagePathAllowlist(config, unit) : undefined;
+    return {
+      ...job,
+      dependsOn: [SWEEP_PLAN_JOB_IDS.plan],
+      input: {
+        ...(job.input as object),
+        repoRoot: config.repoRoot,
+        worktreesDir: config.worktreesDir,
+        runPrefix: config.runPrefix,
+        base: config.base,
+        kind: resolvedSegments[index]?.kind,
+        slug: resolvedSegments[index]?.slug,
+        ...overlay,
+        ...(defaultScope !== undefined ? { stagePathAllowlist: defaultScope } : {}),
+      },
+    };
+  });
   return {
     id: planId,
     label:
