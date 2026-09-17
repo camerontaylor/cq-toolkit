@@ -370,12 +370,17 @@ describe('reviewStateOfDecision (gh pr view --json reviewDecision)', () => {
   });
 });
 
-describe('metaOf (gh pr view --json isDraft,state)', () => {
-  test('a literal isDraft plus the lifecycle word map onto the seam', () => {
-    expect(metaOf({ isDraft: true, state: 'OPEN' })).toEqual({ isDraft: true, state: 'open' });
-    expect(metaOf({ isDraft: false, state: 'MERGED' })).toEqual({
+describe('metaOf (gh pr view --json isDraft,state,mergeable)', () => {
+  test('the literal words map onto the seam vocabulary', () => {
+    expect(metaOf({ isDraft: true, state: 'OPEN', mergeable: 'MERGEABLE' })).toEqual({
+      isDraft: true,
+      state: 'open',
+      mergeable: 'mergeable',
+    });
+    expect(metaOf({ isDraft: false, state: 'MERGED', mergeable: 'CONFLICTING' })).toEqual({
       isDraft: false,
       state: 'merged',
+      mergeable: 'conflicting',
     });
   });
 
@@ -385,10 +390,16 @@ describe('metaOf (gh pr view --json isDraft,state)', () => {
     expect(() => metaOf({ state: 'OPEN' })).toThrow(/unreadable isDraft/);
   });
 
-  test('an unrecognized lifecycle word maps to unknown (the tracker guard treats it as non-open)', () => {
-    expect(metaOf({ isDraft: false, state: 'WHAT' })).toEqual({
+  test('an unrecognized lifecycle or mergeability word maps to unknown (r3 jMJpD)', () => {
+    expect(metaOf({ isDraft: false, state: 'WHAT', mergeable: 'HUH' })).toEqual({
       isDraft: false,
       state: 'unknown',
+      mergeable: 'unknown',
+    });
+    expect(metaOf({ isDraft: false })).toEqual({
+      isDraft: false,
+      state: 'unknown',
+      mergeable: 'unknown',
     });
   });
 });
@@ -434,6 +445,28 @@ describe('composeSection (the r2#4 tracker-body compose protocol)', () => {
     expect(composed).toContain(manifestSection); // the fresh content landed
     expect(composed).not.toContain('STALE manifest line');
     expect(composed).toContain('READINESS line'); // the sibling is untouched
+  });
+
+  test('a descriptive `<!-- cq-toolkit …` comment inside a section does NOT truncate the scan (r3)', () => {
+    // The section END is an EXACT marker match: the real bodies carry a
+    // descriptive comment whose line starts `<!-- cq-toolkit` — close to,
+    // but never equal to, a section marker — so it is CONTENT and the
+    // replacement must consume it (along with the stale bullets) without
+    // stopping early, while the sibling section stays verbatim.
+    const existing = [
+      MANIFEST_SECTION_MARKER,
+      '<!-- cq-toolkit fleet-run manifest: runPrefix cq/09-16a (generated; updated in place, never duplicated) -->',
+      'STALE manifest bullet',
+      '',
+      READINESS_SECTION_MARKER,
+      '<!-- cq-toolkit fleet-run report: runPrefix cq/09-16a (generated; merge-readiness, never auto-merges) -->',
+      'READINESS line',
+    ].join('\n');
+    const composed = composeSection(existing, manifestSection);
+    expect(composed).toContain(manifestSection); // full replacement reached the sibling marker
+    expect(composed).not.toContain('STALE manifest bullet');
+    expect(composed).toContain(READINESS_SECTION_MARKER);
+    expect(composed).toContain('READINESS line');
   });
 
   test('replacement works regardless of section order (readiness first, manifest last)', () => {

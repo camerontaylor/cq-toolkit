@@ -25,6 +25,7 @@ import { READINESS_SECTION_MARKER } from '../../../src/ops/pr/assemblePrs.js';
 import type {
   PrChecks,
   PrEffects,
+  PrMergeable,
   PrReviewState,
   PrState,
 } from '../../../src/ops/pr/assemblePrs.js';
@@ -45,6 +46,8 @@ interface FakeGh {
   drafts: Map<number, boolean>;
   /** Per-PR scripted lifecycle states (absent → open). */
   metas: Map<number, PrState>;
+  /** Per-PR scripted mergeability (absent → mergeable). */
+  mergeables: Map<number, PrMergeable>;
   /** Faults keyed by PR number, per read. */
   checkFaults: Map<number, string>;
   reviewFaults: Map<number, string>;
@@ -63,6 +66,7 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
     reviews: seed.reviews ?? new Map<number, PrReviewState>(),
     drafts: seed.drafts ?? new Map<number, boolean>(),
     metas: seed.metas ?? new Map<number, PrState>(),
+    mergeables: seed.mergeables ?? new Map<number, PrMergeable>(),
     checkFaults: seed.checkFaults ?? new Map<number, string>(),
     reviewFaults: seed.reviewFaults ?? new Map<number, string>(),
     metaFaults: seed.metaFaults ?? new Map<number, string>(),
@@ -99,6 +103,7 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
         return {
           isDraft: state.drafts.get(number) === true,
           state: state.metas.get(number) ?? 'open',
+          mergeable: state.mergeables.get(number) ?? 'mergeable',
         };
       },
       getPrBody: async (number) => state.bodies.get(number) ?? '',
@@ -393,6 +398,65 @@ describe('a draft PR is blocked regardless of checks and review', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Lifecycle + mergeability dominance (PR-165 r3, codex jMJpD): the fold
+// reads meta FIRST — unmergeable PRs are blocked on green evidence
+// ---------------------------------------------------------------------------
+
+describe('lifecycle and mergeability dominate the fold', () => {
+  const greenSeed: Partial<FakeGh> = {
+    checks: new Map([[11, { state: 'pass' }]]),
+    reviews: new Map([[11, { state: 'approved' }]]),
+  };
+
+  test('a CLOSED PR with green checks and approval → blocked, reason state: closed', async () => {
+    const fake = fakeGh({ ...greenSeed, metas: new Map([[11, 'closed']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'state: closed',
+    });
+  });
+
+  test('a MERGED PR → blocked, reason state: merged', async () => {
+    const fake = fakeGh({ ...greenSeed, metas: new Map([[11, 'merged']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({ readiness: 'blocked', reason: 'state: merged' });
+  });
+
+  test('merge CONFLICTS with green checks and approval → blocked, reason merge conflicts', async () => {
+    const fake = fakeGh({ ...greenSeed, mergeables: new Map([[11, 'conflicting']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({
+      readiness: 'blocked',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'merge conflicts',
+    });
+    expect(report.counts).toEqual({ ready: 0, blocked: 1, unknown: 0 });
+  });
+
+  test('an UNKNOWN mergeable word is unknown-tolerant: the row stays for the other halves', async () => {
+    const fake = fakeGh({ ...greenSeed, mergeables: new Map([[11, 'unknown']]) });
+    const report = await okReport(
+      makeRunReport(fake.gh),
+      inputOf({ packages: [{ name: 'core', number: 11 }] }),
+    );
+    expect(report.rows[0]).toMatchObject({ readiness: 'ready' });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Tracker update in place; never a merge, never a second PR
 // ---------------------------------------------------------------------------
 
@@ -528,6 +592,20 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
 // ---------------------------------------------------------------------------
 
 describe('boundary validation refuses bad inputs before any gh call', () => {
+  test('a hostile or unsanitary runPrefix is refused at the boundary (r3 boundary parity)', async () => {
+    // SEGMENT_RE parity means a backtick-bearing prefix is REFUSED too —
+    // the reviewer's "escaped in the body" case is unreachable through the
+    // op boundary; the reportSection mdSafe on runPrefix stays as
+    // defense-in-depth for direct library callers (its siblings are pinned
+    // by the markdown-metacharacter tests).
+    for (const bad of ['cq/x--></textarea', 'cq/x>', 'cq/..', 'cq/a.lock', 'cq/`x`']) {
+      const fake = fakeGh();
+      const result = await makeRunReport(fake.gh)(inputOf({ runPrefix: bad }));
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain('runPrefix');
+      expect(fake.edits.size).toBe(0);
+    }
+  });
   test('a zero, negative, or non-integer PR number is refused naming the field', async () => {
     const op = makeRunReport(fakeGh().gh);
     for (const bad of [0, -3, 1.5]) {

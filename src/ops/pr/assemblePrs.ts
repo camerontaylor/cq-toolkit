@@ -129,13 +129,18 @@ export interface PrReviewState {
 
 /**
  * The meta half of the merge-readiness evidence: `isDraft` — GitHub cannot
- * merge a draft, whatever the checks say — and the lifecycle `state`, which
+ * merge a draft, whatever the checks say; the lifecycle `state` — which
  * lifecycle-guards the tracker writers (a non-open tracker is a landed
- * record, never rewritten).
+ * record, never rewritten) and blocks readiness on a non-open PR; and
+ * `mergeable` — a PR with merge conflicts is not mergeable however green
+ * its checks.
  */
+export type PrMergeable = 'mergeable' | 'conflicting' | 'unknown';
+
 export interface PrMeta {
   isDraft: boolean;
   state: PrState;
+  mergeable: PrMergeable;
 }
 
 /** JSON-serializable input of the `pr.assemblePrs` op: one fleet run's PR plan. */
@@ -148,7 +153,13 @@ export interface AssemblePrsInput {
   base: string;
   /** The tracker PR's dedicated branch and title, both under the run prefix. */
   tracker: { title: string; branch: string };
-  /** One entry per package; `branch` must start `<runPrefix>/`. */
+  /**
+   * One entry per package; `branch` must start `<runPrefix>/`. An entry's
+   * `body` travels over STDIN (`--body-file -`) straight to the PR body —
+   * it is never interpolated into the tracker manifest — so multiline
+   * markdown is fine (Cc-refused fields are only the interpolated ones:
+   * names, titles, branches).
+   */
   packages: Array<{ name: string; branch: string; title: string; body?: string }>;
   /** Open every PR as a draft; DEFAULT TRUE — a fleet run assembles quietly. */
   draft?: boolean;
@@ -381,9 +392,12 @@ export const READINESS_SECTION_MARKER = '<!-- cq:readiness -->';
  * Upsert ONE section (its FIRST line is its marker) into `existing`:
  *   - absent/empty existing → the section alone;
  *   - marker present → the section REPLACES the lines from its marker to
- *     just before the next `<!-- cq:… -->` marker (or EOF) — everything
- *     else, sibling sections included, is preserved byte-for-byte;
+ *     just before the next SECTION MARKER (or EOF) — everything else,
+ *     sibling sections included, is preserved byte-for-byte;
  *   - marker absent → the section is appended after the existing content.
+ * The section END is detected by EXACT marker match (r3): a descriptive
+ * `<!-- cq-toolkit …` comment inside a section — or any future `<!-- cq:`
+ * prefixed line — is content, never a terminator.
  * Markdown-safe by construction: the section builders already escaped
  * their interpolations.
  */
@@ -399,7 +413,8 @@ export function composeSection(existing: string | undefined, section: string): s
   }
   let end = lines.length;
   for (let index = start + 1; index < lines.length; index += 1) {
-    if (lines[index]?.trim().startsWith('<!-- cq:')) {
+    const candidate = lines[index]?.trim();
+    if (candidate === MANIFEST_SECTION_MARKER || candidate === READINESS_SECTION_MARKER) {
       end = index;
       break;
     }
@@ -442,7 +457,7 @@ function singleLine(text: string): string {
 function manifestSection(input: AssemblePrsInput, rows: readonly ManifestRow[]): string {
   const lines: string[] = [
     MANIFEST_SECTION_MARKER,
-    `<!-- cq-toolkit fleet-run manifest: runPrefix ${input.runPrefix} (generated; updated in place, never duplicated) -->`,
+    `<!-- cq-toolkit fleet-run manifest: runPrefix ${mdSafe(input.runPrefix)} (generated; updated in place, never duplicated) -->`,
     `# Fleet run \`${mdSafe(input.runPrefix)}\``,
     '',
     `Tracker PR for the fleet run against \`${mdSafe(input.base)}\`. Per-package PRs carry branches under \`${mdSafe(input.runPrefix)}/\`; this manifest is updated in place as packages assemble.`,
@@ -503,11 +518,8 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
   if (input.base.startsWith('-')) {
     return `pr: base '${input.base}' must not start with '-' — it is a positional gh argument, never a flag`;
   }
-  for (const segment of input.runPrefix.split('/')) {
-    if (!SEGMENT_RE.test(segment) || refnameUnsafeSegment(segment)) {
-      return `pr: runPrefix '${input.runPrefix}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — no separators beyond the '/', no leading dash, never a '..' run or a '.lock' suffix (it feeds a git refname)`;
-    }
-  }
+  const prefixFault = runPrefixFault(input.runPrefix);
+  if (prefixFault !== null) return prefixFault;
   if (input.tracker === null || typeof input.tracker !== 'object') {
     return 'pr: tracker must be an object with non-empty title and branch';
   }
@@ -544,10 +556,13 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
       `packages[${String(index)}].branch`,
     );
     if (branchFault !== null) return branchFault;
-    if (pkg.body !== undefined) {
-      if (typeof pkg.body !== 'string' || CONTROL_CHARS_RE.test(pkg.body)) {
-        return `pr: packages[${String(index)}].body must be a string without control characters — it feeds the PR body`;
-      }
+    // The body is the ONE free-form field: it travels over STDIN
+    // (`--body-file -`) straight to the PR body and is never interpolated
+    // into the tracker manifest, so control characters and multiline
+    // markdown are fine (PR-165 r2 / codex jMJpG — the old Cc refusal made
+    // normal markdown impractical). Only its TYPE is contract.
+    if (pkg.body !== undefined && typeof pkg.body !== 'string') {
+      return `pr: packages[${String(index)}].body must be a string (it feeds the PR body over stdin; multiline markdown is fine)`;
     }
   }
   if (input.draft !== undefined && typeof input.draft !== 'boolean') {
@@ -569,6 +584,22 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
       return `pr: packages[${String(firstOwner)}] and packages[${String(index)}] share branch '${pkg.branch}' — each package PR needs its own head under the run prefix`;
     }
     branchOwners.set(pkg.branch, index);
+  }
+  return null;
+}
+
+/**
+ * THE RUN-PREFIX RULE (round-3 boundary parity): both family ops label
+ * tracker bodies and reports with the run prefix, and it feeds git
+ * refnames — so it must be '/'-joined safe segments (${SEGMENT_RE.source}
+ * per segment), never a '..' run or a '.lock' suffix. ONE definition,
+ * shared by assemblePrs and runReport, so the boundary cannot drift.
+ */
+export function runPrefixFault(prefix: string): string | null {
+  for (const segment of prefix.split('/')) {
+    if (!SEGMENT_RE.test(segment) || refnameUnsafeSegment(segment)) {
+      return `pr: runPrefix '${prefix}' must be '/'-joined safe segments (${SEGMENT_RE.source}) — no separators beyond the '/', no leading dash, never a '..' run or a '.lock' suffix (it feeds a git refname)`;
+    }
   }
   return null;
 }

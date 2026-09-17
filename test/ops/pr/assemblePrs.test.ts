@@ -99,7 +99,7 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
       },
       getPrChecks: async () => ({ state: 'pass' }),
       getPrReviewState: async () => ({ state: 'none' }),
-      getPrMeta: async () => ({ isDraft: false, state: 'open' }),
+      getPrMeta: async () => ({ isDraft: false, state: 'open', mergeable: 'mergeable' }),
       getPrBody: async () => '',
     },
   };
@@ -560,5 +560,35 @@ describe('the tracker write composes, never clobbers', () => {
     const written = fake.edits.get(101);
     expect(written).toContain('`co\\`reb`'); // backtick escaped, angle stripped
     expect(written).not.toContain('<b>');
+  });
+
+  test('a MULTILINE markdown body is accepted and transported verbatim (r3 codex jMJpG)', async () => {
+    // The body rides stdin (--body-file -) straight to the PR and is never
+    // interpolated into the tracker manifest — control characters and
+    // newlines are its business, so the old Cc refusal is gone.
+    const fake = fakeGh();
+    const multilineBody = '## Notes\n\n- one\n- two\n\n```sh\nnpm test\n```';
+    const result = await okReport(
+      makeAssemblePrs(fake.gh),
+      inputOf({
+        packages: [{ name: 'core', branch: PKG_CORE, title: 'core fixes', body: multilineBody }],
+      }),
+    );
+    expect(result.packages[0]).toMatchObject({ name: 'core', created: true });
+    // creates[0] is the TRACKER (tracker-first); the package create is second.
+    expect(fake.creates[1]?.head).toBe(PKG_CORE);
+    expect(fake.creates[1]?.body).toBe(multilineBody);
+  });
+
+  test('a non-string body is still refused naming the field', async () => {
+    const fake = fakeGh();
+    const error = await failedAt(
+      makeAssemblePrs(fake.gh),
+      inputOf({
+        packages: [{ name: 'core', branch: PKG_CORE, title: 'x', body: 42 as unknown as string }],
+      }),
+    );
+    expect(error).toContain('packages[0].body must be a string');
+    expect(fake.calls).toEqual([]);
   });
 });

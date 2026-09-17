@@ -11,6 +11,11 @@
 // refresh when `tracker` is present.
 //
 // Invariants honored here:
+//   - META READS FIRST (lifecycle/mergeability dominance, codex jMJpD): a
+//     draft, a non-open state, or merge conflicts is `blocked` regardless
+//     of checks/review — green evidence on an unmergeable PR is a
+//     fabricated ready; an UNKNOWN mergeable word is unknown-tolerant and
+//     leaves the row to the other halves.
 //   - DRAFT DOMINATES: a draft PR is `blocked` regardless of checks/review
 //     — GitHub cannot merge a draft, however green its evidence.
 //   - REVIEW_REQUIRED is not `none`: a demanded-but-absent review is
@@ -29,6 +34,7 @@ import type { Op } from '../../kernel/types.js';
 import {
   composeSection,
   READINESS_SECTION_MARKER,
+  runPrefixFault,
   type PrChecks,
   type PrEffects,
   type PrReviewState,
@@ -107,10 +113,15 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
       const meta = await settled(() => gh.getPrMeta(pkg.number));
       const observedChecks = checks.outcome === 'settled' ? checks.value.state : 'unknown';
       const observedReview = review.outcome === 'settled' ? review.value.state : 'unknown';
-      // DRAFT DOMINATES (PR-165 r1, codex jLt4f): the fleet's own PRs open
-      // as drafts, and GitHub cannot merge a draft however green its
-      // evidence — a draft is `blocked` regardless of checks/review, even
-      // when those reads faulted.
+      // META READS FIRST (PR-165 r3 codex jMJpD): the lifecycle and
+      // mergeability halves dominate the fold — a draft, a non-open PR, or
+      // a conflicting PR is `blocked` however green its checks and review,
+      // and the evidence halves still show on the row. DRAFT first (the
+      // fleet's own PRs open as drafts and GitHub cannot merge a draft);
+      // then STATE (a closed/merged PR is history, not a merge candidate);
+      // then MERGEABILITY. An UNKNOWN mergeable word is unknown-TOLERANT —
+      // GitHub is still computing, so the row stays for the other halves
+      // instead of being blocked on unreadable evidence.
       if (meta.outcome === 'settled' && meta.value.isDraft) {
         rows.push({
           name: pkg.name,
@@ -119,6 +130,28 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
           checks: observedChecks,
           review: observedReview,
           reason: 'draft — not ready for review',
+        });
+        continue;
+      }
+      if (meta.outcome === 'settled' && meta.value.state !== 'open') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'blocked',
+          checks: observedChecks,
+          review: observedReview,
+          reason: `state: ${meta.value.state}`,
+        });
+        continue;
+      }
+      if (meta.outcome === 'settled' && meta.value.mergeable === 'conflicting') {
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'blocked',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'merge conflicts',
         });
         continue;
       }
@@ -256,7 +289,7 @@ function readinessOf(
 function reportSection(runPrefix: string, rows: readonly RunReportRow[]): string {
   const lines: string[] = [
     READINESS_SECTION_MARKER,
-    `<!-- cq-toolkit fleet-run report: runPrefix ${runPrefix} (generated; merge-readiness, never auto-merges) -->`,
+    `<!-- cq-toolkit fleet-run report: runPrefix ${mdSafe(runPrefix)} (generated; merge-readiness, never auto-merges) -->`,
     `# Fleet run \`${mdSafe(runPrefix)}\` — merge readiness`,
     '',
     'Three-valued readiness per package: `ready` / `blocked` / `unknown`. This report is evidence only — nothing is merged by it.',
@@ -326,6 +359,11 @@ function inputFaultOf(input: RunReportInput): string | null {
   if (CONTROL_CHARS_RE.test(input.runPrefix)) {
     return 'pr: runPrefix must not contain control characters — it labels the report and the tracker body';
   }
+  // BOUNDARY PARITY (round 3): the run prefix labels the tracker body and
+  // the report, so it is held to the SAME '/'-joined safe-segment rule as
+  // the assembler's — one shared validator, no drift.
+  const prefixFault = runPrefixFault(input.runPrefix);
+  if (prefixFault !== null) return prefixFault;
   if (input.tracker !== undefined) {
     if (input.tracker === null || typeof input.tracker !== 'object') {
       return 'pr: tracker must be an object with a positive-integer number';

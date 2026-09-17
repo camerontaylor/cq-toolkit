@@ -297,13 +297,23 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
  * corrupt draft flag as "not a draft" is the one fold that could still
  * yield a fabricated `ready`, so it faults into the row's `unknown` like
  * any sibling read. The lifecycle half maps through {@link prStateOf}
- * (unknown words → `unknown`, which the tracker guard treats as non-open).
+ * (unknown words → `unknown`, which the tracker guard treats as non-open);
+ * `mergeable` maps gh's MERGEABLE/CONFLICTING words, anything else (an
+ * unrecognized word, a missing key — GitHub still computing) → `unknown`,
+ * which readiness treats as unknown-tolerant rather than a block.
  */
-export function metaOf(payload: { isDraft?: unknown; state?: unknown }): PrMeta {
+export function metaOf(payload: {
+  isDraft?: unknown;
+  state?: unknown;
+  mergeable?: unknown;
+}): PrMeta {
   if (typeof payload.isDraft !== 'boolean') {
     throw new Error('gh pr view printed an unreadable isDraft — payload untrustworthy');
   }
-  return { isDraft: payload.isDraft, state: prStateOf(payload.state) };
+  let mergeable: PrMeta['mergeable'] = 'unknown';
+  if (payload.mergeable === 'MERGEABLE') mergeable = 'mergeable';
+  else if (payload.mergeable === 'CONFLICTING') mergeable = 'conflicting';
+  return { isDraft: payload.isDraft, state: prStateOf(payload.state), mergeable };
 }
 
 /**
@@ -337,8 +347,8 @@ export function bodyOf(payload: { body?: unknown }): string {
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrChecks:       gh pr view <n> --json statusCheckRollup
  *   - getPrReviewState:  gh pr view <n> --json reviewDecision
- *   - getPrMeta:         gh pr view <n> --json isDraft,state (fail-closed on
- *                        an unreadable draft flag)
+ *   - getPrMeta:         gh pr view <n> --json isDraft,state,mergeable
+ *                        (fail-closed on an unreadable draft flag)
  *   - getPrBody:         gh pr view <n> --json body (the compose protocol's
  *                        read half)
  * The seam carries NO merge effect — the fleet run report is a
@@ -426,9 +436,9 @@ export function makeSubprocessPrEffects(
       ),
     getPrMeta: async (number) =>
       metaOf(
-        parseGhJson<{ isDraft?: unknown; state?: unknown }>(
+        parseGhJson<{ isDraft?: unknown; state?: unknown; mergeable?: unknown }>(
           await runGh(
-            ['pr', 'view', String(number), '--json', 'isDraft,state'],
+            ['pr', 'view', String(number), '--json', 'isDraft,state,mergeable'],
             repoRoot,
             timeoutMs,
           ),
