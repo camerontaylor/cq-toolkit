@@ -86,7 +86,12 @@ import type {
   WorkUnit,
 } from '../ops/sweep/planSweep.js';
 import { sweepUnitSegments } from '../ops/sweep/unit.js';
-import type { SweepUnitDispatchInput, SweepUnitSegments } from '../ops/sweep/unit.js';
+import type {
+  SweepUnitCheckConfig,
+  SweepUnitDispatchInput,
+  SweepUnitDriverConfig,
+  SweepUnitSegments,
+} from '../ops/sweep/unit.js';
 
 /**
  * The shipped plan's stable id (the discovery name and the Plan.id — also
@@ -150,6 +155,19 @@ export interface SweepPlanConfig {
   trackerBranch?: string;
   /** Tracker PR title override; default derived from the run prefix. */
   trackerTitle?: string;
+  /**
+   * The dispatch-grade fixer/probe/prompt wiring, merged into EVERY unit
+   * job's input so the plan is dispatch-ready through the central
+   * 'sweep.unit' entry without a further enrichment pass. `promptTemplate`
+   * here is one static template for the whole fleet (placeholder-
+   * substituted per unit by the op binding); a per-unit prompt is the
+   * caller's post-build enrichment. An overlay's per-unit values still win.
+   */
+  unitDispatch?: {
+    driver?: SweepUnitDriverConfig;
+    check?: SweepUnitCheckConfig;
+    promptTemplate?: string;
+  };
 }
 
 /** The planner input a config authors — the planSweep job's static input. */
@@ -279,6 +297,7 @@ export function buildSweepPlan(
     return segments;
   });
   const overlay = unitJobOverlay ?? {};
+  const dispatch = config.unitDispatch ?? {};
   const unitJobs = report.jobs.map((job, index) => {
     const unit = job.input as WorkUnit;
     // jZ59w: the default per-unit scope applies unless the overlay
@@ -298,6 +317,13 @@ export function buildSweepPlan(
         base: config.base,
         kind: resolvedSegments[index]?.kind,
         slug: resolvedSegments[index]?.slug,
+        // jeDch: the config's dispatch wiring lands on every unit job (the
+        // overlay's per-unit values still win over it).
+        ...(dispatch.driver !== undefined ? { driver: dispatch.driver } : {}),
+        ...(dispatch.check !== undefined ? { check: dispatch.check } : {}),
+        ...(dispatch.promptTemplate !== undefined
+          ? { promptTemplate: dispatch.promptTemplate }
+          : {}),
         ...overlay,
         ...(defaultScope !== undefined ? { stagePathAllowlist: defaultScope } : {}),
       },

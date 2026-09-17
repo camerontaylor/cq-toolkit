@@ -25,6 +25,7 @@ import {
   bindingsFromDispatch,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
+  pushLockOptions,
   sweepRunStateDir,
 } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitDispatchInput } from '../../../src/ops/sweep/unit.js';
@@ -228,6 +229,22 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
       mutex: { lockPath: '/locks/custom.lock', staleMs: 5000 },
     });
     expect(overridden.mutex).toEqual({ lockPath: '/locks/custom.lock', staleMs: 5000 });
+    // jeDcl: the PUSH lock preserves the caller's FULL mutex config — only
+    // the lockfile is the push's own. A shorter stale window on the push
+    // could let a waiting sibling classify the push's held lock as stale and
+    // steal it MID-PUSH.
+    expect(
+      pushLockOptions(
+        { lockPath: '/locks/custom.lock', staleMs: 45000, retries: 4, retryBaseMs: 250 },
+        12000,
+      ),
+    ).toEqual({
+      timeoutMs: 12000,
+      lockPath: '/locks/custom.lock',
+      staleMs: 45000,
+      retries: 4,
+      retryBaseMs: 250,
+    });
     // The resolved segments override rides the bindings (jTPa1).
     const renamed = bindingsFromDispatch({ ...VALID, kind: 'fix', slug: 'a-b-2' });
     expect(renamed.segments).toEqual({

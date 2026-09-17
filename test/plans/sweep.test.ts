@@ -272,6 +272,45 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(inputs.map((input) => input.slug)).toEqual(['alpha', 'beta']);
   });
 
+  test('config.unitDispatch makes the enriched jobs dispatch-ready; absent leaves them unwired (jeDch)', () => {
+    const driver = {
+      binary: ['node', '/opt/agent.mjs'],
+      provider: 'cq-e2e',
+      model: 'sweep-fake',
+      sessionsDir: '/tmp/sweep-sessions',
+    };
+    const check = {
+      adapter: 'tsc-lines' as const,
+      command: 'node',
+      args: ['scripts/check.js', '{package}'],
+      timeoutMs: 30_000,
+    };
+    const wired = buildSweepPlan(
+      { ...CONFIG, unitDispatch: { driver, check, promptTemplate: 'fix {package} at {worktree}' } },
+      twoUnitReport(),
+    );
+    const wiredInputs = wired.jobs
+      .slice(1, 3)
+      .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
+    // Dispatch-ready: driver/check/promptTemplate on EVERY unit job, and the
+    // whole input parses the registry mirror.
+    for (const input of wiredInputs) {
+      expect(input.driver).toEqual(driver);
+      expect(input.check).toEqual(check);
+      expect(input.promptTemplate).toBe('fix {package} at {worktree}');
+    }
+    // ABSENT: unchanged — no driver/check keys (the exactOptional shape).
+    const unwired = buildSweepPlan(CONFIG, twoUnitReport());
+    const unwiredInputs = unwired.jobs
+      .slice(1, 3)
+      .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
+    for (const input of unwiredInputs) {
+      expect(input.driver).toBeUndefined();
+      expect(input.check).toBeUndefined();
+      expect(input.promptTemplate).toBeUndefined();
+    }
+  });
+
   test('a hand-built report with misaligned jobs/units is plan corruption (jTPa1-era guard)', () => {
     const units: Array<WorkUnit> = [
       { package: 'alpha', fixer: 'fix', files: [] },

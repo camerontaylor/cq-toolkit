@@ -879,14 +879,18 @@ const GIT_NO_AUTO_MAINTENANCE_ENV = {
  * The shipped push leg: `git push -u origin <branch>` run in `repoRoot` with
  * an execFile ARGS ARRAY (never a shell string), bounded by the worktreeFor
  * family's default wall clock, and serialized through a git mutex on
- * `lockPath` (default `<runStateDir>/push.lock` — the same run-state dir the
- * worktree mutations' bookkeeping lives beside). Resolves void; REJECTS with
- * the captured stderr on a non-zero exit (the op folds the rejection into a
- * `failed` result naming the branch).
+ * `lockPath` (default `<runStateDir>/git-mutex.lock` — the SAME lockfile the
+ * worktree mutations serialize on). Resolves void; REJECTS with the captured
+ * stderr on a non-zero exit (the op folds the rejection into a `failed`
+ * result naming the branch).
  */
 export function makePushBranch(opts?: {
   timeoutMs?: number;
   lockPath?: string;
+  /** Mutex timings — preserved from the caller's mutex config (jeDcl): a push misclassifying a held lock on a different stale window would race a sibling's worktree mutations. */
+  staleMs?: number;
+  retries?: number;
+  retryBaseMs?: number;
 }): (repoRoot: string, branch: string) => Promise<void> {
   const git = makeGhRunner({
     bin: 'git',
@@ -894,7 +898,14 @@ export function makePushBranch(opts?: {
     env: { ...GIT_NO_AUTO_MAINTENANCE_ENV },
   });
   const mutex: GitMutex | undefined =
-    opts?.lockPath === undefined ? undefined : makeGitMutex({ lockPath: opts.lockPath });
+    opts?.lockPath === undefined
+      ? undefined
+      : makeGitMutex({
+          lockPath: opts.lockPath,
+          ...(opts.staleMs !== undefined ? { staleMs: opts.staleMs } : {}),
+          ...(opts.retries !== undefined ? { retries: opts.retries } : {}),
+          ...(opts.retryBaseMs !== undefined ? { retryBaseMs: opts.retryBaseMs } : {}),
+        });
   return async (repoRoot: string, branch: string): Promise<void> => {
     const run = async (): Promise<void> => {
       const pushed = await git(['-C', repoRoot, 'push', '-u', 'origin', branch]);
@@ -907,6 +918,32 @@ export function makePushBranch(opts?: {
       return;
     }
     await mutex.withLock(run);
+  };
+}
+
+/**
+ * The push-lock options for one dispatch (jeDcl): the caller's FULL mutex
+ * config — timings PRESERVED, `lockPath` swapped to the push lockfile — so
+ * the push's stale window matches the worktree mutex's exactly (a push
+ * holding a lock under a shorter stale window than the worktree mutex's
+ * could be misclassified stale by a waiting sibling and steal it mid-push).
+ */
+export function pushLockOptions(
+  mutex: WorktreeMutexConfig,
+  gitTimeoutMs?: number,
+): {
+  timeoutMs?: number;
+  lockPath: string;
+  staleMs?: number;
+  retries?: number;
+  retryBaseMs?: number;
+} {
+  return {
+    ...(gitTimeoutMs !== undefined ? { timeoutMs: gitTimeoutMs } : {}),
+    lockPath: mutex.lockPath,
+    ...(mutex.staleMs !== undefined ? { staleMs: mutex.staleMs } : {}),
+    ...(mutex.retries !== undefined ? { retries: mutex.retries } : {}),
+    ...(mutex.retryBaseMs !== undefined ? { retryBaseMs: mutex.retryBaseMs } : {}),
   };
 }
 
@@ -992,15 +1029,14 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     }),
     // DEFAULT TRUE: a fleet's branches must reach the remote before
     // assemblePrs; an explicit push:false opts into a local-only run. The
-    // push shares the dispatch mutex's lockfile (jVgCc) so it cannot race a
-    // sibling's worktree add/prune.
+    // push shares the dispatch mutex's lockfile AND its timings (jeDcl — a
+    // push under a shorter stale window could be misclassified stale by a
+    // waiting sibling and stolen mid-push) so it cannot race a sibling's
+    // worktree add/prune.
     ...(input.push === false
       ? {}
       : {
-          pushBranch: makePushBranch({
-            ...(input.gitTimeoutMs !== undefined ? { timeoutMs: input.gitTimeoutMs } : {}),
-            lockPath: mutex.lockPath,
-          }),
+          pushBranch: makePushBranch(pushLockOptions(mutex, input.gitTimeoutMs)),
         }),
     ...(input.stagePathAllowlist !== undefined
       ? { stagePathAllowlist: input.stagePathAllowlist }
