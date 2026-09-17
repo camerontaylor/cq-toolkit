@@ -97,6 +97,8 @@ const BEEF_SHA = 'beef4567beef4567beef4567beef4567beef4567';
 const DEAD_SHA = 'dead5678dead5678dead5678dead5678dead5678';
 /** An UNCLAIMED mid-range commit for the range-accountability pin (round 2). */
 const MID_SHA = 'abcd1234abcd1234abcd1234abcd1234abcd1234';
+/** An ANCESTOR of the before-head — the backward-move pin's tip (jLBJm P2). */
+const ANCESTOR_SHA = 'cccc1111cccc1111cccc1111cccc1111cccc1111';
 /** The served origin heads — 40-hex so the per-item gate's STRICT
  * descendant check (sha ≠ before.headSha) is exercisable. */
 const BEFORE_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -1412,6 +1414,30 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     // The replies still post (A's honest no-change answer, B's claim); the
     // resolves are withheld by the unreported range.
     expect(outcome.actionsPosted).toBe(2);
+  });
+
+  test('a BACKWARD head move with an empty accounted range blocks publication (jLBJm P2)', async () => {
+    // A worker `git reset` to an ANCESTOR of the before-head moves HEAD
+    // without adding any commit: `rev-list <before>..HEAD` comes back
+    // EMPTY, and an empty accounted range is UNACCOUNTED — the honest
+    // changed:false reply must not publish (or record) a round over a
+    // moved-backward tree.
+    const world = defaultWorld();
+    world.commitMessages = {};
+    world.worktreeAdvancesAt = 2;
+    world.worktreeAdvancesTo = ANCESTOR_SHA; // an ancestor of BEFORE_SHA
+    world.revListShas = []; // `rev-list <before>..HEAD` is empty behind the base
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(false, 'Nothing to change.', []))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual(
+      `unreported-commit: worktree head moved to ${ANCESTOR_SHA} but ${BEFORE_SHA}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
+    );
+    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
+    expect(outcome.actionsPosted).toBe(1); // reply-only; the resolve is withheld
   });
 
   test('range accountability: A claims+verifies, B claims+verifies → the whole range is accounted for and publishes', async () => {

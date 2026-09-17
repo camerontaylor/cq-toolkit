@@ -760,6 +760,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   //   - MID-RANGE unreported work is caught (round-2 major: worker A
   //     commits unreported, worker B commits + claims on top — a tip-only
   //     check published A's commit silently);
+  //   - a headMoved with an EMPTY accounted range is UNACCOUNTED (jLBJm P2:
+  //     a backward `git reset` to an ancestor adds no commit in
+  //     base..HEAD — reading that emptiness as "nothing added" would
+  //     publish a moved-backward tree);
   //   - a rev-list FAILURE is fail-closed: an unknown range publishes
   //     nothing.
   // Rows claiming changed:true whose commits fail verification keep the
@@ -808,12 +812,22 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           .filter((line) => line !== '')
       : [];
   const unaccounted = rangeShas.filter((sha) => !verifiedClaimed.has(sha));
-  const unreportedCommit = headMoved && (addedRange.code !== 0 || unaccounted.length > 0);
+  // An EMPTY accounted range with a moved head is UNACCOUNTED (jLBJm P2):
+  // `rev-list <before>..HEAD` returns nothing when HEAD moved BACKWARD (a
+  // worker `git reset` to an ancestor) or outside the base..HEAD span —
+  // reading that emptiness as "nothing added" would publish a moved-backward
+  // tree and record the round over unreported movement.
+  const unreportedCommit =
+    headMoved && (addedRange.code !== 0 || rangeShas.length === 0 || unaccounted.length > 0);
   if (unreportedCommit) {
     if (addedRange.code !== 0) {
       // Fail-closed: the added range is unknown, so nothing publishes.
       reasons.push(
         `unreported-commit: the added range ${before.headSha}..HEAD could not be enumerated (rev-list exit ${String(addedRange.code)}) — publication withheld fail-closed`,
+      );
+    } else if (rangeShas.length === 0) {
+      reasons.push(
+        `unreported-commit: worktree head moved to ${headAfter.stdout.trim()} but ${before.headSha}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
       );
     } else {
       // Claimed-but-failed commits first: the reason names the failing

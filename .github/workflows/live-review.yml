@@ -3,6 +3,10 @@
 # the run seeds a real scratch repo, opens a real PR, and posts real review
 # replies/resolutions with the caller's GH_TOKEN — nothing automatic may
 # fire it. (Mirrors .github/workflows/live-drivers.yml's discipline.)
+# PROVENANCE: a repo-owned CI workflow modeled on live-drivers.yml — NOT
+# instantiated from policy/templates (that set owns the merge-queue doctrine
+# workflows; this repo's other CI workflows — ci.yml, denylist.yml,
+# pack-audit.yml, install-matrix.yml — are likewise repo-owned).
 #
 # SECRETS: this file carries NAMES only. GH_TOKEN must be a repo Actions
 # secret with repo scope on the dispatching user's account (it creates
