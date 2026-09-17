@@ -14,12 +14,11 @@
 //   - META READS FIRST (lifecycle/mergeability dominance, codex jMJpD): a
 //     draft, a non-open state, or merge conflicts is `blocked` regardless
 //     of checks/review — green evidence on an unmergeable PR is a
-//     fabricated ready. `mergeable: 'unknown'` FAILS CLOSED (D2
-//     adjudication jNf_h): GitHub has not computed mergeability yet, so
-//     `ready` there would be a verdict ahead of evidence — the row is
-//     `unknown` naming it. mergeStateStatus UNKNOWN stays unknown-tolerant
-//     (the checks/review halves already cover what UNSTABLE/DRAFT would
-//     say).
+//     fabricated ready. BOTH `mergeable: 'unknown'` AND
+//     `mergeStateStatus: 'unknown'` FAIL CLOSED (D2 adjudications jNf_h +
+//     jOEDe): GitHub has not determined mergeability yet, so `ready` there
+//     would be a verdict ahead of evidence — the row is `unknown` naming
+//     the half that is not yet computed.
 //   - DRAFT DOMINATES: a draft PR is `blocked` regardless of checks/review
 //     — GitHub cannot merge a draft, however green its evidence.
 //   - REVIEW_REQUIRED is not `none`: a demanded-but-absent review is
@@ -130,19 +129,19 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
       const observedChecks = checks.state;
       const observedReview = review.state;
       // META READS FIRST (PR-165 r3 codex jMJpD + final jNTyP; mergeable
-      // unknown fail-closed per D2 adjudication jNf_h): the lifecycle and
-      // mergeability halves dominate the fold — a draft, a non-open PR, a
-      // conflicting PR, or a protection-blocked/behind merge state is
-      // `blocked` however green its checks and review, and the evidence
-      // halves still show on the row. DRAFT first (the fleet's own PRs open
-      // as drafts and GitHub cannot merge a draft); then STATE (a
-      // closed/merged PR is history, not a merge candidate); then
-      // MERGEABILITY (conflicts). `mergeable: 'unknown'` means GitHub has
-      // NOT yet determined mergeability — calling that ready would be a
-      // verdict ahead of evidence, so it is `unknown` (jNf_h), NOT
-      // tolerated; only a settled `mergeable` continues to MERGE STATE
-      // STATUS, whose UNKNOWN word remains unknown-tolerant (the checks and
-      // review halves already cover what UNSTABLE/DRAFT would say).
+      // AND mergeStateStatus unknown fail-closed per D2 adjudications
+      // jNf_h/jOEDe): the lifecycle and mergeability halves dominate the
+      // fold — a draft, a non-open PR, a conflicting PR, or a
+      // protection-blocked/behind merge state is `blocked` however green
+      // its checks and review, and the evidence halves still show on the
+      // row. DRAFT first (the fleet's own PRs open as drafts and GitHub
+      // cannot merge a draft); then STATE (a closed/merged PR is history,
+      // not a merge candidate); then MERGEABILITY (conflicts). BOTH
+      // `mergeable: 'unknown'` AND `mergeStateStatus: 'unknown'` mean
+      // GitHub has not determined mergeability — calling that ready would
+      // be a verdict ahead of evidence, so both are `unknown` (jNf_h,
+      // jOEDe), NOT tolerated; only a settled CLEAN merge state continues
+      // to the checks/review halves.
       if (meta.isDraft) {
         rows.push({
           name: pkg.name,
@@ -195,6 +194,19 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
           checks: observedChecks,
           review: observedReview,
           reason: `merge state: ${meta.mergeStateStatus} — branch protection requirement`,
+        });
+        continue;
+      }
+      if (meta.mergeStateStatus === 'unknown') {
+        // jOEDe: an undetermined merge state cannot support a merge-ready
+        // verdict either — fail closed exactly like `mergeable: 'unknown'`.
+        rows.push({
+          name: pkg.name,
+          number: pkg.number,
+          readiness: 'unknown',
+          checks: observedChecks,
+          review: observedReview,
+          reason: 'merge state not yet determined by GitHub',
         });
         continue;
       }

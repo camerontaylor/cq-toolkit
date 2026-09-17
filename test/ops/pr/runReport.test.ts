@@ -447,20 +447,22 @@ describe('lifecycle and mergeability dominate the fold', () => {
     expect(report.rows[0]).toMatchObject({ readiness: 'ready' });
   });
 
-  test('an UNKNOWN merge state is unknown-tolerant — but a failing checks half still blocks it', async () => {
-    const fake = fakeGh({
-      checks: new Map([[11, { state: 'fail', failing: ['build'] }]]),
-      reviews: new Map([[11, { state: 'approved' }]]),
-      statuses: new Map([[11, 'unknown']]),
-    });
+  test('an UNKNOWN merge state FAILS CLOSED → unknown, reason naming the undetermined state (jOEDe)', async () => {
+    // Same doctrine as mergeable-unknown (jNf_h): GitHub's undetermined
+    // merge state cannot support a merge-ready verdict, green evidence or
+    // not.
+    const fake = fakeGh({ ...greenSeed, statuses: new Map([[11, 'unknown']]) });
     const report = await okReport(
       makeRunReport(fake.gh),
       inputOf({ packages: [{ name: 'core', number: 11 }] }),
     );
     expect(report.rows[0]).toMatchObject({
-      readiness: 'blocked',
-      reason: 'checks failing (build)',
+      readiness: 'unknown',
+      checks: 'pass',
+      review: 'approved',
+      reason: 'merge state not yet determined by GitHub',
     });
+    expect(report.counts).toEqual({ ready: 0, blocked: 0, unknown: 1 });
   });
 });
 

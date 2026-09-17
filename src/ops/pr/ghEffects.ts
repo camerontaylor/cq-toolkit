@@ -316,7 +316,8 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
  * guard treats as non-open); `mergeable` maps gh's MERGEABLE/CONFLICTING
  * words; `mergeStateStatus` maps CLEAN/BLOCKED/BEHIND (DIRTY folds to
  * `blocked` — it IS a conflicts verdict) with UNSTABLE/DRAFT/UNKNOWN and
- * missing keys → `unknown`, which the fold tolerates.
+ * missing keys → `unknown`, which the fold FAILS CLOSED on (jOEDe: an
+ * undetermined merge state cannot support a ready verdict).
  */
 export function metaOf(payload: {
   isDraft?: unknown;
@@ -341,10 +342,10 @@ export function metaOf(payload: {
 /**
  * gh's mergeStateStatus word → the seam's {@link PrMergeStateStatus}
  * (final jNTyP): CLEAN → clean, BLOCKED → blocked, BEHIND → behind, DIRTY →
- * blocked (it is a conflicts verdict), and EVERYTHING else — UNSTABLE
- * (covered by the checks half), DRAFT (covered by the draft half),
- * UNKNOWN, missing keys, unrecognized words — → `unknown`, which the fold
- * tolerates rather than blocking on evidence it cannot read.
+ * blocked (it is a conflicts verdict), and EVERYTHING else — UNSTABLE,
+ * DRAFT, UNKNOWN, missing keys, unrecognized words — → `unknown`. The fold
+ * FAILS CLOSED on that `unknown` (jOEDe): an undetermined merge state can
+ * never support a ready verdict.
  */
 export function mergeStateStatusOf(word: unknown): PrMeta['mergeStateStatus'] {
   if (word === 'CLEAN') return 'clean';
