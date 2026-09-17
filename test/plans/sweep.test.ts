@@ -38,7 +38,12 @@ import type { PlanSweepReport, WorkUnit } from '../../src/ops/sweep/planSweep.js
 import { SWEEP_UNIT_OP } from '../../src/ops/sweep/planSweep.js';
 import { registry as sweepRegistry } from '../../src/ops/sweep/registry.js';
 import { makeSweepUnitOp, sweepUnitSegments } from '../../src/ops/sweep/unit.js';
-import { buildSweepPlan, SWEEP_PLAN_ID, type SweepPlanConfig } from '../../src/plans/sweep.js';
+import {
+  buildSweepPlan,
+  SWEEP_PLAN_ID,
+  SweepUnitJobOverlay,
+  type SweepPlanConfig,
+} from '../../src/plans/sweep.js';
 import {
   buildTestFixPlan,
   TEST_FIX_FIXER,
@@ -204,6 +209,67 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(() => buildTestFixPlan(CONFIG, corrupted)).toThrow(
       /embed inputs outside the test-only set/,
     );
+  });
+
+  test('the suffix loop reserves FINAL slugs: natural scope-foo-2 cannot be collided (jcqEj)', () => {
+    // The finder's exact fixture: '@scope/foo' normalizes to 'scope-foo',
+    // and BOTH 'scope-foo' and 'scope-foo-2' are NATURAL packages. The old
+    // seen-inputs ordinal gave the third unit 'scope-foo-2' — colliding with
+    // the second. The reserved-set loop keeps suffixing until free.
+    const units: Array<WorkUnit> = [
+      { package: '@scope/foo', fixer: 'fix', files: [] },
+      { package: 'scope-foo', fixer: 'fix', files: [] },
+      { package: 'scope-foo-2', fixer: 'fix', files: [] },
+    ];
+    const report: PlanSweepReport = {
+      jobs: units.map((unit, index) => ({
+        id: `sweep-natural-${index}`,
+        op: SWEEP_UNIT_OP,
+        input: unit,
+        dependsOn: [],
+      })),
+      units,
+      suppressed: [],
+      needsHuman: [],
+    };
+    const plan = buildSweepPlan(CONFIG, report);
+    const inputs = plan.jobs
+      .slice(1, 4)
+      .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
+    const slugs = inputs.map((input) => input.slug);
+    // Each unit suffixes its OWN base when taken — deterministic, traceable,
+    // and all three DISTINCT (the old seen-inputs ordinal handed 'scope-foo-2'
+    // to BOTH the second and the third unit).
+    expect(slugs).toEqual(['scope-foo', 'scope-foo-2', 'scope-foo-2-2']);
+    expect(new Set(slugs).size).toBe(3);
+    // The assembler accepts all three DISTINCT branches.
+    const assemble = AssemblePrsInputSchema.parse((plan.jobs[4] as { input: unknown }).input);
+    expect(assemble.packages.map((pkg) => pkg.branch)).toEqual([
+      'cq/09-16a/fix/scope-foo',
+      'cq/09-16a/fix/scope-foo-2',
+      'cq/09-16a/fix/scope-foo-2-2',
+    ]);
+  });
+
+  test('the overlay cannot override the builder-owned kind/slug (jcqEl)', () => {
+    // TYPE pin: kind/slug (and package/fixer/files) are the collision
+    // resolution's and the planner's to set — an overlay carrying them is a
+    // compile error (excess property against the Omit type).
+    const clean: SweepUnitJobOverlay = { push: false };
+    expect(clean.push).toBe(false);
+    const overridden: SweepUnitJobOverlay = {
+      push: false,
+      // @ts-expect-error — kind is builder-owned (jcqEl)
+      kind: 'overridden',
+    };
+    void overridden;
+    // RUNTIME pin: the enrichment ships the RESOLVED segments regardless.
+    const plan = buildSweepPlan(CONFIG, twoUnitReport(), SWEEP_PLAN_ID, { push: false });
+    const inputs = plan.jobs
+      .slice(1, 3)
+      .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
+    expect(inputs.map((input) => input.kind)).toEqual(['fix', 'fix']);
+    expect(inputs.map((input) => input.slug)).toEqual(['alpha', 'beta']);
   });
 
   test('a hand-built report with misaligned jobs/units is plan corruption (jTPa1-era guard)', () => {

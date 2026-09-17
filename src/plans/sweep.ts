@@ -71,8 +71,9 @@
 // one derivation shared by the builder (assemble input) and the unit op
 // (worktreeFor input), and the builder ships the RESOLVED kind/slug on each
 // enriched unit job so derivation collisions (jTPa1: `@a/b` vs `a.b` both
-// normalize to `a-b`) are disambiguuated ONCE — a deterministic `-2` suffix
-// in unit order, the planner's job-id idiom — and every surface (branch,
+// normalize to `a-b`) are resolved ONCE — a reserved-set suffix loop
+// (`-2`, `-3`, … in unit order) over every FINAL slug, so a suffix can never
+// collide with a NATURAL package slug (jcqEj) — and every surface (branch,
 // worktree, committed marker, assembler) agrees.
 import type { AssemblePrsInput } from '../ops/pr/assemblePrs.js';
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
@@ -104,12 +105,24 @@ export const SWEEP_PLAN_JOB_IDS = {
 /**
  * The unit-job knobs a caller layers OVER the run context the builder
  * enriches with — everything that makes an enriched unit job fully
- * dispatchable (see SweepUnitDispatchInput).
+ * dispatchable (see SweepUnitDispatchInput). `kind`, `slug` and `package`
+ * are deliberately EXCLUDED: the segments are the builder's collision
+ * resolution (jcqEl) — an overlay overriding them would desync the unit's
+ * branch/worktree/marker from the assembler's resolvedSegments — and the
+ * unit identity names the work the planner selected.
  */
 export type SweepUnitJobOverlay = Partial<
   Omit<
     SweepUnitDispatchInput,
-    'repoRoot' | 'worktreesDir' | 'runPrefix' | 'base' | 'package' | 'fixer' | 'files'
+    | 'repoRoot'
+    | 'worktreesDir'
+    | 'runPrefix'
+    | 'base'
+    | 'package'
+    | 'fixer'
+    | 'files'
+    | 'kind'
+    | 'slug'
   >
 >;
 
@@ -234,10 +247,13 @@ export function buildSweepPlan(
   unitJobOverlay?: SweepUnitJobOverlay,
 ): Plan {
   // jTPa1: resolve each unit's segments ONCE, disambiguating normalization
-  // collisions deterministically (a `-2` suffix in unit order — the
-  // planner's job-id idiom) and shipping the RESOLVED kind/slug on the
-  // enriched job so the op's branch, worktree, and committed marker all
-  // agree with the assembler.
+  // collisions deterministically — a RESERVED-SET loop over every FINAL slug
+  // (jcqEj): keep suffixing `-2`, `-3`, … until a slug is actually free, so
+  // the suffix cannot collide with a NATURAL package slug (units
+  // `@scope/foo`, `scope-foo`, `scope-foo-2` resolve to `scope-foo`,
+  // `scope-foo-2`, `scope-foo-3` — all distinct). The RESOLVED kind/slug
+  // ships on the enriched job so the op's branch, worktree, and committed
+  // marker all agree with the assembler.
   // Alignment guard for hand-built reports: planSweep emits EXACTLY one job
   // per unit (same loop, index-aligned) — a report whose jobs and units
   // diverge would silently mis-resolve segments or drop units below.
@@ -246,19 +262,21 @@ export function buildSweepPlan(
       `buildSweepPlan: the phase-A report is misaligned — ${String(report.jobs.length)} job(s) vs ${String(report.units.length)} unit(s); planSweep emits exactly one job per unit`,
     );
   }
-  const usedSlugs = new Map<string, number>();
+  const reserved = new Set<string>(); // `${kind}/${slug}` actually handed out
   const resolvedSegments: SweepUnitSegments[] = report.units.map((unit) => {
     const base = sweepUnitSegments(config.runPrefix, unit);
-    const key = `${base.kind}/${base.slug}`;
-    const ordinal = usedSlugs.get(key) ?? 0;
-    usedSlugs.set(key, ordinal + 1);
-    return ordinal === 0
-      ? base
-      : {
-          kind: base.kind,
-          slug: `${base.slug}-${ordinal + 1}`,
-          branch: `${config.runPrefix}/${base.kind}/${base.slug}-${ordinal + 1}`,
-        };
+    let segments = base;
+    let ordinal = 1;
+    while (reserved.has(`${segments.kind}/${segments.slug}`)) {
+      ordinal += 1;
+      segments = {
+        kind: base.kind,
+        slug: `${base.slug}-${ordinal}`,
+        branch: `${config.runPrefix}/${base.kind}/${base.slug}-${ordinal}`,
+      };
+    }
+    reserved.add(`${segments.kind}/${segments.slug}`);
+    return segments;
   });
   const overlay = unitJobOverlay ?? {};
   const unitJobs = report.jobs.map((job, index) => {
