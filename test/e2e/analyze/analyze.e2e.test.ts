@@ -276,6 +276,23 @@ describe('end-to-end on a fixture repo (the acceptance check)', () => {
     { timeout: 180_000 },
     () => runAnalyzeChain('real'),
   );
+
+  test('ANALYZE_E2E_REQUIRE_REAL=1 enforcement: the real ast-grep binary must be installed', () => {
+    // OPT-IN ENFORCEMENT GUARD for the real-binary acceptance half above:
+    // that leg is runIf(available), so CI — which does not install
+    // ast-grep — silently skips it. A CI job that INSTALLS ast-grep can set
+    // ANALYZE_E2E_REQUIRE_REAL=1 to turn that silent skip into a loud
+    // failure here. Setting the variable belongs in the CI job that
+    // installs the binary; the workflows are lane-i-owned, so the variable
+    // setup is deliberately NOT edited in this change (recorded for the
+    // conductor's STATUS).
+    if (process.env.ANALYZE_E2E_REQUIRE_REAL !== '1' || AST_GREP_AVAILABLE) {
+      return; // not enforcing, or the binary IS present — nothing to guard
+    }
+    throw new Error(
+      "ANALYZE_E2E_REQUIRE_REAL=1 but no 'ast-grep' binary is on PATH — the REAL-binary acceptance half (the end-to-end codemod on the real engine) is being silently skipped; install ast-grep in the CI job that sets this variable",
+    );
+  });
 });
 
 describe('the quarantine lane in miniature (end to end)', () => {

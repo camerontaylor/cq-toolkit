@@ -61,7 +61,13 @@ export const PLAYBOOK_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  * The verifier command: the gates {@link CheckCommand} shape, reused
  * verbatim (module header). The consumer points it at whatever command
  * proves the playbook's remediation held (exit 0 = held, per
- * playbooks/verifier.ts).
+ * playbooks/verifier.ts). AUTHORED-OPTIONAL, DISPATCH-DEFAULTED: both
+ * optional fields may be omitted in the asset, and the dispatch op
+ * (playbooks/registry.ts) fills them at the OP boundary when absent —
+ * `cwd` defaults to the analysis `dir` (an omitted cwd would inherit the
+ * dispatching process's cwd, and exit 0 against the wrong tree is a
+ * vacuous pass), `timeoutMs` to the gates' 600_000ms op-boundary default.
+ * An authored value passes through verbatim.
  */
 export type VerifierCommand = CheckCommand;
 
@@ -95,7 +101,12 @@ export interface Playbook {
    * only). Engine semantics are validated at dispatch, not here.
    */
   rule: Record<string, unknown>;
-  /** The command that decides whether the playbook REMAINS dispatchable. */
+  /**
+   * The command that decides whether the playbook REMAINS dispatchable.
+   * Its `cwd`/`timeoutMs` are authored-optional; dispatch defaults an
+   * omitted `cwd` to the analysis dir and an omitted `timeoutMs` to
+   * 600_000ms (see {@link VerifierCommand}).
+   */
   verifier: { command: VerifierCommand };
 }
 

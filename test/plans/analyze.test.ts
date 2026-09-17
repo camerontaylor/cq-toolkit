@@ -12,15 +12,23 @@
 //   4. REMEDIATION IS NOT IN THE PLAN (UC §1 row 9): no job names any
 //      remediation op — the approval gate stays outside the plan runner's
 //      autonomous path.
+//   5. THE FLOOR'S HONESTY, THROUGH THE REAL RUNNER: the shipped floor run
+//      verbatim through the governed runPlan seam (the review-loop
+//      precedent) terminates at the collect job with the honest no-input
+//      failure, the cluster/report jobs end non-done (blocked), and
+//      NOTHING is written into the working directory.
+import { readdir } from 'node:fs/promises';
 import { describe, expect, test } from 'vitest';
+import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
+import type { OpRegistryEntry } from '../../src/kernel/types.js';
 import {
   ClusterErrorsInputSchema,
   CollectFailuresInputSchema,
   RenderAnalysisReportInputSchema,
   registry as analyzeRegistry,
 } from '../../src/ops/analyze/registry.js';
-import { CheckRunnerInputSchema } from '../../src/ops/gates/registry.js';
+import { CheckRunnerInputSchema, registry as gatesRegistry } from '../../src/ops/gates/registry.js';
 import {
   ANALYZE_JOB_IDS,
   ANALYZE_PLAN_ID,
@@ -154,4 +162,43 @@ describe('the shipped analyze plan entry (the discoverable floor)', () => {
     expect(typeof input.command.command).toBe('string');
     expect(input.command.command.length).toBeGreaterThan(0);
   });
+
+  // The floor's central honesty claim, pinned through the REAL runner and
+  // the REAL ops (the governed runPlan seam, the review-loop precedent):
+  // run VERBATIM, the floor's collect job fails with the honest no-input
+  // policy ('aggregating zero runs would fabricate a clean FailureSet'),
+  // the cluster/report jobs end non-done (blocked on the failed
+  // dependency), and NOTHING is written into the working directory.
+  test('the floor run verbatim through runPlan terminates at collect and writes NOTHING (the honesty pin)', async () => {
+    const view: OpRegistryView = {
+      get: (name) => {
+        const entry = [...gatesRegistry, ...analyzeRegistry].find(
+          (candidate) => candidate.name === name,
+        );
+        return entry as OpRegistryEntry<never, never> | undefined;
+      },
+    };
+    const floor = await plan.importer();
+    const report = await runPlan(floor, { concurrency: 1, stopOnError: true }, view);
+    const byId = new Map(report.jobs.map((job) => [job.jobId, job]));
+    // The probe (the placeholder tsc over this repo, which the static gate
+    // keeps clean) completes ok; collect then fails on the empty-sets
+    // policy — the runner's honest-stop keeps the rest from running.
+    const collect = byId.get(ANALYZE_JOB_IDS.collect);
+    expect(collect?.result.status).toBe('failed');
+    if (collect?.result.status === 'failed') {
+      expect(collect.result.error).toContain('no input sets');
+    }
+    for (const jobId of [ANALYZE_JOB_IDS.cluster, ANALYZE_JOB_IDS.report]) {
+      const row = byId.get(jobId);
+      expect(row?.result.status).not.toBe('ok');
+      expect(row?.result.status).toBe('failed');
+      if (row?.result.status === 'failed') {
+        expect(row.result.error).toContain('blocked:');
+      }
+    }
+    // And nothing was rendered: no report pair in the working directory.
+    const entries = await readdir(process.cwd());
+    expect(entries.filter((name) => name.startsWith('analysis-'))).toEqual([]);
+  }, 180_000);
 });

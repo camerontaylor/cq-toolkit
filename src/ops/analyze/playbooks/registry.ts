@@ -305,20 +305,25 @@ export function makePlaybookDispatchOp(
     }
     const files = applied.files;
     // ---- 4. The playbook's own verifier decides the outcome.
-    // OP-BOUNDARY TIMEOUT DEFAULT (the gates registry's op-boundary
-    // precedent): the authored format keeps the verifier command's
-    // `timeoutMs` OPTIONAL at the LIBRARY level (playbooks/format.ts — a
-    // persisted consumer asset, not an op input), so a JSON-dispatched
-    // verifier whose playbook omits the timeout would otherwise run
-    // UNCAPPED. The dispatch op applies the gates' 600_000ms default HERE,
-    // at the op boundary: an authored explicit timeout passes through
-    // verbatim, an omitted one is capped at the same 10-minute default
-    // every gates op dispatch gets.
+    // OP-BOUNDARY DEFAULTS for the two authored-optional command fields
+    // (both documented on the format's VerifierCommand — the asset keeps
+    // them optional at the LIBRARY level, playbooks/format.ts):
+    //   - timeoutMs: the gates registry's op-boundary precedent — a
+    //     JSON-dispatched verifier whose playbook omits the timeout would
+    //     otherwise run UNCAPPED; the gates' 600_000ms default applies HERE.
+    //   - cwd: an authored command without `cwd` would inherit the
+    //     DISPATCHING process's cwd, so a verifier could exit 0 against the
+    //     wrong tree — a VACUOUS PASS. The dispatch defaults an omitted cwd
+    //     to the analysis `dir` (the containment root the remediation just
+    //     rewrote); an authored cwd passes through verbatim.
     const authoredCommand = playbook.verifier.command;
-    const verifierCommand: VerifierCommand =
-      authoredCommand.timeoutMs === undefined
-        ? { ...authoredCommand, timeoutMs: DISPATCH_VERIFIER_TIMEOUT_MS }
-        : authoredCommand;
+    const verifierCommand: VerifierCommand = {
+      ...authoredCommand,
+      ...(authoredCommand.timeoutMs === undefined
+        ? { timeoutMs: DISPATCH_VERIFIER_TIMEOUT_MS }
+        : {}),
+      ...(authoredCommand.cwd === undefined ? { cwd: input.dir } : {}),
+    };
     const verifier = await makePlaybookVerifier(deps.run)(verifierCommand);
     // The trace record carries the file rows in the exported SHAPE — the
     // engine's per-file diffs stay in the report, never bloat a trace line.
