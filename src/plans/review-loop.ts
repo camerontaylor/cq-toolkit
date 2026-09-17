@@ -532,9 +532,10 @@ type CommitVerificationFailure =
  *     is the exact tree the stage-5 publish pushed) ('not-ancestor');
  *   - PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
  *     worktree, so a sibling's strict-new commit would otherwise satisfy
- *     this item's gate — the commit MESSAGE must name THIS item's id, the
- *     shipped prompt requires it verbatim in the commit subject
- *     ('attribution-missing').
+ *     this item's gate — the commit MESSAGE must name THIS item's id at a
+ *     NON-DIGIT boundary (a numeric comment id must not be satisfied by a
+ *     message naming a superstring of it), the shipped prompt requires it
+ *     verbatim in the commit subject ('attribution-missing').
  *
  * EXPORTED for the unit lane's stage pins: `not-40-hex` is unreachable
  * through the loop (parseFixOutput already rejects non-40-hex claims), so
@@ -567,10 +568,29 @@ export const commitVerificationFailure = async (
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this
-  // item's gate. The commit MESSAGE must name THIS item's id — the shipped
-  // prompt requires it verbatim in the commit subject.
+  // item's gate. The commit MESSAGE must name THIS item's id at a
+  // NON-DIGIT boundary — the shipped prompt requires it verbatim in the
+  // commit subject — because a numeric comment id ('123') is trivially
+  // satisfied by a message naming '1234' under a raw substring read.
   const message = await git(['-C', worktreePath, 'log', '-1', '--format=%B', sha]);
-  return message.code === 0 && message.stdout.includes(itemId) ? null : 'attribution-missing';
+  return message.code === 0 && attributionMatches(message.stdout, itemId)
+    ? null
+    : 'attribution-missing';
+};
+
+/**
+ * The per-item attribution match (round 3 low): the item id must appear in
+ * the commit message at a NON-DIGIT boundary — `(^|[^0-9])<id>([^0-9]|$)`.
+ * Thread ids are PRRT_-distinctive and match trivially; NUMERIC comment ids
+ * need the boundary ('fix 123: apple' attributes item 123, while 'fix
+ * 1234: apple' must NOT attribute it — a raw substring read would). The id
+ * is regex-escaped before interpolation; the match is line-agnostic (the
+ * boundary classes never cross the id, so an id mid-line still matches
+ * against its immediate neighbors).
+ */
+const attributionMatches = (message: string, itemId: string): boolean => {
+  const escaped = itemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^0-9])${escaped}([^0-9]|$)`).test(message);
 };
 
 /**
@@ -579,6 +599,15 @@ export const commitVerificationFailure = async (
  * outcome degrades to needs-human; nothing here invents progress or hides
  * a thread that was not verifiably addressed. Unexpected throws propagate —
  * a bug must look like one (I5).
+ *
+ * DEPLOYMENT REQUIREMENT (round-3 adjudication): configure `responderLogin`
+ * as the loop's own identity. The two self-reply suppressions split by
+ * surface: THREAD-kind feedback rides RESPONDER AUTHORSHIP (classify row
+ * 5, the thread last-word rule — with responderLogin configured, the loop
+ * never re-answers a thread it already replied to); COMMENT-kind feedback
+ * (top-level issue comments, which cannot thread) rides the reply
+ * SIGNATURE — a different surface needing a different mechanism, see
+ * {@link replySignature}.
  */
 export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> {
   const reasons: string[] = [];
@@ -706,6 +735,13 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     headBefore.code === 0 &&
     headAfter.code === 0 &&
     headBefore.stdout.trim() !== headAfter.stdout.trim();
+  // FAIL-CLOSED HEAD READ (round 3): an unreadable post-run HEAD means the
+  // added range cannot be bounded — publication is withheld with its own
+  // reason and the run degrades to needs-human, never fail-open.
+  const headUnreadable = headAfter.code !== 0;
+  if (headUnreadable) {
+    reasons.push(`worktree head unreadable: ${headAfter.stderr.trim() || 'rev-parse failed'}`);
+  }
   // RANGE-ACCOUNTABILITY VERIFICATION (round 2; revises drill 6's tip-only
   // rule): every ok row's claimed commits are verified HERE, through the
   // SAME per-item gate the resolve uses (commitVerificationFailure — 40-hex,
@@ -840,7 +876,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   if (dirtyWorktree) {
     reasons.push('dirty-worktree');
   }
-  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree;
+  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree && !headUnreadable;
   if (commits.length > 0 && publishable) {
     const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
     if (push.code !== 0) {
@@ -934,7 +970,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // (the reply still posts — the summary reports what the worker
       // claimed), and the withheld resolve is recorded as a per-item
       // failure reason.
-      if (publishWithheld || unreportedCommit || dirtyWorktree) {
+      if (publishWithheld || unreportedCommit || dirtyWorktree || headUnreadable) {
         // Publication withheld (a sibling failed), an unreported commit, or
         // a dirty worktree: nothing is resolved — the thread stays open
         // regardless of local state.

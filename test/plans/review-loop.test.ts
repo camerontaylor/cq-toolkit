@@ -144,6 +144,13 @@ interface LoopWorld {
   revListShas?: string[];
   /** Shas whose `<sha>..HEAD` ancestry the fake git REFUSES (drives the not-ancestor stage). */
   ancestorFails?: string[];
+  /**
+   * Worktree-path `rev-parse HEAD` reads after this count FAIL (round 3:
+   * the loop's post-run read is read 3 — read 1 is resolvePrWorktree's
+   * candidate check, read 2 the pre-fix boundary). Drives the fail-closed
+   * head-unreadable gate without disturbing worktree resolution.
+   */
+  headReadFailsAfter?: number;
   /** When true, `status --porcelain` reports a dirty worktree. */
   dirty?: boolean;
   /** GraphQL thread nodes served to fetchReviewState. */
@@ -377,8 +384,16 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
     if (rest[0] === 'rev-parse' && rest[1] === 'HEAD') {
       if (args[1] === worktreePath) {
         // The loop's per-stage worktree HEAD reads (slice 9 item 2): the
-        // head advances after the configured read count.
+        // head advances after the configured read count. Reads after
+        // headReadFailsAfter FAIL (round 3: the loop's post-run read is
+        // read 3 — drives the fail-closed head-unreadable gate).
         worktreeHeadReads += 1;
+        if (
+          world.headReadFailsAfter !== undefined &&
+          worktreeHeadReads > world.headReadFailsAfter
+        ) {
+          return { code: 128, stdout: '', stderr: 'fatal: unreadable HEAD' };
+        }
         const advanced =
           world.worktreeAdvancesAt !== undefined && worktreeHeadReads > world.worktreeAdvancesAt;
         return ok(`${advanced ? (world.worktreeAdvancesTo ?? '4444'.repeat(10)) : SHA}\n`);
@@ -1347,6 +1362,25 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     );
   });
 
+  test('an unreadable post-run HEAD → fail-closed: head-unreadable reason, no publish (round 3)', async () => {
+    // The range gate cannot bound an unreadable HEAD — publication must be
+    // withheld with its OWN reason, never fail-open (round 3). The loop's
+    // post-run read is read 3 (reads 1-2 are resolution + the pre-fix
+    // boundary); the claimed commit still verifies, so this isolates the
+    // head-read gate.
+    const world = defaultWorld();
+    world.headReadFailsAfter = 2;
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [NEW_SHA]))],
+      ghLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual('worktree head unreadable: fatal: unreadable HEAD');
+    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
+    expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
+  });
+
   test('range accountability (round 2): an unclaimed MID-RANGE commit blocks publication and names the sha', async () => {
     // The regression the tip-only rule missed (round-2 major): worker A
     // commits unreported (claims changed:false — it asserts nothing), worker
@@ -1558,6 +1592,42 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
     // attribution-missing — the message must name THIS item.
     expect(await gate(attributedGit, NEW_SHA, 'T1')).toBeNull();
     expect(await gate(attributedGit, NEW_SHA, 'T2')).toBe('attribution-missing');
+  });
+
+  test('numeric item ids match at NON-DIGIT boundaries (round 3 low)', async () => {
+    // A numeric comment id must not be satisfied by a message naming a
+    // digit-superstring ('1234') or a digit-prefixed neighbor ('9123') —
+    // the boundary classes (^|[^0-9]) … ([^0-9]|$) refuse both.
+    const exact = fakeGit(
+      {
+        ...defaultWorld(),
+        knownShas: [SHA, NEW_SHA],
+        commitMessages: { [NEW_SHA]: 'fix 123: apple' },
+      },
+      [],
+      '/wt',
+    );
+    const superstring = fakeGit(
+      {
+        ...defaultWorld(),
+        knownShas: [SHA, NEW_SHA],
+        commitMessages: { [NEW_SHA]: 'fix 1234: apple' },
+      },
+      [],
+      '/wt',
+    );
+    const prefixed = fakeGit(
+      {
+        ...defaultWorld(),
+        knownShas: [SHA, NEW_SHA],
+        commitMessages: { [NEW_SHA]: 'fix 9123: apple' },
+      },
+      [],
+      '/wt',
+    );
+    expect(await gate(exact, NEW_SHA, '123')).toBeNull();
+    expect(await gate(superstring, NEW_SHA, '123')).toBe('attribution-missing');
+    expect(await gate(prefixed, NEW_SHA, '123')).toBe('attribution-missing');
   });
 });
 

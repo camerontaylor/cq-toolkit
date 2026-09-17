@@ -43,9 +43,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Names only — the values live in the repo's Actions secrets / the
-      # dispatch input.
-      GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      # Names only. GH_TOKEN is deliberately NOT here: it is scoped to the
+      # vitest step's env below, so npm ci's lifecycle scripts never see it
+      # (round-3 fix).
       LIVE_GH: '1'
       E5_RUN_ID: ${{ inputs.run_id }}
     steps:
@@ -64,11 +64,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
       # A misconfigured dispatch would otherwise be a green-skipped run (the
-      # live describe skips without LIVE_GH) or a mid-run credential failure
-      # (gh without GH_TOKEN) — refuse both loudly before any live call.
-      - name: Preconditions — the live gate is armed and the token is present
+      # live describe skips without LIVE_GH) — refuse loudly before any live
+      # call. GH_TOKEN's presence is asserted in the vitest step — the only
+      # step its env reaches.
+      - name: Precondition — the live gate is armed
         run: |
           test -n "$LIVE_GH" || { echo 'LIVE_GH is not set — the live test would silently skip; refusing a green-skipped run' >&2; exit 1; }
-          test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }
       - name: Live review-loop e2e (test/e2e/review/live.test.ts)
-        run: npx vitest run test/e2e/review/live.test.ts
+        env:
+          # Names only — scoped to THIS step on purpose (round-3 fix): the
+          # token must not reach npm ci's lifecycle scripts. Prefer the
+          # fine-grained, scratch-repo-scoped PAT from the header note.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }
+          npx vitest run test/e2e/review/live.test.ts
