@@ -1,15 +1,16 @@
-// Sweep lane (WS-D, goal D1) — registry slice: the `sweep.planSweep` and
-// `sweep.worktreeFor` op entries, typed against the FROZEN OpRegistryEntry
-// (src/kernel/types.ts). gitMutex is a library utility, NOT an op — it must
-// never appear here. The importers bind the REAL effects INPUT-DRIVEN —
-// repoRoot (and, for the planner's ledger consult, root + storePath) cross
-// the plain-JSON boundary from the DISPATCHED input; both op modules load
-// through DYNAMIC imports, so loading this registry never loads an op
-// module: module scope imports only zod and types (the type-only imports
-// are erased at compile time), keeping the lazy-import pattern. The zod
-// schemas are registry-time mirrors of the lane's types and live HERE (the
-// shared spot, the ledger registry's LedgerRecordInputSchema precedent)
-// because `inputSchema` must exist eagerly while the ops may not.
+// Sweep lane (WS-D, goals D1+D2) — registry slice: the `sweep.planSweep`,
+// `sweep.worktreeFor`, `sweep.salvage` and `sweep.cleanup` op entries, typed
+// against the FROZEN OpRegistryEntry (src/kernel/types.ts). gitMutex is a
+// library utility, NOT an op — it must never appear here. The importers bind
+// the REAL effects INPUT-DRIVEN — repoRoot (and, for the planner's ledger
+// consult, root + storePath) cross the plain-JSON boundary from the
+// DISPATCHED input; all four op modules load through DYNAMIC imports, so
+// loading this registry never loads an op module: module scope imports only
+// zod and types (the type-only imports are erased at compile time), keeping
+// the lazy-import pattern. The zod schemas are registry-time mirrors of the
+// lane's types and live HERE (the shared spot, the ledger registry's
+// LedgerRecordInputSchema precedent) because `inputSchema` must exist
+// eagerly while the ops may not.
 //
 // THE SELECTOR IS REQUIRED AT THE SCHEMA (UC §1 row 16 — no default): a
 // selector-less input fails schema validation, which lands on the CLI's
@@ -21,8 +22,10 @@
 import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import { LedgerThresholdsOverrideSchema } from '../ledger/registry.js';
+import type { CleanupInput } from './cleanup.js';
 import type { PlanSweepInput } from './planSweep.js';
-import type { WorktreeForInput } from './worktreeFor.js';
+import type { SalvageInput } from './salvage.js';
+import type { WorktreeForInput, WorktreeMutexConfig } from './worktreeFor.js';
 
 // TYPE-ONLY re-export of the git-mutation mutex's config type: gitMutex.ts
 // is a LIBRARY utility, never a registered op, and this reference is the
@@ -106,23 +109,44 @@ export const PlanSweepInputSchema: z.ZodType<PlanSweepInput> = z
   .strict();
 
 /**
- * Registry-time mirror of {@link WorktreeForInput} (the git-mutex binding
- * only — gitMutex itself is a library utility and is never registered).
- * The mutex bounds mirror {@link makeGitMutex}'s construction preconditions
- * (staleMs ≥ 2000 — proper-lockfile's clamp floor; retries ≥ 0;
+ * Registry-time mirror of the OPTIONAL git-mutex binding shared by
+ * `sweep.worktreeFor` and `sweep.cleanup` (one definition, so the
+ * construction preconditions and the crash-recovery cross-field invariant
+ * have exactly ONE — gitMutex itself is a library utility and is never
+ * registered). The bounds mirror {@link makeGitMutex}'s construction
+ * preconditions (staleMs ≥ 2000 — proper-lockfile's clamp floor; retries ≥ 0;
  * retryBaseMs ≥ 1) AND its crash-recovery cross-field invariant: the backoff
  * floor (retryBaseMs × (2^retries − 1)) must reach the stale window, using
  * the factory's shipped defaults for absent fields (30_000 / 9 / 100 — a
  * literal mirror; importing the constants would load the mutex module at
  * registry scope). The schema rejects an individually-valid but
  * collectively-insufficient triple at the arg-error boundary (exit 2)
- * instead of mid-dispatch. The worktree segment / traversal rules (kind,
- * slug, runPrefix) stay the op's library-level contract (`failed` results)
- * — they are path-SAFETY rules about DERIVED values, not plain-JSON shape.
+ * instead of mid-dispatch.
  */
 const MUTEX_DEFAULT_STALE_MS = 30_000;
 const MUTEX_DEFAULT_RETRIES = 9;
 const MUTEX_DEFAULT_RETRY_BASE_MS = 100;
+
+const GitMutexBindingSchema: z.ZodType<WorktreeMutexConfig> = z
+  .object({
+    lockPath: z.string().min(1),
+    staleMs: z.number().int().min(2000).exactOptional(),
+    retries: z.number().int().min(0).exactOptional(),
+    retryBaseMs: z.number().int().min(1).exactOptional(),
+  })
+  .strict()
+  .refine(
+    (m) => {
+      const staleMs = m.staleMs ?? MUTEX_DEFAULT_STALE_MS;
+      const retries = m.retries ?? MUTEX_DEFAULT_RETRIES;
+      const retryBaseMs = m.retryBaseMs ?? MUTEX_DEFAULT_RETRY_BASE_MS;
+      return retryBaseMs * (2 ** retries - 1) >= staleMs;
+    },
+    {
+      message:
+        'the mutex timings are individually valid but collectively insufficient — the retry backoff floor (retryBaseMs × (2^retries − 1), on the factory defaults for absent fields) must reach the stale window, or a crashed holder wedges the run',
+    },
+  );
 
 export const WorktreeForInputSchema: z.ZodType<WorktreeForInput> = z
   .object({
@@ -132,32 +156,64 @@ export const WorktreeForInputSchema: z.ZodType<WorktreeForInput> = z
     kind: z.string().min(1),
     slug: z.string().min(1),
     base: z.string().min(1),
-    mutex: z
-      .object({
-        lockPath: z.string().min(1),
-        staleMs: z.number().int().min(2000).exactOptional(),
-        retries: z.number().int().min(0).exactOptional(),
-        retryBaseMs: z.number().int().min(1).exactOptional(),
-      })
-      .strict()
-      .refine(
-        (m) => {
-          const staleMs = m.staleMs ?? MUTEX_DEFAULT_STALE_MS;
-          const retries = m.retries ?? MUTEX_DEFAULT_RETRIES;
-          const retryBaseMs = m.retryBaseMs ?? MUTEX_DEFAULT_RETRY_BASE_MS;
-          return retryBaseMs * (2 ** retries - 1) >= staleMs;
-        },
-        {
-          message:
-            'the mutex timings are individually valid but collectively insufficient — the retry backoff floor (retryBaseMs × (2^retries − 1), on the factory defaults for absent fields) must reach the stale window, or a crashed holder wedges the run',
-        },
-      )
-      .exactOptional(),
+    mutex: GitMutexBindingSchema.exactOptional(),
     baselineCacheDirs: z.array(z.string().min(1)).exactOptional(),
   })
   .strict();
 
-/** Sweep-lane op registry (planSweep + worktreeFor). */
+/**
+ * Registry-time mirror of {@link SalvageInput}: the interrupted-trees
+ * inventory the CALLER scanned. Element shape only — the traversal/flag/
+ * control-char path rules and the journal semantics stay the op's
+ * library-level contract (`failed` results); they are path-SAFETY and
+ * classification rules, not plain-JSON shape. `discardDirty` is the
+ * explicit-only flag: absent means dirty entries classify `preserve`.
+ */
+export const SalvageInputSchema: z.ZodType<SalvageInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    entries: z.array(
+      z
+        .object({
+          path: z.string().min(1),
+          branch: z.string().min(1).exactOptional(),
+          runPrefix: z.string().min(1).exactOptional(),
+          journal: z
+            .object({
+              lastStep: z.string().min(1).exactOptional(),
+              stepsTotal: z.number().int().min(0).exactOptional(),
+              allTerminal: z.boolean().exactOptional(),
+            })
+            .strict()
+            .exactOptional(),
+        })
+        .strict(),
+    ),
+    discardDirty: z.boolean().exactOptional(),
+  })
+  .strict();
+
+/**
+ * Registry-time mirror of {@link CleanupInput}. `olderThanMs` is REQUIRED
+ * and bounds-checked here (integer ≥ 0) — an age cutoff is the op's one
+ * numeric precondition. The mutex block reuses the shared
+ * {@link GitMutexBindingSchema} (one definition of the timings invariant).
+ * The dry-run default (true when absent) and the force/dirty ladder stay
+ * the op's library-level contract.
+ */
+export const CleanupInputSchema: z.ZodType<CleanupInput> = z
+  .object({
+    repoRoot: z.string().min(1),
+    worktreesDir: z.string().min(1),
+    runPrefix: z.string().min(1),
+    olderThanMs: z.number().int().min(0),
+    dryRun: z.boolean().exactOptional(),
+    force: z.boolean().exactOptional(),
+    mutex: GitMutexBindingSchema.exactOptional(),
+  })
+  .strict();
+
+/** Sweep-lane op registry (planSweep, worktreeFor, salvage, cleanup). */
 export const registry: OpRegistryEntry[] = [
   {
     name: 'sweep.planSweep',
@@ -189,6 +245,37 @@ export const registry: OpRegistryEntry[] = [
         (m) =>
           (async (input: WorktreeForInput) =>
             m.makeWorktreeFor(m.makeSubprocessWorktreeEffects(input.repoRoot))(input)) as Op<
+            unknown,
+            unknown
+          >,
+      ),
+  },
+  {
+    name: 'sweep.salvage',
+    inputSchema: SalvageInputSchema,
+    // The salvage effects are repo-independent (the probes take the entry
+    // path directly), so the binding is constructed per dispatch with no
+    // input fields — still input-driven in the family sense: nothing is
+    // wired at registry module scope.
+    importer: () =>
+      import('./salvage.js').then(
+        (m) =>
+          (async (input: SalvageInput) =>
+            m.makeSalvage(m.makeSubprocessSalvageEffects())(input)) as Op<unknown, unknown>,
+      ),
+  },
+  {
+    name: 'sweep.cleanup',
+    inputSchema: CleanupInputSchema,
+    // Same seam, same input-driven binding: the cleanup effects adapter is
+    // bound to the dispatched input's repoRoot per call (its listings reuse
+    // the worktreeFor adapter's parsers; worktree remove carries NO force
+    // flag unless the op's explicit force reached the effect).
+    importer: () =>
+      import('./cleanup.js').then(
+        (m) =>
+          (async (input: CleanupInput) =>
+            m.makeCleanup(m.makeSubprocessCleanupEffects(input.repoRoot))(input)) as Op<
             unknown,
             unknown
           >,
