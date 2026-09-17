@@ -121,8 +121,9 @@ const baseInput = (prs: MergePrsCandidate[], modelSpec?: typeof MODEL_SPEC): Run
 /**
  * THE FAKE EFFECTS — an in-memory MergeEffects, zero real git/gh. Records
  * every call; scriptable failures: a nonzero fetchRef and per-pr mergePr
- * failures (the union test's failed-merge surface). validateRef always
- * answers the same sha, so no drift ever fires.
+ * failures (the union test's failed-merge surface). validateRef answers
+ * the same sha EXCEPT for refs listed in driftRefs, which drift after
+ * their first validate (the acted-verification surface).
  */
 class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
@@ -1048,16 +1049,17 @@ describe('runMergePrs', () => {
     }
   });
 
-  test('makeRunMergePrsOp threads harnessConfig into its resolve binding (seam-agnostic dispatch)', async () => {
-    // Mirror of resolveConflict.test.ts's harnessConfig test: the config's
-    // only consumer is the DEFAULT driver construction inside the resolve
-    // binding — deliberately unobservable through a supplied driver (the
-    // LIVE proof of a config's effect is F5's scripted-agent path, which
-    // supplies deps.driver). Behaviorally: a dispatch with a harnessConfig
-    // present behaves identically — the conflicting pr is dispatched, the
-    // acted self-report is verified against a MOVING head, and the
-    // resolution lands; and the op binds with the config alone (an empty
-    // run dispatches nothing).
+  test('makeRunMergePrsOp accepts harnessConfig and dispatches identically (type-level threading; behavioral pin is dispatch parity)', async () => {
+    // Mirror of resolveConflict.test.ts's harnessConfig test. HONESTY NOTE
+    // (PR162 r1): with driver SUPPLIED the config is inert — this test pins
+    // dispatch parity + binding, not the forwarding spread itself (a silent
+    // drop of the spread would stay green here; the spread is type-checked
+    // and the LIVE proof of a config's effect is F5's scripted-agent path,
+    // which supplies deps.driver). Behaviorally: a dispatch with a
+    // harnessConfig present behaves identically — the conflicting pr is
+    // dispatched, the acted self-report is verified against a MOVING head,
+    // and the resolution lands; and the op binds with the config alone (an
+    // empty run dispatches nothing).
     const dir = await mkdtemp(join(tmpdir(), 'runprs-harness-'));
     try {
       const effects = new FakeMergeEffects();
