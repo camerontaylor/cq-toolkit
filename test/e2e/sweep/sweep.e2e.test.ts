@@ -104,6 +104,7 @@ afterAll(() => {
 });
 
 interface Scenario {
+  root: string;
   repo: string;
   /** The scratch repo's LOCAL BARE origin — the push leg's recorder (jSKJL). */
   origin: string;
@@ -126,6 +127,7 @@ async function scenario(runPrefix: string): Promise<Scenario> {
   await gitOut(['init', '-q', '--bare', origin], root);
   await gitOut(['-C', repo, 'remote', 'add', 'origin', origin], root);
   return {
+    root,
     repo,
     origin,
     journalDir: join(root, 'journal'),
@@ -350,9 +352,9 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       const alphaReport = alpha.report;
       expect(alphaReport?.baseline.verdict).toBe('failing');
       expect(alphaReport?.baseline.failureSet?.failures[0]?.message).toBe(ALPHA_FAILURE_MESSAGE);
-      expect(alphaReport?.final.verdict).toBe('clean');
-      expect(alphaReport?.regression.verdict).toBe('no-regression');
-      expect(alphaReport?.regression.fixedFailures).toHaveLength(1);
+      expect(alphaReport?.final?.verdict).toBe('clean');
+      expect(alphaReport?.regression?.verdict).toBe('no-regression');
+      expect(alphaReport?.regression?.fixedFailures).toHaveLength(1);
       expect(alphaReport?.worktree.reused).toBe(false);
       expect(alphaReport?.tamperFindings).toEqual([]);
       expect(alphaReport?.committed).toBe(true);
@@ -465,6 +467,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         config: scene.config,
         planner: first.planner,
         enrichedJobs: first.plan.jobs,
+        runIndex: 0,
       });
       const alphaRow = salvaged.rows.find((row) => row.path.endsWith('fix/alpha'));
       const betaSalvageRow = salvaged.rows.find((row) => row.path.endsWith('fix/beta'));
@@ -520,10 +523,11 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         assembled.packages,
       );
 
-      // Three journaled runs (units 1, units 2, the marker-filtered
-      // assemble), each complete with a run-finished frame.
+      // Journaled runs: units 1 (0), the beta rescue re-dispatch (1), units
+      // 2 (2), the marker-filtered assemble (3) — each complete with a
+      // run-finished frame.
       const runIds = await openRunLog(scene.journalDir).runs();
-      expect(runIds).toHaveLength(3);
+      expect(runIds).toHaveLength(4);
       await expectCompleteJournal(
         scene.journalDir,
         [
@@ -531,9 +535,9 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
           ['sweep-alpha-fix', 'sweep.unit'],
           ['sweep-beta-fix', 'sweep.unit'],
         ],
-        1,
+        2,
       );
-      await expectCompleteJournal(scene.journalDir, [['sweep-assemble', 'pr.assemblePrs']], 2);
+      await expectCompleteJournal(scene.journalDir, [['sweep-assemble', 'pr.assemblePrs']], 3);
 
       // The re-invoke's output is failures-only clean as well.
       expect(second.output).toContain('0 failing unit(s) of 2');
@@ -577,6 +581,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         config: scene.config,
         planner: outcome.planner,
         enrichedJobs: outcome.plan.jobs,
+        runIndex: 0,
       });
       expect(salvaged.rows.find((row) => row.path.endsWith('fix/alpha'))?.class).toBe('reuse');
       expect(salvaged.rows.find((row) => row.path.endsWith('fix/beta'))?.class).toBe('preserve');
@@ -923,6 +928,134 @@ test(
     expect(scene.gh.created).toHaveLength(0);
   },
 );
+
+// ---------------------------------------------------------------------------
+// 7. Rescue lane (arm-a §4.2 step 5) and prep mode (UC §1 row 3)
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: rescue lane and prep mode', () => {
+  test(
+    'a transient fault is rescued: the -r2 re-dispatch runs, the unit lands ok, and the fleet assembles',
+    { timeout: 180_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-rescue');
+      // Attempt 1 faults (marker consumed); a re-dispatch proceeds to the fix.
+      const faultMarker = join(scene.root, 'alpha-faulted');
+      const outcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config: { ...scene.config, rescue: { maxRedispatch: 1 } } },
+          prompts(
+            {
+              edit: ALPHA_FIX,
+              faultOnce: { marker: faultMarker, why: 'transient crash on alpha' },
+            },
+            {},
+          ),
+        ),
+      );
+
+      // Run 1: alpha FAILED (the transient fault); the RESCUE run re-dispatched
+      // sweep-alpha-fix-r2 and it landed OK.
+      const alpha = unitRow(outcome.run, 'alpha');
+      expect(alpha.status).toBe('failed');
+      expect(alpha.error).toMatch(
+        /\[INFRA\] sweep.unit alpha: the fixer worker stopped with reason 'error'/,
+      );
+      expect(outcome.rescueRuns).toHaveLength(1);
+      const rescueRow = outcome.rescueRuns?.[0]?.jobs[0];
+      expect(rescueRow?.jobId).toBe('sweep-alpha-fix-r2');
+      expect(rescueRow?.result.status).toBe('ok');
+      // The fleet assembles the rescued unit.
+      expect(outcome.assembleRun).toBeDefined();
+      const assembled = assembleReport(outcome.assembleRun as RunReport);
+      expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
+    },
+  );
+
+  test(
+    'a TAMPER fault is never re-dispatched: no rescue run, straight to preserve',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-tamper-rescue');
+      const config: SweepPlanConfig = { ...scene.config, rescue: { maxRedispatch: 1 } };
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config },
+          prompts(
+            { edit: ALPHA_FIX },
+            {
+              write: {
+                file: 'packages/beta/test/added.test.js',
+                text: "it.skip('gaming the run', () => {});\n",
+              },
+            },
+          ),
+        ),
+      );
+      // Beta's unit failed with a TAMPER verdict: NOT retryable — no rescue
+      // run exists for it.
+      const beta = unitRow(outcome.run, 'beta');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/\[TAMPER\]/);
+      expect(outcome.rescueRuns).toBeUndefined();
+      // And the tree state routes it to preserve.
+      const salvaged = await salvageInterruptedRun({
+        journalDir: scene.journalDir,
+        planId: SWEEP_PLAN_ID,
+        config: scene.config,
+        planner: outcome.planner,
+        enrichedJobs: outcome.plan.jobs,
+        runIndex: 0,
+      });
+      expect(salvaged.rows.find((row) => row.path.endsWith('fix/beta'))?.class).toBe('preserve');
+    },
+  );
+
+  test(
+    'prep mode runs probes only: baseline evidence for both packages, zero agents, zero commits, zero PRs',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-prep');
+      const config: SweepPlanConfig = { ...scene.config, mode: 'prep' };
+      const outcome = await runSweepPlan(
+        optsFor({ ...scene, config }, prompts({ edit: ALPHA_FIX }, {})),
+      );
+
+      // Both prep units landed ok with probe evidence only.
+      expect(outcome.run.counts).toMatchObject({ done: 3, failed: 0, blocked: 0 });
+      for (const pkg of ['alpha', 'beta']) {
+        const row = unitRow(outcome.run, pkg);
+        expect(row.status).toBe('ok');
+        expect(row.report?.mode).toBe('prep');
+        expect(row.report?.baseline.failureSet).toBeDefined();
+        expect(row.report?.final).toBeUndefined();
+        expect(row.report?.regression).toBeUndefined();
+        expect(row.report?.committed).toBeUndefined();
+        expect(row.report?.pushed).toBeUndefined();
+      }
+      // Zero agent invocations: the sessions dir was never created.
+      expect(existsSync(scene.sessionsDir)).toBe(false);
+      // Zero commits pushed and zero PRs: prep's product is the evidence.
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads.trim()).toBe('');
+      expect(scene.gh.calls).toHaveLength(0);
+      expect(outcome.assembleRun).toBeUndefined();
+      // The baseline snapshots exist for BOTH packages (run-state, namespaced).
+      for (const pkg of ['alpha', 'beta']) {
+        expect(
+          existsSync(
+            join(
+              sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-prep'),
+              SWEEP_RUN_STATE_BASELINE_DIR,
+              'fix',
+              `${pkg}.json`,
+            ),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+});
 
 // The journal-file shape sanity: one NDJSON file per dispatch (units + the
 // marker-filtered assemble), every line parseable.

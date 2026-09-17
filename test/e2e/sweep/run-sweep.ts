@@ -58,7 +58,11 @@ import {
   SWEEP_UNIT_OP,
 } from '../../../src/ops/sweep/planSweep.js';
 import type { PlanSweepReport, WorkUnit } from '../../../src/ops/sweep/planSweep.js';
-import { sweepUnitSegments } from '../../../src/ops/sweep/unit.js';
+import {
+  RETRYABLE_FAULT_CLASSES,
+  sweepUnitFaultClass,
+  sweepUnitSegments,
+} from '../../../src/ops/sweep/unit.js';
 import type {
   SweepUnitCheckConfig,
   SweepUnitDispatchInput,
@@ -175,6 +179,8 @@ export interface SweepRunOutcome {
    * its own run file (the plan id's LATEST).
    */
   assembleRun?: RunReport;
+  /** The rescue re-dispatch runs, in dispatch order (arm-a §4.2 step 5). */
+  rescueRuns?: RunReport[];
   /** The failures-only DEFAULT output (see renderSweepOutput). */
   output: string;
 }
@@ -270,15 +276,72 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     }
   }
 
+  // THE RESCUE LANE (arm-a §4.2 step 5; I8 — the rescue POLICY lives HERE in
+  // the plan/runner layer, never in the agent driver): a failed unit whose
+  // fault class is RETRYABLE ([PROBE]/[INFRA]/[REGRESSION]) is re-dispatched
+  // up to config.rescue.maxRedispatch times (default 1), each attempt its
+  // OWN journaled job (`<jobId>-r2`, `-r3`, …). TAMPER/SCOPE verdicts are
+  // NEVER re-dispatched — they are verdicts about the work, and after the
+  // budget is spent every unit lands in the salvage lanes (preserve/resume
+  // per tree state).
+  const rescueBudget = opts.config.rescue?.maxRedispatch ?? 1;
+  const rescueRuns: RunReport[] = [];
+  const unitStatusAfterRescue = new Map<string, 'ok' | 'not-ok'>();
+  if (rescueBudget > 0) {
+    for (const job of planner.jobs) {
+      const row = run.jobs.find((candidate) => candidate.jobId === job.id);
+      if (row === undefined || row.result.status === 'ok') continue;
+      const error = row.result.status === 'failed' ? row.result.error : '';
+      const faultClass = sweepUnitFaultClass(error);
+      if (!RETRYABLE_FAULT_CLASSES.includes(faultClass)) continue;
+      const unitJob = plan.jobs.find((candidate) => candidate.id === job.id);
+      if (unitJob === undefined) continue;
+      let lastError = error;
+      for (let attempt = 2; attempt <= 1 + rescueBudget; attempt += 1) {
+        const rescuePlan = {
+          id: SWEEP_PLAN_ID,
+          label: `sweep: rescue re-dispatch (attempt ${attempt} of ${1 + rescueBudget})`,
+          jobs: [
+            {
+              ...unitJob,
+              id: `${unitJob.id}-r${attempt}`,
+              dependsOn: [] as string[],
+            },
+          ],
+        };
+        const rescueReport = await runPlan(
+          rescuePlan,
+          { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
+          view,
+        );
+        rescueRuns.push(rescueReport);
+        const rescueRow = rescueReport.jobs[0];
+        if (rescueRow?.result.status === 'ok') {
+          lastError = '';
+          break;
+        }
+        if (rescueRow?.result.status === 'failed') {
+          lastError = rescueRow.result.error;
+          // A rescue attempt that fails with a NON-retryable class stops the
+          // loop for this unit immediately (no budget burn on verdicts).
+          if (!RETRYABLE_FAULT_CLASSES.includes(sweepUnitFaultClass(lastError))) break;
+        }
+      }
+      unitStatusAfterRescue.set(job.id, lastError === '' ? 'ok' : 'not-ok');
+    }
+  }
+
   // THE ASSEMBLE LEG (jTPa8), composed post-run from the committed markers —
-  // the fleet gate first (every unit must have succeeded; a failed unit
-  // withholds the whole fleet's PRs), then the marker filter (a package
-  // assembles only when its unit COMMITTED AND PUSHED — matched by branch
-  // AND package name; a no-change unit never yields an empty-diff PR). An
-  // empty filtered fleet dispatches NO assemble at all (no empty tracker).
+  // the fleet gate first (every unit must have succeeded — a unit its rescue
+  // attempt rescued counts as succeeded; a still-failed unit withholds the
+  // whole fleet's PRs), then the marker filter (a package assembles only
+  // when its unit COMMITTED AND PUSHED — matched by branch AND package name;
+  // a no-change unit never yields an empty-diff PR). An empty filtered fleet
+  // dispatches NO assemble at all (no empty tracker).
   const fleetOk = planner.jobs.every((job) => {
     const row = run.jobs.find((candidate) => candidate.jobId === job.id);
-    return row?.result.status === 'ok';
+    if (row?.result.status === 'ok') return true;
+    return unitStatusAfterRescue.get(job.id) === 'ok';
   });
   let assembleRun: RunReport | undefined;
   if (fleetOk && planner.units.length > 0 && assembleTemplate !== undefined) {
@@ -311,6 +374,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     planner,
     run,
     plan,
+    ...(rescueRuns.length > 0 ? { rescueRuns } : {}),
     ...(assembleRun !== undefined ? { assembleRun } : {}),
     output: renderSweepOutput(opts.config, planner, run),
   };
@@ -358,7 +422,7 @@ export function renderSweepOutput(
 // Interrupted-run salvage — the journal tail, scanned + classified
 // ---------------------------------------------------------------------------
 
-/** Scan the LATEST run of the plan id and classify its interrupted trees (the REAL salvage op). */
+/** Scan one journaled run of the plan id and classify its interrupted trees (the REAL salvage op). */
 export async function salvageInterruptedRun(opts: {
   journalDir: string;
   planId: string;
@@ -370,8 +434,10 @@ export async function salvageInterruptedRun(opts: {
    * derived, which mis-derives a collision fleet's `-2` tree.
    */
   enrichedJobs?: Job[];
+  /** Journal-run index to scan (runs() is oldest-first; default -1 = latest). The rescue lane appends runs AFTER the units run, so target 0 explicitly. */
+  runIndex?: number;
 }): Promise<SalvagePlan> {
-  const events = await latestRunEvents(opts.journalDir, opts.planId);
+  const events = await runEventsAt(opts.journalDir, opts.planId, opts.runIndex ?? -1);
   const salvaged = await makeSalvage(makeSubprocessSalvageEffects())({
     repoRoot: opts.config.repoRoot,
     entries: salvageEntriesFor(opts.config, opts.planner, events, opts.enrichedJobs),

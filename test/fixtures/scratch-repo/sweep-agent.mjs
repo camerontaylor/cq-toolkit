@@ -33,6 +33,7 @@
 //
 // Fixed usage everywhere: {input_tokens:10, output_tokens:5,
 // cache_read_input_tokens:2, cache_creation_input_tokens:3}.
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, resolve, sep } from 'node:path';
 import process from 'node:process';
@@ -115,8 +116,33 @@ async function performDelete(file) {
 const instruction = await instructionOf();
 out({ type: 'system', subtype: 'init', session_id: sessionId, model });
 
+// The TRANSIENT fault ({faultOnce:{marker,why}}): faults ONLY the first
+// invocation (the marker file is created outside the checkout); a re-dispatch
+// sees the marker and proceeds — the rescue lane's attempt-1/attempt-2 shape.
+let faulted = false;
+if (
+  instruction.faultOnce !== undefined &&
+  instruction.faultOnce !== null &&
+  typeof instruction.faultOnce.marker === 'string' &&
+  instruction.faultOnce.marker !== ''
+) {
+  if (!existsSync(instruction.faultOnce.marker)) {
+    const { writeFile: writeMarker } = await import('node:fs/promises');
+    const { dirname: dirOf } = await import('node:path');
+    await mkdir(dirOf(instruction.faultOnce.marker), { recursive: true });
+    await writeMarker(instruction.faultOnce.marker, 'faulted\n');
+    faulted = true;
+  }
+}
 if (typeof instruction.fault === 'string' && instruction.fault !== '') {
-  process.stderr.write(`sweep-agent: ${instruction.fault}\n`);
+  faulted = true;
+}
+if (faulted) {
+  const why =
+    instruction.faultOnce !== undefined && instruction.faultOnce !== null
+      ? String(instruction.faultOnce.why ?? 'transient fault')
+      : String(instruction.fault ?? 'fault');
+  process.stderr.write(`sweep-agent: ${why}\n`);
   process.exitCode = 1; // no result event — the driver's 'error' stop reason
 } else {
   const texts = [];

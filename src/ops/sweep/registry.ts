@@ -239,6 +239,7 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     files: z.array(z.string()),
     kind: z.string().min(1).exactOptional(),
     slug: z.string().min(1).exactOptional(),
+    mode: z.enum(['fix', 'prep']).exactOptional(),
     mutex: GitMutexBindingSchema.exactOptional(),
     sandboxPolicy: SandboxPolicySchema.exactOptional(),
     gitTimeoutMs: z.number().int().min(1).exactOptional(),

@@ -59,6 +59,7 @@ export type {
 export { makeCleanup, makeSubprocessCleanupEffects } from './cleanup.js';
 export type {
   CommittedMarker,
+  SweepUnitFaultClass,
   SweepUnitBindings,
   SweepUnitCheckConfig,
   SweepUnitDispatchInput,
@@ -68,6 +69,7 @@ export type {
   UnitProbe,
 } from './unit.js';
 export {
+  RETRYABLE_FAULT_CLASSES,
   bindingsFromDispatch,
   DEFAULT_UNIT_GIT_TIMEOUT_MS,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
@@ -77,6 +79,7 @@ export {
   SWEEP_RUN_STATE_BASELINE_DIR,
   SWEEP_RUN_STATE_COMMITTED_DIR,
   sweepRunStateDir,
+  sweepUnitFaultClass,
   sweepUnitSegments,
 } from './unit.js';
 export type {

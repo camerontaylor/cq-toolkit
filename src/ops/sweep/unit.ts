@@ -167,6 +167,12 @@ export interface SweepUnitBindings {
    */
   segments?: SweepUnitSegments;
   /**
+   * The pipeline mode (UC §1 row 3): 'fix' (default) runs the full pipeline;
+   * 'prep' = probes only — worktreeFor → baselineProbe → snapshot, no
+   * fixer/driver invocation, no gates, no commit, no push, no marker.
+   */
+  mode?: 'fix' | 'prep';
+  /**
    * The git-mutex binding (jVgCc) for the unit's worktree mutations —
    * concurrent sibling units at the caller's concurrency serialize their
    * prune/add/ref sections on ONE lockfile instead of racing. Absent = no
@@ -238,26 +244,67 @@ export interface UnitProbe {
   failureSet: FailureSet;
 }
 
-/** The unit op's report — every stage's evidence, plain JSON. */
+/**
+ * The unit op's report — every stage's evidence, plain JSON. FIX mode sets
+ * every field; PREP mode (probes only) stops after the baseline snapshot and
+ * reports `mode: 'prep'` with the probe/worktree evidence ONLY — the
+ * post-fix fields are omitted (a fabricated empty regression/tamper verdict
+ * would claim evidence no scan collected).
+ */
 export interface SweepUnitReport {
   package: string;
   fixer: string;
   /** The worktree the unit ran in (create or I7 reuse). */
   worktree: SweepWorkspace;
+  /** The pipeline mode this unit ran in ('fix' default; 'prep' = probes only). */
+  mode: 'fix' | 'prep';
   /** The BEFORE probe (the baseline; never cached — I7). */
   baseline: UnitProbe;
-  /** The AFTER probe. */
-  final: UnitProbe;
-  /** The regression gate's decision over the two probes. */
-  regression: RegressionReport;
-  /** The tamper scan of the STAGED fix (empty = clean). */
-  tamperFindings: TamperFinding[];
-  /** true when the fix was committed; false when nothing was staged (an idempotent re-run). */
-  committed: boolean;
-  /** true when the unit's branch was pushed to its remote (a committed unit with a push binding). */
-  pushed: boolean;
+  /** The AFTER probe. Present in 'fix' mode only. */
+  final?: UnitProbe;
+  /** The regression gate's decision over the two probes. Present in 'fix' mode only. */
+  regression?: RegressionReport;
+  /** The tamper scan of the STAGED fix (empty = clean). Present in 'fix' mode only. */
+  tamperFindings?: TamperFinding[];
+  /** true when the fix was committed; false when nothing was staged (an idempotent re-run). Present in 'fix' mode only. */
+  committed?: boolean;
+  /** true when the unit's branch was pushed to its remote. Present in 'fix' mode only. */
+  pushed?: boolean;
   /** The branch the unit's PR carries (`<runPrefix>/<kind>/<slug>`). */
   prBranch: string;
+}
+
+/**
+ * The unit fault CLASS carried as a stable `[CLASS]` prefix on every
+ * `failed` error — the rescue policy's classification seam (arm-a §4.2
+ * step 5, I8: rescue POLICY lives in the plan/runner layer; the op only
+ * reports the class).
+ */
+export type SweepUnitFaultClass = 'probe' | 'infra' | 'regression' | 'tamper' | 'scope' | 'unknown';
+
+/** Retryable classes for the rescue lane (arm-a §4.2 step 5): transient
+ * evidence/infrastructure faults. TAMPER findings and SCOPE violations are
+ * verdicts about the WORK (never retried — they route to preserve + the
+ * failure report). */
+export const RETRYABLE_FAULT_CLASSES: readonly SweepUnitFaultClass[] = [
+  'probe',
+  'infra',
+  'regression',
+];
+
+/** Classify a unit's failed error text by its `[CLASS]` prefix. */
+export function sweepUnitFaultClass(error: string): SweepUnitFaultClass {
+  if (error.startsWith('[PROBE]')) return 'probe';
+  if (error.startsWith('[INFRA]')) return 'infra';
+  if (error.startsWith('[REGRESSION]')) return 'regression';
+  if (error.startsWith('[TAMPER]')) return 'tamper';
+  if (error.startsWith('[SCOPE]')) return 'scope';
+  return 'unknown';
+}
+
+/** Prefix a class tag onto a unit fault message (stable, machine-readable). */
+function tagged(cls: Exclude<SweepUnitFaultClass, 'unknown'>, message: string): string {
+  return `[${cls.toUpperCase()}] ${message}`;
 }
 
 /**
@@ -281,8 +328,35 @@ export interface SweepUnitReport {
  *   3. the baseline snapshot is written to the run-state dir
  *      (baseline/<kind>/<slug>.json) — caller-visible record, NEVER read
  *      back (the probe always re-runs), never inside the tree.
- *   4. the fixer — one Driver run in the worktree (the session workspace IS
+ *   4. PREP MODE (bindings.mode === 'prep', UC §1 row 3): STOP here — the
+ *      unit returns the probe/worktree evidence with no fixer, no gates, no
+ *      commit, no push, no marker. Prep's product is the baseline evidence.
+ *   5. the fixer — one Driver run in the worktree (the session workspace IS
  *      the tree, I6); a non-'complete' stop reason fails the unit.
+ *   6. final probe — the AFTER FailureSet, same verdict guards.
+ *   7. regressionGate — tolerate the baseline's failures, block novel ones
+ *      (the crown jewel, R2 D5); a regression fails the unit uncommitted.
+ *   8. STAGE the fix (`git add -A`, gitignore-respected), then the staged-
+ *      path allowlist (BOTH sides of staged renames — jVgCj), then
+ *      hackDetector over the STAGED diff — a plain working-tree diff misses
+ *      NEW files (untracked until staged), and the scanner must see exactly
+ *      the set the commit would publish. An out-of-scope path or a tamper
+ *      finding leaves the fix staged but UNCOMMITTED.
+ *   9. commit — skipped when nothing is staged (an idempotent re-run's
+ *      no-op fixer); commits exactly the scanned set.
+ *  10. push — with a push binding and a fresh commit, publish the unit's
+ *      branch (`push -u origin <branch>` in the shipped binding); skipped
+ *      when nothing was committed or no binding is present. On the
+ *      no-commit leg, a branch carrying commits beyond the base is an
+ *      earlier run's STRANDED fix — its push is RE-ATTEMPTED (idempotent),
+ *      and an unreadable ahead-count fails the unit fail-closed.
+ *  11. the committed marker (jTPa8) — written by a unit whose fix is ON
+ *      THE REMOTE (pushed): `<runStateDir>/committed/<kind>/<slug>.json`: the
+ *      record the assemble leg reads as its source of truth, so a no-change
+ *      unit with nothing on the remote never assembles an empty-diff PR.
+ *  Every `failed` error carries a stable `[CLASS]` prefix (PROBE, INFRA,
+ *  REGRESSION, TAMPER, SCOPE — see sweepUnitFaultClass): the rescue lane's
+ *  classification seam.
  *   5. final probe — the AFTER FailureSet, same verdict guards.
  *   6. regressionGate — tolerate the baseline's failures, block novel ones
  *      (the crown jewel, R2 D5); a regression fails the unit uncommitted.
@@ -331,9 +405,24 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // 3. The baseline snapshot: run-state, outside the tree — written, never
     // read (the probe always re-runs).
     const cacheFault = await writeBaselineSnapshot(bindings, segments, baseline);
-    if (cacheFault !== null) return { status: 'failed', error: cacheFault };
+    if (cacheFault !== null) return { status: 'failed', error: tagged('infra', cacheFault) };
 
-    // 4. The fixer: one Driver run whose workspace IS the worktree (a fresh
+    // 4. PREP MODE (UC §1 row 3): probes only. The unit returns the
+    // baseline/worktree evidence — no fixer, no gates, no commit, no push,
+    // no marker. Prep's product IS the evidence.
+    if (bindings.mode === 'prep') {
+      const prepReport: SweepUnitReport = {
+        package: unit.package,
+        fixer: unit.fixer,
+        mode: 'prep',
+        worktree,
+        baseline,
+        prBranch: segments.branch,
+      };
+      return { status: 'ok', value: prepReport };
+    }
+
+    // 5. The fixer: one Driver run whose workspace IS the worktree (a fresh
     // session record in the caller's sessions dir; the record's messages
     // never touch the tree).
     let stopReason: string;
@@ -355,15 +444,20 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     } catch (err) {
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: the fixer driver failed — ${messageOf(err)}`,
+        error: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: the fixer driver failed — ${messageOf(err)}`,
+        ),
       };
     }
     if (stopReason !== 'complete') {
       return {
         status: 'failed',
-        error:
+        error: tagged(
+          'infra',
           `sweep.unit ${unit.package}: the fixer worker stopped with reason '${stopReason}'` +
-          (denial !== undefined ? ` — ${denial}` : ''),
+            (denial !== undefined ? ` — ${denial}` : ''),
+        ),
       };
     }
 
@@ -381,7 +475,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     if (gated.status !== 'ok') {
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: the regression gate returned ${gated.status} — ${resultDetail(gated)}`,
+        error: tagged(
+          'regression',
+          `sweep.unit ${unit.package}: the regression gate returned ${gated.status} — ${resultDetail(gated)}`,
+        ),
       };
     }
     if (gated.value.verdict === 'regression') {
@@ -390,7 +487,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         .join('; ');
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: REGRESSION — the fix introduced ${String(gated.value.novelFailures.length)} novel failure(s): ${novel}`,
+        error: tagged(
+          'regression',
+          `sweep.unit ${unit.package}: REGRESSION — the fix introduced ${String(gated.value.novelFailures.length)} novel failure(s): ${novel}`,
+        ),
       };
     }
 
@@ -401,21 +501,27 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // commit would publish. Either refusal leaves the fix staged but
     // UNCOMMITTED.
     const staged = await stageUnitFiles(bindings, unit, worktree);
-    if (staged !== null) return { status: 'failed', error: staged };
+    if (staged !== null) return { status: 'failed', error: tagged('infra', staged) };
     const scope = await enforceStagePathAllowlist(bindings, unit, worktree);
-    if (scope !== null) return { status: 'failed', error: scope };
+    if (scope !== null) return { status: 'failed', error: tagged('scope', scope) };
     const diff = await bindings.git(['-C', worktree.path, 'diff', '--cached', '--']);
     if (diff.code !== 0) {
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: git diff --cached failed — ${diff.stderr.trim()}`,
+        error: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: git diff --cached failed — ${diff.stderr.trim()}`,
+        ),
       };
     }
     const hack = await hackDetector({ diff: diff.stdout });
     if (hack.status !== 'ok') {
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: the tamper scan returned ${hack.status} — ${resultDetail(hack)}`,
+        error: tagged(
+          'tamper',
+          `sweep.unit ${unit.package}: the tamper scan returned ${hack.status} — ${resultDetail(hack)}`,
+        ),
       };
     }
     if (hack.value.length > 0) {
@@ -424,14 +530,17 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         .join('; ');
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: tamper findings — the fix games the checks: ${named}`,
+        error: tagged(
+          'tamper',
+          `sweep.unit ${unit.package}: tamper findings — the fix games the checks: ${named}`,
+        ),
       };
     }
 
     // 8. Commit the scanned set — skipped when nothing is staged (the fixer
     // no-oped; an idempotent re-run).
     const commit = await commitStaged(bindings, unit, worktree);
-    if (commit.fault !== null) return { status: 'failed', error: commit.fault };
+    if (commit.fault !== null) return { status: 'failed', error: tagged('infra', commit.fault) };
 
     // 9. Push the committed branch — only when something was committed and a
     // push binding is present. A push failure fails the unit: the commit
@@ -444,7 +553,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       } catch (err) {
         return {
           status: 'failed',
-          error: `sweep.unit ${unit.package}: git push of '${segments.branch}' failed — ${messageOf(err)} (the commit is local; the branch must exist on the remote before a PR is assembled)`,
+          error: tagged(
+            'infra',
+            `sweep.unit ${unit.package}: git push of '${segments.branch}' failed — ${messageOf(err)} (the commit is local; the branch must exist on the remote before a PR is assembled)`,
+          ),
         };
       }
     }
@@ -468,7 +580,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         // whether a commit is stranded — never silently omit one.
         return {
           status: 'failed',
-          error: `sweep.unit ${unit.package}: git rev-list --count failed — ${counted.stderr.trim()}`,
+          error: tagged(
+            'infra',
+            `sweep.unit ${unit.package}: git rev-list --count failed — ${counted.stderr.trim()}`,
+          ),
         };
       }
       const aheadCommits = Number.parseInt(counted.stdout.trim(), 10);
@@ -479,7 +594,10 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         } catch (err) {
           return {
             status: 'failed',
-            error: `sweep.unit ${unit.package}: git push of stranded commit(s) on '${segments.branch}' failed — ${messageOf(err)}`,
+            error: tagged(
+              'infra',
+              `sweep.unit ${unit.package}: git push of stranded commit(s) on '${segments.branch}' failed — ${messageOf(err)}`,
+            ),
           };
         }
       }
@@ -492,12 +610,13 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // empty-diff PR).
     if (pushed) {
       const markerFault = await writeCommittedMarker(bindings, segments, unit);
-      if (markerFault !== null) return { status: 'failed', error: markerFault };
+      if (markerFault !== null) return { status: 'failed', error: tagged('infra', markerFault) };
     }
 
     const report: SweepUnitReport = {
       package: unit.package,
       fixer: unit.fixer,
+      mode: 'fix',
       worktree,
       baseline,
       final,
@@ -528,7 +647,9 @@ async function probeLeg(
       worktreeFor(worktreeInputOf(bindings, unit)),
     );
     if (result.status !== 'ok') {
-      return { fault: `sweep.unit ${unit.package}: worktreeFor — ${resultDetail(result)}` };
+      return {
+        fault: tagged('infra', `sweep.unit ${unit.package}: worktreeFor — ${resultDetail(result)}`),
+      };
     }
     worktree = result.value;
   }
@@ -542,19 +663,28 @@ async function probeLeg(
   if (probed.status !== 'ok') {
     return {
       worktree,
-      fault: `sweep.unit ${unit.package}: the ${leg} probe returned ${probed.status} — ${resultDetail(probed)}`,
+      fault: tagged(
+        'probe',
+        `sweep.unit ${unit.package}: the ${leg} probe returned ${probed.status} — ${resultDetail(probed)}`,
+      ),
     };
   }
   if (probed.value.verdict === 'bail') {
     return {
       worktree,
-      fault: `sweep.unit ${unit.package}: the ${leg} probe BAILED after ${String(probed.value.attempts)} attempt(s) — the check never completed, so there is no trustworthy state to gate on`,
+      fault: tagged(
+        'probe',
+        `sweep.unit ${unit.package}: the ${leg} probe BAILED after ${String(probed.value.attempts)} attempt(s) — the check never completed, so there is no trustworthy state to gate on`,
+      ),
     };
   }
   if (probed.value.failureSet === undefined) {
     return {
       worktree,
-      fault: `sweep.unit ${unit.package}: the ${leg} probe reported ${probed.value.verdict} with no failure set — ungateable evidence`,
+      fault: tagged(
+        'probe',
+        `sweep.unit ${unit.package}: the ${leg} probe reported ${probed.value.verdict} with no failure set — ungateable evidence`,
+      ),
     };
   }
   // NARROWED past the guards: clean/failing with a FailureSet present.
@@ -832,6 +962,8 @@ export interface SweepUnitDispatchInput {
    */
   kind?: string;
   slug?: string;
+  /** The pipeline mode (UC §1 row 3); default 'fix' — see SweepUnitBindings.mode. */
+  mode?: 'fix' | 'prep';
   /**
    * The git-mutex binding (jVgCc) for the unit's worktree mutations —
    * sibling units at the caller's concurrency serialize their prune/add/ref
@@ -1000,6 +1132,7 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     runPrefix: input.runPrefix,
     base: input.base,
     segments,
+    ...(input.mode !== undefined ? { mode: input.mode } : {}),
     mutex,
     adapter: input.check.adapter,
     // The REAL probe runner (the checkRunner lane's shipped subprocess seam).

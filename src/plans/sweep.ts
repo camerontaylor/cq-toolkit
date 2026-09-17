@@ -156,6 +156,24 @@ export interface SweepPlanConfig {
   /** Tracker PR title override; default derived from the run prefix. */
   trackerTitle?: string;
   /**
+   * The pipeline mode (UC §1 row 3); default 'fix'. PREP = probes only: the
+   * plan emits the planner job + one probe-only unit per selected package
+   * (worktreeFor → baselineProbe → run-state snapshot) — NO fixer/driver
+   * invocation, NO gates, NO commit/push, NO assemble job. Prep's product is
+   * the baseline evidence.
+   */
+  mode?: 'fix' | 'prep';
+  /**
+   * The RESCUE lane (arm-a §4.2 step 5; I8 — rescue POLICY lives in the
+   * plan/runner layer, never the agent driver): a failed unit whose fault
+   * class is RETRYABLE ([PROBE]/[INFRA]/[REGRESSION]) is re-dispatched up to
+   * `maxRedispatch` times (default 1) by the reference driver, each attempt
+   * its own journaled job (`<jobId>-r2`, `-r3`, …). TAMPER/SCOPE verdicts
+   * are never re-dispatched — after the budget is spent the unit lands in
+   * the salvage lanes (preserve/resume per tree state).
+   */
+  rescue?: { maxRedispatch?: number };
+  /**
    * The dispatch-grade fixer/probe/prompt wiring, merged into EVERY unit
    * job's input so the plan is dispatch-ready through the central
    * 'sweep.unit' entry without a further enrichment pass. `promptTemplate`
@@ -317,6 +335,9 @@ export function buildSweepPlan(
         base: config.base,
         kind: resolvedSegments[index]?.kind,
         slug: resolvedSegments[index]?.slug,
+        // PREP MODE (UC §1 row 3): the unit jobs carry the mode; the unit op
+        // stops after the baseline snapshot (probes only).
+        ...(config.mode === 'prep' ? { mode: 'prep' as const } : {}),
         // jeDch: the config's dispatch wiring lands on every unit job (the
         // overlay's per-unit values still win over it).
         ...(dispatch.driver !== undefined ? { driver: dispatch.driver } : {}),
@@ -338,13 +359,15 @@ export function buildSweepPlan(
     jobs: [
       { id: SWEEP_PLAN_JOB_IDS.plan, op: 'sweep.planSweep', input: sweepPlannerInput(config) },
       ...unitJobs,
-      // The assembler exists only for a non-empty fleet: `pr.assemblePrs` is
-      // TRACKER-FIRST (UC row 22) — even zero packages would search for (and
-      // create) a tracker on the real forge, so the floor's empty fleet
-      // assembles nothing and stays a harmless pass. THIS job is the
-      // DECLARED fleet: the reference wiring composes the ACTUAL assemble
-      // dispatch post-run from the committed markers (jTPa8).
-      ...(unitJobs.length > 0
+      // The assembler exists only for a non-empty fleet IN FIX MODE:
+      // `pr.assemblePrs` is TRACKER-FIRST (UC row 22) — even zero packages
+      // would search for (and create) a tracker on the real forge, so the
+      // floor's empty fleet assembles nothing and stays a harmless pass —
+      // and PREP mode assembles nothing at all (its product is the probe
+      // evidence; there is nothing to assemble). THIS job is the DECLARED
+      // fleet: the reference wiring composes the ACTUAL assemble dispatch
+      // post-run from the committed markers (jTPa8).
+      ...(unitJobs.length > 0 && config.mode !== 'prep'
         ? [
             {
               id: SWEEP_PLAN_JOB_IDS.assemble,

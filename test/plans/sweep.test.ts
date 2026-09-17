@@ -311,6 +311,25 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     }
   });
 
+  test('test-fix carries PREP mode: probe-only plan, no assemble (ws-i)', () => {
+    const prepReport = twoUnitReport(TEST_FIX_FIXER);
+    const prepPlan = buildTestFixPlan({ ...CONFIG, mode: 'prep' }, prepReport);
+    expect(prepPlan.id).toBe(TEST_FIX_PLAN_ID);
+    // Planner job + two probe-only unit jobs; NO assemble job.
+    expect(prepPlan.jobs.map((job) => job.id)).toEqual([
+      'sweep-plan',
+      'sweep-alpha-fix',
+      'sweep-beta-fix',
+    ]);
+    const inputs = prepPlan.jobs
+      .slice(1, 3)
+      .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
+    for (const input of inputs) {
+      expect(input.mode).toBe('prep');
+      expect(input.fixer).toBe(TEST_FIX_FIXER);
+    }
+  });
+
   test('a hand-built report with misaligned jobs/units is plan corruption (jTPa1-era guard)', () => {
     const units: Array<WorkUnit> = [
       { package: 'alpha', fixer: 'fix', files: [] },
