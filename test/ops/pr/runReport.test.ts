@@ -557,7 +557,7 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     expect(written).toContain('`core` — #11 — checks: pass; review: approved — READY');
   });
 
-  test('markdown metacharacters in a row name cannot break the report bullets (r2#7)', async () => {
+  test('markdown metacharacters in a row name cannot break the report bullets (r2#7 + final jN7cZ)', async () => {
     const fake = fakeGh({
       checks: new Map([[11, { state: 'pass' }]]),
       reviews: new Map([[11, { state: 'approved' }]]),
@@ -570,7 +570,11 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       }),
     );
     const written = fake.edits.get(7);
-    expect(written).toContain('`co\\`reb`');
+    // Backticks REPLACED with U+2019 (CommonMark ignores backslash escapes
+    // inside code spans), angles stripped — the span cannot be closed.
+    expect(written).toContain('`co’reb`');
+    expect(written).not.toContain('co`');
+    expect(written).not.toContain('\\`');
     expect(written).not.toContain('<b>');
   });
 

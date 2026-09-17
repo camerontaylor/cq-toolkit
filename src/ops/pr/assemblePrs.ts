@@ -466,12 +466,16 @@ export function composeSection(existing: string | undefined, section: string): s
 }
 
 /**
- * Markdown-safe interpolation (r2#7): backticks escaped so a name or a
- * fault message cannot break out of its bullet, angle brackets stripped so
- * nothing interpolated can smuggle HTML into the tracker body.
+ * Markdown-safe interpolation (r2#7; backtick substitution per final
+ * jN7cZ): backticks are REPLACED with the typographic apostrophe U+2019 —
+ * never backslash-escaped, because CommonMark does not process backslash
+ * escapes inside code spans, so a `\`` would still close the generated
+ * span and inject formatting. Replacement makes closing it impossible.
+ * Angle brackets are stripped so nothing interpolated can smuggle HTML
+ * into the tracker body.
  */
 function mdSafe(text: string): string {
-  return text.replace(/`/g, '\\`').replace(/[<>]/g, '');
+  return text.replace(/`/g, '’').replace(/[<>]/g, '');
 }
 
 /** Flatten a fault message to one safe markdown line (Cc runs become spaces). */

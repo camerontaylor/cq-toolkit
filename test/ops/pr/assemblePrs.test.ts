@@ -600,7 +600,12 @@ describe('the tracker write composes, never clobbers', () => {
       inputOf({ packages: [{ name: 'co`re<b>', branch: PKG_CORE, title: 'x' }] }),
     );
     const written = fake.edits.get(101);
-    expect(written).toContain('`co\\`reb`'); // backtick escaped, angle stripped
+    // Backticks are REPLACED with U+2019 (final jN7cZ — CommonMark does not
+    // process backslash escapes inside code spans), angles stripped: the
+    // generated code span can never be closed by the name.
+    expect(written).toContain('`co’reb`');
+    expect(written).not.toContain('co`');
+    expect(written).not.toContain('\\`');
     expect(written).not.toContain('<b>');
   });
 
