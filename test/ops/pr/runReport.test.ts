@@ -530,6 +530,9 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       '# Fleet run `cq/09-16a`',
       '',
       '- `core` — #11 (`cq/09-16a/fix/core`)',
+      '<!-- /cq:manifest -->',
+      '',
+      'User prose below the manifest survives.',
       '',
     ].join('\n');
     const fake = fakeGh({
@@ -541,7 +544,7 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     expect(report.trackerUpdated).toBe(true);
     const written = fake.edits.get(7);
     expect(written).toContain(READINESS_SECTION_MARKER);
-    // The assembler's manifest survived BYTE-FOR-BYTE.
+    // The assembler's manifest survived BYTE-FOR-BYTE — prose below included.
     expect(written).toContain(manifestBody.trimEnd());
     expect(written).toContain('`core` — #11 — checks: pass; review: approved — READY');
   });

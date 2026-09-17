@@ -17,7 +17,10 @@
 //     overflow first (a size limit is not a timeout), then the SIGKILL
 //     timeout, then exit-code + captured stderr.
 //   - PR bodies and comments travel over STDIN (`--body-file -`), so no
-//     markdown body is ever argv.
+//     markdown body is ever argv. createPr sends the body flag on EVERY
+//     create — empty-string when the request omits a body — because
+//     non-interactive gh (GH_PROMPT_DISABLED=1) requires title AND body;
+//     the earlier absent→no-flag contract is REVERSED (final, jMrm0).
 //
 // Parsing is kept small and exported pure ({@link parsePrList},
 // {@link selectPrMatch}, {@link parseCreatedPr}, {@link checksOfRollup},
@@ -341,8 +344,12 @@ export function bodyOf(payload: { body?: unknown }): string {
  *                        generous limit (gh's default 30 truncates) and the
  *                        deterministic {@link selectPrMatch} (prefer open,
  *                        else lowest number) keep the adoption I11-honest
- *   - createPr:          gh pr create --head … --base … --title … [--body-file -] [--draft]
- *                        (the body, when present, travels over stdin)
+ *   - createPr:          gh pr create --head … --base … --title … --body-file - [--draft]
+ *                        (the body ALWAYS travels over stdin; an absent
+ *                        request body is an honest empty body — with
+ *                        GH_PROMPT_DISABLED=1 a body-less create would
+ *                        prompt-fault, since non-interactive gh requires
+ *                        title AND body. REVERSES the cycle-2 rejection.)
  *   - editPrBody:        gh pr edit <n> --body-file -   (body over stdin)
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrChecks:       gh pr view <n> --json statusCheckRollup
@@ -394,15 +401,14 @@ export function makeSubprocessPrEffects(
         request.base,
         '--title',
         request.title,
+        // ALWAYS a body over stdin (PR-165 final, jMrm0 — REVERSING the
+        // cycle-2 rejection): non-interactive `gh pr create` requires title
+        // AND body, and with GH_PROMPT_DISABLED=1 there is no prompt
+        // fallback — a body-less create would fault the row. An absent
+        // request body becomes an HONEST empty body, never a fault.
       ];
-      // The body travels over STDIN (`--body-file -`), never argv — the
-      // same transport discipline as editPrBody/comment, so no markdown
-      // body is ever a process argument.
-      let body: string | undefined;
-      if (request.body !== undefined) {
-        args.push('--body-file', '-');
-        body = request.body;
-      }
+      args.push('--body-file', '-');
+      const body = request.body ?? '';
       if (request.draft) args.push('--draft');
       return parseCreatedPr(await runGh(args, repoRoot, timeoutMs, body));
     },

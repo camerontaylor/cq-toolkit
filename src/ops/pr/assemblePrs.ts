@@ -374,57 +374,66 @@ function pendingRowOf(pkg: { name: string; branch: string }): ManifestRow {
   return { name: pkg.name, branch: pkg.branch };
 }
 
-// THE SECTION COMPOSE PROTOCOL (PR-165 r2#4): the tracker PR's body hosts
-// TWO sections owned by two different writers — the assembler owns
-// {@link MANIFEST_SECTION_MARKER}, the run report owns
-// {@link READINESS_SECTION_MARKER} — and each writer replaces ONLY its own
-// section, creating it when absent and preserving every other section
-// (and any prose outside the sections) verbatim. Neither writer can clobber
-// the other.
+// THE SECTION COMPOSE PROTOCOL (PR-165 r2#4, end markers per final jMrm3):
+// the tracker PR's body hosts TWO sections owned by two different writers —
+// the assembler owns the manifest section, the run report owns the
+// readiness section — and each writer replaces ONLY its own section: from
+// its START marker to ITS OWN END marker (both written by the builders),
+// creating both when absent. Lines outside a managed span — user prose
+// above, between, or below the sections — are ALWAYS preserved verbatim;
+// neither writer can clobber the other or the caller's prose.
 
-/** The assembler's section marker — the fleet-run manifest lives under it. */
+/** The assembler's section START marker — the fleet-run manifest lives under it. */
 export const MANIFEST_SECTION_MARKER = '<!-- cq:manifest -->';
 
-/** The run report's section marker — the merge-readiness report lives under it. */
+/** The assembler's section END marker (final jMrm3): bounds the managed span. */
+export const MANIFEST_SECTION_END_MARKER = '<!-- /cq:manifest -->';
+
+/** The run report's section START marker — the merge-readiness report lives under it. */
 export const READINESS_SECTION_MARKER = '<!-- cq:readiness -->';
 
+/** The run report's section END marker (final jMrm3): bounds the managed span. */
+export const READINESS_SECTION_END_MARKER = '<!-- /cq:readiness -->';
+
 /**
- * Upsert ONE section (its FIRST line is its marker) into `existing`:
+ * Upsert ONE section into `existing`. The section's FIRST line is its
+ * START marker and its LAST line is its END marker; the span REPLACED in
+ * `existing` runs from a line exactly matching the START marker to a line
+ * exactly matching the derived END marker (start replaced inclusively, end
+ * marker replaced by the new section's own):
  *   - absent/empty existing → the section alone;
- *   - marker present → the section REPLACES the lines from its marker to
- *     just before the next SECTION MARKER (or EOF) — everything else,
- *     sibling sections included, is preserved byte-for-byte;
- *   - marker absent → the section is appended after the existing content.
- * The section END is detected by EXACT marker match (r3): a descriptive
- * `<!-- cq-toolkit …` comment inside a section — or any future `<!-- cq:`
- * prefixed line — is content, never a terminator.
+ *   - START present → the managed span is replaced; prose and sibling
+ *     sections outside the span survive byte-for-byte (final jMrm3 — a
+ *     missing END marker owns the tail, the legacy-body migration path);
+ *   - START absent → the section is appended after the existing content.
  * Markdown-safe by construction: the section builders already escaped
  * their interpolations.
  */
 export function composeSection(existing: string | undefined, section: string): string {
-  const marker = (section.split('\n')[0] ?? '').trim();
+  const sectionLines = section.trimEnd().split('\n');
+  const startMarker = (sectionLines[0] ?? '').trim();
+  const endMarker = startMarker.replace('<!-- cq:', '<!-- /cq:');
   if (existing === undefined || existing.trim() === '') {
     return `${section.trimEnd()}\n`;
   }
-  const lines = existing.split('\n');
-  const start = lines.findIndex((line) => line.trim() === marker);
+  const existingLines = existing.split('\n');
+  const start = existingLines.findIndex((line) => line.trim() === startMarker);
   if (start === -1) {
     return `${existing.trimEnd()}\n\n${section.trimEnd()}\n`;
   }
-  let end = lines.length;
-  for (let index = start + 1; index < lines.length; index += 1) {
-    const candidate = lines[index]?.trim();
-    if (candidate === MANIFEST_SECTION_MARKER || candidate === READINESS_SECTION_MARKER) {
+  let end = existingLines.length; // no END marker → the span owns the tail (legacy bodies)
+  for (let index = start + 1; index < existingLines.length; index += 1) {
+    if (existingLines[index]?.trim() === endMarker) {
       end = index;
       break;
     }
   }
-  const separator = end < lines.length ? [''] : [];
   return [
-    ...lines.slice(0, start),
-    ...section.trimEnd().split('\n'),
-    ...separator,
-    ...lines.slice(end),
+    ...existingLines.slice(0, start),
+    ...sectionLines,
+    // Owning the tail (a legacy START without an END) still ends the body
+    // with a newline, matching every other compose outcome.
+    ...(end < existingLines.length ? existingLines.slice(end + 1) : ['']),
   ].join('\n');
 }
 
@@ -476,6 +485,7 @@ function manifestSection(input: AssemblePrsInput, rows: readonly ManifestRow[]):
           : 'pending';
     lines.push(`- \`${mdSafe(row.name)}\` — ${where} (\`${row.branch}\`)`);
   }
+  lines.push(MANIFEST_SECTION_END_MARKER);
   return lines.join('\n');
 }
 

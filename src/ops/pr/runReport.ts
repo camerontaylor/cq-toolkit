@@ -33,6 +33,7 @@
 import type { Op } from '../../kernel/types.js';
 import {
   composeSection,
+  READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
   runPrefixFault,
   type PrChecks,
@@ -306,6 +307,7 @@ function reportSection(runPrefix: string, rows: readonly RunReportRow[]): string
       `- \`${mdSafe(row.name)}\` — #${String(row.number)} — checks: ${row.checks}; review: ${row.review} — ${verdict}${why}`,
     );
   }
+  lines.push(READINESS_SECTION_END_MARKER);
   return lines.join('\n');
 }
 

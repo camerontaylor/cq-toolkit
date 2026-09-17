@@ -29,7 +29,9 @@ import { describe, expect, test } from 'vitest';
 import type { PrSearchResult, PrState } from '../../../src/ops/pr/assemblePrs.js';
 import {
   composeSection,
+  MANIFEST_SECTION_END_MARKER,
   MANIFEST_SECTION_MARKER,
+  READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
 } from '../../../src/ops/pr/assemblePrs.js';
 import {
@@ -416,9 +418,19 @@ describe('bodyOf (gh pr view --json body)', () => {
   });
 });
 
-describe('composeSection (the r2#4 tracker-body compose protocol)', () => {
-  const manifestSection = `${MANIFEST_SECTION_MARKER}\n# Fleet run\n- \`core\` — #11`;
-  const readinessSection = `${READINESS_SECTION_MARKER}\n# Merge readiness\n- \`core\` — READY`;
+describe('composeSection (the tracker-body compose protocol, END markers per final jMrm3)', () => {
+  const manifestSection = [
+    MANIFEST_SECTION_MARKER,
+    '# Fleet run',
+    '- `core` — #11',
+    MANIFEST_SECTION_END_MARKER,
+  ].join('\n');
+  const readinessSection = [
+    READINESS_SECTION_MARKER,
+    '# Merge readiness',
+    '- `core` — READY',
+    READINESS_SECTION_END_MARKER,
+  ].join('\n');
 
   test('no existing body → the section alone', () => {
     expect(composeSection(undefined, manifestSection)).toBe(`${manifestSection}\n`);
@@ -431,51 +443,90 @@ describe('composeSection (the r2#4 tracker-body compose protocol)', () => {
     );
   });
 
-  test('an existing marker → ONLY that section is replaced; a sibling section survives verbatim', () => {
+  test('an existing span → ONLY the span between START and ITS END is replaced', () => {
     const existing = [
       'Prose header.',
       MANIFEST_SECTION_MARKER,
       'STALE manifest line',
+      MANIFEST_SECTION_END_MARKER,
       '',
       READINESS_SECTION_MARKER,
       'READINESS line',
+      READINESS_SECTION_END_MARKER,
     ].join('\n');
     const composed = composeSection(existing, manifestSection);
     expect(composed).toContain('Prose header.');
-    expect(composed).toContain(manifestSection); // the fresh content landed
+    expect(composed).toContain(manifestSection); // the fresh span landed
     expect(composed).not.toContain('STALE manifest line');
     expect(composed).toContain('READINESS line'); // the sibling is untouched
   });
 
-  test('a descriptive `<!-- cq-toolkit …` comment inside a section does NOT truncate the scan (r3)', () => {
-    // The section END is an EXACT marker match: the real bodies carry a
-    // descriptive comment whose line starts `<!-- cq-toolkit` — close to,
-    // but never equal to, a section marker — so it is CONTENT and the
-    // replacement must consume it (along with the stale bullets) without
-    // stopping early, while the sibling section stays verbatim.
+  test('USER PROSE BELOW the section survives a span replacement (final jMrm3)', () => {
+    const existing = [
+      MANIFEST_SECTION_MARKER,
+      'STALE manifest line',
+      MANIFEST_SECTION_END_MARKER,
+      '',
+      'User prose below the section.',
+    ].join('\n');
+    const composed = composeSection(existing, manifestSection);
+    expect(composed).toContain(manifestSection);
+    expect(composed).not.toContain('STALE manifest line');
+    expect(composed).toContain('User prose below the section.');
+  });
+
+  test('USER PROSE BETWEEN the sections survives either writer', () => {
+    const existing = [
+      MANIFEST_SECTION_MARKER,
+      'STALE manifest line',
+      MANIFEST_SECTION_END_MARKER,
+      'Prose between the sections.',
+      READINESS_SECTION_MARKER,
+      'READINESS line',
+      READINESS_SECTION_END_MARKER,
+    ].join('\n');
+    const viaManifest = composeSection(existing, manifestSection);
+    expect(viaManifest).toContain('Prose between the sections.');
+    expect(viaManifest).not.toContain('STALE manifest line');
+    const viaReadiness = composeSection(existing, readinessSection);
+    expect(viaReadiness).toContain('Prose between the sections.');
+    expect(viaReadiness).toContain(readinessSection);
+  });
+
+  test('a descriptive `<!-- cq-toolkit …` comment is CONTENT, never a terminator (r3)', () => {
     const existing = [
       MANIFEST_SECTION_MARKER,
       '<!-- cq-toolkit fleet-run manifest: runPrefix cq/09-16a (generated; updated in place, never duplicated) -->',
       'STALE manifest bullet',
+      MANIFEST_SECTION_END_MARKER,
       '',
       READINESS_SECTION_MARKER,
       '<!-- cq-toolkit fleet-run report: runPrefix cq/09-16a (generated; merge-readiness, never auto-merges) -->',
       'READINESS line',
+      READINESS_SECTION_END_MARKER,
     ].join('\n');
     const composed = composeSection(existing, manifestSection);
-    expect(composed).toContain(manifestSection); // full replacement reached the sibling marker
+    expect(composed).toContain(manifestSection); // the span was replaced up to ITS end marker
     expect(composed).not.toContain('STALE manifest bullet');
     expect(composed).toContain(READINESS_SECTION_MARKER);
     expect(composed).toContain('READINESS line');
+  });
+
+  test('LEGACY bodies without END markers: the span owns the tail (migration path)', () => {
+    const existing = [MANIFEST_SECTION_MARKER, 'STALE manifest line'].join('\n');
+    const composed = composeSection(existing, manifestSection);
+    expect(composed).toBe(`${manifestSection}\n`);
   });
 
   test('replacement works regardless of section order (readiness first, manifest last)', () => {
     const existing = [
       READINESS_SECTION_MARKER,
       'READINESS line',
+      READINESS_SECTION_END_MARKER,
       '',
       MANIFEST_SECTION_MARKER,
       'STALE manifest line',
+      MANIFEST_SECTION_END_MARKER,
     ].join('\n');
     const composed = composeSection(existing, manifestSection);
     expect(composed).toContain('READINESS line');
@@ -592,11 +643,15 @@ describe('createPr carries the body over stdin, never argv', () => {
     }
   });
 
-  test('a create WITHOUT a body sends no body flag at all', async () => {
+  test('a create WITHOUT a body STILL sends --body-file - with EMPTY stdin (final jMrm0 reversal)', async () => {
+    // Non-interactive gh (GH_PROMPT_DISABLED=1) requires title AND body —
+    // a body-less create would prompt-fault the row. An absent request
+    // body becomes an honest EMPTY body over stdin, never a fault.
     const scratch = await mkdtemp(join(tmpdir(), 'cq-pr-create-'));
     const binDir = join(scratch, 'bin');
     const repoDir = join(scratch, 'repo');
     const argsFile = join(scratch, 'argv');
+    const stdinFile = join(scratch, 'stdin');
     await mkdir(binDir, { recursive: true });
     await mkdir(repoDir, { recursive: true });
     await writeFile(
@@ -604,6 +659,7 @@ describe('createPr carries the body over stdin, never argv', () => {
       [
         '#!/bin/sh',
         `printf '%s\\n' "$@" > '${argsFile}'`,
+        `cat > '${stdinFile}'`,
         'echo "https://github.test/owner/repo/pull/7"',
         '',
       ].join('\n'),
@@ -621,9 +677,11 @@ describe('createPr carries the body over stdin, never argv', () => {
       });
       expect(created.number).toBe(7);
       const argv = (await readFile(argsFile, 'utf8')).split('\n').filter((line) => line !== '');
+      expect(argv).toContain('--body-file');
+      expect(argv).toContain('-');
       expect(argv).not.toContain('--body');
-      expect(argv).not.toContain('--body-file');
       expect(argv).not.toContain('--draft');
+      expect(await readFile(stdinFile, 'utf8')).toBe('');
     } finally {
       if (originalPath === undefined) delete process.env['PATH'];
       else process.env['PATH'] = originalPath;

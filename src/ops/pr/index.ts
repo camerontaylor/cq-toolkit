@@ -24,7 +24,9 @@ export type {
 export {
   composeSection,
   makeAssemblePrs,
+  MANIFEST_SECTION_END_MARKER,
   MANIFEST_SECTION_MARKER,
+  READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
 } from './assemblePrs.js';
 // The run report's value type is exported ALIASED: the kernel's frozen

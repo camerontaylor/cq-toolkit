@@ -21,6 +21,7 @@ import { describe, expect, test } from 'vitest';
 import {
   makeAssemblePrs,
   MANIFEST_SECTION_MARKER,
+  READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
   type AssemblePrsInput,
   type PrCreateRequest,
@@ -534,11 +535,14 @@ describe('the tracker write composes, never clobbers', () => {
       prsByHead: new Map([[TRACKER_BRANCH, { number: 7 }]]),
     });
     const readinessBody = [
-      '<!-- cq:readiness -->',
+      READINESS_SECTION_MARKER,
       '<!-- cq-toolkit fleet-run report: runPrefix cq/09-16a (generated; merge-readiness, never auto-merges) -->',
       '# Fleet run `cq/09-16a` — merge readiness',
       '',
       '- `core` — #11 — checks: pass; review: approved — READY',
+      READINESS_SECTION_END_MARKER,
+      '',
+      'User prose below the section survives.',
       '',
     ].join('\n');
     fake.gh.getPrBody = async () => readinessBody;
@@ -547,7 +551,7 @@ describe('the tracker write composes, never clobbers', () => {
     expect(written).toContain(MANIFEST_SECTION_MARKER);
     expect(written).toContain(READINESS_SECTION_MARKER);
     expect(written).toContain('`core` — #101'); // the fresh manifest content landed
-    // The readiness section survived BYTE-FOR-BYTE.
+    // The readiness section survived BYTE-FOR-BYTE, prose included.
     expect(written).toContain(readinessBody.trimEnd());
   });
 
