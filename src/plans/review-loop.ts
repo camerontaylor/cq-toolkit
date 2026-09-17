@@ -71,6 +71,7 @@
 // the CLI does; the default view is the central registry built exactly the
 // way run-plan builds its view).
 import type { Budget, ModelSpec } from '../driver/types.js';
+import { deepFreeze } from '../harness/config.js';
 import type { HarnessConfig } from '../harness/config.js';
 import {
   BudgetGovernor,
@@ -112,6 +113,94 @@ import { snapshotPrState, verifyPrOutcome } from '../ops/review/verifyReviewOutc
 
 /** Cap for the composed push-failure reason — a push can spew pages of output. */
 const PUSH_REASON_MAX = 500;
+
+/**
+ * The loop's SELF-REPLY SIGNATURE (drill 8): every reply body the loop
+ * composes — a thread's review_reply and a top-level issue_comment alike —
+ * OPENS with this exact line, and {@link defaultLoopClassifyConfig} skips
+ * bodies that open with its prefix. The marker must LEAD: the skip pattern
+ * is START-anchored, and the case the signature exists for is a previously
+ * posted loop reply re-fetched as feedback — its body starts with whatever
+ * the loop said, so only a leading marker can match (cycle-1 major: a
+ * trailing marker matched nothing). Issue comments do not thread, so
+ * without the signature each reply the loop posts re-fetches as NEW
+ * feedback and the loop answers itself forever. Content-keyed on purpose:
+ * the classify vocabulary's 'responder's own words' class made
+ * deterministic under the single-identity deviation (authorship-based
+ * skipping is blind when the drill holds exactly one identity — see
+ * defaultLoopClassifyConfig).
+ *
+ * ACCEPTED v1 LIMITATION (round-1 low): the skip pattern is PREFIX-only, so
+ * an adversarial reviewer could LEAD their own comment with the marker to
+ * get it suppressed. That is self-defeating for them — the only feedback
+ * hidden is their own — and the signature carries no authority (nothing
+ * trusts a marker-led comment, it is merely not consumed as feedback), so
+ * the vector buys an attacker nothing but silence toward themselves. A
+ * nonce-based signature (per-PR secret compared on read) is the noted
+ * future hardening if this ever matters; v1 ships the plain marker.
+ */
+export const replySignature = (owner: string, repo: string, pr: number): string =>
+  `<!-- cq-review-loop:${owner}/${repo}#${String(pr)} -->`;
+
+/** The content key recognizing the signature (the composed line's prefix). */
+const REPLY_SIGNATURE_PATTERN = /^<!-- cq-review-loop:/;
+
+/**
+ * The loop's shipped classify DEFAULT: defaultClassifyConfig plus the
+ * GENERATION-SIGNATURE skip patterns — platform/bot tooling housekeeping,
+ * never review feedback. FOUND LIVE, growing AS DATA (R3's designated
+ * mechanism: the patterns ride the frozen ClassifyConfig shape, never a
+ * code branch):
+ *   - drill 6: GitHub's housekeeping shape, body opens
+ *     `<!-- This is an auto-generated comment …`;
+ *   - drills 7–8: the Codex review bot's sticky PR summary, body opens
+ *     `<!-- codex-pull-request-review-summary …` (then "## Codex Review
+ *     Summary / This comment shows the latest Codex review activity…").
+ *     Drill 7's comment id 5705054746 — first read as a markerless
+ *     "This comment shows the latest checks…" shape — was THIS summary all
+ *     along; the drill-7 diagnostic misread a length-truncated body, and
+ *     the codex marker above covers it.
+ * Without the suppression every real-PR run fixer-runs on the platform's
+ * own comments.
+ *
+ * REJECTED AS DATA (cycle 2): bare-text suppression ("This comment shows
+ * the latest checks…"). Author-blind and spoofable — a human OPENING a
+ * comment with that phrase would have real feedback suppressed. Body-only
+ * config patterns anchor on GENERATION SIGNATURES (the HTML markers
+ * above): the right trust level for content that carries no author
+ * identity, and the standard every future pattern here must meet.
+ *
+ * And the loop's OWN reply signature (drill 8, {@link replySignature}):
+ * `/^<!-- cq-review-loop:/`. Issue comments do not thread, so every reply
+ * the loop posts would otherwise re-fetch as a NEW actionable item and the
+ * loop would consume its own words forever. This is the classify
+ * vocabulary's 'responder's own words' class made DETERMINISTIC under the
+ * single-identity deviation: `skipResponderAuthoredThreads` keys on author
+ * identity, but when the drill holds exactly one identity every comment
+ * shares that author — the marker makes "already said by us" readable from
+ * CONTENT, independent of the authorship knob.
+ *
+ * Line-START anchored without `m` ON PURPOSE — these markers ARE the body's
+ * first bytes on the real comments, and a human comment that merely quotes
+ * or mentions them mid-body must never skip (conservative bias: ambiguous
+ * cases fail toward actionable, a human looks at them). The set grows as
+ * data: a new live-observed housekeeping shape appends one anchored
+ * pattern here, documented with its drill — and stays
+ * generation-signature anchored per the rejection above. Callers may
+ * still replace the config WHOLESALE (ReviewLoopOpts.classifyConfig) — a
+ * replacement replaces this default INCLUDING the suppression, so a
+ * custom config that wants it re-adds the patterns. Frozen: config data
+ * the loop reads, never a caller-mutable surface.
+ */
+export const defaultLoopClassifyConfig: ClassifyConfig = deepFreeze({
+  ...defaultClassifyConfig,
+  skipPatterns: [
+    ...defaultClassifyConfig.skipPatterns,
+    /^<!-- This is an auto-generated comment/,
+    /^<!-- codex-pull-request-review-summary/,
+    REPLY_SIGNATURE_PATTERN,
+  ],
+});
 
 /** Everything runReviewLoop needs — plain data plus the injected seams. */
 export interface ReviewLoopOpts {
@@ -413,49 +502,95 @@ const worktreePushArgs = (
 const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
+ * The stage at which one claimed commit FAILED verification (round-1 low:
+ * the unreported-commit reason names it — "claimed but failed verification"
+ * is not actionable unless the human knows WHICH gate refused). Checked in
+ * order: 'not-40-hex' (shape — the literal "HEAD" and short shas are
+ * rejected before any git call), 'not-descendant' (the sha does not resolve
+ * to a commit, is the before-head itself, or is not a STRICT descendant of
+ * the before-head), 'not-ancestor' (not an ancestor of the pushed worktree
+ * HEAD), 'attribution-missing' (the commit message does not name the item).
+ */
+type CommitVerificationFailure =
+  | 'not-40-hex'
+  | 'not-descendant'
+  | 'not-ancestor'
+  | 'attribution-missing';
+
+/**
  * Verify one claimed commit through the git seam IN THE PUSHED WORKTREE,
  * strictly mechanically (exit codes only), hardened against spoofing
- * (round-2 finding 2):
+ * (round-2 finding 2). Returns null when the commit verifies, else the
+ * failing stage:
  *   - the candidate must BE a full 40-hex sha — the literal "HEAD" and
- *     short shas are rejected before any git call;
- *   - `rev-parse --verify <sha>^{commit}` must succeed (it exists here);
- *   - `merge-base --is-ancestor <before.headSha> <sha>` must exit 0 with
+ *     short shas are rejected before any git call ('not-40-hex');
+ *   - `rev-parse --verify <sha>^{commit}` must succeed (it exists here) and
+ *     `merge-base --is-ancestor <before.headSha> <sha>` must exit 0 with
  *     the sha DISTINCT from the before-snapshot head — a STRICT descendant:
- *     the pre-existing base commit is not a fix;
+ *     the pre-existing base commit is not a fix ('not-descendant');
  *   - `merge-base --is-ancestor <sha> HEAD` must exit 0 (the worktree HEAD
- *     is the exact tree the stage-5 publish pushed).
+ *     is the exact tree the stage-5 publish pushed) ('not-ancestor');
+ *   - PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
+ *     worktree, so a sibling's strict-new commit would otherwise satisfy
+ *     this item's gate — the commit MESSAGE must name THIS item's id at a
+ *     NON-DIGIT boundary (a numeric comment id must not be satisfied by a
+ *     message naming a superstring of it), the shipped prompt requires it
+ *     verbatim in the commit subject ('attribution-missing').
+ *
+ * EXPORTED for the unit lane's stage pins: `not-40-hex` is unreachable
+ * through the loop (parseFixOutput already rejects non-40-hex claims), so
+ * the stage taxonomy is pinned by calling this gate directly.
  */
-const commitInPushedHead = async (
+export const commitVerificationFailure = async (
   git: GhFn,
   worktreePath: string,
   sha: string,
   baseSha: string,
   itemId: string,
-): Promise<boolean> => {
+): Promise<CommitVerificationFailure | null> => {
   if (!COMMIT_SHA_RE.test(sha)) {
-    return false;
+    return 'not-40-hex';
   }
   if (sha.toLowerCase() === baseSha.toLowerCase()) {
-    return false; // STRICT descendant: the before-head itself is not a fix
+    return 'not-descendant'; // STRICT descendant: the before-head itself is not a fix
   }
   const verify = await git(['-C', worktreePath, 'rev-parse', '--verify', `${sha}^{commit}`]);
   if (verify.code !== 0) {
-    return false;
+    return 'not-descendant'; // unresolvable — it cannot be a strict descendant
   }
   const descendant = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', baseSha, sha]);
   if (descendant.code !== 0) {
-    return false;
+    return 'not-descendant';
   }
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
   if (ancestor.code !== 0) {
-    return false;
+    return 'not-ancestor';
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this
-  // item's gate. The commit MESSAGE must name THIS item's id — the shipped
-  // prompt requires it verbatim in the commit subject.
+  // item's gate. The commit MESSAGE must name THIS item's id at a
+  // NON-DIGIT boundary — the shipped prompt requires it verbatim in the
+  // commit subject — because a numeric comment id ('123') is trivially
+  // satisfied by a message naming '1234' under a raw substring read.
   const message = await git(['-C', worktreePath, 'log', '-1', '--format=%B', sha]);
-  return message.code === 0 && message.stdout.includes(itemId);
+  return message.code === 0 && attributionMatches(message.stdout, itemId)
+    ? null
+    : 'attribution-missing';
+};
+
+/**
+ * The per-item attribution match (round 3 low): the item id must appear in
+ * the commit message at a NON-DIGIT boundary — `(^|[^0-9])<id>([^0-9]|$)`.
+ * Thread ids are PRRT_-distinctive and match trivially; NUMERIC comment ids
+ * need the boundary ('fix 123: apple' attributes item 123, while 'fix
+ * 1234: apple' must NOT attribute it — a raw substring read would). The id
+ * is regex-escaped before interpolation; the match is line-agnostic (the
+ * boundary classes never cross the id, so an id mid-line still matches
+ * against its immediate neighbors).
+ */
+const attributionMatches = (message: string, itemId: string): boolean => {
+  const escaped = itemId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^0-9])${escaped}([^0-9]|$)`).test(message);
 };
 
 /**
@@ -464,6 +599,15 @@ const commitInPushedHead = async (
  * outcome degrades to needs-human; nothing here invents progress or hides
  * a thread that was not verifiably addressed. Unexpected throws propagate —
  * a bug must look like one (I5).
+ *
+ * DEPLOYMENT REQUIREMENT (round-3 adjudication): configure `responderLogin`
+ * as the loop's own identity. The two self-reply suppressions split by
+ * surface: THREAD-kind feedback rides RESPONDER AUTHORSHIP (classify row
+ * 5, the thread last-word rule — with responderLogin configured, the loop
+ * never re-answers a thread it already replied to); COMMENT-kind feedback
+ * (top-level issue comments, which cannot thread) rides the reply
+ * SIGNATURE — a different surface needing a different mechanism, see
+ * {@link replySignature}.
  */
 export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> {
   const reasons: string[] = [];
@@ -503,7 +647,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   const classification = classifyThreads(
     state,
     opts.nowMs,
-    opts.classifyConfig ?? defaultClassifyConfig,
+    opts.classifyConfig ?? defaultLoopClassifyConfig,
   );
   if (classification.truncated) {
     return {
@@ -532,18 +676,34 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // never silently dropped (see enrichBatches for the per-batch policy).
   const { items: correlated, skipped: vanishedRows } = enrichBatches(batches, state);
   skipped.push(...vanishedRows);
-  // (3b) ROUND-AWARE DISPATCH MEMORY (round-3 item 4): an enriched item
-  // whose round-versioned reply actionId is ALREADY dispatched was answered
-  // THIS round — skip it entirely (no fix job, no new commit, no duplicate
-  // reply); new feedback fingerprints a new round and re-opens the item.
+  // (3b) ROUND-AWARE DISPATCH MEMORY (round-3 item 4; carry fix — codex
+  // P2): an enriched item whose round-versioned REPLY actionId is already
+  // dispatched was answered THIS round — no re-fix, no re-reply. But a
+  // THREAD whose round-versioned RESOLVE has NOT dispatched still needs its
+  // thread closed: skipping the item entirely used to strand a
+  // posted-reply-unresolved thread forever (the resolve was withheld or
+  // failed in the posting run, and every later run skipped past it while
+  // reporting ok). Such an item emits ONLY the round-versioned resolve
+  // action (same actionId → posts once, dedupe-safe by the dispatch log);
+  // comment-kind items have no resolve and skip fully. New feedback
+  // fingerprints a new round and re-opens the item.
   const dispatched = new Set(
     (await fileDispatchLog(opts.dispatchLogPath).load()).map((record) => record.actionId),
   );
   const fixInputs: FixReviewItemInput[] = [];
   const sources = new Map<string, EnrichedSource>();
+  const carriedResolves: Extract<ReviewAction, { kind: 'resolve_thread' }>[] = [];
   for (const entry of correlated) {
     const replyActionId = `review-loop:${String(opts.pr)}:reply:${entry.source.itemId}-${entry.source.roundFingerprint}`;
     if (dispatched.has(replyActionId)) {
+      const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${entry.source.itemId}-${entry.source.roundFingerprint}`;
+      if (entry.source.kind === 'thread' && !dispatched.has(resolveActionId)) {
+        carriedResolves.push({
+          kind: 'resolve_thread',
+          actionId: resolveActionId,
+          threadId: entry.source.itemId,
+        });
+      }
       skipped.push({ id: entry.source.itemId, reason: 'already-answered-this-round' });
       continue;
     }
@@ -559,6 +719,64 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       harness: opts.harness ?? reviewFixHarness,
       ...(opts.promptOverride !== undefined ? { promptOverride: opts.promptOverride } : {}),
       ...(opts.fixBudget !== undefined ? { budget: opts.fixBudget } : {}),
+    });
+  }
+  // CARRIED RESOLVES OVER RESPONDED THREADS (codex P2 jNUCa): a thread
+  // whose loop reply posted classifies 'responded' next run (the reply is
+  // the thread's latest word) and planReviewBatch excludes it — the 3b
+  // carry over PLANNED items above would never see it, and a resolve that
+  // failed or was withheld behind that reply would strand the thread
+  // unresolved permanently (in the single-identity drill AND the documented
+  // bot-identity deployment). Walk the classification's responded THREAD
+  // items and carry the round-versioned resolve when it has not dispatched
+  // (no fix job, no reply — the reply already posted; the resolve pushes
+  // nothing). Deduped against the planned carry by thread id; the
+  // fingerprint is computed over the thread's fetched data exactly the way
+  // stage 6 computes it. AUTHORIZATION (jNfip): the carry fires only when
+  // the thread's LATEST reply opens with the loop's own signature — the
+  // signature-led reply is the evidence that a resolve was queued by THIS
+  // loop; any other latest reply is not carried, and the feedback stays
+  // outstanding instead of being closed without a verified fix.
+  const carriedIds = new Set(carriedResolves.map((resolve) => resolve.threadId));
+  for (const item of classification.items) {
+    if (item.kind !== 'thread' || item.verdict !== 'responded') {
+      continue;
+    }
+    if (carriedIds.has(item.id)) {
+      continue;
+    }
+    const thread = state.threads.find((candidate) => candidate.id === item.id);
+    if (thread === undefined) {
+      continue; // vanished between fetch and classify — nothing to resolve
+    }
+    // AUTHORIZATION (jNfip): the thread's LATEST reply must open with the
+    // loop's own signature — the signature-led reply is the evidence that a
+    // resolve was queued by this loop. Any other latest reply (a PR-author
+    // or third-party reply) is not carried; the feedback stays outstanding.
+    const latestReply = thread.replies[thread.replies.length - 1];
+    if (latestReply === undefined || !REPLY_SIGNATURE_PATTERN.test(latestReply.body)) {
+      continue;
+    }
+    // Same shape enrichItem builds (body + replies) — identical fingerprint
+    // to the stage-6 resolve of the posting run.
+    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundFingerprint(
+      item.id,
+      {
+        id: thread.id,
+        path: thread.path,
+        line: thread.line,
+        body: thread.body,
+        comments: thread.replies,
+      },
+    )}`;
+    if (dispatched.has(resolveActionId)) {
+      continue; // already resolved-and-recorded — a full no-op for this item
+    }
+    carriedIds.add(item.id);
+    carriedResolves.push({
+      kind: 'resolve_thread',
+      actionId: resolveActionId,
+      threadId: item.id,
     });
   }
 
@@ -591,12 +809,157 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     headBefore.code === 0 &&
     headAfter.code === 0 &&
     headBefore.stdout.trim() !== headAfter.stdout.trim();
-  const claimedNoChange = fixReport.jobs.some(
-    (row) => row.result.status === 'ok' && !(row.result.value as FixReviewItemResult).changed,
-  );
-  const unreportedCommit = headMoved && claimedNoChange;
-  if (unreportedCommit) {
-    reasons.push('unreported-commit: worktree advanced but the worker reported no commit');
+  // FAIL-CLOSED HEAD READ (round 3; extended by the final bot slice, P1):
+  // an unreadable PRE-run OR post-run HEAD breaks the gate — a failing
+  // pre-run read makes headMoved false (it requires both reads), which
+  // would skip the range gate entirely while publishable stayed true and
+  // an unaccounted nonempty range could publish. Both reads are
+  // fail-closed: publication is withheld with its own reason naming WHICH
+  // read failed, and the run degrades to needs-human, never fail-open.
+  const headUnreadable = headAfter.code !== 0 || headBefore.code !== 0;
+  if (headUnreadable) {
+    const failedRead = headBefore.code !== 0 ? headBefore : headAfter;
+    const which = headBefore.code !== 0 ? 'pre-run' : 'post-run';
+    reasons.push(
+      `worktree head unreadable (${which}): ${failedRead.stderr.trim() || 'rev-parse failed'}`,
+    );
+  }
+  // RANGE-ACCOUNTABILITY VERIFICATION (round 2; revises drill 6's tip-only
+  // rule): every ok row's claimed commits are verified HERE, through the
+  // SAME per-item gate the resolve uses (commitVerificationFailure — 40-hex,
+  // strict descendant of the OBSERVED pre-run head, ancestor of the worktree
+  // HEAD, message names the item). The pass runs BEFORE the publish
+  // decision, because publication keys on the WHOLE added range, not on
+  // per-row claims or the tip alone: `rev-list <observedBase>..HEAD`
+  // enumerates every commit the fix run added, and EACH must be a verified
+  // claimed commit. Consequences:
+  //   - a worker that commits while claiming changed:false still blocks
+  //     (its commit is in the range and unclaimed) — tip-unclaimed is the
+  //     single-commit special case of the same rule;
+  //   - an honestly-no-change sibling NEVER false-positives on another
+  //     item's legitimate commit (found live, drill 6: one real fix plus
+  //     two honest no-ops read as "unreported" under the old per-row delta);
+  //   - MID-RANGE unreported work is caught (round-2 major: worker A
+  //     commits unreported, worker B commits + claims on top — a tip-only
+  //     check published A's commit silently);
+  //   - a headMoved with an EMPTY accounted range is UNACCOUNTED (jLBJm P2:
+  //     a backward `git reset` to an ancestor adds no commit in
+  //     base..HEAD — reading that emptiness as "nothing added" would
+  //     publish a moved-backward tree);
+  //   - a rev-list FAILURE is fail-closed: an unknown range publishes
+  //     nothing.
+  // THE RANGE BASE IS THE OBSERVED PRE-RUN HEAD (codex P2), never the PR
+  // snapshot's headSha: the snapshot is origin's REST view and can LAG the
+  // sha resolvePrWorktree actually fetched/checked out — a stale
+  // before.headSha would drag PRE-EXISTING commits into the added range and
+  // block a legitimate run as unreported. Invariant preserved:
+  // resolvePrWorktree only returns a worktree AT the freshly fetched origin
+  // head, so the observed headBefore IS the fetched truth at fix time (a
+  // reused worktree that is ahead is re-created — its prior commits reach
+  // origin only via a prior push, which the next fetch sees). The
+  // before-SNAPSHOT stays what it is: the verify stage's PR-level baseline.
+  // Rows claiming changed:true whose commits fail verification keep the
+  // unverified-commits path in the action stage; changed:false rows fire
+  // nothing once the range is accounted for. Reported-but-failed commits
+  // are remembered BY SHA so the unreported reasons can name the failing
+  // stage (round-1 low).
+  const observedBase = headBefore.code === 0 ? headBefore.stdout.trim() : null;
+  const verifiedClaimed = new Set<string>();
+  const reportedFailures = new Map<string, CommitVerificationFailure>();
+  const rowVerified = new Map<string, boolean>();
+  if (observedBase !== null) {
+    // An unreadable pre-run head already fail-closes the run (above) — the
+    // gate has no base to verify against, and every changed row is withheld
+    // in the action stage regardless.
+    for (const row of fixReport.jobs) {
+      let verified = false;
+      if (row.result.status === 'ok') {
+        const source = sources.get(row.jobId);
+        for (const sha of (row.result.value as FixReviewItemResult).commits) {
+          // The range compare below runs over rev-list's output; claimed
+          // shas are normalized the same way.
+          const key = sha.toLowerCase();
+          const failure =
+            source === undefined
+              ? 'attribution-missing'
+              : await commitVerificationFailure(
+                  opts.git,
+                  worktree.path,
+                  sha,
+                  observedBase,
+                  source.itemId,
+                );
+          if (failure === null) {
+            verified = true;
+            verifiedClaimed.add(key);
+          } else {
+            reportedFailures.set(key, failure);
+          }
+        }
+      }
+      rowVerified.set(row.jobId, verified);
+    }
+  }
+  const worktreeTip = headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : '';
+  const addedRange =
+    observedBase === null
+      ? null
+      : await opts.git(['-C', worktree.path, 'rev-list', `${observedBase}..HEAD`]);
+  const rangeShas =
+    addedRange !== null && addedRange.code === 0
+      ? addedRange.stdout
+          .split('\n')
+          .map((line) => line.trim().toLowerCase())
+          .filter((line) => line !== '')
+      : [];
+  const unaccounted = rangeShas.filter((sha) => !verifiedClaimed.has(sha));
+  // An EMPTY accounted range with a moved head is UNACCOUNTED (jLBJm P2):
+  // `rev-list <before>..HEAD` returns nothing when HEAD moved BACKWARD (a
+  // worker `git reset` to an ancestor) or outside the base..HEAD span —
+  // reading that emptiness as "nothing added" would publish a moved-backward
+  // tree and record the round over unreported movement.
+  const unreportedCommit =
+    headMoved &&
+    (addedRange === null ||
+      addedRange.code !== 0 ||
+      rangeShas.length === 0 ||
+      unaccounted.length > 0);
+  if (unreportedCommit && observedBase !== null) {
+    if (addedRange === null || addedRange.code !== 0) {
+      // Fail-closed: the added range is unknown, so nothing publishes.
+      reasons.push(
+        `unreported-commit: the added range ${observedBase}..HEAD could not be enumerated (rev-list exit ${String(addedRange?.code ?? -1)}) — publication withheld fail-closed`,
+      );
+    } else if (rangeShas.length === 0) {
+      reasons.push(
+        `unreported-commit: worktree head moved to ${headAfter.stdout.trim()} but ${observedBase}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
+      );
+    } else {
+      // Claimed-but-failed commits first: the reason names the failing
+      // stage ("tip" when the refused commit IS the tip).
+      for (const sha of unaccounted) {
+        const failure = reportedFailures.get(sha);
+        if (failure === undefined) {
+          continue;
+        }
+        const where = sha === worktreeTip ? 'worktree tip' : 'worktree commit';
+        reasons.push(
+          `unreported-commit: ${where} ${sha} was claimed but failed verification (${failure})`,
+        );
+      }
+      const unclaimed = unaccounted.filter((sha) => !reportedFailures.has(sha));
+      if (unclaimed.length > 0) {
+        if (unclaimed.length === 1 && unclaimed[0] === worktreeTip) {
+          reasons.push(
+            `unreported-commit: worktree tip ${headAfter.stdout.trim()} is not a claimed fix — a worker committed without reporting it`,
+          );
+        } else {
+          reasons.push(
+            `unreported-commit: ${String(unclaimed.length)} commit(s) in ${observedBase}..HEAD are not claimed fixes: ${unclaimed.join(' ')}`,
+          );
+        }
+      }
+    }
   }
 
   // (5) Publish, then verify. The fix commits are LOCAL until pushed, so the
@@ -632,7 +995,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   if (dirtyWorktree) {
     reasons.push('dirty-worktree');
   }
-  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree;
+  const publishable = allRowsOk && !unreportedCommit && !dirtyWorktree && !headUnreadable;
   if (commits.length > 0 && publishable) {
     const push = await opts.git(worktreePushArgs(worktree.path, opts.headRefName, pushTarget));
     if (push.code !== 0) {
@@ -659,13 +1022,23 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // (REST lag, an unrelated sibling) must not condemn the whole loop.
   }
 
-  // (6) Actions from the fix rows. ok+changed+commits → reply + resolve;
-  // ok+unchanged → reply only (the honest no-change answer), never a
-  // resolve; non-ok rows → nothing, they feed hasFailures. RESOLVES ARE
-  // GATED PER ITEM on locally-verified commits (see the module doc) — the
-  // PR-wide VerifyOutcome is observability only. actionIds are stable
-  // coordinates (pr + item id) so a re-run dedupes against the dispatch
-  // log.
+  // (6) Actions from the fix rows. PUBLISH-GATE UNIFICATION (jMY2X): when
+  // the publish gate is blocked (publishable false — unaccounted range,
+  // rev-list failure, unreadable head, dirty worktree, mixed-worktree
+  // withholding), EVERY ok row produces NO action: no reply (which would
+  // cite unpublished commits or record a "nothing to fix" round over an
+  // unsane tree, making the next run treat the feedback as answered), no
+  // resolve, nothing recorded — the next run re-plans everything once the
+  // worktree/origin state is sane. This subsumes the head-unreadable reply
+  // withholding (jLtVU/jMP_C): same behavior, now for every blocked shape.
+  // The block's shape-specific reason is already in `reasons` (unreported
+  // range, dirty worktree, unreadable head, publish-withheld-mixed-worktree)
+  // and feeds hasFailures; each withheld row adds a shared per-row marker.
+  // When publishable is true: ok+changed+commits → reply + resolve (resolve
+  // gated per item on locally-verified commits); ok+unchanged → reply only
+  // (the honest no-change answer), never a resolve; non-ok rows → nothing,
+  // they feed hasFailures. actionIds are stable coordinates (pr + item id)
+  // so a re-run dedupes against the dispatch log.
   const actions: ReviewAction[] = [];
   for (const row of fixReport.jobs) {
     if (row.result.status !== 'ok') {
@@ -685,17 +1058,22 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       continue; // unreachable: one source per built job, same order
     }
     const value = row.result.value as FixReviewItemResult;
-    const notes =
-      (publishWithheld
-        ? '\n\nNote: the fix is committed locally but publication was withheld; it is not yet on the remote.'
-        : '') +
-      (unreportedCommit
-        ? `\n\nNote: the worktree advanced during the run — an unreported commit (${headAfter.stdout.trim()}) was observed; a human should check it.`
-        : '');
-    const body =
+    // Publish-gate unification (jMY2X, above): a blocked gate withholds
+    // EVERY row's reply — the shape-specific reason is already recorded.
+    if (!publishable) {
+      reasons.push(`reply withheld for ${row.jobId} — publication blocked`);
+      continue;
+    }
+    // The SELF-REPLY SIGNATURE LEADS every reply body (drill 8, cycle-1
+    // major — see replySignature): REPLY_SIGNATURE_PATTERN is
+    // START-anchored, so the marker must be the body's FIRST line for a
+    // re-run to recognize its own words as skip-class content.
+    const signature = replySignature(opts.owner, opts.repo, opts.pr);
+    const body = `${signature}\n\n${
       value.changed && value.commits.length > 0
-        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}${notes}`
-        : `${value.summary}${notes}`;
+        ? `${value.summary}\n\nCommits: ${value.commits.join(' ')}`
+        : value.summary
+    }`;
     if (source.kind === 'thread') {
       // A reply must anchor to the thread's ROOT REST id; a thread whose
       // root is unanchorable (null rootDatabaseId) is recorded as a failure
@@ -715,16 +1093,11 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // Only a THREAD can resolve (a review summary / top-level comment has
       // no resolvable thread node) — and only through the PER-ITEM gate:
       // at least one reported commit must be verifiable in the pushed
-      // worktree (commitInPushedHead). The resolve never rides the global
-      // snapshot alone: a hallucinated sha must not hide its thread (the
-      // reply still posts — the summary reports what the worker claimed),
-      // and the withheld resolve is recorded as a per-item failure reason.
-      if (publishWithheld || unreportedCommit || dirtyWorktree) {
-        // Publication withheld (a sibling failed), an unreported commit, or
-        // a dirty worktree: nothing is resolved — the thread stays open
-        // regardless of local state.
-        continue;
-      }
+      // worktree (commitVerificationFailure). The resolve never rides the
+      // global snapshot alone: a hallucinated sha must not hide its thread
+      // (the reply still posts — the summary reports what the worker
+      // claimed), and the withheld resolve is recorded as a per-item
+      // failure reason.
       if (value.changed && value.commits.length > 0 && value.truncated === true) {
         // Round-3 item 13: a CONTEXT-truncated worker saw a clipped tail and
         // may have missed the actual constraint — the reply reports the
@@ -733,16 +1106,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           `thread ${source.itemId}: truncated-context — the worker saw a clipped prompt; resolve withheld, reply posted`,
         );
       } else if (value.changed && value.commits.length > 0) {
-        let verified = false;
-        for (const sha of value.commits) {
-          if (
-            await commitInPushedHead(opts.git, worktree.path, sha, before.headSha, source.itemId)
-          ) {
-            verified = true;
-            break;
-          }
-        }
-        if (verified) {
+        // Already verified in the range-accountability pass above — the SAME
+        // gate (commitVerificationFailure incl. attribution) over the SAME
+        // inputs (the publish push moves no worktree ref), never re-run.
+        if (rowVerified.get(row.jobId) === true) {
           actions.push({
             kind: 'resolve_thread',
             actionId: `review-loop:${String(opts.pr)}:resolve:${source.itemId}-${source.roundFingerprint}`,
@@ -764,6 +1131,13 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       });
     }
   }
+  // CARRIED RESOLVES (stage 3b): a thread whose round reply already
+  // dispatched but whose resolve did not rides THIS run's dispatch — no fix
+  // ran for it, no reply is re-posted; the resolve's own actionId dedupes.
+  // These bypass the publish-gate withholding deliberately: their round was
+  // already published when the reply recorded, and the resolve mutation
+  // pushes nothing.
+  actions.push(...carriedResolves);
 
   // (7) Reply + resolve over the gh seam — push-before-post (the same
   // composed worktree push: an idempotent re-assertion against origin races

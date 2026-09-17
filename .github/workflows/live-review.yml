@@ -1,0 +1,93 @@
+# The LIVE review-loop drill — goal E5 (ws-e): end-to-end against a scratch
+# GitHub repo. MANUAL DISPATCH ONLY, never on push, never on pull_request:
+# the run seeds a real scratch repo, opens a real PR, and posts real review
+# replies/resolutions with the caller's GH_TOKEN — nothing automatic may
+# fire it. (Mirrors .github/workflows/live-drivers.yml's discipline.)
+# Dispatch always checks out MAIN — the drill validates branches LOCALLY
+# pre-merge — so only main's trusted code ever executes under GH_TOKEN.
+# PROVENANCE: a repo-owned CI workflow modeled on live-drivers.yml — NOT
+# instantiated from policy/templates (that set owns the merge-queue doctrine
+# workflows; this repo's other CI workflows — ci.yml, denylist.yml,
+# pack-audit.yml, install-matrix.yml — are likewise repo-owned).
+#
+# SECRETS: this file carries NAMES only. GH_TOKEN must be a repo Actions
+# secret with repo scope on the dispatching user's account (it creates
+# cq-scratch-e5-<run_id>, pushes, and posts). Prefer a FINE-GRAINED PAT
+# scoped to the scratch repo(s) only — not the full account token: the drill
+# needs create/push/comment on one scratch repo and nothing else (the
+# names-only rule is unchanged; this line is about the secret's SCOPE).
+# The scratch repo is LEFT
+# BEHIND on purpose (the token holds no delete_repo scope); use a FRESH
+# run_id per drill so the seeded fixtures are unambiguous.
+#
+# The vitest leg runs from source (no build): the live describe skips
+# cleanly unless LIVE_GH=1, and the precondition step below asserts the gate
+# is armed so a misconfigured dispatch can never report a green-skipped run.
+name: live-review
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Scratch-repo run id (repo cq-scratch-e5-<run_id>; fresh id per drill)
+        required: false
+        default: 'e5-live'
+
+# One live drill at a time: a second dispatch queues behind the in-flight
+# one (cancel-in-progress: false — cancelling mid-loop could strand a
+# half-dispatched review). Fixed group, not per-ref: this workflow never
+# fires on PRs, so there is nothing per-ref to isolate.
+concurrency:
+  group: live-review
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  live-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Names only. GH_TOKEN is deliberately NOT here: it is scoped to the
+      # vitest step's env below, so npm ci's lifecycle scripts never see it
+      # (round-3 fix).
+      LIVE_GH: '1'
+      E5_RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # PINNED TO MAIN (jM88Y): workflow_dispatch accepts any
+          # write-collaborator's branch as ref — without this pin, that
+          # branch's test code would execute under the repo GH_TOKEN. The
+          # drill validates branches LOCALLY pre-merge; dispatch always runs
+          # main's trusted code.
+          ref: main
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout (persist-credentials: false); gh rides
+          # GH_TOKEN, not the checkout credential.
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      # A misconfigured dispatch would otherwise be a green-skipped run (the
+      # live describe skips without LIVE_GH) — refuse loudly before any live
+      # call. GH_TOKEN's presence is asserted in the vitest step — the only
+      # step its env reaches.
+      - name: Precondition — the live gate is armed
+        run: |
+          test -n "$LIVE_GH" || { echo 'LIVE_GH is not set — the live test would silently skip; refusing a green-skipped run' >&2; exit 1; }
+      - name: Live review-loop e2e (test/e2e/review/live.test.ts)
+        env:
+          # Names only — scoped to THIS step on purpose (round-3 fix): the
+          # token must not reach npm ci's lifecycle scripts. Prefer the
+          # fine-grained, scratch-repo-scoped PAT from the header note.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN is not set — every gh call would fail mid-run; refusing to start' >&2; exit 1; }
+          npx vitest run test/e2e/review/live.test.ts
