@@ -21,6 +21,8 @@
 //   {edit:{file,oldText,newText}}  perform ONE literal first-occurrence
 //                                  replacement in cwd (the worktree), the
 //                                  alpha fix or the beta break
+//   {write:{file,text}}            ADD one new file in cwd (the worktree) —
+//                                  the tamper-guard e2e's new-file hack
 //   {fault:"why"}                  stderr + exit 1 with NO result event —
 //                                  the driver's 'error' stop reason (the
 //                                  mid-run fault the interrupt test reaps)
@@ -28,8 +30,8 @@
 //
 // Fixed usage everywhere: {input_tokens:10, output_tokens:5,
 // cache_read_input_tokens:2, cache_creation_input_tokens:3}.
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve, sep } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, resolve, sep } from 'node:path';
 import process from 'node:process';
 
 const USAGE = {
@@ -85,6 +87,20 @@ async function performEdit(edit) {
   return `fixed '${file}' (one replacement)`;
 }
 
+/**
+ * The one new-file write ({write:{file,text}}) — how a "fixer" ADDS a file
+ * (the tamper-guard e2e's new-file hack: the unit op stages before it
+ * scans, so the staged diff must carry exactly this).
+ */
+async function performWrite(write) {
+  const file = typeof write.file === 'string' ? write.file : '';
+  const abs = resolveInside(file);
+  if (file === '' || abs === undefined) return `refused: '${file}' resolves outside the checkout`;
+  await mkdir(dirname(abs), { recursive: true });
+  await writeFile(abs, String(write.text ?? ''), 'utf8');
+  return `added '${file}'`;
+}
+
 const instruction = await instructionOf();
 out({ type: 'system', subtype: 'init', session_id: sessionId, model });
 
@@ -92,10 +108,12 @@ if (typeof instruction.fault === 'string' && instruction.fault !== '') {
   process.stderr.write(`sweep-agent: ${instruction.fault}\n`);
   process.exitCode = 1; // no result event — the driver's 'error' stop reason
 } else {
-  const text =
-    instruction.edit === undefined || instruction.edit === null
-      ? 'nothing to fix'
-      : await performEdit(instruction.edit);
+  let text = 'nothing to fix';
+  if (instruction.write !== undefined && instruction.write !== null) {
+    text = await performWrite(instruction.write);
+  } else if (instruction.edit !== undefined && instruction.edit !== null) {
+    text = await performEdit(instruction.edit);
+  }
   out({ type: 'assistant', message: { content: [{ type: 'text', text }], usage: USAGE } });
   out({
     type: 'result',

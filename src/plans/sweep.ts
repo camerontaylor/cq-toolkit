@@ -14,13 +14,16 @@
 //   report's `units` and dispatch-ready `jobs` (op 'sweep.unit' — the D1-
 //   pinned contract name, planSweep.ts) are the fan-out data.
 //   Phase B — buildSweepPlan(config, report) emits the expanded static
-//   graph: the planner job FIRST (the plan's producer, re-run honestly —
-//   the planner is deterministic over its static input, so it re-derives
-//   exactly the units the caller expanded from), one unit job per
-//   PlanSweepReport job (embedded VERBATIM, re-rooted on the planner job),
-//   and ONE `pr.assemblePrs` job depending on every unit (the fleet
-//   assembles only when every unit succeeded — a failed unit blocks the
-//   whole fleet's PRs; per-unit isolation happened at the unit jobs).
+//   graph: the planner job FIRST (re-run honestly; under the workspace-all
+//   and explicit selectors the planner is deterministic over its static
+//   input, so it re-derives the same units the caller expanded from —
+//   changed-vs-base re-derives from LIVE state by design, so a caller
+//   expanded from a stale phase-A report is divergent by construction and
+//   the caller must re-run phase A), one unit job per PlanSweepReport job
+//   (embedded VERBATIM, re-rooted on the planner job), and ONE
+//   `pr.assemblePrs` job depending on every unit (the fleet assembles only
+//   when every unit succeeded — a failed unit blocks the whole fleet's PRs;
+//   per-unit isolation happened at the unit jobs).
 //
 // THE UNIT JOB'S OP — 'sweep.unit' is a COMPOSITION, not an atomic op: its
 // pipeline is a dataflow (worktreeFor's workspace feeds the probe's cwd, the
@@ -41,10 +44,14 @@
 // show (a reused tree re-probes its baseline). Instead the caller salvages
 // the interrupted trees (sweep.salvage over the journal tail it scanned),
 // re-invokes the SAME expanded plan, and every unit job re-executes:
-// `sweep.worktreeFor` REUSES the strictly-clean tree (evicting baseline
-// caches — I7), the unit re-probes, the fixer no-ops on an already-fixed
-// tree, and the commit step skips when the tree is clean. Idempotency lives
-// in the ops, not in a skip.
+// `sweep.worktreeFor` REUSES the strictly-clean tree, the unit re-probes
+// (I7: the baseline probe NEVER caches — every invocation runs the check
+// again), the fixer no-ops on an already-fixed tree, and the commit step
+// skips when nothing is staged. Idempotency lives in the ops, not in a skip.
+// BASELINE STATE NEVER TOUCHES THE TREE: the unit's baseline snapshot is
+// written to the run-state dir (sweepRunStateDir — a SIBLING of
+// worktreesDir), so a tree carries no untracked tool state and a reuse is
+// automatically strictly clean.
 //
 // THE FLOOR (the registry entry): an EMPTY fleet run of the same builder —
 // a schema-valid plan whose planner job plans nothing (empty manifest) and
@@ -60,9 +67,9 @@
 // needs no runtime output — sweepUnitSegments is the one derivation shared
 // by the builder (assemble input) and the unit op (worktreeFor input).
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { z } from 'zod';
-import type { Budget, Driver, ModelSpec, ToolPolicy } from '../driver/types.js';
+import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../driver/types.js';
 import { SessionStore } from '../harness/session.js';
 import type { Op, OpResult, Plan, PlanRegistryEntry } from '../kernel/types.js';
 import type { AdapterName, CheckCommand, FailureSet, RunCheck } from '../ops/gates/checkRunner.js';
@@ -99,8 +106,24 @@ export const SWEEP_PLAN_JOB_IDS = {
   assemble: 'sweep-assemble',
 } as const;
 
-/** The default I7 baseline-cache dir a unit's baseline snapshot is written under. */
-export const SWEEP_BASELINE_CACHE_DIR = '.cq/baseline';
+/**
+ * The run-state dir of one sweep run: a SIBLING of `worktreesDir` (resolved
+ * against `repoRoot`, then suffixed `-state`) — derived deterministically
+ * from the config and NEVER inside any worktree. The unit op writes its
+ * baseline snapshots here (`<runStateDir>/baseline/<kind>/<slug>.json`), so
+ * a worktree carries no untracked tool state: a tree's strict-clean is
+ * unpolluted by baseline bookkeeping, a reuse is automatically I7-clean, and
+ * salvage never sees a completed unit as dirty because of it.
+ */
+export function sweepRunStateDir(repoRoot: string, worktreesDir: string): string {
+  return `${resolve(repoRoot, worktreesDir)}-state`;
+}
+
+/** The baseline-snapshot subdir of the run-state dir (sweepRunStateDir-scoped). */
+export const SWEEP_RUN_STATE_BASELINE_DIR = 'baseline';
+
+/** The worktreeFor family's default git wall clock (600s), for the unit op's adapter. */
+export const DEFAULT_UNIT_GIT_TIMEOUT_MS = 600_000;
 
 /**
  * Registry-time mirror of the unit job's input — the planner's WorkUnit
@@ -265,11 +288,13 @@ export interface SweepUnitBindings {
   /** The base the worktrees check out (and the PRs target). */
   base: string;
   /**
-   * I7 baseline-cache dirs handed to worktreeFor (evicted from a REUSED
-   * tree); the FIRST entry is where the unit writes its own baseline
-   * snapshot — git-ignored tool state that makes a reuse's eviction visible.
+   * Run-state dir for this sweep run — where the unit writes its baseline
+   * snapshot, OUTSIDE every worktree (a tree carrying untracked baseline
+   * state would never be strictly clean: reuse would break and salvage
+   * would preserve completed units). Default:
+   * sweepRunStateDir(repoRoot, worktreesDir) — derived from the config.
    */
-  baselineCacheDirs: string[];
+  runStateDir?: string;
   /** The probe's wire-format adapter. */
   adapter: AdapterName;
   /** The check execution seam (probes NEVER cache — two calls, two runs, I7). */
@@ -284,11 +309,24 @@ export interface SweepUnitBindings {
   sessionsDir: string;
   /** Tool policy for the fixer invocation; default an 'edit'-only allowlist. */
   toolPolicy?: ToolPolicy;
+  /**
+   * Sandbox preference for the fixer invocation; default `{level: 'none'}`.
+   * PRODUCTION callers should set this (the subprocess driver does not
+   * enforce the level itself — it narrows the tool surface and records the
+   * unenforced request per run): the binding exists so a deployment can
+   * turn it on without touching this composition.
+   */
+  sandboxPolicy?: SandboxPolicy;
+  /**
+   * Wall-clock cap for one git subprocess of the unit's worktree adapter;
+   * default DEFAULT_UNIT_GIT_TIMEOUT_MS (the worktreeFor family's 600s).
+   */
+  gitTimeoutMs?: number;
   /** Budget caps for the fixer invocation; default uncapped. */
   budget?: Budget;
   /** The fixer prompt — caller-composed data (the toolkit bakes in no vendor prompt). */
   prompt: (unit: WorkUnit, worktree: SweepWorkspace) => string;
-  /** The git transport for the diff, status, add, and commit steps. */
+  /** The git transport for the stage, diff, and commit steps. */
   git: GhFn;
 }
 
@@ -315,7 +353,7 @@ export interface SweepUnitReport {
   final: UnitProbe;
   /** The regression gate's decision over the two probes. */
   regression: RegressionReport;
-  /** The tamper scan of the fix's diff (empty = clean). */
+  /** The tamper scan of the STAGED fix (empty = clean). */
   tamperFindings: TamperFinding[];
   /** true when the fix was committed; false when the tree was already clean (an idempotent re-run). */
   committed: boolean;
@@ -325,41 +363,49 @@ export interface SweepUnitReport {
 
 /**
  * The 'sweep.unit' op factory: the per-package pipeline as ONE composition —
- * worktreeFor → baselineProbe → fixer (via the Driver seam) → baselineProbe
- * again → regressionGate → hackDetector → commit — over the injected
- * SweepUnitBindings. Every stage's fault is a `failed` result naming the
- * stage (no throws across the op seam, no fabricated progress); a REGRESSION
- * verdict or a tamper finding fails the unit WITHOUT committing — the tree
- * stays dirty, salvage preserves it, and no PR is assembled.
+ * worktreeFor → baselineProbe → baseline snapshot (run state) → fixer (via
+ * the Driver seam) → baselineProbe again → regressionGate → stage →
+ * hackDetector → commit — over the injected SweepUnitBindings. Every stage's
+ * fault is a `failed` result naming the stage (no throws across the op seam,
+ * no fabricated progress); a REGRESSION verdict or a tamper finding fails
+ * the unit WITHOUT committing — the tree stays dirty, salvage preserves it,
+ * and no PR is assembled.
  *
  * Pipeline contract, in order:
- *   1. worktreeFor — create or STRICT-clean reuse (I7: a reused tree's
- *      baseline caches are evicted, so step 2 always re-probes).
+ *   1. worktreeFor — create or STRICT-clean reuse (the tree never carries
+ *      baseline state — it lives in the run-state dir — so a reuse is
+ *      automatically clean; the probe below always re-runs, I7).
  *   2. baseline probe — the BEFORE FailureSet; bail/indeterminate is a unit
  *      failure (no trustworthy baseline, no honest gate).
- *   3. the baseline snapshot is written under the FIRST baselineCacheDirs
- *      entry — the cache that makes a reuse's I7 eviction visible; it is
- *      NEVER read back (the probe always re-runs).
+ *   3. the baseline snapshot is written to the run-state dir
+ *      (baseline/<kind>/<slug>.json) — caller-visible record, NEVER read
+ *      back (the probe always re-runs), never inside the tree.
  *   4. the fixer — one Driver run in the worktree (the session workspace IS
  *      the tree, I6); a non-'complete' stop reason fails the unit.
  *   5. final probe — the AFTER FailureSet, same verdict guards.
  *   6. regressionGate — tolerate the baseline's failures, block novel ones
  *      (the crown jewel, R2 D5); a regression fails the unit uncommitted.
- *   7. hackDetector over `git diff` — a tamper finding fails the unit
- *      uncommitted (the diff is unstaged working-tree vs HEAD).
- *   8. commit — skipped when the tree is already clean (an idempotent
- *      re-run's no-op fixer); only the unit's own files are staged.
+ *   7. STAGE the fix (`git add -A`, gitignore-respected), then hackDetector
+ *      over the STAGED diff — a plain working-tree diff misses NEW files
+ *      (untracked until staged), and the scanner must see exactly the set
+ *      the commit would publish. A tamper finding leaves the fix staged but
+ *      UNCOMMITTED.
+ *   8. commit — skipped when nothing is staged (an idempotent re-run's
+ *      no-op fixer); commits exactly the scanned set.
  */
 export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, SweepUnitReport> {
   const probe = makeBaselineProbe(bindings.runCheck);
   const worktreeFor = makeWorktreeFor(
-    makeSubprocessWorktreeEffects(bindings.repoRoot, { timeoutMs: UNIT_GIT_TIMEOUT_MS }),
+    makeSubprocessWorktreeEffects(bindings.repoRoot, {
+      timeoutMs: bindings.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,
+    }),
   );
   return async (unit) => {
     const segments = sweepUnitSegments(bindings.runPrefix, unit);
 
-    // 1–2. The tree, then the BEFORE probe (a reused tree arrives with its
-    // baseline caches evicted — the probe below is the re-probe, I7).
+    // 1–2. The tree, then the BEFORE probe (the tree carries no baseline
+    // state — the snapshot lives in the run-state dir — so a reuse arrives
+    // strictly clean, and the probe below is always a fresh re-probe, I7).
     const before = await probeLeg(probe, bindings, unit, worktreeFor, 'baseline');
     if (before.worktree === undefined || before.probe === undefined) {
       return { status: 'failed', error: before.fault ?? '(no detail)' };
@@ -367,9 +413,9 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     const worktree = before.worktree;
     const baseline = before.probe;
 
-    // 3. The baseline snapshot: git-ignored tool state under the first
-    // configured cache dir — written, never read (the probe always re-runs).
-    const cacheFault = await writeBaselineCache(bindings, segments.slug, worktree.path, baseline);
+    // 3. The baseline snapshot: run-state, outside the tree — written, never
+    // read (the probe always re-runs).
+    const cacheFault = await writeBaselineSnapshot(bindings, segments, baseline);
     if (cacheFault !== null) return { status: 'failed', error: cacheFault };
 
     // 4. The fixer: one Driver run whose workspace IS the worktree (a fresh
@@ -384,7 +430,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
         prompt: bindings.prompt(unit, worktree),
         modelSpec: bindings.modelSpec,
         toolPolicy: bindings.toolPolicy ?? { allow: ['edit'], mode: 'allowlist' },
-        sandboxPolicy: { level: 'none' },
+        sandboxPolicy: bindings.sandboxPolicy ?? { level: 'none' },
         sessionRef: record.sessionId,
         budget: bindings.budget ?? {},
       });
@@ -433,13 +479,17 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       };
     }
 
-    // 7. The tamper scan over the fix's diff (uncommitted working-tree diff
-    // vs HEAD — the fix has not been staged yet).
-    const diff = await bindings.git(['-C', worktree.path, 'diff', '--']);
+    // 7. STAGE the fix, then scan the STAGED diff: a plain working-tree diff
+    // misses NEW files (untracked until staged), and the tamper scanner must
+    // see exactly the set the commit would publish. A finding leaves the fix
+    // staged but UNCOMMITTED.
+    const staged = await stageUnitFiles(bindings, unit, worktree);
+    if (staged !== null) return { status: 'failed', error: staged };
+    const diff = await bindings.git(['-C', worktree.path, 'diff', '--cached', '--']);
     if (diff.code !== 0) {
       return {
         status: 'failed',
-        error: `sweep.unit ${unit.package}: git diff failed — ${diff.stderr.trim()}`,
+        error: `sweep.unit ${unit.package}: git diff --cached failed — ${diff.stderr.trim()}`,
       };
     }
     const hack = await hackDetector({ diff: diff.stdout });
@@ -459,8 +509,9 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       };
     }
 
-    // 8. Commit — skipped when the tree is already clean (the fixer no-oped).
-    const commit = await commitWorktree(bindings, unit, worktree);
+    // 8. Commit the scanned set — skipped when nothing is staged (the fixer
+    // no-oped; an idempotent re-run).
+    const commit = await commitStaged(bindings, unit, worktree);
     if (commit.fault !== null) return { status: 'failed', error: commit.fault };
 
     const report: SweepUnitReport = {
@@ -543,7 +594,6 @@ function worktreeInputOf(bindings: SweepUnitBindings, unit: WorkUnit): WorktreeF
     kind: segments.kind,
     slug: segments.slug,
     base: bindings.base,
-    baselineCacheDirs: bindings.baselineCacheDirs,
   };
 }
 
@@ -560,32 +610,42 @@ async function callTotal<R>(stage: string, run: () => Promise<OpResult<R>>): Pro
   }
 }
 
-/** Stage the unit's own files and commit; skip honestly when the tree is clean. */
-async function commitWorktree(
+/**
+ * Stage everything the fixer left in the worktree (`git add -A` —
+ * gitignore-respected, so tool state is never staged): the tamper scan and
+ * the commit must see the SAME set, and a NEW file the fixer created is
+ * untracked until staged. A fault names the stage.
+ */
+async function stageUnitFiles(
+  bindings: SweepUnitBindings,
+  unit: WorkUnit,
+  worktree: SweepWorkspace,
+): Promise<string | null> {
+  const added = await bindings.git(['-C', worktree.path, 'add', '-A']);
+  if (added.code !== 0) {
+    return `sweep.unit ${unit.package}: git add failed — ${added.stderr.trim()}`;
+  }
+  return null;
+}
+
+/**
+ * Commit the ALREADY-STAGED set; skipped honestly when nothing is staged
+ * (the fixer no-oped — an idempotent re-run).
+ */
+async function commitStaged(
   bindings: SweepUnitBindings,
   unit: WorkUnit,
   worktree: SweepWorkspace,
 ): Promise<{ committed: boolean; fault: string | null }> {
-  const status = await bindings.git(['-C', worktree.path, 'status', '--porcelain']);
-  if (status.code !== 0) {
+  const empty = await bindings.git(['-C', worktree.path, 'diff', '--cached', '--quiet']);
+  if (empty.code !== 0 && empty.code !== 1) {
     return {
       committed: false,
-      fault: `sweep.unit ${unit.package}: git status failed — ${status.stderr.trim()}`,
+      fault: `sweep.unit ${unit.package}: git diff --cached --quiet failed — ${empty.stderr.trim()}`,
     };
   }
-  if (status.stdout.trim() === '') {
-    return { committed: false, fault: null }; // the fixer no-oped — nothing to commit
-  }
-  const addArgs =
-    unit.files.length > 0
-      ? ['-C', worktree.path, 'add', '--', ...unit.files]
-      : ['-C', worktree.path, 'add', '-A'];
-  const added = await bindings.git(addArgs);
-  if (added.code !== 0) {
-    return {
-      committed: false,
-      fault: `sweep.unit ${unit.package}: git add failed — ${added.stderr.trim()}`,
-    };
+  if (empty.code === 0) {
+    return { committed: false, fault: null }; // nothing staged — nothing to commit
   }
   const committed = await bindings.git([
     '-C',
@@ -603,24 +663,31 @@ async function commitWorktree(
   return { committed: true, fault: null };
 }
 
-/** Write the baseline snapshot under the first configured cache dir; a fault names the stage. */
-async function writeBaselineCache(
+/**
+ * Write the baseline snapshot to the RUN-STATE dir —
+ * `<runStateDir>/baseline/<kind>/<slug>.json`, never inside the worktree (a
+ * tree carrying untracked baseline state would never be strictly clean:
+ * reuse would break and salvage would preserve completed units). Written,
+ * never read back (the probe always re-runs, I7). A fault names the stage.
+ */
+async function writeBaselineSnapshot(
   bindings: SweepUnitBindings,
-  slug: string,
-  worktreePath: string,
+  segments: SweepUnitSegments,
   baseline: UnitProbe,
 ): Promise<string | null> {
-  const dir = bindings.baselineCacheDirs[0] ?? SWEEP_BASELINE_CACHE_DIR;
+  const runStateDir =
+    bindings.runStateDir ?? sweepRunStateDir(bindings.repoRoot, bindings.worktreesDir);
+  const baselineDir = join(runStateDir, SWEEP_RUN_STATE_BASELINE_DIR, segments.kind);
   try {
-    await mkdir(join(worktreePath, dir), { recursive: true });
+    await mkdir(baselineDir, { recursive: true });
     await writeFile(
-      join(worktreePath, dir, `${slug}.json`),
+      join(baselineDir, `${segments.slug}.json`),
       `${JSON.stringify(baseline.failureSet ?? null)}\n`,
       'utf8',
     );
     return null;
   } catch (err) {
-    return `sweep.unit: could not write the baseline cache under '${dir}' — ${messageOf(err)}`;
+    return `sweep.unit: could not write the baseline snapshot under '${baselineDir}' — ${messageOf(err)}`;
   }
 }
 
@@ -638,9 +705,6 @@ function resultDetail(result: {
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
-
-/** The unit op's git wall clock — bounds one worktree/commit step, never a policy. */
-const UNIT_GIT_TIMEOUT_MS = 60_000;
 
 // ---------------------------------------------------------------------------
 // The floor — the discovered registry entry

@@ -110,7 +110,11 @@ const ROOT_PACKAGE_JSON = `${JSON.stringify(
   2,
 )}\n`;
 
-const GITIGNORE = '.cq/\nworktrees/\n';
+const GITIGNORE = 'worktrees/\n';
+// NOTE: no '.cq/' (or any tool-state) entry ON PURPOSE — the unit op must
+// write its baseline snapshots OUTSIDE the worktree (the run-state dir). A
+// gitignore entry here would mask a regression to in-tree state, and the
+// strict-clean/reuse/salvage assertions would not catch it.
 
 const PKG_JSON = (name: string): string =>
   `${JSON.stringify({ name, version: '1.0.0', private: true }, null, 2)}\n`;

@@ -50,6 +50,7 @@ import {
   sweepPlannerInput,
   sweepUnitSegments,
   SweepUnitInputSchema,
+  SWEEP_PLAN_JOB_IDS,
   type SweepPlanConfig,
 } from '../../../src/plans/sweep.js';
 import {
@@ -197,7 +198,6 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     worktreesDir: opts.config.worktreesDir,
     runPrefix: opts.config.runPrefix,
     base: opts.config.base,
-    baselineCacheDirs: ['.cq/baseline'],
     adapter: 'tsc-lines',
     runCheck,
     checkCommand: opts.checkCommand,
@@ -244,14 +244,33 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       (overridden.get(name) ?? central.get(name)) as OpRegistryEntry<never, never> | undefined,
   };
 
-  // Phase B: the expanded graph, journaled. stopOnError + the assemble job's
-  // dependsOn-every-unit is the fleet gate: one failed unit withholds the PRs.
+  // Phase B: the expanded graph, journaled. stopOnError:false — I9's
+  // collect-all (every unit dispatches and lands a journal outcome; nothing
+  // fails by never having run). The assemble job's dependsOn-every-unit is
+  // the fleet gate: one failed unit withholds the PRs.
   const plan = buildSweepPlan(opts.config, planner);
   const run = await runPlan(
     plan,
-    { concurrency: 1, stopOnError: true, journalDir: opts.journalDir },
+    { concurrency: 1, stopOnError: false, journalDir: opts.journalDir },
     view,
   );
+  // The in-plan planner job must re-derive the SAME fan-out the caller
+  // expanded from — job ids and units (workspace-all/explicit are
+  // deterministic over the static input; changed-vs-base re-derives from
+  // live state, so a stale phase-A report diverges HERE, loudly).
+  const planRow = run.jobs.find((job) => job.jobId === SWEEP_PLAN_JOB_IDS.plan);
+  if (planRow?.result.status === 'ok') {
+    const rederived = planRow.result.value as PlanSweepReport;
+    const planIds = rederived.jobs.map((job) => job.id).join(',');
+    const callerIds = planner.jobs.map((job) => job.id).join(',');
+    const planUnits = JSON.stringify(rederived.units);
+    const callerUnits = JSON.stringify(planner.units);
+    if (planIds !== callerIds || planUnits !== callerUnits) {
+      throw new Error(
+        `e2e: the in-plan planner re-derived DIFFERENT units than the caller expanded from — the expanded graph is stale; re-run phase A. caller: ${callerUnits} in-plan: ${planUnits}`,
+      );
+    }
+  }
   return { planner, run, output: renderSweepOutput(opts.config, planner, run) };
 }
 
@@ -336,18 +355,20 @@ export async function salvageInterruptedRun(opts: {
 }
 
 /**
- * The journal-tail derivation: one SalvageEntry per manifest package, its
- * tail read from the run's events IN JOURNAL ORDER.
+ * The journal-tail derivation: ONE SalvageEntry per UNIT (per kind/slug — a
+ * multi-fixer fleet plans several trees per package; grouping per package
+ * would leave sibling trees unclassified), its tail read from the run's
+ * events IN JOURNAL ORDER.
  *
- * Per package (allTerminal = EVERY unit job of the package finished ok — a
- * failed unit is terminal but NOT done: the work did not happen, so the tree
- * is not clean-done; salvage must see it as pending, not done):
- *   - allTerminal — every unit job's LAST finish is ok;
+ * Per unit (allTerminal = its job's LAST finish is ok — a failed unit is
+ * terminal but NOT done: the work did not happen, so the tree is not
+ * clean-done; salvage must see it as pending, not done):
+ *   - allTerminal — the unit job's last finish is ok;
  *   - lastStep    — the job ID of the LAST matching job-finished event in
  *     journal order (jobs can finish out of plan order; the tail is the
- *     journal's last word, not the plan's). No terminal event for the
- *     package → NO lastStep (a run interrupted before its first write
- *     carries no done evidence — salvage's absent-evidence branch, I9).
+ *     journal's last word, not the plan's). No terminal event for the unit
+ *     → NO lastStep (a run interrupted before its first write carries no
+ *     done evidence — salvage's absent-evidence branch, I9).
  */
 export function salvageEntriesFor(
   config: SweepPlanConfig,
@@ -355,32 +376,29 @@ export function salvageEntriesFor(
   events: readonly JournalEvent[],
 ): SalvageEntry[] {
   const finishes = new Map<string, string | undefined>(); // jobId → last terminal status
-  const finishOrder: Array<{ jobId: string; status: string }> = []; // journal order
+  const finishOrder: string[] = []; // jobIds in journal finish order
   for (const event of events) {
     if (event.type === 'job-finished') {
       finishes.set(event.jobId, event.result.status);
-      finishOrder.push({ jobId: event.jobId, status: event.result.status });
+      finishOrder.push(event.jobId);
     }
   }
-  const byPackage = new Map<string, string[]>();
-  for (const job of planner.jobs) {
-    const unit = job.input as WorkUnit;
-    const jobIds = byPackage.get(unit.package) ?? [];
-    jobIds.push(job.id);
-    byPackage.set(unit.package, jobIds);
-  }
   const entries: SalvageEntry[] = [];
-  for (const [packageName, jobIds] of byPackage) {
-    const first = planner.jobs.find((job) => (job.input as WorkUnit).package === packageName);
-    const unit = first?.input as WorkUnit;
+  for (const unit of planner.units) {
     const segments = sweepUnitSegments(config.runPrefix, unit);
-    const lastTerminal = finishOrder.findLast((finish) => jobIds.includes(finish.jobId));
+    const job = planner.jobs.find(
+      (candidate) =>
+        (candidate.input as WorkUnit).package === unit.package &&
+        (candidate.input as WorkUnit).fixer === unit.fixer,
+    );
+    if (job === undefined) continue; // a unit without its job cannot be tailed
+    const lastStep = finishOrder.findLast((jobId) => jobId === job.id);
     entries.push({
       path: absoluteWorktreePath(config, segments.kind, segments.slug),
       branch: segments.branch,
       journal: {
-        ...(lastTerminal !== undefined ? { lastStep: lastTerminal.jobId } : {}),
-        allTerminal: jobIds.every((jobId) => finishes.get(jobId) === 'ok'),
+        ...(lastStep !== undefined ? { lastStep: job.id } : {}),
+        allTerminal: finishes.get(job.id) === 'ok',
       },
     });
   }

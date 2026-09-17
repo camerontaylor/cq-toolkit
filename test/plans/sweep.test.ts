@@ -10,22 +10,33 @@
 //      carries NO assemble job (assemblePrs is tracker-first; a zero-package
 //      run must never touch a forge).
 //   4. THE TEST-FIX PIN: buildTestFixPlan REPLACES the fixer set with the one
-//      test-only label — the plan's identity is the restriction (UC §1 row 4).
+//      test-only label — the plan's identity is the restriction (UC §1 row 4)
+//      — and validates EVERYWHERE: the report's units AND its embedded unit
+//      jobs; a clean-units/foreign-job report is plan corruption, thrown.
 //   5. THE FLOOR RUNS: the sweep floor through the real runner + the real
 //      sweep registry entry is a harmless pass (empty manifest plans nothing,
 //      zero effect calls).
+//   6. THE BINDINGS RIDE THE SEAMS: the unit composition's sandboxPolicy
+//      binding (default `none`, caller-overridable for production) lands
+//      verbatim in the Driver's OpInvocation.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import type { Driver, OpInvocation } from '../../src/driver/types.js';
+import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, Plan } from '../../src/kernel/types.js';
 import { registry as prRegistry } from '../../src/ops/pr/registry.js';
 import { AssemblePrsInputSchema } from '../../src/ops/pr/registry.js';
 import { PlanSweepInputSchema } from '../../src/ops/sweep/registry.js';
-import type { PlanSweepReport } from '../../src/ops/sweep/planSweep.js';
+import type { PlanSweepReport, WorkUnit } from '../../src/ops/sweep/planSweep.js';
 import { SWEEP_UNIT_OP } from '../../src/ops/sweep/planSweep.js';
 import { registry as sweepRegistry } from '../../src/ops/sweep/registry.js';
 import {
   buildSweepPlan,
+  makeSweepUnitOp,
   SWEEP_PLAN_ID,
   SweepUnitInputSchema,
   sweepUnitSegments,
@@ -151,6 +162,24 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(() => buildTestFixPlan(CONFIG, twoUnitReport('fix'))).toThrow(
       /outside the test-only set/,
     );
+    // And so is a report whose UNITS are clean but whose EMBEDDED unit-job
+    // inputs carry a foreign fixer — the jobs are what get dispatched.
+    const corrupted: PlanSweepReport = {
+      jobs: [
+        {
+          id: 'sweep-alpha-evil',
+          op: SWEEP_UNIT_OP,
+          input: { package: 'alpha', fixer: 'evil-fix', files: [] },
+          dependsOn: [],
+        },
+      ],
+      units: [{ package: 'alpha', fixer: TEST_FIX_FIXER, files: [] }],
+      suppressed: [],
+      needsHuman: [],
+    };
+    expect(() => buildTestFixPlan(CONFIG, corrupted)).toThrow(
+      /embed inputs outside the test-only set/,
+    );
   });
 
   test('the sweep floor runs through the real runner as a harmless pass', async () => {
@@ -170,4 +199,57 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(report.counts).toMatchObject({ done: 1, failed: 0, blocked: 0 });
     expect(report.jobs[0]?.result.status).toBe('ok');
   });
+
+  test(
+    'the unit composition binds sandboxPolicy: default none, the override rides the invocation',
+    { timeout: 120_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'd4-unit-bindings-'));
+      try {
+        const repo = join(root, 'repo');
+        await generateScratchRepo(repo);
+        const captured: OpInvocation[] = [];
+        // A capturing fake driver: records the invocation, then stops the
+        // pipeline (the op folds the throw into a `failed` result — the
+        // capture is the point).
+        const driver: Driver = {
+          run: async (invocation) => {
+            captured.push(invocation);
+            throw new Error('captured — stopping the pipeline here');
+          },
+        };
+        const base = {
+          repoRoot: repo,
+          worktreesDir: 'worktrees',
+          runPrefix: 'cq/unit-bind',
+          base: 'main',
+          adapter: 'tsc-lines' as const,
+          // A clean probe — no subprocess needed for this pin.
+          runCheck: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
+          checkCommand: (unit: WorkUnit, worktreePath: string) => ({
+            command: process.execPath,
+            args: ['scripts/check.js', unit.package],
+            cwd: worktreePath,
+            timeoutMs: 30_000,
+          }),
+          driver,
+          modelSpec: { model: 'sweep-fake', provider: 'cq-d4-e2e' },
+          sessionsDir: join(root, 'sessions'),
+          prompt: () => 'capture me',
+          git: async () => ({ code: 0, stdout: '', stderr: '' }),
+        };
+        const unit: WorkUnit = { package: 'alpha', fixer: 'fix', files: [] };
+        // DEFAULT: none (the shipped behavior, unchanged).
+        const failed = await makeSweepUnitOp(base)(unit);
+        expect(failed.status).toBe('failed'); // the capture's deliberate stop
+        expect(captured[0]?.sandboxPolicy).toEqual({ level: 'none' });
+        // OVERRIDE: the binding rides verbatim into the OpInvocation.
+        const hardened: WorkUnit = { package: 'alpha', fixer: 'hardened', files: [] };
+        await makeSweepUnitOp({ ...base, sandboxPolicy: { level: 'workspace-write' } })(hardened);
+        expect(captured[1]?.sandboxPolicy).toEqual({ level: 'workspace-write' });
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });

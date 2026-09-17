@@ -32,20 +32,29 @@ export type TestFixPlanConfig = Omit<SweepPlanConfig, 'fixers'> & { fixers?: str
  * test-fix id with `fixers` pinned to the one test-only label. A caller
  * passing `fixers` here gets it REPLACED, never merged: the plan's identity
  * is the restriction, so no extra fixer can ride in through the config.
- * The phase-A report must agree: a report whose units carry a fixer outside
- * the test-only set is a caller/planner mismatch — plan corruption, thrown
- * here before it can embed foreign units.
+ * The phase-A report must agree EVERYWHERE: a report whose units OR whose
+ * embedded unit-job inputs carry a fixer outside the test-only set is a
+ * caller/planner mismatch — plan corruption, thrown here before foreign
+ * units can be embedded.
  */
 export function buildTestFixPlan(
   config: TestFixPlanConfig,
   report: Parameters<typeof buildSweepPlan>[1],
 ): ReturnType<typeof buildSweepPlan> {
-  const foreign = [...new Set(report.units.map((unit) => unit.fixer))].filter(
+  const foreignUnits = [...new Set(report.units.map((unit) => unit.fixer))].filter(
     (fixer) => fixer !== TEST_FIX_FIXER,
   );
-  if (foreign.length > 0) {
+  if (foreignUnits.length > 0) {
     throw new Error(
-      `buildTestFixPlan: the phase-A report carries fixer(s) ${JSON.stringify(foreign)} outside the test-only set ['${TEST_FIX_FIXER}'] — the report must come from a planner run of THIS plan's config`,
+      `buildTestFixPlan: the phase-A report carries fixer(s) ${JSON.stringify(foreignUnits)} outside the test-only set ['${TEST_FIX_FIXER}'] — the report must come from a planner run of THIS plan's config`,
+    );
+  }
+  const foreignJobs = report.jobs
+    .filter((job) => (job.input as { fixer?: unknown }).fixer !== TEST_FIX_FIXER)
+    .map((job) => job.id);
+  if (foreignJobs.length > 0) {
+    throw new Error(
+      `buildTestFixPlan: the phase-A report's unit job(s) ${JSON.stringify(foreignJobs)} embed inputs outside the test-only set ['${TEST_FIX_FIXER}'] — the report must come from a planner run of THIS plan's config`,
     );
   }
   return buildSweepPlan({ ...config, fixers: [TEST_FIX_FIXER] }, report, TEST_FIX_PLAN_ID);

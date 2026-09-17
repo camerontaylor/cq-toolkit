@@ -19,9 +19,13 @@
 //   4. EVIDENCE QUALITY: every journaled line parses through the frozen
 //      JournalEventSchema (not just a type-field sniff), and the salvage
 //      journal tail takes lastStep from the LAST job-finished event in
-//      journal order — jobs can finish out of plan order.
+//      journal order — jobs can finish out of plan order, and a multi-fixer
+//      fleet yields ONE salvage entry per unit tree.
+//   5. THE TAMPER GUARD, ON NEW FILES: the unit op stages BEFORE it scans,
+//      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
+//      scan and its unit fails uncommitted.
 import { execFile } from 'node:child_process';
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -37,7 +41,11 @@ import {
 } from '../../fixtures/scratch-repo/generate.js';
 import { openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
-import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
+import {
+  SWEEP_PLAN_ID,
+  SWEEP_RUN_STATE_BASELINE_DIR,
+  sweepRunStateDir,
+} from '../../../src/plans/sweep.js';
 import type { SweepPlanConfig, SweepUnitReport } from '../../../src/plans/sweep.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import type {
@@ -404,14 +412,29 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(probes.get('alpha')).toBe(2); // the reused tree re-probed baseline + final
       expect(probes.get('beta')).toBe(2);
 
-      // Alpha's unit: REUSED tree, its baseline cache EVICTED (I7, visible),
-      // no second commit (the fixer no-oped on the already-fixed tree).
+      // Alpha's unit: REUSED tree — and the reuse is clean WITHOUT any cache
+      // eviction, because the tree carries NO baseline state (the snapshot
+      // lives in the run-state dir outside the worktree, I7). No second
+      // commit either: the fixer no-oped on the already-fixed tree.
       const alphaSecond = unitRow(second.run, 'alpha');
       expect(alphaSecond.status).toBe('ok');
       expect(alphaSecond.report?.worktree.reused).toBe(true);
-      expect(alphaSecond.report?.worktree.clearedBaselineCaches).toContain('.cq/baseline');
+      expect(alphaSecond.report?.worktree.clearedBaselineCaches).toEqual([]);
       expect(alphaSecond.report?.committed).toBe(false);
       expect(unitRow(second.run, 'beta').report?.worktree.reused).toBe(true);
+      // The tree itself: no '.cq' (or any baseline state) inside; the
+      // snapshot is in the run-state dir, keyed kind/slug.
+      expect(existsSync(resolve(scene.repo, 'worktrees', 'fix', 'alpha', '.cq'))).toBe(false);
+      expect(
+        existsSync(
+          join(
+            sweepRunStateDir(scene.repo, 'worktrees'),
+            SWEEP_RUN_STATE_BASELINE_DIR,
+            'fix',
+            'alpha.json',
+          ),
+        ),
+      ).toBe(true);
 
       // The fleet assembles now: tracker-first, 3 PRs.
       const assembled = assembleReport(second.run);
@@ -471,6 +494,59 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(salvaged.rows.find((row) => row.path.endsWith('fix/beta'))?.class).toBe('preserve');
       expect(salvaged.counts).toMatchObject({ reuse: 1, preserve: 1, resume: 0 });
       // And no PR exists: the fleet never assembled.
+      expect(scene.gh.created).toHaveLength(0);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 3. The tamper guard, on NEW files: stage first, then scan the STAGED diff
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: tamper guard on new files', () => {
+  test(
+    'a fixer that ADDS a file with an it.skip hack: the staged scan flags it, the unit fails uncommitted',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-tamper');
+      const HACKED = {
+        file: 'packages/beta/test/added.test.js',
+        text: "it.skip('gaming the run', () => {});\n",
+      };
+      // Alpha fixes normally; beta "fixes" by ADDING a skip-marked file.
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(scene, prompts({ edit: ALPHA_FIX }, { write: HACKED })),
+      );
+
+      // Alpha committed; beta's unit FAILED on the tamper finding.
+      const alpha = unitRow(outcome.run, 'alpha');
+      expect(alpha.status).toBe('ok');
+      expect(alpha.report?.committed).toBe(true);
+      const beta = unitRow(outcome.run, 'beta');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/tamper findings/);
+      expect(beta.error).toMatch(/new-skip-only/);
+      expect(beta.error).toMatch(/added\.test\.js/);
+
+      // The fix was withheld AFTER staging: the hack file sits staged but
+      // uncommitted — the branch carries no commit, the tree is dirty.
+      expect(
+        await makeSubprocessWorktreeEffects(scene.repo).isStrictClean(
+          resolve(scene.repo, 'worktrees', 'fix', 'beta'),
+        ),
+      ).toBe(false);
+      const betaCommits = await gitOut(
+        ['rev-list', '--count', 'main..cq/e2e-tamper/fix/beta'],
+        scene.repo,
+      );
+      expect(betaCommits.trim()).toBe('0');
+      // The staged diff is exactly where the finding came from.
+      const staged = await gitOut(
+        ['-C', resolve(scene.repo, 'worktrees', 'fix', 'beta'), 'diff', '--cached', '--name-only'],
+        scene.repo,
+      );
+      expect(staged).toContain('packages/beta/test/added.test.js');
+      // No PR exists: the fleet never assembled.
       expect(scene.gh.created).toHaveLength(0);
     },
   );
@@ -564,6 +640,65 @@ describe('sweep e2e: journal evidence shape', () => {
       expect(entry.journal?.lastStep).toBeUndefined();
       expect(entry.journal?.allTerminal).toBe(false);
     }
+  });
+
+  test('a multi-fixer fleet yields ONE salvage entry per UNIT tree (per kind/slug)', () => {
+    const config = sceneLessConfig();
+    // ONE package, TWO fixers — two trees (worktrees/fix/alpha and
+    // worktrees/test-fix/alpha), two jobs, two independent tails.
+    const units: Array<WorkUnit> = [
+      { package: 'alpha', fixer: 'fix', files: [] },
+      { package: 'alpha', fixer: 'test-fix', files: [] },
+    ];
+    const planner: SweepRunOutcome['planner'] = {
+      jobs: units.map((unit) => ({
+        id: `sweep-${unit.package}-${unit.fixer}`,
+        op: 'sweep.unit',
+        input: unit,
+        dependsOn: [],
+      })),
+      units,
+      suppressed: [],
+      needsHuman: [],
+    };
+    const runId = 'sweep--fan--000000';
+    const at = (tick: number): string => new Date(1_700_000_000_000 + tick).toISOString();
+    const entries = salvageEntriesFor(config, planner, [
+      { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
+      {
+        type: 'job-finished',
+        runId,
+        at: at(1),
+        jobId: 'sweep-alpha-fix',
+        opId: 'sweep.unit',
+        inputsHash: 'h',
+        result: { status: 'failed', error: 'boom' },
+      },
+      {
+        type: 'job-finished',
+        runId,
+        at: at(2),
+        jobId: 'sweep-alpha-test-fix',
+        opId: 'sweep.unit',
+        inputsHash: 'h',
+        result: { status: 'ok', value: {} },
+      },
+    ]);
+    // Two entries, one per unit tree — the package-grouped derivation would
+    // have collapsed both fixers into one tree and dropped the other.
+    expect(entries).toHaveLength(2);
+    const fixEntry = entries.find((entry) => entry.branch?.endsWith('fix/alpha'));
+    const testFixEntry = entries.find((entry) => entry.branch?.endsWith('test-fix/alpha'));
+    expect(fixEntry?.path).toContain('worktrees/fix/alpha');
+    expect(testFixEntry?.path).toContain('worktrees/test-fix/alpha');
+    expect(fixEntry?.journal).toMatchObject({
+      lastStep: 'sweep-alpha-fix',
+      allTerminal: false,
+    });
+    expect(testFixEntry?.journal).toMatchObject({
+      lastStep: 'sweep-alpha-test-fix',
+      allTerminal: true,
+    });
   });
 });
 
