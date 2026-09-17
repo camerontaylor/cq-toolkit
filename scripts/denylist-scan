@@ -16,11 +16,11 @@
 //
 // Modes:
 //   scripts/denylist-scan              tree scan; exit 0 = clean, 1 = findings
-//   scripts/denylist-scan --self-test  four legs + one pure-text config
-//                                      check, three gitleaks runs; the
-//                                      pure-text legs — (4) and the config
-//                                      check — run FIRST so their verdicts
-//                                      never depend on gitleaks:
+//   scripts/denylist-scan --self-test  four legs + two pure-text config
+//                                      checks, three gitleaks runs; the
+//                                      pure-text legs — (4) and the two
+//                                      config checks — run FIRST so their
+//                                      verdicts never depend on gitleaks:
 //                                      (1) dirty fixture — every rule class
 //                                      must fire on ITS OWN sample probe
 //                                      (per-rule probe files, one scan,
@@ -221,6 +221,25 @@ function splitKeyValue(s, where) {
   return { key: m[1], value: parseScalar(m[2] || '', where) };
 }
 
+// `probe_path` feeds the self-test probe placement as a path.join() segment
+// (probeFileFor/writeProbes): a value that is ABSOLUTE on either platform
+// REPLACES the fixture root outright (win32-absolute per path.win32 —
+// leading '/', drive prefix, or UNC — so a scanner run on a Windows host
+// cannot be steered outside the fixture either) and a `..` segment walks
+// out of it, so either would place probe files outside the intended
+// directory. Probe paths are repo-relative by discipline (both repos'
+// patterns.yml use only in-repo paths); backslashes are normalized to '/'
+// before the segment check, the same normalization pathEndsWithProbe
+// applies to finding paths.
+function assertRelativeProbePath(value, where) {
+  if (path.win32.isAbsolute(value)) {
+    throw new ConfigError(`${where}: probe_path must be repo-relative, got absolute "${value}"`);
+  }
+  if (value.replace(/\\/g, '/').split('/').includes('..')) {
+    throw new ConfigError(`${where}: probe_path must not contain ".." segments, got "${value}"`);
+  }
+}
+
 function parsePatterns(text) {
   const rules = [];
   const cleanProbes = [];
@@ -268,6 +287,7 @@ function parsePatterns(text) {
       const kv = splitKeyValue(raw.trim(), where);
       if (!RULE_KEYS.includes(kv.key)) throw new ConfigError(`${where}: unexpected rule key "${kv.key}"`);
       if (Object.hasOwn(rule, kv.key)) throw new ConfigError(`${where}: duplicate rule key "${kv.key}"`);
+      if (kv.key === 'probe_path') assertRelativeProbePath(kv.value, where);
       rule[kv.key] = kv.value;
       return;
     }
@@ -817,10 +837,14 @@ function splitFlowTopLevel(flowText) {
 // entry is "name: <value>" (the value may be a nested flow collection), the
 // bare name otherwise (block item `- name`, scalar `name`, flow item
 // `name`). Null when the entry is not a plain name (a nested collection or
-// a multi-word scalar). Optional quotes around the name are tolerated.
+// a multi-word scalar). Optional quotes around the name are tolerated —
+// around a MAPPING KEY too (`"push":` / `'pull_request':` are the
+// YAML-1.1-safe spellings of boolean-key lookalikes), so a required
+// workflow spelled with quoted triggers still passes the I4 both-triggers
+// check.
 function entryName(entry) {
   const t = entry.trim().replace(/^-\s+/, '');
-  const kv = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:/.exec(t);
+  const kv = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?\s*:/.exec(t);
   const name = kv ? kv[1] : t;
   const quoted = /^["']?([A-Za-z_][A-Za-z0-9_-]*)["']?$/.exec(name);
   return quoted ? quoted[1] : null;
@@ -1078,6 +1102,86 @@ function selfTestWorkflowI4() {
   return ok;
 }
 
+// Pure-text parser guards (no gitleaks): (a) probe_path must stay
+// repo-relative — absolute, drive-prefixed, and `..`-segment values are
+// rejected at parse time, so the self-test probe placement (writeProbes'
+// path.join) can never be steered outside its fixture directory, while the
+// shipped patterns.yml's own probe paths still parse; (b) QUOTED mapping
+// keys in an `on:` block ("push": / 'pull_request': — the YAML-1.1-safe
+// spellings) satisfy the I4 both-triggers check, while a nested input named
+// `push` still never counts as a trigger.
+function selfTestParserGuards(rules) {
+  let ok = true;
+  const rejectCases = [
+    '/abs/probe.txt',
+    'C:\\abs\\probe.txt',
+    '\\\\srv\\share\\probe.txt',
+    '\\root-relative.txt',
+    '../up/probe.txt',
+    'a/../b/probe.txt',
+    'a\\..\\b.txt',
+    "''",
+  ];
+  for (const probe of rejectCases) {
+    const text = [
+      'rules:',
+      '  - id: guard-probe',
+      "    description: 'parser guard fixture rule'",
+      "    regex: '(?i)guard[_-]secret'",
+      "    sample: 'guard_secret=not-a-real-value'",
+      `    probe_path: ${probe}`,
+      'clean_probes:',
+      "  - 'clean/probes/none.txt'",
+    ].join('\n');
+    try {
+      parsePatterns(text);
+      console.error(`FAIL parser-guards: probe_path ${probe} was accepted (must be rejected)`);
+      ok = false;
+    } catch (e) {
+      if (!(e instanceof ConfigError)) {
+        console.error(`FAIL parser-guards: probe_path ${probe} threw ${e && e.constructor ? e.constructor.name : typeof e} instead of ConfigError`);
+        ok = false;
+      }
+    }
+  }
+  for (const r of rules) {
+    if (r.probe_path === undefined) continue;
+    if (r.probe_path.startsWith('/') || r.probe_path.replace(/\\/g, '/').split('/').includes('..')) {
+      console.error(`FAIL parser-guards: shipped patterns.yml probe_path '${r.probe_path}' is not repo-relative`);
+      ok = false;
+    }
+  }
+  const quotedBlock = [
+    'name: quoted-triggers',
+    '"on":',
+    '  "push":',
+    "  'pull_request':",
+    'jobs:',
+    '  j:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: echo hi',
+  ].join('\n');
+  const block = extractOnBlock(quotedBlock);
+  if (block === null || !onBlockHasTrigger(block, 'push') || !onBlockHasTrigger(block, 'pull_request')) {
+    console.error('FAIL parser-guards: quoted mapping-key triggers ("push": / \'pull_request\':) do not satisfy the both-triggers check');
+    ok = false;
+  }
+  const quotedFlow = ['name: quoted-flow', 'on: ["push", "pull_request"]', 'jobs: {}'].join('\n');
+  const flow = extractOnBlock(quotedFlow);
+  if (flow === null || !onBlockHasTrigger(flow, 'push') || !onBlockHasTrigger(flow, 'pull_request')) {
+    console.error('FAIL parser-guards: quoted flow-style triggers do not satisfy the both-triggers check');
+    ok = false;
+  }
+  const nestedInput = ['name: nested-input', '"on":', '  workflow_dispatch:', '    inputs:', '      push:', 'jobs: {}'].join('\n');
+  const nested = extractOnBlock(nestedInput);
+  if (nested !== null && onBlockHasTrigger(nested, 'push')) {
+    console.error('FAIL parser-guards: a nested input named push wrongly satisfies trigger presence');
+    ok = false;
+  }
+  return ok;
+}
+
 function selfTest() {
   const { rules, cleanProbes } = loadPatterns();
   const tmp = makeTempDir(path.join(os.tmpdir(), 'denylist-selftest-'));
@@ -1091,10 +1195,16 @@ function selfTest() {
     if (selfTestWorkflowI4()) console.log('PASS workflow-I4');
     else failed++;
 
-    // The other pure-text check: the pack audit's no-dist opt-in omits
-    // exactly the dist/ entry (no gitleaks needed either).
+    // The other pure-text checks: the pack audit's no-dist opt-in omits
+    // exactly the dist/ entry (no gitleaks needed either), and the parser
+    // guards (probe_path traversal rejection + quoted mapping-key
+    // triggers) hold.
     checks++;
     if (selfTestNoDistAllowlist()) console.log('PASS no-dist-allowlist');
+    else failed++;
+
+    checks++;
+    if (selfTestParserGuards(rules)) console.log('PASS parser-guards');
     else failed++;
 
     // Every remaining leg runs gitleaks, so the 8.x major gate belongs here
@@ -1153,7 +1263,7 @@ function main(argv) {
   }
   console.error('usage: scripts/denylist-scan [--self-test]');
   console.error('  (no flags)   scan the repo tree with the denylist rules');
-  console.error('  --self-test  dirty fixture, clean probes, tree config, workflow I4, and no-dist-allowlist legs');
+  console.error('  --self-test  dirty fixture, clean probes, tree config, workflow I4, no-dist-allowlist, and parser-guards legs');
   return 2;
 }
 
