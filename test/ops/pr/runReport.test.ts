@@ -21,7 +21,13 @@
 //      without `tracker` no edit runs and trackerUpdated is false.
 //   5. Counts include zeros; the report is plain JSON.
 import { describe, expect, test } from 'vitest';
-import type { PrChecks, PrEffects, PrReviewState } from '../../../src/ops/pr/assemblePrs.js';
+import { READINESS_SECTION_MARKER } from '../../../src/ops/pr/assemblePrs.js';
+import type {
+  PrChecks,
+  PrEffects,
+  PrReviewState,
+  PrState,
+} from '../../../src/ops/pr/assemblePrs.js';
 import { makeSubprocessPrEffects } from '../../../src/ops/pr/ghEffects.js';
 import { makeRunReport, type RunReportInput } from '../../../src/ops/pr/runReport.js';
 
@@ -37,12 +43,16 @@ interface FakeGh {
   reviews: Map<number, PrReviewState>;
   /** Per-PR scripted draft flags (absent → not a draft). */
   drafts: Map<number, boolean>;
+  /** Per-PR scripted lifecycle states (absent → open). */
+  metas: Map<number, PrState>;
   /** Faults keyed by PR number, per read. */
   checkFaults: Map<number, string>;
   reviewFaults: Map<number, string>;
   metaFaults: Map<number, string>;
   /** editPrBody bodies keyed by PR number. */
   edits: Map<number, string>;
+  /** Existing bodies keyed by PR number (the getPrBody read). */
+  bodies: Map<number, string>;
   /** createPr invocations — the report must NEVER make one. */
   creates: number;
 }
@@ -52,10 +62,12 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
     checks: seed.checks ?? new Map<number, PrChecks>(),
     reviews: seed.reviews ?? new Map<number, PrReviewState>(),
     drafts: seed.drafts ?? new Map<number, boolean>(),
+    metas: seed.metas ?? new Map<number, PrState>(),
     checkFaults: seed.checkFaults ?? new Map<number, string>(),
     reviewFaults: seed.reviewFaults ?? new Map<number, string>(),
     metaFaults: seed.metaFaults ?? new Map<number, string>(),
     edits: seed.edits ?? new Map<number, string>(),
+    bodies: seed.bodies ?? new Map<number, string>(),
     creates: 0,
     gh: {
       searchPrByHead: async () => null,
@@ -84,8 +96,12 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
       getPrMeta: async (number) => {
         const fault = state.metaFaults.get(number);
         if (fault !== undefined) throw new Error(fault);
-        return { isDraft: state.drafts.get(number) === true };
+        return {
+          isDraft: state.drafts.get(number) === true,
+          state: state.metas.get(number) ?? 'open',
+        };
       },
+      getPrBody: async (number) => state.bodies.get(number) ?? '',
     },
   };
   return state;
@@ -423,6 +439,66 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
     );
   });
 
+  test('a NON-OPEN tracker number is refused before any write (r2#2), rows carried in the error', async () => {
+    for (const trackerState of ['merged', 'closed', 'unknown'] as const) {
+      const fake = fakeGh({ metas: new Map([[7, trackerState]]) });
+      const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
+      expect(result.status).toBe('failed');
+      expect(result.status === 'failed' && result.error).toContain(`is in state '${trackerState}'`);
+      expect(result.status === 'failed' && result.error).toContain('core #11');
+      expect(fake.edits.size).toBe(0);
+    }
+  });
+
+  test('a tracker META-read fault fails the op with the rows (the lifecycle guard needs the read)', async () => {
+    const fake = fakeGh({ metaFaults: new Map([[7, 'meta read boom']]) });
+    const result = await makeRunReport(fake.gh)(inputOf({ tracker: { number: 7 } }));
+    expect(result.status).toBe('failed');
+    expect(result.status === 'failed' && result.error).toContain('lifecycle state');
+    expect(result.status === 'failed' && result.error).toContain('meta read boom');
+    expect(fake.edits.size).toBe(0);
+  });
+
+  test('the report upsert preserves an existing manifest section verbatim (r2#4)', async () => {
+    const manifestBody = [
+      '<!-- cq:manifest -->',
+      '<!-- cq-toolkit fleet-run manifest: runPrefix cq/09-16a (generated; updated in place, never duplicated) -->',
+      '# Fleet run `cq/09-16a`',
+      '',
+      '- `core` — #11 (`cq/09-16a/fix/core`)',
+      '',
+    ].join('\n');
+    const fake = fakeGh({
+      checks: new Map([[11, { state: 'pass' }]]),
+      reviews: new Map([[11, { state: 'approved' }]]),
+      bodies: new Map([[7, manifestBody]]),
+    });
+    const report = await okReport(makeRunReport(fake.gh), inputOf({ tracker: { number: 7 } }));
+    expect(report.trackerUpdated).toBe(true);
+    const written = fake.edits.get(7);
+    expect(written).toContain(READINESS_SECTION_MARKER);
+    // The assembler's manifest survived BYTE-FOR-BYTE.
+    expect(written).toContain(manifestBody.trimEnd());
+    expect(written).toContain('`core` — #11 — checks: pass; review: approved — READY');
+  });
+
+  test('markdown metacharacters in a row name cannot break the report bullets (r2#7)', async () => {
+    const fake = fakeGh({
+      checks: new Map([[11, { state: 'pass' }]]),
+      reviews: new Map([[11, { state: 'approved' }]]),
+    });
+    await okReport(
+      makeRunReport(fake.gh),
+      inputOf({
+        tracker: { number: 7 },
+        packages: [{ name: 'co`re<b>', number: 11 }],
+      }),
+    );
+    const written = fake.edits.get(7);
+    expect(written).toContain('`co\\`reb`');
+    expect(written).not.toContain('<b>');
+  });
+
   test('TYPE + RUNTIME PIN: the PrEffects seam admits no merge-class member', async () => {
     // The record annotation below fails to COMPILE the moment a member is
     // added to (or removed from) PrEffects — the type-level pin that the
@@ -432,13 +508,14 @@ describe('the tracker is updated in place, and nothing ever merges', () => {
       searchPrByHead: true,
       createPr: true,
       editPrBody: true,
+      getPrBody: true,
       comment: true,
       getPrChecks: true,
       getPrReviewState: true,
       getPrMeta: true,
     };
     const names = Object.keys(seamMembers);
-    expect(names).toHaveLength(7);
+    expect(names).toHaveLength(8);
     expect(names.some((name) => /merge|rebase|squash|close/i.test(name))).toBe(false);
     // The production adapter is pinned to the same seven — no merge effect
     // by construction there either.

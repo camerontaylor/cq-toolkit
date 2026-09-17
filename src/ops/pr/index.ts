@@ -21,7 +21,12 @@ export type {
   PrSearchResult,
   PrState,
 } from './assemblePrs.js';
-export { makeAssemblePrs } from './assemblePrs.js';
+export {
+  composeSection,
+  makeAssemblePrs,
+  MANIFEST_SECTION_MARKER,
+  READINESS_SECTION_MARKER,
+} from './assemblePrs.js';
 // The run report's value type is exported ALIASED: the kernel's frozen
 // runner report already owns `RunReport` on the root barrel, and a second
 // plain `RunReport` would be silently EXCLUDED from the root barrel's
@@ -31,10 +36,11 @@ export type { PrReadiness, PrRunReport, RunReportInput, RunReportRow } from './r
 export { makeRunReport } from './runReport.js';
 export type { SubprocessPrEffectsOptions } from './ghEffects.js';
 export {
+  bodyOf,
   checksOfRollup,
   makeSubprocessPrEffects,
   mapGhFault,
-  metaOfIsDraft,
+  metaOf,
   parseCreatedPr,
   parsePrList,
   reviewStateOfDecision,

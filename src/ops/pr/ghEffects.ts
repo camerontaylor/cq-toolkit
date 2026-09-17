@@ -21,8 +21,9 @@
 //
 // Parsing is kept small and exported pure ({@link parsePrList},
 // {@link selectPrMatch}, {@link parseCreatedPr}, {@link checksOfRollup},
-// {@link reviewStateOfDecision}, {@link metaOfIsDraft}) — fixture-tested in
-// test/ops/pr/registry.test.ts against captured gh JSON shapes.
+// {@link reviewStateOfDecision}, {@link metaOf}, {@link bodyOf}) —
+// fixture-tested in test/ops/pr/registry.test.ts against captured gh JSON
+// shapes.
 import { execFile } from 'node:child_process';
 import type {
   PrChecks,
@@ -150,12 +151,12 @@ export function parsePrList(text: string): PrSearchResult[] {
     throw new Error('gh pr list returned a non-array payload — payload untrustworthy');
   }
   return payload.map((row) => {
-    if (
-      row === null ||
-      typeof row !== 'object' ||
-      typeof (row as { number?: unknown }).number !== 'number'
-    ) {
-      throw new Error('gh pr list returned a row without a numeric number — payload untrustworthy');
+    const number =
+      row === null || typeof row !== 'object' ? undefined : (row as { number?: unknown }).number;
+    if (typeof number !== 'number' || !Number.isInteger(number) || number < 1) {
+      throw new Error(
+        'gh pr list returned a row without a positive-integer number — payload untrustworthy',
+      );
     }
     const numbered = row as { number: number; url?: unknown; state?: unknown };
     const url = typeof numbered.url === 'string' && numbered.url !== '' ? numbered.url : undefined;
@@ -291,12 +292,31 @@ export function reviewStateOfDecision(decision: unknown): PrReviewState {
 }
 
 /**
- * Map gh's `isDraft` onto the seam's {@link PrMeta}: only a literal `true`
- * blocks (a missing/unrecognized key is read as not-draft — the ordinary
- * fold — never as a fabricated draft).
+ * Map gh's `isDraft`+`state` onto the seam's {@link PrMeta}. FAIL-CLOSED on
+ * the draft half (r2#3): a non-boolean/missing `isDraft` THROWS — reading a
+ * corrupt draft flag as "not a draft" is the one fold that could still
+ * yield a fabricated `ready`, so it faults into the row's `unknown` like
+ * any sibling read. The lifecycle half maps through {@link prStateOf}
+ * (unknown words → `unknown`, which the tracker guard treats as non-open).
  */
-export function metaOfIsDraft(isDraft: unknown): PrMeta {
-  return { isDraft: isDraft === true };
+export function metaOf(payload: { isDraft?: unknown; state?: unknown }): PrMeta {
+  if (typeof payload.isDraft !== 'boolean') {
+    throw new Error('gh pr view printed an unreadable isDraft — payload untrustworthy');
+  }
+  return { isDraft: payload.isDraft, state: prStateOf(payload.state) };
+}
+
+/**
+ * Map gh's `body` onto the seam's current-body read: a null/missing body is
+ * the empty string (an empty PR body is real); a non-string non-null body
+ * is an untrustworthy payload (thrown).
+ */
+export function bodyOf(payload: { body?: unknown }): string {
+  if (payload.body === null || payload.body === undefined) return '';
+  if (typeof payload.body !== 'string') {
+    throw new Error('gh pr view printed a non-string body — payload untrustworthy');
+  }
+  return payload.body;
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +337,10 @@ export function metaOfIsDraft(isDraft: unknown): PrMeta {
  *   - comment:           gh pr comment <n> --body-file - (body over stdin)
  *   - getPrChecks:       gh pr view <n> --json statusCheckRollup
  *   - getPrReviewState:  gh pr view <n> --json reviewDecision
- *   - getPrMeta:         gh pr view <n> --json isDraft
+ *   - getPrMeta:         gh pr view <n> --json isDraft,state (fail-closed on
+ *                        an unreadable draft flag)
+ *   - getPrBody:         gh pr view <n> --json body (the compose protocol's
+ *                        read half)
  * The seam carries NO merge effect — the fleet run report is a
  * merge-readiness artifact; merging stays the merge family's guarded
  * business.
@@ -402,11 +425,22 @@ export function makeSubprocessPrEffects(
         ).reviewDecision,
       ),
     getPrMeta: async (number) =>
-      metaOfIsDraft(
-        parseGhJson<{ isDraft?: unknown }>(
-          await runGh(['pr', 'view', String(number), '--json', 'isDraft'], repoRoot, timeoutMs),
+      metaOf(
+        parseGhJson<{ isDraft?: unknown; state?: unknown }>(
+          await runGh(
+            ['pr', 'view', String(number), '--json', 'isDraft,state'],
+            repoRoot,
+            timeoutMs,
+          ),
           'gh pr view',
-        ).isDraft,
+        ),
+      ),
+    getPrBody: async (number) =>
+      bodyOf(
+        parseGhJson<{ body?: unknown }>(
+          await runGh(['pr', 'view', String(number), '--json', 'body'], repoRoot, timeoutMs),
+          'gh pr view',
+        ),
       ),
   };
 }

@@ -26,7 +26,13 @@
 //   - No throws across the op seam; counts include zeros; the report is
 //     plain JSON.
 import type { Op } from '../../kernel/types.js';
-import type { PrChecks, PrEffects, PrReviewState } from './assemblePrs.js';
+import {
+  composeSection,
+  READINESS_SECTION_MARKER,
+  type PrChecks,
+  type PrEffects,
+  type PrReviewState,
+} from './assemblePrs.js';
 
 /** JSON-serializable input of the `pr.runReport` op. */
 export interface RunReportInput {
@@ -48,10 +54,10 @@ export interface RunReportRow {
   name: string;
   number: number;
   readiness: PrReadiness;
-  /** The observed check-rollup state (`pass`/`fail`/`pending`/`none`), or `unknown` when it could not be read. */
-  checks: string;
-  /** The observed review state (`approved`/`changes-requested`/`none`/`unknown`), or `unknown` when it could not be read. */
-  review: string;
+  /** The observed check-rollup state, or `unknown` when it could not be read. */
+  checks: PrChecks['state'] | 'unknown';
+  /** The observed review state, or `unknown` when it could not be read. */
+  review: PrReviewState['state'] | 'unknown';
   /** Why the row is `blocked`/`unknown` — a checks/review deadlock explanation or the effects fault. */
   reason?: string;
 }
@@ -147,14 +153,36 @@ export function makeRunReport(gh: PrEffects): Op<RunReportInput, PrRunReport> {
 
     let trackerUpdated = false;
     if (input.tracker !== undefined) {
+      // THE LIFECYCLE GUARD (PR-165 r2#2): a stale/merged tracker number is
+      // a landed record — the report refuses to rewrite it (same rule as
+      // the assembler's adoption refusal), and the failure carries the
+      // collected rows, since a `failed` result carries no value.
+      let trackerState: string;
       try {
-        await gh.editPrBody(input.tracker.number, reportBody(input.runPrefix, rows));
+        trackerState = (await gh.getPrMeta(input.tracker.number)).state;
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `pr: could not read tracker PR #${String(input.tracker.number)}'s lifecycle state — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+        };
+      }
+      if (trackerState !== 'open') {
+        return {
+          status: 'failed',
+          error: `pr: tracker PR #${String(input.tracker.number)} is in state '${trackerState}' — refusing to write the run report into a non-open tracker; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
+        };
+      }
+      // THE COMPOSE PROTOCOL (r2#4): the report upserts ONLY its readiness
+      // section into the tracker's CURRENT body — the assembler's manifest
+      // section is preserved verbatim.
+      try {
+        const current = await gh.getPrBody(input.tracker.number);
+        await gh.editPrBody(
+          input.tracker.number,
+          composeSection(current, reportSection(input.runPrefix, rows)),
+        );
         trackerUpdated = true;
       } catch (err) {
-        // The rows were collected before the tracker write — they ride the
-        // failure text (the progressNote pattern), because a `failed` result
-        // carries no value and discarding the fleet's evidence over a lost
-        // body edit would make the caller re-read every PR.
         return {
           status: 'failed',
           error: `pr: could not update tracker PR #${String(input.tracker.number)} with the run report — ${messageOf(err)}; the collected rows, carried here since the result carries no value: ${rowSummary(rows)}`,
@@ -219,13 +247,17 @@ function readinessOf(
 /**
  * The run report rendered in the tracker manifest style: one bullet per
  * package with its PR number, the observed evidence, and the verdict;
- * blocked/unknown rows carry their reason. Plain markdown, updated in
- * place on the tracker PR.
+ * blocked/unknown rows carry their reason. Plain markdown, upserted into
+ * the tracker body under {@link READINESS_SECTION_MARKER} (r2#4 — the
+ * assembler's manifest section is never touched); every interpolation is
+ * markdown-safe (backticks escaped, angle brackets stripped, Cc runs
+ * flattened).
  */
-function reportBody(runPrefix: string, rows: readonly RunReportRow[]): string {
+function reportSection(runPrefix: string, rows: readonly RunReportRow[]): string {
   const lines: string[] = [
+    READINESS_SECTION_MARKER,
     `<!-- cq-toolkit fleet-run report: runPrefix ${runPrefix} (generated; merge-readiness, never auto-merges) -->`,
-    `# Fleet run \`${runPrefix}\` — merge readiness`,
+    `# Fleet run \`${mdSafe(runPrefix)}\` — merge readiness`,
     '',
     'Three-valued readiness per package: `ready` / `blocked` / `unknown`. This report is evidence only — nothing is merged by it.',
     '',
@@ -236,12 +268,17 @@ function reportBody(runPrefix: string, rows: readonly RunReportRow[]): string {
   }
   for (const row of rows) {
     const verdict = row.readiness.toUpperCase();
-    const why = row.reason === undefined ? '' : ` — ${singleLine(row.reason)}`;
+    const why = row.reason === undefined ? '' : ` — ${mdSafe(singleLine(row.reason))}`;
     lines.push(
-      `- \`${row.name}\` — #${String(row.number)} — checks: ${row.checks}; review: ${row.review} — ${verdict}${why}`,
+      `- \`${mdSafe(row.name)}\` — #${String(row.number)} — checks: ${row.checks}; review: ${row.review} — ${verdict}${why}`,
     );
   }
-  return `${lines.join('\n')}\n`;
+  return lines.join('\n');
+}
+
+/** Markdown-safe interpolation (r2#7): backticks escaped, angle brackets stripped. */
+function mdSafe(text: string): string {
+  return text.replace(/`/g, '\\`').replace(/[<>]/g, '');
 }
 
 /** Flatten a reason to one safe markdown line (Cc runs become spaces). */

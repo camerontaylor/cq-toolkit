@@ -28,10 +28,16 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { PrSearchResult, PrState } from '../../../src/ops/pr/assemblePrs.js';
 import {
+  composeSection,
+  MANIFEST_SECTION_MARKER,
+  READINESS_SECTION_MARKER,
+} from '../../../src/ops/pr/assemblePrs.js';
+import {
+  bodyOf,
   checksOfRollup,
   makeSubprocessPrEffects,
   mapGhFault,
-  metaOfIsDraft,
+  metaOf,
   parseCreatedPr,
   parsePrList,
   reviewStateOfDecision,
@@ -226,11 +232,15 @@ describe('parsePrList (gh pr list --json number,url,state)', () => {
     ]);
   });
 
-  test('a non-array payload and a row without a number are untrustworthy (thrown)', () => {
+  test('a non-array payload and an out-of-contract number are untrustworthy (thrown, r2#5)', () => {
     expect(() => parsePrList('{"number":7}')).toThrow(/non-array payload/);
     expect(() => parsePrList('[{"url":"https://github.test/owner/repo/pull/7"}]')).toThrow(
-      /without a numeric number/,
+      /positive-integer number/,
     );
+    // A PR number is 1, 2, 3… — zero, negatives, and floats are all noise.
+    expect(() => parsePrList('[{"number":0}]')).toThrow(/positive-integer number/);
+    expect(() => parsePrList('[{"number":-3}]')).toThrow(/positive-integer number/);
+    expect(() => parsePrList('[{"number":2.5}]')).toThrow(/positive-integer number/);
   });
 
   test('non-JSON output is a fault, never a guess', () => {
@@ -360,11 +370,84 @@ describe('reviewStateOfDecision (gh pr view --json reviewDecision)', () => {
   });
 });
 
-describe('metaOfIsDraft (gh pr view --json isDraft)', () => {
-  test('a literal true is a draft; false and a missing key are not (never a fabricated draft)', () => {
-    expect(metaOfIsDraft(true)).toEqual({ isDraft: true });
-    expect(metaOfIsDraft(false)).toEqual({ isDraft: false });
-    expect(metaOfIsDraft(undefined)).toEqual({ isDraft: false });
+describe('metaOf (gh pr view --json isDraft,state)', () => {
+  test('a literal isDraft plus the lifecycle word map onto the seam', () => {
+    expect(metaOf({ isDraft: true, state: 'OPEN' })).toEqual({ isDraft: true, state: 'open' });
+    expect(metaOf({ isDraft: false, state: 'MERGED' })).toEqual({
+      isDraft: false,
+      state: 'merged',
+    });
+  });
+
+  test('FAILS CLOSED on an unreadable isDraft (r2#3): a corrupt draft flag must never read as not-a-draft', () => {
+    expect(() => metaOf({ isDraft: undefined, state: 'OPEN' })).toThrow(/unreadable isDraft/);
+    expect(() => metaOf({ isDraft: 'maybe', state: 'OPEN' })).toThrow(/unreadable isDraft/);
+    expect(() => metaOf({ state: 'OPEN' })).toThrow(/unreadable isDraft/);
+  });
+
+  test('an unrecognized lifecycle word maps to unknown (the tracker guard treats it as non-open)', () => {
+    expect(metaOf({ isDraft: false, state: 'WHAT' })).toEqual({
+      isDraft: false,
+      state: 'unknown',
+    });
+  });
+});
+
+describe('bodyOf (gh pr view --json body)', () => {
+  test('a string body passes; a null or missing body is the empty string', () => {
+    expect(bodyOf({ body: 'hello' })).toBe('hello');
+    expect(bodyOf({ body: null })).toBe('');
+    expect(bodyOf({})).toBe('');
+  });
+
+  test('a non-string non-null body is untrustworthy (thrown)', () => {
+    expect(() => bodyOf({ body: 42 })).toThrow(/non-string body/);
+  });
+});
+
+describe('composeSection (the r2#4 tracker-body compose protocol)', () => {
+  const manifestSection = `${MANIFEST_SECTION_MARKER}\n# Fleet run\n- \`core\` — #11`;
+  const readinessSection = `${READINESS_SECTION_MARKER}\n# Merge readiness\n- \`core\` — READY`;
+
+  test('no existing body → the section alone', () => {
+    expect(composeSection(undefined, manifestSection)).toBe(`${manifestSection}\n`);
+    expect(composeSection('', readinessSection)).toBe(`${readinessSection}\n`);
+  });
+
+  test('a body without the marker → the section appended, existing content preserved', () => {
+    expect(composeSection('Some prose.\n', manifestSection)).toBe(
+      `Some prose.\n\n${manifestSection}\n`,
+    );
+  });
+
+  test('an existing marker → ONLY that section is replaced; a sibling section survives verbatim', () => {
+    const existing = [
+      'Prose header.',
+      MANIFEST_SECTION_MARKER,
+      'STALE manifest line',
+      '',
+      READINESS_SECTION_MARKER,
+      'READINESS line',
+    ].join('\n');
+    const composed = composeSection(existing, manifestSection);
+    expect(composed).toContain('Prose header.');
+    expect(composed).toContain(manifestSection); // the fresh content landed
+    expect(composed).not.toContain('STALE manifest line');
+    expect(composed).toContain('READINESS line'); // the sibling is untouched
+  });
+
+  test('replacement works regardless of section order (readiness first, manifest last)', () => {
+    const existing = [
+      READINESS_SECTION_MARKER,
+      'READINESS line',
+      '',
+      MANIFEST_SECTION_MARKER,
+      'STALE manifest line',
+    ].join('\n');
+    const composed = composeSection(existing, manifestSection);
+    expect(composed).toContain('READINESS line');
+    expect(composed).toContain(manifestSection);
+    expect(composed).not.toContain('STALE manifest line');
   });
 });
 

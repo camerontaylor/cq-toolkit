@@ -20,6 +20,8 @@
 import { describe, expect, test } from 'vitest';
 import {
   makeAssemblePrs,
+  MANIFEST_SECTION_MARKER,
+  READINESS_SECTION_MARKER,
   type AssemblePrsInput,
   type PrCreateRequest,
   type PrEffects,
@@ -97,7 +99,8 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
       },
       getPrChecks: async () => ({ state: 'pass' }),
       getPrReviewState: async () => ({ state: 'none' }),
-      getPrMeta: async () => ({ isDraft: false }),
+      getPrMeta: async () => ({ isDraft: false, state: 'open' }),
+      getPrBody: async () => '',
     },
   };
   return state;
@@ -482,5 +485,80 @@ describe('the report is plain JSON', () => {
     const fake = fakeGh({ createFaultOnHead: PKG_UTIL });
     const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
     expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// State-aware per-package adoption (PR-165 r2#1)
+// ---------------------------------------------------------------------------
+
+describe('a non-open package PR is refused as a ROW fault, never adopted', () => {
+  test('a MERGED package PR → its row faults, the op stays ok, the sibling still assembles', async () => {
+    const fake = fakeGh({
+      prsByHead: new Map([[PKG_CORE, { number: 55, state: 'merged' }]]),
+    });
+    const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
+    expect(result.packages[0]).toMatchObject({ name: 'core', created: false });
+    expect(result.packages[0]?.fault).toContain("is in state 'merged'");
+    expect(result.packages[0]?.number).toBeUndefined();
+    expect(result.packages[1]).toMatchObject({ name: 'util', created: true });
+    expect(fake.calls).not.toContain(`create:${PKG_CORE}`);
+  });
+
+  test('the adoption refusal shows in the tracker manifest', async () => {
+    const fake = fakeGh({
+      prsByHead: new Map([[PKG_CORE, { number: 55, state: 'closed' }]]),
+    });
+    const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
+    const manifest = fake.edits.get(result.tracker.number);
+    expect(manifest).toContain('FAULT:');
+    expect(manifest).toContain("is in state 'closed'");
+  });
+
+  test('an OPEN package PR is still adopted in place (the positive pole)', async () => {
+    const fake = fakeGh({
+      prsByHead: new Map([[PKG_CORE, { number: 55, state: 'open' }]]),
+    });
+    const result = await okReport(makeAssemblePrs(fake.gh), inputOf());
+    expect(result.packages[0]).toEqual({ name: 'core', number: 55, created: false });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The section compose protocol + markdown safety (PR-165 r2#4, r2#7)
+// ---------------------------------------------------------------------------
+
+describe('the tracker write composes, never clobbers', () => {
+  test('the manifest upsert preserves an existing readiness section verbatim', async () => {
+    const fake = fakeGh({
+      prsByHead: new Map([[TRACKER_BRANCH, { number: 7 }]]),
+    });
+    const readinessBody = [
+      '<!-- cq:readiness -->',
+      '<!-- cq-toolkit fleet-run report: runPrefix cq/09-16a (generated; merge-readiness, never auto-merges) -->',
+      '# Fleet run `cq/09-16a` — merge readiness',
+      '',
+      '- `core` — #11 — checks: pass; review: approved — READY',
+      '',
+    ].join('\n');
+    fake.gh.getPrBody = async () => readinessBody;
+    await okReport(makeAssemblePrs(fake.gh), inputOf());
+    const written = fake.edits.get(7);
+    expect(written).toContain(MANIFEST_SECTION_MARKER);
+    expect(written).toContain(READINESS_SECTION_MARKER);
+    expect(written).toContain('`core` — #101'); // the fresh manifest content landed
+    // The readiness section survived BYTE-FOR-BYTE.
+    expect(written).toContain(readinessBody.trimEnd());
+  });
+
+  test('markdown metacharacters in a package name cannot break the manifest bullets', async () => {
+    const fake = fakeGh();
+    await okReport(
+      makeAssemblePrs(fake.gh),
+      inputOf({ packages: [{ name: 'co`re<b>', branch: PKG_CORE, title: 'x' }] }),
+    );
+    const written = fake.edits.get(101);
+    expect(written).toContain('`co\\`reb`'); // backtick escaped, angle stripped
+    expect(written).not.toContain('<b>');
   });
 });

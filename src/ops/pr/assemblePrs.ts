@@ -8,18 +8,21 @@
 //
 // Invariants honored here:
 //   - UC row 22, TRACKER-FIRST: the effects calls ORDER — the tracker PR is
-//     searched (by head branch) first, created as a draft when absent, and
-//     only then are per-package PRs attempted. A tracker search/creation
-//     fault fails the whole op with ZERO package PRs attempted (fail before
-//     any package PR exists — a fleet must never outlive its tracker).
+//     searched (by head branch AND base) first, created as a draft when
+//     absent, and only then are per-package PRs attempted. A tracker
+//     search/creation fault fails the whole op with ZERO package PRs
+//     attempted (fail before any package PR exists — a fleet must never
+//     outlive its tracker). The LATER manifest-edit fault also fails the
+//     op, but by then the package PRs exist: the failure text NAMES every
+//     PR already ensured instead of claiming none was attempted.
 //   - NEVER A SECOND TRACKER: an existing tracker PR (same head branch) is
 //     REUSED — its number is reported with `created: false` and its body is
 //     refreshed in place via editPrBody; createPr is never called for the
 //     tracker head when a PR already sits there.
-//   - PER-ROW PACKAGE FAULTS: a per-package search/create fault lands on
-//     that package's report row (`fault`) and never fails the others — the
-//     fleet run collects all results (I9); only a TRACKER fault fails the
-//     op.
+//   - PER-ROW PACKAGE FAULTS: a per-package search/create/adoption fault
+//     lands on that package's report row (`fault`) and never fails the
+//     others — the fleet run collects all results (I9); only a TRACKER
+//     fault fails the op.
 //   - No throws across the op seam: every effects rejection is folded into
 //     a `failed` result or a per-row fault; every input contract violation
 //     is a `failed` result naming the field (the worktreeFor boundary
@@ -32,13 +35,13 @@ import type { Op } from '../../kernel/types.js';
  * inject recording fakes, production binds {@link makeSubprocessPrEffects}.
  *
  * NO MERGE EFFECT BY CONSTRUCTION: the seam is the family's whole GitHub
- * vocabulary — search, create, edit-body, comment, and the readiness reads
- * (checks, review decision, draft status) — and it deliberately admits no
- * merge/rebase/close member. The fleet run report (runReport.ts) is a
- * merge-READINESS artifact; merging is the merge family's guarded business
- * (MergeEffects + safeArgs), never this seam's. The key-set pin in
- * test/ops/pr/runReport.test.ts fails the build the moment a merge-class
- * member is added.
+ * vocabulary — search, create, body read/edit, comment, and the readiness
+ * reads (checks, review decision, draft/lifecycle meta) — and it
+ * deliberately admits no merge/rebase/close member. The fleet run report
+ * (runReport.ts) is a merge-READINESS artifact; merging is the merge
+ * family's guarded business (MergeEffects + safeArgs), never this seam's.
+ * The key-set pin in test/ops/pr/runReport.test.ts fails the build the
+ * moment a merge-class member is added.
  */
 export interface PrEffects {
   /**
@@ -52,6 +55,13 @@ export interface PrEffects {
   createPr(request: PrCreateRequest): Promise<PrCreateResult>;
   /** Replace a PR's body — the tracker's update-in-place mechanism. */
   editPrBody(number: number, body: string): Promise<void>;
+  /**
+   * The PR's CURRENT body — the read half of the section compose protocol
+   * (r2): both tracker writers compose their own section into the body this
+   * returns, so the manifest writer and the readiness writer never clobber
+   * each other's sections.
+   */
+  getPrBody(number: number): Promise<string>;
   /** Append a comment to a PR (reserved for tracker annotations). */
   comment(number: number, body: string): Promise<void>;
   /** The check-rollup verdict for one PR (three-valued sources; runReport). */
@@ -59,9 +69,11 @@ export interface PrEffects {
   /** The review-decision verdict for one PR (runReport). */
   getPrReviewState(number: number): Promise<PrReviewState>;
   /**
-   * The PR's draft flag (runReport): a draft PR can carry green checks and
-   * an approval, yet GitHub cannot merge it — the report must not call it
-   * ready. A dedicated single-purpose read (kept apart from
+   * The PR's draft flag AND lifecycle state (runReport): a draft PR can
+   * carry green checks and an approval, yet GitHub cannot merge it — the
+   * report must not call it ready; and a non-open tracker must never be
+   * rewritten, so the report lifecycle-guards its tracker edit. One
+   * read answering both writer-guard questions (kept apart from
    * getPrChecks/getPrReviewState so every seam member answers exactly one
    * question).
    */
@@ -115,9 +127,15 @@ export interface PrReviewState {
   state: 'approved' | 'changes-requested' | 'none' | 'required' | 'unknown';
 }
 
-/** The draft half of the merge-readiness evidence: GitHub cannot merge a draft, whatever the checks say. */
+/**
+ * The meta half of the merge-readiness evidence: `isDraft` — GitHub cannot
+ * merge a draft, whatever the checks say — and the lifecycle `state`, which
+ * lifecycle-guards the tracker writers (a non-open tracker is a landed
+ * record, never rewritten).
+ */
 export interface PrMeta {
   isDraft: boolean;
+  state: PrState;
 }
 
 /** JSON-serializable input of the `pr.assemblePrs` op: one fleet run's PR plan. */
@@ -232,7 +250,7 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
           head: input.tracker.branch,
           base: input.base,
           title: input.tracker.title,
-          body: manifestBody(input, input.packages.map(pendingRowOf)),
+          body: manifestSection(input, input.packages.map(pendingRowOf)),
           draft,
         });
         trackerNumber = created.number;
@@ -249,13 +267,23 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
     // PER-PACKAGE: search-then-create per branch, in input order; a fault
     // isolates to its row (I9 — the fleet run collects all results).
     // manifestRows parallels rows index-for-index and carries the branch the
-    // report row omits (the manifest bullet names it).
+    // report row omits (the manifest bullet names it). Adoption is
+    // STATE-AWARE (PR-165 r2#1): a MERGED or CLOSED PR on the head+base is
+    // history, not a live fleet member — it is refused as a ROW fault
+    // naming the state (mirroring the tracker refusal), never adopted with
+    // created:false for runReport to fold into a fabricated ready.
     const rows: AssemblePrsPackageReport[] = [];
     const manifestRows: ManifestRow[] = [];
     for (const pkg of input.packages) {
       try {
         const existing = await gh.searchPrByHead(pkg.branch, input.base);
         if (existing !== null) {
+          if (existing.state !== 'open') {
+            const fault = `PR #${String(existing.number)} for branch '${pkg.branch}' is in state '${existing.state}' — refusing adoption: a non-open PR is a landed record, never a live fleet member`;
+            rows.push({ name: pkg.name, created: false, fault });
+            manifestRows.push({ name: pkg.name, branch: pkg.branch, fault });
+            continue;
+          }
           rows.push(
             withUrl({ name: pkg.name, number: existing.number, created: false }, existing.url),
           );
@@ -278,14 +306,21 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
       }
     }
 
-    // UPDATE-IN-PLACE: the tracker's body is the run's live manifest. For a
+    // UPDATE-IN-PLACE (the compose protocol, r2#4): the tracker's body is
+    // the run's live manifest. The op reads the CURRENT body and upserts
+    // ONLY the manifest section, preserving the readiness section the run
+    // report owns — the two tracker writers never clobber each other. For a
     // reused tracker this edit is the whole update (never a second tracker);
     // for a created tracker it replaces the pending skeleton with the actual
-    // numbers. A body-edit fault fails the op — a stale tracker manifest is
-    // a silently lying merge-readiness artifact — and the error names every
-    // package PR already ensured so the caller can find them.
+    // numbers. A read-or-edit fault fails the op — a stale tracker manifest
+    // is a silently lying merge-readiness artifact — and the error names
+    // every package PR already ensured so the caller can find them.
     try {
-      await gh.editPrBody(trackerNumber, manifestBody(input, manifestRows));
+      const current = await gh.getPrBody(trackerNumber);
+      await gh.editPrBody(
+        trackerNumber,
+        composeSection(current, manifestSection(input, manifestRows)),
+      );
     } catch (err) {
       const ensured = rows
         .filter((row) => row.number !== undefined)
@@ -328,19 +363,89 @@ function pendingRowOf(pkg: { name: string; branch: string }): ManifestRow {
   return { name: pkg.name, branch: pkg.branch };
 }
 
+// THE SECTION COMPOSE PROTOCOL (PR-165 r2#4): the tracker PR's body hosts
+// TWO sections owned by two different writers — the assembler owns
+// {@link MANIFEST_SECTION_MARKER}, the run report owns
+// {@link READINESS_SECTION_MARKER} — and each writer replaces ONLY its own
+// section, creating it when absent and preserving every other section
+// (and any prose outside the sections) verbatim. Neither writer can clobber
+// the other.
+
+/** The assembler's section marker — the fleet-run manifest lives under it. */
+export const MANIFEST_SECTION_MARKER = '<!-- cq:manifest -->';
+
+/** The run report's section marker — the merge-readiness report lives under it. */
+export const READINESS_SECTION_MARKER = '<!-- cq:readiness -->';
+
 /**
- * The fleet-run manifest: plain markdown, one bullet per package with its PR
- * number, its pending state, or its fault. Written by createPr (all rows
- * pending) and refreshed by editPrBody (numbers/faults). Fault text is
- * flattened to one line — gh fault messages carry stderr newlines that
- * would corrupt the bullet framing.
+ * Upsert ONE section (its FIRST line is its marker) into `existing`:
+ *   - absent/empty existing → the section alone;
+ *   - marker present → the section REPLACES the lines from its marker to
+ *     just before the next `<!-- cq:… -->` marker (or EOF) — everything
+ *     else, sibling sections included, is preserved byte-for-byte;
+ *   - marker absent → the section is appended after the existing content.
+ * Markdown-safe by construction: the section builders already escaped
+ * their interpolations.
  */
-function manifestBody(input: AssemblePrsInput, rows: readonly ManifestRow[]): string {
+export function composeSection(existing: string | undefined, section: string): string {
+  const marker = (section.split('\n')[0] ?? '').trim();
+  if (existing === undefined || existing.trim() === '') {
+    return `${section.trimEnd()}\n`;
+  }
+  const lines = existing.split('\n');
+  const start = lines.findIndex((line) => line.trim() === marker);
+  if (start === -1) {
+    return `${existing.trimEnd()}\n\n${section.trimEnd()}\n`;
+  }
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (lines[index]?.trim().startsWith('<!-- cq:')) {
+      end = index;
+      break;
+    }
+  }
+  const separator = end < lines.length ? [''] : [];
+  return [
+    ...lines.slice(0, start),
+    ...section.trimEnd().split('\n'),
+    ...separator,
+    ...lines.slice(end),
+  ].join('\n');
+}
+
+/**
+ * Markdown-safe interpolation (r2#7): backticks escaped so a name or a
+ * fault message cannot break out of its bullet, angle brackets stripped so
+ * nothing interpolated can smuggle HTML into the tracker body.
+ */
+function mdSafe(text: string): string {
+  return text.replace(/`/g, '\\`').replace(/[<>]/g, '');
+}
+
+/** Flatten a fault message to one safe markdown line (Cc runs become spaces). */
+function singleLine(text: string): string {
+  return text
+    .split(/[\p{Cc}]/u)
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * The fleet-run manifest SECTION (under {@link MANIFEST_SECTION_MARKER}):
+ * plain markdown, one bullet per package with its PR number, its pending
+ * state, or its fault. Written by createPr (all rows pending) and upserted
+ * by editPrBody (numbers/faults). Fault text is flattened to one line — gh
+ * fault messages carry stderr newlines that would corrupt the bullet
+ * framing — and every interpolation is markdown-safe.
+ */
+function manifestSection(input: AssemblePrsInput, rows: readonly ManifestRow[]): string {
   const lines: string[] = [
+    MANIFEST_SECTION_MARKER,
     `<!-- cq-toolkit fleet-run manifest: runPrefix ${input.runPrefix} (generated; updated in place, never duplicated) -->`,
-    `# Fleet run \`${input.runPrefix}\``,
+    `# Fleet run \`${mdSafe(input.runPrefix)}\``,
     '',
-    `Tracker PR for the fleet run against \`${input.base}\`. Per-package PRs carry branches under \`${input.runPrefix}/\`; this manifest is updated in place as packages assemble.`,
+    `Tracker PR for the fleet run against \`${mdSafe(input.base)}\`. Per-package PRs carry branches under \`${mdSafe(input.runPrefix)}/\`; this manifest is updated in place as packages assemble.`,
     '',
     '## Packages',
   ];
@@ -352,20 +457,11 @@ function manifestBody(input: AssemblePrsInput, rows: readonly ManifestRow[]): st
       row.number !== undefined
         ? `#${String(row.number)}`
         : row.fault !== undefined
-          ? `FAULT: ${singleLine(row.fault)}`
+          ? `FAULT: ${mdSafe(singleLine(row.fault))}`
           : 'pending';
-    lines.push(`- \`${row.name}\` — ${where} (\`${row.branch}\`)`);
+    lines.push(`- \`${mdSafe(row.name)}\` — ${where} (\`${row.branch}\`)`);
   }
-  return `${lines.join('\n')}\n`;
-}
-
-/** Flatten a fault message to one safe markdown line (Cc runs become spaces). */
-function singleLine(text: string): string {
-  return text
-    .split(/[\p{Cc}]/u)
-    .join(' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return lines.join('\n');
 }
 
 // ---------------------------------------------------------------------------
@@ -462,11 +558,9 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
   // the tracker's own branch would race the tracker-first ordering (the
   // package search would adopt the tracker PR as a fleet member). Both are
   // refused at the boundary, naming the colliding entries.
-  if (input.tracker.branch !== undefined) {
-    const collision = input.packages.findIndex((pkg) => pkg.branch === input.tracker.branch);
-    if (collision !== -1) {
-      return `pr: packages[${String(collision)}].branch '${input.tracker.branch}' is the tracker's own branch — a package PR and the tracker cannot share a head`;
-    }
+  const collision = input.packages.findIndex((pkg) => pkg.branch === input.tracker.branch);
+  if (collision !== -1) {
+    return `pr: packages[${String(collision)}].branch '${input.tracker.branch}' is the tracker's own branch — a package PR and the tracker cannot share a head`;
   }
   const branchOwners = new Map<string, number>();
   for (const [index, pkg] of input.packages.entries()) {
