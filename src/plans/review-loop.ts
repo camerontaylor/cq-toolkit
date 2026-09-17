@@ -721,6 +721,52 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       ...(opts.fixBudget !== undefined ? { budget: opts.fixBudget } : {}),
     });
   }
+  // CARRIED RESOLVES OVER RESPONDED THREADS (codex P2 jNUCa): a thread
+  // whose loop reply posted classifies 'responded' next run (the reply is
+  // the thread's latest word) and planReviewBatch excludes it — the 3b
+  // carry over PLANNED items above would never see it, and a resolve that
+  // failed or was withheld behind that reply would strand the thread
+  // unresolved permanently (in the single-identity drill AND the documented
+  // bot-identity deployment). Walk the classification's responded THREAD
+  // items and carry the round-versioned resolve when it has not dispatched
+  // (no fix job, no reply — the reply already posted; the resolve pushes
+  // nothing). Deduped against the planned carry by thread id; the
+  // fingerprint is computed over the thread's fetched data exactly the way
+  // stage 6 computes it.
+  const carriedIds = new Set(carriedResolves.map((resolve) => resolve.threadId));
+  for (const item of classification.items) {
+    if (item.kind !== 'thread' || item.verdict !== 'responded') {
+      continue;
+    }
+    if (carriedIds.has(item.id)) {
+      continue;
+    }
+    const thread = state.threads.find((candidate) => candidate.id === item.id);
+    if (thread === undefined) {
+      continue; // vanished between fetch and classify — nothing to resolve
+    }
+    // Same shape enrichItem builds (body + replies) — identical fingerprint
+    // to the stage-6 resolve of the posting run.
+    const resolveActionId = `review-loop:${String(opts.pr)}:resolve:${item.id}-${roundFingerprint(
+      item.id,
+      {
+        id: thread.id,
+        path: thread.path,
+        line: thread.line,
+        body: thread.body,
+        comments: thread.replies,
+      },
+    )}`;
+    if (dispatched.has(resolveActionId)) {
+      continue; // already resolved-and-recorded — a full no-op for this item
+    }
+    carriedIds.add(item.id);
+    carriedResolves.push({
+      kind: 'resolve_thread',
+      actionId: resolveActionId,
+      threadId: item.id,
+    });
+  }
 
   // (4) The governed fix run. concurrency is FORCED to 1 (the shared
   // per-PR-worktree sequencing contract) and stopOnError is false (one bad

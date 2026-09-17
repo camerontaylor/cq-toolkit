@@ -757,8 +757,24 @@ describe('review-loop exit mapping', () => {
 // ---------------------------------------------------------------------------
 
 describe('review-loop re-run no-op', () => {
-  test('a responded thread → zero batches, zero jobs, zero mutations, ok, no NO PROGRESS', async () => {
+  test('a responded+resolved thread → zero batches, zero jobs, zero mutations, ok, no NO PROGRESS', async () => {
+    // The thread's last word is the responder's AND the thread is resolved
+    // in-world (a prior round closed it): classify 'resolved' — the
+    // carried-resolve walk (jNUCa) does not fire for an already-resolved,
+    // already-dispatched thread, and the re-run stays a true no-op. (A
+    // responded-but-UNRESOLVED thread legitimately carries its resolve on
+    // the next run — see the jNUCa pin.)
     const world = defaultWorld();
+    world.threads = [
+      {
+        id: 'T1',
+        isResolved: true,
+        isOutdated: false,
+        path: 'src/a.ts',
+        line: 3,
+        comments: { nodes: [rootComment(101, 'reviewer', 'Fix src/a.ts at 3.')] },
+      },
+    ];
     world.pullsComments = [
       restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
       restComment(202, 'prauthor', 'Addressed in the pushed commit.', iso(REPLY_AGE), 101),
@@ -1876,6 +1892,68 @@ describe('pending-resolve carry (codex P2)', () => {
     expect(run3.outcome.status).toBe('ok');
     expect(run3.outcome.plan.jobs).toEqual([]);
     expect(run3.outcome.skipped).toEqual([{ id: 'T1', reason: 'already-answered-this-round' }]);
+    expect(invocations3).toHaveLength(0);
+    expect(run3.outcome.actionsPosted).toBe(0);
+    expect(run3.outcome.reply).toBeUndefined();
+  });
+});
+
+describe('carried resolves over responded threads (codex P2 jNUCa)', () => {
+  test('reply posted + resolve failed → the next run carries the resolve from the RESPONDED classification; then a full no-op', async () => {
+    // The jNUCa shape: the loop's reply is the thread's LATEST word, so the
+    // next run classifies the thread 'responded' and planReviewBatch
+    // excludes it — the planned-items carry never sees it. The classification
+    // walk carries the round-versioned resolve instead: no fix job (the
+    // driver is never called), no re-reply, and the thread resolves.
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-carry2-'));
+    scratchDirs.push(scratch);
+    const dispatchLogPath = join(scratch, 'dispatch.jsonl');
+    const world = defaultWorld();
+    world.resolveReviewThreadFails = true; // run 1: the reply posts; the resolve fails
+    const invocations1: OpInvocation[] = [];
+    const run1 = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed.', [NEW_SHA]))],
+      invocations: invocations1,
+      dispatchLogPath,
+    });
+    expect(run1.outcome.status).toBe('needs-human');
+    expect(
+      run1.outcome.reasons.some((reason) => reason.includes('dispatch failed (resolve_thread')),
+    ).toBe(true);
+    expect(run1.outcome.actionsPosted).toBe(1);
+    expect(run1.outcome.reply?.posted.map((record) => record.kind)).toEqual(['review_reply']);
+
+    // Run 2: the fetched state shows the loop's reply as the thread's latest
+    // word (responder-authored, postdating the feedback) → the thread
+    // classifies 'responded' → the carried resolve posts from the
+    // classification walk.
+    world.resolveReviewThreadFails = false;
+    world.pullsComments = [
+      restComment(101, 'reviewer', 'Fix src/a.ts at 3.', iso(ROOT_AGE), null),
+      restComment(201, 'prauthor', 'Fixed with a pushed commit.', iso(REPLY_AGE), 101),
+    ];
+    const invocations2: OpInvocation[] = [];
+    const run2 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations2,
+      dispatchLogPath,
+    });
+    expect(run2.outcome.status).toBe('ok');
+    expect(run2.outcome.reasons).toEqual([]);
+    expect(run2.outcome.plan.jobs).toEqual([]);
+    expect(invocations2).toHaveLength(0);
+    expect(run2.outcome.actionsPosted).toBe(1);
+    expect(run2.outcome.reply?.posted.map((record) => record.kind)).toEqual(['resolve_thread']);
+
+    // Run 3: the resolve actionId is dispatched → a full no-op.
+    const invocations3: OpInvocation[] = [];
+    const run3 = await runLoop(world, {
+      driverResults: [],
+      invocations: invocations3,
+      dispatchLogPath,
+    });
+    expect(run3.outcome.status).toBe('ok');
+    expect(run3.outcome.plan.jobs).toEqual([]);
     expect(invocations3).toHaveLength(0);
     expect(run3.outcome.actionsPosted).toBe(0);
     expect(run3.outcome.reply).toBeUndefined();
