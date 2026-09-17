@@ -34,8 +34,11 @@ import {
   ANALYZE_PLAN_ID,
   makeAnalyzePlan,
   plan,
-  type AnalyzePlanInputs,
 } from '../../src/plans/analyze.js';
+// The input type resolves through the BARREL (review-debt #167): if the
+// barrel's `export type { AnalyzePlanInputs }` line is dropped, this file
+// fails to compile — the re-export stays pinned by the suite.
+import type { AnalyzePlanInputs } from '../../src/plans/index.js';
 import { getPlan } from '../../src/plans/registry.js';
 
 /** The remediation ops that must NEVER appear in the shipped plan. */
