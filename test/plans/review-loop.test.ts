@@ -99,6 +99,11 @@ const DEAD_SHA = 'dead5678dead5678dead5678dead5678dead5678';
 const MID_SHA = 'abcd1234abcd1234abcd1234abcd1234abcd1234';
 /** An ANCESTOR of the before-head — the backward-move pin's tip (jLBJm P2). */
 const ANCESTOR_SHA = 'cccc1111cccc1111cccc1111cccc1111cccc1111';
+/**
+ * A PRE-EXISTING commit between the STALE snapshot head and the observed
+ * base — the stale-snapshot pin's false positive (codex P2).
+ */
+const PREEXISTING_SHA = '0123abcd0123abcd0123abcd0123abcd0123abcd';
 /** The served origin heads — 40-hex so the per-item gate's STRICT
  * descendant check (sha ≠ before.headSha) is exercisable. */
 const BEFORE_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -144,6 +149,13 @@ interface LoopWorld {
    * every listed sha to be a verified claimed commit.
    */
   revListShas?: string[];
+  /**
+   * BASE-KEYED ranges (codex P2): when set, `rev-list <base>..HEAD` answers
+   * from THIS map instead of revListShas — the stale-snapshot pin serves a
+   * different range per base (the snapshot-stale base drags in
+   * pre-existing commits the observed base does not).
+   */
+  revListByBase?: Record<string, string[]>;
   /** Shas whose `<sha>..HEAD` ancestry the fake git REFUSES (drives the not-ancestor stage). */
   ancestorFails?: string[];
   /**
@@ -356,10 +368,11 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         return { code: 128, stdout: '', stderr: 'fatal: not an ancestor relation in this world' };
       }
       // Two-ref ancestry: 0 when (a) FROM is a served origin head (either —
-      // the stage-5 publish may already have moved it) and TO is a known new
-      // commit (the strict-descendant check), or (b) FROM is a known new
-      // commit and TO is HEAD (the pushed-head check).
-      const servedHead = from === BEFORE_SHA || from === AFTER_SHA;
+      // the stage-5 publish may already have moved it; SHA too, since
+      // resolvePrWorktree fetched it — the observed base, codex P2) and TO
+      // is a known new commit (the strict-descendant check), or (b) FROM is
+      // a known new commit and TO is HEAD (the pushed-head check).
+      const servedHead = from === BEFORE_SHA || from === AFTER_SHA || from === SHA;
       const descendantOfHead = servedHead && world.knownShas.includes(to);
       const inPushedHead = world.knownShas.includes(from) && to === 'HEAD';
       if (descendantOfHead || inPushedHead) {
@@ -371,7 +384,14 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       // The loop's range accountability (round 2): `rev-list <before>..HEAD`
       // lists the commits the fix run added — the world declares them
       // (default: the advanced tip alone). prWorktree's `rev-list --count`
-      // guard never runs in these worlds (the reuse path skips it).
+      // guard never runs in these worlds (the reuse path skips it). When
+      // revListByBase is set, the answer keys on the BASE the loop passes
+      // (the stale-snapshot pin, codex P2).
+      if (world.revListByBase !== undefined) {
+        const base = (rest[1] ?? '').replace(/\.\.HEAD$/, '');
+        const shas = world.revListByBase[base] ?? [];
+        return ok(`${shas.join('\n')}${shas.length > 0 ? '\n' : ''}`);
+      }
       const advanced = world.worktreeAdvancesAt !== undefined;
       const shas = advanced
         ? (world.revListShas ?? [world.worktreeAdvancesTo ?? '4444'.repeat(10)])
@@ -1425,12 +1445,12 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld fail-closed
   });
 
-  test('range accountability (round 2): an unclaimed MID-RANGE commit blocks publication and names the sha', async () => {
+  test('range accountability (round 2): an unclaimed MID-RANGE commit below the OBSERVED base blocks and names the sha', async () => {
     // The regression the tip-only rule missed (round-2 major): worker A
     // commits unreported (claims changed:false — it asserts nothing), worker
-    // B commits + claims on top. The tip is B's VERIFIED commit, but A's
-    // commit sits unclaimed in the added range — publication must block and
-    // the reason must name it.
+    // B commits + claims on top. The range is enumerated from the OBSERVED
+    // base (codex P2) — `SHA..HEAD` — and MID_SHA sits unclaimed inside it:
+    // publication must block and the reason must name it.
     const world = defaultWorld();
     world.threads = [
       actionableThread('T1', 'src/a.ts', 3, 101),
@@ -1439,7 +1459,10 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     world.commitMessages = { [NEW_SHA]: 'Fix review item T2 in src/b.ts' };
     world.worktreeAdvancesAt = 2;
     world.worktreeAdvancesTo = NEW_SHA; // the tip: T2's claimed commit
-    world.revListShas = [NEW_SHA, MID_SHA]; // rev-list order: newest first
+    world.revListByBase = {
+      [SHA]: [NEW_SHA, MID_SHA], // the observed base sees both added commits
+      [BEFORE_SHA]: [], // the stale snapshot base would see an empty range
+    };
     const ghLog: string[][] = [];
     const { outcome } = await runLoop(world, {
       driverResults: [
@@ -1450,12 +1473,45 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
-      `unreported-commit: 1 commit(s) in ${BEFORE_SHA}..HEAD are not claimed fixes: ${MID_SHA}`,
+      `unreported-commit: 1 commit(s) in ${SHA}..HEAD are not claimed fixes: ${MID_SHA}`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
     // The replies still post (A's honest no-change answer, B's claim); the
     // resolves are withheld by the unreported range.
     expect(outcome.actionsPosted).toBe(2);
+  });
+
+  test('a stale PR-snapshot head does NOT block a legitimate run (codex P2): the range base is the OBSERVED head', async () => {
+    // The snapshot's REST headSha can LAG the sha resolvePrWorktree fetched
+    // and checked out. With the snapshot's stale sha as the range base, the
+    // range drags in PRE-EXISTING commits (PREEXISTING_SHA, between the
+    // stale head and the observed base) that can never be claimed — a
+    // legitimate run was blocked as unreported. The fix: the base is the
+    // OBSERVED pre-run head (SHA), whose range holds only the claimed fix.
+    const world = defaultWorld();
+    world.threads = [actionableThread('T1', 'src/a.ts', 3, 101)];
+    world.revListByBase = {
+      [BEFORE_SHA]: [PREEXISTING_SHA, NEW_SHA], // the stale base drags in pre-existing work
+      [SHA]: [NEW_SHA], // the OBSERVED base sees only the claimed fix
+    };
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T1 in src/a.ts' };
+    world.worktreeAdvancesAt = 2;
+    world.worktreeAdvancesTo = NEW_SHA; // the fix commit is the tip
+    const gitLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [completeWorker(fixLine(true, 'Fixed the fruit.', [NEW_SHA]))],
+      gitLog,
+    });
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.status).toBe('ok');
+    // The publish push AND replyAndResolve's push-before-post.
+    expect(gitLogPushes(gitLog)).toBe(2);
+    // The verified fix resolves its thread.
+    expect(outcome.actionsPosted).toBe(2);
+    expect(outcome.reply?.posted.map((record) => record.kind)).toEqual([
+      'review_reply',
+      'resolve_thread',
+    ]);
   });
 
   test('a BACKWARD head move with an empty accounted range blocks publication (jLBJm P2)', async () => {
@@ -1476,7 +1532,7 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     });
     expect(outcome.status).toBe('needs-human');
     expect(outcome.reasons).toContainEqual(
-      `unreported-commit: worktree head moved to ${ANCESTOR_SHA} but ${BEFORE_SHA}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
+      `unreported-commit: worktree head moved to ${ANCESTOR_SHA} but ${SHA}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
     );
     expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
     expect(outcome.actionsPosted).toBe(1); // reply-only; the resolve is withheld

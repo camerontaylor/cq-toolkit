@@ -753,12 +753,12 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // RANGE-ACCOUNTABILITY VERIFICATION (round 2; revises drill 6's tip-only
   // rule): every ok row's claimed commits are verified HERE, through the
   // SAME per-item gate the resolve uses (commitVerificationFailure — 40-hex,
-  // strict descendant of the before-head, ancestor of the worktree HEAD,
-  // message names the item). The pass runs BEFORE the publish decision,
-  // because publication keys on the WHOLE added range, not on per-row
-  // claims or the tip alone: `rev-list <before.headSha>..HEAD` enumerates
-  // every commit the fix run added, and EACH must be a verified claimed
-  // commit. Consequences:
+  // strict descendant of the OBSERVED pre-run head, ancestor of the worktree
+  // HEAD, message names the item). The pass runs BEFORE the publish
+  // decision, because publication keys on the WHOLE added range, not on
+  // per-row claims or the tip alone: `rev-list <observedBase>..HEAD`
+  // enumerates every commit the fix run added, and EACH must be a verified
+  // claimed commit. Consequences:
   //   - a worker that commits while claiming changed:false still blocks
   //     (its commit is in the range and unclaimed) — tip-unclaimed is the
   //     single-commit special case of the same rule;
@@ -774,46 +774,65 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   //     publish a moved-backward tree);
   //   - a rev-list FAILURE is fail-closed: an unknown range publishes
   //     nothing.
+  // THE RANGE BASE IS THE OBSERVED PRE-RUN HEAD (codex P2), never the PR
+  // snapshot's headSha: the snapshot is origin's REST view and can LAG the
+  // sha resolvePrWorktree actually fetched/checked out — a stale
+  // before.headSha would drag PRE-EXISTING commits into the added range and
+  // block a legitimate run as unreported. Invariant preserved:
+  // resolvePrWorktree only returns a worktree AT the freshly fetched origin
+  // head, so the observed headBefore IS the fetched truth at fix time (a
+  // reused worktree that is ahead is re-created — its prior commits reach
+  // origin only via a prior push, which the next fetch sees). The
+  // before-SNAPSHOT stays what it is: the verify stage's PR-level baseline.
   // Rows claiming changed:true whose commits fail verification keep the
   // unverified-commits path in the action stage; changed:false rows fire
   // nothing once the range is accounted for. Reported-but-failed commits
   // are remembered BY SHA so the unreported reasons can name the failing
   // stage (round-1 low).
+  const observedBase = headBefore.code === 0 ? headBefore.stdout.trim() : null;
   const verifiedClaimed = new Set<string>();
   const reportedFailures = new Map<string, CommitVerificationFailure>();
   const rowVerified = new Map<string, boolean>();
-  for (const row of fixReport.jobs) {
-    let verified = false;
-    if (row.result.status === 'ok') {
-      const source = sources.get(row.jobId);
-      for (const sha of (row.result.value as FixReviewItemResult).commits) {
-        // The range compare below runs over rev-list's output; claimed shas
-        // are normalized the same way.
-        const key = sha.toLowerCase();
-        const failure =
-          source === undefined
-            ? 'attribution-missing'
-            : await commitVerificationFailure(
-                opts.git,
-                worktree.path,
-                sha,
-                before.headSha,
-                source.itemId,
-              );
-        if (failure === null) {
-          verified = true;
-          verifiedClaimed.add(key);
-        } else {
-          reportedFailures.set(key, failure);
+  if (observedBase !== null) {
+    // An unreadable pre-run head already fail-closes the run (above) — the
+    // gate has no base to verify against, and every changed row is withheld
+    // in the action stage regardless.
+    for (const row of fixReport.jobs) {
+      let verified = false;
+      if (row.result.status === 'ok') {
+        const source = sources.get(row.jobId);
+        for (const sha of (row.result.value as FixReviewItemResult).commits) {
+          // The range compare below runs over rev-list's output; claimed
+          // shas are normalized the same way.
+          const key = sha.toLowerCase();
+          const failure =
+            source === undefined
+              ? 'attribution-missing'
+              : await commitVerificationFailure(
+                  opts.git,
+                  worktree.path,
+                  sha,
+                  observedBase,
+                  source.itemId,
+                );
+          if (failure === null) {
+            verified = true;
+            verifiedClaimed.add(key);
+          } else {
+            reportedFailures.set(key, failure);
+          }
         }
       }
+      rowVerified.set(row.jobId, verified);
     }
-    rowVerified.set(row.jobId, verified);
   }
   const worktreeTip = headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : '';
-  const addedRange = await opts.git(['-C', worktree.path, 'rev-list', `${before.headSha}..HEAD`]);
+  const addedRange =
+    observedBase === null
+      ? null
+      : await opts.git(['-C', worktree.path, 'rev-list', `${observedBase}..HEAD`]);
   const rangeShas =
-    addedRange.code === 0
+    addedRange !== null && addedRange.code === 0
       ? addedRange.stdout
           .split('\n')
           .map((line) => line.trim().toLowerCase())
@@ -826,16 +845,20 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // reading that emptiness as "nothing added" would publish a moved-backward
   // tree and record the round over unreported movement.
   const unreportedCommit =
-    headMoved && (addedRange.code !== 0 || rangeShas.length === 0 || unaccounted.length > 0);
-  if (unreportedCommit) {
-    if (addedRange.code !== 0) {
+    headMoved &&
+    (addedRange === null ||
+      addedRange.code !== 0 ||
+      rangeShas.length === 0 ||
+      unaccounted.length > 0);
+  if (unreportedCommit && observedBase !== null) {
+    if (addedRange === null || addedRange.code !== 0) {
       // Fail-closed: the added range is unknown, so nothing publishes.
       reasons.push(
-        `unreported-commit: the added range ${before.headSha}..HEAD could not be enumerated (rev-list exit ${String(addedRange.code)}) — publication withheld fail-closed`,
+        `unreported-commit: the added range ${observedBase}..HEAD could not be enumerated (rev-list exit ${String(addedRange?.code ?? -1)}) — publication withheld fail-closed`,
       );
     } else if (rangeShas.length === 0) {
       reasons.push(
-        `unreported-commit: worktree head moved to ${headAfter.stdout.trim()} but ${before.headSha}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
+        `unreported-commit: worktree head moved to ${headAfter.stdout.trim()} but ${observedBase}..HEAD is empty — the tip is not a claimed fix (backward or out-of-range movement)`,
       );
     } else {
       // Claimed-but-failed commits first: the reason names the failing
@@ -858,7 +881,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           );
         } else {
           reasons.push(
-            `unreported-commit: ${String(unclaimed.length)} commit(s) in ${before.headSha}..HEAD are not claimed fixes: ${unclaimed.join(' ')}`,
+            `unreported-commit: ${String(unclaimed.length)} commit(s) in ${observedBase}..HEAD are not claimed fixes: ${unclaimed.join(' ')}`,
           );
         }
       }
