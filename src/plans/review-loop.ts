@@ -139,7 +139,7 @@ const PUSH_REASON_MAX = 500;
  * nonce-based signature (per-PR secret compared on read) is the noted
  * future hardening if this ever matters; v1 ships the plain marker.
  */
-const replySignature = (owner: string, repo: string, pr: number): string =>
+export const replySignature = (owner: string, repo: string, pr: number): string =>
   `<!-- cq-review-loop:${owner}/${repo}#${String(pr)} -->`;
 
 /** The content key recognizing the signature (the composed line's prefix). */
@@ -535,8 +535,12 @@ type CommitVerificationFailure =
  *     this item's gate — the commit MESSAGE must name THIS item's id, the
  *     shipped prompt requires it verbatim in the commit subject
  *     ('attribution-missing').
+ *
+ * EXPORTED for the unit lane's stage pins: `not-40-hex` is unreachable
+ * through the loop (parseFixOutput already rejects non-40-hex claims), so
+ * the stage taxonomy is pinned by calling this gate directly.
  */
-const commitVerificationFailure = async (
+export const commitVerificationFailure = async (
   git: GhFn,
   worktreePath: string,
   sha: string,
@@ -702,25 +706,31 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     headBefore.code === 0 &&
     headAfter.code === 0 &&
     headBefore.stdout.trim() !== headAfter.stdout.trim();
-  // HEAD-ACCOUNTABILITY VERIFICATION (drill 6; revises slice 9 item 2's
-  // run-level delta): every ok row's claimed commits are verified HERE,
-  // through the SAME per-item gate the resolve uses
-  // (commitVerificationFailure — 40-hex, strict descendant of the
-  // before-head, ancestor of the worktree HEAD, message names the item).
-  // The pass runs BEFORE the publish decision because publication keys on
-  // the TIP, not on per-row claims:
-  //   - the tip may sit past the before-head only when some item's VERIFIED
-  //     commit accounts for it — a worker that commits while claiming
-  //     changed:false still blocks (its commit IS the tip and unclaimed);
+  // RANGE-ACCOUNTABILITY VERIFICATION (round 2; revises drill 6's tip-only
+  // rule): every ok row's claimed commits are verified HERE, through the
+  // SAME per-item gate the resolve uses (commitVerificationFailure — 40-hex,
+  // strict descendant of the before-head, ancestor of the worktree HEAD,
+  // message names the item). The pass runs BEFORE the publish decision,
+  // because publication keys on the WHOLE added range, not on per-row
+  // claims or the tip alone: `rev-list <before.headSha>..HEAD` enumerates
+  // every commit the fix run added, and EACH must be a verified claimed
+  // commit. Consequences:
+  //   - a worker that commits while claiming changed:false still blocks
+  //     (its commit is in the range and unclaimed) — tip-unclaimed is the
+  //     single-commit special case of the same rule;
   //   - an honestly-no-change sibling NEVER false-positives on another
   //     item's legitimate commit (found live, drill 6: one real fix plus
-  //     two honest no-ops read as "unreported" under the old per-row delta
-  //     and wrongly withheld publication).
+  //     two honest no-ops read as "unreported" under the old per-row delta);
+  //   - MID-RANGE unreported work is caught (round-2 major: worker A
+  //     commits unreported, worker B commits + claims on top — a tip-only
+  //     check published A's commit silently);
+  //   - a rev-list FAILURE is fail-closed: an unknown range publishes
+  //     nothing.
   // Rows claiming changed:true whose commits fail verification keep the
   // unverified-commits path in the action stage; changed:false rows fire
-  // nothing once the tip is accounted for. Reported-but-failed commits are
-  // remembered BY SHA so the unreported reason can name the failing stage
-  // when the tip was claimed but refused (round-1 low).
+  // nothing once the range is accounted for. Reported-but-failed commits
+  // are remembered BY SHA so the unreported reasons can name the failing
+  // stage (round-1 low).
   const verifiedClaimed = new Set<string>();
   const reportedFailures = new Map<string, CommitVerificationFailure>();
   const rowVerified = new Map<string, boolean>();
@@ -729,7 +739,7 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     if (row.result.status === 'ok') {
       const source = sources.get(row.jobId);
       for (const sha of (row.result.value as FixReviewItemResult).commits) {
-        // The tip compare below runs over rev-parse's output; claimed shas
+        // The range compare below runs over rev-list's output; claimed shas
         // are normalized the same way.
         const key = sha.toLowerCase();
         const failure =
@@ -753,14 +763,48 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     rowVerified.set(row.jobId, verified);
   }
   const worktreeTip = headAfter.code === 0 ? headAfter.stdout.trim().toLowerCase() : '';
-  const unreportedCommit = headMoved && !verifiedClaimed.has(worktreeTip);
+  const addedRange = await opts.git(['-C', worktree.path, 'rev-list', `${before.headSha}..HEAD`]);
+  const rangeShas =
+    addedRange.code === 0
+      ? addedRange.stdout
+          .split('\n')
+          .map((line) => line.trim().toLowerCase())
+          .filter((line) => line !== '')
+      : [];
+  const unaccounted = rangeShas.filter((sha) => !verifiedClaimed.has(sha));
+  const unreportedCommit = headMoved && (addedRange.code !== 0 || unaccounted.length > 0);
   if (unreportedCommit) {
-    const tipFailure = reportedFailures.get(worktreeTip);
-    reasons.push(
-      tipFailure === undefined
-        ? `unreported-commit: worktree tip ${headAfter.stdout.trim()} is not a claimed fix — a worker committed without reporting it`
-        : `unreported-commit: worktree tip ${headAfter.stdout.trim()} was claimed but failed verification (${tipFailure})`,
-    );
+    if (addedRange.code !== 0) {
+      // Fail-closed: the added range is unknown, so nothing publishes.
+      reasons.push(
+        `unreported-commit: the added range ${before.headSha}..HEAD could not be enumerated (rev-list exit ${String(addedRange.code)}) — publication withheld fail-closed`,
+      );
+    } else {
+      // Claimed-but-failed commits first: the reason names the failing
+      // stage ("tip" when the refused commit IS the tip).
+      for (const sha of unaccounted) {
+        const failure = reportedFailures.get(sha);
+        if (failure === undefined) {
+          continue;
+        }
+        const where = sha === worktreeTip ? 'worktree tip' : 'worktree commit';
+        reasons.push(
+          `unreported-commit: ${where} ${sha} was claimed but failed verification (${failure})`,
+        );
+      }
+      const unclaimed = unaccounted.filter((sha) => !reportedFailures.has(sha));
+      if (unclaimed.length > 0) {
+        if (unclaimed.length === 1 && unclaimed[0] === worktreeTip) {
+          reasons.push(
+            `unreported-commit: worktree tip ${headAfter.stdout.trim()} is not a claimed fix — a worker committed without reporting it`,
+          );
+        } else {
+          reasons.push(
+            `unreported-commit: ${String(unclaimed.length)} commit(s) in ${before.headSha}..HEAD are not claimed fixes: ${unclaimed.join(' ')}`,
+          );
+        }
+      }
+    }
   }
 
   // (5) Publish, then verify. The fix commits are LOCAL until pushed, so the
@@ -885,10 +929,11 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // Only a THREAD can resolve (a review summary / top-level comment has
       // no resolvable thread node) — and only through the PER-ITEM gate:
       // at least one reported commit must be verifiable in the pushed
-      // worktree (commitInPushedHead). The resolve never rides the global
-      // snapshot alone: a hallucinated sha must not hide its thread (the
-      // reply still posts — the summary reports what the worker claimed),
-      // and the withheld resolve is recorded as a per-item failure reason.
+      // worktree (commitVerificationFailure). The resolve never rides the
+      // global snapshot alone: a hallucinated sha must not hide its thread
+      // (the reply still posts — the summary reports what the worker
+      // claimed), and the withheld resolve is recorded as a per-item
+      // failure reason.
       if (publishWithheld || unreportedCommit || dirtyWorktree) {
         // Publication withheld (a sibling failed), an unreported commit, or
         // a dirty worktree: nothing is resolved — the thread stays open
@@ -903,9 +948,9 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
           `thread ${source.itemId}: truncated-context — the worker saw a clipped prompt; resolve withheld, reply posted`,
         );
       } else if (value.changed && value.commits.length > 0) {
-        // Already verified in the HEAD-accountability pass above — the SAME
-        // gate (commitInPushedHead incl. attribution) over the SAME inputs
-        // (the publish push moves no worktree ref), never re-run.
+        // Already verified in the range-accountability pass above — the SAME
+        // gate (commitVerificationFailure incl. attribution) over the SAME
+        // inputs (the publish push moves no worktree ref), never re-run.
         if (rowVerified.get(row.jobId) === true) {
           actions.push({
             kind: 'resolve_thread',

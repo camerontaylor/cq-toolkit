@@ -54,7 +54,11 @@ import type { PlannedBatch } from '../../src/ops/review/planReviewBatch.js';
 import type { RegistryMap, WorktreeRegistry } from '../../src/ops/review/prWorktree.js';
 import type { ReviewThread } from '../../src/ops/review/threads.js';
 import { listPlans } from '../../src/plans/registry.js';
-import { enrichBatches, runReviewLoop } from '../../src/plans/review-loop.js';
+import {
+  commitVerificationFailure,
+  enrichBatches,
+  runReviewLoop,
+} from '../../src/plans/review-loop.js';
 import { MAX_ITEM_BODY_CHARS } from '../../src/ops/review/fixReviewItem.js';
 import { reviewFixHarness } from '../../src/ops/review/fixReviewItem.js';
 import type { ReviewLoopOutcome } from '../../src/plans/review-loop.js';
@@ -89,6 +93,10 @@ const SHA = 'b7e5f1a2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8';
  */
 const NEW_SHA = 'cafe1234cafe1234cafe1234cafe1234cafe1234';
 const BEEF_SHA = 'beef4567beef4567beef4567beef4567beef4567';
+/** A second real commit for the range pins (worker B's claimed tip). */
+const DEAD_SHA = 'dead5678dead5678dead5678dead5678dead5678';
+/** An UNCLAIMED mid-range commit for the range-accountability pin (round 2). */
+const MID_SHA = 'abcd1234abcd1234abcd1234abcd1234abcd1234';
 /** The served origin heads — 40-hex so the per-item gate's STRICT
  * descendant check (sha ≠ before.headSha) is exercisable. */
 const BEFORE_SHA = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
@@ -127,6 +135,15 @@ interface LoopWorld {
   worktreeAdvancesAt?: number;
   /** The sha the ADVANCED worktree HEAD reports (default: the 4444 filler). */
   worktreeAdvancesTo?: string;
+  /**
+   * Shas `rev-list <before>..HEAD` prints for the ADVANCED worktree
+   * (rev-list order, newest first; default: the advanced tip alone — a
+   * single commit). The loop's range accountability (round 2) requires
+   * every listed sha to be a verified claimed commit.
+   */
+  revListShas?: string[];
+  /** Shas whose `<sha>..HEAD` ancestry the fake git REFUSES (drives the not-ancestor stage). */
+  ancestorFails?: string[];
   /** When true, `status --porcelain` reports a dirty worktree. */
   dirty?: boolean;
   /** GraphQL thread nodes served to fetchReviewState. */
@@ -316,12 +333,17 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
       return { code: 128, stdout: '', stderr: `fatal: Needed a single revision: ${sha}` };
     }
     if (rest[0] === 'merge-base' && rest[1] === '--is-ancestor') {
+      const from = rest[2] ?? '';
+      const to = rest[3] ?? '';
+      // The not-ancestor stage driver (round-2 low): a declared sha's
+      // HEAD-ancestry is refused before the permissive pass conditions.
+      if (world.ancestorFails !== undefined && world.ancestorFails.includes(from)) {
+        return { code: 128, stdout: '', stderr: 'fatal: not an ancestor relation in this world' };
+      }
       // Two-ref ancestry: 0 when (a) FROM is a served origin head (either —
       // the stage-5 publish may already have moved it) and TO is a known new
       // commit (the strict-descendant check), or (b) FROM is a known new
       // commit and TO is HEAD (the pushed-head check).
-      const from = rest[2] ?? '';
-      const to = rest[3] ?? '';
       const servedHead = from === BEFORE_SHA || from === AFTER_SHA;
       const descendantOfHead = servedHead && world.knownShas.includes(to);
       const inPushedHead = world.knownShas.includes(from) && to === 'HEAD';
@@ -329,6 +351,17 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         return { code: 0, stdout: '', stderr: '' };
       }
       return { code: 128, stdout: '', stderr: 'fatal: not an ancestor relation in this world' };
+    }
+    if (rest[0] === 'rev-list') {
+      // The loop's range accountability (round 2): `rev-list <before>..HEAD`
+      // lists the commits the fix run added — the world declares them
+      // (default: the advanced tip alone). prWorktree's `rev-list --count`
+      // guard never runs in these worlds (the reuse path skips it).
+      const advanced = world.worktreeAdvancesAt !== undefined;
+      const shas = advanced
+        ? (world.revListShas ?? [world.worktreeAdvancesTo ?? '4444'.repeat(10)])
+        : [];
+      return ok(`${shas.join('\n')}${shas.length > 0 ? '\n' : ''}`);
     }
     if (rest[0] === 'log' && rest[1] === '-1') {
       // Per-item attribution (round-3 finding 3): the commit message the
@@ -1280,6 +1313,111 @@ describe('observed worktree movement (slice 9 item 2, drill-6 revision)', () => 
     expect(outcome.actionsPosted).toBe(1); // the reply posts; the resolve is withheld
   });
 
+  test('a claimed tip failing resolvability/ancestry names those stages (round-2 low)', async () => {
+    // not-descendant: the claimed sha does not even resolve in the worktree
+    // (rev-parse refuses unknown shas) — the gate names the stage.
+    const unresolvable: LoopWorld = {
+      ...defaultWorld(),
+      knownShas: [SHA], // BEEF_SHA is a lie: rev-parse cannot resolve it
+      commitMessages: {},
+      worktreeAdvancesAt: 2,
+      worktreeAdvancesTo: BEEF_SHA,
+    };
+    const unresolvableRun = await runLoop(unresolvable, {
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [BEEF_SHA]))],
+    });
+    expect(unresolvableRun.outcome.reasons).toContainEqual(
+      `unreported-commit: worktree tip ${BEEF_SHA} was claimed but failed verification (not-descendant)`,
+    );
+    // not-ancestor: the sha resolves and descends, but its HEAD-ancestry is
+    // refused (the world's ancestorFails drives the fake's merge-base).
+    const notAncestor: LoopWorld = {
+      ...defaultWorld(),
+      knownShas: [SHA, NEW_SHA],
+      ancestorFails: [NEW_SHA],
+      commitMessages: {},
+      worktreeAdvancesAt: 2,
+      worktreeAdvancesTo: NEW_SHA,
+    };
+    const notAncestorRun = await runLoop(notAncestor, {
+      driverResults: [completeWorker(fixLine(true, 'Claims the fix.', [NEW_SHA]))],
+    });
+    expect(notAncestorRun.outcome.reasons).toContainEqual(
+      `unreported-commit: worktree tip ${NEW_SHA} was claimed but failed verification (not-ancestor)`,
+    );
+  });
+
+  test('range accountability (round 2): an unclaimed MID-RANGE commit blocks publication and names the sha', async () => {
+    // The regression the tip-only rule missed (round-2 major): worker A
+    // commits unreported (claims changed:false — it asserts nothing), worker
+    // B commits + claims on top. The tip is B's VERIFIED commit, but A's
+    // commit sits unclaimed in the added range — publication must block and
+    // the reason must name it.
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/b.ts', 8, 102),
+    ];
+    world.commitMessages = { [NEW_SHA]: 'Fix review item T2 in src/b.ts' };
+    world.worktreeAdvancesAt = 2;
+    world.worktreeAdvancesTo = NEW_SHA; // the tip: T2's claimed commit
+    world.revListShas = [NEW_SHA, MID_SHA]; // rev-list order: newest first
+    const ghLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(false, 'A: nothing to change.', [])),
+        completeWorker(fixLine(true, 'Fixed B.', [NEW_SHA])),
+      ],
+      ghLog,
+    });
+    expect(outcome.status).toBe('needs-human');
+    expect(outcome.reasons).toContainEqual(
+      `unreported-commit: 1 commit(s) in ${BEFORE_SHA}..HEAD are not claimed fixes: ${MID_SHA}`,
+    );
+    expect(gitLogPushes(ghLog)).toBe(0); // publication withheld
+    // The replies still post (A's honest no-change answer, B's claim); the
+    // resolves are withheld by the unreported range.
+    expect(outcome.actionsPosted).toBe(2);
+  });
+
+  test('range accountability: A claims+verifies, B claims+verifies → the whole range is accounted for and publishes', async () => {
+    // Every sha in the added range is a verified claimed commit — the range
+    // rule publishes exactly like the old tip rule did for this shape.
+    const world = defaultWorld();
+    world.threads = [
+      actionableThread('T1', 'src/a.ts', 3, 101),
+      actionableThread('T2', 'src/b.ts', 8, 102),
+    ];
+    world.commitMessages = {
+      [NEW_SHA]: 'Fix review item T1 in src/a.ts',
+      [DEAD_SHA]: 'Fix review item T2 in src/b.ts',
+    };
+    world.knownShas = [SHA, NEW_SHA, DEAD_SHA];
+    world.worktreeAdvancesAt = 2;
+    world.worktreeAdvancesTo = DEAD_SHA; // B's commit is the tip
+    world.revListShas = [DEAD_SHA, NEW_SHA]; // the whole range is claimed
+    const gitLog: string[][] = [];
+    const { outcome } = await runLoop(world, {
+      driverResults: [
+        completeWorker(fixLine(true, 'Fixed A.', [NEW_SHA])),
+        completeWorker(fixLine(true, 'Fixed B.', [DEAD_SHA])),
+      ],
+      gitLog,
+    });
+    expect(outcome.reasons).toEqual([]);
+    expect(outcome.status).toBe('ok');
+    // The publish push AND replyAndResolve's push-before-post.
+    expect(gitLogPushes(gitLog)).toBe(2);
+    // Both threads reply AND resolve — replies before resolves.
+    expect(outcome.actionsPosted).toBe(4);
+    expect(outcome.reply?.posted.map((record) => record.kind)).toEqual([
+      'review_reply',
+      'review_reply',
+      'resolve_thread',
+      'resolve_thread',
+    ]);
+  });
+
   test('a dirty worktree at publish time → dirty-worktree reason, no push, no resolve', async () => {
     const world = defaultWorld();
     world.dirty = true;
@@ -1382,6 +1520,44 @@ describe('auto-generated sticky comment skip + self-reply marker (drills 6-8, cy
       ),
       `post argv ${JSON.stringify(posts)}`,
     ).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Verification-failure stages, pinned DIRECTLY on the gate (round-1/2 low):
+// `not-40-hex` is unreachable through the loop — parseFixOutput already
+// rejects non-40-hex claims — so the taxonomy is pinned by calling
+// commitVerificationFailure itself over a minimal fake git.
+// ---------------------------------------------------------------------------
+
+describe('commitVerificationFailure stage taxonomy (round 2)', () => {
+  const gate = async (git: GhFn, sha: string, itemId: string) =>
+    commitVerificationFailure(git, '/wt', sha, BEFORE_SHA, itemId);
+
+  test('all four stages are named, in gate order', async () => {
+    // notAncestorGit: NEW_SHA resolves and descends but its HEAD-ancestry is
+    // refused; attributedGit: NEW_SHA's message names T1.
+    const notAncestorGit = fakeGit(
+      { ...defaultWorld(), knownShas: [SHA, NEW_SHA], ancestorFails: [NEW_SHA] },
+      [],
+      '/wt',
+    );
+    const attributedGit = fakeGit(
+      { ...defaultWorld(), commitMessages: { [NEW_SHA]: 'Fix review item T1 in src/a.ts' } },
+      [],
+      '/wt',
+    );
+    // not-40-hex — rejected BEFORE any git call (the literal "HEAD" shape).
+    expect(await gate(notAncestorGit, 'HEAD', 'T1')).toBe('not-40-hex');
+    // not-descendant — the before-head itself is not a fix; an unresolvable
+    // sha cannot be a strict descendant either.
+    expect(await gate(notAncestorGit, BEFORE_SHA, 'T1')).toBe('not-descendant');
+    expect(await gate(notAncestorGit, BEEF_SHA, 'T1')).toBe('not-descendant');
+    // not-ancestor — resolvable + descendant, but refused against HEAD.
+    expect(await gate(notAncestorGit, NEW_SHA, 'T1')).toBe('not-ancestor');
+    // attribution-missing — the message must name THIS item.
+    expect(await gate(attributedGit, NEW_SHA, 'T1')).toBeNull();
+    expect(await gate(attributedGit, NEW_SHA, 'T2')).toBe('attribution-missing');
   });
 });
 

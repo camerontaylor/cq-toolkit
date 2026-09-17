@@ -251,6 +251,30 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
     );
     expect(reply).toBeDefined();
 
+    // Bounded REST convergence (round-2 low; the setup-poll pattern): the
+    // fresh head read below must not false-fail on REST lag — wait (small,
+    // bounded) for the head the LOOP reported before asserting on fresh
+    // reads.
+    const expectedHeadSha = outcome.fixReport?.jobs
+      .flatMap((row) =>
+        row.result.status === 'ok' ? (row.result.value as { commits: string[] }).commits : [],
+      )
+      .find((sha) => sha !== undefined);
+    if (expectedHeadSha !== undefined) {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
+        const probe = await ghJson<{ head?: { sha?: unknown } | null }>(gh, [
+          'api',
+          `repos/${f.fullName}/pulls/${String(f.pr)}`,
+        ]);
+        if (probe.head?.sha === expectedHeadSha) {
+          break;
+        }
+        await new Promise((resolve: (value: void) => void) => {
+          setTimeout(resolve, 2_000);
+        });
+      }
+    }
+
     const pr = await ghJson<{ head: { ref: string; sha: string } }>(gh, [
       'api',
       `repos/${f.fullName}/pulls/${String(f.pr)}`,
