@@ -73,8 +73,15 @@ import { SIGNATURE_MAX_CHARS } from '../ledger/ledger.js';
 import type { Cluster, ClusterErrorsReport } from './clusterErrors.js';
 import type { AnalyzeFileStore } from './analysisStore.js';
 
-/** The sidecar schema version — the only one {@link parseAnalysisSidecar} accepts. */
-export const ANALYSIS_SIDECAR_SCHEMA_VERSION = 1;
+/**
+ * The sidecar schema version — the only one {@link parseAnalysisSidecar}
+ * accepts. Version 2 (review-debt #155): reportFingerprint widened from
+ * 8-hex FNV-1a to 16-hex SHA-256-truncated. Version-1 sidecars are NOT
+ * migrated — they fail parse loudly (wrong version), which is the honest
+ * fate of an analysis artifact from before the handle change; re-run the
+ * analysis instead.
+ */
+export const ANALYSIS_SIDECAR_SCHEMA_VERSION = 2;
 
 /**
  * The per-target-file evidence captured at ANALYSIS time: the file path
