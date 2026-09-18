@@ -78,6 +78,7 @@ export {
   readCommittedMarkers,
   SWEEP_RUN_STATE_BASELINE_DIR,
   SWEEP_RUN_STATE_COMMITTED_DIR,
+  SWEEP_RUN_STATE_SCANNED_DIR,
   sweepRunStateDir,
   sweepUnitFaultClass,
   sweepUnitSegments,

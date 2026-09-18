@@ -155,6 +155,19 @@ if (faulted) {
   if (instruction.edit !== undefined && instruction.edit !== null) {
     texts.push(await performEdit(instruction.edit));
   }
+  if (instruction.selfCommit !== undefined && instruction.selfCommit !== null) {
+    // The #174 attack shape: the DRIVER commits the fix itself, so the
+    // op's stage step later finds nothing to stage and its scan/commit
+    // gates never see these bytes.
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('git', ['add', '-A'], { cwd: process.cwd() });
+    execFileSync(
+      'git',
+      ['commit', '-m', String(instruction.selfCommit.message ?? 'driver self-commit')],
+      { cwd: process.cwd() },
+    );
+    texts.push('committed the fix directly (driver self-commit)');
+  }
   const text = texts.length === 0 ? 'nothing to fix' : texts.join('; ');
   out({ type: 'assistant', message: { content: [{ type: 'text', text }], usage: USAGE } });
   out({

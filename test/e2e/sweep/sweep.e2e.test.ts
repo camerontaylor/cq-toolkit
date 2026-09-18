@@ -649,6 +649,66 @@ describe('sweep e2e: tamper guard on new files', () => {
 // 4. The test-fix scope, enforced on the staged set (jSKJY)
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 3b. The strand-retry trust pin: a driver SELF-COMMIT is never pushed (#174)
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: driver self-commit vs the strand-retry trust pin (#174)', () => {
+  test(
+    'a driver that COMMITS the fix itself: the stage gates see nothing, and the strand-retry refuses to push the unscanned commit',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-selfcommit');
+      // Alpha fixes normally; beta "fixes" by committing the file DIRECTLY —
+      // the op's later `git add -A` stages nothing, so the stage-path
+      // allowlist, the tamper scan, and the commit step never see those
+      // bytes and no scanned-sha record exists for the unit.
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          scene,
+          prompts(
+            { edit: ALPHA_FIX },
+            {
+              write: {
+                file: 'packages/beta/src/self.ts',
+                text: 'export const self = 1;\n',
+              },
+              selfCommit: { message: 'beta driver self-commit' },
+            },
+          ),
+        ),
+      );
+
+      // Alpha: the normal record-and-push flow (control).
+      const alpha = unitRow(outcome.run, 'alpha');
+      expect(alpha.status).toBe('ok');
+      expect(alpha.report?.committed).toBe(true);
+      expect(alpha.report?.committedSha).toMatch(/^[0-9a-f]{40}$/);
+
+      // Beta: the strand-retry finds commits ahead of base with NO scanned
+      // record and FAILS the unit TAMPER — needs-human evidence, never a
+      // push of unscanned bytes.
+      const beta = unitRow(outcome.run, 'beta');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/NOT the verified scanned commit/);
+      expect(beta.error).toMatch(/no scanned-commit record exists/);
+      expect(beta.error).toMatch(/needs-human evidence/);
+
+      // Beta's unscanned commit exists LOCALLY but never reached the origin;
+      // alpha's branch did (push itself still works — the pin targets the
+      // trust, not the transport).
+      const localCommits = await gitOut(
+        ['rev-list', '--count', 'main..cq/e2e-selfcommit/fix/beta'],
+        scene.repo,
+      );
+      expect(localCommits.trim()).toBe('1');
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).toContain('cq/e2e-selfcommit/fix/alpha');
+      expect(originHeads).not.toContain('cq/e2e-selfcommit/fix/beta');
+    },
+  );
+});
+
 describe('sweep e2e: test-fix stage-path allowlist', () => {
   test(
     'a test-fix worker editing production code: failed naming the path; the legitimate test fix commits and pushes',

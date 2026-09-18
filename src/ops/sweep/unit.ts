@@ -133,6 +133,9 @@ export const SWEEP_RUN_STATE_BASELINE_DIR = 'baseline';
 /** The committed-marker subdir of the run-state dir (jTPa8). */
 export const SWEEP_RUN_STATE_COMMITTED_DIR = 'committed';
 
+/** The scanned-commit-sha record subdir of the run-state dir (review-debt #174). */
+export const SWEEP_RUN_STATE_SCANNED_DIR = 'scanned';
+
 /** The worktreeFor family's default git wall clock (600s), for the unit op's adapter. */
 export const DEFAULT_UNIT_GIT_TIMEOUT_MS = 600_000;
 
@@ -268,6 +271,12 @@ export interface SweepUnitReport {
   tamperFindings?: TamperFinding[];
   /** true when the fix was committed; false when nothing was staged (an idempotent re-run). Present in 'fix' mode only. */
   committed?: boolean;
+  /** The sha of the commit that carried the SCANNED set (review-debt #174:
+   * the strand-retry pushes ONLY a commit this op verified — this is the
+   * evidence, persisted to the run-state `scanned/` record, that a
+   * stranded push is re-publishing a scanned commit and not an unscanned
+   * driver-self-commit). Present when `committed` is true. */
+  committedSha?: string;
   /** true when the unit's branch was pushed to its remote. Present in 'fix' mode only. */
   pushed?: boolean;
   /** The branch the unit's PR carries (`<runPrefix>/<kind>/<slug>`). */
@@ -538,9 +547,31 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     }
 
     // 8. Commit the scanned set — skipped when nothing is staged (the fixer
-    // no-oped; an idempotent re-run).
+    // no-oped; an idempotent re-run). The commit's sha is RECORDED — in the
+    // report and in the run-state `scanned/` record — so the strand-retry
+    // (9b) can prove any ahead-of-base commit it pushes is THIS op's
+    // scanned commit and not an unscanned driver-self-commit (review-debt
+    // #174: `git add -A` stages nothing after driver self-commits, so the
+    // stage/scan gates never saw those bytes; without the record, 9b would
+    // push them as "verified").
     const commit = await commitStaged(bindings, unit, worktree);
     if (commit.fault !== null) return { status: 'failed', error: tagged('infra', commit.fault) };
+    let committedSha: string | undefined;
+    if (commit.committed) {
+      const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+      if (head.code !== 0) {
+        return {
+          status: 'failed',
+          error: tagged(
+            'infra',
+            `sweep.unit ${unit.package}: git rev-parse HEAD failed — ${head.stderr.trim()}`,
+          ),
+        };
+      }
+      committedSha = head.stdout.trim();
+      const recordFault = await recordScannedCommitSha(bindings, segments, committedSha);
+      if (recordFault !== null) return { status: 'failed', error: tagged('infra', recordFault) };
+    }
 
     // 9. Push the committed branch — only when something was committed and a
     // push binding is present. A push failure fails the unit: the commit
@@ -563,10 +594,15 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
 
     // 9b. The STRANDED-COMMIT RETRY (resume completeness): on the
     // no-commit leg (this run's fixer no-oped on an already-fixed tree) with
-    // a push binding, a branch carrying commits beyond the base is an
-    // EARLIER run's verified fix whose push failed — re-attempt the push
-    // (idempotent: an up-to-date remote is a no-op). Without this, the
-    // stranded local commit would be silently omitted from the fleet's PRs.
+    // a push binding, a branch carrying commits beyond the base is a
+    // candidate EARLIER run's verified fix whose push failed — re-attempt
+    // the push (idempotent: an up-to-date remote is a no-op). WITHOUT the
+    // sha verification this would push ANY driver-self-committed bytes
+    // unscanned (review-debt #174), so the retry pushes ONLY when the tip
+    // IS the recorded scanned sha (the run-state `scanned/` record the
+    // commit step wrote); any other ahead-of-base state — no record, or a
+    // tip that diverges from the record — fails the unit TAMPER: needs-
+    // human evidence, never a push.
     if (!commit.committed && bindings.pushBranch !== undefined) {
       const counted = await bindings.git([
         '-C',
@@ -588,6 +624,30 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       }
       const aheadCommits = Number.parseInt(counted.stdout.trim(), 10);
       if (Number.isFinite(aheadCommits) && aheadCommits > 0) {
+        const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+        if (head.code !== 0) {
+          return {
+            status: 'failed',
+            error: tagged(
+              'infra',
+              `sweep.unit ${unit.package}: git rev-parse HEAD failed — ${head.stderr.trim()}`,
+            ),
+          };
+        }
+        const recorded = await readScannedCommitSha(bindings, segments);
+        if (recorded === null || head.stdout.trim() !== recorded) {
+          const detail =
+            recorded === null
+              ? 'no scanned-commit record exists for this unit (an unscanned driver-self-commit, or a record from before this hardening)'
+              : `the tip (${head.stdout.trim()}) diverges from the recorded scanned sha (${recorded})`;
+          return {
+            status: 'failed',
+            error: tagged(
+              'tamper',
+              `sweep.unit ${unit.package}: ${String(aheadCommits)} commit(s) ahead of '${bindings.base}' on '${segments.branch}' are NOT the verified scanned commit — ${detail}; an unscanned commit must not be pushed — needs-human evidence`,
+            ),
+          };
+        }
         try {
           await bindings.pushBranch(bindings.repoRoot, segments.branch);
           pushed = true;
@@ -623,6 +683,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       regression: gated.value,
       tamperFindings: hack.value,
       committed: commit.committed,
+      ...(committedSha !== undefined ? { committedSha } : {}),
       pushed,
       prBranch: segments.branch,
     };
@@ -1212,6 +1273,65 @@ async function writeCommittedMarker(
     return null;
   } catch (err) {
     return `sweep.unit: could not write the committed marker under '${markerDir}' — ${messageOf(err)}`;
+  }
+}
+
+/**
+ * Record the SCANNED commit's sha in the run-state —
+ * `<runStateDir>/scanned/<kind>/<slug>.json` (review-debt #174): the
+ * strand-retry's proof that an ahead-of-base tip is THIS op's scanned
+ * commit. Written at the commit step, read back on the no-commit leg.
+ */
+async function recordScannedCommitSha(
+  bindings: SweepUnitBindings,
+  segments: SweepUnitSegments,
+  sha: string,
+): Promise<string | null> {
+  const runStateDir =
+    bindings.runStateDir ??
+    sweepRunStateDir(bindings.repoRoot, bindings.worktreesDir, bindings.runPrefix);
+  const scannedDir = join(runStateDir, SWEEP_RUN_STATE_SCANNED_DIR, segments.kind);
+  try {
+    await mkdir(scannedDir, { recursive: true });
+    await writeFile(
+      join(scannedDir, `${segments.slug}.json`),
+      `${JSON.stringify({ sha: sha })}\n`,
+      'utf8',
+    );
+    return null;
+  } catch (err) {
+    return `sweep.unit: could not write the scanned-commit record under '${scannedDir}' — ${messageOf(err)}`;
+  }
+}
+
+/**
+ * Read back the recorded scanned-commit sha (review-debt #174), or null
+ * when no record exists (a divergent history is the caller's fail-closed
+ * case, not a fault here).
+ */
+async function readScannedCommitSha(
+  bindings: SweepUnitBindings,
+  segments: SweepUnitSegments,
+): Promise<string | null> {
+  const runStateDir =
+    bindings.runStateDir ??
+    sweepRunStateDir(bindings.repoRoot, bindings.worktreesDir, bindings.runPrefix);
+  try {
+    const text = await readFile(
+      join(runStateDir, SWEEP_RUN_STATE_SCANNED_DIR, segments.kind, `${segments.slug}.json`),
+      'utf8',
+    );
+    const parsed: unknown = JSON.parse(text);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      typeof (parsed as { sha?: unknown }).sha === 'string'
+    ) {
+      return (parsed as { sha: string }).sha;
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
