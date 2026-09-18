@@ -77,7 +77,7 @@
 //      (the discarded-flag blind spot is closed), push refspecs need both
 //      halves non-empty (`:dst` is a remote-branch deletion), and
 //      worktree list/remove are flag-free — `--force` is refused.
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1387,5 +1387,43 @@ describe('diagnoseMergeFailure', () => {
 
   test('pure: same report → deep-equal diagnosis', () => {
     expect(diagnoseMergeFailure(mixed)).toEqual(diagnoseMergeFailure(mixed));
+  });
+});
+
+describe('realMergeEffects gh spawn scoping — the real makeGhRunner over a recording fake gh (review-debt #163)', () => {
+  test('realMergeEffects scopes the gh spawn to the repo root and strips an inherited GH_REPO (review-debt #163: no wrong-repo PRs on cwd/GH_REPO collisions)', async () => {
+    // The REAL makeGhRunner (no run override — that would hide the spawn
+    // opts) with a fake gh binary that records its cwd AND its GH_REPO: the
+    // effect must spawn INSIDE repoRoot even though the test process cwd is
+    // elsewhere, and an inherited GH_REPO (gh's repo resolution: -R >
+    // GH_REPO > cwd) must be stripped — the cwd is otherwise defeated.
+    const tmp = await mkdtemp(join(tmpdir(), 'cq-merge-ghcwd-'));
+    const repo = join(tmp, 'repo');
+    const record = join(tmp, 'cwd.txt');
+    const ghRepoRecord = join(tmp, 'ghrepo.txt');
+    await mkdir(repo);
+    const gh = join(tmp, 'fake-gh.sh');
+    await writeFile(
+      gh,
+      `#!/bin/sh\nprintf '%s' "$PWD" > '${record}'\nprintf '%s' "$GH_REPO" > '${ghRepoRecord}'\n`,
+    );
+    chmodSync(gh, 0o755);
+    const previousGhRepo = process.env.GH_REPO;
+    process.env.GH_REPO = 'wrong-owner/wrong-repo';
+    try {
+      const effects = realMergeEffects({ repoRoot: repo, ghBin: gh });
+      expect(await effects.retargetBase(7, 'other')).toMatchObject({ code: 0 });
+      // Compare REAL paths: on macOS os.tmpdir() hands out the logical
+      // /var/... spelling of a symlinked directory, and sh's $PWD keeps
+      // that logical form while node may hand the physical one — the
+      // contract is "same directory", not "same spelling".
+      const { readFile, realpath: realpathFsp } = await import('node:fs/promises');
+      expect(await realpathFsp(await readFile(record, 'utf8'))).toBe(await realpathFsp(repo));
+      expect(await readFile(ghRepoRecord, 'utf8')).toBe('');
+    } finally {
+      if (previousGhRepo === undefined) delete process.env.GH_REPO;
+      else process.env.GH_REPO = previousGhRepo;
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });

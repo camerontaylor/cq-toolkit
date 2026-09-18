@@ -420,6 +420,15 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const ghRunnerOpts = {
     ...(opts.ghBin !== undefined ? { bin: opts.ghBin } : {}),
     ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    // Scope gh to the target repository (review-debt #163): git already
+    // runs via -C, but gh resolved its repo from the process cwd or GH_REPO
+    // — an SDK caller with cwd ≠ target repo could hit WRONG-repo PRs when
+    // numbers collide. The spawn cwd fixes that without touching argv
+    // shapes (safeArgs unaffected); GH_REPO is stripped from the inherited
+    // env because gh's resolution precedence (-R > GH_REPO > cwd) would
+    // otherwise defeat the cwd. The git runner keeps -C argv scoping.
+    cwd: repoRoot,
+    unsetEnv: ['GH_REPO'],
   };
   const gitRunnerOpts = {
     ...(opts.gitBin !== undefined ? { bin: opts.gitBin } : {}),

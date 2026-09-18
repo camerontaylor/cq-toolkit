@@ -14,6 +14,7 @@
 // owner/repo spelling validator and the `--paginate --slurp` payload
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
+import { isAbsolute, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
 export interface GhResult {
@@ -60,8 +61,10 @@ export class GhError extends Error {
  * The default GhFn: spawns `opts.bin`, else CQ_GH_BIN, else `'gh'` (CQ_GH_BIN
  * is the seam CLI-driven tests use to substitute a fake gh script), captures
  * both streams, and resolves with code + streams. The environment passes
- * through unchanged, layered with `opts.env` overrides (the test seam for
- * scenario/log plumbing like CQ_GH_SCENARIO and CQ_GH_LOG); args go to execve
+ * through, layered with `opts.env` overrides (the test seam for scenario/log
+ * plumbing like CQ_GH_SCENARIO and CQ_GH_LOG) MINUS the names `opts.unsetEnv`
+ * strips from the inherited layer (explicit `env` entries win over the
+ * strip); the spawn optionally runs in `opts.cwd`. Args go to execve
  * directly (no shell, no quoting). `timeoutMs` — default UNDEFINED, wait
  * forever — SIGKILLs the child when it elapses and resolves (never rejects,
  * the seam stays total) with the timeout convention code 124 and a
@@ -73,14 +76,51 @@ export function makeGhRunner(opts?: {
   bin?: string;
   env?: Record<string, string>;
   timeoutMs?: number;
+  /** Spawn cwd — scope gh to a repository root (review-debt #163: without
+   * it, gh resolves the repo from the process cwd or GH_REPO, so an SDK
+   * caller with cwd ≠ target repo can hit WRONG-repo PRs when numbers
+   * collide). */
+  cwd?: string;
+  /** Env NAMES to strip from the INHERITED environment before the spawn
+   * (review-debt #163: gh's repo resolution precedence is -R > GH_REPO >
+   * cwd, so a cwd-scoped runner must also strip an inherited GH_REPO or
+   * the cwd never matters). Explicit `env` entries survive the strip —
+   * a caller-provided value is intent and wins over the inherited value
+   * the strip removed. */
+  unsetEnv?: readonly string[];
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
-      const bin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
+      const rawBin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
+      // Bare names PATH-lookup (cwd-independent), but a RELATIVE bin path
+      // with a separator resolves against the spawn cwd — with a scoped
+      // runner that would silently change which binary runs. Pre-resolve
+      // such paths against the process cwd, the pre-scoping resolution.
+      const bin =
+        rawBin.includes('/') || rawBin.includes('\\')
+          ? isAbsolute(rawBin)
+            ? rawBin
+            : pathResolve(process.cwd(), rawBin)
+          : rawBin;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
-      const child = spawn(bin, args, { env: { ...process.env, ...opts?.env } });
+      const inherited = { ...process.env };
+      if (opts?.unsetEnv !== undefined) {
+        // Windows env lookup is case-insensitive (and gh's Go runtime looks
+        // names up case-insensitively there), so the strip must be
+        // case-insensitive on win32; POSIX is case-sensitive on both sides.
+        const caseFold = process.platform === 'win32';
+        const targets = caseFold ? opts.unsetEnv.map((n) => n.toUpperCase()) : opts.unsetEnv;
+        for (const name of Object.keys(inherited)) {
+          const probe = caseFold ? name.toUpperCase() : name;
+          if (targets.includes(probe)) delete inherited[name];
+        }
+      }
+      const child = spawn(bin, args, {
+        ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        env: { ...inherited, ...opts?.env },
+      });
       // The runner — not the child — owns this one wall clock: it bounds a
       // single spawned gh invocation and OBEYS by killing, never by deciding
       // policy (the governor owns WHEN a run aborts; this only bounds one
