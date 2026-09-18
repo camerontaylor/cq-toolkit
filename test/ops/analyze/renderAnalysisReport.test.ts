@@ -295,7 +295,7 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
       '"schemaVersion": 2',
     );
     expect(() => parseAnalysisSidecar(wrongVersion)).toThrow(
-      /schema violation \(expected schemaVersion 1\)/,
+      /schema violation \(expected schemaVersion 2\)/,
     );
     expect(() => parseAnalysisSidecar(wrongVersion)).toThrow(/schemaVersion/);
   });
