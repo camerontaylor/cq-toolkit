@@ -685,13 +685,17 @@ describe('sweep e2e: driver self-commit vs the strand-retry trust pin (#174)', (
       expect(alpha.report?.committed).toBe(true);
       expect(alpha.report?.committedSha).toMatch(/^[0-9a-f]{40}$/);
 
-      // Beta: the strand-retry finds commits ahead of base with NO scanned
-      // record and FAILS the unit TAMPER — needs-human evidence, never a
-      // push of unscanned bytes.
+      // Beta: the PRE-STAGE HEAD pin catches the self-commit FIRST — HEAD
+      // moved during the fixer run, the staged-diff scan could never see
+      // those bytes, so the unit fails TAMPER with nothing staged,
+      // committed, recorded, or pushed (needs-human evidence). The
+      // strand-retry's own no-record refusal (#174's 9b guard) sits behind
+      // this for the resume shape: a self-commit from an EARLIER run whose
+      // record never existed.
       const beta = unitRow(outcome.run, 'beta');
       expect(beta.status).toBe('failed');
-      expect(beta.error).toMatch(/NOT the verified scanned commit/);
-      expect(beta.error).toMatch(/no scanned-commit record exists/);
+      expect(beta.error).toMatch(/worktree HEAD moved during the fixer run/);
+      expect(beta.error).toMatch(/driver self-commit is not a supported mode/);
       expect(beta.error).toMatch(/needs-human evidence/);
 
       // Beta's unscanned commit exists LOCALLY but never reached the origin;

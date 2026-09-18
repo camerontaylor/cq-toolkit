@@ -433,7 +433,20 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
 
     // 5. The fixer: one Driver run whose workspace IS the worktree (a fresh
     // session record in the caller's sessions dir; the record's messages
-    // never touch the tree).
+    // never touch the tree). The PRE-DRIVER HEAD is pinned first
+    // (review-debt #174): a driver that self-commits moves HEAD before the
+    // stage gates run, and the staged-diff scan can never see bytes that
+    // are already in the tree.
+    const preDriverHead = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+    if (preDriverHead.code !== 0) {
+      return {
+        status: 'failed',
+        error: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: git rev-parse HEAD failed — ${preDriverHead.stderr.trim()}`,
+        ),
+      };
+    }
     let stopReason: string;
     let denial: string | undefined;
     try {
@@ -509,6 +522,29 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // (untracked until staged), and the scanner must see exactly the set the
     // commit would publish. Either refusal leaves the fix staged but
     // UNCOMMITTED.
+    // HEAD must be exactly what the driver was handed (review-debt #174):
+    // a driver that self-committed mid-run moved it, and the staged-diff
+    // scan is blind to committed bytes — fail TAMPER before staging
+    // anything (nothing recorded, nothing pushed; needs-human evidence).
+    const preStageHead = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
+    if (preStageHead.code !== 0) {
+      return {
+        status: 'failed',
+        error: tagged(
+          'infra',
+          `sweep.unit ${unit.package}: git rev-parse HEAD failed — ${preStageHead.stderr.trim()}`,
+        ),
+      };
+    }
+    if (preStageHead.stdout.trim() !== preDriverHead.stdout.trim()) {
+      return {
+        status: 'failed',
+        error: tagged(
+          'tamper',
+          `sweep.unit ${unit.package}: the worktree HEAD moved during the fixer run (${preDriverHead.stdout.trim()} -> ${preStageHead.stdout.trim()}) — a driver self-commit is not a supported mode and its bytes were never scanned; nothing staged or committed — needs-human evidence`,
+        ),
+      };
+    }
     const staged = await stageUnitFiles(bindings, unit, worktree);
     if (staged !== null) return { status: 'failed', error: tagged('infra', staged) };
     const scope = await enforceStagePathAllowlist(bindings, unit, worktree);
