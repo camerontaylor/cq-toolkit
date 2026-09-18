@@ -142,7 +142,7 @@ export interface RenderedAnalysis {
  * published artifact FILES (review-debt #155): with the previous 32-bit
  * FNV-1a handle, two distinct analyses of the same directory whose report
  * JSONs collided on the fingerprint silently OVERWROTE each other's
- * artifact pair; a collision now needs ~2^64 distinct reports. Even then
+ * artifact pair; a collision reaches even a coin-flip probability only at ~2^32 distinct reports (the birthday bound for 64 bits) — versus ~2^16 at the old 32 bits. Even then
  * the blast radius stays a same-name overwrite, not an identity confusion —
  * the sidecar inside carries the full canonical report and per-cluster
  * signatures, and the returned op result records the fingerprint.

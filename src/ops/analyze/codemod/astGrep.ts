@@ -449,7 +449,13 @@ function diffSegments(currentBytes: Uint8Array, edits: readonly PlannedEdit[]): 
         endByte: edit.endByte - blockStart,
       })),
     );
-    if (!Buffer.from(spliced).toString('utf8').endsWith('\n')) block.endLine += 1;
+    // Extend ONLY on a true JOIN: the spliced content must be non-empty
+    // (a block whose bytes were deleted outright — a full-line deletion —
+    // joins nothing; the next line merely moves up and must stay context)
+    // and must have lost the trailing newline (the newline the old block
+    // carried is what glued it to the next line).
+    const splicedText = Buffer.from(spliced).toString('utf8');
+    if (splicedText !== '' && !splicedText.endsWith('\n')) block.endLine += 1;
   }
   const merged: typeof blocks = [];
   for (const block of blocks) {

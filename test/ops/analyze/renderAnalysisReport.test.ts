@@ -290,9 +290,13 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
     expect(() => parseAnalysisSidecar('{}')).toThrow(/schemaVersion/);
     const report = fixtureReport();
     const { sidecar } = renderAnalysisReport(report);
+    // Mutate the version to a GENUINELY wrong value (the sidecar serializes
+    // schemaVersion 2, so replacing 2 with 1 really changes it — a replace
+    // that matches nothing would fail the coverage check instead and pass
+    // for the wrong reason).
     const wrongVersion = serializeAnalysisSidecar(sidecar).replace(
-      '"schemaVersion": 1',
       '"schemaVersion": 2',
+      '"schemaVersion": 1',
     );
     expect(() => parseAnalysisSidecar(wrongVersion)).toThrow(
       /schema violation \(expected schemaVersion 2\)/,

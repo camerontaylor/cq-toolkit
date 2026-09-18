@@ -295,6 +295,18 @@ describe('renderUnifiedDiff (synthesized hunks, exact at the edit sites)', () =>
     );
   });
 
+  test('a FULL-line deletion does not extend the block: the next line stays context (coderabbit r1)', () => {
+    // Deleting `alpha\n` outright joins nothing — beta merely moves up. The
+    // extension must require surviving spliced content, or beta would be
+    // rendered as removed-and-readded.
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('alpha\nbeta\n', 'utf8'), [
+      { file: 'src/a.ts', startByte: 0, endByte: 6, replacement: '' },
+    ]);
+    expect(diff).toBe(
+      ['--- src/a.ts\n', '+++ src/a.ts\n', '@@ -1,2 +1,1 @@\n', '-alpha\n', ' beta\n'].join(''),
+    );
+  });
+
   test('a newline-only deletion shows the JOINED line, not an invisible join (review-debt #159)', () => {
     // The plan deletes ONLY the newline after 'alpha' (byte 5): alpha joins
     // beta. A one-line block would render `-alpha` / `+alpha` with beta as
