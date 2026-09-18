@@ -77,7 +77,7 @@
 //      (the discarded-flag blind spot is closed), push refspecs need both
 //      halves non-empty (`:dst` is a remote-branch deletion), and
 //      worktree list/remove are flag-free — `--force` is refused.
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1158,6 +1158,27 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     });
     expect(await effects.mergePr(7, { method: 'merge' })).toEqual(OK);
     expect(ghCalls).toEqual([['pr', 'merge', '7', '--merge']]);
+  });
+
+  test('realMergeEffects scopes the gh spawn to the repo root (review-debt #163: no wrong-repo PRs on cwd collisions)', async () => {
+    // The REAL makeGhRunner (no run override — that would hide the spawn
+    // opts) with a fake gh binary that records its cwd: the effect must
+    // spawn INSIDE repoRoot even though the test process cwd is elsewhere.
+    const tmp = await mkdtemp(join(tmpdir(), 'cq-merge-ghcwd-'));
+    const repo = join(tmp, 'repo');
+    const record = join(tmp, 'cwd.txt');
+    await mkdir(repo);
+    const gh = join(tmp, 'fake-gh.sh');
+    await writeFile(gh, `#!/bin/sh\nprintf '%s' "$PWD" > '${record}'\n`);
+    chmodSync(gh, 0o755);
+    try {
+      const effects = realMergeEffects({ repoRoot: repo, ghBin: gh });
+      expect(await effects.retargetBase(7, 'other')).toMatchObject({ code: 0 });
+      const { readFile } = await import('node:fs/promises');
+      expect(await readFile(record, 'utf8')).toBe(repo);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 
   test('realMergeEffects git argv shapes: validate/fetch/push (injected runner — zero processes, no fs)', async () => {

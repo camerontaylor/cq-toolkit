@@ -73,6 +73,11 @@ export function makeGhRunner(opts?: {
   bin?: string;
   env?: Record<string, string>;
   timeoutMs?: number;
+  /** Spawn cwd — scope gh to a repository root (review-debt #163: without
+   * it, gh resolves the repo from the process cwd or GH_REPO, so an SDK
+   * caller with cwd ≠ target repo can hit WRONG-repo PRs when numbers
+   * collide). */
+  cwd?: string;
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
@@ -80,7 +85,10 @@ export function makeGhRunner(opts?: {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
-      const child = spawn(bin, args, { env: { ...process.env, ...opts?.env } });
+      const child = spawn(bin, args, {
+        ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
+        env: { ...process.env, ...opts?.env },
+      });
       // The runner — not the child — owns this one wall clock: it bounds a
       // single spawned gh invocation and OBEYS by killing, never by deciding
       // policy (the governor owns WHEN a run aborts; this only bounds one
