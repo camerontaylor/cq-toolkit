@@ -340,6 +340,24 @@ describe('renderUnifiedDiff (synthesized hunks, exact at the edit sites)', () =>
     );
   });
 
+  test('a CRLF newline-only deletion joins the lines, CR preserved in the text (r2 review)', () => {
+    // CRLF files: the extension predicate fires on the \n half; the CR is
+    // ordinary text and survives inside the joined line.
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('alpha\r\nbeta\r\n', 'utf8'), [
+      { file: 'src/a.ts', startByte: 6, endByte: 7, replacement: '' },
+    ]);
+    expect(diff).toBe(
+      [
+        '--- src/a.ts\n',
+        '+++ src/a.ts\n',
+        '@@ -1,2 +1,1 @@\n',
+        '-alpha\r\n',
+        '-beta\r\n',
+        '+alpha\rbeta\r\n',
+      ].join(''),
+    );
+  });
+
   test('a replacement that KEEPS the newline does not extend the block (r1 review)', () => {
     // Rewriting 'alpha' in place leaves the block's trailing newline intact:
     // no join, beta stays context — the no-extension control.
