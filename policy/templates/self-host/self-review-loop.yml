@@ -174,4 +174,4 @@ jobs:
         if: always()
         with:
           path: .selfhost/journal
-          key: self-review-loop-state-${{ github.run_id }}
+          key: self-review-loop-state-${{ github.run_id }}-${{ github.run_attempt }}

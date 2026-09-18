@@ -163,4 +163,4 @@ jobs:
         if: always()
         with:
           path: .selfhost/journal
-          key: self-merge-prs-state-${{ github.run_id }}
+          key: self-merge-prs-state-${{ github.run_id }}-${{ github.run_attempt }}
