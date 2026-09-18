@@ -34,14 +34,18 @@
 // caught and recorded as a failure row while its siblings continue — a
 // needs-human outcome or a recorded failure is an HONEST result the
 // workflow logs (exit 0), never a fabricated green and never a crash that
-// orphans the remaining PRs. The LISTING call is the exception (candidates'
+// orphans the remaining PRs. One exception to "siblings continue": a thrown
+// loop may carry UNACCOUNTED spend, so the throw burns the sweep budget
+// (remaining zeroed, fail-closed) and the PRs after it are recorded
+// `sweep budget exhausted` instead of re-spending an allowance the entry can
+// no longer vouch for. The LISTING call is the exception (candidates'
 // contract): when it fails there is nothing to isolate — the throw
 // propagates and the process exits 1.
 //
 // NO SECRETS: the summary carries structural facts only — PR numbers,
 // statuses, action counts, reason lines, logins at most — never tokens,
 // env, or stderr dumps beyond the loop's own capped reason lines.
-import { readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
@@ -196,6 +200,14 @@ const EXCLUDE_PROTECTED_HEAD = `protected-branch head (a review fix would push w
 const EXCLUDE_SWEEP_BUDGET = 'sweep budget exhausted (I9)';
 
 /**
+ * The fail-closed suffix appended to a THROWN loop's failure row (KyI): the
+ * thrown loop's spend cannot be read from a report that never resolved, so
+ * the sweep is burned and the row records WHY the later PRs read exhausted.
+ */
+const EXCLUDE_SWEEP_BUDGET_FAIL_CLOSED =
+  'sweep budget exhausted (fail-closed: a thrown loop may have unaccounted spend)';
+
+/**
  * The pre-loop exclusion reason for a listing row, or null when the row is
  * loopable: open is the listing's own filter; same-repo (the #142 contract —
  * the loop only ever works the base repository's branches), non-draft, and
@@ -240,9 +252,10 @@ export async function runSelfReviewLoop(
 ): Promise<SelfReviewLoopSummary> {
   const loop = deps.loop ?? runReviewLoop;
   const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
-  // Persistence seams under journalRoot — created lazily by their consumers;
-  // the ONE direct filesystem touch here is pruneAuditDirs' bounded cleanup
-  // of the audit dirs prior runs left behind.
+  // Persistence seams under journalRoot — created lazily by their consumers
+  // (the real-run path creates the ROOT itself first, see the mkdir below);
+  // the direct filesystem touches here are that root creation and
+  // pruneAuditDirs' bounded cleanup of the audit dirs prior runs left behind.
   const registry = fileWorktreeRegistry(join(journalRoot, 'worktree-registry.json'));
   const worktreeRoot = join(cfg.repoRoot, '.selfhost', 'worktrees');
 
@@ -279,6 +292,16 @@ export async function runSelfReviewLoop(
   }
 
   const stamp = deps.nowMs();
+  // FIRST-RUN JOURNAL ROOT (CodeRabbit round 2, KyA): on a first run / cache
+  // miss `<journalRoot>` does not exist, and the registry's first `withLock`
+  // needs `<journalRoot>/worktree-registry.json.lock` — the lockfile layer
+  // requires its PARENT directory before anything creates it, so every PR
+  // used to fail at resolvePrWorktree and no cacheable state ever appeared.
+  // Create the root recursively BEFORE the registry is used and before the
+  // loop's own journal writes (per-PR audit dirs, dispatch logs). Real runs
+  // only: the dry run's contract is fetch + summarize with no filesystem
+  // effect, and it never touches the registry or the journal.
+  mkdirSync(journalRoot, { recursive: true });
   // The SWEEP-LEVEL cap (I9): one budget for the whole run, carried forward
   // in listing order — re-granting the full cap per PR would multiply the
   // advertised cap by the PR count.
@@ -322,6 +345,13 @@ export async function runSelfReviewLoop(
         journalDir: join(journalRoot, `${String(row.pr)}-${String(stamp)}`),
         maxUsd: remaining,
       },
+      // The wall-clock ladder's LIMITS half (I8/I9; review-debt #137's arming
+      // for the REVIEW path — the merge path arms it in self-merge-prs.ts):
+      // the frozen default rides the governor, so a wedged fixer is
+      // escalated by the ladder instead of stalling the scheduled run to its
+      // workflow timeout. Default-only by design — no cfg override, no CLI
+      // flag (the entry invents no number and offers no knob).
+      limits: { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs },
       dispatchLogPath: join(journalRoot, `dispatch-${String(row.pr)}.ndjson`),
       worktreeRoot,
       // Tests-only injection: absent → runReviewLoop builds its own default
@@ -343,9 +373,17 @@ export async function runSelfReviewLoop(
         remaining -= cost;
       }
     } catch (error) {
+      // FAIL-CLOSED SWEEP BUDGET (CodeRabbit round 2, KyI): a loop that
+      // spent and THEN threw leaves its fix-run cost unaccounted — the
+      // carry-forward above only subtracts on resolve. Carrying the old
+      // remaining forward would let every later PR re-spend the same
+      // allowance. The throw therefore BURNS the sweep: remaining is zeroed
+      // and the failure row says so, honestly, instead of pretending the
+      // budget survives an unaccounted spend.
+      remaining = 0;
       failures.push({
         pr: row.pr,
-        error: oneLine(error instanceof Error ? error.message : String(error)),
+        error: `${oneLine(error instanceof Error ? error.message : String(error))} — ${EXCLUDE_SWEEP_BUDGET_FAIL_CLOSED}`,
       });
     }
   }

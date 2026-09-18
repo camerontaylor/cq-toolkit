@@ -30,6 +30,7 @@
 // and logged at exit 0. Only a whole-run throw (bad args, a failed listing
 // fetch) exits 1. NO SECRETS: the payload carries PR numbers, verdicts,
 // branch-safe reasons, and report counts — never tokens or env.
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -168,6 +169,15 @@ export async function runSelfMergePrs(
     };
   }
 
+  // FIRST-RUN JOURNAL ROOT (the review-loop entry's same first-run fix): on
+  // a first run / cache miss `<journalRoot>` does not exist, and this run's
+  // effects under it — the merge sessions dir (`buildRunInput`'s
+  // sessionsDir) and the kernel journal (`merge-<stamp>`) — need their
+  // parent before any writer touches them. Create it recursively before the
+  // plan is built. Real runs only: the dry run classifies and returns above,
+  // never touching the journal.
+  const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
+  mkdirSync(journalRoot, { recursive: true });
   const input = buildRunInput(fetched.candidates, cfg, nowMs);
   // The governed composition — the recorded seam, not optional (I9),
   // mirroring src/cli/run-plan.ts: the caps ride BOTH the RunOptions (the

@@ -220,6 +220,26 @@ describe('runSelfMergePrs — real run', () => {
     expect(existsSync(join(journalRoot, 'merge-5000'))).toBe(true);
   });
 
+  test('first-run journal root: a NON-EXISTENT nested journalRoot is created and the run succeeds (KyA)', async () => {
+    const seen: RunMergePrsInput[] = [];
+    const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });
+    // The first-run / cache-miss shape: even the parent of the journal root
+    // does not exist yet. The entry must create the root recursively before
+    // its journal writers (sessions dir, `merge-<stamp>`) need it.
+    const base = tmpJournalRoot();
+    const journalRoot = join(base, 'first', 'run', 'journal');
+    expect(existsSync(journalRoot)).toBe(false);
+    const result = await runSelfMergePrs(
+      { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
+      { ...baseCfg, journalRoot },
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(result.outcome).toEqual(cannedOutcome);
+    expect(seen).toHaveLength(1);
+    expect(existsSync(journalRoot)).toBe(true); // created, recursively
+    expect(existsSync(join(journalRoot, 'merge-5000'))).toBe(true); // journal persisted
+  });
+
   test('a non-ok job result → outcome null, the report is the evidence', async () => {
     const seen: RunMergePrsInput[] = [];
     const view = scriptedView(seen, { status: 'failed', error: 'git refused' });

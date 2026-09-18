@@ -33,16 +33,25 @@
 //   9. The bounded prune: after a real run only the newest 5 `<pr>-<stamp>`
 //      audit dirs remain under the journal root; the flat dispatch-<pr>
 //      .ndjson dedupe logs ride untouched.
+//  10. First-run journal root (CodeRabbit KyA): a real run points journalRoot
+//      at a NON-EXISTENT nested path and still succeeds — the entry creates
+//      the root recursively before the registry/journal writers need it.
+//  11. The wall-clock ladder rides the loop opts (CodeRabbit KyE): every
+//      loop's limits carry SelfhostDefaults.perJobWallClockMs (the #137
+//      review-path arming; merge-path symmetric).
+//  12. Fail-closed sweep budget (CodeRabbit KyI): a loop that THROWS burns
+//      the sweep — the failure row says so and the later PRs are recorded
+//      exhausted instead of re-spending an unaccounted allowance.
 //
 // The loop fn is injected (deps.loop — the documented DI seam): a recording
 // fake returning a minimal ReviewLoopOutcome. The gh seam is a fake GhFn
 // routing on argv (candidates.test.ts's fixture style) — no spawned process
 // anywhere, and the REAL listOpenPrs/fetchReviewState parse the fake's wire
 // payloads.
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test } from 'vitest';
 import type { RunReport } from '../../src/kernel/types.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -172,9 +181,31 @@ const baseCfg = (over: Partial<SelfReviewLoopCfg> = {}) => ({
   ...over,
 });
 
+/**
+ * A REAL temp directory per real-run test: the entry now CREATES the journal
+ * root on first run (KyA), so real-run journal roots must live where mkdir
+ * is allowed — a fake literal like '/j' would be an EACCES crash, not a
+ * test. Dry-run tests keep the fake literals (the dry run touches nothing).
+ */
+const tempRoots: string[] = [];
+const tempJournalRoot = (): string => {
+  const root = mkdtempSync(join(tmpdir(), 'self-review-loop-journal-'));
+  tempRoots.push(root);
+  return root;
+};
+afterEach(() => {
+  while (tempRoots.length > 0) {
+    const root = tempRoots.pop();
+    if (root !== undefined) {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 describe('runSelfReviewLoop — real run', () => {
   test('loops exactly the open same-repo non-draft PRs; passthrough of responderLogin, driver, and journal shapes', async () => {
     const calls: RecordedCall[] = [];
+    const journalRoot = tempJournalRoot();
     const gh = fakeGh([
       pullRow(7),
       pullRow(8, { draft: true }), // skipped: draft
@@ -186,7 +217,7 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr) => fakeOutcome(pr)),
       ),
-      baseCfg({ journalRoot: '/journal' }),
+      baseCfg({ journalRoot }),
     );
 
     // Only PRs 7 and 10 were loopable; both resolved. The skipped rows are
@@ -213,9 +244,9 @@ describe('runSelfReviewLoop — real run', () => {
     expect(first.repoRoot).toBe('/checkout');
     // Journal shapes: one dir per PR namespaced by the ONE run stamp; the
     // dispatch log persists per PR directly under the journal root.
-    expect(first.runOptions?.journalDir).toBe('/journal/7-1700000000000');
+    expect(first.runOptions?.journalDir).toBe(join(journalRoot, '7-1700000000000'));
     expect(first.runOptions?.maxUsd).toBe(SelfhostDefaults.maxUsd);
-    expect(first.dispatchLogPath).toBe('/journal/dispatch-7.ndjson');
+    expect(first.dispatchLogPath).toBe(join(journalRoot, 'dispatch-7.ndjson'));
     // Worktrees live under the gitignored runtime root.
     expect(first.worktreeRoot).toBe('/checkout/.selfhost/worktrees');
     // THE CLASSIFY DEFAULT RIDES UNCHANGED: no override is passed, so
@@ -223,11 +254,15 @@ describe('runSelfReviewLoop — real run', () => {
     expect(first.classifyConfig).toBeUndefined();
     // No registry-view injection → absent (runReviewLoop builds its default).
     expect(first.driverRegistryView).toBeUndefined();
+    // The wall-clock ladder rides every loop (KyE / #137): the frozen
+    // default, wrapped in the LIMITS half's one-field shape.
+    expect(first.limits).toEqual({ perJobWallClockMs: SelfhostDefaults.perJobWallClockMs });
   });
 
   test('responderLogin and maxUsd overrides reach the loop opts; the clock is read per PR', async () => {
     const calls: RecordedCall[] = [];
     let tick = 0;
+    const journalRoot = tempJournalRoot();
     const gh = fakeGh([pullRow(7), pullRow(8)]);
     const summary = await runSelfReviewLoop(
       {
@@ -236,7 +271,7 @@ describe('runSelfReviewLoop — real run', () => {
         nowMs: () => (tick += 1),
         loop: fakeLoop(calls, async (pr) => fakeOutcome(pr)),
       },
-      baseCfg({ responderLogin: 'cq-loop-bot', maxUsd: 2, journalRoot: '/j' }),
+      baseCfg({ responderLogin: 'cq-loop-bot', maxUsd: 2, journalRoot }),
     );
 
     expect(summary.results).toHaveLength(2);
@@ -246,8 +281,8 @@ describe('runSelfReviewLoop — real run', () => {
     // own nowMs — the per-PR stamps differ (fresh snapshots).
     expect(calls[0]?.opts.nowMs).toBe(2);
     expect(calls[1]?.opts.nowMs).toBe(3);
-    expect(calls[0]?.opts.runOptions?.journalDir).toBe('/j/7-1');
-    expect(calls[1]?.opts.runOptions?.journalDir).toBe('/j/8-1');
+    expect(calls[0]?.opts.runOptions?.journalDir).toBe(join(journalRoot, '7-1'));
+    expect(calls[1]?.opts.runOptions?.journalDir).toBe(join(journalRoot, '8-1'));
   });
 
   test('per-PR fault isolation: a throwing loop records the failure, its siblings continue', async () => {
@@ -261,14 +296,81 @@ describe('runSelfReviewLoop — real run', () => {
           return fakeOutcome(pr);
         }),
       ),
-      baseCfg({ journalRoot: '/j' }),
+      baseCfg({ journalRoot: tempJournalRoot() }),
     );
 
     expect(summary.results.map((row) => row.pr)).toEqual([7]);
     expect(summary.failures).toEqual([
-      { pr: 8, error: 'injected loop boom' }, // ONE line — a log fact, not the dump
+      {
+        // ONE line — a log fact, not the dump — plus the fail-closed sweep
+        // burn (KyI): the thrown loop's spend is unaccountable, so the row
+        // says the budget did not survive it.
+        pr: 8,
+        error:
+          'injected loop boom — sweep budget exhausted (fail-closed: a thrown loop may have unaccounted spend)',
+      },
     ]);
     expect(calls).toHaveLength(2); // the sibling was still attempted
+  });
+
+  test('first-run journal root: a NON-EXISTENT nested journalRoot is created and the run succeeds (KyA)', async () => {
+    const calls: RecordedCall[] = [];
+    // Point journalRoot at a path whose PARENT does not exist either — the
+    // first-run / cache-miss shape. Before the fix the registry's withLock
+    // needed `<journalRoot>/worktree-registry.json.lock` here and every PR
+    // failed at resolvePrWorktree; the entry must create the root itself.
+    const base = tempJournalRoot();
+    const journalRoot = join(base, 'first', 'run', 'journal');
+    expect(existsSync(journalRoot)).toBe(false);
+    const gh = fakeGh([pullRow(7), pullRow(8)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot }),
+    );
+
+    expect(summary.results.map((row) => row.pr)).toEqual([7, 8]);
+    expect(summary.failures).toEqual([]);
+    expect(existsSync(journalRoot)).toBe(true); // created, recursively
+  });
+
+  test('a thrown loop burns the sweep budget (KyI): the failure row says so and the next PR is recorded exhausted', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8), pullRow(9)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => {
+          if (pr === 7) {
+            // Spend the budget and THROW before the entry can read the
+            // rollup: the cost is real but unaccountable. The throw must
+            // burn the sweep — PR 8/9 must not re-spend the allowance.
+            void outcomeWithFixCost(pr, 1);
+            throw new Error('injected loop boom after spend');
+          }
+          return outcomeWithFixCost(pr, 1);
+        }),
+      ),
+      baseCfg({ maxUsd: 3, journalRoot: tempJournalRoot() }),
+    );
+
+    // PR 7 was invoked (it spent, then threw); PR 8 never dispatched — the
+    // zeroed remaining skipped it with the RECORDED exhausted row, and PR 9
+    // rode the same skip (remaining is already ≤ 0).
+    expect(calls.map((call) => call.opts.pr)).toEqual([7]);
+    expect(summary.failures).toEqual([
+      {
+        pr: 7,
+        error:
+          'injected loop boom after spend — sweep budget exhausted (fail-closed: a thrown loop may have unaccounted spend)',
+      },
+    ]);
+    expect(summary.excluded).toEqual([
+      { pr: 8, reason: 'sweep budget exhausted (I9)' },
+      { pr: 9, reason: 'sweep budget exhausted (I9)' },
+    ]);
   });
 
   test('a listing row without a PR number is recorded as excluded, not silently skipped', async () => {
@@ -282,7 +384,7 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr) => fakeOutcome(pr)),
       ),
-      baseCfg({ journalRoot: '/j' }),
+      baseCfg({ journalRoot: tempJournalRoot() }),
     );
     expect(summary.excluded).toEqual([
       { pr: 0, reason: 'fetch-failed: listing row without a PR number' },
@@ -303,7 +405,7 @@ describe('runSelfReviewLoop — real run', () => {
         ),
         driverRegistryView: view,
       },
-      baseCfg({ journalRoot: '/j' }),
+      baseCfg({ journalRoot: tempJournalRoot() }),
     );
     expect(calls[0]?.opts.driverRegistryView).toBe(view);
   });
@@ -316,7 +418,7 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr) => outcomeWithFixCost(pr, 2)),
       ),
-      baseCfg({ maxUsd: 1.5, journalRoot: '/j' }),
+      baseCfg({ maxUsd: 1.5, journalRoot: tempJournalRoot() }),
     );
 
     // PR 7's fix run spent 2 of the 1.5 sweep cap; PR 8 never dispatches —
@@ -334,7 +436,7 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr) => outcomeWithFixCost(pr, 1)),
       ),
-      baseCfg({ maxUsd: 3, journalRoot: '/j' }),
+      baseCfg({ maxUsd: 3, journalRoot: tempJournalRoot() }),
     );
 
     // Per-PR maxUsd is the REMAINING sweep budget after each prior fix
@@ -352,7 +454,7 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr) => fakeOutcome(pr)),
       ),
-      baseCfg({ journalRoot: '/j' }),
+      baseCfg({ journalRoot: tempJournalRoot() }),
     );
 
     // The recorded reason names the rule: a review fix would push worker
