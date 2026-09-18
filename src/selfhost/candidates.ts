@@ -9,16 +9,17 @@
 // family's fetchReviewState (its GraphQL pagination, page caps, and lag
 // traps are already fail-closed and tested); transport and the --slurp page
 // normalizer ride gh.ts's shared seam (ghJson, slurpedComments). This
-// module adds exactly one new read — the REST open-PR listing — and never
-// touches GraphQL pagination itself.
+// module adds exactly two new REST reads — the open-PR listing and the
+// per-PR single-pull GET (the authoritative mergeable_state source) — and
+// never touches GraphQL pagination itself.
 //
 // FAULT ISOLATION (the scheduled-run contract): one bad PR must not orphan
-// the others. A PR whose enrichment (head-commit read or fetchReviewState)
-// fails is EXCLUDED with a one-line `fetch-failed: …` reason — never
-// fabricated data, never a crashed run. The LISTING call is the exception:
-// when it fails there is nothing to isolate — the throw propagates (an
-// empty candidate set that pretends the forge said "nothing open" would be
-// a fabricated success).
+// the others. A PR whose enrichment (single-pull read, head-commit read, or
+// fetchReviewState) fails is EXCLUDED with a one-line `fetch-failed: …`
+// reason — never fabricated data, never a crashed run. The LISTING call is
+// the exception: when it fails there is nothing to isolate — the throw
+// propagates (an empty candidate set that pretends the forge said "nothing
+// open" would be a fabricated success).
 //
 // THE #142 FORK CONTRACT: forked PRs are excluded outright and must be
 // handled by a human — the self-hosted automation only ever works the base
@@ -30,7 +31,7 @@ import { GhError, ghJson, ghNameOk, slurpedComments } from '../ops/review/gh.js'
 import type { GhFn } from '../ops/review/gh.js';
 import type { MergePrsCandidate } from '../ops/merge/runPrs.js';
 
-/** The listing's page size — also the truncation heuristic's threshold. */
+/** The listing's page size (`per_page` on the REST listing read). */
 const PER_PAGE = 100;
 
 /**
@@ -109,13 +110,20 @@ const oneLine = (text: string): string => {
 
 /**
  * The REST open-PR listing's raw result: the slurped pages flattened to row
- * records, plus the page-level truncation flag (a FULL last page may have a
- * successor — the fail-closed doubt classifyPr's row 3 refuses on). The one
- * read both consumers share: fetchMergeCandidates (enrichment input) and
- * listOpenPrs (the review-loop entry's slim view).
+ * records, plus the listing's truncation flag — always `false` BY CONTRACT.
+ * The listing read is UNBOUNDED (`--paginate`: there is no page cap), and a
+ * full last page is not a truncation signal — gh simply issues another
+ * request, so a final page of exactly PER_PAGE rows is an ordinary outcome
+ * (a heuristic flagging it would mislabel a fully-paginated fetch as
+ * truncated forever, classifying every candidate `awaiting` on every run).
+ * Truncation doubt enters a candidate only from the enrichment fetch layer
+ * (fetchReviewState's page-cap/lag flags) — the one place a real cap
+ * exists. The one read both consumers share: fetchMergeCandidates
+ * (enrichment input) and listOpenPrs (the review-loop entry's slim view).
  */
 interface OpenPullListing {
   rows: Array<Record<string, unknown>>;
+  /** Always false — unbounded pagination carries no listing truncation. */
   truncated: boolean;
 }
 
@@ -142,12 +150,11 @@ const listOpenPulls = async (deps: {
   const listPath = `repos/${owner}/${repo}/pulls?state=open&per_page=${String(PER_PAGE)}`;
   const rawList = await ghJson<unknown>(gh, ['api', listPath, '--paginate', '--slurp']);
   const pages = slurpedComments<unknown>(rawList, listPath);
-  // Fail-closed truncation: a FULL last page may have been followed by more
-  // (the drills' single-page convention, generalized to pages) — flag it and
-  // let the downstream truncation rows refuse the evidence.
-  const lastPage = pages[pages.length - 1];
-  const truncated = lastPage !== undefined && lastPage.length >= PER_PAGE;
-  return { rows: pages.flat().map(asRecord), truncated };
+  // No truncation signal exists on this read: `--paginate` is unbounded, so
+  // a full last page is simply followed by another request — the flag stays
+  // false by contract (see OpenPullListing); real truncation doubt comes
+  // only from the enrichment fetch layer.
+  return { rows: pages.flat().map(asRecord), truncated: false };
 };
 
 /**
@@ -195,14 +202,18 @@ export async function listOpenPrs(deps: {
  *
  * Reads, per run: ONE REST listing (`repos/{owner}/{repo}/pulls?state=open`
  * at `per_page=100`, `--paginate --slurp`, normalized by gh.ts's shared
- * slurpedComments guard) and, per surviving PR, the head-commit timestamp
- * (REST `…/commits/{sha}` — committer date, author date as the fallback)
- * and the FULL review state via fetchReviewState (GraphQL threads +
- * reviews, REST reply chains; its fail-closed `truncated` flag is OR-ed
- * into the candidate so a capped or lagging read can never read as
- * complete). The listing's own truncation is fail-closed the same way: a
- * full last page (PER_PAGE rows) may have a successor, so the flag rides
- * true — classifyPr's row 3 then refuses to trust the evidence.
+ * slurpedComments guard) and, per surviving PR, the computed mergeability
+ * (REST `…/pulls/{n}` — the single-PR endpoint; the list rows carry
+ * mergeable_state only as a lazily-computed value that is frequently
+ * unknown), the head-commit timestamp (REST `…/commits/{sha}` — committer
+ * date, author date as the fallback) and the FULL review state via
+ * fetchReviewState (GraphQL threads + reviews, REST reply chains; its
+ * fail-closed `truncated` flag is OR-ed into the candidate so a capped or
+ * lagging read can never read as complete). The listing read itself carries
+ * NO truncation signal — `--paginate` is unbounded (a full last page is
+ * followed by another request, never trusted as a final page), so its
+ * truncation flag is false by contract and the candidate's truncation comes
+ * ONLY from the enrichment fetch layer's real caps.
  *
  * Exclusions, in order, before any enrichment: cross-repository forks
  * (`head.repo.full_name` ≠ `{owner}/{repo}` — the #142 contract, reason
@@ -219,8 +230,11 @@ export async function fetchMergeCandidates(
 ): Promise<CandidateFetchResult> {
   const { gh, owner, repo } = deps;
   // The ONE listing read (shared with listOpenPrs): validation, pagination,
-  // slurp normalization, and the page-level truncation flag all live there.
-  const { rows, truncated: listTruncated } = await listOpenPulls({ gh, owner, repo });
+  // and slurp normalization all live there. Its truncation flag is false by
+  // contract (unbounded --paginate — see OpenPullListing) and is
+  // deliberately NOT read here: the candidate's fail-closed truncation
+  // comes only from the enrichment layer below.
+  const { rows } = await listOpenPulls({ gh, owner, repo });
 
   const candidates: MergePrsCandidate[] = [];
   const excluded: ExcludedCandidate[] = [];
@@ -252,6 +266,17 @@ export async function fetchMergeCandidates(
     // Enrichment under per-PR fault isolation: a bad PR is excluded with a
     // one-line reason; the run (and its sibling PRs) carries on.
     try {
+      // Mergeability is computed LAZILY by GitHub: the LIST-pulls rows often
+      // carry mergeable_state as null/unknown, so the honest source is the
+      // SINGLE-PR endpoint (mirroring the live drill's fetchOne) — its
+      // computed mergeable_state is what maps below, and convergence comes
+      // from the next scheduled run re-reading it once GitHub has finished
+      // computing. `mergeable` rides the same payload; a null/absent/
+      // uncomputed state needs no separate handling — the mapping fails
+      // closed to 'UNKNOWN'.
+      const pullWire = asRecord(
+        await ghJson<unknown>(gh, ['api', `repos/${owner}/${repo}/pulls/${String(pr)}`]),
+      );
       const head = asRecord(pull['head']);
       const sha = asString(head['sha']);
       let lastCommitAt: string | null = null;
@@ -276,11 +301,13 @@ export async function fetchMergeCandidates(
         pr,
         authorLogin: asString(asRecord(pull['user'])['login']) || null,
         draft: false,
-        mergeState: toMergeState(pull['mergeable_state']),
-        // BOTH fail-closed flags survive: the listing's page-level doubt OR
-        // fetchReviewState's cap/lag reasons — losing either would let a
-        // partial read masquerade as complete evidence.
-        truncated: listTruncated || reviewState.truncated,
+        mergeState: toMergeState(pullWire['mergeable_state']),
+        // Truncated is true ONLY from an actual truncation signal —
+        // fetchReviewState's cap/lag flags, the one layer with a real page
+        // cap. The listing read is unbounded (--paginate), so it carries no
+        // listing truncation and nothing rides in from it (see
+        // OpenPullListing's contract).
+        truncated: reviewState.truncated,
         threads: reviewState.threads,
         reviews: reviewState.reviews,
         // The PR's flat general conversation (row 7's evidence); the flat

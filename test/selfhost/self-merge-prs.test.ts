@@ -78,6 +78,11 @@ const fetchGh =
     if (path.startsWith(`repos/${REPO_PATH}/commits/`)) {
       return json(commitPayload('2026-01-02T00:00:00Z'));
     }
+    if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(path)) {
+      // The single-PR enrichment GET — mergeable_state's authoritative
+      // source (candidates.ts reads it there, not off the list row).
+      return json({ mergeable: false, mergeable_state: 'dirty' });
+    }
     if (path === 'graphql') {
       const prEntry = args.find((a) => a.startsWith('pr='));
       const pr = prEntry === undefined ? 0 : Number(prEntry.slice('pr='.length));

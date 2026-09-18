@@ -81,6 +81,26 @@ jobs:
         run: npm ci
       - name: Build from source
         run: npm run build
+      # DURABLE vs EPHEMERAL under .selfhost/journal: the conflict agent's
+      # SessionStore (journal/sessions — the entry's buildRunInput puts it
+      # there) is the resume memory — an interrupted conflict agent's
+      # session must be resumable by the next scheduled run, so this step
+      # persists the journal root between runs (each run saves under its
+      # own run-id key; the next run restores by the state- prefix).
+      # Deliberately ephemeral: per-run audit trails ride along but are not
+      # the point, and the conflict worktrees are NOT cached — they live
+      # OUTSIDE the journal, and cached worktree paths go stale as main
+      # advances (a fresh worktree is prepared per resolution). Restore
+      # runs at this step, before the run step; the save rides the action's
+      # post phase — after the run step, failure included (an interrupted
+      # conflict agent's session is exactly what the next run must resume).
+      - name: Restore the journal state (conflict-agent session store)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
+        with:
+          path: .selfhost/journal
+          key: self-merge-prs-state-${{ github.run_id }}
+          restore-keys: |
+            self-merge-prs-state-
       - name: Classify and merge eligible PRs (dist/selfhost/self-merge-prs.js)
         env:
           # Step-scoped on purpose (the live-review.yml round-3
@@ -110,11 +130,14 @@ jobs:
           set -euo pipefail
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
           test -n "$Z_AI_API_KEY" || { echo 'Z_AI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
-          ARGS="--repo $GH_REPO"
+          # Bash ARRAY, never a string: the expansions stay single words
+          # even if a future value carries spaces (an unquoted $ARGS
+          # word-splits).
+          ARGS=(--repo "$GH_REPO")
           if [ -n "$MAX_USD" ]; then
-            ARGS="$ARGS --max-usd $MAX_USD"
+            ARGS+=(--max-usd "$MAX_USD")
           fi
           if [ "$DRY_RUN" = "true" ]; then
-            ARGS="$ARGS --dry-run"
+            ARGS+=(--dry-run)
           fi
-          node dist/selfhost/self-merge-prs.js $ARGS | tee "$GITHUB_STEP_SUMMARY"
+          node dist/selfhost/self-merge-prs.js "${ARGS[@]}" | tee "$GITHUB_STEP_SUMMARY"

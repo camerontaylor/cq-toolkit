@@ -4,25 +4,30 @@
 //
 // Pinned here:
 //   1. Happy-path wire mapping: ONE open PR → a full MergePrsCandidate —
-//      REST listing fields (number/author/draft/mergeable_state/head/base),
-//      the head-commit timestamp from the REST commits read, and
-//      threads/reviews/issueComments from a faked fetchReviewState payload
-//      (GraphQL wire shapes copied from
+//      REST listing fields (number/author/draft/head/base), the computed
+//      mergeable_state from the SINGLE-PR endpoint (the list rows carry it
+//      only lazily-computed), the head-commit timestamp from the REST
+//      commits read, and threads/reviews/issueComments from a faked
+//      fetchReviewState payload (GraphQL wire shapes copied from
 //      test/ops/review/fetchReviewState.test.ts, including reply-chain
 //      reconstruction from REST).
 //   2. The #142 fork contract: a cross-repository head is excluded with the
 //      exact contract reason and costs zero review-state reads.
 //   3. Draft exclusion, same shape.
-//   4. Fail-closed pagination: a full 100-row page rides truncated=true into
-//      every candidate (and a 99-row page does not) — the flat-array payload
-//      tolerance included.
+//   4. Unbounded pagination carries NO listing truncation: a final page of
+//      exactly 100 rows is an ordinary --paginate outcome (flagging it
+//      would mislabel a fully-paginated fetch as truncated forever), so
+//      candidates ride truncated=false at both 100 and 99 rows.
 //   5. Per-PR fault isolation: a PR whose enrichment fails is excluded with
 //      a one-line `fetch-failed: …` reason while its siblings survive.
-//   6. mergeable_state mapping: known states uppercase through; anything
-//      unknown → 'UNKNOWN' (classifyPr then fails closed to awaiting).
+//   6. mergeable_state comes from the SINGLE-PR payload, not the list row
+//      (the test makes the two disagree); known states uppercase through;
+//      anything unknown or uncomputed → 'UNKNOWN' (classifyPr then fails
+//      closed to awaiting).
 //   7. fetchReviewState's truncation flag is OR-ed into the candidate (the
 //      reviews-lag trap), so a lagging GraphQL snapshot cannot read as
-//      complete.
+//      complete — the one real truncation signal, since the listing is
+//      unbounded.
 //   8. The listing call failing is NOT isolated: it throws (an empty result
 //      would fabricate "nothing open").
 //   9. parseSelfhostArgs: happy overrides, the zero cap, unknown-flag and
@@ -128,6 +133,16 @@ const commitPayload = (date: string) => ({
   commit: { committer: { date }, author: { date } },
 });
 
+/**
+ * The single-PR REST wire (`repos/…/pulls/{n}`) — mergeable_state's
+ * authoritative source. Default: computed clean (the lazy-compute result an
+ * uncontested PR carries).
+ */
+const singlePullPayload = (mergeableState: unknown) => ({
+  mergeable: mergeableState === null ? null : true,
+  mergeable_state: mergeableState,
+});
+
 // ---------------------------------------------------------------------------
 // The fake gh — routes on argv, records every call, fails on demand
 // ---------------------------------------------------------------------------
@@ -135,6 +150,8 @@ const commitPayload = (date: string) => ({
 interface FakeHandlers {
   /** The listing payload — a flat array OR --slurp page arrays, verbatim. */
   list?: () => unknown;
+  /** pr → the single-PR REST payload (mergeable_state's real source). */
+  singlePull?: (pr: number) => unknown;
   /** sha → commits payload. */
   commits?: (sha: string) => unknown;
   /** pr → graphql payload. */
@@ -164,6 +181,10 @@ const fakeGh =
     }
     if (path === `repos/${REPO_PATH}/pulls?state=open&per_page=100`) {
       return json(handlers.list?.() ?? []);
+    }
+    const single = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(path);
+    if (single !== null) {
+      return json(handlers.singlePull?.(Number(single[1])) ?? singlePullPayload('clean'));
     }
     if (path.startsWith(`repos/${REPO_PATH}/commits/`)) {
       const sha = path.slice(`repos/${REPO_PATH}/commits/`.length);
@@ -253,6 +274,8 @@ describe('fetchMergeCandidates', () => {
     ]);
     expect(ranGraphqlFor(calls, 8)).toBe(false);
     expect(calls.some((line) => line.includes('/commits/sha-8'))).toBe(false);
+    // Zero enrichment reads of any kind: the single-PR GET is enrichment too.
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/8`))).toBe(false);
   });
 
   test('draft exclusion: a draft PR is excluded before any enrichment', async () => {
@@ -266,7 +289,7 @@ describe('fetchMergeCandidates', () => {
     expect(ranGraphqlFor(calls, 9)).toBe(false);
   });
 
-  test('pagination truncation: a full 100-row page flags truncated on every candidate; 99 rows do not', async () => {
+  test('unbounded pagination: a final page of exactly 100 rows is NOT truncation — candidates ride truncated=false', async () => {
     const hundred = Array.from({ length: 100 }, (_unused, i) => pullRow(i + 1));
     const full = await fetchMergeCandidates({
       gh: fakeGh({ list: () => hundred }), // FLAT payload — the slurpedComments tolerance
@@ -274,7 +297,10 @@ describe('fetchMergeCandidates', () => {
       repo: REPO,
     });
     expect(full.candidates).toHaveLength(100);
-    expect(full.candidates.every((candidate) => candidate.truncated)).toBe(true);
+    // A full last page is an ordinary --paginate outcome (gh simply fetches
+    // the next page): flagging it truncated would permanently await a
+    // fully-paginated fetch.
+    expect(full.candidates.every((candidate) => candidate.truncated)).toBe(false);
 
     const ninetyNine = await fetchMergeCandidates({
       gh: fakeGh({ list: () => hundred.slice(0, 99) }),
@@ -306,22 +332,37 @@ describe('fetchMergeCandidates', () => {
     expect(graphqlFailure?.reason.startsWith('fetch-failed:')).toBe(true);
   });
 
-  test('mergeable_state mapping: known states uppercase through, unknown strings → UNKNOWN', async () => {
-    const gh = fakeGh({
-      list: () => [
-        pullRow(11, { mergeable_state: 'dirty' }),
-        pullRow(12, { mergeable_state: 'has_hooks' }),
-        pullRow(13, { mergeable_state: 'some-future-state' }),
-      ],
-    });
+  test('mergeable_state comes from the SINGLE-PR endpoint, not the list row; unknown/uncomputed → UNKNOWN', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        list: () => [
+          // The list rows' lazy values DISAGREE with the single-PR payloads
+          // below — the candidates must carry the single endpoint's values.
+          pullRow(11, { mergeable_state: 'dirty' }),
+          pullRow(12, { mergeable_state: 'clean' }),
+          pullRow(13, { mergeable_state: 'clean' }),
+        ],
+        singlePull: (pr) =>
+          pr === 11
+            ? singlePullPayload('blocked')
+            : pr === 12
+              ? singlePullPayload('has_hooks')
+              : singlePullPayload(null), // uncomputed mergeability (mergeable null, no state)
+      },
+      calls,
+    );
 
     const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO });
 
     expect(result.candidates.map((candidate) => candidate.mergeState)).toEqual([
-      'DIRTY',
-      'HAS_HOOKS',
-      'UNKNOWN',
+      'BLOCKED', // the single endpoint's value — not the list row's DIRTY
+      'HAS_HOOKS', // likewise — not the list row's CLEAN
+      'UNKNOWN', // null/uncomputed fails closed
     ]);
+    // Each enriched PR was read through the single-PR REST endpoint.
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/11`))).toBe(true);
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/13`))).toBe(true);
   });
 
   test('fetchReviewState truncation is OR-ed into the candidate (reviews lag → truncated)', async () => {
