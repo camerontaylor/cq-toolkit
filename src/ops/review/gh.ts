@@ -14,7 +14,7 @@
 // owner/repo spelling validator and the `--paginate --slurp` payload
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
-import { isAbsolute, resolve } from 'node:path';
+import { isAbsolute, resolve as pathResolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
 export interface GhResult {
