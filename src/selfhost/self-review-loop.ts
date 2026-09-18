@@ -111,31 +111,57 @@ export interface SelfReviewLoopCfg {
  * `dryRun`/`wouldRun` are present only in dry-run mode: the structural
  * would-run summary (log-safe lines, no titles or bodies), with the
  * pre-loop exclusions (fork/draft/no-number/state-fetch-failure) named.
+ * `excluded` is present only in real-run mode: every listed-but-not-looped
+ * PR (fork, draft, a row without a number) with its reason — the SAME
+ * strings the dry-run path surfaces in its wouldRun lines. A PR absent
+ * from results, failures, AND excluded would be a lie, so the trio is the
+ * contract.
  */
 export interface SelfReviewLoopSummary {
   results: Array<{ pr: number; outcome: ReviewLoopOutcome }>;
   failures: Array<{ pr: number; error: string }>;
   dryRun?: true;
   wouldRun?: string[];
+  excluded?: Array<{ pr: number; reason: string }>;
 }
 
+/** The no-number exclusion reason (shared verbatim by both run modes). */
+const EXCLUDE_NO_NUMBER = 'fetch-failed: listing row without a PR number';
+
+/** The fork exclusion reason (shared verbatim by both run modes). */
+const excludeForked = (headRepoFullName: string): string =>
+  `forked-pr (head repo ${headRepoFullName === '' ? 'unknown' : headRepoFullName})`;
+
+/** The draft exclusion reason (shared verbatim by both run modes). */
+const EXCLUDE_DRAFT = 'draft';
+
 /**
- * The PRs the loop may run on, from one listing row: open is the listing's
- * own filter; same-repo (the #142 contract — the loop only ever works the
- * base repository's branches) and non-draft gate here, before any worktree
- * or dispatch exists.
+ * The pre-loop exclusion reason for a listing row, or null when the row is
+ * loopable: open is the listing's own filter; same-repo (the #142 contract —
+ * the loop only ever works the base repository's branches) and non-draft
+ * gate here, before any worktree or dispatch exists. ONE classifier serves
+ * BOTH run modes — the dry run renders it as a `#<n> excluded <reason>`
+ * wouldRun line, the real run records it as an `excluded` row — so the two
+ * payloads' reason strings can never drift.
  */
-const loopable = (
-  row: { headRepoFullName: string; draft: boolean },
+const preLoopExclusion = (
+  row: { pr: number; headRepoFullName: string; draft: boolean },
   owner: string,
   repo: string,
-): boolean => row.headRepoFullName === `${owner}/${repo}` && !row.draft;
+): string | null => {
+  if (row.pr === 0) return EXCLUDE_NO_NUMBER;
+  if (row.headRepoFullName !== `${owner}/${repo}`) return excludeForked(row.headRepoFullName);
+  if (row.draft) return EXCLUDE_DRAFT;
+  return null;
+};
 
 /**
  * Run the review loop over every open, same-repo, non-draft PR (module doc).
  *
  * Real run: one runReviewLoop per PR with per-PR fault isolation; the run
- * stamp (one clock reading) namespaces each PR's journal dir. Dry run: NO
+ * stamp (one clock reading) namespaces each PR's journal dir; the pre-loop
+ * exclusions (fork/draft/no-number) are RECORDED in `excluded` — same
+ * reason strings as the dry run — never silently skipped. Dry run: NO
  * worktree, NO dispatch, NO loop — only the listing and a per-PR
  * fetchReviewState summary of what WOULD run (a state read failure there is
  * isolated into the wouldRun lines, never fatal — the dry run must sketch,
@@ -159,17 +185,9 @@ export async function runSelfReviewLoop(
   if (cfg.dryRun === true) {
     const wouldRun: string[] = [];
     for (const row of rows) {
-      if (row.pr === 0) {
-        wouldRun.push('#0 excluded fetch-failed: listing row without a PR number');
-        continue;
-      }
-      if (row.headRepoFullName !== `${cfg.owner}/${cfg.repo}`) {
-        const shown = row.headRepoFullName === '' ? 'unknown' : row.headRepoFullName;
-        wouldRun.push(`#${String(row.pr)} excluded forked-pr (head repo ${shown})`);
-        continue;
-      }
-      if (row.draft) {
-        wouldRun.push(`#${String(row.pr)} excluded draft`);
+      const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo);
+      if (exclusion !== null) {
+        wouldRun.push(`#${String(row.pr)} excluded ${exclusion}`);
         continue;
       }
       try {
@@ -197,9 +215,16 @@ export async function runSelfReviewLoop(
   const stamp = deps.nowMs();
   const results: Array<{ pr: number; outcome: ReviewLoopOutcome }> = [];
   const failures: Array<{ pr: number; error: string }> = [];
+  const excluded: Array<{ pr: number; reason: string }> = [];
   for (const row of rows) {
-    if (row.pr === 0 || !loopable(row, cfg.owner, cfg.repo)) {
-      continue; // not loopable (fork/draft/no-number) — the dry run names these; the real run skips them
+    // The pre-loop gates RECORD, not skip: every listed-but-not-looped PR
+    // (fork/draft/no-number) rides out in `excluded` with the same reason
+    // strings the dry run surfaces — a silent skip would orphan the PR from
+    // the summary (an absent row is a lie, not a shrug).
+    const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo);
+    if (exclusion !== null) {
+      excluded.push({ pr: row.pr, reason: exclusion });
+      continue;
     }
     const opts: ReviewLoopOpts = {
       owner: cfg.owner,
@@ -236,7 +261,7 @@ export async function runSelfReviewLoop(
       });
     }
   }
-  return { results, failures };
+  return { results, failures, excluded };
 }
 
 /**
@@ -286,6 +311,10 @@ async function main(): Promise<void> {
       reasons: row.outcome.reasons,
     })),
     failures: summary.failures,
+    // The real run's pre-loop exclusions (fork/draft/no-number), same
+    // reason strings the dry run names in wouldRun ([] in dry-run mode,
+    // whose exclusions ride the wouldRun lines).
+    excluded: summary.excluded ?? [],
   };
   process.stdout.write(`${JSON.stringify(payload)}\n`);
   // Prominent, not buried: every failure is echoed as its own stderr line —

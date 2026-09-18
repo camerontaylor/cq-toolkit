@@ -5,7 +5,9 @@
 // the e2e lanes' suites — this file pins the DEPLOYMENT WIRING):
 //   1. The real listing path: the injected fake gh answers the shared REST
 //      listing (candidates.ts's listOpenPrs) and the entry loops exactly the
-//      open, same-repo, non-draft PRs (forks/drafts are skipped).
+//      open, same-repo, non-draft PRs (forks/drafts/no-number rows are
+//      RECORDED as `excluded` rows — the real run's payload carries the same
+//      reason strings the dry run surfaces in wouldRun).
 //   2. Per-PR fault isolation: the first PR's loop resolves, the second
 //      THROWS — one result row, one failure row with the message, no crash.
 //   3. Opt passthrough: responderLogin, the maxUsd default AND override, the
@@ -158,9 +160,15 @@ describe('runSelfReviewLoop — real run', () => {
       baseCfg({ journalRoot: '/journal' }),
     );
 
-    // Only PRs 7 and 10 were loopable; both resolved.
+    // Only PRs 7 and 10 were loopable; both resolved. The skipped rows are
+    // RECORDED, not silently dropped: the real run's `excluded` rows carry
+    // the same reason strings the dry run surfaces.
     expect(summary.results.map((row) => row.pr)).toEqual([7, 10]);
     expect(summary.failures).toEqual([]);
+    expect(summary.excluded).toEqual([
+      { pr: 8, reason: 'draft' },
+      { pr: 9, reason: 'forked-pr (head repo octo/fork)' },
+    ]);
     expect(calls).toHaveLength(2);
 
     const first = calls[0]?.opts;
@@ -234,6 +242,26 @@ describe('runSelfReviewLoop — real run', () => {
     expect(calls).toHaveLength(2); // the sibling was still attempted
   });
 
+  test('a listing row without a PR number is recorded as excluded, not silently skipped', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([
+      { state: 'open', draft: false, head: { ref: 'x', sha: 's', repo: { full_name: REPO_PATH } } },
+      pullRow(7),
+    ]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: '/j' }),
+    );
+    expect(summary.excluded).toEqual([
+      { pr: 0, reason: 'fetch-failed: listing row without a PR number' },
+    ]);
+    expect(summary.results.map((row) => row.pr)).toEqual([7]);
+    expect(calls).toHaveLength(1); // only the numbered PR reached the loop
+  });
+
   test('driverRegistryView injection rides through to the loop opts', async () => {
     const calls: RecordedCall[] = [];
     const view: OpRegistryView = { get: () => undefined };
@@ -270,6 +298,9 @@ describe('runSelfReviewLoop — dry run', () => {
     expect(summary.results).toEqual([]);
     expect(summary.failures).toEqual([]);
     expect(summary.dryRun).toBe(true);
+    // Dry-run mode carries NO excluded rows — the exclusions ride the
+    // wouldRun lines (the real run's shape, mirrored below).
+    expect(summary.excluded).toBeUndefined();
     expect(summary.wouldRun).toEqual([
       '#7 would-run head=pr-7 threads=0 reviews=0 issueComments=0 truncated=false',
       '#9 excluded draft',

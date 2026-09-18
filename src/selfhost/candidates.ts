@@ -215,12 +215,16 @@ export async function listOpenPrs(deps: {
  * truncation flag is false by contract and the candidate's truncation comes
  * ONLY from the enrichment fetch layer's real caps.
  *
- * Exclusions, in order, before any enrichment: cross-repository forks
- * (`head.repo.full_name` ≠ `{owner}/{repo}` — the #142 contract, reason
- * names the head repo) and drafts. A PR whose enrichment throws is
- * excluded with `fetch-failed: <one line>` — isolated, never fatal to its
- * siblings (see the module doc). Owner/repo are validated against the
- * shared ghNameOk charset + dot-segment rule before any path is built.
+ * Exclusions, in order: cross-repository forks (`head.repo.full_name` ≠
+ * `{owner}/{repo}` — the #142 contract, reason names the head repo) and
+ * drafts, gated TWICE — cheaply on the listing row before any read (a
+ * forked or draft row costs zero enrichment), then RE-BOUND inside
+ * enrichment to the fresh single-PR payload (the authoritative read — a row
+ * that went stale between listing and GET loses to it; see the enrichment
+ * comment). A PR whose enrichment throws is excluded with
+ * `fetch-failed: <one line>` — isolated, never fatal to its siblings (see
+ * the module doc). Owner/repo are validated against the shared ghNameOk
+ * charset + dot-segment rule before any path is built.
  *
  * Throws ONLY when the listing itself fails (GhError or an unparseable
  * payload) — with no page of truth there is no honest result to return.
@@ -249,6 +253,9 @@ export async function fetchMergeCandidates(
 
     // Fork gate FIRST (the #142 contract), then the draft gate — both are
     // pre-enrichment so a forked or draft PR costs zero review-state reads.
+    // These bind to the LISTING row (a cheap short-circuit); the same gates
+    // re-bind to the authoritative single-PR payload below, inside
+    // enrichment, because a row can go stale between listing and GET.
     const headRepoFullName = asString(asRecord(asRecord(pull['head'])['repo'])['full_name']);
     if (headRepoFullName !== `${owner}/${repo}`) {
       const shown = headRepoFullName === '' ? 'unknown' : headRepoFullName;
@@ -266,19 +273,39 @@ export async function fetchMergeCandidates(
     // Enrichment under per-PR fault isolation: a bad PR is excluded with a
     // one-line reason; the run (and its sibling PRs) carries on.
     try {
-      // Mergeability is computed LAZILY by GitHub: the LIST-pulls rows often
-      // carry mergeable_state as null/unknown, so the honest source is the
-      // SINGLE-PR endpoint (mirroring the live drill's fetchOne) — its
-      // computed mergeable_state is what maps below, and convergence comes
-      // from the next scheduled run re-reading it once GitHub has finished
-      // computing. `mergeable` rides the same payload; a null/absent/
-      // uncomputed state needs no separate handling — the mapping fails
-      // closed to 'UNKNOWN'.
+      // The SINGLE-PR endpoint (mirroring the live drill's fetchOne) is the
+      // AUTHORITATIVE payload for every per-PR eligibility field: head
+      // SHA/ref, base ref, draft flag, the fork gate's head repo, and
+      // mergeable_state. The LIST-pulls rows carry these only as-of listing
+      // time — and mergeable_state there is additionally lazy (often
+      // null/unknown until GitHub computes it) — so the mapping below rides
+      // `pullWire`, never the row; a stale row (rebase, draft conversion,
+      // fork retarget) loses to the fresh read, and convergence comes from
+      // the next scheduled run re-reading it. `mergeable` rides the same
+      // payload; a null/absent/uncomputed state needs no separate handling —
+      // the mapping fails closed to 'UNKNOWN'.
       const pullWire = asRecord(
         await ghJson<unknown>(gh, ['api', `repos/${owner}/${repo}/pulls/${String(pr)}`]),
       );
-      const head = asRecord(pull['head']);
-      const sha = asString(head['sha']);
+      // The fork and draft gates RE-BOUND to the fresh payload (same
+      // reasons, the authoritative fields): a PR that became a fork head or
+      // a draft after the listing is excluded here, before any further
+      // enrichment read.
+      const wireHead = asRecord(pullWire['head']);
+      const wireHeadRepo = asString(asRecord(wireHead['repo'])['full_name']);
+      if (wireHeadRepo !== `${owner}/${repo}`) {
+        const shown = wireHeadRepo === '' ? 'unknown' : wireHeadRepo;
+        excluded.push({
+          pr,
+          reason: `forked-pr (head repo ${shown}) — #142 contract: forked PRs are excluded and must be handled by a human`,
+        });
+        continue;
+      }
+      if (pullWire['draft'] === true) {
+        excluded.push({ pr, reason: 'draft' });
+        continue;
+      }
+      const sha = asString(wireHead['sha']);
       let lastCommitAt: string | null = null;
       if (sha !== '') {
         const commitWire = asRecord(
@@ -300,7 +327,9 @@ export async function fetchMergeCandidates(
       candidates.push({
         pr,
         authorLogin: asString(asRecord(pull['user'])['login']) || null,
-        draft: false,
+        // Post-gate the payload's draft flag is false — but it rides the
+        // authoritative payload, never a hardcoded assumption.
+        draft: pullWire['draft'] === true,
         mergeState: toMergeState(pullWire['mergeable_state']),
         // Truncated is true ONLY from an actual truncation signal —
         // fetchReviewState's cap/lag flags, the one layer with a real page
@@ -315,8 +344,8 @@ export async function fetchMergeCandidates(
         // chains by fetchReviewState itself.
         issueComments: reviewState.restIssueComments,
         lastCommitAt,
-        headRefName: asString(head['ref']),
-        baseRefName: asString(asRecord(pull['base'])['ref']),
+        headRefName: asString(wireHead['ref']),
+        baseRefName: asString(asRecord(pullWire['base'])['ref']),
         state: asString(pull['state']) === 'open' ? 'open' : 'closed',
       });
     } catch (error) {

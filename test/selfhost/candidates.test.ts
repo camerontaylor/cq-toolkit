@@ -32,6 +32,10 @@
 //      would fabricate "nothing open").
 //   9. parseSelfhostArgs: happy overrides, the zero cap, unknown-flag and
 //      malformed/negative --max-usd throws with usage.
+//  10. The fork/draft gates re-bind to the SINGLE-PR payload: when the
+//      listing row and the payload disagree on draft/fork fields, the
+//      payload wins (and the candidate's head/base fields ride the payload
+//      too, the commits read included).
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv, recording every
 // call) — no spawned process anywhere.
@@ -134,13 +138,34 @@ const commitPayload = (date: string) => ({
 });
 
 /**
- * The single-PR REST wire (`repos/…/pulls/{n}`) — mergeable_state's
- * authoritative source. Default: computed clean (the lazy-compute result an
- * uncontested PR carries).
+ * The single-PR REST wire (`repos/…/pulls/{n}`) — the AUTHORITATIVE payload
+ * for every per-PR eligibility field (mergeable_state, head SHA/ref, base
+ * ref, draft, head repo), not just mergeability. Default: computed clean
+ * (the lazy-compute result an uncontested PR carries) with the same-repo
+ * head/base the listing row carries; the overrides model row/payload drift
+ * (a draft conversion, a fork retarget, a rename between listing and GET).
  */
-const singlePullPayload = (mergeableState: unknown) => ({
+const singlePullPayload = (
+  pr: number,
+  mergeableState: unknown,
+  overrides?: {
+    draft?: boolean;
+    headRepo?: string;
+    headRef?: string;
+    headSha?: string;
+    baseRef?: string;
+  },
+) => ({
+  state: 'open',
+  draft: overrides?.draft ?? false,
   mergeable: mergeableState === null ? null : true,
   mergeable_state: mergeableState,
+  head: {
+    ref: overrides?.headRef ?? `pr-${String(pr)}`,
+    sha: overrides?.headSha ?? `sha-${String(pr)}`,
+    repo: { full_name: overrides?.headRepo ?? REPO_PATH },
+  },
+  base: { ref: overrides?.baseRef ?? 'merge-queue' },
 });
 
 // ---------------------------------------------------------------------------
@@ -184,7 +209,9 @@ const fakeGh =
     }
     const single = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(path);
     if (single !== null) {
-      return json(handlers.singlePull?.(Number(single[1])) ?? singlePullPayload('clean'));
+      return json(
+        handlers.singlePull?.(Number(single[1])) ?? singlePullPayload(Number(single[1]), 'clean'),
+      );
     }
     if (path.startsWith(`repos/${REPO_PATH}/commits/`)) {
       const sha = path.slice(`repos/${REPO_PATH}/commits/`.length);
@@ -345,10 +372,10 @@ describe('fetchMergeCandidates', () => {
         ],
         singlePull: (pr) =>
           pr === 11
-            ? singlePullPayload('blocked')
+            ? singlePullPayload(11, 'blocked')
             : pr === 12
-              ? singlePullPayload('has_hooks')
-              : singlePullPayload(null), // uncomputed mergeability (mergeable null, no state)
+              ? singlePullPayload(12, 'has_hooks')
+              : singlePullPayload(13, null), // uncomputed mergeability (mergeable null, no state)
       },
       calls,
     );
@@ -363,6 +390,59 @@ describe('fetchMergeCandidates', () => {
     // Each enriched PR was read through the single-PR REST endpoint.
     expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/11`))).toBe(true);
     expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/13`))).toBe(true);
+  });
+
+  test('fork/draft gates and head/base fields ride the SINGLE-PR payload when the listing row disagrees', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        // The listing says all three are same-repo, non-draft, head
+        // `pr-<n>`/`sha-<n>`, base merge-queue. The single-PR payloads
+        // DISAGREE — the payload must win everywhere.
+        list: () => [pullRow(21), pullRow(22), pullRow(23)],
+        singlePull: (pr) => {
+          if (pr === 21) return singlePullPayload(21, 'clean', { headRepo: 'octo/fork' }); // rebased onto a fork head after the listing
+          if (pr === 22) return singlePullPayload(22, 'clean', { draft: true }); // converted to draft after the listing
+          // Head renamed/re-based since the listing — the candidate and the
+          // commits read must ride the payload's refs, not the row's.
+          return singlePullPayload(23, 'clean', {
+            headRef: 'pr-23-renamed',
+            headSha: 'sha-23-fresh',
+            baseRef: 'rebase-target',
+          });
+        },
+        commits: (sha) => commitPayload(sha === 'sha-23-fresh' ? '2026-01-03T00:00:00Z' : 'x'),
+      },
+      calls,
+    );
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO });
+
+    // The fresh fork and draft gates fired, with the SAME reason strings the
+    // listing-row gates carry.
+    expect(result.candidates.map((candidate) => candidate.pr)).toEqual([23]);
+    expect(result.excluded).toEqual([
+      {
+        pr: 21,
+        reason:
+          'forked-pr (head repo octo/fork) — #142 contract: forked PRs are excluded and must be handled by a human',
+      },
+      { pr: 22, reason: 'draft' },
+    ]);
+    // Both re-gates fired AFTER the single-PR GET but BEFORE any further
+    // enrichment read (the GET is the one read a stale-row survivor pays).
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/21`))).toBe(true);
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/22`))).toBe(true);
+    expect(ranGraphqlFor(calls, 21)).toBe(false);
+    expect(ranGraphqlFor(calls, 22)).toBe(false);
+    // The surviving candidate's structural fields came from the PAYLOAD:
+    expect(result.candidates[0]?.headRefName).toBe('pr-23-renamed');
+    expect(result.candidates[0]?.baseRefName).toBe('rebase-target');
+    expect(result.candidates[0]?.lastCommitAt).toBe('2026-01-03T00:00:00Z');
+    // ...including the head SHA the commits read rode (never the row's
+    // stale sha-23).
+    expect(calls.some((line) => line.endsWith(`/commits/sha-23-fresh`))).toBe(true);
+    expect(calls.some((line) => line.endsWith(`/commits/sha-23`))).toBe(false);
   });
 
   test('fetchReviewState truncation is OR-ed into the candidate (reviews lag → truncated)', async () => {

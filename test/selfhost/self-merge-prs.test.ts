@@ -79,9 +79,19 @@ const fetchGh =
       return json(commitPayload('2026-01-02T00:00:00Z'));
     }
     if (/^repos\/[^/]+\/[^/]+\/pulls\/\d+$/.test(path)) {
-      // The single-PR enrichment GET — mergeable_state's authoritative
-      // source (candidates.ts reads it there, not off the list row).
-      return json({ mergeable: false, mergeable_state: 'dirty' });
+      // The single-PR enrichment GET — the authoritative payload for
+      // mergeable_state AND every eligibility field (candidates.ts
+      // re-binds its fork/draft gates to it), so the fake carries the full
+      // same-repo, non-draft wire shape, not just the state.
+      const pr = Number(path.slice(path.lastIndexOf('/') + 1));
+      return json({
+        state: 'open',
+        draft: false,
+        mergeable: false,
+        mergeable_state: 'dirty',
+        head: { ref: `pr-${String(pr)}`, sha: `sha-${String(pr)}`, repo: { full_name: REPO_PATH } },
+        base: { ref: 'merge-queue' },
+      });
     }
     if (path === 'graphql') {
       const prEntry = args.find((a) => a.startsWith('pr='));

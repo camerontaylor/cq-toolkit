@@ -106,11 +106,13 @@ jobs:
       # the point, and the conflict worktrees are NOT cached — they live
       # OUTSIDE the journal, and cached worktree paths go stale as main
       # advances (a fresh worktree is prepared per resolution). Restore
-      # runs at this step, before the run step; the save rides the action's
-      # post phase — after the run step, failure included (an interrupted
-      # conflict agent's session is exactly what the next run must resume).
+      # runs at this step, before the run step; the save is a SEPARATE
+      # actions/cache/save step AFTER the run step, gated `if: always()` —
+      # the combined action's post-save runs only on job success, so a
+      # failed run would lose exactly the session state the next run must
+      # resume from.
       - name: Restore the journal state (conflict-agent session store)
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
         with:
           path: .selfhost/journal
           key: self-merge-prs-state-${{ github.run_id }}
@@ -155,3 +157,10 @@ jobs:
             ARGS+=(--dry-run)
           fi
           node dist/selfhost/self-merge-prs.js "${ARGS[@]}" | tee "$GITHUB_STEP_SUMMARY"
+      # always() persists a failed run's journal (a success-only post-save would lose the exact session state the next run resumes from); the rolling restore-keys prefix keeps newest state winning.
+      - name: Save the journal state (conflict-agent session store)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
+        if: always()
+        with:
+          path: .selfhost/journal
+          key: self-merge-prs-state-${{ github.run_id }}
