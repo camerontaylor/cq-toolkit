@@ -340,6 +340,25 @@ describe('renderUnifiedDiff (synthesized hunks, exact at the edit sites)', () =>
     );
   });
 
+  test('a between-lines boundary insertion renders the following line rewritten (r3 review)', () => {
+    // A zero-width insertion AT a line boundary probes an empty window and
+    // extends over the FOLLOWING line: the diff shows `-beta` / `+Xbeta`
+    // (the insertion becomes visible instead of the old invisible-prepend).
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('alpha\nbeta\n', 'utf8'), [
+      { file: 'src/a.ts', startByte: 6, endByte: 6, replacement: 'X' },
+    ]);
+    expect(diff).toBe(
+      [
+        '--- src/a.ts\n',
+        '+++ src/a.ts\n',
+        '@@ -1,2 +1,2 @@\n',
+        ' alpha\n',
+        '-beta\n',
+        '+Xbeta\n',
+      ].join(''),
+    );
+  });
+
   test('a CRLF newline-only deletion joins the lines, CR preserved in the text (r2 review)', () => {
     // CRLF files: the extension predicate fires on the \n half; the CR is
     // ordinary text and survives inside the joined line.

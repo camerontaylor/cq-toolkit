@@ -449,12 +449,16 @@ function diffSegments(currentBytes: Uint8Array, edits: readonly PlannedEdit[]): 
         endByte: edit.endByte - blockStart,
       })),
     );
-    // A zero-width boundary-insertion block (the defensive branch above)
-    // also passes through here: its block text is non-empty and — when the
-    // insertion is at EOF without a newline — loses the trailing newline,
-    // so the extension renders the rewritten last line (which FIXES the old
-    // invisible-prepend rendering). A boundary insertion BETWEEN newline-
-    // terminated lines keeps the newline and never extends.
+    // Zero-width boundary-insertion blocks (the defensive branch above)
+    // also pass through here, and the extension is what makes them render
+    // at all: an insertion BETWEEN newline-terminated lines probes an EMPTY
+    // window (blockStart == blockEnd at the boundary), so the spliced text
+    // is the bare insertion — non-empty, newline-less — and the block
+    // extends over the FOLLOWING line, rendering `-line` / `+Xline` (which
+    // fixes the old invisible-prepend rendering). An EOF insertion into a
+    // file NOT ending in a newline never reaches the extension (the
+    // `!lastLine.endsWithNewline` guard skips it — the rewrite there comes
+    // from the pre-existing EOF clamp).
     // Extend ONLY on a true JOIN: the spliced content must be non-empty
     // (a block whose bytes were deleted outright — a full-line deletion —
     // joins nothing; the next line merely moves up and must stay context)
