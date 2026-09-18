@@ -51,6 +51,7 @@ describe('makeGhRunner', () => {
   }, 10_000);
 
   test('unsetEnv strips an INHERITED name; an explicit env entry survives the strip (review-debt #163)', async () => {
+    const previousProbeRepo = process.env.CQ_GH_PROBE_REPO;
     process.env.CQ_GH_PROBE_REPO = 'inherited/wrong-repo';
     const bin = await tempBin(
       'env-echo.mjs',
@@ -73,7 +74,8 @@ describe('makeGhRunner', () => {
       })([]);
       expect(explicit.stdout).toBe('explicit/kept');
     } finally {
-      delete process.env.CQ_GH_PROBE_REPO;
+      if (previousProbeRepo === undefined) delete process.env.CQ_GH_PROBE_REPO;
+      else process.env.CQ_GH_PROBE_REPO = previousProbeRepo;
     }
   }, 10_000);
 
