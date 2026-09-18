@@ -1,0 +1,120 @@
+# instantiated from policy/templates/self-host/self-merge-prs.yml — edit the template, not this file
+#
+# The self-hosting merge-dispatch automation (ws-k stage 2, item 7): the
+# repo's own open PRs are classified → planned → executed THROUGH THE
+# GOVERNED KERNEL — fetchMergeCandidates → makeMergePrsPlan's single
+# 'merge-prs-run' job → BudgetGovernor over governorConfig → runPlan →
+# withBudgetStop, exactly the recorded src/cli/run-plan.ts composition,
+# with the frozen SelfhostDefaults as the caps.
+#
+# I2 (no-privileged-reviewer acceptance) governs the repo's OWN merges —
+# and with ONE GitHub identity every automation-eligible PR classifies
+# `awaiting`: the lane leader hand-merges it after full gates and records
+# it in SELF-HOSTING.md (repo root). THE RECORDED DEVIATION: an
+# intervention is not a failure — a silent stall is. Scheduled runs carry
+# the maxUsd budget cap (I9 — an honest, reported stop) and the governor
+# wall-clock ladder (#137's arming: a wedged conflict-agent job is
+# escalated by the ladder instead of stalling the slot).
+name: self-merge-prs
+
+on:
+  schedule:
+    # OWNER-MANDATED WINDOW (the window rule is binding): 15:00–01:00 UTC =
+    # 23:00–09:00 Asia/Singapore — automation idles across Z.AI's GLM
+    # peak-hour window (14:00–18:00 SGT), where quota consumption
+    # multiplies (~3×). 01:00 UTC is deliberately EXCLUDED: 09:00 SGT is
+    # the hard stop — no operation is initiated at or after it (the second
+    # cron's last fire is 00:45 UTC = 08:45 SGT).
+    - cron: '*/15 15-23 * * *'
+    - cron: '0,15,30,45 0 * * *'
+  workflow_dispatch:
+    inputs:
+      max_usd:
+        description: USD cap override for this run ('' = config default, SelfhostDefaults.maxUsd)
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: Fetch + classify only — never build the plan, never execute a merge
+        required: false
+        default: false
+        type: boolean
+
+# A cancelled mid-run merge could strand a half-executed plan — a queued
+# run waits rather than kills the in-flight dispatch (same discipline as
+# live-review.yml and self-review-loop.yml). Fixed group, not per-ref:
+# this workflow never fires on PRs, so there is nothing per-ref to isolate.
+concurrency:
+  group: self-merge-prs
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  self-merge-prs:
+    runs-on: ubuntu-latest
+    # The stage-2 switch gives automation ONE ≤20-minute run per slot; the
+    # next slot re-enters with the persisted journal.
+    timeout-minutes: 20
+    steps:
+      - name: Check out main (trusted code only)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # PINNED TO MAIN: schedule/dispatch always run main's trusted code
+          # under GH_TOKEN — workflow_dispatch accepts any write-
+          # collaborator's branch as ref, and that branch's code must never
+          # execute here. Branches are validated LOCALLY pre-merge (two
+          # CodeRabbit cycles + the gates); the automation runs only merged
+          # main.
+          ref: main
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout; gh rides GH_TOKEN, not the checkout
+          # credential.
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build from source
+        run: npm run build
+      - name: Classify and merge eligible PRs (dist/selfhost/self-merge-prs.js)
+        env:
+          # Step-scoped on purpose (the live-review.yml round-3
+          # discipline): the token must never reach npm ci's lifecycle
+          # scripts — it reaches ONLY this step.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # The conflict agent is a real worker: RunMergePrsInput.modelSpec
+          # is set from SelfhostDefaults.driver, and its dispatches ride
+          # the same ai-sdk route as the review loop's fix workers — so the
+          # driver key and its presence assert ride here too.
+          Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
+          # gh resolves the repo from the environment (effects never pass
+          # -R); the entry also receives --repo $GH_REPO explicitly.
+          GH_REPO: ${{ github.repository }}
+          # Env-indirection doctrine: inputs reach the script as env vars,
+          # never as interpolated text. Both are '' on schedule events.
+          MAX_USD: ${{ inputs.max_usd }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          # main()'s contract (src/selfhost/self-merge-prs.ts): ONE compact
+          # JSON payload on stdout; exit 0 even when rows come back
+          # needs-human or budget-stopped — honest outcomes are the
+          # contract (needs-human rows mirrored to stderr for the workflow
+          # log); only a whole-run throw (bad args, a failed listing fetch)
+          # exits 1. pipefail below turns that throw into a red step
+          # despite tee.
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
+          test -n "$Z_AI_API_KEY" || { echo 'Z_AI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
+          ARGS="--repo $GH_REPO"
+          if [ -n "$MAX_USD" ]; then
+            ARGS="$ARGS --max-usd $MAX_USD"
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          node dist/selfhost/self-merge-prs.js $ARGS | tee "$GITHUB_STEP_SUMMARY"
