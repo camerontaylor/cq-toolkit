@@ -419,6 +419,66 @@ function diffSegments(currentBytes: Uint8Array, edits: readonly PlannedEdit[]): 
       blocks.push({ startLine, endLine, edits: [edit] });
     }
   }
+  // NEWLINE-JOIN EXTENSION (review-debt #159): a plan that deletes or
+  // replaces ONLY a block's trailing newline JOINS the block's last line
+  // with the next one — rendered as a one-line block, the join is invisible
+  // (the joined neighbor appears as unchanged context and the resulting
+  // line is never shown). When the spliced block bytes lose the trailing
+  // newline their old bytes had and a next line exists, extend the block
+  // over the joined line — the edits' relative offsets stay valid (they
+  // sit inside the old block, a subset of the extended range) — then
+  // re-merge blocks the extension made to touch. Display-only cost: the
+  // segments walk below re-splices each block (the write path splices the
+  // whole file once, independently of this renderer).
+  for (const block of blocks) {
+    const delEnd = Math.min(block.endLine, oldLines.length);
+    const lastLine = oldLines[delEnd - 1];
+    if (lastLine === undefined || !lastLine.endsWithNewline || delEnd >= oldLines.length) {
+      continue;
+    }
+    const blockStart = lineStarts[block.startLine] as number;
+    const blockEnd =
+      (lineStarts[delEnd - 1] as number) +
+      Buffer.byteLength(lastLine.text, 'utf8') +
+      (lastLine.endsWithNewline ? 1 : 0);
+    const spliced = applyEditsToBytes(
+      currentBytes.subarray(blockStart, blockEnd),
+      block.edits.map((edit) => ({
+        ...edit,
+        startByte: edit.startByte - blockStart,
+        endByte: edit.endByte - blockStart,
+      })),
+    );
+    // Zero-width boundary-insertion blocks (the defensive branch above)
+    // also pass through here, and the extension is what makes them render
+    // at all: an insertion BETWEEN newline-terminated lines probes an EMPTY
+    // window (blockStart == blockEnd at the boundary), so the spliced text
+    // is the bare insertion — non-empty, newline-less — and the block
+    // extends over the FOLLOWING line, rendering `-line` / `+Xline` (which
+    // fixes the old invisible-prepend rendering). An EOF insertion into a
+    // file NOT ending in a newline never reaches the extension (the
+    // `!lastLine.endsWithNewline` guard skips it — the rewrite there comes
+    // from the pre-existing EOF clamp).
+    // Extend ONLY on a true JOIN: the spliced content must be non-empty
+    // (a block whose bytes were deleted outright — a full-line deletion —
+    // joins nothing; the next line merely moves up and must stay context)
+    // and must have lost the trailing newline (the newline the old block
+    // carried is what glued it to the next line).
+    const splicedText = Buffer.from(spliced).toString('utf8');
+    if (splicedText !== '' && !splicedText.endsWith('\n')) block.endLine += 1;
+  }
+  const merged: typeof blocks = [];
+  for (const block of blocks) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && block.startLine <= last.endLine) {
+      last.endLine = Math.max(last.endLine, block.endLine);
+      last.edits.push(...block.edits);
+    } else {
+      merged.push(block);
+    }
+  }
+  blocks.length = 0;
+  blocks.push(...merged);
   const segments: DiffLine[] = [];
   let oldLine = 0;
   for (const block of blocks) {

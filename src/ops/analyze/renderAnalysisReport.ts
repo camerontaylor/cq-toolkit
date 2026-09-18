@@ -9,7 +9,7 @@
 //     {@link renderAnalysisReport} is a pure function of (report, meta) —
 //     stable ordering carried in from the G1 report (clusters by id,
 //     members/noise by exact identity), NO timestamps anywhere in the
-//     content, and the report fingerprint is FNV-1a 32-bit over the
+//     content, and the report fingerprint is SHA-256 truncated to 64 bits over the
 //     canonical report JSON ({@link reportFingerprint}, the G1 hashing
 //     approach: the report's own deterministic ordering makes plain
 //     JSON.stringify canonical, exactly as clusterSignature relies on its
@@ -63,6 +63,7 @@
 //     sidecar writer and reader are this module and applyRemediation) — the
 //     z.ZodType annotations pin the parse to the TypeScript types, so a
 //     shape drift fails typecheck.
+import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
@@ -72,8 +73,15 @@ import { SIGNATURE_MAX_CHARS } from '../ledger/ledger.js';
 import type { Cluster, ClusterErrorsReport } from './clusterErrors.js';
 import type { AnalyzeFileStore } from './analysisStore.js';
 
-/** The sidecar schema version — the only one {@link parseAnalysisSidecar} accepts. */
-export const ANALYSIS_SIDECAR_SCHEMA_VERSION = 1;
+/**
+ * The sidecar schema version — the only one {@link parseAnalysisSidecar}
+ * accepts. Version 2 (review-debt #155): reportFingerprint widened from
+ * 8-hex FNV-1a to 16-hex SHA-256-truncated. Version-1 sidecars are NOT
+ * migrated — they fail parse loudly (wrong version), which is the honest
+ * fate of an analysis artifact from before the handle change; re-run the
+ * analysis instead.
+ */
+export const ANALYSIS_SIDECAR_SCHEMA_VERSION = 2;
 
 /**
  * The per-target-file evidence captured at ANALYSIS time: the file path
@@ -102,7 +110,7 @@ export interface ClusterEvidence {
 /** The published sidecar: schema version, content fingerprint, the report, and the analysis-time evidence. */
 export interface AnalysisSidecar {
   schemaVersion: typeof ANALYSIS_SIDECAR_SCHEMA_VERSION;
-  /** FNV-1a 32-bit over the canonical report JSON ({@link reportFingerprint}). */
+  /** SHA-256 truncated to 64 bits (16 hex) over the canonical report JSON ({@link reportFingerprint}). */
   reportFingerprint: string;
   /** The G1 clustering report — the semantic payload the sidecar exists to carry. */
   report: ClusterErrorsReport;
@@ -125,15 +133,22 @@ export interface RenderedAnalysis {
 }
 
 /**
- * FNV-1a 32-bit over the canonical report JSON — the content-derived handle
- * shared by the sidecar, the deterministic file names, and the op result.
- * Canonicality rides the G1 report's own determinism (fixed key construction
- * order, clusters sorted by id, members/noise by exact identity), so the
- * same clustering hashes the same in any presentation order — the same
- * approach as clusterSignature's tuple hashing.
+ * SHA-256, truncated to 64 bits (16 hex chars), over the canonical report
+ * JSON — the content-derived handle shared by the sidecar, the
+ * deterministic file names, and the op result. Canonicality rides the G1
+ * report's own determinism (fixed key construction order, clusters sorted
+ * by id, members/noise by exact identity), so the same clustering hashes
+ * the same in any presentation order. 64 bits because the handle names the
+ * published artifact FILES (review-debt #155): with the previous 32-bit
+ * FNV-1a handle, two distinct analyses of the same directory whose report
+ * JSONs collided on the fingerprint silently OVERWROTE each other's
+ * artifact pair; a collision reaches even a coin-flip probability only at ~2^32 distinct reports (the birthday bound for 64 bits) — versus ~2^16 at the old 32 bits. Even then
+ * the blast radius stays a same-name overwrite, not an identity confusion —
+ * the sidecar inside carries the full canonical report and per-cluster
+ * signatures, and the returned op result records the fingerprint.
  */
 export function reportFingerprint(report: ClusterErrorsReport): string {
-  return fnv1a32Hex(JSON.stringify(report));
+  return createHash('sha256').update(JSON.stringify(report)).digest('hex').slice(0, 16);
 }
 
 /**
@@ -229,6 +244,9 @@ export class SidecarFormatError extends Error {
 /** 8 lowercase hex digits — the FNV-1a 32-bit form used by ids and digests. */
 const Hex8 = z.string().regex(/^[0-9a-f]{8}$/, 'expected 8 lowercase hex digits');
 
+/** 16 lowercase hex digits — SHA-256 truncated to 64 bits: the report handle (review-debt #155: collision-resistant artifact naming). */
+const Hex16 = z.string().regex(/^[0-9a-f]{16}$/, 'expected 16 lowercase hex digits');
+
 const SidecarFailureSchema: z.ZodType<CheckFailure> = z
   .object({
     file: z.string().nullable(),
@@ -272,7 +290,7 @@ const SidecarReportSchema: z.ZodType<ClusterErrorsReport> = z
 const AnalysisSidecarSchema: z.ZodType<AnalysisSidecar> = z
   .object({
     schemaVersion: z.literal(ANALYSIS_SIDECAR_SCHEMA_VERSION),
-    reportFingerprint: Hex8,
+    reportFingerprint: Hex16,
     report: SidecarReportSchema,
     evidence: z.array(
       z

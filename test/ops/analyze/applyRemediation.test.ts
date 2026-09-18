@@ -188,12 +188,12 @@ describe('applyRemediation acceptance: fail-closed sidecar contract', () => {
   test('a corrupt sidecar (wrong version, drifted report) fails closed through the strict parse', async () => {
     const store = memoryStore('/ws', {
       ...FIXTURE_FILES,
-      [SIDECAR_PATH]: '{"schemaVersion": 2, "report": {}, "evidence": []}',
+      [SIDECAR_PATH]: '{"schemaVersion": 99, "report": {}, "evidence": []}',
     });
     const result = await makeOp(store)(baseInput());
     expect(result.status).toBe('failed');
     if (result.status === 'failed') {
-      expect(result.error).toContain('expected schemaVersion 1');
+      expect(result.error).toContain('expected schemaVersion 2');
     }
     const drifted = memoryStore('/ws', {
       ...FIXTURE_FILES,
