@@ -61,8 +61,10 @@ export class GhError extends Error {
  * The default GhFn: spawns `opts.bin`, else CQ_GH_BIN, else `'gh'` (CQ_GH_BIN
  * is the seam CLI-driven tests use to substitute a fake gh script), captures
  * both streams, and resolves with code + streams. The environment passes
- * through unchanged, layered with `opts.env` overrides (the test seam for
- * scenario/log plumbing like CQ_GH_SCENARIO and CQ_GH_LOG); args go to execve
+ * through, layered with `opts.env` overrides (the test seam for scenario/log
+ * plumbing like CQ_GH_SCENARIO and CQ_GH_LOG) MINUS the names `opts.unsetEnv`
+ * strips from the inherited layer (explicit `env` entries win over the
+ * strip); the spawn optionally runs in `opts.cwd`. Args go to execve
  * directly (no shell, no quoting). `timeoutMs` — default UNDEFINED, wait
  * forever — SIGKILLs the child when it elapses and resolves (never rejects,
  * the seam stays total) with the timeout convention code 124 and a

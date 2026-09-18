@@ -9,7 +9,7 @@
 // fixtures) and run through the real makeGhRunner seam.
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import { makeGhRunner, ghJson } from '../../../src/ops/review/gh.js';
 import type { GhFn } from '../../../src/ops/review/gh.js';
@@ -77,6 +77,28 @@ describe('makeGhRunner', () => {
       if (previousProbeRepo === undefined) delete process.env.CQ_GH_PROBE_REPO;
       else process.env.CQ_GH_PROBE_REPO = previousProbeRepo;
     }
+  }, 10_000);
+
+  test('a RELATIVE separator-bearing bin resolves against the process cwd, not a scoped opts.cwd (review-debt #163)', async () => {
+    const bin = await tempBin(
+      'relative-probe.mjs',
+      [
+        '#!/usr/bin/env node',
+        'import process from "node:process";',
+        'process.stdout.write("resolved-ok");',
+        '',
+      ].join('\n'),
+    );
+    const rel = `./${relative(process.cwd(), bin)}`;
+    // The spawn cwd is a DIFFERENT directory: if the bin resolved there the
+    // run would 127 — resolving against the process cwd (the pre-scoping
+    // semantics) finds the probe.
+    const elsewhere = await mkdtemp(join(tmpdir(), 'cq-gh-elsewhere-'));
+    tempDirs.push(elsewhere);
+    const run = makeGhRunner({ bin: rel, cwd: elsewhere });
+    const res = await run([]);
+    expect(res.code).toBe(0);
+    expect(res.stdout).toBe('resolved-ok');
   }, 10_000);
 
   test('a nonexistent binary resolves (never rejects) with the 127 convention', async () => {
