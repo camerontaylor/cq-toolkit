@@ -6,6 +6,7 @@
 // target failed, deterministic names), and the registry importer resolving
 // end-to-end over a real mkdtemp dir (the one place real fs is allowed
 // here, mirroring the C4 registry-test precedent).
+import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
@@ -29,7 +30,6 @@ import {
   sidecarFileName,
 } from '../../../src/ops/analyze/renderAnalysisReport.js';
 import { registry } from '../../../src/ops/analyze/registry.js';
-import { fnv1a32Hex } from '../../../src/ops/gates/fingerprint.js';
 import type { ClusterErrorsReport } from '../../../src/ops/analyze/clusterErrors.js';
 import type { RenderedAnalysisPaths } from '../../../src/ops/analyze/renderAnalysisReport.js';
 import type { CheckFailure, FailureSet } from '../../../src/ops/gates/index.js';
@@ -149,9 +149,14 @@ describe('renderAnalysisReport (pure core): determinism is the contract', () => 
     expect(serializeAnalysisSidecar(second.sidecar)).toBe(serializeAnalysisSidecar(first.sidecar));
   });
 
-  test('the report fingerprint is FNV-1a 32-bit over the canonical report JSON', () => {
+  test('the report fingerprint is SHA-256 truncated to 64 bits (16 hex) over the canonical report JSON (review-debt #155)', () => {
     const report = fixtureReport();
-    expect(reportFingerprint(report)).toBe(fnv1a32Hex(JSON.stringify(report)));
+    expect(reportFingerprint(report)).toBe(
+      createHash('sha256').update(JSON.stringify(report)).digest('hex').slice(0, 16),
+    );
+    // The handle is 16 hex chars — it names published artifact FILES, so it
+    // must be collision-resistant, not display-grade.
+    expect(reportFingerprint(report)).toMatch(/^[0-9a-f]{16}$/);
   });
 
   test('a changed report changes the fingerprint; evidence changes the sidecar but not the markdown', () => {

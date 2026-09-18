@@ -295,6 +295,27 @@ describe('renderUnifiedDiff (synthesized hunks, exact at the edit sites)', () =>
     );
   });
 
+  test('a newline-only deletion shows the JOINED line, not an invisible join (review-debt #159)', () => {
+    // The plan deletes ONLY the newline after 'alpha' (byte 5): alpha joins
+    // beta. A one-line block would render `-alpha` / `+alpha` with beta as
+    // unchanged context — the join invisible. The block extends over the
+    // joined line so the diff shows the full resulting line.
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('alpha\nbeta\ngamma\n', 'utf8'), [
+      { file: 'src/a.ts', startByte: 5, endByte: 6, replacement: '' },
+    ]);
+    expect(diff).toBe(
+      [
+        '--- src/a.ts\n',
+        '+++ src/a.ts\n',
+        '@@ -1,3 +1,2 @@\n',
+        '-alpha\n',
+        '-beta\n',
+        '+alphabeta\n',
+        ' gamma\n',
+      ].join(''),
+    );
+  });
+
   test('far-apart edits produce separate hunks with three context lines', () => {
     const lines: string[] = [];
     for (let i = 1; i <= 20; i++) lines.push(`const v${i} = ${i};`);
