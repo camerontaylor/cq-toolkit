@@ -36,6 +36,9 @@
 //      listing row and the payload disagree on draft/fork fields, the
 //      payload wins (and the candidate's head/base fields ride the payload
 //      too, the commits read included).
+//  11. state and authorLogin ride the SINGLE-PR payload too: a PR closed
+//      or re-authored between listing and GET enters with the payload's
+//      values, never the listing row's stale ones.
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv, recording every
 // call) — no spawned process anywhere.
@@ -140,10 +143,12 @@ const commitPayload = (date: string) => ({
 /**
  * The single-PR REST wire (`repos/…/pulls/{n}`) — the AUTHORITATIVE payload
  * for every per-PR eligibility field (mergeable_state, head SHA/ref, base
- * ref, draft, head repo), not just mergeability. Default: computed clean
- * (the lazy-compute result an uncontested PR carries) with the same-repo
- * head/base the listing row carries; the overrides model row/payload drift
- * (a draft conversion, a fork retarget, a rename between listing and GET).
+ * ref, draft, head repo, open/closed state, author login), not just
+ * mergeability. Default: computed clean (the lazy-compute result an
+ * uncontested PR carries) with the same-repo head/base, open state, and
+ * author the listing row carries; the overrides model row/payload drift
+ * (a draft conversion, a fork retarget, a rename, a close, a re-author —
+ * any change between listing and GET).
  */
 const singlePullPayload = (
   pr: number,
@@ -154,9 +159,12 @@ const singlePullPayload = (
     headRef?: string;
     headSha?: string;
     baseRef?: string;
+    state?: string;
+    userLogin?: string;
   },
 ) => ({
-  state: 'open',
+  state: overrides?.state ?? 'open',
+  user: { login: overrides?.userLogin ?? `pr-author-${String(pr)}` },
   draft: overrides?.draft ?? false,
   mergeable: mergeableState === null ? null : true,
   mergeable_state: mergeableState,
@@ -326,8 +334,9 @@ describe('fetchMergeCandidates', () => {
     expect(full.candidates).toHaveLength(100);
     // A full last page is an ordinary --paginate outcome (gh simply fetches
     // the next page): flagging it truncated would permanently await a
-    // fully-paginated fetch.
-    expect(full.candidates.every((candidate) => candidate.truncated)).toBe(false);
+    // fully-paginated fetch. The contract is "no candidate is truncated" —
+    // asserted positively so a partial regression cannot slip through.
+    expect(full.candidates.every((candidate) => !candidate.truncated)).toBe(true);
 
     const ninetyNine = await fetchMergeCandidates({
       gh: fakeGh({ list: () => hundred.slice(0, 99) }),
@@ -335,7 +344,7 @@ describe('fetchMergeCandidates', () => {
       repo: REPO,
     });
     expect(ninetyNine.candidates).toHaveLength(99);
-    expect(ninetyNine.candidates.every((candidate) => candidate.truncated)).toBe(false);
+    expect(ninetyNine.candidates.every((candidate) => !candidate.truncated)).toBe(true);
   });
 
   test('per-PR fault isolation: a failing enrichment excludes that PR alone, one-line reason', async () => {
@@ -443,6 +452,40 @@ describe('fetchMergeCandidates', () => {
     // stale sha-23).
     expect(calls.some((line) => line.endsWith(`/commits/sha-23-fresh`))).toBe(true);
     expect(calls.some((line) => line.endsWith(`/commits/sha-23`))).toBe(false);
+  });
+
+  test('state and authorLogin ride the SINGLE-PR payload when the listing row disagrees', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        // The listing says both are open under pr-author-<n>; the single-PR
+        // payloads DISAGREE — PR 31 was closed after the listing, PR 32 was
+        // re-authored. The candidates must carry the payload's values: a
+        // stale row must not enter a closed PR as open, nor keep a
+        // superseded login (classifyPr's external-thread/self-review rows
+        // key on it).
+        list: () => [pullRow(31), pullRow(32)],
+        singlePull: (pr) =>
+          pr === 31
+            ? singlePullPayload(31, 'clean', { state: 'closed' }) // closed/merged after the listing
+            : singlePullPayload(32, 'clean', { userLogin: 'author-b' }), // author changed after the listing
+      },
+      calls,
+    );
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO });
+
+    expect(result.excluded).toEqual([]);
+    expect(result.candidates).toHaveLength(2);
+    // PR 31: the payload's closed state wins over the row's open.
+    expect(result.candidates[0]?.state).toBe('closed');
+    expect(result.candidates[0]?.authorLogin).toBe('pr-author-31');
+    // PR 32: the payload's fresh login wins over the row's stale one.
+    expect(result.candidates[1]?.state).toBe('open');
+    expect(result.candidates[1]?.authorLogin).toBe('author-b');
+    // Each surviving PR was read through the single-PR REST endpoint.
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/31`))).toBe(true);
+    expect(calls.some((line) => line.includes(`repos/${REPO_PATH}/pulls/32`))).toBe(true);
   });
 
   test('fetchReviewState truncation is OR-ed into the candidate (reviews lag → truncated)', async () => {

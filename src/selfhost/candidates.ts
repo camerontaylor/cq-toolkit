@@ -275,8 +275,9 @@ export async function fetchMergeCandidates(
     try {
       // The SINGLE-PR endpoint (mirroring the live drill's fetchOne) is the
       // AUTHORITATIVE payload for every per-PR eligibility field: head
-      // SHA/ref, base ref, draft flag, the fork gate's head repo, and
-      // mergeable_state. The LIST-pulls rows carry these only as-of listing
+      // SHA/ref, base ref, draft flag, the fork gate's head repo,
+      // mergeable_state, the PR's open/closed state, and the author login.
+      // The LIST-pulls rows carry these only as-of listing
       // time — and mergeable_state there is additionally lazy (often
       // null/unknown until GitHub computes it) — so the mapping below rides
       // `pullWire`, never the row; a stale row (rebase, draft conversion,
@@ -326,7 +327,11 @@ export async function fetchMergeCandidates(
 
       candidates.push({
         pr,
-        authorLogin: asString(asRecord(pull['user'])['login']) || null,
+        // The author login rides the payload too (classifyPr's
+        // external-thread/self-review rows key on it): a login re-authored
+        // between listing and GET loses to the fresh read, same as every
+        // other eligibility field above.
+        authorLogin: asString(asRecord(pullWire['user'])['login']) || null,
         // Post-gate the payload's draft flag is false — but it rides the
         // authoritative payload, never a hardcoded assumption.
         draft: pullWire['draft'] === true,
@@ -346,7 +351,9 @@ export async function fetchMergeCandidates(
         lastCommitAt,
         headRefName: asString(wireHead['ref']),
         baseRefName: asString(asRecord(pullWire['base'])['ref']),
-        state: asString(pull['state']) === 'open' ? 'open' : 'closed',
+        // State rides the payload as well: a PR closed or merged between
+        // the listing and this GET must not enter as open.
+        state: asString(pullWire['state']) === 'open' ? 'open' : 'closed',
       });
     } catch (error) {
       const reason =
