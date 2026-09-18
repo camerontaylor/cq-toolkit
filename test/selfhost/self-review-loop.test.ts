@@ -42,6 +42,13 @@
 //  12. Fail-closed sweep budget (CodeRabbit KyI): a loop that THROWS burns
 //      the sweep — the failure row says so and the later PRs are recorded
 //      exhausted instead of re-spending an unaccounted allowance.
+//  13. Head-ref revalidation (CodeRabbit P1): immediately before each
+//      dispatch the single-PR endpoint re-vouches for the head ref — a
+//      renamed head is an excluded row (`head ref renamed since listing
+//      (<old> -> <new>)`) and a failed revalidation read is a failure row
+//      (`head revalidation failed: …`); NEITHER ever dispatches the loop,
+//      a failed revalidation does not burn the sweep budget (nothing was
+//      spent), and the dry run makes no revalidation reads at all.
 //
 // The loop fn is injected (deps.loop — the documented DI seam): a recording
 // fake returning a minimal ReviewLoopOutcome. The gh seam is a fake GhFn
@@ -97,20 +104,42 @@ const emptyGraphql = (pr: number) => ({
 const json = (value: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(value), stderr: '' });
 
 /**
- * The fake gh: routes the shared REST listing plus (optionally) the
+ * The fake gh: routes the shared REST listing, the per-PR single-pull GET
+ * (the pre-dispatch head-ref revalidation read), plus — optionally — the
  * review-state reads the dry run makes. `stateRoutes` false leaves every
- * non-listing route failing — the dry run's per-PR state reads then fail
- * and must be isolated into the wouldRun lines.
+ * review-state route failing — the dry run's per-PR state reads then fail
+ * and must be isolated into the wouldRun lines. The single-pull route
+ * defaults to a payload that VOUCHES for each row's listed head ref (the
+ * ordinary world: nothing renamed between listing and dispatch); returning
+ * the string 'fail' makes that PR's GET exit 1.
  */
 const fakeGh =
-  (rows: unknown[], opts?: { failListing?: boolean; stateRoutes?: boolean }): GhFn =>
+  (
+    rows: unknown[],
+    opts?: {
+      failListing?: boolean;
+      stateRoutes?: boolean;
+      singlePull?: (pr: number) => unknown | 'fail';
+      calls?: string[];
+    },
+  ): GhFn =>
   async (args: string[]): Promise<GhResult> => {
+    opts?.calls?.push(args.join(' '));
     const path = args[0] === 'api' && typeof args[1] === 'string' ? args[1] : '';
     if (path === LIST_PATH) {
       if (opts?.failListing === true) {
         return { code: 1, stdout: '', stderr: 'injected listing failure' };
       }
       return json(rows);
+    }
+    const single = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(path);
+    if (single !== null) {
+      const pr = Number(single[1]);
+      const payload = opts?.singlePull?.(pr) ?? { head: { ref: `pr-${String(pr)}` } };
+      if (payload === 'fail') {
+        return { code: 1, stdout: '', stderr: 'injected gh failure' };
+      }
+      return json(payload);
     }
     if (opts?.stateRoutes === true) {
       if (path === 'graphql') {
@@ -504,12 +533,96 @@ describe('runSelfReviewLoop — real run', () => {
       rmSync(journalRoot, { recursive: true, force: true });
     }
   });
+
+  test('a head renamed since the listing is caught by the pre-dispatch revalidation — excluded row, loop never invoked', async () => {
+    const calls: RecordedCall[] = [];
+    const ghCalls: string[] = [];
+    // The listing says head `pr-7`; the single-PR payload disagrees — the
+    // branch was renamed between the listing read and this dispatch.
+    const gh = fakeGh([pullRow(7)], {
+      singlePull: () => ({ head: { ref: 'pr-7-renamed' } }),
+      calls: ghCalls,
+    });
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: tempJournalRoot() }),
+    );
+
+    // Recorded, not silent — and the loop was NEVER dispatched against the
+    // stale name (no fixes pushed to a branch the forge no longer names).
+    expect(summary.results).toEqual([]);
+    expect(summary.failures).toEqual([]);
+    expect(summary.excluded).toEqual([
+      { pr: 7, reason: 'head ref renamed since listing (pr-7 -> pr-7-renamed)' },
+    ]);
+    expect(calls).toHaveLength(0);
+    // The revalidation rode the single-PR endpoint (the candidates argv
+    // pattern), not some GraphQL detour.
+    expect(ghCalls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/7`))).toBe(true);
+  });
+
+  test('a failed head-revalidation read fails closed: a failure row, no dispatch, and the sibling still runs on an unburned budget', async () => {
+    const calls: RecordedCall[] = [];
+    // PR 7's revalidation GET exits 1; PR 8's vouches for its listed head.
+    const gh = fakeGh([pullRow(7), pullRow(8)], {
+      singlePull: (pr) => (pr === 7 ? 'fail' : { head: { ref: `pr-${String(pr)}` } }),
+    });
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: tempJournalRoot() }),
+    );
+
+    // PR 7: an unverifiable head is not a dispatchable head — failed row,
+    // never dispatched.
+    expect(summary.failures).toHaveLength(1);
+    expect(summary.failures[0]?.pr).toBe(7);
+    expect(summary.failures[0]?.error.startsWith('head revalidation failed: ')).toBe(true);
+    // PR 8: the sibling carried on — and the sweep budget was NOT burned by
+    // the skip (nothing was spent), so it ran against the full default cap.
+    expect(summary.results.map((row) => row.pr)).toEqual([8]);
+    expect(summary.excluded).toEqual([]);
+    const eighth = calls.find((call) => call.opts.pr === 8);
+    expect(eighth?.opts.runOptions?.maxUsd).toBe(SelfhostDefaults.maxUsd);
+  });
+
+  test('matching heads: every dispatched loop is preceded by exactly one vouching single-PR read', async () => {
+    const calls: RecordedCall[] = [];
+    const ghCalls: string[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8)], { calls: ghCalls });
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: tempJournalRoot() }),
+    );
+
+    // The ordinary world is unchanged: vouching payloads, both loops run.
+    expect(summary.results.map((row) => row.pr)).toEqual([7, 8]);
+    expect(summary.excluded).toEqual([]);
+    expect(summary.failures).toEqual([]);
+    // One revalidation GET per dispatched PR, in listing order.
+    expect(ghCalls.filter((line) => /^api repos\/octo\/widget\/pulls\/\d+$/.test(line))).toEqual([
+      `api repos/${REPO_PATH}/pulls/7`,
+      `api repos/${REPO_PATH}/pulls/8`,
+    ]);
+  });
 });
 
 describe('runSelfReviewLoop — dry run', () => {
   test('returns empty results and NEVER calls the loop; wouldRun carries the structural summary', async () => {
     const calls: RecordedCall[] = [];
-    const gh = fakeGh([pullRow(7), pullRow(9, { draft: true })], { stateRoutes: true });
+    const ghCalls: string[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(9, { draft: true })], {
+      stateRoutes: true,
+      calls: ghCalls,
+    });
     const summary = await runSelfReviewLoop(
       baseDeps(
         gh,
@@ -524,6 +637,10 @@ describe('runSelfReviewLoop — dry run', () => {
     expect(summary.results).toEqual([]);
     expect(summary.failures).toEqual([]);
     expect(summary.dryRun).toBe(true);
+    // No head-ref revalidation either: the dry run dispatches nothing, so
+    // it cannot push to a stale branch and makes no single-PR reads (the
+    // strict shape excludes the review-state comments/reviews routes).
+    expect(ghCalls.some((line) => /^api repos\/octo\/widget\/pulls\/\d+$/.test(line))).toBe(false);
     // Dry-run mode carries NO excluded rows — the exclusions ride the
     // wouldRun lines (the real run's shape, mirrored below).
     expect(summary.excluded).toBeUndefined();

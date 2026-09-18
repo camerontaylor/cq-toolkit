@@ -9,9 +9,10 @@
 // family's fetchReviewState (its GraphQL pagination, page caps, and lag
 // traps are already fail-closed and tested); transport and the --slurp page
 // normalizer ride gh.ts's shared seam (ghJson, slurpedComments). This
-// module adds exactly two new REST reads — the open-PR listing and the
-// per-PR single-pull GET (the authoritative mergeable_state source) — and
-// never touches GraphQL pagination itself.
+// module adds exactly three new REST reads — the open-PR listing, the
+// per-PR single-pull GET (the authoritative mergeable_state source), and
+// the ONE bounded recently-closed page the closed-ancestor sweep reads —
+// and never touches GraphQL pagination itself.
 //
 // FAULT ISOLATION (the scheduled-run contract): one bad PR must not orphan
 // the others. A PR whose enrichment (single-pull read, head-commit read, or
@@ -19,7 +20,12 @@
 // reason — never fabricated data, never a crashed run. The LISTING call is
 // the exception: when it fails there is nothing to isolate — the throw
 // propagates (an empty candidate set that pretends the forge said "nothing
-// open" would be a fabricated success).
+// open" would be a fabricated success). The closed-ancestor sweep is
+// isolated the same per-read way, one level up: a failed closed-page read
+// degrades to the pre-sweep behavior (stacked children stall at
+// `unresolved_base` — the status quo the sweep exists to fix) instead of
+// orphaning the already-fetched open candidates with a whole-run throw;
+// a `#0` audit row keeps the degradation visible in the workflow log.
 //
 // THE #142 FORK CONTRACT: forked PRs are excluded outright and must be
 // handled by a human — the self-hosted automation only ever works the base
@@ -33,6 +39,17 @@ import type { MergePrsCandidate } from '../ops/merge/runPrs.js';
 
 /** The listing's page size (`per_page` on the REST listing read). */
 const PER_PAGE = 100;
+
+/**
+ * How far back the closed-ancestor sweep looks. A parent PR merged within
+ * the last day can still be the LIVE stack rung one of this fetch's open
+ * children sits on (planMergeOrder's retarget-self needs the parent's
+ * CLOSED structural row — the #153 family); a merge older than the window
+ * cannot anchor a current sweep's stack (the child has been stuck for over
+ * a day already and loses nothing by waiting for the next sweep). The
+ * window is half-open: merged_at in `(now − 24h, now]` qualifies.
+ */
+const CLOSED_ANCESTOR_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Cap for the `fetch-failed: …` exclusion reason — an error (gh stderr, a
@@ -72,8 +89,11 @@ export interface FetchMergeCandidatesDeps {
   repo: string;
   /**
    * The run's injected clock, reserved for the entry modules' uniform
-   * time seam. The fetch itself is CLOCK-FREE (it maps wire payloads, it
-   * classifies nothing) — downstream stages own every time comparison.
+   * time seam. The fetch owns exactly ONE time comparison — the
+   * closed-ancestor freshness window (the sweep below; a fetch-scope
+   * row filter, not a classification judgment) — fed from this single
+   * reading; every classification-time comparison stays downstream.
+   * Absent → `Date.now()` at sweep time.
    */
   nowMs?: number;
 }
@@ -107,6 +127,17 @@ const oneLine = (text: string): string => {
   const line = text.split('\n', 1)[0] ?? '';
   return line.length > FETCH_REASON_MAX ? line.slice(0, FETCH_REASON_MAX) : line;
 };
+
+/**
+ * The shared per-PR enrichment's outcome: a fully mapped candidate, or the
+ * stable exclusion reason an authoritative-payload gate fired (the caller
+ * records it — the reason strings are the open loop's exact ones). A
+ * transport failure is NOT an outcome: the read THROWS and the caller
+ * applies per-PR fault isolation (`fetch-failed: …`).
+ */
+type EnrichOutcome =
+  | { kind: 'candidate'; candidate: MergePrsCandidate }
+  | { kind: 'excluded'; reason: string };
 
 /**
  * The REST open-PR listing's raw result: the slurped pages flattened to row
@@ -209,11 +240,10 @@ export async function listOpenPrs(deps: {
  * date, author date as the fallback) and the FULL review state via
  * fetchReviewState (GraphQL threads + reviews, REST reply chains; its
  * fail-closed `truncated` flag is OR-ed into the candidate so a capped or
- * lagging read can never read as complete). The listing read itself carries
- * NO truncation signal — `--paginate` is unbounded (a full last page is
- * followed by another request, never trusted as a final page), so its
- * truncation flag is false by contract and the candidate's truncation comes
- * ONLY from the enrichment fetch layer's real caps.
+ * lagging read can never read as complete). After the open loop, the
+ * CLOSED-ANCESTOR SWEEP reads ONE bounded page of recently-closed PRs so a
+ * just-merged parent can still anchor its open child's stack (see the
+ * sweep comment below — the #153 family).
  *
  * Exclusions, in order: cross-repository forks (`head.repo.full_name` ≠
  * `{owner}/{repo}` — the #142 contract, reason names the head repo) and
@@ -243,97 +273,76 @@ export async function fetchMergeCandidates(
   const candidates: MergePrsCandidate[] = [];
   const excluded: ExcludedCandidate[] = [];
 
-  for (const pull of rows) {
-    const prNumber = pull['number'];
-    const pr = typeof prNumber === 'number' && Number.isSafeInteger(prNumber) ? prNumber : 0;
-    if (pr === 0) {
-      excluded.push({ pr: 0, reason: 'fetch-failed: listing row without a PR number' });
-      continue;
-    }
-
-    // Fork gate FIRST (the #142 contract), then the draft gate — both are
-    // pre-enrichment so a forked or draft PR costs zero review-state reads.
-    // These bind to the LISTING row (a cheap short-circuit); the same gates
-    // re-bind to the authoritative single-PR payload below, inside
-    // enrichment, because a row can go stale between listing and GET.
-    const headRepoFullName = asString(asRecord(asRecord(pull['head'])['repo'])['full_name']);
-    if (headRepoFullName !== `${owner}/${repo}`) {
-      const shown = headRepoFullName === '' ? 'unknown' : headRepoFullName;
-      excluded.push({
-        pr,
+  // The per-PR enrichment BOTH loops share (the open listing's survivors and
+  // the closed-ancestor sweep's kept rows below). The SINGLE-PR endpoint
+  // (mirroring the live drill's fetchOne) is the AUTHORITATIVE payload for
+  // every per-PR eligibility field: head SHA/ref, base ref, draft flag, the
+  // fork gate's head repo, mergeable_state, the PR's open/closed state, and
+  // the author login. The LIST-pulls rows carry these only as-of listing
+  // time — and mergeable_state there is additionally lazy (often null/
+  // unknown until GitHub computes it) — so the mapping below rides
+  // `pullWire`, never the row; a stale row (rebase, draft conversion, fork
+  // retarget) loses to the fresh read, and convergence comes from the next
+  // scheduled run re-reading it. `mergeable` rides the same payload; a
+  // null/absent/uncomputed state needs no separate handling — the mapping
+  // fails closed to 'UNKNOWN'.
+  //
+  // Gates, re-bound to the fresh payload: the fork gate ALWAYS (#142 binds
+  // to the authoritative head repo whatever the row's state); the draft
+  // gate only when `gateDraft` — open candidates gate (a draft can never
+  // merge), while closed structural rows skip it (a closed row is never a
+  // merge target, so its draft flag carries no signal worth a gate).
+  //
+  // THROWS on any transport failure — the CALLER applies per-PR fault
+  // isolation and records `fetch-failed: <one line>`.
+  const enrichPull = async (pr: number, gateDraft: boolean): Promise<EnrichOutcome> => {
+    const pullWire = asRecord(
+      await ghJson<unknown>(gh, ['api', `repos/${owner}/${repo}/pulls/${String(pr)}`]),
+    );
+    const wireHead = asRecord(pullWire['head']);
+    const wireHeadRepo = asString(asRecord(wireHead['repo'])['full_name']);
+    if (wireHeadRepo !== `${owner}/${repo}`) {
+      const shown = wireHeadRepo === '' ? 'unknown' : wireHeadRepo;
+      return {
+        kind: 'excluded',
         reason: `forked-pr (head repo ${shown}) — #142 contract: forked PRs are excluded and must be handled by a human`,
-      });
-      continue;
+      };
     }
-    if (pull['draft'] === true) {
-      excluded.push({ pr, reason: 'draft' });
-      continue;
+    if (gateDraft && pullWire['draft'] === true) {
+      return { kind: 'excluded', reason: 'draft' };
     }
-
-    // Enrichment under per-PR fault isolation: a bad PR is excluded with a
-    // one-line reason; the run (and its sibling PRs) carries on.
-    try {
-      // The SINGLE-PR endpoint (mirroring the live drill's fetchOne) is the
-      // AUTHORITATIVE payload for every per-PR eligibility field: head
-      // SHA/ref, base ref, draft flag, the fork gate's head repo,
-      // mergeable_state, the PR's open/closed state, and the author login.
-      // The LIST-pulls rows carry these only as-of listing
-      // time — and mergeable_state there is additionally lazy (often
-      // null/unknown until GitHub computes it) — so the mapping below rides
-      // `pullWire`, never the row; a stale row (rebase, draft conversion,
-      // fork retarget) loses to the fresh read, and convergence comes from
-      // the next scheduled run re-reading it. `mergeable` rides the same
-      // payload; a null/absent/uncomputed state needs no separate handling —
-      // the mapping fails closed to 'UNKNOWN'.
-      const pullWire = asRecord(
-        await ghJson<unknown>(gh, ['api', `repos/${owner}/${repo}/pulls/${String(pr)}`]),
+    const sha = asString(wireHead['sha']);
+    let lastCommitAt: string | null = null;
+    if (sha !== '') {
+      const commitWire = asRecord(
+        await ghJson<unknown>(gh, ['api', `repos/${owner}/${repo}/commits/${sha}`]),
       );
-      // The fork and draft gates RE-BOUND to the fresh payload (same
-      // reasons, the authoritative fields): a PR that became a fork head or
-      // a draft after the listing is excluded here, before any further
-      // enrichment read.
-      const wireHead = asRecord(pullWire['head']);
-      const wireHeadRepo = asString(asRecord(wireHead['repo'])['full_name']);
-      if (wireHeadRepo !== `${owner}/${repo}`) {
-        const shown = wireHeadRepo === '' ? 'unknown' : wireHeadRepo;
-        excluded.push({
-          pr,
-          reason: `forked-pr (head repo ${shown}) — #142 contract: forked PRs are excluded and must be handled by a human`,
-        });
-        continue;
-      }
-      if (pullWire['draft'] === true) {
-        excluded.push({ pr, reason: 'draft' });
-        continue;
-      }
-      const sha = asString(wireHead['sha']);
-      let lastCommitAt: string | null = null;
-      if (sha !== '') {
-        const commitWire = asRecord(
-          await ghJson<unknown>(gh, ['api', `repos/${owner}/${repo}/commits/${sha}`]),
-        );
-        const commitRecord = asRecord(commitWire['commit']);
-        // Committer date is the drills' convention; the author date is the
-        // fallback for wires that omit the committer block. Neither present
-        // → null (PrCandidate's documented "unresolvable" case — classifyPr
-        // row 4 fails closed on it; nothing is invented).
-        lastCommitAt =
-          asString(asRecord(commitRecord['committer'])['date']) ||
-          asString(asRecord(commitRecord['author'])['date']) ||
-          null;
-      }
+      const commitRecord = asRecord(commitWire['commit']);
+      // Committer date is the drills' convention; the author date is the
+      // fallback for wires that omit the committer block. Neither present
+      // → null (PrCandidate's documented "unresolvable" case — classifyPr
+      // row 4 fails closed on it; nothing is invented).
+      lastCommitAt =
+        asString(asRecord(commitRecord['committer'])['date']) ||
+        asString(asRecord(commitRecord['author'])['date']) ||
+        null;
+    }
 
-      const reviewState = await fetchReviewState({ owner, repo, pr }, undefined, gh);
+    const reviewState = await fetchReviewState({ owner, repo, pr }, undefined, gh);
 
-      candidates.push({
+    return {
+      kind: 'candidate',
+      candidate: {
         pr,
         // The author login rides the payload too (classifyPr's
         // external-thread/self-review rows key on it): a login re-authored
         // between listing and GET loses to the fresh read, same as every
         // other eligibility field above.
         authorLogin: asString(asRecord(pullWire['user'])['login']) || null,
-        // Post-gate the payload's draft flag is false — but it rides the
-        // authoritative payload, never a hardcoded assumption.
+        // Post-gate the payload's draft flag is false for open candidates —
+        // but it rides the authoritative payload, never a hardcoded
+        // assumption (a closed structural row keeps whatever the payload
+        // says; classifyStage withholds closed rows either way).
         draft: pullWire['draft'] === true,
         mergeState: toMergeState(pullWire['mergeable_state']),
         // Truncated is true ONLY from an actual truncation signal —
@@ -352,15 +361,147 @@ export async function fetchMergeCandidates(
         headRefName: asString(wireHead['ref']),
         baseRefName: asString(asRecord(pullWire['base'])['ref']),
         // State rides the payload as well: a PR closed or merged between
-        // the listing and this GET must not enter as open.
+        // the listing and this GET must not enter as open — and, for a
+        // closed-ancestor row, one re-opened between the closed page and
+        // this GET re-enters as open (the payload wins in both directions).
         state: asString(pullWire['state']) === 'open' ? 'open' : 'closed',
+      },
+    };
+  };
+
+  const recordOutcome = (pr: number, outcome: EnrichOutcome): void => {
+    if (outcome.kind === 'candidate') {
+      candidates.push(outcome.candidate);
+    } else {
+      excluded.push({ pr, reason: outcome.reason });
+    }
+  };
+
+  for (const pull of rows) {
+    const prNumber = pull['number'];
+    const pr = typeof prNumber === 'number' && Number.isSafeInteger(prNumber) ? prNumber : 0;
+    if (pr === 0) {
+      excluded.push({ pr: 0, reason: 'fetch-failed: listing row without a PR number' });
+      continue;
+    }
+
+    // Fork gate FIRST (the #142 contract), then the draft gate — both are
+    // pre-enrichment so a forked or draft PR costs zero review-state reads.
+    // These bind to the LISTING row (a cheap short-circuit); the same gates
+    // re-bind to the authoritative single-PR payload inside enrichPull,
+    // because a row can go stale between listing and GET.
+    const headRepoFullName = asString(asRecord(asRecord(pull['head'])['repo'])['full_name']);
+    if (headRepoFullName !== `${owner}/${repo}`) {
+      const shown = headRepoFullName === '' ? 'unknown' : headRepoFullName;
+      excluded.push({
+        pr,
+        reason: `forked-pr (head repo ${shown}) — #142 contract: forked PRs are excluded and must be handled by a human`,
       });
+      continue;
+    }
+    if (pull['draft'] === true) {
+      excluded.push({ pr, reason: 'draft' });
+      continue;
+    }
+
+    // Enrichment under per-PR fault isolation: a bad PR is excluded with a
+    // one-line reason; the run (and its sibling PRs) carries on.
+    try {
+      recordOutcome(pr, await enrichPull(pr, true));
     } catch (error) {
       const reason =
         error instanceof GhError
           ? `gh exit ${String(error.code)}: ${oneLine(error.stderr)}`
           : oneLine(error instanceof Error ? error.message : String(error));
       excluded.push({ pr, reason: `fetch-failed: ${reason}` });
+    }
+  }
+
+  // CLOSED-ANCESTOR SWEEP (the #153 family): after a parent PR merges in
+  // sweep N, its still-open child (based on the parent's head branch) would
+  // stall at planMergeOrder's `unresolved_base` FOREVER — every later sweep
+  // fetches only state=open, and the retarget-self plan needs the parent's
+  // CLOSED structural row to recognize that the child's stack rung is gone
+  // (an open-only candidate set resolves the child's base ref to nothing).
+  // So, ONE bounded page of recently-closed PRs:
+  //   `repos/{owner}/{repo}/pulls?state=closed&sort=updated&direction=desc
+  //    &per_page=100`
+  // a SINGLE page — deliberately NOT `--paginate`/`--slurp`, so the sweep's
+  // cost is capped at one request no matter how long the repo's closed
+  // history is. A row is kept only when BOTH hold:
+  //   (a) it is actually MERGED and FRESH — `merged_at` present and
+  //       ISO-parseable (a NaN parse never compares), within the last
+  //       CLOSED_ANCESTOR_WINDOW_MS (future timestamps dropped too — a
+  //       wire with skewed clock reads must not pass on recency);
+  //   (b) it is structurally RELEVANT — its `head.ref` is the BASE ref of
+  //       one of this fetch's candidates, exactly the relation the stack
+  //       graph reads (child.baseRefName === parent.headRefName). The set
+  //       is deliberately the candidates' BASE refs only: a closed head
+  //       matching an open HEAD anchors nothing, and a non-matching row
+  //       can never affect a plan, so it is dropped here rather than
+  //       enriched — the sweep is ancestor-hunting, not a second listing,
+  //       and only KEPT rows owe the workflow log an account.
+  // Each kept row rides the SAME single-PR enrichment (enrichPull, draft
+  // gate off, fork gate on) and lands as a `state: 'closed'` candidate —
+  // classifyStage withholds closed rows from classification, so the row can
+  // never be a merge target; it exists purely so retarget-self can see the
+  // closed rung. A row whose number is already a candidate is skipped (a PR
+  // closed between the two reads must never enter twice — planMergeOrder's
+  // duplicate_pr gate must never see the same number twice).
+  //
+  // WHY BOUNDED: 24h of recency + one page + the name filter cap the sweep
+  // at one request and at most a handful of enrichments — a repository with
+  // years of merged stacks can never inflate the run's cost or its log.
+  //
+  // Best-effort isolation (module doc): a failed closed-page read degrades
+  // to the pre-sweep behavior (stacked children stall at unresolved_base —
+  // exactly the status quo this sweep exists to fix) rather than throwing
+  // past the already-fetched open candidates; the `#0` audit row keeps the
+  // degradation visible.
+  const ancestorBaseRefs = new Set(candidates.map((candidate) => candidate.baseRefName));
+  if (ancestorBaseRefs.size > 0) {
+    try {
+      const closedPath =
+        `repos/${owner}/${repo}/pulls?state=closed` +
+        `&sort=updated&direction=desc&per_page=${String(PER_PAGE)}`;
+      const closedPage = await ghJson<unknown>(gh, ['api', closedPath]);
+      if (!Array.isArray(closedPage)) {
+        throw new Error(`gh api ${closedPath} returned a non-array payload`);
+      }
+      const nowMs = deps.nowMs ?? Date.now(); // the sweep's ONE clock reading
+      const candidatePrs = new Set(candidates.map((candidate) => candidate.pr));
+      for (const row of closedPage.map(asRecord)) {
+        const prNumber = row['number'];
+        const pr = typeof prNumber === 'number' && Number.isSafeInteger(prNumber) ? prNumber : 0;
+        if (pr === 0 || candidatePrs.has(pr)) continue; // unusable / already enriched
+        const mergedAt = asString(row['merged_at']);
+        const mergedMs = mergedAt === '' ? Number.NaN : Date.parse(mergedAt);
+        if (
+          !Number.isFinite(mergedMs) || // absent or unparseable — never compare NaN
+          mergedMs > nowMs || // a future merge is a skewed wire, not a fresh one
+          nowMs - mergedMs >= CLOSED_ANCESTOR_WINDOW_MS // outside the live window
+        ) {
+          continue;
+        }
+        if (!ancestorBaseRefs.has(asString(asRecord(row['head'])['ref']))) continue;
+        // Same fault isolation as the open loop: a bad ancestor costs its
+        // own `fetch-failed` row, never its siblings.
+        try {
+          recordOutcome(pr, await enrichPull(pr, false));
+        } catch (error) {
+          const reason =
+            error instanceof GhError
+              ? `gh exit ${String(error.code)}: ${oneLine(error.stderr)}`
+              : oneLine(error instanceof Error ? error.message : String(error));
+          excluded.push({ pr, reason: `fetch-failed: ${reason}` });
+        }
+      }
+    } catch (error) {
+      const reason =
+        error instanceof GhError
+          ? `gh exit ${String(error.code)}: ${oneLine(error.stderr)}`
+          : oneLine(error instanceof Error ? error.message : String(error));
+      excluded.push({ pr: 0, reason: `fetch-failed: closed-ancestor sweep: ${reason}` });
     }
   }
 

@@ -39,6 +39,17 @@
 //  11. state and authorLogin ride the SINGLE-PR payload too: a PR closed
 //      or re-authored between listing and GET enters with the payload's
 //      values, never the listing row's stale ones.
+//  12. The closed-ancestor sweep (#153): a parent merged within the last
+//      24h whose head.ref is an open candidate's base ref rides along as a
+//      `state: 'closed'` STRUCTURAL candidate through the same single-PR
+//      enrichment (payload state wins); unrelated closed rows (wrong
+//      branch, stale merge, absent/garbage merged_at, future merge,
+//      already-enriched number) are dropped by the bounded filter before
+//      any enrichment; the closed read is ONE page (never paginated); a
+//      failed closed-page read degrades to a `#0` audit row while the open
+//      candidates survive; a failing ancestor enrichment is isolated to
+//      its own `fetch-failed` row; no closed read at all when nothing open
+//      exists to anchor.
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv, recording every
 // call) — no spawned process anywhere.
@@ -120,7 +131,13 @@ const restComment = (id: number, inReplyTo?: number) => ({
 /** One REST listing row (`repos/…/pulls?state=open`), same-repo by default. */
 const pullRow = (
   n: number,
-  overrides?: { draft?: boolean; mergeable_state?: string; headRepo?: string; state?: string },
+  overrides?: {
+    draft?: boolean;
+    mergeable_state?: string;
+    headRepo?: string;
+    state?: string;
+    baseRef?: string;
+  },
 ) => ({
   number: n,
   state: overrides?.state ?? 'open',
@@ -131,6 +148,32 @@ const pullRow = (
     ref: `pr-${String(n)}`,
     sha: `sha-${String(n)}`,
     repo: { full_name: overrides?.headRepo ?? REPO_PATH },
+  },
+  base: { ref: overrides?.baseRef ?? 'merge-queue' },
+});
+
+/**
+ * One REST closed-PR row (`repos/…/pulls?state=closed`) — the
+ * closed-ancestor sweep's raw material. Merged 2h before CLOSED_NOW by
+ * default; the overrides model every way a row can fail the bounded filter
+ * (wrong branch, stale merge, absent/garbage merged_at, future merge).
+ */
+const CLOSED_NOW = Date.parse('2026-01-02T03:00:00Z');
+const closedRow = (
+  n: number,
+  overrides?: { mergedAt?: string | null; headRef?: string; state?: string; draft?: boolean },
+) => ({
+  number: n,
+  state: overrides?.state ?? 'closed',
+  draft: overrides?.draft ?? false,
+  ...(overrides?.mergedAt === null
+    ? {}
+    : { merged_at: overrides?.mergedAt ?? '2026-01-02T01:00:00Z' }),
+  user: { login: `pr-author-${String(n)}` },
+  head: {
+    ref: overrides?.headRef ?? `pr-${String(n)}`,
+    sha: `sha-${String(n)}`,
+    repo: { full_name: REPO_PATH },
   },
   base: { ref: 'merge-queue' },
 });
@@ -183,6 +226,8 @@ const singlePullPayload = (
 interface FakeHandlers {
   /** The listing payload — a flat array OR --slurp page arrays, verbatim. */
   list?: () => unknown;
+  /** The closed-ancestor page payload (a flat array — ONE page, no slurp). */
+  closed?: () => unknown;
   /** pr → the single-PR REST payload (mergeable_state's real source). */
   singlePull?: (pr: number) => unknown;
   /** sha → commits payload. */
@@ -214,6 +259,9 @@ const fakeGh =
     }
     if (path === `repos/${REPO_PATH}/pulls?state=open&per_page=100`) {
       return json(handlers.list?.() ?? []);
+    }
+    if (path === `repos/${REPO_PATH}/pulls?state=closed&sort=updated&direction=desc&per_page=100`) {
+      return json(handlers.closed?.() ?? []);
     }
     const single = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(path);
     if (single !== null) {
@@ -531,6 +579,208 @@ describe('fetchMergeCandidates', () => {
       '#7 candidate state=open mergeState=CLEAN draft=false truncated=false threads=1 reviews=1 issueComments=0 head=pr-7 base=merge-queue lastCommitAt=2026-01-02T00:00:00Z',
     );
     expect(lines[1]).toBe('#9 excluded draft');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fetchMergeCandidates — the closed-ancestor sweep (#153)
+// ---------------------------------------------------------------------------
+
+describe('fetchMergeCandidates — closed-ancestor sweep (#153)', () => {
+  test('a parent merged 2h ago whose head.ref is an open child’s base rides along as a state=closed structural candidate', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        // Child 21 stacks on the merged parent's head branch pr-20 — the
+        // stack relation planMergeOrder matches (child.base === parent.head).
+        // The base rides the LISTING row AND the single-PR payload (the
+        // payload is the authoritative base ref the ancestor set is built
+        // from), so both carry the stack position.
+        list: () => [pullRow(21, { baseRef: 'pr-20' })],
+        closed: () => [closedRow(20)], // merged 2h before CLOSED_NOW
+        singlePull: (pr) =>
+          pr === 20
+            ? singlePullPayload(20, 'clean', { state: 'closed' }) // the payload stays authoritative for a merged row
+            : singlePullPayload(pr, 'clean', { baseRef: 'pr-20' }),
+      },
+      calls,
+    );
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    expect(result.excluded).toEqual([]);
+    // The open child first (the listing loop), the closed parent appended
+    // by the sweep — the plan sorts internally by number either way.
+    expect(result.candidates.map((c) => [c.pr, c.state])).toEqual([
+      [21, 'open'],
+      [20, 'closed'],
+    ]);
+    const parent = result.candidates[1];
+    expect(parent?.headRefName).toBe('pr-20');
+    expect(parent?.baseRefName).toBe('merge-queue');
+    expect(parent?.mergeState).toBe('CLEAN');
+    expect(parent?.lastCommitAt).toBe('2026-01-02T00:00:00Z');
+    // The closed read is ONE bounded page — a single request, never
+    // paginated, never slurped.
+    const closedCalls = calls.filter((line) => line.includes('state=closed'));
+    expect(closedCalls).toHaveLength(1);
+    expect(closedCalls[0]).toContain('state=closed&sort=updated&direction=desc&per_page=100');
+    expect(closedCalls[0]).not.toContain('--paginate');
+    // The parent rode the SAME single-PR enrichment as the open child.
+    expect(calls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/20`))).toBe(true);
+    expect(calls.some((line) => line.endsWith('/commits/sha-20'))).toBe(true);
+  });
+
+  test('the closed row rides the single-PR enrichment and the payload state wins (re-opened between page and GET → open)', async () => {
+    const gh = fakeGh({
+      list: () => [pullRow(31, { baseRef: 'pr-30' })],
+      closed: () => [closedRow(30)],
+      singlePull: (pr) =>
+        pr === 30
+          ? singlePullPayload(30, 'clean', { state: 'open' }) // re-opened after the closed page was read
+          : singlePullPayload(pr, 'clean', { baseRef: 'pr-30' }),
+    });
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    // The authoritative payload outranks the page's state=closed premise —
+    // the same payload-wins rule every other field rides.
+    expect(result.excluded).toEqual([]);
+    expect(result.candidates.map((c) => [c.pr, c.state])).toEqual([
+      [31, 'open'],
+      [30, 'open'],
+    ]);
+  });
+
+  test('unrelated closed rows are dropped by the bounded filter before any enrichment', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        list: () => [pullRow(41)],
+        closed: () => [
+          closedRow(42, { headRef: 'unrelated-branch' }), // wrong branch — anchors nothing
+          closedRow(43, { headRef: 'merge-queue', mergedAt: '2025-12-30T03:00:00Z' }), // merged 3 days ago
+          closedRow(44, { headRef: 'merge-queue', mergedAt: '2026-01-01T03:00:00Z' }), // exactly 24h — the window is half-open
+          closedRow(45, { mergedAt: null }), // no merged_at (closed unmerged)
+          closedRow(46, { headRef: 'merge-queue', mergedAt: 'not-a-timestamp' }), // NaN-guarded parse
+          closedRow(47, { headRef: 'merge-queue', mergedAt: '2026-01-02T09:00:00Z' }), // future — a skewed wire
+          closedRow(41, { headRef: 'merge-queue' }), // fresh + name match, but 41 is already an open candidate
+        ],
+      },
+      calls,
+    );
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    expect(result.candidates.map((c) => c.pr)).toEqual([41]);
+    // Dropped rows were never work items — they appear in NEITHER list,
+    // and none of them cost a single enrichment read (the duplicate-number
+    // guard kept 41 to its one open-loop enrichment).
+    expect(result.excluded).toEqual([]);
+    for (const n of [42, 43, 44, 45, 46, 47]) {
+      expect(calls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/${String(n)}`))).toBe(
+        false,
+      );
+    }
+    expect(calls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/41`))).toBe(true);
+  });
+
+  test('a closed structural row skips the draft gate (a draft can never merge — the flag gates nothing for a never-merge row)', async () => {
+    const gh = fakeGh({
+      list: () => [pullRow(81, { baseRef: 'pr-80' })],
+      closed: () => [closedRow(80, { draft: true })],
+      singlePull: (pr) =>
+        pr === 80
+          ? singlePullPayload(80, 'clean', { state: 'closed', draft: true })
+          : singlePullPayload(pr, 'clean', { baseRef: 'pr-80' }),
+    });
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    expect(result.excluded).toEqual([]);
+    expect(result.candidates.map((c) => [c.pr, c.state, c.draft])).toEqual([
+      [81, 'open', false],
+      [80, 'closed', true],
+    ]);
+  });
+
+  test('the fork gate stays ON for a closed structural row (#142 binds to the payload whatever the state)', async () => {
+    const gh = fakeGh({
+      list: () => [pullRow(91, { baseRef: 'pr-90' })],
+      closed: () => [closedRow(90)],
+      singlePull: (pr) =>
+        pr === 90
+          ? singlePullPayload(90, 'clean', { state: 'closed', headRepo: 'octo/fork' })
+          : singlePullPayload(pr, 'clean', { baseRef: 'pr-90' }),
+    });
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    expect(result.candidates.map((c) => c.pr)).toEqual([91]);
+    expect(result.excluded).toEqual([
+      {
+        pr: 90,
+        reason:
+          'forked-pr (head repo octo/fork) — #142 contract: forked PRs are excluded and must be handled by a human',
+      },
+    ]);
+  });
+
+  test('a failed closed-page read degrades honestly: the open candidates survive and a #0 audit row explains the skip', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        list: () => [pullRow(51, { baseRef: 'pr-50' })],
+        closed: () => [closedRow(50)],
+        fail: (args) => args.some((a) => a.includes('state=closed')),
+      },
+      calls,
+    );
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    // The listing succeeded — there IS a page of truth — so the sweep's
+    // failure must not orphan the open candidates (the module-doc fault
+    // contract); the degradation is a recorded row, never silence.
+    expect(result.candidates.map((c) => c.pr)).toEqual([51]);
+    expect(result.excluded).toEqual([
+      { pr: 0, reason: 'fetch-failed: closed-ancestor sweep: gh exit 1: injected gh failure' },
+    ]);
+  });
+
+  test('a failing ancestor enrichment is isolated: a fetch-failed row for the closed PR, open siblings unaffected', async () => {
+    const gh = fakeGh({
+      list: () => [pullRow(61, { baseRef: 'pr-60' })],
+      closed: () => [closedRow(60)],
+      singlePull: (pr) =>
+        singlePullPayload(pr, 'clean', { baseRef: pr === 61 ? 'pr-60' : 'merge-queue' }),
+      fail: (args) => args.some((a) => a.endsWith(`repos/${REPO_PATH}/pulls/60`)),
+    });
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    expect(result.candidates.map((c) => c.pr)).toEqual([61]);
+    expect(result.excluded).toHaveLength(1);
+    expect(result.excluded[0]?.pr).toBe(60);
+    expect(result.excluded[0]?.reason.startsWith('fetch-failed: gh exit 1:')).toBe(true);
+  });
+
+  test('no closed-page read at all when nothing open exists to anchor', async () => {
+    const calls: string[] = [];
+    const gh = fakeGh(
+      {
+        list: () => [],
+        closed: () => [closedRow(70, { headRef: 'merge-queue' })],
+      },
+      calls,
+    );
+
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
+
+    expect(result.candidates).toEqual([]);
+    // No open base refs → no ancestor can matter → the read is never made
+    // (an idle sweep costs zero requests).
+    expect(calls.some((line) => line.includes('state=closed'))).toBe(false);
   });
 });
 

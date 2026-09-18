@@ -8,6 +8,11 @@
 //   - the PR set comes from the REAL forge via candidates.ts's shared REST
 //     listing (listOpenPrs — one read, same argv pattern as the merge
 //     candidates fetch);
+//   - each PR's head ref is REVALIDATED immediately before its dispatch
+//     (one single-PR GET, the candidates module's argv pattern): a branch
+//     renamed between the listing and the dispatch would otherwise receive
+//     the loop's pushes under its stale name — renamed heads and failed
+//     revalidation reads are recorded rows, never dispatches;
 //   - each qualifying PR runs the SHIPPED runReviewLoop with the frozen
 //     SelfhostDefaults (driver model, maxUsd default) and the loop's own
 //     defaults UNCHANGED — in particular classifyConfig is never overridden,
@@ -49,6 +54,7 @@ import { mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
+import { GhError, ghJson } from '../ops/review/gh.js';
 import type { GhFn } from '../ops/review/gh.js';
 import { makeGhRunner } from '../ops/review/gh.js';
 import { fileWorktreeRegistry } from '../ops/review/prWorktree.js';
@@ -69,6 +75,31 @@ const FAILURE_REASON_MAX = 500;
 const oneLine = (text: string): string => {
   const line = text.split('\n', 1)[0] ?? '';
   return line.length > FAILURE_REASON_MAX ? line.slice(0, FAILURE_REASON_MAX) : line;
+};
+
+/**
+ * One capped line from a thrown revalidation read — a GhError names gh's
+ * exit and stderr (the candidates module's same shape), anything else its
+ * message. A log fact, never the dump.
+ */
+const oneLineError = (error: unknown): string =>
+  error instanceof GhError
+    ? `gh exit ${String(error.code)}: ${oneLine(error.stderr)}`
+    : oneLine(error instanceof Error ? error.message : String(error));
+
+/**
+ * Structural read of the single-PR payload's `head.ref` — `''` when the
+ * wire omits any step (the same JSON-boundary guard style as the candidates
+ * module). An absent ref compares as `''` and so can never match a real
+ * listed branch: the PR then reads as renamed and is skipped — the loop
+ * never dispatches on a payload that cannot vouch for its head.
+ */
+const headRefOfPayload = (wire: unknown): string => {
+  if (typeof wire !== 'object' || wire === null) return '';
+  const head = (wire as Record<string, unknown>)['head'];
+  if (typeof head !== 'object' || head === null) return '';
+  const ref = (head as Record<string, unknown>)['ref'];
+  return typeof ref === 'string' ? ref : '';
 };
 
 /** A per-run audit directory name: `<pr>-<stamp>` — digits, dash, digits. */
@@ -164,8 +195,10 @@ export interface SelfReviewLoopCfg {
  * pre-loop exclusions (fork/draft/no-number/state-fetch-failure) named.
  * `excluded` is present only in real-run mode: every listed-but-not-looped
  * PR (fork, draft, a row without a number, a protected-branch head, a PR
- * reached after the sweep budget ran out) with its reason — the SAME
- * strings the dry-run path surfaces in its wouldRun lines. A PR absent
+ * reached after the sweep budget ran out, a PR whose head ref was renamed
+ * between the listing and its dispatch) with its reason — the SAME
+ * strings the dry-run path surfaces in its wouldRun lines, plus the
+ * dispatch-time revalidation rows only a real run can discover. A PR absent
  * from results, failures, AND excluded would be a lie, so the trio is the
  * contract.
  */
@@ -325,6 +358,42 @@ export async function runSelfReviewLoop(
     // loop under a spent budget (I9 — honest stop, honest bookkeeping).
     if (remaining <= 0) {
       excluded.push({ pr: row.pr, reason: EXCLUDE_SWEEP_BUDGET });
+      continue;
+    }
+    // HEAD-REF REVALIDATION (CodeRabbit P1): the listing at the top was
+    // read ONCE, and a head branch renamed after that read but before this
+    // dispatch would have the loop push fixes to the STALE name — git
+    // recreates the old branch from the worktree, the real PR head never
+    // updates, yet the loop's replies and resolves still post. So,
+    // immediately before dispatching each PR's loop, re-fetch the
+    // single-PR endpoint (`repos/{owner}/{repo}/pulls/{n}` — the same argv
+    // pattern the candidates module's enrichment rides) and compare its
+    // authoritative `head.ref` to the listed headRefName. On mismatch the
+    // PR is recorded excluded-style and skipped — the loop is NEVER
+    // dispatched against a branch the forge no longer confirms. A failed
+    // revalidation read fails CLOSED the same way (a failure row, no
+    // dispatch): an unverifiable head is never a dispatchable head. The
+    // sweep budget is deliberately NOT burned here — nothing was spent:
+    // the loop never ran. Dry runs skip this read entirely (they dispatch
+    // nothing, so they cannot push to a stale branch).
+    try {
+      const wire = await ghJson<unknown>(deps.gh, [
+        'api',
+        `repos/${cfg.owner}/${cfg.repo}/pulls/${String(row.pr)}`,
+      ]);
+      const freshHeadRef = headRefOfPayload(wire);
+      if (freshHeadRef !== row.headRefName) {
+        excluded.push({
+          pr: row.pr,
+          reason: `head ref renamed since listing (${row.headRefName} -> ${freshHeadRef})`,
+        });
+        continue;
+      }
+    } catch (error) {
+      failures.push({
+        pr: row.pr,
+        error: `head revalidation failed: ${oneLineError(error)}`,
+      });
       continue;
     }
     const opts: ReviewLoopOpts = {
