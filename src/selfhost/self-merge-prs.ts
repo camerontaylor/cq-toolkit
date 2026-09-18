@@ -178,6 +178,12 @@ export async function runSelfMergePrs(
     concurrency: 1,
     stopOnError: false,
     maxUsd: cfg.maxUsd ?? SelfhostDefaults.maxUsd,
+    // The governed run's durable kernel journal (the RunReport's evidence
+    // trail), namespaced `merge-<stamp>` under the journal root — stamp =
+    // the same once-read clock the loop entry stamps its per-PR dirs with.
+    // The CLI's optional --journal-dir is a human-run choice; a scheduled
+    // run has no human to copy stdout, so the entry always persists it.
+    journalDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), `merge-${String(nowMs)}`),
   };
   const governor = new BudgetGovernor(
     governorConfig(runOptions, { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs }),

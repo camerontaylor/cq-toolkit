@@ -20,7 +20,20 @@
 //      injected op is never consulted, no plan is built; the verdicts and
 //      exclusions are the whole payload.
 //   5. A failing listing fetch throws (the candidates contract).
-import { describe, expect, test } from 'vitest';
+//   6. A budget trip THROUGH the real composition is a REPORTED result,
+//      never a throw and never a fabricated outcome: cost evidence above
+//      the cap folds through the governed run, the job's row is the honest
+//      budget-exhausted verdict, and — the one-job plan leaving nothing
+//      undispatched for the trip to gate — the report claims NO early stop
+//      (I9 both directions; the kernel's #15-4b rule).
+//   7. The real run's RunOptions carry a durable journalDir (`merge-<stamp>`
+//      under the journal root) — asserted on the DIRECTORY the runner
+//      actually creates, the honest end-to-end observable.
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, test } from 'vitest';
+import { currentJobContext } from '../../src/kernel/governor.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, OpResult } from '../../src/kernel/types.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -137,6 +150,20 @@ const scriptedView = (seen: RunMergePrsInput[], result: OpResult<unknown>): OpRe
 
 const baseCfg = { owner: OWNER, repo: REPO, repoRoot: '/checkout', journalRoot: '/j' };
 
+// Temp journal roots for the real-run tests: with the entry persisting a
+// kernel journal (`merge-<stamp>` under the journal root) a real run now
+// creates directories, so the tests point the journal at the OS tempdir and
+// clean up after themselves.
+const tmpRoots: string[] = [];
+const tmpJournalRoot = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'self-merge-prs-'));
+  tmpRoots.push(dir);
+  return dir;
+};
+afterEach(() => {
+  for (const dir of tmpRoots.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
 describe('buildRunInput (the pure input builder)', () => {
   test('every field rides the frozen defaults or the cfg — nothing invented', () => {
     const input = buildRunInput([], { repoRoot: '/checkout', journalRoot: '/j' }, 1234);
@@ -161,9 +188,10 @@ describe('runSelfMergePrs — real run', () => {
   test('fetches candidates, dispatches the built input through the scripted op, rides the outcome + report + exclusions', async () => {
     const seen: RunMergePrsInput[] = [];
     const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });
+    const journalRoot = tmpJournalRoot();
     const result = await runSelfMergePrs(
       { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
-      baseCfg,
+      { ...baseCfg, journalRoot },
     );
 
     expect(result.dryRun).toBeUndefined(); // the real-run branch
@@ -176,7 +204,7 @@ describe('runSelfMergePrs — real run', () => {
     expect(input.protectedBranch).toBe('main');
     expect(input.wallClockMs).toBe(SelfhostDefaults.perJobWallClockMs);
     expect(input.modelSpec).toEqual(SelfhostDefaults.driver);
-    expect(input.sessionsDir).toBe('/j/sessions');
+    expect(input.sessionsDir).toBe(join(journalRoot, 'sessions'));
     expect(input.nowMs).toBe(5_000);
     expect(input.prs.map((candidate) => candidate.pr)).toEqual([7]); // the draft never enters
     expect(input.repoRoot).toBe('/checkout');
@@ -186,19 +214,67 @@ describe('runSelfMergePrs — real run', () => {
     expect(result.report.stoppedEarly).toBe(false);
     // The fetch's exclusion bookkeeping rides through for the workflow log.
     expect(result.excluded).toEqual([{ pr: 9, reason: 'draft' }]);
+    // The durable kernel journal really persisted: the runner created the
+    // `merge-<stamp>` dir the composition put in its RunOptions (stamp =
+    // the once-read clock) under the journal root.
+    expect(existsSync(join(journalRoot, 'merge-5000'))).toBe(true);
   });
 
   test('a non-ok job result → outcome null, the report is the evidence', async () => {
     const seen: RunMergePrsInput[] = [];
     const view = scriptedView(seen, { status: 'failed', error: 'git refused' });
+    const journalRoot = tmpJournalRoot();
     const result = await runSelfMergePrs(
       { gh: fetchGh(), driverRegistryView: view, nowMs: () => 0 },
-      baseCfg,
+      { ...baseCfg, journalRoot },
     );
     if (result.dryRun === true) throw new Error('unreachable');
     expect(result.outcome).toBeNull();
     expect(result.report.counts.failed).toBe(1);
     expect(result.report.jobs[0]?.result).toEqual({ status: 'failed', error: 'git refused' });
+    expect(existsSync(join(journalRoot, 'merge-0'))).toBe(true);
+  });
+
+  test('a budget trip through the real composition is a reported result, never silent or thrown', async () => {
+    // The op streams its modeled cost through the governed job context (the
+    // DD-9 path a real driver-backed op reports through) — 2 USD against the
+    // 1 USD cap trips the governor mid-job — and returns the frozen
+    // taxonomy's honest worker verdict for a budget bound hit.
+    const trippedOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportCost(2);
+      return { status: 'budget-exhausted' };
+    };
+    const view: OpRegistryView = {
+      get: (name) =>
+        name === 'merge.runPrs'
+          ? ({
+              name: 'merge.runPrs',
+              inputSchema: RunMergePrsInputSchema,
+              importer: async (): Promise<
+                (input: RunMergePrsInput) => Promise<OpResult<unknown>>
+              > => trippedOp,
+            } as unknown as OpRegistryEntry<never, never>)
+          : undefined,
+    };
+    const result = await runSelfMergePrs(
+      { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
+      { ...baseCfg, maxUsd: 1, journalRoot: tmpJournalRoot() },
+    );
+
+    // REPORTED, never thrown: the call resolves — the exit-0 honest-stop
+    // contract — with the full result carrying the evidence.
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(result.outcome).toBeNull(); // the non-ok job — the report is the evidence
+    expect(result.report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
+    expect(result.report.counts['budget-exhausted']).toBe(1);
+    // And the stop stays HONEST about its scope: the merge plan is ONE job
+    // and it executed, so nothing was undispatched for the trip to gate —
+    // withBudgetStop refuses to fabricate a stoppedEarly claim over it
+    // (I9 both directions; the kernel's 'a trip that gated NOTHING stays
+    // silent' rule). The annotated early-stop form is pinned where gated
+    // rows exist: test/kernel/governor.test.ts.
+    expect(result.report.stoppedEarly).toBe(false);
+    expect(result.report.earlyStopReason).toBeUndefined();
   });
 });
 

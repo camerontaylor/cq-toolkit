@@ -23,13 +23,27 @@
 //      state-read failure isolated into an excluded line, never fatal).
 //   6. A failing LISTING call throws (the candidates contract — no
 //      fabricated "nothing open").
+//   7. The maxUsd cap is SWEEP-LEVEL: carried forward across the PRs in
+//      order (each loop gets the REMAINING budget, decremented by its fix
+//      run's fixReport.costUSD rollup); a PR reached at ≤ 0 remaining is
+//      recorded `sweep budget exhausted (I9)`, never looped, never silent.
+//   8. A PR whose head is the protected branch (SelfhostDefaults.protected-
+//      Branch) is excluded BEFORE the loop — a review fix would push worker
+//      commits to it.
+//   9. The bounded prune: after a real run only the newest 5 `<pr>-<stamp>`
+//      audit dirs remain under the journal root; the flat dispatch-<pr>
+//      .ndjson dedupe logs ride untouched.
 //
 // The loop fn is injected (deps.loop — the documented DI seam): a recording
 // fake returning a minimal ReviewLoopOutcome. The gh seam is a fake GhFn
 // routing on argv (candidates.test.ts's fixture style) — no spawned process
 // anywhere, and the REAL listOpenPrs/fetchReviewState parse the fake's wire
 // payloads.
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
+import type { RunReport } from '../../src/kernel/types.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import type { ReviewLoopOpts, ReviewLoopOutcome } from '../../src/plans/review-loop.js';
@@ -111,6 +125,21 @@ const fakeOutcome = (pr: number, status: 'ok' | 'needs-human' = 'ok'): ReviewLoo
   skipped: [],
   plan: { id: 'review-loop', jobs: [] },
   actionsPosted: 0,
+});
+
+/** A minimal fix-run report carrying one derived cost rollup (the sweep cap's input). */
+const fixReportWithCost = (costUSD: number): RunReport => ({
+  runId: 'fix-run',
+  stoppedEarly: false,
+  counts: { queued: 0, running: 0, blocked: 0, done: 0, failed: 0, 'budget-exhausted': 0 },
+  jobs: [],
+  costUSD,
+});
+
+/** A loop outcome whose fix run spent `costUSD` — the sweep cap's evidence. */
+const outcomeWithFixCost = (pr: number, costUSD: number): ReviewLoopOutcome => ({
+  ...fakeOutcome(pr),
+  fixReport: fixReportWithCost(costUSD),
 });
 
 interface RecordedCall {
@@ -277,6 +306,101 @@ describe('runSelfReviewLoop — real run', () => {
       baseCfg({ journalRoot: '/j' }),
     );
     expect(calls[0]?.opts.driverRegistryView).toBe(view);
+  });
+
+  test('the maxUsd cap is sweep-level: a PR reached at zero remaining is recorded, not looped', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => outcomeWithFixCost(pr, 2)),
+      ),
+      baseCfg({ maxUsd: 1.5, journalRoot: '/j' }),
+    );
+
+    // PR 7's fix run spent 2 of the 1.5 sweep cap; PR 8 never dispatches —
+    // and the skip is a RECORDED row, never a silent one.
+    expect(calls).toHaveLength(1);
+    expect(summary.results.map((row) => row.pr)).toEqual([7]);
+    expect(summary.excluded).toEqual([{ pr: 8, reason: 'sweep budget exhausted (I9)' }]);
+  });
+
+  test('the sweep cap carries forward: each loop gets the remaining budget, not a fresh cap', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8), pullRow(9)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => outcomeWithFixCost(pr, 1)),
+      ),
+      baseCfg({ maxUsd: 3, journalRoot: '/j' }),
+    );
+
+    // Per-PR maxUsd is the REMAINING sweep budget after each prior fix
+    // run's cost rollup: 3 − 1 → 2 − 1 → 1. Three looped PRs, one cap.
+    expect(calls.map((call) => call.opts.runOptions?.maxUsd)).toEqual([3, 2, 1]);
+    expect(summary.results.map((row) => row.pr)).toEqual([7, 8, 9]);
+    expect(summary.excluded).toEqual([]);
+  });
+
+  test('a PR whose head is the protected branch is excluded before the loop', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7, { ref: 'main' }), pullRow(8)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: '/j' }),
+    );
+
+    // The recorded reason names the rule: a review fix would push worker
+    // commits to the protected branch.
+    expect(summary.excluded).toEqual([
+      {
+        pr: 7,
+        reason: `protected-branch head (a review fix would push worker commits to ${SelfhostDefaults.protectedBranch})`,
+      },
+    ]);
+    expect(summary.results.map((row) => row.pr)).toEqual([8]);
+    expect(calls.map((call) => call.opts.pr)).toEqual([8]); // the loop never ran for 7
+  });
+
+  test('the bounded prune keeps the newest 5 audit dirs and never touches the dispatch logs', async () => {
+    const calls: RecordedCall[] = [];
+    const journalRoot = mkdtempSync(join(tmpdir(), 'self-review-loop-'));
+    try {
+      // 7 prior-run audit dirs (oldest stamp first) plus the flat dedupe
+      // log and a non-matching journal resident the prune must leave alone.
+      for (let i = 0; i < 7; i++) {
+        mkdirSync(join(journalRoot, `7-${String(1_700_000_000_000 + i)}`), { recursive: true });
+      }
+      writeFileSync(join(journalRoot, 'dispatch-7.ndjson'), '{}\n');
+      writeFileSync(join(journalRoot, 'worktree-registry.json'), '{}\n');
+
+      const gh = fakeGh([pullRow(7)]);
+      const summary = await runSelfReviewLoop(
+        baseDeps(
+          gh,
+          fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+        ),
+        baseCfg({ journalRoot }),
+      );
+      expect(summary.results).toHaveLength(1);
+
+      // Exactly the five NEWEST stamps survive; the flat dispatch log (the
+      // cross-run dedupe memory) and the registry never match the
+      // `<pr>-<stamp>` directory pattern and ride untouched.
+      const expected = [
+        ...[2, 3, 4, 5, 6].map((i) => `7-${String(1_700_000_000_000 + i)}`),
+        'dispatch-7.ndjson',
+        'worktree-registry.json',
+      ].sort();
+      expect(readdirSync(journalRoot).sort()).toEqual(expected);
+    } finally {
+      rmSync(journalRoot, { recursive: true, force: true });
+    }
   });
 });
 

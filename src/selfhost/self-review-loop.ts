@@ -14,6 +14,12 @@
 //     so defaultLoopClassifyConfig's bot-authored-thread suppression stays
 //     ON (the skipResponderAuthoredThreads:false flip was the live drills'
 //     single-identity deviation, never a deployment setting);
+//   - the maxUsd cap is SWEEP-LEVEL: the configured (or default) cap is
+//     carried forward across the PRs in listing order — each PR's loop gets
+//     the REMAINING budget, each loop's fix-run cost rollup (DD-9,
+//     fixReport.costUSD) decrements it, and a PR reached at ≤ 0 remaining is
+//     recorded `sweep budget exhausted (I9)` instead of silently skipping or
+//     silently multiplying the advertised cap by the PR count;
 //   - responderLogin rides cfg (the token's user in CI, passed by the
 //     workflow as --responder-login) — the round-3 deployment requirement:
 //     the loop's own identity drives the thread last-word suppression, and
@@ -35,6 +41,7 @@
 // NO SECRETS: the summary carries structural facts only — PR numbers,
 // statuses, action counts, reason lines, logins at most — never tokens,
 // env, or stderr dumps beyond the loop's own capped reason lines.
+import { readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
@@ -58,6 +65,43 @@ const FAILURE_REASON_MAX = 500;
 const oneLine = (text: string): string => {
   const line = text.split('\n', 1)[0] ?? '';
   return line.length > FAILURE_REASON_MAX ? line.slice(0, FAILURE_REASON_MAX) : line;
+};
+
+/** A per-run audit directory name: `<pr>-<stamp>` — digits, dash, digits. */
+const AUDIT_DIR_PATTERN = /^\d+-\d+$/;
+
+/** How many of the newest per-run audit directories the journal keeps. */
+const AUDIT_DIRS_KEPT = 5;
+
+/**
+ * Bounded journal growth (CRT1): the workflow's cache restore/save pair
+ * re-accumulates every `<pr>-<stamp>/` audit dir a prior run saved, so the
+ * real run prunes them to the newest AUDIT_DIRS_KEPT before returning. ONLY
+ * that directory shape is ever removed — the flat `dispatch-<pr>.ndjson`
+ * dedupe logs (the cross-run memory the whole journal exists to persist),
+ * the worktree registry, and the sessions dir never match the pattern. The
+ * trailing stamp is a clock reading, so newest-first is a sort on that
+ * number — deterministic, no stat calls. Best-effort housekeeping: an
+ * unreadable journal root (a first run) or a failed removal must never fail
+ * an honest run — the next run's prune retries.
+ */
+const pruneAuditDirs = (journalRoot: string): void => {
+  let dirs: string[];
+  try {
+    dirs = readdirSync(journalRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && AUDIT_DIR_PATTERN.test(entry.name))
+      .map((entry) => entry.name);
+  } catch {
+    return; // no journal root yet — nothing to prune
+  }
+  const stampOf = (name: string): number => Number(name.slice(name.indexOf('-') + 1));
+  for (const name of dirs.sort((a, b) => stampOf(b) - stampOf(a)).slice(AUDIT_DIRS_KEPT)) {
+    try {
+      rmSync(join(journalRoot, name), { recursive: true, force: true });
+    } catch {
+      // retried by the next run's prune — never a run-failing effect
+    }
+  }
 };
 
 /**
@@ -97,7 +141,10 @@ export interface SelfReviewLoopCfg {
    * Null = author-blind verify — the documented fallback, never a guess.
    */
   responderLogin: string | null;
-  /** USD-cap override; default SelfhostDefaults.maxUsd (I9). */
+  /** USD-cap override; default SelfhostDefaults.maxUsd (I9). SWEEP-LEVEL:
+   * the cap is carried forward across the run's PRs (each loop gets the
+   * remaining budget, decremented by each fix run's cost rollup), never the
+   * full cap re-granted per PR. */
   maxUsd?: number;
   /** Journal root override; default `<repoRoot>/.selfhost/journal`. */
   journalRoot?: string;
@@ -112,7 +159,8 @@ export interface SelfReviewLoopCfg {
  * would-run summary (log-safe lines, no titles or bodies), with the
  * pre-loop exclusions (fork/draft/no-number/state-fetch-failure) named.
  * `excluded` is present only in real-run mode: every listed-but-not-looped
- * PR (fork, draft, a row without a number) with its reason — the SAME
+ * PR (fork, draft, a row without a number, a protected-branch head, a PR
+ * reached after the sweep budget ran out) with its reason — the SAME
  * strings the dry-run path surfaces in its wouldRun lines. A PR absent
  * from results, failures, AND excluded would be a lie, so the trio is the
  * contract.
@@ -136,22 +184,36 @@ const excludeForked = (headRepoFullName: string): string =>
 const EXCLUDE_DRAFT = 'draft';
 
 /**
+ * The protected-branch exclusion reason (shared verbatim by both run modes):
+ * the loop's fix workers push review commits to the PR's HEAD branch, so a
+ * PR whose head IS the protected branch must never be looped — the push
+ * would land worker commits on it (SelfhostDefaults.protectedBranch, the
+ * resolveConflict protectedBranch passthrough's same rule).
+ */
+const EXCLUDE_PROTECTED_HEAD = `protected-branch head (a review fix would push worker commits to ${SelfhostDefaults.protectedBranch})`;
+
+/** The sweep-budget exclusion reason — real-run only (a dry run spends nothing). */
+const EXCLUDE_SWEEP_BUDGET = 'sweep budget exhausted (I9)';
+
+/**
  * The pre-loop exclusion reason for a listing row, or null when the row is
  * loopable: open is the listing's own filter; same-repo (the #142 contract —
- * the loop only ever works the base repository's branches) and non-draft
- * gate here, before any worktree or dispatch exists. ONE classifier serves
- * BOTH run modes — the dry run renders it as a `#<n> excluded <reason>`
- * wouldRun line, the real run records it as an `excluded` row — so the two
- * payloads' reason strings can never drift.
+ * the loop only ever works the base repository's branches), non-draft, and
+ * not-headed-into the protected branch gate here, before any worktree or
+ * dispatch exists. ONE classifier serves BOTH run modes — the dry run
+ * renders it as a `#<n> excluded <reason>` wouldRun line, the real run
+ * records it as an `excluded` row — so the two payloads' reason strings can
+ * never drift.
  */
 const preLoopExclusion = (
-  row: { pr: number; headRepoFullName: string; draft: boolean },
+  row: { pr: number; headRepoFullName: string; draft: boolean; headRefName: string },
   owner: string,
   repo: string,
 ): string | null => {
   if (row.pr === 0) return EXCLUDE_NO_NUMBER;
   if (row.headRepoFullName !== `${owner}/${repo}`) return excludeForked(row.headRepoFullName);
   if (row.draft) return EXCLUDE_DRAFT;
+  if (row.headRefName === SelfhostDefaults.protectedBranch) return EXCLUDE_PROTECTED_HEAD;
   return null;
 };
 
@@ -160,8 +222,11 @@ const preLoopExclusion = (
  *
  * Real run: one runReviewLoop per PR with per-PR fault isolation; the run
  * stamp (one clock reading) namespaces each PR's journal dir; the pre-loop
- * exclusions (fork/draft/no-number) are RECORDED in `excluded` — same
- * reason strings as the dry run — never silently skipped. Dry run: NO
+ * exclusions (fork/draft/no-number/protected-branch head) are RECORDED in
+ * `excluded` — same reason strings as the dry run — never silently skipped;
+ * the maxUsd cap is sweep-level, carried forward across the PRs (a PR
+ * reached at ≤ 0 remaining is recorded, not looped, not charged the full
+ * cap again). Dry run: NO
  * worktree, NO dispatch, NO loop — only the listing and a per-PR
  * fetchReviewState summary of what WOULD run (a state read failure there is
  * isolated into the wouldRun lines, never fatal — the dry run must sketch,
@@ -175,8 +240,9 @@ export async function runSelfReviewLoop(
 ): Promise<SelfReviewLoopSummary> {
   const loop = deps.loop ?? runReviewLoop;
   const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
-  // Persistence seams under journalRoot — created lazily by their consumers,
-  // never here (this module touches no filesystem directly).
+  // Persistence seams under journalRoot — created lazily by their consumers;
+  // the ONE direct filesystem touch here is pruneAuditDirs' bounded cleanup
+  // of the audit dirs prior runs left behind.
   const registry = fileWorktreeRegistry(join(journalRoot, 'worktree-registry.json'));
   const worktreeRoot = join(cfg.repoRoot, '.selfhost', 'worktrees');
 
@@ -213,17 +279,29 @@ export async function runSelfReviewLoop(
   }
 
   const stamp = deps.nowMs();
+  // The SWEEP-LEVEL cap (I9): one budget for the whole run, carried forward
+  // in listing order — re-granting the full cap per PR would multiply the
+  // advertised cap by the PR count.
+  let remaining = cfg.maxUsd ?? SelfhostDefaults.maxUsd;
   const results: Array<{ pr: number; outcome: ReviewLoopOutcome }> = [];
   const failures: Array<{ pr: number; error: string }> = [];
   const excluded: Array<{ pr: number; reason: string }> = [];
   for (const row of rows) {
     // The pre-loop gates RECORD, not skip: every listed-but-not-looped PR
-    // (fork/draft/no-number) rides out in `excluded` with the same reason
-    // strings the dry run surfaces — a silent skip would orphan the PR from
-    // the summary (an absent row is a lie, not a shrug).
+    // (fork/draft/no-number/protected-branch head) rides out in `excluded`
+    // with the same reason strings the dry run surfaces — a silent skip
+    // would orphan the PR from the summary (an absent row is a lie, not a
+    // shrug).
     const exclusion = preLoopExclusion(row, cfg.owner, cfg.repo);
     if (exclusion !== null) {
       excluded.push({ pr: row.pr, reason: exclusion });
+      continue;
+    }
+    // The sweep cap gates before any worktree or dispatch: a PR reached at
+    // ≤ 0 remaining is a recorded row, never a silent skip and never a
+    // loop under a spent budget (I9 — honest stop, honest bookkeeping).
+    if (remaining <= 0) {
+      excluded.push({ pr: row.pr, reason: EXCLUDE_SWEEP_BUDGET });
       continue;
     }
     const opts: ReviewLoopOpts = {
@@ -242,7 +320,7 @@ export async function runSelfReviewLoop(
       nowMs: deps.nowMs(),
       runOptions: {
         journalDir: join(journalRoot, `${String(row.pr)}-${String(stamp)}`),
-        maxUsd: cfg.maxUsd ?? SelfhostDefaults.maxUsd,
+        maxUsd: remaining,
       },
       dispatchLogPath: join(journalRoot, `dispatch-${String(row.pr)}.ndjson`),
       worktreeRoot,
@@ -253,7 +331,17 @@ export async function runSelfReviewLoop(
         : {}),
     };
     try {
-      results.push({ pr: row.pr, outcome: await loop(opts) });
+      const outcome = await loop(opts);
+      results.push({ pr: row.pr, outcome });
+      // Carry the spend forward from THIS PR's fix run — the governed
+      // report's derived-only cost rollup (DD-9). A PR whose loop refused
+      // before the fix stage (no fixReport) or whose report carries no
+      // rollup consumed nothing this entry can account for: decrement only
+      // on a present, finite number, never on absence.
+      const cost = outcome.fixReport?.costUSD;
+      if (typeof cost === 'number' && Number.isFinite(cost)) {
+        remaining -= cost;
+      }
     } catch (error) {
       failures.push({
         pr: row.pr,
@@ -261,6 +349,10 @@ export async function runSelfReviewLoop(
       });
     }
   }
+  // Bounded journal growth: the workflow's cache save persists everything
+  // under journalRoot, so drop all but the newest per-run audit dirs before
+  // this run's state is saved (the flat dispatch logs ride untouched).
+  pruneAuditDirs(journalRoot);
   return { results, failures, excluded };
 }
 
@@ -311,9 +403,10 @@ async function main(): Promise<void> {
       reasons: row.outcome.reasons,
     })),
     failures: summary.failures,
-    // The real run's pre-loop exclusions (fork/draft/no-number), same
-    // reason strings the dry run names in wouldRun ([] in dry-run mode,
-    // whose exclusions ride the wouldRun lines).
+    // The real run's pre-loop exclusions (fork/draft/no-number/protected-
+    // branch/sweep-budget), same reason strings the dry run names in
+    // wouldRun ([] in dry-run mode, whose exclusions ride the wouldRun
+    // lines).
     excluded: summary.excluded ?? [],
   };
   process.stdout.write(`${JSON.stringify(payload)}\n`);

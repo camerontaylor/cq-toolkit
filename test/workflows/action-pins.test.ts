@@ -1,7 +1,7 @@
 // Slice C — the action-pinning policy, mechanically enforced:
 //   1. EVERY `uses:` across every generated workflow (all *.yml and *.yaml
 //      under .github/workflows/ — GitHub executes both extensions) and the
-//      six template files under
+//      eight template files under
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
@@ -23,7 +23,7 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
 
-// The six template files (source of truth) that carry `uses:` steps or are
+// The eight template files (source of truth) that carry `uses:` steps or are
 // otherwise part of the pinning policy.
 const TEMPLATE_FILES = [
   'policy/templates/init-merge-queue.yml',
@@ -32,6 +32,8 @@ const TEMPLATE_FILES = [
   'policy/templates/sync-merge-queue.yml',
   'policy/templates/required-check.md',
   'policy/templates/affected-tests.md',
+  'policy/templates/self-host/self-review-loop.yml',
+  'policy/templates/self-host/self-merge-prs.yml',
 ];
 
 // Every `uses:` value in the text (quoted `'uses':` keys included — YAML

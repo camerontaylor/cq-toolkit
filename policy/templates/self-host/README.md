@@ -94,9 +94,11 @@ adopter owns it by hand.
   scheduled slot forever.
 - Why: an uncapped scheduled dispatch spends without bound (I9), and a
   wedged job would eat the slot (review-debt #137's arming).
-- Enforcement: the governor armed inside the entry modules
-  (`src/selfhost/self-merge-prs.ts`'s `buildRunInput`; the review loop's
-  `runOptions`) from the frozen constants in `src/selfhost/config.ts`
+- Enforcement: the governor armed inside the entry modules —
+  `src/selfhost/self-merge-prs.ts`'s `new BudgetGovernor(governorConfig(...))`
+  construction over `runSelfMergePrs`'s runOptions (`buildRunInput` only
+  prepares the plan input); the review loop's `runOptions` — from the frozen
+  constants in `src/selfhost/config.ts`
   (`SelfhostDefaults.maxUsd`, `SelfhostDefaults.perJobWallClockMs`).
 
 ### One ≤20-minute slot per schedule fire
