@@ -50,6 +50,33 @@ describe('makeGhRunner', () => {
     expect(res.stdout).toBe('a\u65e5b');
   }, 10_000);
 
+  test('unsetEnv strips an INHERITED name; an explicit env entry survives the strip (review-debt #163)', async () => {
+    process.env.CQ_GH_PROBE_REPO = 'inherited/wrong-repo';
+    const bin = await tempBin(
+      'env-echo.mjs',
+      [
+        '#!/usr/bin/env node',
+        'import process from "node:process";',
+        `process.stdout.write(String(process.env.CQ_GH_PROBE_REPO ?? ''));`,
+        '',
+      ].join('\n'),
+    );
+    try {
+      // Inherited + stripped: the child sees nothing.
+      const stripped = await makeGhRunner({ bin, unsetEnv: ['CQ_GH_PROBE_REPO'] })([]);
+      expect(stripped.stdout).toBe('');
+      // Explicit env of the same name is caller intent and SURVIVES the strip.
+      const explicit = await makeGhRunner({
+        bin,
+        env: { CQ_GH_PROBE_REPO: 'explicit/kept' },
+        unsetEnv: ['CQ_GH_PROBE_REPO'],
+      })([]);
+      expect(explicit.stdout).toBe('explicit/kept');
+    } finally {
+      delete process.env.CQ_GH_PROBE_REPO;
+    }
+  }, 10_000);
+
   test('a nonexistent binary resolves (never rejects) with the 127 convention', async () => {
     const run = makeGhRunner({ bin: '/nonexistent-cq-gh-probe' });
     const res = await run(['whatever']);

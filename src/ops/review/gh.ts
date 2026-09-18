@@ -14,6 +14,7 @@
 // owner/repo spelling validator and the `--paginate --slurp` payload
 // normalizer) — hoisted here so the seams cannot drift apart.
 import { spawn } from 'node:child_process';
+import { isAbsolute, resolve } from 'node:path';
 
 /** Result of one `gh` invocation: the exit code plus the captured streams. */
 export interface GhResult {
@@ -88,13 +89,31 @@ export function makeGhRunner(opts?: {
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
-      const bin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
+      const rawBin = opts?.bin ?? process.env.CQ_GH_BIN ?? 'gh';
+      // Bare names PATH-lookup (cwd-independent), but a RELATIVE bin path
+      // with a separator resolves against the spawn cwd — with a scoped
+      // runner that would silently change which binary runs. Pre-resolve
+      // such paths against the process cwd, the pre-scoping resolution.
+      const bin =
+        rawBin.includes('/') || rawBin.includes('\\')
+          ? isAbsolute(rawBin)
+            ? rawBin
+            : resolve(process.cwd(), rawBin)
+          : rawBin;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
       const inherited = { ...process.env };
       if (opts?.unsetEnv !== undefined) {
-        for (const name of opts.unsetEnv) delete inherited[name];
+        // Windows env lookup is case-insensitive (and gh's Go runtime looks
+        // names up case-insensitively there), so the strip must be
+        // case-insensitive on win32; POSIX is case-sensitive on both sides.
+        const caseFold = process.platform === 'win32';
+        const targets = caseFold ? opts.unsetEnv.map((n) => n.toUpperCase()) : opts.unsetEnv;
+        for (const name of Object.keys(inherited)) {
+          const probe = caseFold ? name.toUpperCase() : name;
+          if (targets.includes(probe)) delete inherited[name];
+        }
       }
       const child = spawn(bin, args, {
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
