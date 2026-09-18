@@ -295,6 +295,69 @@ describe('renderUnifiedDiff (synthesized hunks, exact at the edit sites)', () =>
     );
   });
 
+  test('post-extension re-merge: two newline-joins whose extended blocks touch share one hunk (r1 review)', () => {
+    // Deleting the newline after 'a' and after 'c' extends block [0,1) to
+    // [0,2) and block [2,3) to [2,4) — now touching, so the re-merge pass
+    // fuses them into ONE block [0,4) rendering one hunk.
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('a\nb\nc\nd\ne\n', 'utf8'), [
+      { file: 'src/a.ts', startByte: 1, endByte: 2, replacement: '' },
+      { file: 'src/a.ts', startByte: 5, endByte: 6, replacement: '' },
+    ]);
+    expect(diff).toBe(
+      [
+        '--- src/a.ts\n',
+        '+++ src/a.ts\n',
+        '@@ -1,5 +1,3 @@\n',
+        '-a\n',
+        '-b\n',
+        '-c\n',
+        '-d\n',
+        '+ab\n',
+        '+cd\n',
+        ' e\n',
+      ].join(''),
+    );
+  });
+
+  test('EOF join without a trailing newline renders both no-newline markers (r1 review)', () => {
+    // 'beta' has no trailing newline (EOF): joining alpha+beta consumes the
+    // file's last newline, so BOTH the del and add sides carry the
+    // '\ No newline at end of file' marker.
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('alpha\nbeta', 'utf8'), [
+      { file: 'src/a.ts', startByte: 5, endByte: 6, replacement: '' },
+    ]);
+    expect(diff).toBe(
+      [
+        '--- src/a.ts\n',
+        '+++ src/a.ts\n',
+        '@@ -1,2 +1,1 @@\n',
+        '-alpha\n',
+        '-beta\n',
+        '\\ No newline at end of file\n',
+        '+alphabeta\n',
+        '\\ No newline at end of file\n',
+      ].join(''),
+    );
+  });
+
+  test('a replacement that KEEPS the newline does not extend the block (r1 review)', () => {
+    // Rewriting 'alpha' in place leaves the block's trailing newline intact:
+    // no join, beta stays context — the no-extension control.
+    const diff = renderUnifiedDiff('src/a.ts', Buffer.from('alpha\nbeta\n', 'utf8'), [
+      { file: 'src/a.ts', startByte: 0, endByte: 5, replacement: 'gamma' },
+    ]);
+    expect(diff).toBe(
+      [
+        '--- src/a.ts\n',
+        '+++ src/a.ts\n',
+        '@@ -1,2 +1,2 @@\n',
+        '-alpha\n',
+        '+gamma\n',
+        ' beta\n',
+      ].join(''),
+    );
+  });
+
   test('a FULL-line deletion does not extend the block: the next line stays context (coderabbit r1)', () => {
     // Deleting `alpha\n` outright joins nothing — beta merely moves up. The
     // extension must require surviving spliced content, or beta would be

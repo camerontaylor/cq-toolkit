@@ -285,6 +285,16 @@ describe('the sidecar format: strict parse, re-derived fingerprint, coverage con
     );
   });
 
+  test('an 8-hex reportFingerprint (the old handle) FAILS the sidecar schema (r1 review — Hex16 negative branch)', () => {
+    const report = fixtureReport();
+    const { sidecar } = renderAnalysisReport(report);
+    const truncated = JSON.parse(serializeAnalysisSidecar(sidecar));
+    truncated.reportFingerprint = (truncated.reportFingerprint as string).slice(0, 8);
+    expect(() => parseAnalysisSidecar(JSON.stringify(truncated))).toThrow(
+      /expected 16 lowercase hex digits/,
+    );
+  });
+
   test('missing/garbage/wrong-version sidecars fail with clear errors', () => {
     expect(() => parseAnalysisSidecar('not json {')).toThrow(SidecarFormatError);
     expect(() => parseAnalysisSidecar('{}')).toThrow(/schemaVersion/);
