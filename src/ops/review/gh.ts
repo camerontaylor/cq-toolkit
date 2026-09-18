@@ -78,6 +78,13 @@ export function makeGhRunner(opts?: {
    * caller with cwd ≠ target repo can hit WRONG-repo PRs when numbers
    * collide). */
   cwd?: string;
+  /** Env NAMES to strip from the INHERITED environment before the spawn
+   * (review-debt #163: gh's repo resolution precedence is -R > GH_REPO >
+   * cwd, so a cwd-scoped runner must also strip an inherited GH_REPO or
+   * the cwd never matters). Explicit `env` entries survive the strip —
+   * a caller-provided value is intent and wins over the inherited value
+   * the strip removed. */
+  unsetEnv?: readonly string[];
 }): GhFn {
   return (args: string[]) =>
     new Promise<GhResult>((resolve) => {
@@ -85,9 +92,13 @@ export function makeGhRunner(opts?: {
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
       let timedOut = false;
+      const inherited = { ...process.env };
+      if (opts?.unsetEnv !== undefined) {
+        for (const name of opts.unsetEnv) delete inherited[name];
+      }
       const child = spawn(bin, args, {
         ...(opts?.cwd !== undefined ? { cwd: opts.cwd } : {}),
-        env: { ...process.env, ...opts?.env },
+        env: { ...inherited, ...opts?.env },
       });
       // The runner — not the child — owns this one wall clock: it bounds a
       // single spawned gh invocation and OBEYS by killing, never by deciding

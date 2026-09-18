@@ -1160,23 +1160,34 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     expect(ghCalls).toEqual([['pr', 'merge', '7', '--merge']]);
   });
 
-  test('realMergeEffects scopes the gh spawn to the repo root (review-debt #163: no wrong-repo PRs on cwd collisions)', async () => {
+  test('realMergeEffects scopes the gh spawn to the repo root and strips an inherited GH_REPO (review-debt #163: no wrong-repo PRs on cwd/GH_REPO collisions)', async () => {
     // The REAL makeGhRunner (no run override — that would hide the spawn
-    // opts) with a fake gh binary that records its cwd: the effect must
-    // spawn INSIDE repoRoot even though the test process cwd is elsewhere.
+    // opts) with a fake gh binary that records its cwd AND its GH_REPO: the
+    // effect must spawn INSIDE repoRoot even though the test process cwd is
+    // elsewhere, and an inherited GH_REPO (gh's repo resolution: -R >
+    // GH_REPO > cwd) must be stripped — the cwd is otherwise defeated.
     const tmp = await mkdtemp(join(tmpdir(), 'cq-merge-ghcwd-'));
     const repo = join(tmp, 'repo');
     const record = join(tmp, 'cwd.txt');
+    const ghRepoRecord = join(tmp, 'ghrepo.txt');
     await mkdir(repo);
     const gh = join(tmp, 'fake-gh.sh');
-    await writeFile(gh, `#!/bin/sh\nprintf '%s' "$PWD" > '${record}'\n`);
+    await writeFile(
+      gh,
+      `#!/bin/sh\nprintf '%s' "$PWD" > '${record}'\nprintf '%s' "$GH_REPO" > '${ghRepoRecord}'\n`,
+    );
     chmodSync(gh, 0o755);
+    const previousGhRepo = process.env.GH_REPO;
+    process.env.GH_REPO = 'wrong-owner/wrong-repo';
     try {
       const effects = realMergeEffects({ repoRoot: repo, ghBin: gh });
       expect(await effects.retargetBase(7, 'other')).toMatchObject({ code: 0 });
       const { readFile } = await import('node:fs/promises');
       expect(await readFile(record, 'utf8')).toBe(repo);
+      expect(await readFile(ghRepoRecord, 'utf8')).toBe('');
     } finally {
+      if (previousGhRepo === undefined) delete process.env.GH_REPO;
+      else process.env.GH_REPO = previousGhRepo;
       await rm(tmp, { recursive: true, force: true });
     }
   });
