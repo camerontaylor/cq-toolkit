@@ -98,7 +98,7 @@ export function makeGhRunner(opts?: {
         rawBin.includes('/') || rawBin.includes('\\')
           ? isAbsolute(rawBin)
             ? rawBin
-            : resolve(process.cwd(), rawBin)
+            : pathResolve(process.cwd(), rawBin)
           : rawBin;
       const stdoutChunks: Buffer[] = [];
       const stderrChunks: Buffer[] = [];
