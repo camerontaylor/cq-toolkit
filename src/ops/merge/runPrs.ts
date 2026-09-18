@@ -132,10 +132,10 @@ export interface RunMergePrsInput {
   baseBranch: string;
   /**
    * Absolute path of the checked-out repository (the effects target). The
-   * caller must aim gh at the target repository (GH_REPO env or process
-   * cwd) — the effects layer scopes git via this path but never gh: the
-   * gh runner spawns without a repo cwd and without `-R`, so gh resolves
-   * its repository from the environment, not from this path.
+   * effects layer scopes BOTH runners to this path: git via `-C` argv, gh
+   * via the spawn cwd (with an inherited GH_REPO stripped — gh resolves
+   * `-R` > `GH_REPO` > cwd, so a stale GH_REPO must not override the cwd
+   * scoping).
    */
   repoRoot: string;
   /** The fetched candidates, in any array order (planning sorts). */
