@@ -113,7 +113,10 @@ jobs:
           # The fix workers' driver (ai-sdk, served model id): without it
           # the loop's dispatches cannot run — asserted below, before any
           # effect.
-          Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
+          # The driver's routing table reads ZAI_API_KEY (src/driver/subprocess/routing.ts:92,
+          # src/driver/ai-sdk/index.ts:484) — the Actions SECRET is named Z_AI_API_KEY;
+          # env-indirection maps secret name -> driver env name.
+          ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}
@@ -131,7 +134,7 @@ jobs:
           # throw into a red step despite tee.
           set -euo pipefail
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
-          test -n "$Z_AI_API_KEY" || { echo 'Z_AI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
+          test -n "$ZAI_API_KEY" || { echo 'Z_AI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
           # Window-end fail-closed guard: a delayed fire must not initiate operations at/after 01:00 UTC (09:00 SGT, the owner hard stop) — exiting 0 records the honest no-op, not a failure.
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then

@@ -147,7 +147,7 @@ jobs:
           # despite tee.
           set -euo pipefail
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
-          test -n "$Z_AI_API_KEY" || { echo 'Z_AI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
+          test -n "$ZAI_API_KEY" || { echo 'Z_AI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
           # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.)
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
