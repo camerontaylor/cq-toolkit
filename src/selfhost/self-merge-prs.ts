@@ -155,7 +155,15 @@ export async function runSelfMergePrs(
   cfg: SelfMergePrsCfg,
 ): Promise<SelfMergePrsResult> {
   const nowMs = (deps.nowMs ?? (() => Date.now()))();
-  const fetched = await fetchMergeCandidates({ gh: deps.gh, owner: cfg.owner, repo: cfg.repo });
+  // The ONE clock reading rides into the fetch too: the closed-ancestor
+  // sweep's freshness window is judged from the same instant the
+  // classification will be (same fetch + same reading → same verdicts).
+  const fetched = await fetchMergeCandidates({
+    gh: deps.gh,
+    owner: cfg.owner,
+    repo: cfg.repo,
+    nowMs,
+  });
 
   if (cfg.dryRun === true) {
     return {

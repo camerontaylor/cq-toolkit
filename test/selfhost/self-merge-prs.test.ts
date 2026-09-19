@@ -88,6 +88,11 @@ const fetchGh =
       }
       return json([pullRow(7), pullRow(9, { draft: true })]);
     }
+    if (path === `repos/${REPO_PATH}/pulls?state=closed&sort=updated&direction=desc&per_page=100`) {
+      // The closed-ancestor sweep's ONE bounded page: these fixtures have
+      // no live stack rung, so no merged ancestor ever rides along.
+      return json([]);
+    }
     if (path.startsWith(`repos/${REPO_PATH}/commits/`)) {
       return json(commitPayload('2026-01-02T00:00:00Z'));
     }
