@@ -28,10 +28,12 @@ import { deepFreeze } from '../harness/config.js';
 export interface SelfhostDefaultsConfig {
   /**
    * The scheduled runs' USD cap (I9 — the budget cap is an HONEST STOP: the
-   * governor stops the run when the derived cost rollup crosses it, and the
-   * run reports stoppedEarly rather than pretending to have finished). This
-   * is the workflow's `--max-usd` default and feeds BOTH compositions: the
-   * merge dispatch path's RunOptions.maxUsd and the review loop's
+   * governor stops the run when the derived cost rollup crosses it rather
+   * than pretending to have finished — a one-job merge plan surfaces the
+   * trip as the budget-exhausted job row (stoppedEarly stays false), and
+   * the loop path's per-PR governors surface it through the job row too).
+   * This is the workflow's `--max-usd` default and feeds BOTH compositions:
+   * the merge dispatch path's RunOptions.maxUsd and the review loop's
    * runOptions.maxUsd. The effective cap is min(RunOptions.maxUsd,
    * Limits.maxUsd) — the frozen cap-precedence rule — so a caller may lower
    * it per run but no composition can raise it past what the workflow

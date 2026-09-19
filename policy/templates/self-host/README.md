@@ -86,8 +86,10 @@ adopter owns it by hand.
 
 - Rule: every scheduled run carries `--max-usd` (default
   `SelfhostDefaults.maxUsd`, 1 USD) as an honest stop — the governor halts
-  the run when the derived cost rollup crosses it and the run reports
-  `stoppedEarly` rather than pretending to have finished; the merge path
+  the run when the derived cost rollup crosses it rather than pretending to
+  have finished (a one-job merge plan shows the budget-exhausted job row —
+  `stoppedEarly` stays false — and the loop path's per-PR governors surface
+  the trip through the job row too); the merge path
   also arms the governor's wall-clock ladder
   (`SelfhostDefaults.perJobWallClockMs`, 5 minutes) so a wedged
   conflict-agent or fix-worker job is escalated instead of stalling the

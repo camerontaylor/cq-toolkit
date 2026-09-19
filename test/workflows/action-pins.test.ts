@@ -134,4 +134,17 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
       '## Action pinning',
     );
   });
+
+  it('both instantiated self-host workflows carry the automation-window guard', () => {
+    // The window-end fail-closed guard: the UTC clock read plus the abort
+    // line — a delayed fire must refuse to initiate operations, not run
+    // outside the scheduled window.
+    for (const name of ['self-review-loop.yml', 'self-merge-prs.yml']) {
+      const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
+      expect(text, `${name}: the window guard's UTC clock read`).toContain('date -u +%H%M');
+      expect(text, `${name}: the window guard's abort line`).toContain(
+        'outside the scheduled automation window',
+      );
+    }
+  });
 });

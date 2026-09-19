@@ -40,17 +40,22 @@
 // needs-human outcome or a recorded failure is an HONEST result the
 // workflow logs (exit 0), never a fabricated green and never a crash that
 // orphans the remaining PRs. One exception to "siblings continue": a thrown
-// loop may carry UNACCOUNTED spend, so the throw burns the sweep budget
-// (remaining zeroed, fail-closed) and the PRs after it are recorded
-// `sweep budget exhausted` instead of re-spending an allowance the entry can
-// no longer vouch for. The LISTING call is the exception (candidates'
+// loop WITH SPEND EVIDENCE may carry UNACCOUNTED spend, so the throw burns
+// the sweep budget (remaining zeroed, fail-closed) and the PRs after it are
+// recorded `sweep budget exhausted` instead of re-spending an allowance the
+// entry can no longer vouch for. The burn is SPEND-EVIDENCE-GATED: the
+// evidence is the PR's dispatch log gaining at least one line (the loop's
+// own first dispatch write) — a loop that threw BEFORE any dispatch (a
+// worktree or registry fault) spent nothing and its budget carries forward,
+// so one always-throwing early PR cannot starve every later PR forever.
+// The LISTING call is the exception (candidates'
 // contract): when it fails there is nothing to isolate — the throw
 // propagates and the process exits 1.
 //
 // NO SECRETS: the summary carries structural facts only — PR numbers,
 // statuses, action counts, reason lines, logins at most — never tokens,
 // env, or stderr dumps beyond the loop's own capped reason lines.
-import { mkdirSync, readdirSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { OpRegistryView } from '../kernel/runner.js';
@@ -88,6 +93,24 @@ const oneLineError = (error: unknown): string =>
     : oneLine(error instanceof Error ? error.message : String(error));
 
 /**
+ * Spend evidence for a THROWN loop (the spend-evidence-gated budget burn):
+ * the LOOP itself writes the PR's dispatch log's lines, so a log carrying at
+ * least one line proves the loop got far enough to dispatch — spend may have
+ * begun and the sweep budget burns (fail-closed). A loop that threw BEFORE
+ * its first dispatch (a worktree or registry fault) leaves no lines and
+ * spent nothing: its budget carries forward unchanged.
+ */
+const dispatchLogHasLines = (dispatchLogPath: string): boolean => {
+  try {
+    return readFileSync(dispatchLogPath, 'utf8')
+      .split('\n')
+      .some((line) => line.trim() !== '');
+  } catch {
+    return false; // no log file (or unreadable) — nothing was dispatched
+  }
+};
+
+/**
  * Structural read of the single-PR payload's `head.ref` — `''` when the
  * wire omits any step (the same JSON-boundary guard style as the candidates
  * module). An absent ref compares as `''` and so can never match a real
@@ -100,6 +123,29 @@ const headRefOfPayload = (wire: unknown): string => {
   if (typeof head !== 'object' || head === null) return '';
   const ref = (head as Record<string, unknown>)['ref'];
   return typeof ref === 'string' ? ref : '';
+};
+
+/**
+ * Structural read of the single-PR payload's top-level `state` — `''` when
+ * the wire omits it or the value is not a string. Anything but `'open'`
+ * fails the revalidation's state requirement: a payload that cannot vouch
+ * for openness is never a dispatchable PR (headRefOfPayload's same rule).
+ */
+const stateOfPayload = (wire: unknown): string => {
+  if (typeof wire !== 'object' || wire === null) return '';
+  const state = (wire as Record<string, unknown>)['state'];
+  return typeof state === 'string' ? state : '';
+};
+
+/**
+ * Structural read of the single-PR payload's top-level `draft` — undefined
+ * when the wire omits it or the value is not a boolean; the revalidation
+ * requires exactly `false`.
+ */
+const draftOfPayload = (wire: unknown): boolean | undefined => {
+  if (typeof wire !== 'object' || wire === null) return undefined;
+  const draft = (wire as Record<string, unknown>)['draft'];
+  return typeof draft === 'boolean' ? draft : undefined;
 };
 
 /** A per-run audit directory name: `<pr>-<stamp>` — digits, dash, digits. */
@@ -189,7 +235,8 @@ export interface SelfReviewLoopCfg {
 
 /**
  * The run's honest outcome: one row per looped PR (its full ReviewLoopOutcome)
- * and one row per PR whose loop THREW — both are facts the workflow records.
+ * and one row per PR whose loop THREW or whose pre-dispatch revalidation
+ * read FAILED — both are facts the workflow records.
  * `dryRun`/`wouldRun` are present only in dry-run mode: the structural
  * would-run summary (log-safe lines, no titles or bodies), with the
  * pre-loop exclusions (fork/draft/no-number/state-fetch-failure) named.
@@ -231,6 +278,12 @@ const EXCLUDE_PROTECTED_HEAD = `protected-branch head (a review fix would push w
 
 /** The sweep-budget exclusion reason — real-run only (a dry run spends nothing). */
 const EXCLUDE_SWEEP_BUDGET = 'sweep budget exhausted (I9)';
+
+/** The closed-after-listing exclusion reason (the revalidation payload's state). */
+const EXCLUDE_CLOSED_AFTER_LISTING = 'closed after listing';
+
+/** The draft-converted-after-listing exclusion reason (the revalidation payload's draft flag). */
+const EXCLUDE_DRAFTED_AFTER_LISTING = 'converted to draft after listing';
 
 /**
  * The fail-closed suffix appended to a THROWN loop's failure row (KyI): the
@@ -370,9 +423,13 @@ export async function runSelfReviewLoop(
     // pattern the candidates module's enrichment rides) and compare its
     // authoritative `head.ref` to the listed headRefName. On mismatch the
     // PR is recorded excluded-style and skipped — the loop is NEVER
-    // dispatched against a branch the forge no longer confirms. A failed
-    // revalidation read fails CLOSED the same way (a failure row, no
-    // dispatch): an unverifiable head is never a dispatchable head. The
+    // dispatched against a branch the forge no longer confirms. The same
+    // payload also re-vouches for the PR's STATUS: a PR closed or converted
+    // to draft after the listing must never receive the loop's replies and
+    // pushes, so `state === 'open'` and `draft === false` are required —
+    // an absent or non-conforming field fails closed, as an excluded row.
+    // A failed revalidation read fails CLOSED the same way (a failure row,
+    // no dispatch): an unverifiable head is never a dispatchable head. The
     // sweep budget is deliberately NOT burned here — nothing was spent:
     // the loop never ran. Dry runs skip this read entirely (they dispatch
     // nothing, so they cannot push to a stale branch).
@@ -387,6 +444,14 @@ export async function runSelfReviewLoop(
           pr: row.pr,
           reason: `head ref renamed since listing (${row.headRefName} -> ${freshHeadRef})`,
         });
+        continue;
+      }
+      if (stateOfPayload(wire) !== 'open') {
+        excluded.push({ pr: row.pr, reason: EXCLUDE_CLOSED_AFTER_LISTING });
+        continue;
+      }
+      if (draftOfPayload(wire) !== false) {
+        excluded.push({ pr: row.pr, reason: EXCLUDE_DRAFTED_AFTER_LISTING });
         continue;
       }
     } catch (error) {
@@ -442,17 +507,29 @@ export async function runSelfReviewLoop(
         remaining -= cost;
       }
     } catch (error) {
-      // FAIL-CLOSED SWEEP BUDGET (CodeRabbit round 2, KyI): a loop that
-      // spent and THEN threw leaves its fix-run cost unaccounted — the
-      // carry-forward above only subtracts on resolve. Carrying the old
-      // remaining forward would let every later PR re-spend the same
-      // allowance. The throw therefore BURNS the sweep: remaining is zeroed
-      // and the failure row says so, honestly, instead of pretending the
-      // budget survives an unaccounted spend.
-      remaining = 0;
+      // FAIL-CLOSED SWEEP BUDGET, SPEND-EVIDENCE-GATED (CodeRabbit round 2,
+      // KyI): a loop that spent and THEN threw leaves its fix-run cost
+      // unaccounted — the carry-forward above only subtracts on resolve.
+      // Carrying the old remaining forward would let every later PR re-spend
+      // the same allowance, so a throw WITH spend evidence BURNS the sweep:
+      // remaining is zeroed and the failure row says so, honestly, instead
+      // of pretending the budget survives an unaccounted spend. The evidence
+      // gate: the loop itself writes the PR's dispatch log's first line at
+      // its first dispatch, so a log WITHOUT lines proves the loop threw
+      // BEFORE any dispatch (a worktree or registry fault) and spent
+      // nothing — the budget then carries forward unchanged, and one
+      // always-throwing early PR cannot starve every later PR forever.
+      const message = oneLine(error instanceof Error ? error.message : String(error));
+      const burned = dispatchLogHasLines(opts.dispatchLogPath);
+      if (burned) {
+        remaining = 0;
+      }
       failures.push({
         pr: row.pr,
-        error: `${oneLine(error instanceof Error ? error.message : String(error))} — ${EXCLUDE_SWEEP_BUDGET_FAIL_CLOSED}`,
+        // The fail-closed suffix rides only a BURNED budget — it records why
+        // the later PRs read exhausted, so it must not claim a burn that did
+        // not happen.
+        error: burned ? `${message} — ${EXCLUDE_SWEEP_BUDGET_FAIL_CLOSED}` : message,
       });
     }
   }

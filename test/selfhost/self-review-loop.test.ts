@@ -39,16 +39,23 @@
 //  11. The wall-clock ladder rides the loop opts (CodeRabbit KyE): every
 //      loop's limits carry SelfhostDefaults.perJobWallClockMs (the #137
 //      review-path arming; merge-path symmetric).
-//  12. Fail-closed sweep budget (CodeRabbit KyI): a loop that THROWS burns
-//      the sweep — the failure row says so and the later PRs are recorded
-//      exhausted instead of re-spending an unaccounted allowance.
+//  12. Fail-closed sweep budget (CodeRabbit KyI), SPEND-EVIDENCE-GATED: a
+//      loop that THROWS after its dispatch log gained a line burns the
+//      sweep — the failure row says so and the later PRs are recorded
+//      exhausted instead of re-spending an unaccounted allowance; a loop
+//      that throws BEFORE any dispatch-log line (a pre-spend fault) spent
+//      nothing, so its budget carries forward and its siblings still run.
 //  13. Head-ref revalidation (CodeRabbit P1): immediately before each
 //      dispatch the single-PR endpoint re-vouches for the head ref — a
 //      renamed head is an excluded row (`head ref renamed since listing
 //      (<old> -> <new>)`) and a failed revalidation read is a failure row
 //      (`head revalidation failed: …`); NEITHER ever dispatches the loop,
 //      a failed revalidation does not burn the sweep budget (nothing was
-//      spent), and the dry run makes no revalidation reads at all.
+//      spent), and the dry run makes no revalidation reads at all. The
+//      same payload's `state`/`draft` are re-required (`open`, `false`) —
+//      a PR closed or converted to draft after the listing is an excluded
+//      row (`closed after listing` / `converted to draft after listing`),
+//      never a dispatch.
 //
 // The loop fn is injected (deps.loop — the documented DI seam): a recording
 // fake returning a minimal ReviewLoopOutcome. The gh seam is a fake GhFn
@@ -109,9 +116,10 @@ const json = (value: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(va
  * review-state reads the dry run makes. `stateRoutes` false leaves every
  * review-state route failing — the dry run's per-PR state reads then fail
  * and must be isolated into the wouldRun lines. The single-pull route
- * defaults to a payload that VOUCHES for each row's listed head ref (the
- * ordinary world: nothing renamed between listing and dispatch); returning
- * the string 'fail' makes that PR's GET exit 1.
+ * defaults to a payload that VOUCHES for each row's listed head ref AND its
+ * open, non-draft status (the ordinary world: nothing renamed, closed, or
+ * drafted between listing and dispatch); returning the string 'fail' makes
+ * that PR's GET exit 1.
  */
 const fakeGh =
   (
@@ -135,7 +143,11 @@ const fakeGh =
     const single = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/.exec(path);
     if (single !== null) {
       const pr = Number(single[1]);
-      const payload = opts?.singlePull?.(pr) ?? { head: { ref: `pr-${String(pr)}` } };
+      const payload = opts?.singlePull?.(pr) ?? {
+        state: 'open',
+        draft: false,
+        head: { ref: `pr-${String(pr)}` },
+      };
       if (payload === 'fail') {
         return { code: 1, stdout: '', stderr: 'injected gh failure' };
       }
@@ -188,11 +200,11 @@ interface RecordedCall {
 const fakeLoop =
   (
     calls: RecordedCall[],
-    behavior: (pr: number) => Promise<ReviewLoopOutcome>,
+    behavior: (pr: number, opts: ReviewLoopOpts) => Promise<ReviewLoopOutcome>,
   ): typeof runReviewLoop =>
   async (opts: ReviewLoopOpts): Promise<ReviewLoopOutcome> => {
     calls.push({ opts });
-    return behavior(opts.pr);
+    return behavior(opts.pr, opts);
   };
 
 const baseDeps = (gh: GhFn, loop: typeof runReviewLoop): SelfReviewLoopDeps => ({
@@ -331,12 +343,12 @@ describe('runSelfReviewLoop — real run', () => {
     expect(summary.results.map((row) => row.pr)).toEqual([7]);
     expect(summary.failures).toEqual([
       {
-        // ONE line — a log fact, not the dump — plus the fail-closed sweep
-        // burn (KyI): the thrown loop's spend is unaccountable, so the row
-        // says the budget did not survive it.
+        // ONE line — a log fact, not the dump. No dispatch-log line was
+        // written, so the throw carried NO spend evidence and the sweep
+        // budget was NOT burned (the spend-evidence-gated rule, KyI) — the
+        // fail-closed suffix rides only a burn that happened.
         pr: 8,
-        error:
-          'injected loop boom — sweep budget exhausted (fail-closed: a thrown loop may have unaccounted spend)',
+        error: 'injected loop boom',
       },
     ]);
     expect(calls).toHaveLength(2); // the sibling was still attempted
@@ -371,12 +383,14 @@ describe('runSelfReviewLoop — real run', () => {
     const summary = await runSelfReviewLoop(
       baseDeps(
         gh,
-        fakeLoop(calls, async (pr) => {
+        fakeLoop(calls, async (pr, opts) => {
           if (pr === 7) {
             // Spend the budget and THROW before the entry can read the
-            // rollup: the cost is real but unaccountable. The throw must
-            // burn the sweep — PR 8/9 must not re-spend the allowance.
-            void outcomeWithFixCost(pr, 1);
+            // rollup: the cost is real but unaccountable. The spend is
+            // EVIDENCED by the dispatch log's first line — the loop's own
+            // write, as the real loop does at its first dispatch — so the
+            // throw must burn the sweep; PR 8/9 must not re-spend.
+            writeFileSync(opts.dispatchLogPath, '{}\n');
             throw new Error('injected loop boom after spend');
           }
           return outcomeWithFixCost(pr, 1);
@@ -400,6 +414,35 @@ describe('runSelfReviewLoop — real run', () => {
       { pr: 8, reason: 'sweep budget exhausted (I9)' },
       { pr: 9, reason: 'sweep budget exhausted (I9)' },
     ]);
+  });
+
+  test('a loop that throws BEFORE any dispatch-log line carries the budget forward (spend-evidence-gated burn)', async () => {
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(7), pullRow(8)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => {
+          if (pr === 7) {
+            // Throw at entry — a worktree/registry-style fault, BEFORE any
+            // dispatch-log line exists: nothing was spent, so the budget
+            // must carry forward and the sibling must still run (an
+            // ungated burn would let this PR starve every later PR).
+            throw new Error('injected pre-spend fault');
+          }
+          return outcomeWithFixCost(pr, 1);
+        }),
+      ),
+      baseCfg({ maxUsd: 2, journalRoot: tempJournalRoot() }),
+    );
+
+    // PR 8 was dispatched against the FULL remaining allowance, and PR 7's
+    // failure row is the plain message — no fail-closed burn suffix.
+    expect(calls.map((call) => call.opts.pr)).toEqual([7, 8]);
+    expect(calls[1]?.opts.runOptions?.maxUsd).toBe(2);
+    expect(summary.results.map((row) => row.pr)).toEqual([8]);
+    expect(summary.failures).toEqual([{ pr: 7, error: 'injected pre-spend fault' }]);
+    expect(summary.excluded).toEqual([]);
   });
 
   test('a listing row without a PR number is recorded as excluded, not silently skipped', async () => {
@@ -564,11 +607,43 @@ describe('runSelfReviewLoop — real run', () => {
     expect(ghCalls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/7`))).toBe(true);
   });
 
+  test('a PR closed or drafted after the listing is caught by the revalidation payload — excluded row, loop never invoked', async () => {
+    const calls: RecordedCall[] = [];
+    // Both payloads vouch for the LISTED head ref, so only the state/draft
+    // half of the revalidation can stop these dispatches: PR 7 reads
+    // closed, PR 8 reads converted-to-draft.
+    const gh = fakeGh([pullRow(7), pullRow(8)], {
+      singlePull: (pr) =>
+        pr === 7
+          ? { state: 'closed', draft: false, head: { ref: 'pr-7' } }
+          : { state: 'open', draft: true, head: { ref: 'pr-8' } },
+    });
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: tempJournalRoot() }),
+    );
+
+    // Recorded exclusion-style rows naming the reason; the loop is never
+    // dispatched against a PR the forge no longer shows open and non-draft.
+    expect(summary.results).toEqual([]);
+    expect(summary.failures).toEqual([]);
+    expect(summary.excluded).toEqual([
+      { pr: 7, reason: 'closed after listing' },
+      { pr: 8, reason: 'converted to draft after listing' },
+    ]);
+    expect(calls).toHaveLength(0);
+  });
+
   test('a failed head-revalidation read fails closed: a failure row, no dispatch, and the sibling still runs on an unburned budget', async () => {
     const calls: RecordedCall[] = [];
-    // PR 7's revalidation GET exits 1; PR 8's vouches for its listed head.
+    // PR 7's revalidation GET exits 1; PR 8's vouches for its listed head
+    // and its open, non-draft status.
     const gh = fakeGh([pullRow(7), pullRow(8)], {
-      singlePull: (pr) => (pr === 7 ? 'fail' : { head: { ref: `pr-${String(pr)}` } }),
+      singlePull: (pr) =>
+        pr === 7 ? 'fail' : { state: 'open', draft: false, head: { ref: `pr-${String(pr)}` } },
     });
     const summary = await runSelfReviewLoop(
       baseDeps(
