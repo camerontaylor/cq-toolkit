@@ -23,7 +23,7 @@
 // LATEST run of the plan id, derives each UNIT's SalvageEntry journal tail
 // (one entry per unit tree; lastStep = the LAST job-finished event in
 // journal order), and runs the REAL salvage op over the inventory.
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { candidateRunsForPlan, openRunLog } from '../../../src/kernel/journal.js';
 import type {
   JournalEvent,
@@ -215,10 +215,18 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     jobs: fullPlan.jobs.filter((job) => job.id !== SWEEP_PLAN_JOB_IDS.assemble),
   };
   for (const job of plan.jobs) {
-    if (job.op !== SWEEP_UNIT_OP || opts.promptTemplate === undefined) continue;
-    (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
-      job.input as WorkUnit,
-    );
+    if (job.op !== SWEEP_UNIT_OP) {
+      continue;
+    }
+    // The #174 trust vouch: the harness supplies the run-state dir EXPLICITLY
+    // (outside the worktrees dir) so the strand-retry's scanned-commit record
+    // is trustworthy — the same decision the phase-4 runner must make.
+    (job.input as SweepUnitDispatchInput).runStateDir = join(opts.config.repoRoot, 'cq-run-state');
+    if (opts.promptTemplate !== undefined) {
+      (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
+        job.input as WorkUnit,
+      );
+    }
   }
 
   // The dispatch view: the CENTRAL registry (sweep.planSweep AND the
@@ -349,6 +357,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       opts.config.repoRoot,
       opts.config.worktreesDir,
       opts.config.runPrefix,
+      join(opts.config.repoRoot, 'cq-run-state'),
     );
     const templateInput = assembleTemplate.input as AssemblePrsInput;
     const assembleInput: AssemblePrsInput = {

@@ -54,11 +54,7 @@ import { openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
 import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
-import {
-  SWEEP_RUN_STATE_BASELINE_DIR,
-  sweepRunStateDir,
-  type SweepUnitReport,
-} from '../../../src/ops/sweep/unit.js';
+import { SWEEP_RUN_STATE_BASELINE_DIR, type SweepUnitReport } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitDispatchInput, SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import type {
@@ -436,7 +432,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       // rewritten exactly once per unit run (right after the baseline probe),
       // so a re-run's fresh mtime is the re-probe's evidence.
       const alphaSnapshot = join(
-        sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-interrupt'),
+        join(scene.repo, 'cq-run-state'),
         SWEEP_RUN_STATE_BASELINE_DIR,
         'fix',
         'alpha.json',
@@ -499,12 +495,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(existsSync(resolve(scene.repo, 'worktrees', 'fix', 'alpha', '.cq'))).toBe(false);
       expect(
         existsSync(
-          join(
-            sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-interrupt'),
-            SWEEP_RUN_STATE_BASELINE_DIR,
-            'fix',
-            'alpha.json',
-          ),
+          join(join(scene.repo, 'cq-run-state'), SWEEP_RUN_STATE_BASELINE_DIR, 'fix', 'alpha.json'),
         ),
       ).toBe(true);
 
@@ -648,6 +639,70 @@ describe('sweep e2e: tamper guard on new files', () => {
 // ---------------------------------------------------------------------------
 // 4. The test-fix scope, enforced on the staged set (jSKJY)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 3b. The strand-retry trust pin: a driver SELF-COMMIT is never pushed (#174)
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: driver self-commit vs the strand-retry trust pin (#174)', () => {
+  test(
+    'a driver that COMMITS the fix itself: the stage gates see nothing, and the strand-retry refuses to push the unscanned commit',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-selfcommit');
+      // Alpha fixes normally; beta "fixes" by committing the file DIRECTLY —
+      // the op's later `git add -A` stages nothing, so the stage-path
+      // allowlist, the tamper scan, and the commit step never see those
+      // bytes and no scanned-sha record exists for the unit.
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          scene,
+          prompts(
+            { edit: ALPHA_FIX },
+            {
+              write: {
+                file: 'packages/beta/src/self.ts',
+                text: 'export const self = 1;\n',
+              },
+              selfCommit: { message: 'beta driver self-commit' },
+            },
+          ),
+        ),
+      );
+
+      // Alpha: the normal record-and-push flow (control).
+      const alpha = unitRow(outcome.run, 'alpha');
+      expect(alpha.status).toBe('ok');
+      expect(alpha.report?.committed).toBe(true);
+      expect(alpha.report?.committedSha).toMatch(/^[0-9a-f]{40}$/);
+
+      // Beta: the PRE-STAGE HEAD pin catches the self-commit FIRST — HEAD
+      // moved during the fixer run, the staged-diff scan could never see
+      // those bytes, so the unit fails TAMPER with nothing staged,
+      // committed, recorded, or pushed (needs-human evidence). The
+      // strand-retry's own no-record refusal (#174's 9b guard) sits behind
+      // this for the resume shape: a self-commit from an EARLIER run whose
+      // record never existed.
+      const beta = unitRow(outcome.run, 'beta');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/worktree HEAD moved during the fixer run/);
+      expect(beta.error).toMatch(/driver self-commit is not a supported mode/);
+      expect(beta.error).toMatch(/needs-human evidence/);
+
+      // Beta's unscanned commit exists LOCALLY but never reached the origin;
+      // alpha's branch did (push itself still works — the pin targets the
+      // trust, not the transport).
+      const localCommits = await gitOut(
+        ['rev-list', '--count', 'main..cq/e2e-selfcommit/fix/beta'],
+        scene.repo,
+      );
+      expect(localCommits.trim()).toBe('1');
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).toContain('cq/e2e-selfcommit/fix/alpha');
+      expect(originHeads).not.toContain('cq/e2e-selfcommit/fix/beta');
+    },
+  );
+});
 
 describe('sweep e2e: test-fix stage-path allowlist', () => {
   test(
@@ -1045,7 +1100,7 @@ describe('sweep e2e: rescue lane and prep mode', () => {
         expect(
           existsSync(
             join(
-              sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-prep'),
+              join(scene.repo, 'cq-run-state'),
               SWEEP_RUN_STATE_BASELINE_DIR,
               'fix',
               `${pkg}.json`,
