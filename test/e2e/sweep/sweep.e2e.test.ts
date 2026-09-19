@@ -54,11 +54,7 @@ import { openRunLog } from '../../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import { SWEEP_PLAN_ID } from '../../../src/plans/sweep.js';
 import type { SweepPlanConfig } from '../../../src/plans/sweep.js';
-import {
-  SWEEP_RUN_STATE_BASELINE_DIR,
-  sweepRunStateDir,
-  type SweepUnitReport,
-} from '../../../src/ops/sweep/unit.js';
+import { SWEEP_RUN_STATE_BASELINE_DIR, type SweepUnitReport } from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitDispatchInput, SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import type {
@@ -436,7 +432,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       // rewritten exactly once per unit run (right after the baseline probe),
       // so a re-run's fresh mtime is the re-probe's evidence.
       const alphaSnapshot = join(
-        sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-interrupt'),
+        join(scene.repo, 'cq-run-state'),
         SWEEP_RUN_STATE_BASELINE_DIR,
         'fix',
         'alpha.json',
@@ -499,12 +495,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(existsSync(resolve(scene.repo, 'worktrees', 'fix', 'alpha', '.cq'))).toBe(false);
       expect(
         existsSync(
-          join(
-            sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-interrupt'),
-            SWEEP_RUN_STATE_BASELINE_DIR,
-            'fix',
-            'alpha.json',
-          ),
+          join(join(scene.repo, 'cq-run-state'), SWEEP_RUN_STATE_BASELINE_DIR, 'fix', 'alpha.json'),
         ),
       ).toBe(true);
 
@@ -1109,7 +1100,7 @@ describe('sweep e2e: rescue lane and prep mode', () => {
         expect(
           existsSync(
             join(
-              sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-prep'),
+              join(scene.repo, 'cq-run-state'),
               SWEEP_RUN_STATE_BASELINE_DIR,
               'fix',
               `${pkg}.json`,

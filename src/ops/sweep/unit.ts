@@ -614,6 +614,20 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // stays local and a PR for an unpushed branch would be fabricated.
     let pushed = false;
     if (commit.committed && bindings.pushBranch !== undefined) {
+      // PUSH-TIME RE-VERIFICATION (review-debt #174 r1, HIGH 2): the checks
+      // above ran earlier; between them and the execve a detached driver
+      // process could still commit. Push ONLY the exact scanned commit:
+      // tip === committedSha, its parent === the pre-driver HEAD (exactly
+      // one commit on top of what the driver was handed), and the committed
+      // diff re-scanned clean.
+      const recheck = await verifyScannedTip(
+        bindings,
+        unit,
+        worktree.path,
+        committedSha as string,
+        preDriverHead.stdout.trim(),
+      );
+      if (recheck !== null) return { status: 'failed', error: recheck };
       try {
         await bindings.pushBranch(bindings.repoRoot, segments.branch);
         pushed = true;
@@ -660,6 +674,19 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
       }
       const aheadCommits = Number.parseInt(counted.stdout.trim(), 10);
       if (Number.isFinite(aheadCommits) && aheadCommits > 0) {
+        if (bindings.runStateDir === undefined) {
+          // The derived run-state location sits inside the worktrees dir —
+          // within an unsandboxed driver's write reach — so no record there
+          // can be trustworthy (review-debt #174 r1, HIGH 1). Fail closed:
+          // needs-human, the stranded commit is named evidence.
+          return {
+            status: 'failed',
+            error: tagged(
+              'tamper',
+              `sweep.unit ${unit.package}: ${String(aheadCommits)} commit(s) ahead of '${bindings.base}' on '${segments.branch}' — stranded pushes require an explicit caller-supplied runStateDir (outside the driver's write reach) so the scanned-commit record can be trusted; this run derived it and cannot — needs-human evidence`,
+            ),
+          };
+        }
         const head = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
         if (head.code !== 0) {
           return {
@@ -684,9 +711,23 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
             ),
           };
         }
+        // PUSH-TIME RE-VERIFICATION on the retry leg too: the recorded sha
+        // must still be the tip (the divergence check above), sit directly
+        // on the base, and re-scan clean — the scanned-commit record is the
+        // ONLY thing this push is allowed to publish (review-debt #174).
+        const retryRecheck = await verifyScannedTip(
+          bindings,
+          unit,
+          worktree.path,
+          head.stdout.trim(),
+          null,
+        );
+        if (retryRecheck !== null) return { status: 'failed', error: retryRecheck };
         try {
           await bindings.pushBranch(bindings.repoRoot, segments.branch);
           pushed = true;
+          // The audited fact of WHICH sha was published (r1 review, low 5).
+          committedSha = recorded as string;
         } catch (err) {
           return {
             status: 'failed',
@@ -1065,9 +1106,20 @@ export interface SweepUnitDispatchInput {
    * The git-mutex binding (jVgCc) for the unit's worktree mutations —
    * sibling units at the caller's concurrency serialize their prune/add/ref
    * sections on ONE lockfile. DEFAULT (when absent): a repo-level lock on
-   * the run-state dir (`<runStateDir>/git-mutex.lock`, family timings); the
-   * push shares the same lockfile.
+  /**
+   * EXPLICIT caller-supplied run-state dir (review-debt #174). When set, the
+   * caller VOUCHES the location is outside the fixer driver's write reach —
+   * it is where the scanned-commit-sha record (the strand-retry's push
+   * authorization) lives, and only a caller-controlled location can make
+   * that record trustworthy. When ABSENT the derived
+   * `sweepRunStateDir(...)` location (inside the worktrees dir, within the
+   * driver's reach) is used for baseline snapshots and committed markers,
+   * but the STRAND-RETRY refuses to push (no trustworthy record can exist
+   * there — fail closed, needs-human).
    */
+  runStateDir?: string;
+  /** The run-state dir's git-mutex lockfile (`<runStateDir>/git-mutex.lock`,
+   * family timings); the push shares the same lockfile. */
   mutex?: WorktreeMutexConfig;
   /** Sandbox preference; default `{level: 'none'}` (production callers set it). */
   sandboxPolicy?: SandboxPolicy;
@@ -1230,6 +1282,11 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     base: input.base,
     segments,
     ...(input.mode !== undefined ? { mode: input.mode } : {}),
+    // The caller's explicit vouch (review-debt #174): an absent runStateDir
+    // keeps the derived (driver-reachable) location for baseline/markers,
+    // and the strand-retry refuses to push — the record it would trust
+    // cannot be trustworthy there.
+    ...(input.runStateDir !== undefined ? { runStateDir: input.runStateDir } : {}),
     mutex,
     adapter: input.check.adapter,
     // The REAL probe runner (the checkRunner lane's shipped subprocess seam).
@@ -1313,6 +1370,96 @@ async function writeCommittedMarker(
 }
 
 /**
+ * PUSH-TIME re-verification of the scanned commit (review-debt #174 r1,
+ * HIGH 2): the stage/scan/commit checks ran earlier — between them and the
+ * execve a detached driver process could still have committed. The tip must
+ * be EXACTLY `expectedSha`; when `expectedParent` is non-null the tip must
+ * sit directly on it (exactly one commit on top of the pre-driver HEAD);
+ * and the committed diff (`HEAD^..HEAD`) must re-scan clean through the
+ * same tamper gate. Any mismatch is a [TAMPER] failure naming the
+ * divergence — the push never happens. `expectedParent === null` (the
+ * strand-retry leg) checks the parent against the BASE tip instead: a
+ * recorded stranded commit sits one commit on top of the base by
+ * construction.
+ */
+async function verifyScannedTip(
+  bindings: SweepUnitBindings,
+  unit: WorkUnit,
+  worktreePath: string,
+  expectedSha: string,
+  expectedParent: string | null,
+): Promise<string | null> {
+  const head = await bindings.git(['-C', worktreePath, 'rev-parse', 'HEAD']);
+  if (head.code !== 0) {
+    return tagged(
+      'infra',
+      `sweep.unit ${unit.package}: git rev-parse HEAD failed — ${head.stderr.trim()}`,
+    );
+  }
+  const tip = head.stdout.trim();
+  if (tip !== expectedSha) {
+    return tagged(
+      'tamper',
+      `sweep.unit ${unit.package}: the worktree tip (${tip}) is not the scanned commit (${expectedSha}) at push time — the tree moved after verification; nothing pushed — needs-human evidence`,
+    );
+  }
+  let parentRef = 'HEAD^';
+  if (expectedParent === null) {
+    const baseTip = await bindings.git(['-C', worktreePath, 'rev-parse', `${bindings.base}`]);
+    if (baseTip.code !== 0) {
+      return tagged(
+        'infra',
+        `sweep.unit ${unit.package}: git rev-parse ${bindings.base} failed — ${baseTip.stderr.trim()}`,
+      );
+    }
+    parentRef = `${bindings.base}`;
+    const parent = await bindings.git(['-C', worktreePath, 'rev-parse', 'HEAD^']);
+    if (parent.code !== 0 || parent.stdout.trim() !== baseTip.stdout.trim()) {
+      return tagged(
+        'tamper',
+        `sweep.unit ${unit.package}: the stranded commit's parent is not the base tip — the branch does not carry exactly the recorded scanned commit; nothing pushed — needs-human evidence`,
+      );
+    }
+  } else {
+    const parent = await bindings.git(['-C', worktreePath, 'rev-parse', 'HEAD^']);
+    if (parent.code !== 0) {
+      return tagged(
+        'infra',
+        `sweep.unit ${unit.package}: git rev-parse HEAD^ failed — ${parent.stderr.trim()}`,
+      );
+    }
+    if (parent.stdout.trim() !== expectedParent) {
+      return tagged(
+        'tamper',
+        `sweep.unit ${unit.package}: the pushed commit's parent (${parent.stdout.trim()}) is not the pre-driver HEAD (${expectedParent}) — more than the scanned commit moved; nothing pushed — needs-human evidence`,
+      );
+    }
+  }
+  void parentRef;
+  const committedDiff = await bindings.git(['-C', worktreePath, 'diff', 'HEAD^', 'HEAD', '--']);
+  if (committedDiff.code !== 0) {
+    return tagged(
+      'infra',
+      `sweep.unit ${unit.package}: git diff HEAD^..HEAD failed — ${committedDiff.stderr.trim()}`,
+    );
+  }
+  const hack = await hackDetector({ diff: committedDiff.stdout });
+  if (hack.status !== 'ok' || hack.value.length > 0) {
+    const named =
+      hack.status !== 'ok'
+        ? `the tamper scan returned ${hack.status} — ${resultDetail(hack)}`
+        : `tamper findings in the committed diff: ${hack.value
+            .map((f) => `${f.kind} ${f.file}:${String(f.line ?? '?')} (${f.message})`)
+            .join('; ')}`;
+    return tagged(
+      'tamper',
+      `sweep.unit ${unit.package}: the committed diff FAILED the push-time tamper re-scan — ${named}; nothing pushed — needs-human evidence`,
+    );
+  }
+  return null;
+}
+
+/**
  * Record the SCANNED commit's sha in the run-state —
  * `<runStateDir>/scanned/<kind>/<slug>.json` (review-debt #174): the
  * strand-retry's proof that an ahead-of-base tip is THIS op's scanned
@@ -1336,7 +1483,7 @@ async function recordScannedCommitSha(
     );
     return null;
   } catch (err) {
-    return `sweep.unit: could not write the scanned-commit record under '${scannedDir}' — ${messageOf(err)}`;
+    return `sweep.unit: could not write the scanned-commit record under '${scannedDir}' — the commit IS scanned but will be STRAND-LOCKED (the strand-retry refuses to push without the record); recovery: push '${segments.branch}' manually or re-run — ${messageOf(err)}`;
   }
 }
 
@@ -1391,9 +1538,12 @@ export async function readCommittedMarkers(
   repoRoot: string,
   worktreesDir: string,
   runPrefix: string,
+  /** The EXPLICIT caller-supplied run-state dir (review-debt #174) — when
+   * the writer (the unit op) used one, the reader must read the SAME dir. */
+  runStateDir?: string,
 ): Promise<CommittedMarker[]> {
   const committedDir = join(
-    sweepRunStateDir(repoRoot, worktreesDir, runPrefix),
+    runStateDir ?? sweepRunStateDir(repoRoot, worktreesDir, runPrefix),
     SWEEP_RUN_STATE_COMMITTED_DIR,
   );
   let kindDirs: string[];

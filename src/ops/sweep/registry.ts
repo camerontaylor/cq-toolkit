@@ -243,6 +243,9 @@ export const SweepUnitDispatchInputSchema: z.ZodType<SweepUnitDispatchInput> = z
     mutex: GitMutexBindingSchema.exactOptional(),
     sandboxPolicy: SandboxPolicySchema.exactOptional(),
     gitTimeoutMs: z.number().int().min(1).exactOptional(),
+    // The caller's run-state trust vouch (review-debt #174): explicitly
+    // supplied, it authorizes the strand-retry's scanned-commit record.
+    runStateDir: z.string().min(1).exactOptional(),
     push: z.boolean().exactOptional(),
     stagePathAllowlist: z
       .object({ patterns: z.array(z.string().min(1)).min(1) })
