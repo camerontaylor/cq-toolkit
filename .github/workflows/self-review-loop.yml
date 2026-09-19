@@ -1,0 +1,167 @@
+# instantiated from policy/templates/self-host/self-review-loop.yml — edit the template, not this file
+#
+# The self-hosting review-loop automation (ws-k stage 2, item 7): the
+# toolkit's OWN review loop, built from source, runs against THIS
+# repository's own open PRs — fetch → classify → respond → resolve through
+# the shipped runReviewLoop with the frozen SelfhostDefaults, over every
+# open, same-repo, non-draft PR (one ≤20-min scheduled run per slot; the
+# journal under .selfhost/ persists the dedupe memory across runs via the
+# actions/cache restore/save pair below — the dispatch logs are the durable
+# content).
+# PROVENANCE: a repo-owned instantiated surface of policy/templates/self-host/
+# — the template is the adoptable copy; edit the template, not this file.
+#
+# SINGLE IDENTITY (I2, the recorded deviation): the loop replies and
+# resolves review threads AS THE REPO OWNER'S ACCOUNT (the GH_TOKEN user) —
+# there is no second identity reviewing automation's work yet. Every PR the
+# loop processes is soak evidence recorded in SELF-HOSTING.md (repo root).
+name: self-review-loop
+
+on:
+  schedule:
+    # OWNER-MANDATED WINDOW (the window rule is binding): 15:00–01:00 UTC =
+    # 23:00–09:00 Asia/Singapore — automation idles across Z.AI's GLM
+    # peak-hour window (14:00–18:00 SGT), where quota consumption
+    # multiplies (~3×). 01:00 UTC is deliberately EXCLUDED: 09:00 SGT is
+    # the hard stop — no operation is initiated at or after it (the second
+    # cron's last fire is 00:45 UTC = 08:45 SGT).
+    - cron: '*/15 15-23 * * *'
+    - cron: '0,15,30,45 0 * * *'
+  workflow_dispatch:
+    inputs:
+      max_usd:
+        description: USD cap override for this run ('' = config default, SelfhostDefaults.maxUsd)
+        required: false
+        default: ''
+        type: string
+      dry_run:
+        description: Fetch + summarize only — post nothing, dispatch nothing
+        required: false
+        default: false
+        type: boolean
+
+# A cancelled mid-loop review could strand half-dispatched replies — a
+# queued run waits rather than kills the in-flight loop (same discipline as
+# live-review.yml). Fixed group, not per-ref: this workflow never fires on
+# PRs, so there is nothing per-ref to isolate.
+concurrency:
+  group: self-review-loop
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  self-review-loop:
+    runs-on: ubuntu-latest
+    # The stage-2 switch gives automation ONE ≤20-minute run per slot; the
+    # next slot re-enters with the persisted journal.
+    timeout-minutes: 20
+    steps:
+      - name: Check out main (trusted code only)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          # PINNED TO MAIN: schedule/dispatch always run main's trusted code
+          # under GH_TOKEN — workflow_dispatch accepts any write-
+          # collaborator's branch as ref, and that branch's code must never
+          # execute here. Branches are validated LOCALLY pre-merge (two
+          # CodeRabbit cycles + the gates); the automation runs only merged
+          # main.
+          ref: main
+          # npm runs repo code below, so the checkout token must not
+          # survive checkout; gh rides GH_TOKEN, not the checkout
+          # credential.
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build from source
+        run: npm run build
+      # DURABLE vs EPHEMERAL under .selfhost/journal: the per-PR dispatch
+      # logs (dispatch-<pr>.ndjson) are replyAndResolve's actionId dedupe
+      # memory — the one content that MUST survive across scheduled
+      # invocations, so this step persists the journal root between runs
+      # (each run saves under its own run-id key; the next run restores by
+      # the state- prefix). Deliberately ephemeral: the per-run journalDir
+      # audit trails (<pr>-<stamp>/) ride along but are not the point, the
+      # worktrees themselves live OUTSIDE the journal at .selfhost/worktrees
+      # and are NOT cached (cached worktree paths go stale as main advances
+      # — the worktree registry re-creates missing entries from
+      # refs/pull/<pr>/head), and the registry JSON riding the cache is
+      # self-healing for the same reason. Restore runs at this step, before
+      # the loop step; the save is a SEPARATE actions/cache/save step AFTER
+      # the loop step, gated `if: always()` — the combined action's post-save
+      # runs only on job success, so a failed run would lose exactly the
+      # dispatch-log state the next run must dedupe against.
+      - name: Restore the journal state (dispatch-log dedupe memory)
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
+        with:
+          path: .selfhost/journal
+          key: self-review-loop-state-${{ github.run_id }}
+          restore-keys: |
+            self-review-loop-state-
+      - name: Review loop over this repo's open PRs (dist/selfhost/self-review-loop.js)
+        env:
+          # Step-scoped on purpose (the live-review.yml round-3
+          # discipline): the token must never reach npm ci's lifecycle
+          # scripts — it reaches ONLY this step.
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          # The fix workers' driver (ai-sdk, served model id): without it
+          # the loop's dispatches cannot run — asserted below, before any
+          # effect.
+          # The driver's routing table reads ZAI_API_KEY (src/driver/subprocess/routing.ts:92,
+          # src/driver/ai-sdk/index.ts:484) — the Actions SECRET is named Z_AI_API_KEY;
+          # env-indirection maps secret name -> driver env name.
+          ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
+          # gh resolves the repo from the environment (effects never pass
+          # -R); the entry also receives --repo $GH_REPO explicitly.
+          GH_REPO: ${{ github.repository }}
+          # Env-indirection doctrine: inputs reach the script as env vars,
+          # never as interpolated text. Both are '' on schedule events.
+          MAX_USD: ${{ inputs.max_usd }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          # main()'s contract (src/selfhost/self-review-loop.ts): ONE
+          # compact JSON summary on stdout; exit 0 even with per-PR
+          # failures — needs-human outcomes and recorded failures are
+          # HONEST results (mirrored to stderr for the workflow log), never
+          # a crash that orphans the remaining PRs; only a whole-run throw
+          # (bad args, a failed listing) exits 1. pipefail below turns that
+          # throw into a red step despite tee.
+          set -euo pipefail
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
+          test -n "$ZAI_API_KEY" || { echo 'Z_AI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
+          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after 01:00 UTC (09:00 SGT, the owner hard stop) — exiting 0 records the honest no-op, not a failure.
+          HM=$(date -u +%H%M)
+          if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
+            echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
+            echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations'
+            exit 0
+          fi
+          # Review-fix pushes currently reach plain unauthenticated `git push` (the checkout drops its credential) — point git at gh's credential helper.
+          gh auth setup-git
+          # Worker-created commits currently fail (no identity on hosted runners; the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
+          git config --global user.name 'cq-automation'
+          git config --global user.email 'cq-automation@users.noreply.github.com'
+          LOGIN=$(gh api user -q .login)
+          # Bash ARRAY, never a string: the expansions stay single words even
+          # if a future value carries spaces (an unquoted $ARGS word-splits).
+          ARGS=(--repo "$GH_REPO" --responder-login "$LOGIN")
+          if [ -n "$MAX_USD" ]; then
+            ARGS+=(--max-usd "$MAX_USD")
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS+=(--dry-run)
+          fi
+          node dist/selfhost/self-review-loop.js "${ARGS[@]}" | tee "$GITHUB_STEP_SUMMARY"
+      # always() persists a failed run's journal (a success-only post-save would lose the exact dispatch-log state the next run dedupes against); the rolling restore-keys prefix keeps newest state winning.
+      - name: Save the journal state (dispatch-log dedupe memory)
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
+        if: always()
+        with:
+          path: .selfhost/journal
+          key: self-review-loop-state-${{ github.run_id }}-${{ github.run_attempt }}

@@ -1,7 +1,7 @@
 // Slice C — the action-pinning policy, mechanically enforced:
 //   1. EVERY `uses:` across every generated workflow (all *.yml and *.yaml
 //      under .github/workflows/ — GitHub executes both extensions) and the
-//      six template files under
+//      eight template files under
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
@@ -23,7 +23,7 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
 
-// The six template files (source of truth) that carry `uses:` steps or are
+// The eight template files (source of truth) that carry `uses:` steps or are
 // otherwise part of the pinning policy.
 const TEMPLATE_FILES = [
   'policy/templates/init-merge-queue.yml',
@@ -32,6 +32,8 @@ const TEMPLATE_FILES = [
   'policy/templates/sync-merge-queue.yml',
   'policy/templates/required-check.md',
   'policy/templates/affected-tests.md',
+  'policy/templates/self-host/self-review-loop.yml',
+  'policy/templates/self-host/self-merge-prs.yml',
 ];
 
 // Every `uses:` value in the text (quoted `'uses':` keys included — YAML
@@ -131,5 +133,18 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(readFileSync(join(ROOT, 'policy/templates/README.md'), 'utf8')).toContain(
       '## Action pinning',
     );
+  });
+
+  it('both instantiated self-host workflows carry the automation-window guard', () => {
+    // The window-end fail-closed guard: the UTC clock read plus the abort
+    // line — a delayed fire must refuse to initiate operations, not run
+    // outside the scheduled window.
+    for (const name of ['self-review-loop.yml', 'self-merge-prs.yml']) {
+      const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
+      expect(text, `${name}: the window guard's UTC clock read`).toContain('date -u +%H%M');
+      expect(text, `${name}: the window guard's abort line`).toContain(
+        'outside the scheduled automation window',
+      );
+    }
   });
 });
