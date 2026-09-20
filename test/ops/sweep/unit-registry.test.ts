@@ -254,6 +254,15 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
     expect(sweepRunStateDir('/repo', 'worktrees', 'cq/..')).toBe(
       '/repo/worktrees/.cq-state/cq/%2E%2E',
     );
+    // An EMPTY segment is reserved: `cq//one` must not collapse onto
+    // `cq/one`, and a leading empty segment must not make the namespace
+    // ABSOLUTE (which would escape the state dir).
+    expect(sweepRunStateDir('/repo', 'worktrees', 'cq//one')).toBe(
+      '/repo/worktrees/.cq-state/cq/%EMPTY/one',
+    );
+    expect(sweepRunStateDir('/repo', 'worktrees', '/one')).toBe(
+      '/repo/worktrees/.cq-state/%EMPTY/one',
+    );
   });
 
   test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {

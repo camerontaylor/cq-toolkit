@@ -121,7 +121,9 @@ function normalizedSegment(raw: string): string {
  * overwrote each other's baseline snapshots — fabricated evidence (I7). The
  * encoder keeps `[A-Za-z0-9_-]` verbatim (so `cq/one` and `cq/09-16a` keep
  * their familiar paths) and percent-encodes every other UTF-8 byte, which
- * also neutralises `.`/`..` path segments.
+ * also neutralises `.`/`..` path segments. An EMPTY segment gets a reserved
+ * `%EMPTY` marker so `cq//one` cannot collapse onto `cq/one` and a leading
+ * empty segment cannot make the joined namespace absolute.
  */
 export function sweepRunStateDir(
   repoRoot: string,
@@ -142,8 +144,16 @@ export function sweepRunStateDir(
  * (review-debt #175 item 4), and a literal `%` is itself encoded (`%25`) so
  * the encoding cannot alias. `.` is encoded — which keeps `.`/`..` from ever
  * acting as path segments and keeps the namespace free of dot-files.
+ *
+ * An EMPTY segment is reserved as `%EMPTY` (CLI r1 major): encoding `''` as
+ * `''` let `cq//one` collapse onto `cq/one` when the segments are joined and
+ * resolved, and a leading empty segment (`/one`) made the joined namespace
+ * ABSOLUTE — escaping the state dir entirely. `%EMPTY` cannot be produced by
+ * any non-empty input because the encoder only ever emits `%` as part of a
+ * two-hex-digit escape.
  */
 function stateNamespaceSegment(raw: string): string {
+  if (raw === '') return '%EMPTY';
   let encoded = '';
   for (const byte of Buffer.from(raw, 'utf8')) {
     const character = String.fromCharCode(byte);
