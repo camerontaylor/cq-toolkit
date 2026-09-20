@@ -29,7 +29,10 @@ import { PlanSchema } from '../../src/kernel/schema.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, Plan } from '../../src/kernel/types.js';
 import { registry as prRegistry } from '../../src/ops/pr/registry.js';
-import { AssemblePrsInputSchema } from '../../src/ops/pr/registry.js';
+import {
+  AssemblePrsInputSchema,
+  EnsureTrackerBranchInputSchema,
+} from '../../src/ops/pr/registry.js';
 import {
   PlanSweepInputSchema,
   SweepUnitDispatchInputSchema,
@@ -135,7 +138,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(PlanSweepInputSchema.parse(testFixPlannerJob.input).fixers).toEqual([TEST_FIX_FIXER]);
   });
 
-  test('buildSweepPlan: planner job first, unit jobs verbatim, assemble depends on every unit', () => {
+  test('buildSweepPlan: planner job first, unit jobs verbatim, tracker branch then assemble', () => {
     const plan = buildSweepPlan(CONFIG, twoUnitReport());
     expect(plan.id).toBe(SWEEP_PLAN_ID);
     expect(() => PlanSchema.parse(plan)).not.toThrow();
@@ -143,6 +146,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       'sweep-plan',
       'sweep-alpha-fix',
       'sweep-beta-fix',
+      'sweep-tracker-branch',
       'sweep-assemble',
     ]);
     expect(plan.jobs[0]?.op).toBe('sweep.planSweep');
@@ -155,15 +159,31 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       expect(job.dependsOn).toEqual(['sweep-plan']);
       expect(() => SweepUnitDispatchInputSchema.parse(job.input)).not.toThrow();
     }
-    // The assembler: static data, derived branches, every unit a dependency.
-    const assemble = plan.jobs[3] as {
+    // The tracker-branch leg (review-debt #173): every unit a dependency, and
+    // the assembler depends on it (so the head exists before the PR opens).
+    const trackerBranch = plan.jobs[3] as {
+      id: string;
+      op: string;
+      input: unknown;
+      dependsOn: string[];
+    };
+    expect(trackerBranch.op).toBe('pr.ensureTrackerBranch');
+    expect(trackerBranch.dependsOn).toEqual(['sweep-alpha-fix', 'sweep-beta-fix']);
+    expect(EnsureTrackerBranchInputSchema.parse(trackerBranch.input)).toMatchObject({
+      repoRoot: '/repo',
+      runPrefix: 'cq/09-16a',
+      base: 'main',
+      branch: 'cq/09-16a/tracker',
+    });
+    // The assembler: static data, derived branches, the tracker-branch leg a dependency.
+    const assemble = plan.jobs[4] as {
       id: string;
       op: string;
       input: unknown;
       dependsOn: string[];
     };
     expect(assemble.op).toBe('pr.assemblePrs');
-    expect(assemble.dependsOn).toEqual(['sweep-alpha-fix', 'sweep-beta-fix']);
+    expect(assemble.dependsOn).toEqual(['sweep-tracker-branch']);
     const input = AssemblePrsInputSchema.parse(assemble.input);
     expect(input.tracker.branch).toBe('cq/09-16a/tracker');
     expect(input.packages.map((pkg) => pkg.branch)).toEqual([
@@ -243,7 +263,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(slugs).toEqual(['scope-foo', 'scope-foo-2', 'scope-foo-2-2']);
     expect(new Set(slugs).size).toBe(3);
     // The assembler accepts all three DISTINCT branches.
-    const assemble = AssemblePrsInputSchema.parse((plan.jobs[4] as { input: unknown }).input);
+    const assemble = AssemblePrsInputSchema.parse((plan.jobs[5] as { input: unknown }).input);
     expect(assemble.packages.map((pkg) => pkg.branch)).toEqual([
       'cq/09-16a/fix/scope-foo',
       'cq/09-16a/fix/scope-foo-2',
@@ -270,6 +290,12 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
     expect(inputs.map((input) => input.kind)).toEqual(['fix', 'fix']);
     expect(inputs.map((input) => input.slug)).toEqual(['alpha', 'beta']);
+    // The local-only knob reaches the tracker-branch leg too (review-debt
+    // #173): a `push:false` fleet must not push the tracker branch.
+    const trackerBranchJob = plan.jobs.find((job) => job.id === 'sweep-tracker-branch');
+    expect(
+      EnsureTrackerBranchInputSchema.parse((trackerBranchJob as { input: unknown }).input).push,
+    ).toBe(false);
   });
 
   test('config.unitDispatch makes the enriched jobs dispatch-ready; absent leaves them unwired (jeDch)', () => {
@@ -375,7 +401,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       .slice(1, 3)
       .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
     expect(inputs.map((input) => input.slug)).toEqual(['a-b', 'a-b-2']);
-    const assemble = AssemblePrsInputSchema.parse((plan.jobs[3] as { input: unknown }).input);
+    const assemble = AssemblePrsInputSchema.parse((plan.jobs[4] as { input: unknown }).input);
     expect(assemble.packages.map((pkg) => pkg.branch)).toEqual([
       'cq/09-16a/fix/a-b',
       'cq/09-16a/fix/a-b-2',
