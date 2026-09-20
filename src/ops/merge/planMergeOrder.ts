@@ -149,6 +149,16 @@ export interface PlannedMergeEntry {
   /** Stack depth: roots are 0, a child is its base's depth + 1. */
   depth: number;
   /**
+   * The forge base ref this entry's PR is expected to merge into — the
+   * plan's recorded stack position (review-debt #193). A stacked child
+   * names its parent's head branch; a retarget-self entry names the
+   * closed rung it stacked on. OMITTED when the base is the plan's own
+   * `baseBranch` (the common root case): the executor reads
+   * `entry.baseRefName ?? plan.baseBranch`, so an omitted field means the
+   * trunk, never a missing comparison.
+   */
+  baseRefName?: string;
+  /**
    * The observed head SHA the candidate carried (review-debt #186), when
    * one was observed: executeMerges pins the merge with
    * `--match-head-commit <headSha>`, so a fixer push between plan and run
@@ -368,11 +378,17 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
   ): PlannedMergeEntry => {
     const candidate = plannedByPr.get(pr);
     const headSha = candidate?.headSha;
+    const baseRefName = candidate?.baseRefName;
     return {
       pr,
       action,
       basePr,
       depth,
+      // The expected base (review-debt #193): threaded only when it differs
+      // from the plan's base branch — the executor defaults an omitted
+      // field to `plan.baseBranch`. A stacked child's base is its parent's
+      // head; a retarget-self entry's is the closed rung it stacked on.
+      ...(baseRefName !== undefined && baseRefName !== baseBranch ? { baseRefName } : {}),
       // Only a 40-hex head rides (the consumer's schema admits no other) —
       // an unobserved/garbage head is omitted rather than emitted invalid.
       ...(headSha !== undefined && /^[0-9a-f]{40}$/i.test(headSha) ? { headSha } : {}),

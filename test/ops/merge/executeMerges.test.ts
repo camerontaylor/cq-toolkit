@@ -61,7 +61,7 @@
 //      refused (push.default could pick the protected branch); bundled
 //      short flags carrying an 'f' (-qf) are force; '--amend' is a
 //      forbidden token (history rewrite).
-//  16. ALLOWLIST GUARD (round 2): only the seven documented argv shapes
+//  16. ALLOWLIST GUARD (round 2): only the eight documented argv shapes
 //      execute — everything else is `refused: unknown argv shape`; push
 //      refspecs must be explicit src:dst and never '+'-marked; fetch
 //      refspecs may carry '+' but never a protected-branch destination.
@@ -140,7 +140,14 @@ const entry = (
   action: 'merge' | 'retarget-self' = 'merge',
   basePr: number | null = null,
   depth = 0,
-): PlannedMergeEntry => ({ pr, action, basePr, depth });
+  baseRefName?: string,
+): PlannedMergeEntry => ({
+  pr,
+  action,
+  basePr,
+  depth,
+  ...(baseRefName !== undefined ? { baseRefName } : {}),
+});
 
 const handPlan = (
   order: PlannedMergeEntry[],
@@ -165,11 +172,28 @@ const prOfRef = (ref: string): number | null => {
  */
 class FakeMergeEffects implements MergeEffects {
   /** Every effect call, in order: `validate:<ref>`, `fetch:<ref>`,
-   * `prepare:<pr>@<ref>`, `merge:<pr>:<method>`,
+   * `readBase:<pr>`, `prepare:<pr>@<ref>`, `merge:<pr>:<method>`,
    * `retarget:<pr>:base=<newBase>`, `push:<ref>@<path>`, `remove:<path>`. */
   readonly calls: string[] = [];
   /** pr → live head sha (what validateRef answers). */
   readonly heads = new Map<number, string>();
+  /** pr → forge base ref (what readBaseRef answers); absent → 'main'. */
+  readonly baseRefs = new Map<number, string>();
+  /** pr → readBaseRef fails (`{ ok: false }`). */
+  readonly baseReadFailures = new Set<number>();
+  /** readBaseRef call count per pr — the base-drift scripting hook. */
+  readonly baseReadCalls = new Map<number, number>();
+  /** When set, every readBaseRef call for a pr AT/AFTER baseDriftFromCall
+   * (0-based) answers baseDriftRef instead of the baseRefs entry — the
+   * between-attempts retarget. Default null (no drift). */
+  baseDriftRef: string | null = null;
+  baseDriftFromCall = 1;
+  /** When true, readBaseRef answers `{ ok: true, baseRefName: <number> }` —
+   * the misbehaving-seam hook (the executor must not trust the seam type). */
+  baseReadNonString = false;
+  /** When set, readBaseRef THROWS with this error — the rejecting-read
+   * scripting hook. */
+  baseReadThrows: Error | null = null;
   /** pr → queued mergePr results, shifted per call; default success. */
   readonly mergeQueue = new Map<number, GhResult[]>();
   /** Every mergePr call's head-commit pin (review-debt #186), in order. */
@@ -252,6 +276,19 @@ class FakeMergeEffects implements MergeEffects {
     return OK;
   }
 
+  async readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }> {
+    this.calls.push(`readBase:${String(pr)}`);
+    if (this.baseReadThrows !== null) throw this.baseReadThrows;
+    if (this.baseReadFailures.has(pr)) return { ok: false };
+    if (this.baseReadNonString) return { ok: true, baseRefName: 42 as unknown as string };
+    const seen = this.baseReadCalls.get(pr) ?? 0;
+    this.baseReadCalls.set(pr, seen + 1);
+    if (this.baseDriftRef !== null && seen >= this.baseDriftFromCall) {
+      return { ok: true, baseRefName: this.baseDriftRef };
+    }
+    return { ok: true, baseRefName: this.baseRefs.get(pr) ?? 'main' };
+  }
+
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {
     this.calls.push(`prepare:${String(pr)}@${ref}`);
     if (this.prepareThrows !== null) throw this.prepareThrows;
@@ -310,6 +347,7 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
     const fake = new FakeMergeEffects();
     fake.heads.set(7, sha('a'));
     fake.heads.set(8, sha('b'));
+    fake.baseRefs.set(8, 'feat-7'); // the child's plan-time base is its parent's head
     const plan = stackPlan([planned(7, 'main', 'feat-7'), planned(8, 'feat-7', 'feat-8')]);
 
     const report = await executeMerges({ plan, effects: fake });
@@ -317,8 +355,8 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
     expect(report).toEqual({ merged: [7, 8], retargeted: [], stale: [], failed: [], blocked: [] });
     // The EXACT sequence: baseline sweep first (one fetch + one validate
     // per planned head — fetch BEFORE validate, CR-4), then per action
-    // fetch → revalidate → server-side merge, parents strictly before
-    // children. NO worktree calls anywhere (round 1, rule f).
+    // fetch → revalidate → base re-read → server-side merge, parents
+    // strictly before children. NO worktree calls anywhere (round 1, rule f).
     expect(fake.calls).toEqual([
       'fetch:refs/pull/7/head', // baseline sweep — fetch first
       'fetch:refs/pull/8/head',
@@ -326,9 +364,11 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
       'validate:refs/pull/8/head',
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head', // live-state revalidation
+      'readBase:7', // forge base re-read (#193)
       'merge:7:merge', // server-side; method 'merge' only (I3)
       'fetch:refs/pull/8/head',
       'validate:refs/pull/8/head',
+      'readBase:8', // the child's base is its parent's head, unchanged
       'merge:8:merge',
     ]);
   });
@@ -426,6 +466,7 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
       'validate:refs/pull/7/head',
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
+      'readBase:7',
       'merge:7:merge',
     ]);
   });
@@ -489,6 +530,120 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
   });
 });
 
+describe('executeMerges — (g) forge base-ref re-read (#193): a retarget is skipped, never merged', () => {
+  test('a base that MOVED between plan and run → stale, never merged', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.baseRefs.set(7, 'release'); // the forge now targets a different base
+    const report = await executeMerges({
+      plan: handPlan([entry(7, 'merge', null, 0, 'main')]),
+      effects: fake,
+    });
+
+    expect(report.merged).toEqual([]);
+    expect(report.stale).toEqual([
+      { pr: 7, detail: match.stringContaining('base moved between plan and run') },
+    ]);
+    expect(mergeCalls(fake)).toEqual([]);
+    // The read happened AFTER the head revalidation and BEFORE any merge.
+    expect(fake.calls).toEqual([
+      'fetch:refs/pull/7/head',
+      'validate:refs/pull/7/head',
+      'fetch:refs/pull/7/head',
+      'validate:refs/pull/7/head',
+      'readBase:7',
+    ]);
+  });
+
+  test('an UNCHANGED base → merged (the re-read is a gate, not a blocker)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.baseRefs.set(7, 'feat-7'); // the plan expected 'feat-7' too
+    const report = await executeMerges({
+      plan: handPlan([entry(7, 'merge', null, 0, 'feat-7')]),
+      effects: fake,
+    });
+
+    expect(report.merged).toEqual([7]);
+    expect(report.stale).toEqual([]);
+    expect(mergeCalls(fake)).toEqual(['merge:7:merge']);
+  });
+
+  test('an OMITTED entry base defaults to the plan baseBranch (the root case)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    // No entry.baseRefName: the executor compares against plan.baseBranch.
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+    expect(report.merged).toEqual([7]);
+  });
+
+  test('a read that answers { ok: false } → failed, never merged', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.baseReadFailures.add(7);
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.stale).toEqual([]);
+    expect(report.failed).toEqual([
+      { pr: 7, error: match.stringContaining('readBaseRef for pr 7 unavailable') },
+    ]);
+    expect(mergeCalls(fake)).toEqual([]);
+  });
+
+  test('a seam that answers { ok: true } with a NON-string base → failed (the guard does not trust the type)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.baseReadNonString = true;
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.stale).toEqual([]);
+    expect(report.failed).toEqual([
+      { pr: 7, error: match.stringContaining('readBaseRef for pr 7 unavailable') },
+    ]);
+    expect(mergeCalls(fake)).toEqual([]);
+  });
+
+  test('a read that THROWS → failed (fail closed), never merged', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.baseReadThrows = new Error('gh pr view exploded');
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.failed).toEqual([
+      { pr: 7, error: match.stringContaining('readBaseRef for pr 7 threw: gh pr view exploded') },
+    ]);
+    expect(mergeCalls(fake)).toEqual([]);
+  });
+
+  test('a moved base on a stacked child → stale; the parent still merged', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.heads.set(8, sha('b'));
+    fake.baseRefs.set(8, 'main'); // the child was retargeted to the trunk after planning
+    const plan = stackPlan([planned(7, 'main', 'feat-7'), planned(8, 'feat-7', 'feat-8')]);
+    const report = await executeMerges({ plan, effects: fake });
+
+    expect(report.merged).toEqual([7]);
+    expect(report.stale).toEqual([
+      { pr: 8, detail: match.stringContaining('base moved between plan and run') },
+    ]);
+  });
+
+  test('a retarget-self entry does NOT read the base (it merges nothing)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(5, sha('a'));
+    const report = await executeMerges({
+      plan: handPlan([entry(5, 'retarget-self')]),
+      effects: fake,
+    });
+    expect(report.retargeted).toEqual([5]);
+    expect(fake.calls.some((call) => call.startsWith('readBase:'))).toBe(false);
+  });
+});
+
 describe('executeMerges — (e) bounded retry on "base branch was modified"', () => {
   const baseModified = {
     code: 1,
@@ -519,13 +674,42 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
       'validate:refs/pull/7/head', // baseline
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head', // pre-merge
+      'readBase:7', // forge base re-read (#193)
       'merge:7:merge', // attempt 1 — base modified
       'fetch:refs/pull/7/head', // revalidation fetch FIRST (round 1)
       'validate:refs/pull/7/head', // revalidate
+      'readBase:7', // base re-read between attempts (#193)
       'merge:7:merge', // attempt 2 — base modified
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
+      'readBase:7', // base re-read between attempts (#193)
       'merge:7:merge', // attempt 3 — merged
+    ]);
+  });
+
+  test('a base that moves between attempt 1 and the retry → stale, never a second merge (#193)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.mergeQueue.set(7, [baseModified, OK]); // attempt 1 fails retryably; attempt 2 would succeed
+    fake.baseDriftRef = 'release'; // the forge retargets between attempts
+    fake.baseDriftFromCall = 1; // call 0 (pre-merge) sees the planned base; call 1 (retry) sees the move
+
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(report.stale).toEqual([
+      { pr: 7, detail: match.stringContaining('base moved while revalidating') },
+    ]);
+    // Exactly ONE merge attempt: the moved base stopped the retry before a
+    // second merge could land in the changed base.
+    expect(mergeCalls(fake)).toEqual(['merge:7:merge']);
+    // The retry re-read happened AFTER the head revalidation.
+    const afterFirstMerge = fake.calls.slice(fake.calls.indexOf('merge:7:merge') + 1);
+    expect(afterFirstMerge).toEqual([
+      'fetch:refs/pull/7/head',
+      'validate:refs/pull/7/head',
+      'readBase:7',
     ]);
   });
 
@@ -743,6 +927,7 @@ describe('executeMerges — the plan is the only source of actions', () => {
       'validate:refs/pull/7/head',
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
+      'readBase:7',
       'merge:7:merge',
     ]);
     expect(JSON.stringify(report).includes('3')).toBe(false);
@@ -906,9 +1091,11 @@ describe('executeMerges — (d) per-effective-base serial order, recorded in cal
       'validate:refs/pull/6/head',
       'fetch:refs/pull/5/head',
       'validate:refs/pull/5/head',
+      'readBase:5',
       'merge:5:merge',
       'fetch:refs/pull/6/head',
       'validate:refs/pull/6/head',
+      'readBase:6',
       'merge:6:merge',
     ]);
   });
@@ -1167,6 +1354,32 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     ).toThrow(UnsafeMergeArgsError);
   });
 
+  test('round-193: the base-ref read shape passes; broader gh pr view shapes are refused', () => {
+    expect(safeArgs(['pr', 'view', '7', '--json', 'baseRefName'])).toEqual([
+      'pr',
+      'view',
+      '7',
+      '--json',
+      'baseRefName',
+    ]);
+    // A different json field, a multi-field list, a missing pr number, a
+    // trailing flag, and a non-numeric pr are all unknown — the read stays
+    // exactly one shape.
+    expect(() => safeArgs(['pr', 'view', '7', '--json', 'headRefName'])).toThrow(
+      /refused: unknown argv shape/,
+    );
+    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName,headRefName'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['pr', 'view', '--json', 'baseRefName'])).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'view', '7', '--json', 'baseRefName', '--jq', '.'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() => safeArgs(['pr', 'view', 'abc', '--json', 'baseRefName'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+  });
+
   test('round-3: push FLAGS are refused — the discarded-flag blind spot is closed', () => {
     // Each would otherwise be a legal explicit src:dst push — refused
     // BECAUSE of the force token riding the tail.
@@ -1233,6 +1446,74 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       ['pr', 'merge', '7', '--merge'],
       ['pr', 'merge', '8', '--merge', '--match-head-commit', sha('a')],
     ]);
+  });
+
+  test('realMergeEffects.readBaseRef reads exactly `gh pr view <n> --json baseRefName` (injected runner)', async () => {
+    const ghCalls: string[][] = [];
+    const effects = realMergeEffects({
+      repoRoot: '/repo',
+      run: async (args: string[]) => {
+        ghCalls.push(args);
+        return { code: 0, stdout: '{"baseRefName":"main"}\n', stderr: '' };
+      },
+    });
+    expect(await effects.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
+    expect(ghCalls).toEqual([['pr', 'view', '7', '--json', 'baseRefName']]);
+
+    // A nonzero exit, unparseable JSON, and a missing/empty field all fail
+    // closed as { ok: false } — never a guessed base.
+    const broken = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 1, stdout: '', stderr: 'not found' }),
+    });
+    expect(await broken.readBaseRef(7)).toEqual({ ok: false });
+
+    const garbage = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: 'not json', stderr: '' }),
+    });
+    expect(await garbage.readBaseRef(7)).toEqual({ ok: false });
+
+    const empty = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: '{"baseRefName":""}', stderr: '' }),
+    });
+    expect(await empty.readBaseRef(7)).toEqual({ ok: false });
+
+    const missing = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: '{}', stderr: '' }),
+    });
+    expect(await missing.readBaseRef(7)).toEqual({ ok: false });
+
+    // A whitespace-padded value is TRIMMED (no false stale at the
+    // consumer); a whitespace-only value is empty-after-trim → fail closed.
+    const padded = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: '{"baseRefName":"  main  "}', stderr: '' }),
+    });
+    expect(await padded.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
+
+    const blank = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: '{"baseRefName":"   "}', stderr: '' }),
+    });
+    expect(await blank.readBaseRef(7)).toEqual({ ok: false });
+
+    // An invalid pr is refused BEFORE any process: the read validates its
+    // own input rather than trusting the caller.
+    const noCall: string[][] = [];
+    const invalid = realMergeEffects({
+      repoRoot: '/repo',
+      run: async (args: string[]) => {
+        noCall.push(args);
+        return { code: 0, stdout: '{"baseRefName":"main"}', stderr: '' };
+      },
+    });
+    expect(await invalid.readBaseRef(0)).toEqual({ ok: false });
+    expect(await invalid.readBaseRef(-1)).toEqual({ ok: false });
+    expect(await invalid.readBaseRef(1.5)).toEqual({ ok: false });
+    expect(noCall).toEqual([]);
   });
 
   test('realMergeEffects git argv shapes: validate/fetch/push (injected runner — zero processes, no fs)', async () => {
