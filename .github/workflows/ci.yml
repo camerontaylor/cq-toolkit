@@ -43,6 +43,17 @@ jobs:
       # deliberate, boring-safe choice.
       - name: Build
         run: npm run build
+      # Generated-artifact drift gate (ws-i scope item 5): regenerate the
+      # per-op reference from the registry and fail when the committed
+      # docs/ops/ tree differs. The generator reads the BUILT registry, so
+      # this step follows the build above; its output is deterministic (no
+      # timestamps, no absolute paths), and `git status --porcelain` also
+      # catches an untracked new op doc that `git diff` alone would miss.
+      - name: Check generated op docs
+        run: |
+          npm run gen:op-docs
+          git diff --exit-code -- docs/ops
+          test -z "$(git status --porcelain -- docs/ops)"
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs

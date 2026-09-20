@@ -31,9 +31,10 @@ and set `persist-credentials: false` — they run repo code and never push.
 ## Worked example — this repo's static job, plus its from-source companion
 
 `{{RUNNER}}`, `{{NODE_VERSION}}`, and `{{INSTALL_CMD}}` are the
-instantiation tokens; the five command steps below are this repo's
+instantiation tokens; the six command steps below are this repo's
 `{{COMMANDS...}}` slot — the static gate (TS7 compiler ratchet and typed Oxlint), then
-format check, test, Knip, build. This repo's `.github/workflows/ci.yml` IS this template
+format check, test, Knip, build, and the generated-op-docs drift check. This repo's
+`.github/workflows/ci.yml` IS this template
 instantiated — nothing hand-carried; regenerate it by substituting the
 tokens (`ubuntu-latest`, `24`, `npm ci`) and adding the provenance header.
 The `from-source` companion job below mirrors ci.yml's second job exactly
@@ -85,6 +86,17 @@ jobs:
       # deliberate, boring-safe choice.
       - name: Build
         run: npm run build
+      # Generated-artifact drift gate (ws-i scope item 5): regenerate the
+      # per-op reference from the registry and fail when the committed
+      # docs/ops/ tree differs. The generator reads the BUILT registry, so
+      # this step follows the build above; its output is deterministic (no
+      # timestamps, no absolute paths), and `git status --porcelain` also
+      # catches an untracked new op doc that `git diff` alone would miss.
+      - name: Check generated op docs
+        run: |
+          npm run gen:op-docs
+          git diff --exit-code -- docs/ops
+          test -z "$(git status --porcelain -- docs/ops)"
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
@@ -121,7 +133,7 @@ jobs:
 ```
 
 When adopting for another repository: keep the `on:` block and the
-permissions shape exactly as shown, swap the tokens, and replace the five
+permissions shape exactly as shown, swap the tokens, and replace the six
 command steps with your own `{{COMMANDS...}}` — then add the resulting
 workflow's file name and job id (the check name) as a pair in
 `REQUIRED_WORKFLOW_CHECKS` so the I4 self-test polices it.
