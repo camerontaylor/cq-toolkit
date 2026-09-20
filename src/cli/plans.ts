@@ -17,9 +17,9 @@
 // the entry's discoverable floor instance — the honest, schema-valid,
 // agent-free pass. Real runs author the builder in the SDK / entry modules;
 // `run-plan --plan=<file>` remains the way to run an arbitrary plan JSON.
-import { getPlan, listPlans } from '../registry/plans.js';
-import { EXIT_CODES } from './exit.js';
-import { narrate, type CliIo, type NarrationMode } from './output.js';
+import type { PlanRegistryEntry } from '../kernel/types.js';
+import { listPlans } from '../registry/plans.js';
+import type { CliIo, NarrationMode } from './output.js';
 import { RunPlanOptionsSchema, parseRunPlanInput, runPlanThroughKernel } from './run-plan.js';
 
 /**
@@ -33,31 +33,23 @@ export async function listPlanNames(plansRoot?: string): Promise<string[]> {
 }
 
 /**
- * Run one plan SUBCOMMAND (a name the plan registry registers): parse the
- * shared governed-run flags, resolve the registry entry's floor plan, and run
- * it through the governed composition. Arg-shaped problems are narrated exits
- * 2; runtime throws (including an importer that throws) propagate to main.ts's
- * catch → 1. main.ts resolves the name first, so the missing-entry path here
- * can only be a registry race — reported as an unknown subcommand (exit 2),
- * never a silent no-op.
+ * Run one plan SUBCOMMAND from its ALREADY-RESOLVED registry entry: parse the
+ * shared governed-run flags, resolve the entry's floor plan, and run it
+ * through the governed composition. The entry is passed in (main.ts resolves
+ * it once for the dispatch/help decision) — no second registry scan, so no
+ * name-keyed TOCTOU between the two lookups. Arg-shaped problems are narrated
+ * exits 2; runtime throws (an importer that throws, a journal failure)
+ * propagate to main.ts's catch → 1.
  */
 export async function runPlanEntryCommand(
-  name: string,
+  entry: PlanRegistryEntry,
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
   opts?: { opsRoot?: string; plansRoot?: string },
 ): Promise<number> {
-  const parsed = parseRunPlanInput(name, flags, io, mode, RunPlanOptionsSchema);
+  const parsed = parseRunPlanInput(entry.name, flags, io, mode, RunPlanOptionsSchema);
   if (!parsed.ok) return parsed.code;
-  const entry = await getPlan(
-    name,
-    opts?.plansRoot === undefined ? {} : { plansRoot: opts.plansRoot },
-  );
-  if (entry === undefined) {
-    narrate(io, `unknown subcommand '${name}' (try --help)`);
-    return EXIT_CODES.usage;
-  }
   const plan = await entry.importer();
-  return runPlanThroughKernel(name, plan, parsed.input, io, mode, opts);
+  return runPlanThroughKernel(entry.name, plan, parsed.input, io, mode, opts);
 }

@@ -240,3 +240,24 @@ describe('sample: plan subcommands through the governed kernel (T4.3)', () => {
     expect(err).toMatch(/invalid input for 'sweep'/);
   });
 });
+
+describe('plan-registry defects degrade help, never break it (T4.3)', () => {
+  test('global --help stays exit 0 (op-only) and narrates a broken plan registry', async () => {
+    // A broken plan module must not turn pure help into a failure: the help
+    // surface degrades to the op subcommands and the skip is narrated.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-conformance-badplans-'));
+    tmpDirs.push(dir);
+    await writeFile(join(dir, 'package.json'), '{"type":"module"}\n');
+    await writeFile(join(dir, 'broken.js'), "throw new Error('broken plan module');\n");
+    const outChunks: string[] = [];
+    const errChunks: string[] = [];
+    const io: CliIo = {
+      stdout: (chunk) => outChunks.push(chunk),
+      stderr: (chunk) => errChunks.push(chunk),
+    };
+    const code = await runCli(['--help'], io, { plansRoot: dir });
+    expect(code).toBe(0);
+    expect(outChunks.join('')).toContain('run-plan');
+    expect(errChunks.join('')).toMatch(/plan registry scan failed/);
+  });
+});

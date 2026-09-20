@@ -405,7 +405,16 @@ async function dispatchCli(
   // follows — help wins).
   if (sub === '--help' || sub === '-h') {
     const opEntries = await list(opsRoot === undefined ? {} : { opsRoot });
-    io.stdout(renderGlobalHelp(subcommandNames(opEntries, await listPlanNames(opts?.plansRoot))));
+    // A defective plan module must not turn pure help into a failure: degrade
+    // to the op-only surface and surface the skip on stderr (the registry's
+    // skippedFamilies visibility posture). Help itself stays exit 0.
+    let planNames: string[] = [];
+    try {
+      planNames = await listPlanNames(opts?.plansRoot);
+    } catch (err) {
+      narrate(io, `plan registry scan failed — help lists op subcommands only: ${messageOf(err)}`);
+    }
+    io.stdout(renderGlobalHelp(subcommandNames(opEntries, planNames)));
     return EXIT_CODES.ok;
   }
 
@@ -486,7 +495,7 @@ async function dispatchCli(
         // Input defects are narrated exits 2 INSIDE runPlanEntryCommand (flag
         // schema, duplicates); runtime throws (an importer that throws, a
         // journal failure) escape as throws → narrated exit 1 below.
-        return await runPlanEntryCommand(sub, parsed.flags, io, mode, opts);
+        return await runPlanEntryCommand(planEntry, parsed.flags, io, mode, opts);
       } catch (err) {
         // Runtime throw → 1; machine mode suppresses the narration line.
         narrateIfHuman(io, mode, `${sub} threw: ${messageOf(err)}`);

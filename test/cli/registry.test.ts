@@ -559,6 +559,27 @@ describe('plan registry (src/plans) — .ts discovery + skip rules', () => {
     expect(alpha?.name).toBe('alpha');
     expect(typeof alpha?.importer).toBe('function');
   });
+
+  test('rejects a dispatcher-reserved plan name (run-plan, flag-shaped, whitespace)', async () => {
+    // The same guard the op registry applies: such a name can never be
+    // dispatched (run-plan is handled before the plan registry; a leading '-'
+    // parses as a flag; whitespace corrupts the plain-text help), so the scan
+    // must reject it loudly instead of listing a dead plan.
+    for (const [file, name] of [
+      ['reserved.ts', 'run-plan'],
+      ['flag.ts', '-dashed'],
+      ['space.ts', 'has space'],
+    ] as const) {
+      const root = await makeTmpPlansRoot('cq-plans-reserved-');
+      await writeFile(
+        join(root, file),
+        `export const plan = { name: '${name}', importer: async () => ({ id: 'x', jobs: [] }) };\n`,
+      );
+      await expect(listPlans({ plansRoot: root })).rejects.toThrow(
+        `plan name '${name}' is reserved`,
+      );
+    }
+  });
 });
 
 describe('root barrel aliases (src/index.js)', () => {
