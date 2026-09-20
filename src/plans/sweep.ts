@@ -401,7 +401,11 @@ export function buildSweepPlan(
             // The tracker-branch leg (review-debt #173) runs BEFORE the
             // assembler: the tracker-first `gh pr create` needs the head to
             // exist on the forge. Gated on every unit (a failed fleet
-            // assembles nothing, so it also leaves no tracker branch).
+            // assembles nothing, so it also leaves no tracker branch). This
+            // is the DECLARED fleet's leg, like the assembler below: the
+            // reference wiring recomposes the ACTUAL leg post-run from the
+            // committed markers (jTPa8), so an all-no-op declared fleet
+            // publishes no tracker branch or PR.
             {
               id: SWEEP_PLAN_JOB_IDS.trackerBranch,
               op: 'pr.ensureTrackerBranch',

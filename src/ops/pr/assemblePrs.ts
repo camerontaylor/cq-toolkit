@@ -793,9 +793,13 @@ export function makeTrackerBodyLock(
 ): TrackerBodyLock {
   return {
     async withLock<T>(trackerNumber: number, fn: () => T | Promise<T>): Promise<T> {
+      // `timings` FIRST, the factory-owned lockPath LAST: the Pick type
+      // excludes lockPath at compile time, but a runtime (JS/SDK) caller
+      // could still pass one, and a caller-chosen path would un-serialize
+      // the two body writers. The repo-rooted, tracker-scoped path wins.
       const mutex = makeGitMutex({
-        lockPath: trackerBodyLockPath(repoRoot, trackerNumber),
         ...timings,
+        lockPath: trackerBodyLockPath(repoRoot, trackerNumber),
       });
       return mutex.withLock(fn);
     },

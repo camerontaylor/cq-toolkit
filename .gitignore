@@ -1,8 +1,10 @@
 .gjc/
-# cq runtime tool state: the git-mutex/tracker-body lock artifacts live under
-# <repoRoot>/.cq/ (src/ops/sweep/gitMutex.ts, src/ops/pr/assemblePrs.ts); a
-# crashed holder can leave a lock directory behind until it is stolen.
-.cq/
+# cq runtime tool state, ROOT-anchored: the git-mutex/tracker-body lock
+# artifacts live under <repoRoot>/.cq/ (src/ops/sweep/gitMutex.ts,
+# src/ops/pr/assemblePrs.ts); a crashed holder can leave a lock directory
+# behind until it is stolen. Anchored so a nested `.cq/` elsewhere stays
+# visible to git.
+/.cq/
 node_modules/
 dist/
 coverage/

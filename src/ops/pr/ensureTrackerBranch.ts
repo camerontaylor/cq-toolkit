@@ -78,7 +78,10 @@ export interface EnsureTrackerBranchInput {
 /** The op's report: the branch, its head sha, and how it got there. */
 export interface EnsureTrackerBranchReport {
   branch: string;
-  /** The head sha now on the remote (equal to the pushed/local commit). */
+  /**
+   * The head sha on the remote; in local-only (`push:false`) mode it is the
+   * local head, since nothing reaches the remote.
+   */
   headSha: string;
   /** true when this call created the local branch (an empty commit on `base`). */
   created: boolean;

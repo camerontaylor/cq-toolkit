@@ -15,7 +15,7 @@
 //      waits on a parked holder.
 //   3. THE LOCK RELEASES ON FAULT: an edit fault inside the span fails the op
 //      and a subsequent writer on the same tracker proceeds.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, test } from 'vitest';
@@ -25,14 +25,17 @@ import {
   MANIFEST_SECTION_MARKER,
   READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
+  trackerBodyLockPath,
   type AssemblePrsInput,
   type PrEffects,
 } from '../../../src/ops/pr/assemblePrs.js';
 import { makeRunReport, type RunReportInput } from '../../../src/ops/pr/runReport.js';
 
+const CLEANUP: string[] = [];
 const REPO_ROOT = mkdtempSync(join(tmpdir(), 'pr-tracker-body-lock-'));
 afterAll(() => {
   rmSync(REPO_ROOT, { recursive: true, force: true });
+  for (const dir of CLEANUP) rmSync(dir, { recursive: true, force: true });
 });
 
 const TRACKER = 1;
@@ -154,6 +157,21 @@ async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<voi
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+describe('trackerBodyLockPath canonicalization (r3 finding 2)', () => {
+  test('a symlinked and a dot-dot spelling of one repo root derive the same artifact', () => {
+    const root = mkdtempSync(join(tmpdir(), 'pr-lock-canon-'));
+    CLEANUP.push(root);
+    const link = join(tmpdir(), `pr-lock-canon-link-${String(Date.now())}`);
+    symlinkSync(root, link, 'dir');
+    CLEANUP.push(link);
+    // The /tmp vs /private/tmp symlink spelling and a relative `..` spelling
+    // of one repo must resolve to ONE lock artifact, or two writers of one
+    // tracker stop serializing.
+    expect(trackerBodyLockPath(link, 7)).toBe(trackerBodyLockPath(root, 7));
+    expect(trackerBodyLockPath(join(root, 'nested', '..'), 7)).toBe(trackerBodyLockPath(root, 7));
+  });
+});
 
 describe('tracker-body read-modify-write lock (review-debt #171)', () => {
   test('two concurrent writers on the SAME tracker compose both sections', async () => {
