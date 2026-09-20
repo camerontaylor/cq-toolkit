@@ -40,6 +40,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../src/driver/types.js';
+import { currentJobContext } from '../../src/kernel/governor.js';
 import { exitCodeForOpResult } from '../../src/cli/exit.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
@@ -520,6 +521,10 @@ const runLoop = async (
     headRepo?: string;
     dispatchLogPath?: string;
     promptOverride?: string;
+    /** Governor LIMITS half riding the loop opts (the review-path #137 arming). */
+    limits?: { perJobWallClockMs?: number };
+    /** Full driver.run override (the wall-clock test's cooperating wedge). */
+    driverRun?: Driver['run'];
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -533,14 +538,16 @@ const runLoop = async (
   const ghLog = o.ghLog ?? [];
   const gitLog = o.gitLog ?? [];
   const driver: Driver = {
-    run: async (invocation) => {
-      o.invocations?.push(invocation);
-      const next = o.driverResults?.shift();
-      if (next === undefined) {
-        throw new Error('scripted driver: no scripted result left');
-      }
-      return next;
-    },
+    run:
+      o.driverRun ??
+      (async (invocation) => {
+        o.invocations?.push(invocation);
+        const next = o.driverResults?.shift();
+        if (next === undefined) {
+          throw new Error('scripted driver: no scripted result left');
+        }
+        return next;
+      }),
   };
   // The fix op dispatches through a registry view whose review.fixItem binds
   // the scripted Driver — the same governed runPlan seam the CLI uses.
@@ -570,6 +577,7 @@ const runLoop = async (
     dispatchLogPath: o.dispatchLogPath ?? join(scratch, 'dispatch.jsonl'),
     worktreeRoot: scratch,
     ...(o.promptOverride !== undefined ? { promptOverride: o.promptOverride } : {}),
+    ...(o.limits !== undefined ? { limits: o.limits } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
 };
@@ -2059,5 +2067,56 @@ describe('already-answered skip for comment items (slice 9 item 4)', () => {
     expect(run3.outcome.plan.jobs).toHaveLength(1);
     expect(run3Invocations).toHaveLength(1);
     expect(run3.outcome.actionsPosted).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fix-run wall-clock ladder (CodeRabbit KyE, review-debt #137)
+// ---------------------------------------------------------------------------
+
+describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
+  test('limits.perJobWallClockMs=20 trips a fixer wedged past it: the governed run records the failure honestly', async () => {
+    // The driver sleeps 200 ms and COOPERATES with the rung-1 signal (a real
+    // subprocess fixer is escalated at the later rungs; in-process, the
+    // signal firing inside the job context is the honest trip evidence).
+    // UNARMED (the pre-fix governor built `governorConfig(runOptions, {})`)
+    // no signal ever fires: the sleep completes and the job ends ok — so a
+    // pass here proves the LIMITS half actually reached the governor.
+    let tripped = false;
+    const startedAt = Date.now();
+    const { outcome } = await runLoop(defaultWorld(), {
+      limits: { perJobWallClockMs: 20 },
+      driverRun: async () => {
+        const signal = currentJobContext()?.signal;
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 200);
+          signal?.addEventListener('abort', () => {
+            tripped = true;
+            clearTimeout(timer);
+            reject(new Error('wall-clock: the fixer hit the rung-1 signal'));
+          });
+        });
+        return completeWorker(fixLine(true, 'unreachable while the ladder is armed', [NEW_SHA]));
+      },
+    });
+
+    // The rung-1 signal fired INSIDE the job context, well before the wedge
+    // would have ended on its own — the ladder was armed through opts.limits.
+    expect(tripped).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(200);
+    // The report shows the trip HONESTLY: the op maps a crashed driver to
+    // indeterminate (no verdict on whether work ran), the row carries the
+    // wall-clock cause, and the loop degrades to needs-human — never a
+    // fabricated green.
+    expect(outcome.status).toBe('needs-human');
+    const row = outcome.fixReport?.jobs[0];
+    expect(row?.result.status).toBe('indeterminate');
+    expect(row?.result.status === 'indeterminate' && row.result.detail).toContain(
+      'driver crashed: wall-clock: the fixer hit the rung-1 signal',
+    );
+    expect(outcome.reasons).toContain(
+      'fix job fix-1 ended indeterminate: fixReviewItem: driver crashed: wall-clock: the fixer hit the rung-1 signal',
+    );
+    expect(outcome.actionsPosted).toBe(0);
   });
 });

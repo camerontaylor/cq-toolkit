@@ -20,7 +20,10 @@
 //      called — never a second tracker); a tracker edit fault fails the op;
 //      without `tracker` no edit runs and trackerUpdated is false.
 //   5. Counts include zeros; the report is plain JSON.
-import { describe, expect, test } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, test } from 'vitest';
 import { READINESS_SECTION_MARKER } from '../../../src/ops/pr/assemblePrs.js';
 import type {
   PrChecks,
@@ -105,8 +108,15 @@ function fakeGh(seed: Partial<FakeGh> = {}): FakeGh {
   return state;
 }
 
+// The default tracker-body lock is repo-rooted (review-debt #171), so the op
+// needs a real, writable repo root; a tmpdir keeps the suite hermetic.
+const REPO_ROOT = mkdtempSync(join(tmpdir(), 'pr-report-lock-'));
+afterAll(() => {
+  rmSync(REPO_ROOT, { recursive: true, force: true });
+});
+
 const inputOf = (overrides: Partial<RunReportInput> = {}): RunReportInput => ({
-  repoRoot: '/repo',
+  repoRoot: REPO_ROOT,
   runPrefix: 'cq/09-16a',
   packages: [
     { name: 'core', number: 11 },

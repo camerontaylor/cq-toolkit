@@ -42,7 +42,12 @@ import {
   routeFor,
 } from '../../src/driver/subprocess/routing.js';
 import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
-import { DEFAULT_MAX_RETAINED_BYTES, spawnManaged } from '../../src/driver/subprocess/process.js';
+import {
+  DEFAULT_CHILD_ENV_ALLOWLIST,
+  DEFAULT_MAX_RETAINED_BYTES,
+  buildChildEnv,
+  spawnManaged,
+} from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
@@ -94,8 +99,9 @@ function conformanceRoutingTable(): RoutingTable {
 // ---------------------------------------------------------------------------
 // Directive → FAKE_AGENT_* env (the conformance script contract, scripted
 // into the fixture). The spawn override injects these per driver instance —
-// process.env is never mutated per-run (vitest runs tests concurrently
-// within a file's worker; per-driver env keeps runs isolated).
+// process.env is never mutated per-run (vitest runs tests sequentially
+// within a file and `fileParallelism: false` serializes files; per-driver
+// env keeps runs isolated).
 // ---------------------------------------------------------------------------
 
 function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
@@ -225,6 +231,13 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
   const record = await store.load(sessionId);
   const entry = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'cli-narration');
   return entry === undefined ? [] : (JSON.parse(entry.content) as string[]);
+}
+
+/** Parse the env-probe line a spawned worker wrote (issue #183 test). */
+function probeEnvOf(narration: readonly string[]): Record<string, string> {
+  const line = narration.find((entry) => entry.startsWith('CQ_ENV_PROBE:'));
+  if (line === undefined) throw new Error('env probe line missing from narration');
+  return JSON.parse(line.slice('CQ_ENV_PROBE:'.length)) as Record<string, string>;
 }
 
 describe('subprocess driver specifics (fake agent CLI)', () => {
@@ -946,4 +959,209 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(close.stdout.codePointAt(0)).toBe(0x1f984); // 🦄
     });
   }, 20_000);
+
+  // -------------------------------------------------------------------------
+  // Child env is default-deny (issue #183)
+  // -------------------------------------------------------------------------
+
+  test('buildChildEnv: allowlisted basics + explicit route values pass, credential-shaped parent names are withheld (#183)', () => {
+    const parent = {
+      PATH: '/usr/bin',
+      HOME: '/home/worker',
+      TERM: 'xterm-256color',
+      LANG: 'en_US.UTF-8',
+      PWD: '/parent/dir',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
+      HTTPS_PROXY: 'http://proxy.example:8080',
+      https_proxy: 'http://proxy.example:8080',
+      GH_TOKEN: 'ghp_marker_secret',
+      CQ_ENV_LEAK_MARKER: 'do-not-leak',
+      AWS_SECRET_ACCESS_KEY: 'aws-marker',
+      NPM_TOKEN: 'npm-marker',
+      SSH_AUTH_SOCK: '/tmp/agent.sock',
+      NODE_OPTIONS: '--require=/tmp/evil.cjs',
+      NODE_PATH: '/tmp/evil-modules',
+    };
+    const child = buildChildEnv(parent, { ANTHROPIC_API_KEY: 'route-key-value' });
+    // Allowlisted basics are inherited…
+    expect(child['PATH']).toBe('/usr/bin');
+    expect(child['HOME']).toBe('/home/worker');
+    expect(child['TERM']).toBe('xterm-256color');
+    expect(child['LANG']).toBe('en_US.UTF-8');
+    // …including network-egress/TLS config a routed CLI needs (r1)…
+    expect(child['NODE_EXTRA_CA_CERTS']).toBe('/etc/ssl/corp.pem');
+    expect(child['HTTPS_PROXY']).toBe('http://proxy.example:8080');
+    // …both proxy spellings: curl ignores uppercase HTTP_PROXY and honors
+    // only lowercase (r2).
+    expect(child['https_proxy']).toBe('http://proxy.example:8080');
+    // …the explicit route value passes (it is composed deliberately, so the
+    // allowlist must never filter it)…
+    expect(child['ANTHROPIC_API_KEY']).toBe('route-key-value');
+    // …and every credential-shaped parent name is withheld.
+    expect(child['GH_TOKEN']).toBeUndefined();
+    expect(child['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+    expect(child['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
+    expect(child['NPM_TOKEN']).toBeUndefined();
+    expect(child['SSH_AUTH_SOCK']).toBeUndefined();
+    expect(child['NODE_OPTIONS']).toBeUndefined(); // code-execution vector, deliberately excluded
+    expect(child['NODE_PATH']).toBeUndefined(); // module-resolution vector
+    // PWD is NOT inherited: spawn does not rewrite it for cwd, so a copied
+    // PWD would be the parent's stale directory (CodeRabbit r1).
+    expect(child['PWD']).toBeUndefined();
+    // The override layer ALWAYS wins over a copied allowlist value (r1).
+    expect(buildChildEnv(parent, { PATH: '/route/bin' })['PATH']).toBe('/route/bin');
+    // The shipped allowlist itself must not carry credential-shaped names —
+    // an explicit deny-set (the regex alone misses AWS_PROFILE,
+    // GOOGLE_APPLICATION_CREDENTIALS, SSH_AUTH_SOCK, …) plus a shape guard.
+    for (const name of [
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'NPM_TOKEN',
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_PROFILE',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'SSH_AUTH_SOCK',
+      'KRB5CCNAME',
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'ZAI_API_KEY',
+      'NODE_OPTIONS',
+      'NODE_PATH',
+      'LD_PRELOAD',
+      'LD_LIBRARY_PATH',
+    ]) {
+      expect(DEFAULT_CHILD_ENV_ALLOWLIST).not.toContain(name);
+    }
+    expect(
+      DEFAULT_CHILD_ENV_ALLOWLIST.some((name) => /TOKEN|SECRET|KEY|PASSWORD/i.test(name)),
+    ).toBe(false);
+    // FROZEN (r1): an in-process push cannot weaken default-deny for later spawns.
+    expect(Object.isFrozen(DEFAULT_CHILD_ENV_ALLOWLIST)).toBe(true);
+    // The explicit extra allowlist is the only route for a non-default name.
+    const extended = buildChildEnv(parent, undefined, ['CQ_ENV_LEAK_MARKER']);
+    expect(extended['CQ_ENV_LEAK_MARKER']).toBe('do-not-leak');
+    expect(extended['GH_TOKEN']).toBeUndefined();
+    // A malformed extra name is rejected at the seam, not silently no-oped (r1/r2).
+    expect(() => buildChildEnv(parent, undefined, [''])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => buildChildEnv(parent, undefined, ['A=B'])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => buildChildEnv(parent, undefined, ['BAD NAME'])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    // A null-prototype child carries a `__proto__` override as an OWN property
+    // instead of silently dropping it through the inherited setter (r2).
+    const protoOverride = Object.create(null) as Record<string, string>;
+    protoOverride['__proto__'] = 'carried';
+    const protoChild = buildChildEnv(parent, protoOverride);
+    expect(Object.prototype.hasOwnProperty.call(protoChild, '__proto__')).toBe(true);
+    expect(protoChild['__proto__']).toBe('carried');
+    // The parent env object is never mutated.
+    expect(parent.GH_TOKEN).toBe('ghp_marker_secret');
+  });
+
+  test('a REAL spawned worker cannot see a marker secret in the entry env, while route env still reaches it; envAllowlist opts a name back in (#183)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // A probe worker: dumps its OWN process.env as a narration line (the
+      // driver folds non-JSON lines into the session record) and then emits
+      // the minimal stream-json run so the invocation completes.
+      const probePath = join(scratchDir, 'env-probe.mjs');
+      await writeFile(
+        probePath,
+        [
+          'const env = { ...process.env };',
+          "process.stdout.write('CQ_ENV_PROBE:' + JSON.stringify(env) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'env-probe', model: 'conformance-1' }) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'env-probe', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, model: 'conformance-1' }) + '\\n');",
+        ].join('\n'),
+        'utf8',
+      );
+      const marker = 'cq-env-leak-marker-7f3a';
+      const savedMarker = process.env.CQ_ENV_LEAK_MARKER;
+      const savedGh = process.env.GH_TOKEN;
+      // GLOBAL process.env mutation, deliberately: the real spawnManaged path
+      // reads the LIVE parent env, so withholding can only be proven against
+      // it. Restored in finally; this file's tests run sequentially (no
+      // vitest .concurrent), so no concurrent test observes the markers.
+      process.env.CQ_ENV_LEAK_MARKER = marker;
+      process.env.GH_TOKEN = 'ghp_marker_secret';
+      const probeOptions: SubprocessDriverOptions = {
+        binary: ['node', probePath],
+        routingTable: conformanceRoutingTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          workspaceRoot: join(scratchDir, 'workspaces'),
+        },
+      };
+      try {
+        // NO spawn override: this is the production spawnManaged path.
+        const denied = await new SubprocessDriver(probeOptions).run(
+          invocation({ prompt: 'env probe run' }),
+        );
+        expect(denied.stopReason).toBe('complete');
+        const deniedEnv = probeEnvOf(await narrationOf(store, denied.sessionId as string));
+        // The marker secret never reaches the worker…
+        expect(deniedEnv['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+        expect(deniedEnv['GH_TOKEN']).toBeUndefined();
+        expect(JSON.stringify(deniedEnv)).not.toContain(marker);
+        // …while terminal basics and the configured route env do. Derive the
+        // expected values from the live env so an ambient CONFORMANCE_* var
+        // cannot flip this test (r2).
+        const expectedKey = process.env.CONFORMANCE_API_KEY as string;
+        const expectedBaseUrl = process.env.CONFORMANCE_BASE_URL ?? 'http://127.0.0.1:1/anthropic';
+        expect(typeof deniedEnv['PATH']).toBe('string');
+        expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe(expectedBaseUrl);
+        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe(expectedKey);
+        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe(expectedKey);
+
+        // The documented escape hatch is real end-to-end (r1): naming the
+        // marker in envAllowlist copies ONLY that parent name back in.
+        const allowed = await new SubprocessDriver({
+          ...probeOptions,
+          envAllowlist: ['CQ_ENV_LEAK_MARKER'],
+        }).run(invocation({ prompt: 'allowlist probe run' }));
+        expect(allowed.stopReason).toBe('complete');
+        const allowedEnv = probeEnvOf(await narrationOf(store, allowed.sessionId as string));
+        expect(allowedEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
+        expect(allowedEnv['GH_TOKEN']).toBeUndefined(); // only the named extra is added
+
+        // The per-instance list is a FROZEN COPY (r2): mutating the caller's
+        // array after construction cannot weaken later spawns.
+        const mutableAllowlist = ['CQ_ENV_LEAK_MARKER'];
+        const frozenDriver = new SubprocessDriver({
+          ...probeOptions,
+          envAllowlist: mutableAllowlist,
+        });
+        mutableAllowlist.push('GH_TOKEN');
+        const frozen = await frozenDriver.run(invocation({ prompt: 'frozen allowlist probe run' }));
+        const frozenEnv = probeEnvOf(await narrationOf(store, frozen.sessionId as string));
+        expect(frozenEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
+        expect(frozenEnv['GH_TOKEN']).toBeUndefined(); // pushed AFTER construction — not honored
+      } finally {
+        if (savedMarker === undefined) delete process.env.CQ_ENV_LEAK_MARKER;
+        else process.env.CQ_ENV_LEAK_MARKER = savedMarker;
+        if (savedGh === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = savedGh;
+      }
+    });
+  }, 20_000);
+
+  test('envAllowlist validation: malformed names throw at construction (#183)', () => {
+    expect(() => new SubprocessDriver({ envAllowlist: [''] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['A=B'] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['BAD NAME'] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
+  });
 });

@@ -1,7 +1,7 @@
 // Slice C — the action-pinning policy, mechanically enforced:
 //   1. EVERY `uses:` across every generated workflow (all *.yml and *.yaml
 //      under .github/workflows/ — GitHub executes both extensions) and the
-//      six template files under
+//      eight template files under
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
@@ -23,7 +23,7 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
 
-// The six template files (source of truth) that carry `uses:` steps or are
+// The eight template files (source of truth) that carry `uses:` steps or are
 // otherwise part of the pinning policy.
 const TEMPLATE_FILES = [
   'policy/templates/init-merge-queue.yml',
@@ -32,6 +32,8 @@ const TEMPLATE_FILES = [
   'policy/templates/sync-merge-queue.yml',
   'policy/templates/required-check.md',
   'policy/templates/affected-tests.md',
+  'policy/templates/self-host/self-review-loop.yml',
+  'policy/templates/self-host/self-merge-prs.yml',
 ];
 
 // Every `uses:` value in the text (quoted `'uses':` keys included — YAML
@@ -131,5 +133,52 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
     expect(readFileSync(join(ROOT, 'policy/templates/README.md'), 'utf8')).toContain(
       '## Action pinning',
     );
+  });
+
+  it('both instantiated self-host workflows carry the automation-window guard', () => {
+    // The window-end fail-closed guard: the UTC clock read plus the abort
+    // line — a delayed fire must refuse to initiate operations, not run
+    // outside the scheduled window.
+    for (const name of ['self-review-loop.yml', 'self-merge-prs.yml']) {
+      const text = readFileSync(join(WORKFLOWS_DIR, name), 'utf8');
+      expect(text, `${name}: the window guard's UTC clock read`).toContain('date -u +%H%M');
+      expect(text, `${name}: the window guard's abort line`).toContain(
+        'outside the scheduled automation window',
+      );
+    }
+  });
+
+  it('the self-host driver-key env NAME is consistent within and across template/instantiation', () => {
+    // Batch-gate finding (VB4K #1): the templates declared env
+    // `Z_AI_API_KEY:` while their own guard asserted `$ZAI_API_KEY` (the name
+    // the drivers read), so an adopter's run refused to start. Pin the
+    // declaration and the assertion to the SAME key, and pin each template
+    // to its instantiation: the declaration NAME is fixed (`ZAI_API_KEY`);
+    // only the secret name is the `{{SELFHOST_DRIVER_KEY}}` placeholder.
+    const declared = (text: string): string | undefined =>
+      text.match(/^\s*([A-Z_]*AI_API_KEY):\s*\$\{\{\s*secrets\./m)?.[1];
+    const asserted = (text: string): string | undefined =>
+      text.match(/test -n "\$([A-Z_]*AI_API_KEY)"/)?.[1];
+    const pairs = ['self-review-loop.yml', 'self-merge-prs.yml'].map((name) => ({
+      name,
+      template: join(ROOT, `policy/templates/self-host/${name}`),
+      instantiated: join(WORKFLOWS_DIR, name),
+    }));
+    for (const { name, template, instantiated } of pairs) {
+      const templateText = readFileSync(template, 'utf8');
+      const instantiatedText = readFileSync(instantiated, 'utf8');
+      const templateDecl = declared(templateText);
+      const instantiatedDecl = declared(instantiatedText);
+      expect(templateDecl, `${name}: template driver env declaration`).toBe('ZAI_API_KEY');
+      expect(instantiatedDecl, `${name}: instantiated driver env declaration`).toBe('ZAI_API_KEY');
+      expect(templateDecl, `${name}: template declaration must match its guard assert`).toBe(
+        asserted(templateText),
+      );
+      expect(
+        instantiatedDecl,
+        `${name}: instantiated declaration must match its guard assert`,
+      ).toBe(asserted(instantiatedText));
+      expect(instantiatedDecl, `${name}: template and instantiation must agree`).toBe(templateDecl);
+    }
   });
 });

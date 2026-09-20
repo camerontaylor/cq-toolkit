@@ -259,6 +259,14 @@ export interface SubprocessDriverOptions {
    * A lookup returning undefined keeps costUSD absent.
    */
   pricing?: (modelSpec: ModelSpec) => PerMillionRates | undefined;
+  /**
+   * Extra parent-env NAMES copied into every spawned CLI worker on top of
+   * the default-deny allowlist (issue #183). Everything else in the entry
+   * process env stays out: a GH_TOKEN or repo secret is NOT inherited unless
+   * a Route's auth plan injects it explicitly or it is named here. Names
+   * only, never values.
+   */
+  envAllowlist?: readonly string[];
   /** Spawn override hook for tests. Default: the real spawnManaged. */
   spawn?: SpawnFn;
 }
@@ -282,6 +290,7 @@ export class SubprocessDriver implements Driver {
   private readonly pricingOverride:
     | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
     | undefined;
+  private readonly envAllowlist: readonly string[] | undefined;
   private readonly spawnImpl: SpawnFn;
 
   constructor(options: SubprocessDriverOptions = {}) {
@@ -292,6 +301,18 @@ export class SubprocessDriver implements Driver {
     if (this.binary.length === 0 || this.binary.some((part) => part === '')) {
       throw new Error(
         `subprocess driver: binary must be a non-empty string or a non-empty array of non-empty strings, got ${JSON.stringify(options.binary)}`,
+      );
+    }
+    // An env-allowlist entry is a NAME copied from the parent env; a name
+    // that is not a well-formed env var identifier (empty, '='-bearing,
+    // whitespace/NUL) would silently do nothing or explode at spawn (issue
+    // #183 r1/r2). Validate HERE, loudly, like the binary template.
+    if (
+      options.envAllowlist !== undefined &&
+      options.envAllowlist.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+    ) {
+      throw new Error(
+        `subprocess driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
       );
     }
     // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
@@ -322,6 +343,11 @@ export class SubprocessDriver implements Driver {
     this.sessionsDir = options.sessionsDir;
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.pricingOverride = options.pricing;
+    // Frozen COPY (issue #183 r2): the default allowlist is frozen for the
+    // same reason — a caller mutating its array after construction must not
+    // weaken default-deny for every later spawn on a "stateless" instance.
+    this.envAllowlist =
+      options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
     this.spawnImpl = options.spawn ?? spawnManaged;
   }
 
@@ -408,6 +434,9 @@ export class SubprocessDriver implements Driver {
         cwd: workspace,
         env: childEnv,
         stdin: prompt,
+        // Default-deny parent-env pass-through (issue #183); undefined keeps
+        // spawnManaged's shipped allowlist alone.
+        ...(this.envAllowlist !== undefined ? { envAllowlist: this.envAllowlist } : {}),
       });
     } catch (err) {
       // Best-effort narration first (the same swallow rule as persistence:
@@ -540,7 +569,10 @@ export class SubprocessDriver implements Driver {
    * each entry names the HOST env var to copy AT RUN TIME; a missing value
    * throws BEFORE the spawn (same never-guess posture as the ai-sdk key
    * check). The route carries names only, so this is the one place a
-   * secret value is ever read.
+   * secret value is ever read. The returned map is the EXPLICIT override
+   * layer `spawnManaged` applies on top of its default-deny allowlist
+   * (issue #183): configured route keys reach the child even though the
+   * parent env is otherwise not inherited.
    */
   private resolveChildEnv(route: Route): Record<string, string> {
     const childEnv: Record<string, string> = { ANTHROPIC_BASE_URL: route.baseUrl };
