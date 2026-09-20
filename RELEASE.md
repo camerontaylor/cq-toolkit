@@ -61,7 +61,7 @@ set.
 | 4   | No history hygiene needed by construction                                | met     | greenfield births: cq-toolkit [#1](https://github.com/camerontaylor/cq-toolkit/pull/1) · cq-fixtures [#1](https://github.com/camerontaylor/cq-fixtures/pull/1)                                                                                                                                                                                                                                                                                                                |
 | 5   | Secrets posture: CI uses GitHub secrets only                             | met     | workflows read `secrets.*`; no repo-tree `*.env*` — [.github/workflows](.github/workflows)                                                                                                                                                                                                                                                                                                                                                                                    |
 | 6   | `npm publish --dry-run` + `npm pack` inspection clean; `files` allowlist | met     | [`publish-dry-run.log`](docs/release-evidence/publish-dry-run.log) · [`pack-audit.log`](docs/release-evidence/pack-audit.log) (tarball sha256 `34dca185901e037a3ccad5c853ad49f40e9297b41db9f99aa9e6c565a2441138`) · [`tarball-listing.txt`](docs/release-evidence/tarball-listing.txt) · CI [pack-audit workflow](.github/workflows/pack-audit.yml) (green on this PR head)                                                                                                   |
-| 7   | README doctrine sections I1–I11                                          | met     | [README §Doctrine](README.md#doctrine-i1i11) · canonical [policy/DOCTRINE.md](policy/DOCTRINE.md)                                                                                                                                                                                                                                                                                                                                                                             |
+| 7   | README doctrine sections I1–I11                                          | met     | [README §Doctrine](README.md#doctrine-i1i11) · canonical [policy/DOCTRINE.md](policy/DOCTRINE.md) · fixtures [README](https://github.com/camerontaylor/cq-fixtures/blob/main/README.md) (suite/scoring schema)                                                                                                                                                                                                                                                                |
 | 8   | Agent scratch dirs gitignored in both repos                              | met     | [toolkit .gitignore](.gitignore) · [fixtures .gitignore](https://github.com/camerontaylor/cq-fixtures/blob/main/.gitignore) · scratch-dir denylist class                                                                                                                                                                                                                                                                                                                      |
 | 9   | Every §10 design debt dispositioned before the tag                       | partial | DD-1 [spike](docs/dd-1-abort-spike.md) · DD-2 [normalization](docs/dd-2-usd-normalization.md) · DD-3/DD-8 [reverify-2026-09](docs/reverify-2026-09.md) · DD-9 [budget](docs/dd-9-api-equivalent-budget.md) · DD-4 fixtures [PR 12](https://github.com/camerontaylor/cq-fixtures/pull/12) · DD-5/DD-6 no v1 action (plan §10) · DD-7 op-result taxonomy in [docs/ops](docs/ops/) — consolidated disposition table `MISSING: docs/dod-evidence.md (T4.5 parallel lane / owner)` |
 | 10  | Release lands whole: one tag per repo; DoD verified here                 | partial | this PR · **MISSING: `v1.0.0` tag refs (T5.2, after promote)**                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -113,7 +113,15 @@ critical/major finding coexists with this PR.
   `pi-opencode/opencode-go/deepseek-v4.1-flash`, thinking high), posted as a
   PR comment. The round-2 fixes are in the commit immediately following the
   reviewed head; the final head is re-reviewed in round 3.
-- round 3: _pending_ (fresh paseo reviewer on the final head).
+- round 3: 4 findings (1 high, 1 medium, 2 low) — **all fixed**: added a
+  `prepack` build hook so `npm publish` from the promoted `main` SHA cannot
+  ship a `dist`-less tarball; recorded the `npm ci` + build prerequisite in
+  the evidence logs; widened the dirty-diff label to the round-1 batch;
+  corrected the Codex rate-limit wording in the PR-body appendix. Fresh
+  reviewer `2045d34` (paseo `pi-opencode/opencode-go/deepseek-v4.1-flash`,
+  thinking medium), posted as a PR comment.
+- round 4 (final-head verification after the high fix): _pending_ (fresh
+  paseo reviewer, thinking high).
 - VB5 batch gate (final goal T5.3): _pending_.
 
 ### Round-1 dispositions
@@ -168,7 +176,9 @@ and `npm run build` exit 0. Owner order 2026-09-20: local `npm test` is
 commit as any code).
 
 - pack audit reproduction (CI `.github/workflows/pack-audit.yml`):
-  `npm pack` → untar outside the tree → `files` allowlist assertion →
+  `npm ci` → `npm run build` → `npm pack` (the new `prepack` hook builds
+  automatically, so a publish from a clean checkout cannot ship a `dist`-less
+  tarball) → untar outside the tree → `files` allowlist assertion →
   `denylist-scan` over the unpacked tree with the tarball's own
   `patterns.yml`. Result **PASS**; tarball sha256
   `34dca185901e037a3ccad5c853ad49f40e9297b41db9f99aa9e6c565a2441138`; 273
@@ -199,6 +209,12 @@ commit as any code).
   (`bin[cq] script name dist/cli.js was invalid and removed`) — the `cq` bin
   would not have shipped. Fixed to `dist/cli.js`; the packed `package.json`
   now carries it.
+- **`prepack` build hook** (round-3 high finding): `dist/` is gitignored and
+  was built only by explicit CI steps, so `npm publish` from the promoted
+  `main` SHA would have packed a tarball with no `dist/` (npm exits 0 and
+  silently drops a missing `files` entry) — a broken `1.0.0`. Added
+  `"prepack": "npm run build"` so `npm pack`/`npm publish` always build the
+  shipped artifacts.
 - **Version-claim alignment** (round-1 finding 7): `docs/naming.md` updated
   and ACP `clientInfo.version` aligned to `1.0.0`. Deriving the client
   version from the manifest at runtime is a post-v1 candidate (recorded,
@@ -207,7 +223,9 @@ commit as any code).
 
 ## For the owner
 
-- `npm publish --access public` of `1.0.0` from the promoted `main` SHA.
+- `npm publish --access public` of `1.0.0` from the promoted `main` SHA
+  (the `prepack` hook builds `dist/` automatically; the tarball audit in
+  `docs/release-evidence/pack-audit.log` is the post-build evidence).
 - Flip research-repo status lines: ADR-0001 → accepted; plan §6/spec status;
   plan §11 DoD table; the parallel T4.5 evidence (`SELF-HOSTING.md` soak,
   `docs/dod-evidence.md`) fills the remaining `MISSING` rows.
