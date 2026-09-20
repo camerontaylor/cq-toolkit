@@ -381,6 +381,23 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(input.stagePathAllowlist?.patterns).toEqual(['^old\\.ts$']);
   });
 
+  test("a 'toString'-named package never reads an inherited selection-evidence member (r2 major)", () => {
+    const units: Array<WorkUnit> = [{ package: 'toString', fixer: 'fix', files: [] }];
+    const report: PlanSweepReport = {
+      jobs: [{ id: 'sweep-toString-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      units,
+      suppressed: [],
+      needsHuman: [],
+      // Evidence for ANOTHER package makes the map non-empty, so an
+      // unguarded `map['toString']` would return Object.prototype.toString
+      // and crash the allowlist loop.
+      selectionEvidence: { other: ['gone.ts'] },
+    };
+    const plan = buildSweepPlan({ ...CONFIG, packages: [{ name: 'toString', path: '.' }] }, report);
+    const input = SweepUnitDispatchInputSchema.parse(plan.jobs[1]?.input);
+    expect(input.stagePathAllowlist).toBeUndefined();
+  });
+
   test('slug normalization and deterministic collision disambiguation (jTPa1)', () => {
     // '@scope/pkg' normalizes to the DISPATCHABLE slug 'scope-pkg' (the old
     // fold produced '-scope-pkg', which SEGMENT_RE refuses).

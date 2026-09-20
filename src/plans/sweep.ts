@@ -351,9 +351,18 @@ export function buildSweepPlan(
     // explicitly carries one (the test-fix plan overrides with the
     // fleet-wide test-file patterns). ABSENT (never undefined-valued —
     // the registry schema's exactOptional keys reject undefined).
+    // Object.hasOwn (r2 major): a package named 'toString'/'constructor'/
+    // '__proto__' would otherwise read an inherited Object.prototype member,
+    // and the `?? []` fallback would not fire — `for...of` on a function
+    // crashes buildSweepPlan. Only an OWN selection-evidence entry counts.
+    const evidence =
+      report.selectionEvidence !== undefined &&
+      Object.hasOwn(report.selectionEvidence, unit.package)
+        ? (report.selectionEvidence[unit.package] ?? [])
+        : [];
     const defaultScope =
       overlay.stagePathAllowlist === undefined
-        ? unitStagePathAllowlist(config, unit, report.selectionEvidence?.[unit.package] ?? [])
+        ? unitStagePathAllowlist(config, unit, evidence)
         : undefined;
     return {
       ...job,
