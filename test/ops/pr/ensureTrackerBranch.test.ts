@@ -255,4 +255,19 @@ describe('makeSubprocessTrackerBranchEffects (real git)', () => {
       expect(second.headSha).toBe(first.headSha);
     },
   );
+
+  test(
+    'localHead rejects a git FAULT instead of reporting the ref absent (r2 finding 4)',
+    { timeout: 60_000 },
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'pr-tracker-nonrepo-'));
+      CLEANUP.push(root);
+      const effects = makeSubprocessTrackerBranchEffects(root);
+      // A non-repo path exits nonzero WITH stderr — the classification must
+      // surface that as a fault, never fold it into "branch absent".
+      await expect(effects.localHead('cq/09-16a/tracker')).rejects.toThrow(
+        /not a git repository|rev-parse/,
+      );
+    },
+  );
 });

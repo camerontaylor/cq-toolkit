@@ -27,6 +27,7 @@
 //     a `failed` result or a per-row fault; every input contract violation
 //     is a `failed` result naming the field (the worktreeFor boundary
 //     style).
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
@@ -754,13 +755,31 @@ export interface TrackerBodyLock {
  * The tracker-scoped lockPath (the artifact proper-lockfile derives is
  * `<lockPath>.lock`). Derived from the repo root so every op and process
  * guarding the same tracker agrees on one artifact; the tracker number
- * scopes it so unrelated trackers never serialize. RESOLVED against the
- * cwd: the shipped floors use `repoRoot: '.'`, and an unresolved relative
- * path would give two processes with different cwds different artifacts —
- * silently un-serializing exactly the writers this lock exists to order.
+ * scopes it so unrelated trackers never serialize. The root is
+ * CANONICALIZED (resolve + realpath): a relative floor (`repoRoot: '.'`)
+ * and an absolute path, or the `/tmp` vs `/private/tmp` spellings of one
+ * directory, must derive the SAME artifact — otherwise two writers of one
+ * tracker silently stop serializing, exactly the #171 interleave. Callers
+ * must still pass the same repo root for the same repository (the ops
+ * default to `input.repoRoot`).
  */
 export function trackerBodyLockPath(repoRoot: string, trackerNumber: number): string {
-  return resolve(repoRoot, '.cq', 'tracker-body', String(trackerNumber));
+  return resolve(canonicalRepoRoot(repoRoot), '.cq', 'tracker-body', String(trackerNumber));
+}
+
+/**
+ * The canonical identity of a repo root: absolute + symlink-resolved when it
+ * exists. A root that does not exist yet cannot be canonicalized; the
+ * absolute path is the best identity available (the mutex creates the lock's
+ * parent anyway).
+ */
+function canonicalRepoRoot(repoRoot: string): string {
+  const resolved = resolve(repoRoot);
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 /**

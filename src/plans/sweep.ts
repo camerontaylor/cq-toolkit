@@ -245,7 +245,6 @@ function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/** The assembler input a config authors — static data, no runtime output needed. */
 /**
  * The tracker-branch job's input — the same head the assembler names
  * (review-debt #173). `push` mirrors the overlay's local-only knob: the
@@ -266,6 +265,7 @@ function trackerBranchInputOf(
   };
 }
 
+/** The assembler input a config authors — static data, no runtime output needed. */
 function assembleInputOf(
   config: SweepPlanConfig,
   report: PlanSweepReport,
