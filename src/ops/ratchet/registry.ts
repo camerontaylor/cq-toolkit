@@ -8,10 +8,11 @@
 // `ratchet.proposeBaselineUpdate`).
 //
 // LAZY RULE (the family convention): module scope imports only zod, node
-// builtins, type-only imports, and the two deliberate helper re-exports at
-// the bottom (the sweep registry's GitMutexConfig precedent) — loading this
-// registry never loads an op module. Every op is reached through its entry's
-// dynamic importer at dispatch.
+// builtins, type-only imports, the pure `./format.js` library (its
+// ISO-instant validator refines the CLI boundary), and the two deliberate
+// helper re-exports at the bottom (the sweep registry's GitMutexConfig
+// precedent) — loading this registry never loads an op module. Every op is
+// reached through its entry's dynamic importer at dispatch.
 //
 // THE METRIC RUNNER IS BOUND AT IMPORTER TIME (the CODEX-P1 seam, kept): the
 // op inputs carry only ids/plain JSON, so a capture/check input carries a
@@ -24,6 +25,10 @@ import { z } from 'zod';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { CaptureBaselineOutcome } from './captureBaseline.js';
 import type { CheckRatchetOutcome } from './checkRatchet.js';
+// The shared ISO-instant validator (a pure library module) so the CLI
+// boundary rejects a malformed `capturedAt` as an arg error (exit 2)
+// before dispatch; the op keeps its own check as defense in depth.
+import { isIso8601Instant } from './format.js';
 import type { DiffVerdict } from './monotonicGuard.js';
 // The op module's declared Propose* types pin the mirror at compile time.
 import type { ProposeInput, ProposeOutcome } from './proposeBaselineUpdate.js';
@@ -34,8 +39,9 @@ import type { ProposeInput, ProposeOutcome } from './proposeBaselineUpdate.js';
  * the kernel's structuredClone, so the runner is never carried here — see
  * ./sources.js):
  *   - `command` — run through lane C's CheckRunner; `parse` picks the raw
- *     shape the adapter reads (`text`, `json`, or `tsc-text` for the tsc
- *     evidence classification).
+ *     shape the adapter reads (`text`, `json`, `tsc-text` for the tsc
+ *     evidence classification, or `coverage-json` for an integer-percent
+ *     coverage summary).
  *   - `file` — read a path (absolute or workspace-relative) and parse it.
  *   - `raw` — the raw value verbatim.
  */
@@ -70,6 +76,11 @@ export const CheckRatchetCommandInputSchema = z
   })
   .strict();
 
+/** An ISO-8601 instant string (the shared validator), for the CLI boundary. */
+const IsoInstant = z.string().refine(isIso8601Instant, {
+  message: 'capturedAt must be a strict ISO-8601 instant (e.g. 2026-09-15T12:00:00Z)',
+});
+
 /** The `ratchet.captureBaseline` registry input (the check shape + an optional pinned clock). */
 export const CaptureBaselineCommandInputSchema = z
   .object({
@@ -77,7 +88,7 @@ export const CaptureBaselineCommandInputSchema = z
     target: z.string().min(1),
     metric: z.string().min(1),
     source: MetricSourceSpecSchema,
-    capturedAt: z.string().min(1).exactOptional(),
+    capturedAt: IsoInstant.exactOptional(),
   })
   .strict();
 
@@ -109,7 +120,7 @@ export const ProposeBaselineUpdateCommandInputSchema: z.ZodType<ProposeInput> = 
           target: z.string().min(1),
           metric: z.string().min(1),
           value: z.number(),
-          capturedAt: z.string().min(1).exactOptional(),
+          capturedAt: IsoInstant.exactOptional(),
         })
         .strict(),
     ),
@@ -190,11 +201,23 @@ export const registry: OpRegistryEntry[] = [
     // coverage integer-percent comparison basis BEFORE the pure guard judges
     // it (the same normalization the local ratchet-check driver applies), so
     // a fractional `93.46 → 93` re-basis cannot read as a loosening while
-    // the live coverage reading is rounded to 93 (review finding 1).
+    // the live coverage reading is rounded to 93 (review finding 1). The
+    // comparison basis is keyed on the coverage METRIC id, so any
+    // (target, coverage) baseline normalizes, not just the shipped pair.
     importer: () =>
       Promise.all([import('./monotonicGuard.js'), import('./format.js')]).then(([m, format]) => {
-        const coverageBaselinePath = format.baselineRelPath('coverage', 'coverage');
+        // `baselines/<target>--<metric>--<digest>.json`; sanitized segments
+        // never contain `--`, so the metric segment is unambiguous.
+        const coverageBaseline = /^baselines\/[^/]*--coverage--[^/]*\.json$/;
         const op: Op<MonotonicGuardCommandInput, DiffVerdict> = async (input) => {
+          // The schema refines this, but direct TS dispatch bypasses the
+          // registry: require EXACTLY one source (both-set is ambiguous).
+          if ((input.diff === undefined) === (input.diffPath === undefined)) {
+            return {
+              status: 'failed',
+              error: 'ratchet: provide exactly one of diff or diffPath',
+            };
+          }
           let diff: string;
           if (input.diff !== undefined) {
             diff = input.diff;
@@ -217,7 +240,7 @@ export const registry: OpRegistryEntry[] = [
           return {
             status: 'ok',
             value: m.checkDiffMonotonicity(
-              format.normalizeBaselineDiffValues(diff, coverageBaselinePath),
+              format.normalizeBaselineDiffValues(diff, coverageBaseline),
             ),
           };
         };

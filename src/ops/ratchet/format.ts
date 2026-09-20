@@ -250,11 +250,22 @@ function diffHeaderPath(line: string): string | null {
  * This is the ONE implementation shared by the `ratchet.monotonicGuard` op
  * (the required workflow's path) and the local `scripts/ratchet-check.mjs`
  * driver (through `loadEngine`).
+ *
+ * The second argument selects the coverage sections: a STRING matches one
+ * exact baseline path, a REGEXP matches a family of paths (the op keys it on
+ * the `coverage` METRIC id, so a coverage baseline under any (target,
+ * coverage) pair still normalizes), and `undefined` falls back to the
+ * `baselines/coverage` prefix.
  */
 export function normalizeBaselineDiffValues(
   diff: string,
-  exactCoverageBaselinePath?: string,
+  coverageBaseline?: string | RegExp,
 ): string {
+  const isCoveragePath = (path: string): boolean => {
+    if (coverageBaseline === undefined) return COVERAGE_BASELINE_SECTION.test(path);
+    if (typeof coverageBaseline === 'string') return path === coverageBaseline;
+    return coverageBaseline.test(path);
+  };
   const out: string[] = [];
   let isCoverageSection = false;
   let inHunk = false;
@@ -269,15 +280,8 @@ export function normalizeBaselineDiffValues(
       const path = diffHeaderPath(line);
       // Assigned PER HEADER, never only-if-matches: a sibling file's header
       // must RESET the flag, so a non-coverage section following a coverage
-      // one can never inherit its normalization. Keyed on the EXACT
-      // coverage-baseline path when the caller provides it (review-debt
-      // #120: a path-prefix regex would also catch an unrelated baseline
-      // whose target merely starts with 'coverage').
-      isCoverageSection =
-        path !== null &&
-        (exactCoverageBaselinePath !== undefined
-          ? path === exactCoverageBaselinePath
-          : COVERAGE_BASELINE_SECTION.test(path));
+      // one can never inherit its normalization.
+      isCoverageSection = path !== null && isCoveragePath(path);
       out.push(line);
       continue;
     }

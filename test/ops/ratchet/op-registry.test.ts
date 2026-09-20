@@ -11,6 +11,9 @@
 //      touching the network, or reading the filesystem at bind time: the
 //      CheckRunner/gh/git seams are bound per dispatch and are closure-only
 //      at construction (the inertness proof).
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import { registry } from '../../../src/ops/ratchet/registry.js';
@@ -110,15 +113,48 @@ describe('ratchet family op registry entries', () => {
       value: { ok: false, violations: [{ why: 'loosened' }] },
     });
   });
+
+  test('ratchet.monotonicGuard normalizes any (target, coverage) pair, not one literal pair (finding N)', async () => {
+    const op = await entryByName('ratchet.monotonicGuard').importer();
+    const verdict = await op({ diff: coverageDiff(93.46, 93, 'web') });
+    expect(verdict).toMatchObject({
+      status: 'ok',
+      value: { ok: true, violations: [], filesChecked: 1 },
+    });
+  });
+
+  test('ratchet.monotonicGuard rejects an ambiguous diff + diffPath input (direct dispatch)', async () => {
+    const op = await entryByName('ratchet.monotonicGuard').importer();
+    const result = await op({ diff: '', diffPath: '/does/not/matter' });
+    expect(result).toMatchObject({ status: 'failed' });
+  });
+
+  test('ratchet.monotonicGuard reads a diffPath file and fails honestly on a missing one (finding M)', async () => {
+    const op = await entryByName('ratchet.monotonicGuard').importer();
+    const dir = await mkdtemp(join(tmpdir(), 'cq-op-registry-diff-'));
+    try {
+      const diffPath = join(dir, 'ratchet.diff');
+      await writeFile(diffPath, coverageDiff(93.46, 93), 'utf8');
+      const ok = await op({ diffPath });
+      expect(ok).toMatchObject({ status: 'ok', value: { ok: true, filesChecked: 1 } });
+
+      const missing = await op({ diffPath: join(dir, 'absent.diff') });
+      expect(missing).toMatchObject({ status: 'failed' });
+      if (missing.status !== 'failed') throw new Error('unreachable');
+      expect(missing.error).toMatch(/could not read diff/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 });
 
-/** A full-file-rewrite diff over the committed coverage baseline path. */
-function coverageDiff(oldValue: number, newValue: number): string {
-  const rel = baselineRelPath('coverage', 'coverage');
+/** A full-file-rewrite diff over a coverage baseline path (any target). */
+function coverageDiff(oldValue: number, newValue: number, target = 'coverage'): string {
+  const rel = baselineRelPath(target, 'coverage');
   const body = (value: number): string[] =>
     renderBaseline({
       schemaVersion: 1,
-      target: 'coverage',
+      target,
       metric: 'coverage',
       direction: 'higher-is-better',
       value,

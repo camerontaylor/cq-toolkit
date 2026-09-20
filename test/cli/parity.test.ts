@@ -16,7 +16,7 @@ import { clusterErrorsOp } from '../../src/ops/analyze/clusterErrors.js';
 import { collectFailuresOp } from '../../src/ops/analyze/collectFailures.js';
 import { hackDetector } from '../../src/ops/gates/hackDetector.js';
 import { regressionGate } from '../../src/ops/gates/regressionGate.js';
-import { checkDiffMonotonicity } from '../../src/ops/ratchet/monotonicGuard.js';
+import { get } from '../../src/registry/index.js';
 
 const VOLATILE_KEYS = new Set(['runId', 'timestamp', 'capturedAt', 'at', 'ts']);
 
@@ -122,9 +122,15 @@ const cases: ParityCase[] = [
   {
     name: 'ratchet.monotonicGuard (empty diff)',
     cliArgs: ['ratchet.monotonicGuard', '--diff='],
-    // The registry op wraps the pure guard: TS parity is the wrapper's shape
-    // around the library verdict.
-    ts: async () => ({ status: 'ok', value: checkDiffMonotonicity('') }),
+    // The TS side goes through the SAME registry entry as the CLI, so the
+    // wrapper's coverage re-basis (and the diffPath branch) has parity
+    // coverage, not just the raw library verdict.
+    ts: async () => {
+      const entry = await get('ratchet.monotonicGuard');
+      if (entry === undefined) throw new Error("missing registry entry 'ratchet.monotonicGuard'");
+      const op = await entry.importer();
+      return op({ diff: '' });
+    },
   },
 ];
 

@@ -199,4 +199,24 @@ describe('makeSubprocessBaselinePrEffects', () => {
       process.env.CQ_AUTOMATION_TOKEN = savedToken;
     }
   });
+
+  test('flag-injection-shaped refs are refused before any argv is built (finding L)', async () => {
+    // A direct caller of the exported effects cannot hand a leading-dash
+    // "ref" to git/gh as an option.
+    expect(() => makeSubprocessBaselinePrEffects(work, '--upload-pack=evil')).toThrow(
+      /unsafe base/,
+    );
+    const effects = makeSubprocessBaselinePrEffects(work, 'main');
+    await expect(effects.findOpenPrByHead('--head=evil')).rejects.toThrow(/unsafe head/);
+    await expect(
+      effects.commitAndUpsertPr({
+        head: '-x',
+        base: 'main',
+        title: 't',
+        body: 'b',
+        commitMessage: 'm',
+        files: [],
+      }),
+    ).rejects.toThrow(/unsafe head/);
+  });
 });

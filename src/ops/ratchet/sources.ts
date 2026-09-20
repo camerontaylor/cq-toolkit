@@ -27,15 +27,18 @@ import type { MetricSource } from './metricRegistry.js';
  * How to obtain the raw data one adapter parses. A discriminated union, all
  * plain JSON:
  *   - `command` — run a check through the injected RunCheck. `parse:'text'`
- *     hands the adapter the combined stdout+stderr, `parse:'json'`
- *     JSON.parses stdout, `parse:'tsc-text'` applies the tsc evidence
- *     classification (a clean exit 0 certifies the authoritative zero
- *     `{count: 0}`; a non-zero with captured diagnostics hands over the raw
- *     text; anything else is null — the `scripts/ratchet-lib.mjs`
- *     `typecheckEvidence` rule, kept here for the JSON op boundary), and
- *     `parse:'coverage-json'` JSON.parses the body and normalizes
+ *     hands the adapter the combined stdout+stderr on a CLEAN exit,
+ *     `parse:'json'`/`'coverage-json'` JSON.parse `stdout` alone (a tool
+ *     logging to stderr must not corrupt valid stdout JSON),
+ *     `parse:'tsc-text'` applies the tsc evidence classification (a clean
+ *     exit 0 certifies the authoritative zero `{count: 0}`; a non-zero with
+ *     captured diagnostics hands over the raw text; anything else is null —
+ *     the `scripts/ratchet-lib.mjs` `typecheckEvidence` rule, kept here for
+ *     the JSON op boundary), and `parse:'coverage-json'` also normalizes
  *     `total.lines.pct` to integer percent (the shared granularity law —
- *     sub-1% cross-runner float noise must never become a verdict).
+ *     sub-1% cross-runner float noise must never become a verdict). A
+ *     non-zero or unobservable exit is non-passing evidence for every parse
+ *     mode except `tsc-text` (its own exit-1/2 handoff).
  *   - `file` — read `path` (absolute, or workspace-relative) and parse it
  *     the same way (`parse:'coverage-json'` for an istanbul
  *     coverage-summary).
@@ -80,9 +83,8 @@ function normalizeCoverage(parsed: unknown): unknown {
   return parsed;
 }
 
-/** Parse captured text per the spec's format; an unparsable JSON body is null (I5). */
-function parseCaptured(text: string, parse: 'text' | 'json' | 'coverage-json'): unknown | null {
-  if (parse === 'text') return text;
+/** Parse a JSON body; an unparsable body is null (I5). */
+function parseJsonCaptured(text: string, parse: 'json' | 'coverage-json'): unknown | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text) as unknown;
@@ -125,8 +127,10 @@ function parseTscCaptured(raw: RawCheckOutput): unknown | null {
 
 /**
  * Build the MetricSource for `spec` over the injected check runner. The
- * returned source is workspace-parameterized: `command` runs in `cwd` (the
- * spec's absolute cwd, else the workspace), `file` resolves a relative path
+ * returned source is workspace-parameterized: a `command` runs in the
+ * spec's `cwd` when it is ABSOLUTE, else in `<ws>/<cwd>` (a relative cwd is
+ * a workspace-relative override, never resolved against the process cwd);
+ * absent `cwd` runs in the workspace itself. `file` resolves a relative path
  * against the workspace.
  */
 export function makeMetricSource(run: RunCheck, spec: MetricSourceSpec): MetricSource {
@@ -135,19 +139,27 @@ export function makeMetricSource(run: RunCheck, spec: MetricSourceSpec): MetricS
       case 'raw':
         return spec.raw;
       case 'command': {
+        // A RELATIVE `cwd` is a workspace-relative override — handing it to
+        // the runner verbatim would run the check in an unintended tree
+        // (the process cwd) and read its diagnostics as this workspace's
+        // evidence. Absolute stays absolute.
+        const cwd =
+          spec.cwd === undefined ? ws : isAbsolute(spec.cwd) ? spec.cwd : join(ws, spec.cwd);
         const raw: RawCheckOutput = await run({
           command: spec.command,
           args: spec.args,
-          cwd: spec.cwd ?? ws,
+          cwd,
           ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
         });
         if (spec.parse === 'tsc-text') return parseTscCaptured(raw);
-        // A timed-out / killed / spawn-failed check reports exitCode null: its
-        // captured bytes are partial evidence, so it is non-passing evidence
-        // regardless of what parsed out of them (the CheckRunner I5 rule,
-        // applied at the metric boundary too).
-        if (raw.exitCode === null) return null;
-        return parseCaptured(`${raw.stdout}${raw.stderr}`, spec.parse);
+        // A timed-out / killed / spawn-failed check (null exit) or a
+        // non-zero exit is non-passing evidence: only a CLEAN run's bytes
+        // are evidence (the legacy typecheckEvidence rule, applied to every
+        // non-tsc parse mode).
+        if (raw.exitCode !== 0) return null;
+        return spec.parse === 'text'
+          ? `${raw.stdout}${raw.stderr}`
+          : parseJsonCaptured(raw.stdout, spec.parse);
       }
       case 'file': {
         const path = isAbsolute(spec.path) ? spec.path : join(ws, spec.path);
@@ -157,7 +169,7 @@ export function makeMetricSource(run: RunCheck, spec: MetricSourceSpec): MetricS
         } catch {
           return null; // absent/unreadable summary — non-passing evidence (I5)
         }
-        return parseCaptured(text, spec.parse);
+        return spec.parse === 'text' ? text : parseJsonCaptured(text, spec.parse);
       }
     }
   };

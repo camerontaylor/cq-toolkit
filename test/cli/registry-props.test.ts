@@ -26,12 +26,15 @@
 // the sandbox, every model-provider credential (ANTHROPIC/OPENAI/DEEPSEEK/
 // ZAI/CLAUDE/*_API_KEY) stripped, and both GITHUB_TOKEN and GH_TOKEN removed.
 // A returned result is then asserted lossless. An op that instead THROWS its
-// fail-loud contract is accepted: no result exists, so there is nothing to
-// serialize — and the throw is exactly the documented "never fabricated ok"
-// behavior. NO entry needs an exclusion, so no ownerless deferral exists; if
-// a future entry cannot run under this sandbox it must be added with BOTH a
-// reason here and the owning workstream/plan §5 row (the WS-C..H family
-// suites own the real effectful behavior today).
+// fail-loud contract is accepted — EXCEPT a `TypeError` (a bug, not a
+// contract) or the harness's own invocation timeout (the op could not finish
+// under the sandbox): both fail the case. The per-entry outcomes are
+// recorded, and the suite asserts a floor of entries actually RETURNED a
+// result, so the serialization property is not vacuous. NO entry needs an
+// exclusion, so no ownerless deferral exists; if a future entry cannot run
+// under this sandbox it must be added with BOTH a reason here and the owning
+// workstream/plan §5 row (the WS-C..H family suites own the real effectful
+// behavior today).
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,10 +128,18 @@ function isPlainObject(value: unknown): boolean {
   return proto === Object.prototype || proto === null;
 }
 
-/** Bound one op invocation; a timeout is treated as a thrown fail-loud outcome. */
+/** A timeout is the harness's own bound, distinct from an op's fail-loud throw. */
+class TimeoutError extends Error {
+  constructor(ms: number) {
+    super(`op invocation exceeded ${ms}ms`);
+    this.name = 'TimeoutError';
+  }
+}
+
+/** Bound one op invocation; a timeout rejects with {@link TimeoutError}. */
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`op invocation exceeded ${ms}ms`)), ms);
+    const timer = setTimeout(() => reject(new TimeoutError(ms)), ms);
     promise.then(
       (value) => {
         clearTimeout(timer);
@@ -192,6 +203,16 @@ describe('pure sample: op results are JSON-serializable (OpResultSchema + the CL
 });
 
 describe('every registry entry: the op result JSON-serializes (hermetic fail-fast invocation)', () => {
+  /** The floor of entries that must actually RETURN a result (not vacuous). */
+  const MIN_RETURNED_RESULTS = 20;
+
+  type InvocationOutcome =
+    | { name: string; kind: 'result' }
+    | { name: string; kind: 'throw'; error: string }
+    | { name: string; kind: 'timeout'; error: string }
+    | { name: string; kind: 'type-error'; error: string };
+
+  const outcomes: InvocationOutcome[] = [];
   let savedCwd = '';
   let savedEnv: NodeJS.ProcessEnv = {};
   let sandbox = '';
@@ -224,21 +245,46 @@ describe('every registry entry: the op result JSON-serializes (hermetic fail-fas
       Object.assign(process.env, savedEnv);
     }
     if (sandbox !== '') await rm(sandbox, { recursive: true, force: true });
+
+    // B: the serialization property must NOT be vacuous. A timeout or a
+    // TypeError already failed its own case; re-assert the aggregate so a
+    // regression that makes every op throw cannot pass silently.
+    const returned = outcomes.filter((outcome) => outcome.kind === 'result').length;
+    const timedOut = outcomes.filter((outcome) => outcome.kind === 'timeout');
+    const typeErrors = outcomes.filter((outcome) => outcome.kind === 'type-error');
+    expect(timedOut.map((outcome) => outcome.name)).toEqual([]);
+    expect(typeErrors.map((outcome) => `${outcome.name}: ${outcome.error}`)).toEqual([]);
+    expect(returned).toBeGreaterThanOrEqual(MIN_RETURNED_RESULTS);
   });
 
   test.each(cases)(
     '%s: returned OpResult is JSON-lossless (a throw is an accepted fail-loud)',
-    async (_name, entry) => {
+    async (name, entry) => {
       const input = sampleFor(entry.inputSchema);
       const op = await entry.importer();
       let result: unknown;
       try {
         result = await withTimeout(op(input), 10_000);
-      } catch {
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        if (error instanceof TimeoutError) {
+          // The harness's own bound: the op could not finish under the
+          // hermetic sandbox — not a fail-loud contract. FAIL the case.
+          outcomes.push({ name, kind: 'timeout', error: errorMessage });
+          throw error;
+        }
+        if (error instanceof TypeError) {
+          // A TypeError is a bug (bad property access, bad call), never the
+          // documented fail-loud contract. FAIL the case.
+          outcomes.push({ name, kind: 'type-error', error: errorMessage });
+          throw error;
+        }
         // Fail-loud contract: no result exists, so there is nothing to
         // serialize. Never a fabricated artifact.
+        outcomes.push({ name, kind: 'throw', error: errorMessage });
         return;
       }
+      outcomes.push({ name, kind: 'result' });
       expect(OpResultSchema.safeParse(result).success).toBe(true);
       assertJsonLossless(result);
       expect(JSON.parse(JSON.stringify(result))).toEqual(result);

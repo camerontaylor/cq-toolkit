@@ -25,6 +25,7 @@ export {
   baselineRelPath,
   isIso8601Instant,
   loosens,
+  normalizeBaselineDiffValues,
   parseBaseline,
   renderBaseline,
   tightens,

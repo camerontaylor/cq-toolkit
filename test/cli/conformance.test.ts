@@ -89,6 +89,26 @@ describe('taxonomy → exit code + I1 streams (fixture family)', () => {
     expect(err).toBe('');
     expect(JSON.parse(out)).toMatchObject({ status: 'failed' });
   });
+
+  test('usage errors are exit 2 with EMPTY stdout (unknown subcommand and schema-invalid input)', async () => {
+    const unknown = await capture(['no-such-op'], { opsRoot: fixtureOps });
+    expect(unknown.code).toBe(2);
+    expect(unknown.out).toBe('');
+    expect(unknown.err).toMatch(/unknown subcommand/);
+
+    // Schema-invalid input (missing required field) → exit 2, no op ran.
+    const missing = await capture(['echo'], { opsRoot: fixtureOps });
+    expect(missing.code).toBe(2);
+    expect(missing.out).toBe('');
+    expect(missing.err).toMatch(/invalid input for 'echo'/);
+
+    // The REAL registry's strict schema: an object-typed field handed a
+    // non-object fails the same way (exit 2, empty stdout).
+    const real = await capture(['gates.regressionGate', '--base=not-an-object']);
+    expect(real.code).toBe(2);
+    expect(real.out).toBe('');
+    expect(real.err).toMatch(/invalid input for 'gates.regressionGate'/);
+  });
 });
 
 describe('sample: pure op through the real registry', () => {

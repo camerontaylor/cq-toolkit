@@ -35,10 +35,44 @@ import type { BaselinePrEffects } from './proposeBaselineUpdate.js';
 /** Captured child output can be large (a full diff/PR body) — never truncate. */
 const MAX_BUFFER = 64 * 1024 * 1024;
 
+/** Wall-clock cap for every effects subprocess; exceeded → SIGKILL → thrown. */
+const EXEC_TIMEOUT_MS = 120_000;
+
 interface ExecResult {
   ok: boolean;
+  /** True when the child was killed for exceeding {@link EXEC_TIMEOUT_MS}. */
+  timedOut: boolean;
   stdout: string;
   stderr: string;
+}
+
+/** Message of an unknown throwable (restore-path narration, never a cast). */
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Conservative ref-safety check for values that become subprocess argv: a
+ * direct caller must not be able to inject a flag (leading `-`) or break the
+ * argv shape. Git's full check-ref-format is stricter, but this rejects
+ * everything that could be misread as an option and every control/space/
+ * glob character; the op layer already applies the complete git rules.
+ */
+const SAFE_REF = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+function assertArgSafeRef(value: string, label: string): void {
+  if (
+    value === '' ||
+    !SAFE_REF.test(value) ||
+    value.endsWith('/') ||
+    value.endsWith('.') ||
+    value.endsWith('.lock') ||
+    value.includes('..') ||
+    value.includes('@{')
+  ) {
+    throw new Error(
+      `ratchet: refusing to build a subprocess argv from an unsafe ${label} '${value}'`,
+    );
+  }
 }
 
 /** One subprocess, never rejecting: the caller decides what a non-zero exit means. */
@@ -56,9 +90,12 @@ function exec(
         ...(opts.env !== undefined ? { env: opts.env } : {}),
         encoding: 'utf8',
         maxBuffer: MAX_BUFFER,
+        timeout: EXEC_TIMEOUT_MS,
+        killSignal: 'SIGKILL',
       },
       (error, stdout, stderr) => {
-        resolve({ ok: error === null, stdout, stderr });
+        const timedOut = error !== null && (error as { killed?: unknown }).killed === true;
+        resolve({ ok: error === null, timedOut, stdout, stderr });
       },
     );
   });
@@ -90,22 +127,28 @@ function ghEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-/** One `gh` invocation, throwing on a non-zero exit (the op contains the throw). */
+/** One `gh` invocation, throwing on a timeout or a non-zero exit (the op contains the throw). */
 async function runGh(repoRoot: string, args: readonly string[]): Promise<string> {
   const res = await exec(ghBin(), args, { cwd: repoRoot, env: ghEnv() });
+  if (res.timedOut) {
+    throw new Error(`gh ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
+  }
   if (!res.ok) {
     throw new Error(`gh ${args[0] ?? ''} failed: ${res.stderr.trim() || res.stdout.trim()}`);
   }
   return res.stdout;
 }
 
-/** One `git` invocation; `allowFail` opts into the non-zero-exit probe shape. */
+/** One `git` invocation; `allowFail` opts into the non-zero-exit probe shape (timeouts still throw). */
 async function runGit(
   repoRoot: string,
   args: readonly string[],
   allowFail = false,
 ): Promise<ExecResult> {
   const res = await exec('git', args, { cwd: repoRoot });
+  if (res.timedOut) {
+    throw new Error(`git ${args[0] ?? ''} timed out after ${EXEC_TIMEOUT_MS}ms`);
+  }
   if (!res.ok && !allowFail) {
     throw new Error(`git ${args[0] ?? ''} failed: ${res.stderr.trim() || res.stdout.trim()}`);
   }
@@ -127,7 +170,9 @@ function prIdentity(url: string): { number: number; url: string } {
  * an effect is called.
  */
 export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string): BaselinePrEffects {
+  assertArgSafeRef(base, 'base');
   const findOpenPrByHead: BaselinePrEffects['findOpenPrByHead'] = async (head) => {
+    assertArgSafeRef(head, 'head');
     const out = await runGh(repoRoot, [
       'pr',
       'list',
@@ -155,7 +200,25 @@ export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string):
   };
 
   const commitAndUpsertPr: BaselinePrEffects['commitAndUpsertPr'] = async (input) => {
+    assertArgSafeRef(input.head, 'head');
+    assertArgSafeRef(input.base, 'base');
     const original = (await runGit(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
+    // Restore the original checkout on success AND on fault. A restore
+    // failure is NEVER silent (K): it throws, and when a primary fault is
+    // already in flight the restore failure is named alongside it rather
+    // than masking it.
+    const restoreOriginal = async (primary?: unknown): Promise<void> => {
+      if (original === '' || original === 'HEAD' || original === input.head) return;
+      try {
+        await runGit(repoRoot, ['checkout', original]);
+      } catch (restoreErr) {
+        const restoreMessage = `git checkout '${original}' (branch restore) failed: ${messageOf(restoreErr)}`;
+        if (primary === undefined) throw new Error(restoreMessage);
+        throw new Error(`${messageOf(primary)}; additionally ${restoreMessage}`, {
+          cause: primary,
+        });
+      }
+    };
     try {
       await runGit(repoRoot, ['fetch', 'origin', input.base]);
       // Reuse the REMOTE head when it exists. A fresh CI checkout has no
@@ -201,13 +264,11 @@ export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string):
         'origin',
         `refs/heads/${input.head}:refs/heads/${input.head}`,
       ]);
-    } finally {
-      // Restore the checkout unless this run never switched (already on the
-      // proposal head, or a detached HEAD).
-      if (original !== '' && original !== 'HEAD' && original !== input.head) {
-        await runGit(repoRoot, ['checkout', original], true);
-      }
+    } catch (err) {
+      await restoreOriginal(err);
+      throw err;
     }
+    await restoreOriginal();
     const existing = await findOpenPrByHead(input.head);
     if (existing !== null) {
       await runGh(repoRoot, [

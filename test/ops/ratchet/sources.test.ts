@@ -5,19 +5,24 @@
 // Pinned here (I5 throughout — every absent/unusable source is NULL, never a
 // fabricated pass):
 //   - `raw` returns the carried value verbatim.
-//   - `command` text/json parse the captured bytes; a null exit (signal,
-//     timeout, spawn fault) is non-passing evidence for both.
+//   - `command` `text` returns the combined stdout+stderr on a CLEAN exit;
+//     `json`/`coverage-json` parse `stdout` alone (stderr noise never
+//     corrupts valid stdout JSON) and round coverage to integer percent.
+//     A null exit (signal/timeout/spawn fault) AND a non-zero exit are
+//     non-passing evidence for every non-tsc parse mode.
 //   - `command` tsc-text applies the evidence classification: a clean exit 0
 //     over an EMPTY capture is the authoritative `{count: 0}`; a clean exit 0
 //     over non-empty output is a configuration/banner fault (null); exits 1/2
 //     hand over the raw text; every other outcome is null.
+//   - `command` `cwd` is a workspace-relative override when relative and
+//     verbatim when absolute; absent means the workspace itself.
 //   - `file` reads workspace-relative or absolute paths; a missing/unreadable
 //     file and an unparsable JSON body are null.
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
-import type { RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
+import type { CheckCommand, RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import { makeMetricSource } from '../../../src/ops/ratchet/sources.js';
 
 const tmpDirs: string[] = [];
@@ -38,6 +43,18 @@ const runnerOf =
   async () =>
     out;
 
+/** A runner that records the `cwd` each dispatch asks for. */
+function cwdRecordingRunner(out: RawCheckOutput): { run: RunCheck; cwds: string[] } {
+  const cwds: string[] = [];
+  return {
+    cwds,
+    run: async (cmd: CheckCommand) => {
+      cwds.push(cmd.cwd ?? '(absent)');
+      return out;
+    },
+  };
+}
+
 describe('makeMetricSource', () => {
   test('raw returns the carried value verbatim', async () => {
     const raw = { count: 4 };
@@ -48,15 +65,17 @@ describe('makeMetricSource', () => {
     await expect(source('/ws')).resolves.toBe(raw);
   });
 
-  test('command text returns the combined stdout+stderr', async () => {
-    const source = makeMetricSource(
-      runnerOf({ stdout: 'src/a.ts(1,7): error TS2322: boom\n', stderr: 'tail', exitCode: 1 }),
-      { kind: 'command', command: 'tsc', args: [], parse: 'text' },
-    );
-    await expect(source('/ws')).resolves.toBe('src/a.ts(1,7): error TS2322: boom\ntail');
+  test('command text returns the combined stdout+stderr on a clean exit', async () => {
+    const source = makeMetricSource(runnerOf({ stdout: 'out', stderr: 'tail', exitCode: 0 }), {
+      kind: 'command',
+      command: 'tsc',
+      args: [],
+      parse: 'text',
+    });
+    await expect(source('/ws')).resolves.toBe('outtail');
   });
 
-  test('command json parses stdout; an unparsable body is null (I5)', async () => {
+  test('command json parses stdout alone (stderr noise ignored); an unparsable body is null (I5)', async () => {
     const ok = makeMetricSource(runnerOf({ stdout: '{"count":3}', stderr: '', exitCode: 0 }), {
       kind: 'command',
       command: 'x',
@@ -64,6 +83,11 @@ describe('makeMetricSource', () => {
       parse: 'json',
     });
     await expect(ok('/ws')).resolves.toEqual({ count: 3 });
+    const noisy = makeMetricSource(
+      runnerOf({ stdout: '{"count":5}', stderr: 'warning: noisy', exitCode: 0 }),
+      { kind: 'command', command: 'x', args: [], parse: 'json' },
+    );
+    await expect(noisy('/ws')).resolves.toEqual({ count: 5 });
     const bad = makeMetricSource(runnerOf({ stdout: 'not json', stderr: '', exitCode: 0 }), {
       kind: 'command',
       command: 'x',
@@ -73,8 +97,57 @@ describe('makeMetricSource', () => {
     await expect(bad('/ws')).resolves.toBeNull();
   });
 
-  test('command with a null exit (timeout/signal/spawn fault) is null for text/json', async () => {
-    for (const parse of ['text', 'json'] as const) {
+  test('command coverage-json parses stdout alone and rounds to integer percent', async () => {
+    const source = makeMetricSource(
+      runnerOf({ stdout: '{"total":{"lines":{"pct":93.46}}}', stderr: 'noise', exitCode: 0 }),
+      { kind: 'command', command: 'x', args: [], parse: 'coverage-json' },
+    );
+    await expect(source('/ws')).resolves.toEqual({ total: { lines: { pct: 93 } } });
+  });
+
+  test('command non-zero exit is null for text/json/coverage-json (legacy typecheckEvidence rule)', async () => {
+    for (const parse of ['text', 'json', 'coverage-json'] as const) {
+      const source = makeMetricSource(
+        runnerOf({ stdout: '{"total":{"lines":{"pct":93.46}}}', stderr: 'x', exitCode: 1 }),
+        { kind: 'command', command: 'x', args: [], parse },
+      );
+      await expect(source('/ws')).resolves.toBeNull();
+    }
+  });
+
+  test('command cwd: relative resolves against ws, absolute stays absolute, absent is ws', async () => {
+    const rel = cwdRecordingRunner({ stdout: 'ok', stderr: '', exitCode: 0 });
+    await makeMetricSource(rel.run, {
+      kind: 'command',
+      command: 'x',
+      args: [],
+      cwd: 'sub',
+      parse: 'text',
+    })('/ws');
+    expect(rel.cwds).toEqual(['/ws/sub']);
+
+    const abs = cwdRecordingRunner({ stdout: 'ok', stderr: '', exitCode: 0 });
+    await makeMetricSource(abs.run, {
+      kind: 'command',
+      command: 'x',
+      args: [],
+      cwd: '/abs',
+      parse: 'text',
+    })('/ws');
+    expect(abs.cwds).toEqual(['/abs']);
+
+    const none = cwdRecordingRunner({ stdout: 'ok', stderr: '', exitCode: 0 });
+    await makeMetricSource(none.run, {
+      kind: 'command',
+      command: 'x',
+      args: [],
+      parse: 'text',
+    })('/ws');
+    expect(none.cwds).toEqual(['/ws']);
+  });
+
+  test('command with a null exit (timeout/signal/spawn fault) is null for every parse mode', async () => {
+    for (const parse of ['text', 'json', 'coverage-json'] as const) {
       const source = makeMetricSource(runnerOf({ stdout: 'partial', stderr: '', exitCode: null }), {
         kind: 'command',
         command: 'x',
