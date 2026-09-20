@@ -1193,7 +1193,7 @@ function selfTestParserGuards(rules) {
   // Windows-plain-name rejection (review-debt #187): reserved characters,
   // C0 controls, and device names (any extension, any case). These shapes
   // must fail in the Windows guard SPECIFICALLY — the loop asserts the
-  // plain-name message, so a parseScalar/empty/canonical rejection cannot
+  // Windows-guard message, so a parseScalar/empty/canonical rejection cannot
   // silently satisfy a Windows case (self-test non-vacuity).
   const windowsRejectCases = [
     'COM1.txt',
@@ -1255,7 +1255,7 @@ function selfTestParserGuards(rules) {
     ].join('\n');
     try {
       parsePatterns(text);
-      console.error(`FAIL parser-guards: probe_path '${probe}' was accepted (must be rejected)`);
+      console.error(`FAIL parser-guards: probe_path ${JSON.stringify(probe)} was accepted (must be rejected)`);
       ok = false;
     } catch (e) {
       // Non-vacuity: a Windows shape rejected by any OTHER guard
@@ -1264,7 +1264,7 @@ function selfTestParserGuards(rules) {
       // the Windows guard fired. Non-ConfigError throws cannot match, so
       // they fail the same way.
       if (!(e instanceof ConfigError) || !/Windows-reserved|Windows device names/.test(e.message)) {
-        console.error(`FAIL parser-guards: probe_path '${probe}' did not reach the Windows guard: ${e instanceof Error ? e.message : e}`);
+        console.error(`FAIL parser-guards: probe_path ${JSON.stringify(probe)} did not reach the Windows guard: ${e instanceof Error ? e.message : e}`);
         ok = false;
       }
     }
@@ -1273,7 +1273,9 @@ function selfTestParserGuards(rules) {
   // nested directory path (the shapes patterns.yml actually uses).
   // DEL (\x7f) and C1 (e.g. U+0085) are legal NTFS name characters:
   // accepted here to pin the \x00-\x1f boundary of the control rejection.
-  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt', 'ok\x7f.txt', 'ok\x85.txt']) {
+  // Near-miss device/reserved pins: future over-broadening of the device
+  // set or reserved class (COM10, CONIN without $, LPT0, #[]) must fail here.
+  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt', 'ok\x7f.txt', 'ok\x85.txt', 'COM10.txt', 'conin.txt', 'LPT0.log', 'ok#bracket[t].txt']) {
     const text = [
       'rules:',
       '  - id: guard-probe',
@@ -1287,7 +1289,7 @@ function selfTestParserGuards(rules) {
     try {
       parsePatterns(text);
     } catch (e) {
-      console.error(`FAIL parser-guards: legal probe_path '${probe}' was rejected: ${e.message}`);
+      console.error(`FAIL parser-guards: legal probe_path ${JSON.stringify(probe)} was rejected: ${e.message}`);
       ok = false;
     }
   }
