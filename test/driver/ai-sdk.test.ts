@@ -299,12 +299,13 @@ describe('ai-sdk driver specifics (mock model)', () => {
       const driver = new AiSdkDriver({ sessionsDir: join(scratchDir, 'sessions') });
       // The self-host config names provider 'ai-sdk' (src/selfhost/config.ts);
       // the default registry must resolve it to the zai factory rather than
-      // throwing unknown-provider. Without the key, the zai factory's own
+      // throwing unknown-provider. Without the key, the factory's own
       // missing-key error is the proof the alias routed (no network call —
-      // the key check is pre-dispatch).
+      // the key check is pre-dispatch), and it names the handle the caller
+      // configured ('ai-sdk'), not the internal factory.
       await expect(
         driver.run(invocation({ modelSpec: { provider: 'ai-sdk', model: 'glm-5.3-flash' } })),
-      ).rejects.toThrow(/provider 'zai' requires ZAI_API_KEY/);
+      ).rejects.toThrow(/provider 'ai-sdk' requires ZAI_API_KEY/);
     } finally {
       if (saved !== undefined) process.env.ZAI_API_KEY = saved;
       await rm(scratchDir, { recursive: true, force: true });

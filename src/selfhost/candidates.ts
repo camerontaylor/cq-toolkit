@@ -350,10 +350,10 @@ export async function fetchMergeCandidates(
         baseRefName: asString(asRecord(pullWire['base'])['ref']),
         // The observed head SHA (review-debt #186): carried through the
         // candidate into the plan so the executor can pin
-        // `gh pr merge --match-head-commit` to the reviewed head. Empty when
-        // the wire omitted it — classifyPr's last_commit_unknown row fails
-        // such a PR closed before it can be ordered.
-        headSha: sha,
+        // `gh pr merge --match-head-commit` to the reviewed head. OMITTED
+        // when the wire did not observe one (never '') — a blank sha is no
+        // pin, and the registry schema admits only 40-hex.
+        ...(sha !== '' ? { headSha: sha } : {}),
         // State rides the payload as well: a PR closed or merged between
         // the listing and this GET must not enter as open — and, for a
         // closed-ancestor row, one re-opened between the closed page and
@@ -450,6 +450,11 @@ export async function fetchMergeCandidates(
   // and at most a handful of enrichments — a repository with years of merged
   // stacks can never inflate the run's cost or its log. Ancestors are
   // retained regardless of age (review-debt #186: no recency window).
+  // RESIDUAL BOUND (recorded): the single page is `sort=updated desc`, so an
+  // ancestor older than the newest PER_PAGE closed rows is still off-page —
+  // the age cutoff no longer drops it, but the page depth can. A base-ref
+  // (`head=owner:<ref>`) query per candidate base is the follow-up that
+  // removes this residual.
   //
   // Best-effort isolation (module doc): a failed closed-page read degrades
   // to the pre-sweep behavior (stacked children stall at unresolved_base —

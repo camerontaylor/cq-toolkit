@@ -361,6 +361,19 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
     // that did not thread a plan head.
     expect(fake.mergeMatches).toEqual([{ pr: 7, matchHeadCommit: head }]);
   });
+
+  test('a MALFORMED plan headSha falls back to the executor baseline — no false stale (#186 review r1)', async () => {
+    const fake = new FakeMergeEffects();
+    const head = sha('a');
+    fake.heads.set(7, head);
+    const plan = handPlan([
+      { pr: 7, action: 'merge', basePr: null, depth: 0, headSha: 'not-a-sha' },
+    ]);
+    const report = await executeMerges({ plan, effects: fake });
+    expect(report.merged).toEqual([7]);
+    expect(report.stale).toEqual([]);
+    expect(fake.mergeMatches).toEqual([{ pr: 7, matchHeadCommit: head }]);
+  });
 });
 
 describe('executeMerges — (a) live-state revalidation: drift is skipped, never merged', () => {

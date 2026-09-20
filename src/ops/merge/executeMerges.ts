@@ -19,7 +19,9 @@
 //      each planned head, taken in one FETCH-THEN-VALIDATE sweep before
 //      any action runs (the observable stand-in for "the sha the plan was
 //      built on" — the executor is invoked directly after planning on the
-//      same live state, and the plan itself carries no shas). The fetch
+//      same live state, and the plan MAY now thread the reviewed head SHA
+//      via entry.headSha — see (a) below; a plan without one still
+//      baselines as before). The fetch
 //      comes FIRST (CR-4): a fresh clone has no local refs/pull ref until
 //      it is fetched, so a validate-before-fetch would read every pr
 //      stale. A head that moved between the baseline and the merge — or
@@ -193,9 +195,10 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
   // run failure (CR-2): nothing executes, every planned pr is recorded
   // `failed` with the error, and the total report returns immediately.
   // Phase 2 validates each fetched head: the executor's first observation
-  // stands in for "the sha the plan was built on" (the plan carries no
-  // shas; it was built moments before on the same live state), and null
-  // marks a head unresolvable even AFTER its fetch — genuine absence (the
+  // stands in for "the sha the plan was built on" when the plan did not
+  // thread one (review-debt #186 adds entry.headSha; it was built moments
+  // before on the same live state), and null marks a head unresolvable even
+  // AFTER its fetch — genuine absence (the
   // pr was merged or closed upstream and its ref reaped) — stale on its
   // turn without any further calls.
   // Run-scoped wholesale failure (round 2, finding 4): the MESSAGE names
@@ -430,11 +433,12 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       continue;
     }
     // THE EXPECTED HEAD (review-debt #186): the sha the PLAN observed when
-    // it carries one (the reviewed head), else the executor's own baseline
-    // observation. A live head that differs is plan→run drift — stale, and
-    // the server-side merge is pinned to this sha either way.
+    // it carries a WELL-FORMED one (the reviewed head), else the executor's
+    // own baseline observation. A malformed/empty plan sha must not override
+    // the valid baseline and strand the PR in a false `stale` — it falls
+    // back (and the merge then pins the baseline).
     const expectedSha =
-      entry.headSha !== undefined && entry.headSha !== '' ? entry.headSha : baselineSha;
+      entry.headSha !== undefined && FULL_SHA_RE.test(entry.headSha) ? entry.headSha : baselineSha;
     await mutexFor(effectiveBaseKey(entry)).run(() => runAction(entry, expectedSha));
   }
 

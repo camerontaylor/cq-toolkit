@@ -622,6 +622,9 @@ describe('fetchMergeCandidates — closed-ancestor sweep (#153)', () => {
     expect(parent?.baseRefName).toBe('merge-queue');
     expect(parent?.mergeState).toBe('CLEAN');
     expect(parent?.lastCommitAt).toBe('2026-01-02T00:00:00Z');
+    // The observed head SHA rides the candidate too (review-debt #186), so
+    // the plan can thread it into the executor's --match-head-commit pin.
+    expect(parent?.headSha).toBe('sha-20');
     // The closed read is ONE bounded page — a single request, never
     // paginated, never slurped.
     const closedCalls = calls.filter((line) => line.includes('state=closed'));

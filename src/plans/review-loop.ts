@@ -832,7 +832,13 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
         governor,
       );
     } finally {
-      opts.onSpend?.(governor.usdSpent);
+      // A throwing observer must never mask the fix run's own outcome.
+      try {
+        opts.onSpend?.(governor.usdSpent);
+      } catch {
+        // Observers are advisory; swallow and let the original result/throw
+        // propagate untouched.
+      }
     }
   })();
   const headAfter = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);

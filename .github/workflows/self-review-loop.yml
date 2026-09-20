@@ -44,8 +44,10 @@ on:
 # (review-debt #186): the review loop's fix pushes/replies and the merge
 # dispatch's server-side merges mutate the same repo state, so they must
 # never interleave — a review push racing a merge executor would invalidate
-# the merge's head pin. A queued run WAITS rather than kills the in-flight
-# sibling (cancel-in-progress: false — cancelling mid-loop could strand
+# the merge's head pin. (The PR-triggered live-review/live-merge drills keep
+# their own group; this serializes the two scheduled self-host workflows.)
+# A queued run WAITS rather than kills the in-flight sibling
+# (cancel-in-progress: false — cancelling mid-loop could strand
 # half-dispatched replies; cancelling mid-merge could strand a half-executed
 # plan). Fixed group, not per-ref: neither workflow fires on PRs.
 concurrency:

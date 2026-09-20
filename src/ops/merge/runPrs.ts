@@ -233,7 +233,9 @@ const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedP
     pr: candidate.pr,
     headRefName: candidate.headRefName,
     baseRefName: candidate.baseRefName,
-    ...(candidate.headSha !== undefined ? { headSha: candidate.headSha } : {}),
+    ...(candidate.headSha !== undefined && candidate.headSha !== ''
+      ? { headSha: candidate.headSha }
+      : {}),
     state: candidate.state,
     authorLogin: candidate.authorLogin,
     classification: candidate.state === 'open' ? classifyPr(candidate, nowMs) : null,

@@ -289,7 +289,7 @@ const EXCLUDE_DRAFTED_AFTER_LISTING = 'converted to draft after listing';
  * instead of burning the whole budget on a guessed ceiling.
  */
 const sweepSpendDeducted = (usd: number): string =>
-  `accounted spend ${String(usd)} deducted from the sweep budget`;
+  `accounted spend ${String(Number(usd.toFixed(6)))} deducted from the sweep budget`;
 
 /**
  * The pre-loop exclusion reason for a listing row, or null when the row is

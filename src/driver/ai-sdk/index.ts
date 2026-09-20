@@ -480,11 +480,13 @@ function defaultProviders(): Record<string, ProviderFactory> {
     }
     return value;
   };
-  const zai = (modelId: string): LanguageModel =>
-    createZai({
-      apiKey: requireKey('zai', 'ZAI_API_KEY'),
-      baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
-    }).languageModel(modelId);
+  const zai =
+    (handle: string) =>
+    (modelId: string): LanguageModel =>
+      createZai({
+        apiKey: requireKey(handle, 'ZAI_API_KEY'),
+        baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
+      }).languageModel(modelId);
   return {
     anthropic: (modelId) =>
       createAnthropic({ apiKey: requireKey('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(
@@ -492,9 +494,11 @@ function defaultProviders(): Record<string, ProviderFactory> {
       ),
     openai: (modelId) =>
       createOpenAI({ apiKey: requireKey('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
-    zai,
+    zai: zai('zai'),
     // The driver-kind alias (see header): the self-host default provider.
-    'ai-sdk': zai,
+    // It reports ITS OWN handle in a missing-key error (not 'zai'), so the
+    // message names the provider the caller actually configured.
+    'ai-sdk': zai('ai-sdk'),
     deepseek: (modelId) =>
       createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
   };

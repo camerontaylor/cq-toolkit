@@ -149,9 +149,10 @@ export interface PlannedMergeEntry {
   /** Stack depth: roots are 0, a child is its base's depth + 1. */
   depth: number;
   /**
-   * The observed head SHA + base branch the candidate carried (review-debt
-   * #186). executeMerges pins the merge with `--match-head-commit <headSha>`,
-   * so a fixer push between plan and run cannot merge an unreviewed head.
+   * The observed head SHA the candidate carried (review-debt #186), when
+   * one was observed: executeMerges pins the merge with
+   * `--match-head-commit <headSha>`, so a fixer push between plan and run
+   * cannot merge an unreviewed head.
    * Present only when the fetch observed one.
    */
   headSha?: string;
@@ -355,7 +356,7 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
   const retargetSet = new Set(retargetRoots);
   const roots = [...mergeRoots, ...retargetRoots].sort((a, b) => a - b);
   // PR-number → candidate (review-debt #186): the plan threads the observed
-  // head SHA + base branch onto every entry so executeMerges can pin the
+  // head SHA onto every entry so executeMerges can pin the
   // merge and re-check the base. Duplicate numbers resolve last-wins here,
   // but duplicates are withheld by gate 1 and never ordered.
   const plannedByPr = new Map(sorted.map((candidate) => [candidate.pr, candidate]));
