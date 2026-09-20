@@ -30,7 +30,6 @@ export {
   makeTrackerBodyLock,
   MANIFEST_SECTION_END_MARKER,
   MANIFEST_SECTION_MARKER,
-  prBranchFaultOf,
   READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
   trackerBodyLockPath,

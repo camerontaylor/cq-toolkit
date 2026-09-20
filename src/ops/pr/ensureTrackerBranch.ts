@@ -66,6 +66,13 @@ export interface EnsureTrackerBranchInput {
   base: string;
   /** The tracker PR's head branch; must start `<runPrefix>/`. */
   branch: string;
+  /**
+   * Push the branch to `origin` (DEFAULT TRUE). `false` is the local-only
+   * mode the sweep's `push:false` overlay selects: the local branch is still
+   * ensured (so a fake-forge assembly can open the PR) but the remote is
+   * never touched — a local-only run may have no origin at all.
+   */
+  push?: boolean;
 }
 
 /** The op's report: the branch, its head sha, and how it got there. */
@@ -75,7 +82,7 @@ export interface EnsureTrackerBranchReport {
   headSha: string;
   /** true when this call created the local branch (an empty commit on `base`). */
   created: boolean;
-  /** true when this call pushed the branch. */
+  /** true when this call pushed the branch (always false in `push:false` mode). */
   pushed: boolean;
   /** true when the remote already carried the branch — a re-invoke reuse. */
   reusedRemote: boolean;
@@ -92,6 +99,26 @@ export function makeEnsureTrackerBranch(
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
     try {
+      // 0. LOCAL-ONLY mode (`push:false`): ensure the local branch exists but
+      //    never touch the remote — a local-only fleet may have no origin.
+      if (input.push === false) {
+        let localSha = await effects.localHead(input.branch);
+        let localCreated = false;
+        if (localSha === null) {
+          localSha = await effects.createBranch(input.branch, input.base);
+          localCreated = true;
+        }
+        return {
+          status: 'ok',
+          value: {
+            branch: input.branch,
+            headSha: localSha,
+            created: localCreated,
+            pushed: false,
+            reusedRemote: false,
+          },
+        };
+      }
       // 1. The remote is authoritative for a re-invoke: an existing remote
       //    branch is reused verbatim, never rewound to a fresh empty commit.
       const remote = await effects.remoteHead(input.branch);
@@ -188,9 +215,18 @@ export function makeSubprocessTrackerBranchEffects(
     },
     async localHead(branch) {
       const result = await run(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
-      if (result.code !== 0) return null;
-      const sha = result.stdout.trim();
-      return sha === '' ? null : sha;
+      if (result.code === 0) {
+        const sha = result.stdout.trim();
+        return sha === '' ? null : sha;
+      }
+      // `--verify --quiet` exits nonzero with EMPTY streams for an absent
+      // ref; any other nonzero (a runner timeout 124, a corrupt/blocked repo
+      // 128, …) is a real fault, never "the branch is absent".
+      if (result.stdout.trim() === '' && result.stderr.trim() === '') return null;
+      throw new Error(
+        result.stderr.trim() ||
+          `git rev-parse --verify refs/heads/${branch} failed (exit ${String(result.code)})`,
+      );
     },
     async createBranch(branch, base) {
       const baseSha = (await must(['rev-parse', '--verify', `${base}^{commit}`])).trim();
@@ -265,6 +301,9 @@ function inputFaultOf(input: EnsureTrackerBranchInput): string | null {
   }
   const prefixFault = runPrefixFault(input.runPrefix);
   if (prefixFault !== null) return prefixFault;
+  if (input.push !== undefined && typeof input.push !== 'boolean') {
+    return `pr: push (${String(input.push)}) must be a boolean (absent means true)`;
+  }
   return prBranchFaultOf(input.branch, input.runPrefix, 'branch');
 }
 

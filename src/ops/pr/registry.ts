@@ -68,6 +68,7 @@ export const EnsureTrackerBranchInputSchema: z.ZodType<EnsureTrackerBranchInput>
     runPrefix: z.string().min(1),
     base: z.string().min(1),
     branch: z.string().min(1),
+    push: z.boolean().exactOptional(),
   })
   .strict()
   .refine((input) => input.branch.startsWith(`${input.runPrefix}/`), {

@@ -1,5 +1,6 @@
 // PR lane (goal D3 follow-up, review-debt #171) — evidence for the
-// tracker-body read-modify-write lock (src/ops/pr/trackerBodyLock.ts).
+// tracker-body read-modify-write lock (makeTrackerBodyLock in
+// src/ops/pr/assemblePrs.ts).
 //
 // The failure this pins: pr.assemblePrs (manifest section) and pr.runReport
 // (readiness section) each read the tracker's CURRENT body, compose their own

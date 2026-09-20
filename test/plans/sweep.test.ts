@@ -290,6 +290,12 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       .map((job) => SweepUnitDispatchInputSchema.parse(job.input));
     expect(inputs.map((input) => input.kind)).toEqual(['fix', 'fix']);
     expect(inputs.map((input) => input.slug)).toEqual(['alpha', 'beta']);
+    // The local-only knob reaches the tracker-branch leg too (review-debt
+    // #173): a `push:false` fleet must not push the tracker branch.
+    const trackerBranchJob = plan.jobs.find((job) => job.id === 'sweep-tracker-branch');
+    expect(
+      EnsureTrackerBranchInputSchema.parse((trackerBranchJob as { input: unknown }).input).push,
+    ).toBe(false);
   });
 
   test('config.unitDispatch makes the enriched jobs dispatch-ready; absent leaves them unwired (jeDch)', () => {

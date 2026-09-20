@@ -246,13 +246,23 @@ function escapeRegex(text: string): string {
 }
 
 /** The assembler input a config authors — static data, no runtime output needed. */
-/** The tracker-branch job's input — the same head the assembler names (review-debt #173). */
-function trackerBranchInputOf(config: SweepPlanConfig): EnsureTrackerBranchInput {
+/**
+ * The tracker-branch job's input — the same head the assembler names
+ * (review-debt #173). `push` mirrors the overlay's local-only knob: the
+ * tracker leg must not push when the fleet is configured local-only
+ * (`push:false`), or a run with no reachable origin would fail the leg and
+ * block assembly.
+ */
+function trackerBranchInputOf(
+  config: SweepPlanConfig,
+  push: boolean | undefined,
+): EnsureTrackerBranchInput {
   return {
     repoRoot: config.repoRoot,
     runPrefix: config.runPrefix,
     base: config.base,
     branch: config.trackerBranch ?? `${config.runPrefix}/tracker`,
+    ...(push === false ? { push: false } : {}),
   };
 }
 
@@ -395,7 +405,7 @@ export function buildSweepPlan(
             {
               id: SWEEP_PLAN_JOB_IDS.trackerBranch,
               op: 'pr.ensureTrackerBranch',
-              input: trackerBranchInputOf(config),
+              input: trackerBranchInputOf(config, overlay.push),
               dependsOn: unitJobs.map((job) => job.id),
             },
             {

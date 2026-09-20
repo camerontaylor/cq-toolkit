@@ -27,7 +27,7 @@
 //     a `failed` result or a per-row fault; every input contract violation
 //     is a `failed` result naming the field (the worktreeFor boundary
 //     style).
-import { join } from 'node:path';
+import { resolve } from 'node:path';
 import type { Op } from '../../kernel/types.js';
 import { makeGitMutex } from '../sweep/gitMutex.js';
 import type { GitMutexConfig } from '../sweep/gitMutex.js';
@@ -170,7 +170,14 @@ export interface AssemblePrsInput {
   runPrefix: string;
   /** The PRs' target branch (e.g. merge-queue). */
   base: string;
-  /** The tracker PR's dedicated branch and title, both under the run prefix. */
+  /**
+   * The tracker PR's dedicated branch and title, both under the run prefix.
+   * PRECONDITION (review-debt #173): `branch` must already EXIST ON THE
+   * REMOTE — this op opens the tracker-first PR for that head, and the
+   * shipped sweep plan runs the sibling `pr.ensureTrackerBranch` leg first.
+   * A standalone caller that skips it opens a PR for a head the forge may
+   * not carry (the exact defect #173 names).
+   */
   tracker: { title: string; branch: string };
   /**
    * One entry per package; `branch` must start `<runPrefix>/`. An entry's
@@ -747,10 +754,13 @@ export interface TrackerBodyLock {
  * The tracker-scoped lockPath (the artifact proper-lockfile derives is
  * `<lockPath>.lock`). Derived from the repo root so every op and process
  * guarding the same tracker agrees on one artifact; the tracker number
- * scopes it so unrelated trackers never serialize.
+ * scopes it so unrelated trackers never serialize. RESOLVED against the
+ * cwd: the shipped floors use `repoRoot: '.'`, and an unresolved relative
+ * path would give two processes with different cwds different artifacts —
+ * silently un-serializing exactly the writers this lock exists to order.
  */
 export function trackerBodyLockPath(repoRoot: string, trackerNumber: number): string {
-  return join(repoRoot, '.cq', 'tracker-body', String(trackerNumber));
+  return resolve(repoRoot, '.cq', 'tracker-body', String(trackerNumber));
 }
 
 /**

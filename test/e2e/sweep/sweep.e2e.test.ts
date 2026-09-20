@@ -138,7 +138,14 @@ async function scenario(runPrefix: string): Promise<Scenario> {
       fixers: ['fix'],
       packageFiles: SCRATCH_PACKAGE_FILES,
     },
-    gh: makeFakeGh(),
+    // The forge-SIMULATING check (review-debt #173): the fake forge refuses
+    // to record a PR whose head is not on the real (bare) remote.
+    gh: makeFakeGh({
+      headExists: async (head) => {
+        const heads = await gitOut(['ls-remote', '--heads', 'origin', `refs/heads/${head}`], repo);
+        return heads.trim() !== '';
+      },
+    }),
   };
 }
 
@@ -434,6 +441,18 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       for (const pr of scene.gh.created) {
         expect(originHeads, `PR head '${pr.head}' must exist on the remote`).toContain(pr.head);
       }
+      // ORDERING PIN: the tracker-branch leg FINISHED before the assembler
+      // STARTED — the head existed on the remote when the tracker-first PR
+      // was opened, not merely by the end of the run.
+      const assembleEvents = await runEventsAt(scene.journalDir, SWEEP_PLAN_ID, 1);
+      const trackerFinished = assembleEvents.findIndex(
+        (event) => event.type === 'job-finished' && event.jobId === 'sweep-tracker-branch',
+      );
+      const assembleStarted = assembleEvents.findIndex(
+        (event) => event.type === 'job-started' && event.jobId === 'sweep-assemble',
+      );
+      expect(trackerFinished).toBeGreaterThan(-1);
+      expect(assembleStarted).toBeGreaterThan(trackerFinished);
     },
   );
 });

@@ -137,6 +137,25 @@ describe('pr.ensureTrackerBranch (review-debt #173)', () => {
     expect(forge.calls).toEqual(['remote:cq/09-16a/tracker']);
   });
 
+  test('push:false (local-only) ensures the local branch but never touches the remote', async () => {
+    const forge = scripted({ remote: null, local: null });
+    const report = await okReport(makeEnsureTrackerBranch(forge.effects), inputOf({ push: false }));
+    expect(report).toEqual({
+      branch: 'cq/09-16a/tracker',
+      headSha: 'created-sha',
+      created: true,
+      pushed: false,
+      reusedRemote: false,
+    });
+    expect(forge.calls).toEqual([
+      'local:cq/09-16a/tracker',
+      'create:cq/09-16a/tracker:origin/merge-queue',
+    ]);
+    expect(forge.calls.some((call) => call.startsWith('remote:') || call.startsWith('push:'))).toBe(
+      false,
+    );
+  });
+
   test('stranded local: a local branch with no remote is pushed (created:false)', async () => {
     const forge = scripted({ remote: null, local: 'stranded-sha', remoteAfter: 'stranded-sha' });
     const report = await okReport(makeEnsureTrackerBranch(forge.effects), inputOf());
@@ -169,6 +188,9 @@ describe('pr.ensureTrackerBranch (review-debt #173)', () => {
     expect(await failedAt(op, inputOf({ base: '--upload-pack=evil' }))).toMatch(
       /must not start with '-'/,
     );
+    expect(
+      await failedAt(op, { ...inputOf(), push: 'yes' } as unknown as EnsureTrackerBranchInput),
+    ).toMatch(/push .* must be a boolean/);
     expect(forge.calls).toEqual([]);
   });
 });

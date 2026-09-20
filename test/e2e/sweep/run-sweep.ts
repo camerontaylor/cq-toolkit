@@ -87,8 +87,13 @@ export interface FakeGh {
   bodies: Map<number, string>;
 }
 
-/** An in-memory forge: search by head+base, create, body read/edit, record everything. */
-export function makeFakeGh(): FakeGh {
+/**
+ * An in-memory forge: search by head+base, create, body read/edit, record
+ * everything. `headExists` is the forge-SIMULATING check (review-debt #173):
+ * when supplied, `createPr` refuses a head that is not on the real remote —
+ * so a tracker PR can never be recorded for an unpushed branch.
+ */
+export function makeFakeGh(opts?: { headExists?: (head: string) => Promise<boolean> }): FakeGh {
   const calls: string[] = [];
   const created: FakeGh['created'] = [];
   const bodies = new Map<number, string>();
@@ -101,6 +106,11 @@ export function makeFakeGh(): FakeGh {
   };
   const createPr = async (request: PrCreateRequest): Promise<PrCreateResult> => {
     calls.push(`createPr ${request.head} -> ${request.base}`);
+    if (opts?.headExists !== undefined && !(await opts.headExists(request.head))) {
+      throw new Error(
+        `the fake forge refuses to open a PR for head '${request.head}' — the branch does not exist on the origin`,
+      );
+    }
     const number = created.length + 1;
     created.push({
       number,
