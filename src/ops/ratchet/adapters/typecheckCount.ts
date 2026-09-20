@@ -23,7 +23,7 @@
 // the count supply the object form, where a structured 0 is a real zero.
 // Cyclic source data is bounded by a visited-set: a cycle yields
 // "no count here", never unbounded recursion.
-import type { MetricAdapter, MetricReading } from '../registry.js';
+import type { MetricAdapter, MetricReading } from '../metricRegistry.js';
 
 // ANSI escape sequences: CSI forms (colors/cursor — what `tsc --pretty`
 // emits) and OSC strings. Stripped before matching; matching the ESC byte

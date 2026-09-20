@@ -1,6 +1,7 @@
 // Lane H slice 1 (+ round-1 fix) — tests for the metric adapter registry
-// (src/ops/ratchet/registry.ts) and the typecheck-count adapter
-// (src/ops/ratchet/adapters/typecheckCount.ts).
+// (src/ops/ratchet/metricRegistry.ts — renamed from registry.ts at T4.2 so
+// the family's registry.ts can be the op registry) and the typecheck-count
+// adapter (src/ops/ratchet/adapters/typecheckCount.ts).
 //
 // Pinned here:
 //   1. Registry: register/get round-trip, unknown-id → undefined, loud
@@ -24,8 +25,12 @@
 //      never a fabricated pass.
 import { describe, expect, test } from 'vitest';
 import { typecheckCount } from '../../../src/ops/ratchet/adapters/typecheckCount.js';
-import { getAdapter, listAdapters, registerAdapter } from '../../../src/ops/ratchet/registry.js';
-import type { MetricAdapter } from '../../../src/ops/ratchet/registry.js';
+import {
+  getAdapter,
+  listAdapters,
+  registerAdapter,
+} from '../../../src/ops/ratchet/metricRegistry.js';
+import type { MetricAdapter } from '../../../src/ops/ratchet/metricRegistry.js';
 
 function adapter(id: string): MetricAdapter {
   return { id, direction: 'lower-is-better', extract: () => null };

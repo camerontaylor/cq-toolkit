@@ -25,6 +25,7 @@ export {
   baselineRelPath,
   isIso8601Instant,
   loosens,
+  normalizeBaselineDiffValues,
   parseBaseline,
   renderBaseline,
   tightens,
@@ -32,8 +33,10 @@ export {
 export type { BaselineFile, Direction } from './format.js';
 export { checkDiffMonotonicity, formatViolations } from './monotonicGuard.js';
 export type { BaselineViolation, DiffVerdict } from './monotonicGuard.js';
-export { getAdapter, listAdapters, registerAdapter } from './registry.js';
-export type { MetricAdapter, MetricReading, MetricSource } from './registry.js';
+export { getAdapter, listAdapters, registerAdapter } from './metricRegistry.js';
+export type { MetricAdapter, MetricReading, MetricSource } from './metricRegistry.js';
+export type { MetricSourceSpec } from './sources.js';
+export { makeMetricSource } from './sources.js';
 export { complexity } from './adapters/complexity.js';
 export { coverage } from './adapters/coverage.js';
 export { typecheckCount } from './adapters/typecheckCount.js';

@@ -38,9 +38,11 @@
 //     contributes no entries and is skipped + surfaced in `skippedFamilies`
 //     instead of throwing. Rationale: at integration a family's registry.ts
 //     may carry its own interim internal registries — e.g. lane-H ratchet's
-//     metric-adapter registry — until the family conforms; op-registry
-//     recognition is by EXPORT SHAPE, and a module without the shape is
-//     simply not an op registry yet. Full convention closure is phase-4 T4.2.
+//     metric-adapter registry before T4.2 moved it to a sibling module —
+//     until the family conforms; op-registry recognition is by EXPORT SHAPE,
+//     and a module without the shape is simply not an op registry yet. All
+//     planned families now conform (T4.2); the tolerance remains for future
+//     families.
 // `listWithDiagnostics()` returns `{ entries, skippedFamilies }` — the family
 // dir names that contributed no entries without erroring (absent or
 // nonconforming) — so an integration-time skip stays visible to callers and
@@ -283,9 +285,9 @@ async function scanOps(
     if (!Array.isArray(registry)) {
       // Loads cleanly but exports no `registry` array: NONCONFORMING, not
       // broken — by export shape the module is not an op registry yet (an
-      // interim internal registry, e.g. lane-H ratchet's metric adapters).
-      // It contributes no entries and is skipped + surfaced, never thrown
-      // (full convention closure is phase-4 T4.2).
+      // interim internal registry, e.g. lane-H ratchet's metric adapters
+      // before T4.2). It contributes no entries and is skipped + surfaced,
+      // never thrown.
       skippedFamilies.push(family);
       continue;
     }

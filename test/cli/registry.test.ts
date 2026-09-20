@@ -1,7 +1,7 @@
-// I1 registry completeness scaffold — test/cli/registry.test.ts.
+// I1 registry completeness — test/cli/registry.test.ts.
 //
-// What is pinned here (full closure is phase-4 T4.2; the MECHANISM has teeth
-// today):
+// What is pinned here (phase-4 T4.2 completed the closure; the MECHANISM has
+// teeth):
 //   1. The src/ops family scan sees every planned family dir (the scan is
 //      exercised for real, not vacuously).
 //   2. The teeth (PER FAMILY): every op module a family dir contains (`*.ts`
@@ -15,17 +15,17 @@
 //      e.g. gates' fingerprint.ts — is family surface, not an orphan op). A
 //      global name set would mask an orphan in family alpha behind family
 //      beta's registered op of the same name. A family whose registry.ts does
-//      not yield a `registry` array — absent (lands in a later phase) or
-//      loads-clean-nonconforming (an interim internal registry, e.g. lane-H
-//      ratchet's metric adapters) — is NOT scanned for orphans: it must be
-//      surfaced in listWithDiagnostics().skippedFamilies instead, and is
-//      collected as a violation only if it appears in NEITHER place (entries
-//      nor skipped). Full closure is phase-4 T4.2.
+//      not yield a `registry` array — absent (a future family, before its
+//      registry lands) or loads-clean-nonconforming (an interim internal
+//      registry) — is NOT scanned for orphans: it must be surfaced in
+//      listWithDiagnostics().skippedFamilies instead, and is collected as a
+//      violation only if it appears in NEITHER place (entries nor skipped).
 //   3. Every registry entry has a subcommand: subcommandNames(list()) covers
 //      all entry names plus 'run-plan'; the empty registry still yields
-//      ['run-plan']. Integration-time skips stay VISIBLE: listWithDiagnostics()
-//      on the default root must report 'ratchet' in skippedFamilies — the
-//      tolerance is surfaced, never silently swallowed.
+//      ['run-plan']. T4.2 closed the family convention (ratchet's interim
+//      metric-adapter registry moved to metricRegistry.ts), so the default
+//      root now reports an EMPTY skippedFamilies — the tolerance stays
+//      surfaced for future families.
 //   4. Fixture-root DI: the pure-op fixture family under
 //      test/fixtures/cli-ops/ resolves exactly its six names through the
 //      same list()/get() seam, and get('echo').importer() yields an async fn.
@@ -137,12 +137,12 @@ describe('registry family scan (src/ops)', () => {
     // 'gates.checkRunner' covers 'checkRunner.ts'), or a `./<base>` reference
     // in the registry module's own source (a helper the registry wires in —
     // gates' fingerprint.ts — is family surface, not an orphan op). A family
-    // whose registry.ts does not yield a `registry` array — absent (lands in
-    // a later phase) or loads-clean-nonconforming (lane-H ratchet's interim
-    // metric-adapter registry) — is NOT scanned for orphans: it must be
-    // surfaced in listWithDiagnostics().skippedFamilies (asserted in the
+    // whose registry.ts does not yield a `registry` array — absent (a future
+    // family) or loads-clean-nonconforming (an interim internal registry) —
+    // is NOT scanned for orphans: it must be surfaced in
+    // listWithDiagnostics().skippedFamilies (asserted in the
     // subcommand-surface test), and is collected as a violation only if it
-    // appears in NEITHER place. Full closure is phase-4 T4.2.
+    // appears in NEITHER place.
     const families = readdirSync(srcOps, { withFileTypes: true })
       .filter((dirent) => dirent.isDirectory())
       .map((dirent) => dirent.name);
@@ -204,9 +204,9 @@ describe('registry family scan (src/ops)', () => {
       }
       if (entryNames === undefined) {
         // Loads clean but exports no `registry` array — a NONCONFORMING
-        // family (e.g. ratchet's interim metric-adapter registry): not
-        // scanned for orphans; the central registry must surface it
-        // (skippedFamilies), else it appears in neither place.
+        // family (an interim internal registry): not scanned for orphans;
+        // the central registry must surface it (skippedFamilies), else it
+        // appears in neither place.
         if (!skipped.has(family)) {
           violations.push(
             `src/ops/${family}: registry.ts exports no 'registry' array and the family is ` +
@@ -248,12 +248,12 @@ describe('registry ⇄ CLI subcommand surface', () => {
     expect(names).toContain('run-plan');
     // The built-in run-plan subcommand exists even with zero op families.
     expect(subcommandNames([])).toEqual(['run-plan']);
-    // Integration visibility (PR 64): a family that loads clean but does not
-    // conform — lane-H ratchet's registry.ts is an interim metric-adapter
-    // registry with no `registry` array export — is SKIPPED, not thrown, and
-    // must stay visible in the diagnostics rather than silently swallowed.
+    // Convention closure (phase-4 T4.2): every planned family now exports a
+    // `registry` array, so NO family is skipped — the diagnostics' skip list
+    // is empty. ratchet's interim metric-adapter registry moved to
+    // metricRegistry.ts and the family's registry.ts is the op registry.
     const { entries: diagEntries, skippedFamilies } = await listWithDiagnostics();
-    expect(skippedFamilies).toContain('ratchet');
+    expect(skippedFamilies).toEqual([]);
     // list() is exactly the diagnostics' entry half (same cached scan).
     expect(diagEntries).toEqual(entries);
   });

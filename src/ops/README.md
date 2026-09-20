@@ -47,12 +47,13 @@ follows this; the central registry and the CLI discover families through it):
   `src/registry/index.js` directly; family-facing TYPE imports come from
   the kernel types (src/kernel/types.js) or `src/registry/types.js`.
 
-INTEGRATION NOTE (2026-09-15, PR 64): families that landed before this
-convention merged are recognized under the amended rules above — gates uses
-FAMILY-PREFIXED entry names ('gates.checkRunner' covering checkRunner.ts;
-the completeness heuristic accepts entry names ending `.<base>`), ratchet's
-registry.ts is currently a non-op metric-adapter registry (loads clean, no
-`registry` array export → skipped + surfaced), and review landed helper
-modules ahead of any registry.ts (tolerated-absent path, surfaced). Full
-convention closure is phase-4 T4.2; lane-H ratchet ops still need
-OpRegistryEntry registration, tracked as review-debt.
+INTEGRATION NOTE (2026-09-15, PR 64; CLOSED by phase-4 T4.2): families
+that landed before this convention merged were recognized under the amended
+rules above — gates uses FAMILY-PREFIXED entry names ('gates.checkRunner'
+covering checkRunner.ts; the completeness heuristic accepts entry names
+ending `.<base>`), ratchet's metric-adapter registry moved out of
+`registry.ts` into `metricRegistry.ts` so the family's `registry.ts` is a
+real op registry, and review's helper modules are referenced from its
+registry. Every planned family now exports a `registry` array, so
+`listWithDiagnostics().skippedFamilies` is empty; the tolerant paths remain
+for future families.

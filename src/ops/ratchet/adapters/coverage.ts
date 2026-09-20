@@ -5,7 +5,7 @@
 // branches/functions/statements pct ride along in `detail` when present and
 // numeric. Anything missing or non-numeric, and any value pct outside
 // [0, 100], yields null — non-passing evidence (I5), never a fabricated pass.
-import type { MetricAdapter, MetricReading } from '../registry.js';
+import type { MetricAdapter, MetricReading } from '../metricRegistry.js';
 
 function pctOf(node: unknown): number | undefined {
   if (typeof node !== 'object' || node === null) return undefined;

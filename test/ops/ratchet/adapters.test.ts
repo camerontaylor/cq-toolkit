@@ -22,7 +22,7 @@
 import { describe, expect, test } from 'vitest';
 import { complexity } from '../../../src/ops/ratchet/adapters/complexity.js';
 import { coverage } from '../../../src/ops/ratchet/adapters/coverage.js';
-import type { MetricReading } from '../../../src/ops/ratchet/registry.js';
+import type { MetricReading } from '../../../src/ops/ratchet/metricRegistry.js';
 
 describe('coverage', () => {
   test('carries its adapter metadata', () => {
