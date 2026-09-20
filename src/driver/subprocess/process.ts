@@ -16,9 +16,14 @@
 //
 // NO SHELL: `spawnManaged` uses node:child_process spawn with `shell:false`
 // — the driver builds argv element-by-element, so nothing the caller wrote
-// is ever re-interpreted by a shell. Env injection is an explicit override
-// map merged over process.env (the CLI needs PATH/HOME etc. to function);
-// per-Route vars (endpoint base URL, auth token) ride that override map.
+// is ever re-interpreted by a shell. CHILD ENV IS DEFAULT-DENY (issue #183):
+// the child receives ONLY the names on DEFAULT_CHILD_ENV_ALLOWLIST (PATH/
+// HOME/terminal basics + documented driver-needed names) copied from the
+// parent env, plus the caller's explicit override map. Per-Route vars
+// (endpoint base URL, auth token) are composed deliberately and always ride
+// that override map, so they reach the child regardless of the allowlist. A
+// GH_TOKEN or repo secret in the entry process env is NOT inherited unless a
+// Route or an explicit `envAllowlist` entry names it.
 //
 // PROCESS GROUPS (issue #19): on POSIX the child is spawned `detached` —
 // it becomes the leader of its OWN process group, so a kill can take the
@@ -48,6 +53,88 @@ export const DEFAULT_MAX_RETAINED_BYTES = 1_048_576; // 1 MiB
 // spawnManaged — the managed child
 // ---------------------------------------------------------------------------
 
+/**
+ * The default-deny child-env allowlist (issue #183): the ONLY names copied
+ * from the parent process env into a spawned worker. Deliberately EXCLUDES
+ * credential-shaped names (`GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`,
+ * `NPM_TOKEN`, …) and `NODE_OPTIONS` (a code-execution vector). A per-Route
+ * auth var reaches the child through `SpawnOptions.env` — an explicit VALUE
+ * the driver composed — not through this list.
+ */
+export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = [
+  // Executable resolution, home, identity, temp dirs — a CLI cannot run
+  // without these. PWD is deliberately ABSENT: node's spawn does not rewrite
+  // it for `cwd`, so an inherited PWD would be the PARENT's directory — a
+  // stale, misleading value that leaks the entry process's path.
+  'PATH',
+  'HOME',
+  'SHELL',
+  'USER',
+  'LOGNAME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  // Terminal/locale basics: output formatting, encoding, timezone.
+  'TERM',
+  'COLORTERM',
+  'NO_COLOR',
+  'FORCE_COLOR',
+  'CI',
+  'LANG',
+  'LANGUAGE',
+  'LC_ALL',
+  'LC_CTYPE',
+  'LC_MESSAGES',
+  'TZ',
+  // XDG base dirs: CLI config/cache/state discovery on POSIX.
+  'XDG_CONFIG_HOME',
+  'XDG_CACHE_HOME',
+  'XDG_DATA_HOME',
+  'XDG_STATE_HOME',
+  // Windows equivalents: a spawned CLI on win32 needs these to run at all.
+  'SystemRoot',
+  'windir',
+  'COMSPEC',
+  'PATHEXT',
+  'USERPROFILE',
+  'USERNAME',
+  'USERDOMAIN',
+  'HOMEDRIVE',
+  'HOMEPATH',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'ProgramFiles',
+  'ProgramData',
+  'NUMBER_OF_PROCESSORS',
+  'OS',
+  'PROCESSOR_ARCHITECTURE',
+];
+
+/**
+ * Compose a child environment with default-deny semantics (issue #183):
+ * copy ONLY the allowlisted names actually set in `parentEnv`, then apply
+ * the caller's explicit `overrides` — which ALWAYS win, because a Route
+ * value is composed deliberately and the allowlist must never filter it.
+ * `extraAllowlist` extends the copied names for a deployment without
+ * weakening the default. The result is a fresh object; the parent env is
+ * never mutated.
+ */
+export function buildChildEnv(
+  parentEnv: Readonly<Record<string, string | undefined>>,
+  overrides?: Readonly<Record<string, string>>,
+  extraAllowlist: readonly string[] = [],
+): Record<string, string> {
+  const child: Record<string, string> = {};
+  for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist]) {
+    const value = parentEnv[name];
+    if (value !== undefined) child[name] = value;
+  }
+  if (overrides !== undefined) {
+    for (const [name, value] of Object.entries(overrides)) child[name] = value;
+  }
+  return child;
+}
+
 /** How to spawn one CLI run. All plain data. */
 export interface SpawnOptions {
   /** The executable (resolved by the caller from its `binary` option). */
@@ -56,8 +143,20 @@ export interface SpawnOptions {
   args: readonly string[];
   /** Working directory: the invocation's workspace (I6 isolation boundary). */
   cwd: string;
-  /** Env overrides merged over process.env (per-Route endpoint + auth vars). */
+  /**
+   * Explicit child env values (per-Route endpoint + auth vars). Applied on
+   * top of the allowlisted parent env (issue #183) and always win — the
+   * caller composed these, so they are trusted by construction.
+   */
   env?: Readonly<Record<string, string>>;
+  /**
+   * Extra parent-env NAMES copied into the child on top of
+   * DEFAULT_CHILD_ENV_ALLOWLIST (issue #183). Default-deny is unchanged:
+   * only names listed here or on the default allowlist are inherited. Use
+   * for deployment-specific driver config (e.g. a CLI config-dir var),
+   * never for secrets a Route can inject explicitly.
+   */
+  envAllowlist?: readonly string[];
   /** When set, written to the child's stdin and the pipe closed (prompt piping). */
   stdin?: string;
   /**
@@ -233,7 +332,9 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     // kill below reaches agent-spawned descendants too. Windows: not set —
     // no Job Object in v1, descendants can survive (header).
     ...(POSIX ? { detached: true } : {}),
-    ...(opts.env !== undefined ? { env: { ...process.env, ...opts.env } } : {}),
+    // DEFAULT-DENY child env (issue #183): only the allowlisted parent names
+    // are inherited; the explicit per-Route overrides always ride on top.
+    env: buildChildEnv(process.env, opts.env, opts.envAllowlist),
   });
 
   child.stdout.setEncoding('utf8');

@@ -42,7 +42,12 @@ import {
   routeFor,
 } from '../../src/driver/subprocess/routing.js';
 import type { RoutingTable } from '../../src/driver/subprocess/routing.js';
-import { DEFAULT_MAX_RETAINED_BYTES, spawnManaged } from '../../src/driver/subprocess/process.js';
+import {
+  DEFAULT_CHILD_ENV_ALLOWLIST,
+  DEFAULT_MAX_RETAINED_BYTES,
+  buildChildEnv,
+  spawnManaged,
+} from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
@@ -946,4 +951,120 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(close.stdout.codePointAt(0)).toBe(0x1f984); // 🦄
     });
   }, 20_000);
+
+  // -------------------------------------------------------------------------
+  // Child env is default-deny (issue #183)
+  // -------------------------------------------------------------------------
+
+  test('buildChildEnv: allowlisted basics + explicit route values pass, credential-shaped parent names are withheld (#183)', () => {
+    const parent = {
+      PATH: '/usr/bin',
+      HOME: '/home/worker',
+      TERM: 'xterm-256color',
+      LANG: 'en_US.UTF-8',
+      PWD: '/parent/dir',
+      GH_TOKEN: 'ghp_marker_secret',
+      CQ_ENV_LEAK_MARKER: 'do-not-leak',
+      AWS_SECRET_ACCESS_KEY: 'aws-marker',
+      NPM_TOKEN: 'npm-marker',
+      NODE_OPTIONS: '--require=/tmp/evil.cjs',
+    };
+    const child = buildChildEnv(parent, { ANTHROPIC_API_KEY: 'route-key-value' });
+    // Allowlisted basics are inherited…
+    expect(child['PATH']).toBe('/usr/bin');
+    expect(child['HOME']).toBe('/home/worker');
+    expect(child['TERM']).toBe('xterm-256color');
+    expect(child['LANG']).toBe('en_US.UTF-8');
+    // …the explicit route value passes (it is composed deliberately, so the
+    // allowlist must never filter it)…
+    expect(child['ANTHROPIC_API_KEY']).toBe('route-key-value');
+    // …and every credential-shaped parent name is withheld.
+    expect(child['GH_TOKEN']).toBeUndefined();
+    expect(child['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+    expect(child['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
+    expect(child['NPM_TOKEN']).toBeUndefined();
+    expect(child['NODE_OPTIONS']).toBeUndefined(); // code-execution vector, deliberately excluded
+    // PWD is NOT inherited: spawn does not rewrite it for cwd, so a copied
+    // PWD would be the parent's stale directory (CodeRabbit r1).
+    expect(child['PWD']).toBeUndefined();
+    // The shipped allowlist itself must not carry credential-shaped names.
+    expect(
+      DEFAULT_CHILD_ENV_ALLOWLIST.some((name) => /TOKEN|SECRET|KEY|PASSWORD/i.test(name)),
+    ).toBe(false);
+    // The explicit extra allowlist is the only route for a non-default name.
+    const extended = buildChildEnv(parent, undefined, ['CQ_ENV_LEAK_MARKER']);
+    expect(extended['CQ_ENV_LEAK_MARKER']).toBe('do-not-leak');
+    expect(extended['GH_TOKEN']).toBeUndefined();
+    // The parent env object is never mutated.
+    expect(parent.GH_TOKEN).toBe('ghp_marker_secret');
+  });
+
+  test('a REAL spawned worker cannot see a marker secret in the entry env, while route env still reaches it (#183)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      // A probe worker: dumps its OWN process.env as a narration line (the
+      // driver folds non-JSON lines into the session record) and then emits
+      // the minimal stream-json run so the invocation completes.
+      const probePath = join(scratchDir, 'env-probe.mjs');
+      await writeFile(
+        probePath,
+        [
+          'const env = { ...process.env };',
+          "process.stdout.write('CQ_ENV_PROBE:' + JSON.stringify(env) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'env-probe', model: 'conformance-1' }) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'env-probe', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, model: 'conformance-1' }) + '\\n');",
+        ].join('\n'),
+        'utf8',
+      );
+      const marker = 'cq-env-leak-marker-7f3a';
+      const savedMarker = process.env.CQ_ENV_LEAK_MARKER;
+      const savedGh = process.env.GH_TOKEN;
+      process.env.CQ_ENV_LEAK_MARKER = marker;
+      process.env.GH_TOKEN = 'ghp_marker_secret';
+      try {
+        // NO spawn override: this is the production spawnManaged path.
+        const driver = new SubprocessDriver({
+          binary: ['node', probePath],
+          routingTable: conformanceRoutingTable(),
+          sessionsDir: join(scratchDir, SESSIONS_DIR),
+          harnessConfig: {
+            ...defaultHarnessConfig,
+            workspaceRoot: join(scratchDir, 'workspaces'),
+          },
+        });
+        const result = await driver.run(invocation({ prompt: 'env probe run' }));
+        expect(result.stopReason).toBe('complete');
+        const narration = await narrationOf(store, result.sessionId as string);
+        const probeLine = narration.find((line) => line.startsWith('CQ_ENV_PROBE:'));
+        expect(probeLine).toBeDefined();
+        const childEnv = JSON.parse((probeLine as string).slice('CQ_ENV_PROBE:'.length)) as Record<
+          string,
+          string
+        >;
+        // The marker secret never reaches the worker…
+        expect(childEnv['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+        expect(childEnv['GH_TOKEN']).toBeUndefined();
+        expect(JSON.stringify(childEnv)).not.toContain(marker);
+        // …while terminal basics and the configured route env do.
+        expect(typeof childEnv['PATH']).toBe('string');
+        expect(childEnv['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:1/anthropic');
+        expect(childEnv['ANTHROPIC_API_KEY']).toBe('conformance-fake-key');
+        expect(childEnv['ANTHROPIC_AUTH_TOKEN']).toBe('conformance-fake-key');
+      } finally {
+        if (savedMarker === undefined) delete process.env.CQ_ENV_LEAK_MARKER;
+        else process.env.CQ_ENV_LEAK_MARKER = savedMarker;
+        if (savedGh === undefined) delete process.env.GH_TOKEN;
+        else process.env.GH_TOKEN = savedGh;
+      }
+    });
+  }, 20_000);
+
+  test('envAllowlist validation: empty and malformed names throw at construction (#183)', () => {
+    expect(() => new SubprocessDriver({ envAllowlist: [''] })).toThrow(
+      /envAllowlist entries must be non-empty env var names without '='/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['A=B'] })).toThrow(
+      /envAllowlist entries must be non-empty env var names without '='/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
+  });
 });

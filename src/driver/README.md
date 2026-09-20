@@ -155,6 +155,18 @@ Files:
   markers; grace delays injectable for tests). The governor decides
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
 
+Child environment is DEFAULT-DENY (issue #183): `spawnManaged` copies
+ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
+terminal + locale basics, XDG dirs, Windows equivalents) from the entry
+process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`,
+`NPM_TOKEN`, or `NODE_OPTIONS`. Per-Route endpoint/auth vars are composed
+explicitly into `SpawnOptions.env` and always win over the allowlist, so
+configured driver keys still reach the worker; a deployment extends the
+copied names with `SubprocessDriverOptions.envAllowlist` (names only,
+never values). A marker secret in the entry process env therefore cannot
+reach a spawned CLI worker, where prompt-injected PR content could
+exfiltrate it.
+
 Argv surface (headless reference): `-p` (prompt rides stdin),
 `--output-format stream-json`, `--verbose` (the real CLI refuses stream-json
 print mode without it — found live, CLI 2.1.270, T1.6 slice 4),
