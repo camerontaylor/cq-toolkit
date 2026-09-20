@@ -49,7 +49,7 @@ import {
 } from '../../../src/ops/pr/ghEffects.js';
 import { registry } from '../../../src/ops/pr/registry.js';
 
-const ENTRY_NAMES = ['pr.assemblePrs', 'pr.runReport'];
+const ENTRY_NAMES = ['pr.ensureTrackerBranch', 'pr.assemblePrs', 'pr.runReport'];
 
 const entryByName = (name: string) => {
   const entry = registry.find((candidate) => candidate.name === name);
@@ -79,7 +79,15 @@ const reportInput = (): Record<string, unknown> => ({
   ],
 });
 
+const ensureTrackerBranchInput = (): Record<string, unknown> => ({
+  repoRoot: '/repo',
+  runPrefix: 'cq/09-16a',
+  base: 'origin/merge-queue',
+  branch: 'cq/09-16a/tracker',
+});
+
 const minimalInputs: Record<string, () => Record<string, unknown>> = {
+  'pr.ensureTrackerBranch': ensureTrackerBranchInput,
   'pr.assemblePrs': assembleInput,
   'pr.runReport': reportInput,
 };
@@ -103,7 +111,7 @@ const firstPackageOf = (input: Record<string, unknown>): Record<string, unknown>
 // ---------------------------------------------------------------------------
 
 describe('pr family registry entries', () => {
-  test('the family carries exactly the two D3 entries', () => {
+  test('the family carries exactly the D3 entries plus the #173 tracker-branch leg', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([...ENTRY_NAMES].sort());
   });
 
@@ -114,6 +122,16 @@ describe('pr family registry entries', () => {
   test.each(ENTRY_NAMES)('%s: inputSchema rejects an unknown key', (name) => {
     const input = { ...minimalInput(name), extra: 1 };
     expect(entryByName(name).inputSchema.safeParse(input).success).toBe(false);
+  });
+
+  test('ensureTrackerBranch: a branch outside the run prefix is rejected', () => {
+    const schema = entryByName('pr.ensureTrackerBranch').inputSchema;
+    expect(
+      schema.safeParse({ ...ensureTrackerBranchInput(), branch: 'other/tracker' }).success,
+    ).toBe(false);
+    expect(
+      schema.safeParse({ ...ensureTrackerBranchInput(), branch: 'cq/09-16a/tracker' }).success,
+    ).toBe(true);
   });
 
   test('assemblePrs: an unknown key INSIDE a package is rejected too (strict throughout)', () => {

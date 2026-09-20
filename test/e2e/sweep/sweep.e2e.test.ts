@@ -138,7 +138,14 @@ async function scenario(runPrefix: string): Promise<Scenario> {
       fixers: ['fix'],
       packageFiles: SCRATCH_PACKAGE_FILES,
     },
-    gh: makeFakeGh(),
+    // The forge-SIMULATING check (review-debt #173): the fake forge refuses
+    // to record a PR whose head is not on the real (bare) remote.
+    gh: makeFakeGh({
+      headExists: async (head) => {
+        const heads = await gitOut(['ls-remote', '--heads', 'origin', `refs/heads/${head}`], repo);
+        return heads.trim() !== '';
+      },
+    }),
   };
 }
 
@@ -402,7 +409,14 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
         ],
         0,
       );
-      await expectCompleteJournal(scene.journalDir, [['sweep-assemble', 'pr.assemblePrs']], 1);
+      await expectCompleteJournal(
+        scene.journalDir,
+        [
+          ['sweep-tracker-branch', 'pr.ensureTrackerBranch'],
+          ['sweep-assemble', 'pr.assemblePrs'],
+        ],
+        1,
+      );
 
       // The failures-only DEFAULT output: a clean run names no package.
       expect(outcome.output).not.toMatch(/alpha|beta/);
@@ -414,6 +428,91 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
       expect(originHeads).toContain('cq/e2e-happy/fix/alpha');
       expect(originHeads).not.toContain('cq/e2e-happy/fix/beta');
+
+      // FORGE-SIMULATING HEAD VERIFICATION (review-debt #173): the tracker
+      // branch was created + pushed, and EVERY head the fake forge recorded
+      // a PR for exists on the real (bare) remote — the fake gh alone cannot
+      // see this, which is exactly what the issue deferred.
+      expect(originHeads).toContain('cq/e2e-happy/tracker');
+      expect(scene.gh.created.map((pr) => pr.head)).toEqual([
+        'cq/e2e-happy/tracker',
+        'cq/e2e-happy/fix/alpha',
+      ]);
+      for (const pr of scene.gh.created) {
+        expect(originHeads, `PR head '${pr.head}' must exist on the remote`).toContain(pr.head);
+      }
+      // ORDERING PIN: the tracker-branch leg FINISHED before the assembler
+      // STARTED — the head existed on the remote when the tracker-first PR
+      // was opened, not merely by the end of the run.
+      const assembleEvents = await runEventsAt(scene.journalDir, SWEEP_PLAN_ID, 1);
+      const trackerFinished = assembleEvents.findIndex(
+        (event) => event.type === 'job-finished' && event.jobId === 'sweep-tracker-branch',
+      );
+      const assembleStarted = assembleEvents.findIndex(
+        (event) => event.type === 'job-started' && event.jobId === 'sweep-assemble',
+      );
+      expect(trackerFinished).toBeGreaterThan(-1);
+      expect(assembleStarted).toBeGreaterThan(trackerFinished);
+    },
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 1b. Tracker branch create/push + re-invoke reuse (review-debt #173)
+// ---------------------------------------------------------------------------
+
+describe('sweep e2e: tracker branch create/push + re-invoke reuse (#173)', () => {
+  test(
+    'a pre-existing remote tracker branch is reused: the fleet still assembles and the remote head is never rewound',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-tracker-reuse');
+      // A previous run's tracker branch: an empty commit on base, already on
+      // the remote. The re-invoke must tolerate it (and never move it).
+      const trackerBranch = 'cq/e2e-tracker-reuse/tracker';
+      const baseSha = (await gitOut(['rev-parse', 'main'], scene.repo)).trim();
+      const tree = (await gitOut(['rev-parse', `${baseSha}^{tree}`], scene.repo)).trim();
+      const prior = (
+        await gitOut(
+          ['commit-tree', tree, '-p', baseSha, '-m', 'pre-existing tracker branch'],
+          scene.repo,
+        )
+      ).trim();
+      await gitOut(['update-ref', `refs/heads/${trackerBranch}`, prior], scene.repo);
+      await gitOut(
+        ['push', 'origin', `refs/heads/${trackerBranch}:refs/heads/${trackerBranch}`],
+        scene.repo,
+      );
+      const before = (
+        await gitOut(['ls-remote', '--heads', 'origin', `refs/heads/${trackerBranch}`], scene.repo)
+      ).trim();
+      expect(before).toContain(prior);
+
+      const outcome = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
+      expect(outcome.assembleRun).toBeDefined();
+      const assembled = assembleReport(outcome.assembleRun as RunReport);
+      expect(assembled.tracker).toMatchObject({ number: 1, created: true });
+      // The tracker-branch leg reported the remote reuse (no create, no push).
+      const trackerRow = outcome.assembleRun?.jobs.find(
+        (candidate) => candidate.jobId === 'sweep-tracker-branch',
+      );
+      expect(trackerRow?.result.status).toBe('ok');
+      if (trackerRow?.result.status === 'ok') {
+        expect(trackerRow.result.value).toMatchObject({
+          reusedRemote: true,
+          created: false,
+          pushed: false,
+          headSha: prior,
+        });
+      }
+      // The remote head is byte-identical: a reuse never rewinds a live
+      // tracker branch to a fresh empty commit.
+      const after = (
+        await gitOut(['ls-remote', '--heads', 'origin', `refs/heads/${trackerBranch}`], scene.repo)
+      ).trim();
+      expect(after).toBe(before);
+      // And the PR head exists on the remote (forge-simulating verification).
+      expect(after).toContain(prior);
     },
   );
 });
@@ -528,7 +627,14 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         ],
         2,
       );
-      await expectCompleteJournal(scene.journalDir, [['sweep-assemble', 'pr.assemblePrs']], 3);
+      await expectCompleteJournal(
+        scene.journalDir,
+        [
+          ['sweep-tracker-branch', 'pr.ensureTrackerBranch'],
+          ['sweep-assemble', 'pr.assemblePrs'],
+        ],
+        3,
+      );
 
       // The re-invoke's output is failures-only clean as well.
       expect(second.output).toContain('0 failing unit(s) of 2');

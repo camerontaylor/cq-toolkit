@@ -25,9 +25,12 @@
 //   (embedded VERBATIM, re-rooted on the planner job, each input ENRICHED
 //   with the run context AND the RESOLVED branch segments so it is
 //   dispatch-grade for the central 'sweep.unit' entry), and ONE
-//   `pr.assemblePrs` job depending on every unit (the fleet assembles only
-//   when every unit succeeded — a failed unit blocks the whole fleet's PRs;
-//   per-unit isolation happened at the unit jobs). The builder's knobs
+//   `pr.ensureTrackerBranch` job depending on every unit (it creates + pushes
+//   the tracker PR's head on the forge — review-debt #173) and ONE
+//   `pr.assemblePrs` job depending on the tracker-branch leg (the fleet
+//   assembles only when every unit succeeded — a failed unit blocks both the
+//   tracker branch and the whole fleet's PRs; per-unit isolation happened at
+//   the unit jobs). The builder's knobs
 //   (fixer wiring, probe command, push, allowlists) arrive through
 //   `unitJobOverlay` / the caller's final enrichment — see
 //   SweepUnitDispatchInput (src/ops/sweep/unit.ts).
@@ -76,6 +79,7 @@
 // collide with a NATURAL package slug (jcqEj) — and every surface (branch,
 // worktree, committed marker, assembler) agrees.
 import type { AssemblePrsInput } from '../ops/pr/assemblePrs.js';
+import type { EnsureTrackerBranchInput } from '../ops/pr/ensureTrackerBranch.js';
 import type { Plan, PlanRegistryEntry } from '../kernel/types.js';
 import type {
   PlanSweepInput,
@@ -103,7 +107,13 @@ export const SWEEP_PLAN_ID = 'sweep';
 export const SWEEP_PLAN_JOB_IDS = {
   /** The planner job — always the plan's first job (the fan-out producer). */
   plan: 'sweep-plan',
-  /** The tracker-first fleet assembler — depends on every unit job. */
+  /**
+   * The tracker-branch leg (review-debt #173): creates + pushes the tracker
+   * head BEFORE the assembler opens its PR. Depends on every unit job, so a
+   * failed fleet never leaves a stray tracker branch.
+   */
+  trackerBranch: 'sweep-tracker-branch',
+  /** The tracker-first fleet assembler — depends on the tracker-branch leg. */
   assemble: 'sweep-assemble',
 } as const;
 
@@ -235,16 +245,35 @@ function escapeRegex(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * The tracker-branch job's input — the same head the assembler names
+ * (review-debt #173). `push` mirrors the overlay's local-only knob: the
+ * tracker leg must not push when the fleet is configured local-only
+ * (`push:false`), or a run with no reachable origin would fail the leg and
+ * block assembly.
+ */
+function trackerBranchInputOf(
+  config: SweepPlanConfig,
+  push: boolean | undefined,
+): EnsureTrackerBranchInput {
+  return {
+    repoRoot: config.repoRoot,
+    runPrefix: config.runPrefix,
+    base: config.base,
+    branch: config.trackerBranch ?? `${config.runPrefix}/tracker`,
+    ...(push === false ? { push: false } : {}),
+  };
+}
+
 /** The assembler input a config authors — static data, no runtime output needed. */
 function assembleInputOf(
   config: SweepPlanConfig,
   report: PlanSweepReport,
   resolved: SweepUnitSegments[],
 ): AssemblePrsInput {
-  // The tracker branch is NAMED here but not created/pushed by this lane —
-  // the per-unit branches are pushed (sweep.unit's push leg); the tracker
-  // branch creation/push + real-forge PR verification is the deferred
-  // phase-4 WS-K real-forge surface (review-debt #173).
+  // The tracker head is created + pushed by the SEPARATE
+  // `pr.ensureTrackerBranch` job (review-debt #173) that this assembler
+  // depends on; this input only NAMES it.
   return {
     repoRoot: config.repoRoot,
     runPrefix: config.runPrefix,
@@ -369,11 +398,25 @@ export function buildSweepPlan(
       // post-run from the committed markers (jTPa8).
       ...(unitJobs.length > 0 && config.mode !== 'prep'
         ? [
+            // The tracker-branch leg (review-debt #173) runs BEFORE the
+            // assembler: the tracker-first `gh pr create` needs the head to
+            // exist on the forge. Gated on every unit (a failed fleet
+            // assembles nothing, so it also leaves no tracker branch). This
+            // is the DECLARED fleet's leg, like the assembler below: the
+            // reference wiring recomposes the ACTUAL leg post-run from the
+            // committed markers (jTPa8), so an all-no-op declared fleet
+            // publishes no tracker branch or PR.
+            {
+              id: SWEEP_PLAN_JOB_IDS.trackerBranch,
+              op: 'pr.ensureTrackerBranch',
+              input: trackerBranchInputOf(config, overlay.push),
+              dependsOn: unitJobs.map((job) => job.id),
+            },
             {
               id: SWEEP_PLAN_JOB_IDS.assemble,
               op: 'pr.assemblePrs',
               input: assembleInputOf(config, report, resolvedSegments),
-              dependsOn: unitJobs.map((job) => job.id),
+              dependsOn: [SWEEP_PLAN_JOB_IDS.trackerBranch],
             },
           ]
         : []),
