@@ -39,12 +39,11 @@
 //  11. The wall-clock ladder rides the loop opts (CodeRabbit KyE): every
 //      loop's limits carry SelfhostDefaults.perJobWallClockMs (the #137
 //      review-path arming; merge-path symmetric).
-//  12. Fail-closed sweep budget (CodeRabbit KyI), SPEND-EVIDENCE-GATED: a
-//      loop that THROWS after its dispatch log gained a line burns the
-//      sweep — the failure row says so and the later PRs are recorded
-//      exhausted instead of re-spending an unaccounted allowance; a loop
-//      that throws BEFORE any dispatch-log line (a pre-spend fault) spent
-//      nothing, so its budget carries forward and its siblings still run.
+//  12. Propagated sweep spend (#186): a loop that THROWS after spending
+//      reports its accounted spend through opts.onSpend; the entry deducts
+//      exactly that known amount and carries the remainder (no whole-sweep
+//      burn, no dispatch-log proxy). A loop that throws BEFORE any spend
+//      deducts nothing, so its budget carries forward and its siblings run.
 //  13. Head-ref revalidation (CodeRabbit P1): immediately before each
 //      dispatch the single-PR endpoint re-vouches for the head ref — a
 //      renamed head is an excluded row (`head ref renamed since listing
@@ -377,7 +376,7 @@ describe('runSelfReviewLoop — real run', () => {
     expect(existsSync(journalRoot)).toBe(true); // created, recursively
   });
 
-  test('a thrown loop burns the sweep budget (KyI): the failure row says so and the next PR is recorded exhausted', async () => {
+  test('a thrown loop deducts its PROPAGATED accounted spend (#186): the failure row says so and the next PR sees the remainder', async () => {
     const calls: RecordedCall[] = [];
     const gh = fakeGh([pullRow(7), pullRow(8), pullRow(9)]);
     const summary = await runSelfReviewLoop(
@@ -385,12 +384,11 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr, opts) => {
           if (pr === 7) {
-            // Spend the budget and THROW before the entry can read the
-            // rollup: the cost is real but unaccountable. The spend is
-            // EVIDENCED by the dispatch log's first line — the loop's own
-            // write, as the real loop does at its first dispatch — so the
-            // throw must burn the sweep; PR 8/9 must not re-spend.
-            writeFileSync(opts.dispatchLogPath, '{}\n');
+            // Spend and THROW: the loop propagates the accounted spend
+            // through onSpend (its finally report in production), so the
+            // entry deducts the KNOWN amount and carries the remainder —
+            // no whole-sweep burn, no dispatch-log proxy.
+            opts.onSpend?.(1);
             throw new Error('injected loop boom after spend');
           }
           return outcomeWithFixCost(pr, 1);
@@ -399,24 +397,20 @@ describe('runSelfReviewLoop — real run', () => {
       baseCfg({ maxUsd: 3, journalRoot: tempJournalRoot() }),
     );
 
-    // PR 7 was invoked (it spent, then threw); PR 8 never dispatched — the
-    // zeroed remaining skipped it with the RECORDED exhausted row, and PR 9
-    // rode the same skip (remaining is already ≤ 0).
-    expect(calls.map((call) => call.opts.pr)).toEqual([7]);
+    // PR 7 spent 1 of 3 then threw: PR 8 runs with the remaining 2, PR 9 too.
+    expect(calls.map((call) => call.opts.pr)).toEqual([7, 8, 9]);
+    expect(calls[1]?.opts.runOptions?.maxUsd).toBe(2);
     expect(summary.failures).toEqual([
       {
         pr: 7,
-        error:
-          'injected loop boom after spend — sweep budget exhausted (fail-closed: a thrown loop may have unaccounted spend)',
+        error: 'injected loop boom after spend — accounted spend 1 deducted from the sweep budget',
       },
     ]);
-    expect(summary.excluded).toEqual([
-      { pr: 8, reason: 'sweep budget exhausted (I9)' },
-      { pr: 9, reason: 'sweep budget exhausted (I9)' },
-    ]);
+    expect(summary.excluded).toEqual([]);
+    expect(summary.results.map((row) => row.pr)).toEqual([8, 9]);
   });
 
-  test('a loop that throws BEFORE any dispatch-log line carries the budget forward (spend-evidence-gated burn)', async () => {
+  test('a loop that throws BEFORE any spend carries the budget forward (nothing to deduct)', async () => {
     const calls: RecordedCall[] = [];
     const gh = fakeGh([pullRow(7), pullRow(8)]);
     const summary = await runSelfReviewLoop(
@@ -424,10 +418,10 @@ describe('runSelfReviewLoop — real run', () => {
         gh,
         fakeLoop(calls, async (pr) => {
           if (pr === 7) {
-            // Throw at entry — a worktree/registry-style fault, BEFORE any
-            // dispatch-log line exists: nothing was spent, so the budget
-            // must carry forward and the sibling must still run (an
-            // ungated burn would let this PR starve every later PR).
+            // Throw at entry — a worktree/registry-style fault with no
+            // propagated spend: nothing was spent, so the budget must carry
+            // forward and the sibling must still run (an unconditional burn
+            // would let this PR starve every later PR).
             throw new Error('injected pre-spend fault');
           }
           return outcomeWithFixCost(pr, 1);
@@ -437,7 +431,7 @@ describe('runSelfReviewLoop — real run', () => {
     );
 
     // PR 8 was dispatched against the FULL remaining allowance, and PR 7's
-    // failure row is the plain message — no fail-closed burn suffix.
+    // failure row is the plain message — no spend suffix.
     expect(calls.map((call) => call.opts.pr)).toEqual([7, 8]);
     expect(calls[1]?.opts.runOptions?.maxUsd).toBe(2);
     expect(summary.results.map((row) => row.pr)).toEqual([8]);

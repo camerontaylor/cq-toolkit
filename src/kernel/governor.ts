@@ -189,6 +189,19 @@ export interface JobGovernance {
    * layer lands, tests inject cost here.
    */
   reportCost(usd: number): void;
+  /**
+   * Report the driver's budget evidence for this invocation in ONE fold
+   * (usage + derived-only cost), applying the SAME DD-9 rules as the
+   * completion-time WorkerResult fold: real usage rolls the token cap, a
+   * present costUSD rolls the USD cap, and real usage with NO costUSD under
+   * a configured maxUsd TRIPS the budget (fail loud, never fail open).
+   * Ops that map a driver WorkerResult into their OWN value shape
+   * (review.fixItem, merge.resolveConflict) call this so the governor still
+   * observes the spend instead of silently pricing the worker at zero.
+   * Exactly one of reportUsage/reportCost/reportResult may carry a given
+   * measurement — the caller must not stream the same evidence twice.
+   */
+  reportResult(result: { usage?: Usage; costUSD?: number }): void;
   readonly info: Readonly<LadderContextInfo & { wallClockMs?: number }>;
 }
 
@@ -265,6 +278,7 @@ export function runLadder<T>(
     onRung?: (marker: LadderRungMarker) => void;
     onUsage?: (usage: Usage) => void;
     onCost?: (usd: number) => void;
+    onResult?: (result: { usage?: Usage; costUSD?: number }) => void;
   },
 ): Promise<LadderOutcome<T>> {
   validateLadderSpec(spec);
@@ -285,6 +299,7 @@ export function runLadder<T>(
     },
     reportUsage: (usage) => opts?.onUsage?.(usage),
     reportCost: (usd) => opts?.onCost?.(usd),
+    reportResult: (result) => opts?.onResult?.(result),
     info: {
       ...info,
       ...(wallClockMs !== undefined ? { wallClockMs } : {}),
@@ -687,6 +702,29 @@ function assertValidUsage(prefix: string, usage: Usage): void {
   }
 }
 
+/**
+ * Non-throwing twins of the assertValid* probes (the DEFENSIVE-FOLD guard):
+ * `observeResult` may receive evidence an op streamed through
+ * reportResult, i.e. raw driver data the `workerResultOfValue` guard at the
+ * completion boundary never vetted. A lying measurement (NaN/Infinity/
+ * negative) folds as ZERO EVIDENCE — the guard rejects it so no post-record
+ * throw escapes the op (review round: reportResult bypassed the guard).
+ */
+const isValidTokensValue = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+const isValidUsd = (usd: unknown): usd is number => isValidTokensValue(usd);
+
+const isValidUsage = (usage: unknown): usage is Usage => {
+  if (typeof usage !== 'object' || usage === null) return false;
+  const record = usage as Record<string, unknown>;
+  for (const field of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
+    if (!isValidTokensValue(record[field])) return false;
+  }
+  const reasoning = record['reasoning'];
+  return reasoning === undefined || isValidTokensValue(reasoning);
+};
+
 // ---------------------------------------------------------------------------
 // BudgetGovernor — the stateful per-run enforcer
 // ---------------------------------------------------------------------------
@@ -892,20 +930,26 @@ export class BudgetGovernor {
    * only when THIS invocation's usage has no cost evidence either way — a
    * `costAlreadyCounted` flag means cost evidence existed and was counted,
    * so there is nothing left to fail loud about.
+   *
+   * DEFENSIVE FOLD (review round): evidence arriving through the job
+   * context (reportResult) is raw driver data that never passed
+   * `workerResultOfValue`; a lying measurement (NaN/Infinity/negative) is
+   * sanitized to ZERO EVIDENCE here instead of throwing out of the op.
    */
   observeResult(
     jobKey: string,
     result: { usage?: Usage; costUSD?: number },
     counts?: { usageAlreadyCounted?: boolean; costAlreadyCounted?: boolean },
   ): void {
-    const usage = result.usage;
+    const usage = isValidUsage(result.usage) ? result.usage : undefined;
+    const costUSD = isValidUsd(result.costUSD) ? result.costUSD : undefined;
     const hasRealUsage = usage !== undefined && totalTokensOf(usage) > 0;
     if (hasRealUsage && usage !== undefined && counts?.usageAlreadyCounted !== true) {
       this.observeUsage(jobKey, usage);
     }
-    if (result.costUSD !== undefined) {
+    if (costUSD !== undefined) {
       if (counts?.costAlreadyCounted !== true) {
-        this.observeCost(jobKey, result.costUSD);
+        this.observeCost(jobKey, costUSD);
       }
     } else if (
       hasRealUsage &&
@@ -1278,6 +1322,17 @@ function governOp(
             reportedCost = true;
             governor.observeCost(jobKey, usd);
           },
+          onResult: (result) => {
+            // The op streamed its driver's evidence in ONE fold: mark only the
+            // measurements observeResult will ACTUALLY fold (the same
+            // sanitizer — a lying value is dropped, so it must not mark the
+            // completion fold as already-counted), then apply DD-9.
+            if (isValidUsage(result.usage) && totalTokensOf(result.usage) > 0) {
+              reportedUsage = true;
+            }
+            if (isValidUsd(result.costUSD)) reportedCost = true;
+            governor.observeResult(jobKey, result);
+          },
         },
       );
       if (outcome.outcome === 'completed') {
@@ -1373,7 +1428,10 @@ export function governRegistry(view: OpRegistryView, governor: BudgetGovernor): 
 }
 
 // ---------------------------------------------------------------------------
-// Honest stop (I9) — report annotation on a REAL trip only
+// Honest stop (I9) — report annotation on a REAL trip only (the
+// stoppedEarly/earlyStopReason claim; `withBudgetStop` additionally annotates
+// the DERIVED costUSD rollup on every path — review-debt #185 — which is not
+// a trip claim).
 // ---------------------------------------------------------------------------
 
 // The runner's never-dispatched row markers (runner.ts is frozen for this
@@ -1414,8 +1472,24 @@ const BLOCKED_MARKER = 'blocked:';
  * freeze workaround). The T1.4 runner integration folds this into runPlan;
  * today the caller composes:
  * `withBudgetStop(await runPlan(...), plan, governor)`.
+ *
+ * COST ANNOTATION (review-debt #185): on EVERY return path this helper also
+ * sets `RunReport.costUSD` from `governor.usdSpent` when the governor
+ * observed any spend and the report carries none — the derived-only run
+ * rollup the review-loop sweep carries forward across PRs. The frozen
+ * `RunReport.costUSD` field is caller-side derived-by-design; the governor
+ * is the composition that actually observed the numbers, so it fills it
+ * here rather than leaving every caller to re-derive it.
  */
 export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGovernor): RunReport {
+  // The run-level USD rollup the governor OBSERVED (reportResult/reportCost/
+  // the WorkerResult fold) — annotated onto the report on EVERY return path
+  // so the caller (ReviewLoopOutcome.fixReport, SelfMergePrsResult.report)
+  // can carry spend forward without re-deriving it. Derived-only (DD-9):
+  // the governor never invents a number, so an empty rollup stays absent
+  // (a fabricated 0 would claim "spent nothing").
+  const annotateCost = (r: RunReport): RunReport =>
+    r.costUSD === undefined && governor.usdSpent > 0 ? { ...r, costUSD: governor.usdSpent } : r;
   // Honesty rule 1 — a budget-family stop only (see the doc comment): the
   // trip, or a per-run dispatch-quota refusal. 'attempt-cap' is per-job and
   // deliberately absent here.
@@ -1423,7 +1497,7 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
     (event) => event.kind === 'short-circuited' && event.reason === 'dispatch-quota',
   );
   if (!governor.tripped && !dispatchQuotaRefused) {
-    return report;
+    return annotateCost(report);
   }
   const rowsByJob = new Map<string, JobOutcome>(report.jobs.map((row) => [row.jobId, row]));
   const depsOf = new Map<string, readonly string[]>(
@@ -1532,13 +1606,13 @@ export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGo
   // every row kept its real verdict (a refusal row is itself terminal
   // evidence), so there is no early stop to claim (I9).
   if (!reMarked) {
-    return report;
+    return annotateCost(report);
   }
-  return {
+  return annotateCost({
     ...report,
     stoppedEarly: true,
     earlyStopReason: 'budget',
     counts,
     jobs,
-  };
+  });
 }

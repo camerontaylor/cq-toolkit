@@ -85,6 +85,14 @@ export interface PlannedPr {
   headRefName: string;
   /** The branch the PR proposes to merge into — its stack position. */
   baseRefName: string;
+  /**
+   * The observed head SHA the candidate carried (review-debt #186), when
+   * one was observed: the plan threads it to executeMerges so the
+   * server-side merge pins `--match-head-commit`. OPTIONAL so callers that
+   * never observed a head (test fixtures, structural plans) are unchanged;
+   * the self-host fetch always observes one.
+   */
+  headSha?: string;
   /** Whether the PR is open or closed. */
   state: 'open' | 'closed';
   /** The PR author's GitHub login, or null when unavailable. Carried for
@@ -140,6 +148,14 @@ export interface PlannedMergeEntry {
   basePr: number | null;
   /** Stack depth: roots are 0, a child is its base's depth + 1. */
   depth: number;
+  /**
+   * The observed head SHA the candidate carried (review-debt #186), when
+   * one was observed: executeMerges pins the merge with
+   * `--match-head-commit <headSha>`, so a fixer push between plan and run
+   * cannot merge an unreviewed head.
+   * Present only when the fetch observed one.
+   */
+  headSha?: string;
 }
 
 /** The plan: the merge order (roots first, depth-first, parents before
@@ -339,16 +355,34 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
   const order: PlannedMergeEntry[] = [];
   const retargetSet = new Set(retargetRoots);
   const roots = [...mergeRoots, ...retargetRoots].sort((a, b) => a - b);
-  for (const pr of roots) {
-    order.push({
+  // PR-number → candidate (review-debt #186): the plan threads the observed
+  // head SHA onto every entry so executeMerges can pin the
+  // merge and re-check the base. Duplicate numbers resolve last-wins here,
+  // but duplicates are withheld by gate 1 and never ordered.
+  const plannedByPr = new Map(sorted.map((candidate) => [candidate.pr, candidate]));
+  const entryFor = (
+    pr: number,
+    action: 'merge' | 'retarget-self',
+    basePr: number | null,
+    depth: number,
+  ): PlannedMergeEntry => {
+    const candidate = plannedByPr.get(pr);
+    const headSha = candidate?.headSha;
+    return {
       pr,
-      action: retargetSet.has(pr) ? 'retarget-self' : 'merge',
-      basePr: null,
-      depth: 0,
-    });
+      action,
+      basePr,
+      depth,
+      // Only a 40-hex head rides (the consumer's schema admits no other) —
+      // an unobserved/garbage head is omitted rather than emitted invalid.
+      ...(headSha !== undefined && /^[0-9a-f]{40}$/i.test(headSha) ? { headSha } : {}),
+    };
+  };
+  for (const pr of roots) {
+    order.push(entryFor(pr, retargetSet.has(pr) ? 'retarget-self' : 'merge', null, 0));
   }
   const emitSubtree = (pr: number, basePr: number, depth: number): void => {
-    order.push({ pr, action: 'merge', basePr, depth });
+    order.push(entryFor(pr, 'merge', basePr, depth));
     const kids = childrenOf.get(pr);
     if (kids === undefined) return;
     for (const kid of kids) emitSubtree(kid, pr, depth + 1);

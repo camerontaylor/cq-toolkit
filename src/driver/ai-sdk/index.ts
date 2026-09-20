@@ -31,7 +31,7 @@
 //
 // PROVIDER INSTANCES (seam rule): providers are imported DIRECTLY and
 // instantiated as real language-model objects — never gateway string ids.
-// The registry { anthropic, openai, zai, deepseek } maps the frozen
+// The registry { anthropic, openai, zai, ai-sdk, deepseek } maps the frozen
 // ModelSpec.provider handle onto the matching @ai-sdk factory; the model id
 // rides ModelSpec.model. UNKNOWN PROVIDER THROWS BEFORE DISPATCH (and
 // before any session is created) — fail loudly, never guess. Production
@@ -461,6 +461,14 @@ function defaultSessionsDir(): string {
  * plan key with 429 insufficient-balance BY DESIGN, while the coding
  * endpoint answers 200). ZAI_BASE_URL overrides the base URL for
  * deployments on the pay-as-you-go wire.
+ *
+ * THE `ai-sdk` HANDLE (review-debt #186): the self-hosting default's
+ * provider (SelfhostDefaults.driver.provider) names the DRIVER, not a
+ * vendor — "the Z.AI coding endpoint is the ai-sdk default route" (see
+ * src/selfhost/config.ts). The registry honors it as an alias for the zai
+ * factory so an op that routes its driver by provider handle can bind the
+ * in-process lane (no host CLI) for exactly that handle, while real vendor
+ * handles keep their own routes.
  */
 function defaultProviders(): Record<string, ProviderFactory> {
   const requireKey = (provider: string, envName: string): string => {
@@ -472,6 +480,13 @@ function defaultProviders(): Record<string, ProviderFactory> {
     }
     return value;
   };
+  const zai =
+    (handle: string) =>
+    (modelId: string): LanguageModel =>
+      createZai({
+        apiKey: requireKey(handle, 'ZAI_API_KEY'),
+        baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
+      }).languageModel(modelId);
   return {
     anthropic: (modelId) =>
       createAnthropic({ apiKey: requireKey('anthropic', 'ANTHROPIC_API_KEY') }).languageModel(
@@ -479,11 +494,11 @@ function defaultProviders(): Record<string, ProviderFactory> {
       ),
     openai: (modelId) =>
       createOpenAI({ apiKey: requireKey('openai', 'OPENAI_API_KEY') }).languageModel(modelId),
-    zai: (modelId) =>
-      createZai({
-        apiKey: requireKey('zai', 'ZAI_API_KEY'),
-        baseURL: process.env.ZAI_BASE_URL ?? 'https://api.z.ai/api/coding/paas/v4',
-      }).languageModel(modelId),
+    zai: zai('zai'),
+    // The driver-kind alias (see header): the self-host default provider.
+    // It reports ITS OWN handle in a missing-key error (not 'zai'), so the
+    // message names the provider the caller actually configured.
+    'ai-sdk': zai('ai-sdk'),
     deepseek: (modelId) =>
       createDeepSeek({ apiKey: requireKey('deepseek', 'DEEPSEEK_API_KEY') }).languageModel(modelId),
   };

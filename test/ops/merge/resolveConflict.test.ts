@@ -52,6 +52,7 @@ import type {
   WorkerResult,
 } from '../../../src/driver/types.js';
 import type { OpResult } from '../../../src/kernel/types.js';
+import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
 import type { GhResult } from '../../../src/ops/review/gh.js';
 import type { MergeEffects } from '../../../src/ops/merge/effects.js';
 import { headRefFor } from '../../../src/ops/merge/effects.js';
@@ -485,7 +486,12 @@ describe('resolveConflict op', () => {
 
     expect(result).toEqual({
       status: 'ok',
-      value: { pr: 44, decision: 'acted', summary: 'merged origin/main and pushed feat/topic' },
+      value: {
+        pr: 44,
+        decision: 'acted',
+        summary: 'merged origin/main and pushed feat/topic',
+        usage: ZERO_USAGE,
+      },
     });
     // The exact sequence: fetch + baseline validate (truth first), prepare,
     // the fn (session created INSIDE the worktree; after the acted parse
@@ -787,7 +793,7 @@ describe('resolveConflict op', () => {
     expect(fullRefOther.status).not.toBe('failed');
   });
 
-  test('a driver pre-dispatch throw is an op outcome: failed, not a crash', async () => {
+  test('a driver pre-dispatch throw is needs-human, not a crash (#186)', async () => {
     const driver = new FakeDriver(new Error('unknown model for provider'));
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
@@ -797,8 +803,71 @@ describe('resolveConflict op', () => {
     });
 
     const result = await op(baseInput());
-    expect(result.status).toBe('failed');
-    expect(failedError(result)).toContain('unknown model for provider');
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('unknown model for provider');
+      expect(result.reason).toContain('could not dispatch');
+    }
+  });
+
+  test('the driver usage + cost are reported to the job context in ONE fold (#185)', async () => {
+    const usage = { input: 12, output: 6, cacheRead: 0, cacheWrite: 0 };
+    const driver = new FakeDriver({
+      structuredOutput: { decision: 'acted', summary: 'pushed' },
+      usage,
+      costUSD: 0.11,
+      denials: [],
+      stopReason: 'complete',
+    });
+    const op = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+    const reported: Array<{ usage?: unknown; costUSD?: number }> = [];
+    const outcome = await runLadder(
+      () => op(baseInput()),
+      {},
+      { op: 'merge.resolveConflict', jobKey: 'j1', attempt: 1 },
+      { onResult: (result) => reported.push(result) },
+    );
+    expect(outcome.outcome).toBe('completed');
+    // The op maps the conflict agent's WorkerResult into its own value
+    // shape, so the governor's WorkerResult fold cannot see the spend — the
+    // job-context report is the merge-plan governor's evidence (#185).
+    expect(reported).toEqual([{ usage, costUSD: 0.11 }]);
+  });
+
+  test('a driver throw with the governed signal aborted → indeterminate (the ladder cancellation, #191 r2)', async () => {
+    const driver = new FakeDriver(new Error('cancelled mid-run'));
+    const op = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+    const outcome = await runLadder(
+      async () => {
+        const signal = currentJobContext()?.signal;
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted === true) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return op(baseInput());
+      },
+      { wallClockMs: 5, abortGraceMs: 60_000, killGraceMs: 60_000 },
+      { op: 'merge.resolveConflict', jobKey: 'resolve-abort', attempt: 1 },
+    );
+    expect(outcome.outcome).toBe('completed');
+    if (outcome.outcome === 'completed') {
+      // The aborted signal makes the thrown run the governed cancellation
+      // (I8) → indeterminate, not needs-human.
+      expect(outcome.value.status).toBe('indeterminate');
+    }
   });
 
   test('the parse dep is the output gate (an injected parser can read what the real one would refuse)', async () => {
@@ -813,7 +882,12 @@ describe('resolveConflict op', () => {
 
     await expect(op(baseInput())).resolves.toEqual({
       status: 'ok',
-      value: { pr: 44, decision: 'acted', summary: 'read by the injected parser' },
+      value: {
+        pr: 44,
+        decision: 'acted',
+        summary: 'read by the injected parser',
+        usage: ZERO_USAGE,
+      },
     });
   });
 
@@ -835,7 +909,7 @@ describe('resolveConflict op', () => {
 
     await expect(op(baseInput())).resolves.toEqual({
       status: 'ok',
-      value: { pr: 44, decision: 'acted', summary: 'ok' },
+      value: { pr: 44, decision: 'acted', summary: 'ok', usage: ZERO_USAGE },
     });
     // And the default op builds with the config alone (nothing runs).
     expect(() => makeResolveConflictOp({ harnessConfig: defaultHarnessConfig })).not.toThrow();
@@ -865,7 +939,7 @@ describe('the acted verification', () => {
 
     await expect(op(baseInput())).resolves.toEqual({
       status: 'ok',
-      value: { pr: 44, decision: 'acted', summary: 'pushed' },
+      value: { pr: 44, decision: 'acted', summary: 'pushed', usage: ZERO_USAGE },
     });
   });
 
@@ -1054,7 +1128,7 @@ describe('I11 forge fact: a push to the head branch IS refs/pull/<pr>/head', () 
 
     await expect(op(baseInput())).resolves.toEqual({
       status: 'ok',
-      value: { pr: 44, decision: 'acted', summary: 'pushed' },
+      value: { pr: 44, decision: 'acted', summary: 'pushed', usage: ZERO_USAGE },
     });
     // The verification addressed the pr ONLY through the pull ref: every
     // fetch/validate in the log names refs/pull/44/head — the push and its

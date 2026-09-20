@@ -172,6 +172,8 @@ class FakeMergeEffects implements MergeEffects {
   readonly heads = new Map<number, string>();
   /** pr → queued mergePr results, shifted per call; default success. */
   readonly mergeQueue = new Map<number, GhResult[]>();
+  /** Every mergePr call's head-commit pin (review-debt #186), in order. */
+  readonly mergeMatches: Array<{ pr: number; matchHeadCommit?: string }> = [];
   /** pr → fetchRef fails. */
   readonly fetchFailures = new Set<number>();
   /** pr → pushRef fails (the hostile-forge hook for the CR1 regression). */
@@ -263,8 +265,15 @@ class FakeMergeEffects implements MergeEffects {
     }
   }
 
-  async mergePr(pr: number, opts: { method: 'merge' }): Promise<GhResult> {
+  async mergePr(
+    pr: number,
+    opts: { method: 'merge'; matchHeadCommit?: string },
+  ): Promise<GhResult> {
     this.calls.push(`merge:${String(pr)}:${opts.method}`);
+    this.mergeMatches.push({
+      pr,
+      ...(opts.matchHeadCommit !== undefined ? { matchHeadCommit: opts.matchHeadCommit } : {}),
+    });
     if (this.mergeThrows !== null) throw this.mergeThrows;
     const next = this.mergeQueue.get(pr)?.shift();
     return next ?? OK;
@@ -329,6 +338,52 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
     const report = await executeMerges({ plan: handPlan([]), effects: fake });
     expect(report).toEqual({ merged: [], retargeted: [], stale: [], failed: [], blocked: [] });
     expect(fake.calls).toEqual([]);
+  });
+
+  test('a planned entry carrying the observed head SHA pins the merge with --match-head-commit (#186)', async () => {
+    const fake = new FakeMergeEffects();
+    const head = sha('a');
+    fake.heads.set(7, head);
+    const plan = handPlan([{ pr: 7, action: 'merge', basePr: null, depth: 0, headSha: head }]);
+    const report = await executeMerges({ plan, effects: fake });
+    expect(report.merged).toEqual([7]);
+    expect(fake.mergeMatches).toEqual([{ pr: 7, matchHeadCommit: head }]);
+  });
+
+  test("a planned entry with NO observed head SHA still pins to the executor's own baseline observation (#186)", async () => {
+    const fake = new FakeMergeEffects();
+    const head = sha('a');
+    fake.heads.set(7, head);
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+    expect(report.merged).toEqual([7]);
+    // The executor's baseline revalidation observed `head`, so that is the
+    // sha the server-side merge pins — the race is closed even for callers
+    // that did not thread a plan head.
+    expect(fake.mergeMatches).toEqual([{ pr: 7, matchHeadCommit: head }]);
+  });
+
+  test('a MALFORMED plan headSha falls back to the executor baseline — no false stale (#186 review r1)', async () => {
+    const fake = new FakeMergeEffects();
+    const head = sha('a');
+    fake.heads.set(7, head);
+    const plan = handPlan([
+      { pr: 7, action: 'merge', basePr: null, depth: 0, headSha: 'not-a-sha' },
+    ]);
+    const report = await executeMerges({ plan, effects: fake });
+    expect(report.merged).toEqual([7]);
+    expect(report.stale).toEqual([]);
+    expect(fake.mergeMatches).toEqual([{ pr: 7, matchHeadCommit: head }]);
+  });
+
+  test('a retarget-self entry ignores the plan head SHA — a head move never blocks a needed retarget (#186 review r1)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('b'));
+    const plan = handPlan([
+      { pr: 7, action: 'retarget-self', basePr: null, depth: 0, headSha: sha('a') },
+    ]);
+    const report = await executeMerges({ plan, effects: fake });
+    expect(report.retargeted).toEqual([7]);
+    expect(report.stale).toEqual([]);
   });
 });
 
@@ -1094,6 +1149,22 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
     );
     // The exact shapes still pass.
     expect(safeArgs(['pr', 'merge', '7', '--merge'])).toEqual(['pr', 'merge', '7', '--merge']);
+    // The head-commit pin (#186) is the ONE allowed trailing pair, and only
+    // as a full 40-hex sha.
+    const pinned = ['pr', 'merge', '7', '--merge', '--match-head-commit', sha('a')];
+    expect(safeArgs(pinned)).toEqual(pinned);
+    expect(() =>
+      safeArgs(['pr', 'merge', '7', '--merge', '--match-head-commit', 'deadbeef']),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() =>
+      safeArgs(['pr', 'merge', '7', '--merge', '--match-head-commit', `${sha('a')}x`]),
+    ).toThrow(UnsafeMergeArgsError);
+    expect(() => safeArgs(['pr', 'merge', '7', '--merge', '--match-head-commit'])).toThrow(
+      UnsafeMergeArgsError,
+    );
+    expect(() =>
+      safeArgs(['pr', 'merge', '7', '--merge', '--match-head-commit', sha('a'), '--admin']),
+    ).toThrow(UnsafeMergeArgsError);
   });
 
   test('round-3: push FLAGS are refused — the discarded-flag blind spot is closed', () => {
@@ -1157,7 +1228,11 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       },
     });
     expect(await effects.mergePr(7, { method: 'merge' })).toEqual(OK);
-    expect(ghCalls).toEqual([['pr', 'merge', '7', '--merge']]);
+    await effects.mergePr(8, { method: 'merge', matchHeadCommit: sha('a') });
+    expect(ghCalls).toEqual([
+      ['pr', 'merge', '7', '--merge'],
+      ['pr', 'merge', '8', '--merge', '--match-head-commit', sha('a')],
+    ]);
   });
 
   test('realMergeEffects git argv shapes: validate/fetch/push (injected runner — zero processes, no fs)', async () => {

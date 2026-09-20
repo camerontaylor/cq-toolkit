@@ -274,6 +274,14 @@ export interface ReviewLoopOpts {
   dispatchLogPath: string;
   /** Root for the PR worktree (default: resolvePrWorktree's own). */
   worktreeRoot?: string;
+  /**
+   * Called after the governed fix run with the run's ACCOUNTED spend
+   * (`governor.usdSpent`), even when the fix run throws (a `finally`
+   * report) — the propagated-spend channel a sweep uses to carry budget
+   * forward without a dispatch-log proxy (review-debt #186). Absent → no
+   * reporting.
+   */
+  onSpend?: (usd: number) => void;
 }
 
 /** The loop's terminal report. Plain JSON; `ok` only when every stage came back clean. */
@@ -813,11 +821,26 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
   // are checked against the OBSERVED worktree movement, not trusted.
   const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
-  const fixReport = withBudgetStop(
-    await runPlan(plan, runOptions, governRegistry(view, governor)),
-    plan,
-    governor,
-  );
+  const fixReport = await (async (): Promise<RunReport> => {
+    // Propagated accounted spend (review-debt #186): report the governor's
+    // observed USD rollup OUT of the loop even when the fix run throws, so a
+    // sweep can carry spend forward without a dispatch-log proxy.
+    try {
+      return withBudgetStop(
+        await runPlan(plan, runOptions, governRegistry(view, governor)),
+        plan,
+        governor,
+      );
+    } finally {
+      // A throwing observer must never mask the fix run's own outcome.
+      try {
+        opts.onSpend?.(governor.usdSpent);
+      } catch {
+        // Observers are advisory; swallow and let the original result/throw
+        // propagate untouched.
+      }
+    }
+  })();
   const headAfter = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
   const headMoved =
     headBefore.code === 0 &&

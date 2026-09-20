@@ -525,6 +525,8 @@ const runLoop = async (
     limits?: { perJobWallClockMs?: number };
     /** Full driver.run override (the wall-clock test's cooperating wedge). */
     driverRun?: Driver['run'];
+    /** Propagated-spend observer (review-debt #186). */
+    onSpend?: (usd: number) => void;
   } = {},
 ): Promise<{
   outcome: ReviewLoopOutcome;
@@ -578,6 +580,7 @@ const runLoop = async (
     worktreeRoot: scratch,
     ...(o.promptOverride !== undefined ? { promptOverride: o.promptOverride } : {}),
     ...(o.limits !== undefined ? { limits: o.limits } : {}),
+    ...(o.onSpend !== undefined ? { onSpend: o.onSpend } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
 };
@@ -2118,5 +2121,41 @@ describe('the fix-run wall-clock ladder (opts.limits → the governor)', () => {
       'fix job fix-1 ended indeterminate: fixReviewItem: driver crashed: wall-clock: the fixer hit the rung-1 signal',
     );
     expect(outcome.actionsPosted).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Propagated accounted spend (review-debt #186)
+// ---------------------------------------------------------------------------
+
+describe('review-loop propagated spend (onSpend)', () => {
+  test('the governed fix run reports its accounted spend (governor usdSpent) through opts.onSpend', async () => {
+    const spent: number[] = [];
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [
+        completeWorker(fixLine(true, 'Guarded the abort path.', [NEW_SHA]), { costUSD: 0.07 }),
+      ],
+      onSpend: (usd) => spent.push(usd),
+    });
+    expect(outcome.status).toBe('ok');
+    // The fix op streams the driver's costUSD through the job context, so the
+    // governor's USD rollup (which withBudgetStop also annotates onto
+    // fixReport.costUSD) is what the sweep receives — no dispatch-log proxy.
+    expect(spent.length).toBeGreaterThan(0);
+    expect(spent[spent.length - 1]).toBeCloseTo(0.07);
+    expect(outcome.fixReport?.costUSD).toBeCloseTo(0.07);
+  });
+
+  test("a THROWING onSpend observer never masks the fix run's outcome (#186 review r2)", async () => {
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort path.', [NEW_SHA]))],
+      onSpend: () => {
+        throw new Error('observer boom');
+      },
+    });
+    // The observer is advisory: its throw is swallowed, and the loop's own
+    // outcome (and any original throw) propagates untouched.
+    expect(outcome.status).toBe('ok');
+    expect(outcome.fixReport?.counts.done).toBe(1);
   });
 });

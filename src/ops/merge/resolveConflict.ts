@@ -97,9 +97,11 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
-import type { Driver, ModelSpec, WorkerResult } from '../../driver/types.js';
+import { AiSdkDriver } from '../../driver/ai-sdk/index.js';
+import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
+import { currentJobContext } from '../../kernel/governor.js';
 import { ModelSpecSchema } from '../../kernel/schema.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import type { GhResult } from '../review/gh.js';
@@ -353,6 +355,19 @@ export interface ConflictResolutionValue {
   pr: number;
   decision: 'acted';
   summary: string;
+  /**
+   * The worker's token usage, verbatim (DD-2: never driver-trusted for
+   * USD). Absent when the driver reported none; also reported to the run
+   * governor through the job context (review-debt #185).
+   */
+  usage?: Usage;
+  /**
+   * The worker's DERIVED-ONLY USD cost, when the driver's price map knew
+   * the served model; absent for an unpriced model, never a fabricated 0.
+   * Folded into the run governor's rollup through the job context so the
+   * merge plan's spend is observable (review-debt #185).
+   */
+  costUSD?: number;
 }
 
 /** Injectable seams — every default is production-real; every override is
@@ -361,7 +376,8 @@ export interface ResolveConflictDeps {
   /** Default: realMergeEffects({ repoRoot: input.repoRoot, protectedBranch? })
    * built lazily per call. */
   effects?: MergeEffects;
-  /** Default: a SubprocessDriver bound to MergeConflictDecisionSchema (the
+  /** Default: provider 'ai-sdk' → an in-process AiSdkDriver, else a
+   * SubprocessDriver, both bound to MergeConflictDecisionSchema (the
    * caller's sessionsDir threads through when given). */
   driver?: Driver;
   /**
@@ -392,10 +408,10 @@ const defaultLoadPrompt = async (): Promise<string> =>
   readFile(fileURLToPath(new URL('./prompts/conflict.default.md', import.meta.url)), 'utf8');
 
 /**
- * The default driver: a SubprocessDriver bound to the decision schema, so
- * the driver-side structured_output gate never rejects a payload the
- * tolerant contract accepts (the schema mirrors the parser's tolerance).
- * The caller's sessionsDir and harnessConfig thread through; under
+ * The default driver: provider 'ai-sdk' (the self-host config's DRIVER
+ * handle — review-debt #186) binds the in-process AiSdkDriver, which needs
+ * no host CLI; any other provider binds a SubprocessDriver bound to the
+ * decision schema. Both share the caller's sessionsDir/harnessConfig; under
  * exactOptionalPropertyTypes an absent option is OMITTED so the driver
  * falls back to ITS OWN default — the dir DEFAULT_RESOLVE_SESSIONS_DIR
  * mirrors by contract, and the harness default is defaultHarnessConfig
@@ -404,12 +420,15 @@ const defaultLoadPrompt = async (): Promise<string> =>
 const defaultDriver = (
   sessionsDir: string | undefined,
   harnessConfig: HarnessConfig | undefined,
-): Driver =>
-  new SubprocessDriver({
+  modelSpec: ModelSpec,
+): Driver => {
+  const common = {
     outputSchema: MergeConflictDecisionSchema,
     ...(sessionsDir !== undefined ? { sessionsDir } : {}),
     ...(harnessConfig !== undefined ? { harnessConfig } : {}),
-  });
+  };
+  return modelSpec.provider === 'ai-sdk' ? new AiSdkDriver(common) : new SubprocessDriver(common);
+};
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
 
@@ -477,7 +496,7 @@ export function makeResolveConflictOp(
         const record = await new SessionStore(sessionsDir).create(workspace);
         return record.sessionId;
       });
-    const driver = deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig);
+    const driver = deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec);
 
     // (b) Truth first: fetch the PR head ref. A nonzero exit means the
     // truth is unavailable — fail closed before any worktree exists.
@@ -562,13 +581,36 @@ export function makeResolveConflictOp(
               budget: { wallClockMs },
             });
           } catch (err) {
-            // A driver's PRE-DISPATCH validation throws (unknown model, a
-            // missing key env) — a misconfiguration is an op outcome.
+            // A THROWN run() with the governor's signal aborted is the
+            // governed cancellation (I8): no verdict on partial work →
+            // indeterminate. Otherwise it is a PRE-DISPATCH misconfiguration
+            // (unknown model, a missing key env, no host CLI for the
+            // provider's route) — the human's to arrange, so `needs-human`
+            // (review-debt #186); `failed` would claim the agent ran and
+            // broke.
+            if (currentJobContext()?.signal.aborted === true) {
+              return {
+                status: 'indeterminate',
+                detail: `resolveConflict: conflict agent dispatch for pr ${input.pr} was cancelled: ${errorMessage(err)}`,
+              };
+            }
             return {
-              status: 'failed',
-              error: `resolveConflict: conflict agent dispatch for pr ${input.pr} threw: ${errorMessage(err)}`,
+              status: 'needs-human',
+              reason: `resolveConflict: the conflict agent could not dispatch for pr ${input.pr}: ${errorMessage(err)}`,
             };
           }
+
+          // SPEND EVIDENCE (review-debt #185): the op maps the driver's
+          // WorkerResult into its own value shape, so the governor's
+          // completion-time fold cannot see the usage/cost. Report the SAME
+          // evidence through the job context in ONE fold (governor
+          // observeResult — the DD-9 rollups and the unpriced-usage
+          // fail-loud trip apply exactly as they would there). Before the
+          // stop-reason mapping so every outcome's spend is observed.
+          currentJobContext()?.reportResult({
+            usage: result.usage,
+            ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
+          });
 
           // (f) stopReason FIRST — only 'complete' reaches the parser.
           if (result.stopReason === 'aborted') {
@@ -676,7 +718,13 @@ export function makeResolveConflictOp(
           }
           return {
             status: 'ok',
-            value: { pr: input.pr, decision: 'acted', summary: decision.summary },
+            value: {
+              pr: input.pr,
+              decision: 'acted',
+              summary: decision.summary,
+              usage: result.usage,
+              ...(result.costUSD !== undefined ? { costUSD: result.costUSD } : {}),
+            },
           };
         },
       );

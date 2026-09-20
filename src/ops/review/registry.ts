@@ -473,23 +473,40 @@ export const registry: OpRegistryEntry[] = [
     // toolPolicyFor reduces the input's harness to tool NAMES, so
     // command/path restrictions can only reach the worker through a driver
     // constructed with that harness, and worktreeFixDriver's session record
-    // makes the PR worktree the invocation's workspace. The SubprocessDriver
-    // class loads through the op module's own import (constructor is inert —
-    // env reads and processes are run()-time), so resolving this entry never
+    // makes the PR worktree the invocation's workspace.
+    //
+    // DRIVER KIND BY PROVIDER HANDLE (review-debt #186): provider 'ai-sdk'
+    // is the self-host config's DRIVER handle (src/selfhost/config.ts — "the
+    // Z.AI coding endpoint is the ai-sdk default route"), and it binds the
+    // in-process AiSdkDriver (no host CLI — the hosted-runner path). Any
+    // other handle binds the SubprocessDriver host-CLI lane. Both classes
+    // are loaded at IMPORTER time only (their constructors are inert: env
+    // reads and processes are run()-time), so resolving this entry never
     // touches env, the network, or the filesystem.
-    importer: () =>
-      import('./fixReviewItem.js').then(
-        (m) =>
-          m.makeFixReviewItem({
-            driver: {
-              perHarness: (harness, worktree) =>
-                m.worktreeFixDriver({
+    importer: async () => {
+      const m = await import('./fixReviewItem.js');
+      const { AiSdkDriver } = await import('../../driver/ai-sdk/index.js');
+      return m.makeFixReviewItem({
+        driver: {
+          perHarness: (harness, worktree, modelSpec) =>
+            modelSpec.provider === 'ai-sdk'
+              ? m.worktreeFixDriver({
+                  harnessConfig: harness,
+                  worktreePath: worktree.path,
+                  makeInner: (sessionsDir) =>
+                    new AiSdkDriver({
+                      harnessConfig: harness,
+                      sessionsDir,
+                      outputSchema: m.FixReviewItemOutputSchema,
+                    }),
+                })
+              : m.worktreeFixDriver({
                   harnessConfig: harness,
                   worktreePath: worktree.path,
                 }),
-            },
-          }) as Op<unknown, unknown>,
-      ),
+        },
+      }) as Op<unknown, unknown>;
+    },
   },
   {
     name: 'review.fetchReviewState',

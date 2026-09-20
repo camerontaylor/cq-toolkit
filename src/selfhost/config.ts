@@ -58,8 +58,13 @@ export interface SelfhostDefaultsConfig {
    * decision (docs/eval-axes-demo.md, conductor decision 2026-09-14): the
    * coding wire observed serving glm-5.3-flash for a glm-4.6 request, and
    * requesting anything else trips the drivers' served-model-mismatch
-   * guard. Config requests the served id so every dispatch runs — and
-   * prices — the model that actually executes.
+   * guard. Config requests the served id so every dispatch runs. NOTE
+   * (review r2): the served id is UNPRICED — `glm-5.3-flash` has no
+   * published list rates (`src/driver/pricing/data.ts`, docs/dd-2), so a
+   * dispatch reports usage with no costUSD and the governor's DD-9
+   * unpriced-usage trip fires under a configured maxUsd. Pricing the
+   * served id is the tracked DD-8 rate-refresh work; this PR does not
+   * fabricate a rate.
    */
   driver: ModelSpec;
   /**
