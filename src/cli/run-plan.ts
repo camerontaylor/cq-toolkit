@@ -90,6 +90,19 @@ export const RunPlanInputSchema = z
   })
   .strict();
 
+/**
+ * run-plan's governed-run OPTIONS without the plan-file key: the shared flag
+ * surface of every plan SUBCOMMAND (`cq <plan-name> …`, src/cli/plans.ts),
+ * where the plan itself is the registry's floor instance rather than a JSON
+ * file. Derived by OMIT so the two surfaces cannot drift; `.omit` preserves
+ * the `.strict()` catchall and every field default (probed against zod 4 — the
+ * unknown-key rejection and the defaults ride along).
+ */
+export const RunPlanOptionsSchema = RunPlanInputSchema.omit({ plan: true });
+
+/** The parsed options of one governed run (the plan-file key excluded). */
+export type RunPlanOptions = z.infer<typeof RunPlanOptionsSchema>;
+
 /** Message of an unknown throwable, for narration and `invalid input` lines. */
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -130,23 +143,25 @@ function narrateIfHuman(io: CliIo, mode: NarrationMode, message: string): void {
 }
 
 /**
- * Run one plan file through the governed kernel. Returns the process exit
- * code (never throws for arg-shaped problems — those are narrated exits;
- * runtime throws propagate to main.ts's catch → 1).
+ * The flag normalization + schema parse shared by run-plan and the plan
+ * subcommands: kebab-case keys are normalized (--stop-on-error → stopOnError),
+ * the reserved mode flags are ignored, a post-normalization duplicate is a
+ * narrated exit 2, and a schema failure is a narrated exit 2 too.
+ * `commandName` labels the narration (`invalid input for '<name>'`).
+ *
+ * The normalized record is NULL-PROTOTYPE (same idiom as parseFlags in
+ * main.ts): a plain {} would route `--__proto__=…` through the inherited
+ * __proto__ ACCESSOR — the key would never become an own property (the strict
+ * schema would silently stop seeing it) and the parsed value would re-point
+ * the record's prototype instead.
  */
-export async function runPlanCommand(
+export function parseRunPlanInput<T>(
+  commandName: string,
   flags: Record<string, unknown>,
   io: CliIo,
   mode: NarrationMode,
-  opts?: { opsRoot?: string },
-): Promise<number> {
-  // Kebab → camel normalization of flag keys (documented in the header).
-  // Reserved mode flags (--json/--help/-h) are main.ts's business — ignored.
-  // The record is NULL-PROTOTYPE (same idiom as parseFlags in main.ts): a
-  // plain {} would route `--__proto__=…` through the inherited __proto__
-  // ACCESSOR — the key would never become an own property (the strict schema
-  // would silently stop seeing it) and the parsed value would re-point this
-  // record's prototype instead.
+  schema: z.ZodType<T>,
+): { ok: true; input: T } | { ok: false; code: number } {
   const normalizedFlags: Record<string, unknown> = { __proto__: null };
   for (const [rawKey, value] of Object.entries(flags)) {
     const key = rawKey.replace(/-([a-z])/g, (_: string, c: string) => c.toUpperCase());
@@ -155,68 +170,41 @@ export async function runPlanCommand(
       narrateIfHuman(
         io,
         mode,
-        `invalid input for 'run-plan': duplicate flag '--${rawKey}' after kebab-case normalization`,
+        `invalid input for '${commandName}': duplicate flag '--${rawKey}' after kebab-case normalization`,
       );
-      return EXIT_CODES.usage;
+      return { ok: false, code: EXIT_CODES.usage };
     }
     normalizedFlags[key] = value;
   }
-  const check = RunPlanInputSchema.safeParse(normalizedFlags);
+  const check = schema.safeParse(normalizedFlags);
   if (!check.success) {
-    narrateIfHuman(io, mode, `invalid input for 'run-plan': ${issueMessage(check.error)}`);
-    return EXIT_CODES.usage;
+    narrateIfHuman(io, mode, `invalid input for '${commandName}': ${issueMessage(check.error)}`);
+    return { ok: false, code: EXIT_CODES.usage };
   }
-  const input = check.data;
+  return { ok: true, input: check.data };
+}
 
-  // INPUT defect (exit 2), not a runtime throw: a --plan path that does not
-  // exist or is not a regular file is arg-shaped, consistent with the other
-  // input defects (reviewer A medium 2 — schema-invalid content was already
-  // 2 while a missing/directory plan path surfaced as a thrown 1).
-  // Stat-error classification: only ENOENT (missing path) and ENOTDIR (a
-  // non-directory path component) mean "this path cannot be a readable plan
-  // file" — arg-shaped → treated as the input defect below. Any OTHER stat
-  // error (EACCES, EIO, …) is a RUNTIME failure, not knowledge about the
-  // argument: it is rethrown and propagates to main.ts's catch → exit 1
-  // 'thrown'.
-  let planStat: Stats | undefined;
-  try {
-    planStat = await stat(input.plan);
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException | null)?.code;
-    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
-    planStat = undefined;
-  }
-  if (planStat === undefined || !planStat.isFile()) {
-    narrateIfHuman(
-      io,
-      mode,
-      `invalid input for 'run-plan': plan file ${input.plan} is not a readable file`,
-    );
-    return EXIT_CODES.usage;
-  }
-
-  // The file exists and is regular (per the stat gate); a read error here is
-  // a post-gate race or permission failure — a RUNTIME throw, not an arg
-  // error: it propagates to main.ts's catch → narrated + exit 1 'thrown'
-  // (stdout stays empty — no result ever existed). Arg-shaped errors are 2;
-  // runtime throws are 1.
-  const raw = await readFile(input.plan, 'utf8');
-  let plan: Plan;
-  try {
-    // Corrupted file CONTENT is corrupted INPUT → exit 2, never a throw.
-    plan = PlanSchema.parse(JSON.parse(raw));
-  } catch (err) {
-    // A zod error is flattened to the one-line issue form (narration stays
-    // line-based); a JSON.parse error narrates its own message.
-    const detail = hasIssues(err) ? issueMessage(err) : messageOf(err);
-    narrateIfHuman(
-      io,
-      mode,
-      `invalid input for 'run-plan': plan file '${input.plan}' is not a valid plan: ${detail}`,
-    );
-    return EXIT_CODES.usage;
-  }
-
+/**
+ * The governed composition for ONE already-resolved Plan: the registry view
+ * over the resolved ops root (the explicit --ops-root flag wins over the
+ * runCli-level DI override), the recorded governor construction (fresh, or
+ * resume-seeded from the journal dir), runPlan + withBudgetStop (I9 is not
+ * optional), then the I1 output triple — the ONE stdout artifact, then
+ * failures-only narration (silent in 'json' mode), then the mechanical exit
+ * code. Shared by run-plan (a plan FILE) and the plan subcommands (a registry
+ * floor plan); see run-plan.ts's header for the shared error taxonomy.
+ *
+ * Kernel-input-class throws (`runPlan: `/`journal: `/`topoOrder: `) are
+ * narrated exits 2; any other throw propagates to the caller's catch → 1.
+ */
+export async function runPlanThroughKernel(
+  commandName: string,
+  plan: Plan,
+  input: RunPlanOptions,
+  io: CliIo,
+  mode: NarrationMode,
+  opts?: { opsRoot?: string },
+): Promise<number> {
   // Registry view over the resolved ops root: the explicit --ops-root flag
   // (input.opsRoot) wins over the runCli-level DI override (opts.opsRoot).
   const opsRoot = input.opsRoot ?? opts?.opsRoot;
@@ -278,14 +266,14 @@ export async function runPlanCommand(
     // CYCLIC PLAN FILE is an invalid plan, not a runtime crash, so it maps
     // to the documented usage path (exit 2) instead of a narrated exit 1.
     // Any other throw (a journal open/write failure, …) stays a RUNTIME
-    // throw → propagates to main.ts's catch → narrated exit 1.
+    // throw → propagates to the caller's catch → narrated exit 1.
     const message = messageOf(err);
     if (
       message.startsWith('runPlan: ') ||
       message.startsWith('journal: ') ||
       message.startsWith('topoOrder: ')
     ) {
-      narrateIfHuman(io, mode, `invalid input for 'run-plan': ${message}`);
+      narrateIfHuman(io, mode, `invalid input for '${commandName}': ${message}`);
       return EXIT_CODES.usage;
     }
     throw err;
@@ -297,4 +285,71 @@ export async function runPlanCommand(
   writeResultJson(io, report);
   narrateRunReport(io, report, mode);
   return exitCodeForRunReport(report);
+}
+
+/**
+ * Run one plan file through the governed kernel. Returns the process exit
+ * code (never throws for arg-shaped problems — those are narrated exits;
+ * runtime throws propagate to main.ts's catch → 1).
+ */
+export async function runPlanCommand(
+  flags: Record<string, unknown>,
+  io: CliIo,
+  mode: NarrationMode,
+  opts?: { opsRoot?: string },
+): Promise<number> {
+  const parsed = parseRunPlanInput('run-plan', flags, io, mode, RunPlanInputSchema);
+  if (!parsed.ok) return parsed.code;
+  const input = parsed.input;
+
+  // INPUT defect (exit 2), not a runtime throw: a --plan path that does not
+  // exist or is not a regular file is arg-shaped, consistent with the other
+  // input defects (reviewer A medium 2 — schema-invalid content was already
+  // 2 while a missing/directory plan path surfaced as a thrown 1).
+  // Stat-error classification: only ENOENT (missing path) and ENOTDIR (a
+  // non-directory path component) mean "this path cannot be a readable plan
+  // file" — arg-shaped → treated as the input defect below. Any OTHER stat
+  // error (EACCES, EIO, …) is a RUNTIME failure, not knowledge about the
+  // argument: it is rethrown and propagates to main.ts's catch → exit 1
+  // 'thrown'.
+  let planStat: Stats | undefined;
+  try {
+    planStat = await stat(input.plan);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException | null)?.code;
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw err;
+    planStat = undefined;
+  }
+  if (planStat === undefined || !planStat.isFile()) {
+    narrateIfHuman(
+      io,
+      mode,
+      `invalid input for 'run-plan': plan file ${input.plan} is not a readable file`,
+    );
+    return EXIT_CODES.usage;
+  }
+
+  // The file exists and is regular (per the stat gate); a read error here is
+  // a post-gate race or permission failure — a RUNTIME throw, not an arg
+  // error: it propagates to main.ts's catch → narrated + exit 1 'thrown'
+  // (stdout stays empty — no result ever existed). Arg-shaped errors are 2;
+  // runtime throws are 1.
+  const raw = await readFile(input.plan, 'utf8');
+  let plan: Plan;
+  try {
+    // Corrupted file CONTENT is corrupted INPUT → exit 2, never a throw.
+    plan = PlanSchema.parse(JSON.parse(raw));
+  } catch (err) {
+    // A zod error is flattened to the one-line issue form (narration stays
+    // line-based); a JSON.parse error narrates its own message.
+    const detail = hasIssues(err) ? issueMessage(err) : messageOf(err);
+    narrateIfHuman(
+      io,
+      mode,
+      `invalid input for 'run-plan': plan file '${input.plan}' is not a valid plan: ${detail}`,
+    );
+    return EXIT_CODES.usage;
+  }
+
+  return runPlanThroughKernel('run-plan', plan, input, io, mode, opts);
 }
