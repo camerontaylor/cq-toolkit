@@ -130,7 +130,13 @@ critical/major finding coexists with this PR.
   `pi-opencode/opencode-go/deepseek-v4.1-flash`, thinking high) **confirmed
   the `prepack` high fix closed** with a clean-clone control pack, and posted
   as a PR comment.
-- round 5 (final-head verification of the r4 doc-only fixes): _pending_.
+- round 5 (final-head verification of the r4 doc-only fixes): 3 low findings
+  — **all fixed** (doc-only: verification-table row label, CHANGELOG soak
+  qualifier, evidence-README second catch-up). Fresh reviewer `2ef6a93`
+  (paseo `pi-opencode/opencode-go/deepseek-v4.1-flash`, thinking medium); no
+  critical/major. This is the final fresh-reviewer round (cap reached); the
+  three low fixes are documentation-only and the r5-verified green gates and
+  packed content are unchanged by them.
 - VB5 batch gate (final goal T5.3): _pending_.
 
 ### Round-1 dispositions
@@ -171,14 +177,15 @@ dismiss / defer→issue) before merge once the App review posts.
 Three deterministic gate runs per `docs/coderabbit-review.md` §5 (before
 cycle 1, between cycles, after cycle-2 addressing); all commands exit 0:
 
-| gate run                   | `format:check` | `check:static`                 | `knip` | `denylist`                       |
-| -------------------------- | -------------- | ------------------------------ | ------ | -------------------------------- |
-| pre-cycle-1                | 0              | 0 (`0 error(s) <= baseline 0`) | 0      | 0 (`tree scan clean, 9 classes`) |
-| between cycles (`b488cb7`) | 0              | 0                              | 0      | 0                                |
-| post-cycle-2 (`04b67fd`)   | 0              | 0                              | 0      | 0                                |
-| post-catch-up (`88dc0e3`)  | 0              | 0                              | 0      | 0                                |
-| round-3 fix (`900043a`)    | 0              | 0                              | 0      | 0                                |
-| final head (`be42cd2`)     | 0              | 0                              | 0      | 0                                |
+| gate run                    | `format:check` | `check:static`                 | `knip` | `denylist`                       |
+| --------------------------- | -------------- | ------------------------------ | ------ | -------------------------------- |
+| pre-cycle-1                 | 0              | 0 (`0 error(s) <= baseline 0`) | 0      | 0 (`tree scan clean, 9 classes`) |
+| between cycles (`b488cb7`)  | 0              | 0                              | 0      | 0                                |
+| post-cycle-2 (`04b67fd`)    | 0              | 0                              | 0      | 0                                |
+| post-catch-up (`88dc0e3`)   | 0              | 0                              | 0      | 0                                |
+| round-3 fix (`900043a`)     | 0              | 0                              | 0      | 0                                |
+| catch-up head (`be42cd2`)   | 0              | 0                              | 0      | 0                                |
+| round-4 doc fix (`d911cae`) | 0              | 0                              | 0      | 0                                |
 
 Plus the three whitespace/conflict-marker checks
 (`git diff --check BASE HEAD`, `--cached`, unstaged) — all clean; `npm ci`

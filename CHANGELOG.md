@@ -121,7 +121,7 @@ release tooling — together with the fixtures/eval repo.
 - build!: Implement agent mechanical tooling ([#132](https://github.com/camerontaylor/cq-toolkit/pull/132))
 - feat(selfhost): T4.1 stage-2 automation switch — scheduled review-loop + merge-prs from source ([#182](https://github.com/camerontaylor/cq-toolkit/pull/182))
 - docs: T4.4 generated op reference + README doctrine + policy adoption guide ([#197](https://github.com/camerontaylor/cq-toolkit/pull/197))
-- docs: T4.5 phase-4 evidence — soak ≥5, ratchet self-evidence, DoD 2/3 table ([#201](https://github.com/camerontaylor/cq-toolkit/pull/201))
+- docs: T4.5 phase-4 evidence — soak ≥5, ratchet self-evidence, DoD 2/3 table ([#201](https://github.com/camerontaylor/cq-toolkit/pull/201)) — soak recorded **NOT MET**, see `SELF-HOSTING.md` §Soak
 
 ### Review-debt burn-down (RD lane)
 
