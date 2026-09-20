@@ -151,4 +151,24 @@ describe('makeMetricSource', () => {
     });
     await expect(unparsable(ws)).resolves.toBeNull();
   });
+
+  test('file coverage-json rounds total.lines.pct to integer percent (shared granularity law)', async () => {
+    const ws = await makeTmpDir();
+    await writeFile(join(ws, 'coverage-summary.json'), '{"total":{"lines":{"pct":93.46}}}', 'utf8');
+    const source = makeMetricSource(runnerOf({ stdout: '', stderr: '', exitCode: 0 }), {
+      kind: 'file',
+      path: 'coverage-summary.json',
+      parse: 'coverage-json',
+    });
+    await expect(source(ws)).resolves.toEqual({ total: { lines: { pct: 93 } } });
+    // A hostile/missing shape passes through untouched — the adapter rules it
+    // unusable (I5), never a fabricated reading.
+    await writeFile(join(ws, 'weird.json'), '"not an object"', 'utf8');
+    const weird = makeMetricSource(runnerOf({ stdout: '', stderr: '', exitCode: 0 }), {
+      kind: 'file',
+      path: 'weird.json',
+      parse: 'coverage-json',
+    });
+    await expect(weird(ws)).resolves.toBe('not an object');
+  });
 });

@@ -79,7 +79,10 @@ file`); it is what makes template drift visible in diffs.
 Every hand-carried workflow is the same template that ships in `policy/` —
 nothing is throwaway. The placeholder ratchet script was replaced (H4) by the
 engine-based runners `scripts/ratchet-typecheck.mjs` and
-`scripts/ratchet-check.mjs`, whose committed baselines live in `baselines/`
+`scripts/ratchet-check.mjs` (kept as local drivers), and the required ratchet
+workflow (`ratchet.yml`) drives the shipped CLI subcommands
+(`ratchet.checkRatchet`, `ratchet.monotonicGuard`); their committed baselines
+live in `baselines/`
 (one schemaVersion-1 file per (target, metric), written by
 `createCaptureBaseline`). Concretely, in this repo: `.github/workflows/ci.yml`
 is `required-check.md` instantiated, the three queue workflows are the three

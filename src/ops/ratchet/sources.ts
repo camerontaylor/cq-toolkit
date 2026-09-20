@@ -28,13 +28,17 @@ import type { MetricSource } from './metricRegistry.js';
  * plain JSON:
  *   - `command` — run a check through the injected RunCheck. `parse:'text'`
  *     hands the adapter the combined stdout+stderr, `parse:'json'`
- *     JSON.parses stdout, and `parse:'tsc-text'` applies the tsc evidence
+ *     JSON.parses stdout, `parse:'tsc-text'` applies the tsc evidence
  *     classification (a clean exit 0 certifies the authoritative zero
  *     `{count: 0}`; a non-zero with captured diagnostics hands over the raw
  *     text; anything else is null — the `scripts/ratchet-lib.mjs`
- *     `typecheckEvidence` rule, kept here for the JSON op boundary).
+ *     `typecheckEvidence` rule, kept here for the JSON op boundary), and
+ *     `parse:'coverage-json'` JSON.parses the body and normalizes
+ *     `total.lines.pct` to integer percent (the shared granularity law —
+ *     sub-1% cross-runner float noise must never become a verdict).
  *   - `file` — read `path` (absolute, or workspace-relative) and parse it
- *     (`parse:'json'` for an istanbul coverage-summary).
+ *     the same way (`parse:'coverage-json'` for an istanbul
+ *     coverage-summary).
  *   - `raw` — the raw value itself, verbatim (a caller that already holds
  *     plain JSON evidence).
  */
@@ -45,19 +49,47 @@ export type MetricSourceSpec =
       args: string[];
       cwd?: string;
       timeoutMs?: number;
-      parse: 'text' | 'json' | 'tsc-text';
+      parse: 'text' | 'json' | 'tsc-text' | 'coverage-json';
     }
-  | { kind: 'file'; path: string; parse: 'text' | 'json' }
+  | { kind: 'file'; path: string; parse: 'text' | 'json' | 'coverage-json' }
   | { kind: 'raw'; raw: unknown };
 
-/** Parse captured text per the spec's format; an unparsable JSON body is null (I5). */
-function parseCaptured(text: string, parse: 'text' | 'json'): unknown | null {
-  if (parse === 'text') return text;
+/**
+ * Integer-percent normalization of a coverage summary (the ONE shared
+ * rounding point, mirroring `scripts/ratchet-lib.mjs`'s
+ * `normalizeCoverageSummary`): v8's 2-decimal `total.lines.pct` is NOT stable
+ * across environments (93.46 locally vs 93.38 in CI), so the reading is
+ * rounded to integer percent before any adapter sees it. A hostile/missing
+ * shape passes through untouched — the adapter rules it unusable (I5), never
+ * a fabricated reading.
+ */
+function normalizeCoverage(parsed: unknown): unknown {
+  if (typeof parsed !== 'object' || parsed === null) return parsed;
   try {
-    return JSON.parse(text) as unknown;
+    const total = (parsed as { total?: unknown }).total;
+    if (typeof total !== 'object' || total === null) return parsed;
+    const lines = (total as { lines?: unknown }).lines;
+    if (typeof lines !== 'object' || lines === null) return parsed;
+    const record = lines as { pct?: unknown };
+    if (typeof record.pct === 'number' && Number.isFinite(record.pct)) {
+      record.pct = Math.round(record.pct);
+    }
+  } catch {
+    // getter/hostile shape: leave as-is (the adapter rules it unusable)
+  }
+  return parsed;
+}
+
+/** Parse captured text per the spec's format; an unparsable JSON body is null (I5). */
+function parseCaptured(text: string, parse: 'text' | 'json' | 'coverage-json'): unknown | null {
+  if (parse === 'text') return text;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
   } catch {
     return null;
   }
+  return parse === 'coverage-json' ? normalizeCoverage(parsed) : parsed;
 }
 
 /**

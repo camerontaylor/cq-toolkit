@@ -66,3 +66,23 @@ export function getAdapter(id: string): MetricAdapter | undefined {
 export function listAdapters(): string[] {
   return [...adapters.keys()].sort();
 }
+
+/**
+ * Register the three SHIPPED first-party adapters when absent (idempotent).
+ * The JSON-dispatched ratchet ops call this at importer time so the CLI can
+ * resolve the shipped metric ids without a caller wiring them; the open
+ * registry contract is unchanged — third-party sources still register
+ * explicitly, and scripts/tests keep doing so. Dynamic imports keep the
+ * adapter modules out of this module's eager graph (and there is no runtime
+ * cycle: the adapters import only TYPES from here).
+ */
+export async function ensureBuiltinAdapters(): Promise<void> {
+  const [typecheck, coverage, complexity] = await Promise.all([
+    import('./adapters/typecheckCount.js'),
+    import('./adapters/coverage.js'),
+    import('./adapters/complexity.js'),
+  ]);
+  for (const adapter of [typecheck.typecheckCount, coverage.coverage, complexity.complexity]) {
+    if (adapters.has(adapter.id) === false) registerAdapter(adapter);
+  }
+}

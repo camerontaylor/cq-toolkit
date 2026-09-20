@@ -105,9 +105,11 @@ through `createCheckRatchet` against the committed per-(target, metric) baseline
 under `baselines/` — a missing baseline fails with the I5 message, a count above
 baseline fails with "only tightening passes", and a nonzero-exit run with no
 parsable diagnostics is refused before the engine ever sees a reading. The same
-rule now covers every wired summary (`scripts/ratchet-check.mjs` also checks the
-coverage baseline and, with `--base`, runs the diff monotonicity guard over a
-PR's baseline changes).
+rule now covers every wired summary: the required ratchet workflow
+(`policy/templates/ratchet.yml`) drives the shipped CLI ops —
+`ratchet.checkRatchet` over the typecheck and coverage summaries and
+`ratchet.monotonicGuard` over a PR's baseline diff — while
+`scripts/ratchet-check.mjs` remains a local driver over the same engine.
 
 ## I6 — every worker is a fresh isolated invocation
 

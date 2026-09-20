@@ -47,14 +47,14 @@ export const MetricSourceSpecSchema = z.discriminatedUnion('kind', [
       args: z.array(z.string()),
       cwd: z.string().min(1).exactOptional(),
       timeoutMs: z.number().int().positive().exactOptional(),
-      parse: z.enum(['text', 'json', 'tsc-text']),
+      parse: z.enum(['text', 'json', 'tsc-text', 'coverage-json']),
     })
     .strict(),
   z
     .object({
       kind: z.literal('file'),
       path: z.string().min(1),
-      parse: z.enum(['text', 'json']),
+      parse: z.enum(['text', 'json', 'coverage-json']),
     })
     .strict(),
   z.object({ kind: z.literal('raw'), raw: z.unknown() }).strict(),
@@ -134,7 +134,11 @@ export const registry: OpRegistryEntry[] = [
         import('./checkRatchet.js'),
         import('./sources.js'),
         import('../gates/checkRunner.js'),
-      ]).then(([m, sources, runner]) => {
+        import('./metricRegistry.js'),
+      ]).then(async ([m, sources, runner, metricRegistry]) => {
+        // The CLI has no caller to register the shipped adapters: bind them
+        // here (idempotent), keeping the open registry contract elsewhere.
+        await metricRegistry.ensureBuiltinAdapters();
         const op: Op<CheckRatchetCommandInput, CheckRatchetOutcome> = async (input) =>
           m.createCheckRatchet(
             new Map([
@@ -159,7 +163,9 @@ export const registry: OpRegistryEntry[] = [
         import('./captureBaseline.js'),
         import('./sources.js'),
         import('../gates/checkRunner.js'),
-      ]).then(([m, sources, runner]) => {
+        import('./metricRegistry.js'),
+      ]).then(async ([m, sources, runner, metricRegistry]) => {
+        await metricRegistry.ensureBuiltinAdapters();
         const op: Op<CaptureBaselineCommandInput, CaptureBaselineOutcome> = async (input) =>
           m.createCaptureBaseline(
             new Map([
