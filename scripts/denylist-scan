@@ -248,6 +248,15 @@ function splitKeyValue(s, where) {
 // finding — accepted-but-unmatchable is a misleading leg failure.
 // Probe paths are repo-relative by discipline (both repos' patterns.yml
 // use only in-repo paths).
+// Windows device names: reserved with any extension and in any case
+// (NUL, NUL.txt, and nul all address the device), so the probe-path check
+// compares the extension-stripped uppercased stem against this set.
+const WINDOWS_DEVICE_NAMES = new Set([
+  'CON', 'PRN', 'AUX', 'NUL',
+  'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
+  'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
+]);
+
 function assertRelativeProbePath(value, where) {
   if (path.win32.isAbsolute(value)) {
     throw new ConfigError(`${where}: probe_path must be repo-relative, got absolute "${value}"`);
@@ -255,6 +264,12 @@ function assertRelativeProbePath(value, where) {
   if (value.includes('\\')) {
     throw new ConfigError(`${where}: probe_path must be '/'-separated, got "${value}"`);
   }
+  // Windows-plain-name rejection (review-debt cq-toolkit#187, routed from
+  // fixtures#15): probe placement must succeed on a Windows host too, where
+  // a segment carrying a reserved character (<>:"|?*), a control character,
+  // or a device name fails creation or addresses a device/ADS. The device
+  // check runs on the extension-stripped stem (NUL.txt is reserved like NUL)
+  // of the already-canonicalized segment, case-insensitively.
   for (const seg of value.split('/')) {
     if (seg === '') {
       throw new ConfigError(`${where}: probe_path must not contain empty segments, got "${value}"`);
@@ -262,6 +277,13 @@ function assertRelativeProbePath(value, where) {
     const canonical = seg.replace(/[ .]+$/, '');
     if (canonical !== seg || canonical === '.' || canonical === '..') {
       throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (trailing dots/spaces and "."/".." spellings are rejected — the fs layer canonicalizes them)`);
+    }
+    if (/[<>:\"|?*\x00-\x1f\x7f-\x9f]/.test(seg)) {
+      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows-reserved and control characters are rejected — probe placement must succeed on Windows hosts)`);
+    }
+    const stem = seg.split('.')[0].toUpperCase();
+    if (WINDOWS_DEVICE_NAMES.has(stem)) {
+      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows device names are rejected with any extension — probe placement must succeed on Windows hosts)`);
     }
   }
 }
@@ -1136,7 +1158,8 @@ function selfTestWorkflowI4() {
 
 // Pure-text parser guards (no gitleaks): (a) probe_path must stay
 // repo-relative — absolute, backslash-separated, non-plain-segment (`..`,
-// trailing dots/spaces, empty), and empty-string values are rejected at
+// trailing dots/spaces, empty), Windows-reserved and control characters,
+// and device names (any extension, any case) are rejected at
 // parse time, so the self-test probe placement (writeProbes' path.join)
 // can never be steered outside its fixture directory on either platform,
 // while legal relative paths still parse (accept-cases below and the
@@ -1159,6 +1182,19 @@ function selfTestParserGuards(rules) {
     '. ..',
     'probe..',
     'a//b.txt',
+    // Windows-plain-name rejection (review-debt #187): reserved characters,
+    // control characters, and device names (any extension, any case).
+    'COM1.txt',
+    'nul',
+    'con',
+    'dir/LPT9.log',
+    'a<b.txt',
+    'a|b.txt',
+    'que?.txt',
+    'a:b.txt',
+    'star*.txt',
+    'quo"te.txt',
+    'a\x01b.txt',
   ];
   for (const probe of rejectCases) {
     const text = [
