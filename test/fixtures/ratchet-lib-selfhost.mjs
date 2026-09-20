@@ -47,6 +47,10 @@ await check('loadEngine returns the registry + format + guard surface', () => {
   ok(typeof engine.renderBaseline === 'function');
   ok(typeof engine.checkDiffMonotonicity === 'function');
   ok(typeof engine.formatViolations === 'function');
+  // The diff-side coverage re-basis normalizer is the ENGINE's single
+  // implementation, shared with the ratchet.monotonicGuard CLI op (review
+  // finding 1).
+  ok(typeof engine.normalizeBaselineDiffValues === 'function');
 });
 await check('the driver-side adapters are the engine-authored ones', () => {
   equal(engine.adapters.typecheckCount.id, 'typecheck-count');
@@ -164,7 +168,7 @@ await check(
       '   "value": 91.6,',
       ' }',
     ].join('\n');
-    const normalized = lib.normalizeBaselineDiffValues(diff);
+    const normalized = engine.normalizeBaselineDiffValues(diff);
     ok(normalized.includes('-  "value": 93,'));
     ok(normalized.includes('+  "value": 93,'));
     ok(normalized.includes('   "value": 92,'));
@@ -180,17 +184,17 @@ await check('normalizeBaselineDiffValues leaves non-baseline files byte-identica
     '-const v = { "value": 1.5 };',
     '+const w = { "value": 2.5 };',
   ].join('\n');
-  equal(lib.normalizeBaselineDiffValues(diff), diff);
+  equal(engine.normalizeBaselineDiffValues(diff), diff);
 });
 await check('guard verdict (a): re-basis 93.46 -> 93 is an equal no-op — pass', () => {
   const verdict = engine.checkDiffMonotonicity(
-    lib.normalizeBaselineDiffValues(baselineValueDiff('93.46', '93')),
+    engine.normalizeBaselineDiffValues(baselineValueDiff('93.46', '93')),
   );
   deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
 });
 await check('guard verdict (b): true loosening 93 -> 92 still fails', () => {
   const verdict = engine.checkDiffMonotonicity(
-    lib.normalizeBaselineDiffValues(baselineValueDiff('93', '92')),
+    engine.normalizeBaselineDiffValues(baselineValueDiff('93', '92')),
   );
   equal(verdict.ok, false);
   equal(verdict.violations.length, 1);
@@ -203,7 +207,7 @@ await check(
   'guard verdict (c): fractional tighten 92.4 -> 93 passes as a tighten (92.4 -> 92)',
   () => {
     const verdict = engine.checkDiffMonotonicity(
-      lib.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
+      engine.normalizeBaselineDiffValues(baselineValueDiff('92.4', '93')),
     );
     deepEqual(verdict, { ok: true, violations: [], filesChecked: 1 });
   },
@@ -232,7 +236,7 @@ function baselineValueDiffFor(file, direction, oldValue, newValue) {
 }
 await check('normalizeBaselineDiffValues leaves a complexity section byte-identical', () => {
   const diff = baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49');
-  equal(lib.normalizeBaselineDiffValues(diff), diff);
+  equal(engine.normalizeBaselineDiffValues(diff), diff);
 });
 await check(
   'normalizeBaselineDiffValues: the coverage flag RESETS per header — a complexity section following a coverage one is never normalized',
@@ -244,7 +248,7 @@ await check(
       baselineValueDiff('93.46', '93'),
       baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49'),
     ].join('\n');
-    const normalizedRealistic = lib.normalizeBaselineDiffValues(realistic);
+    const normalizedRealistic = engine.normalizeBaselineDiffValues(realistic);
     ok(normalizedRealistic.includes('-  "value": 93,')); // coverage side: normalized
     ok(normalizedRealistic.includes('-  "value": 2.40,')); // complexity side: untouched
     ok(normalizedRealistic.includes('+  "value": 2.49,')); // complexity side: untouched
@@ -258,14 +262,14 @@ await check(
       '@@ -0,0 +1,8 @@',
       '+  "value": 2.49,',
     ].join('\n');
-    equal(lib.normalizeBaselineDiffValues(added), added);
+    equal(engine.normalizeBaselineDiffValues(added), added);
   },
 );
 await check(
   'guard verdict: complexity 2.40 -> 2.49 is STILL a loosened violation (not normalized away)',
   () => {
     const verdict = engine.checkDiffMonotonicity(
-      lib.normalizeBaselineDiffValues(
+      engine.normalizeBaselineDiffValues(
         baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.40', '2.49'),
       ),
     );
@@ -279,7 +283,7 @@ await check(
 );
 await check('guard verdict: a complexity TIGHTEN at 2 decimals still passes untouched', () => {
   const verdict = engine.checkDiffMonotonicity(
-    lib.normalizeBaselineDiffValues(
+    engine.normalizeBaselineDiffValues(
       baselineValueDiffFor(COMPLEXITY_FILE, 'lower-is-better', '2.49', '2.40'),
     ),
   );

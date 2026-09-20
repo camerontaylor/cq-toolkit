@@ -19,7 +19,8 @@
 // `--base <ref>` ADDITIONALLY runs the monotonic guard over the PR-shaped
 // diff: `git diff <ref>...HEAD` is normalized to the readings' integer-pct
 // basis (both diff sides, coverage-baseline sections only — see
-// normalizeBaselineDiffValues in ratchet-lib.mjs) and fed to
+// engine.normalizeBaselineDiffValues, the ONE implementation shared with the
+// ratchet.monotonicGuard CLI op) and fed to
 // checkDiffMonotonicity; any baseline movement in the diff that loosens (or
 // flips a direction/unit) is named via formatViolations and fails the run —
 // thresholds only tighten, both live AND in the diff a branch wants to
@@ -38,7 +39,6 @@ import {
   ROOT,
   fail,
   loadEngine,
-  normalizeBaselineDiffValues,
   runCoverageRaw,
   runTypecheckRaw,
   typecheckEvidence,
@@ -178,7 +178,7 @@ if (base !== null) {
   // #120), not a path prefix: engine.baselineRelPath computes the same
   // deterministic path the committed baseline must live at.
   const verdict = engine.checkDiffMonotonicity(
-    normalizeBaselineDiffValues(diff.stdout, engine.baselineRelPath('coverage', 'coverage')),
+    engine.normalizeBaselineDiffValues(diff.stdout, engine.baselineRelPath('coverage', 'coverage')),
   );
   if (verdict.ok === false) {
     for (const line of engine.formatViolations(verdict.violations)) {

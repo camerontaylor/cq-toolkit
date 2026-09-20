@@ -107,8 +107,10 @@ jobs:
           PR_BASE: ${{ github.base_ref }}
         run: |
           # A PR may only TIGHTEN committed baselines. The diff is written to
-          # a file so a large diff never rides argv; the op reads it and
-          # judges baseline files alone.
+          # a file so a large diff never rides argv; the op reads it, applies
+          # the shared coverage integer-percent re-basis (45.46-style float
+          # noise must not read as a loosening against the rounded live
+          # reading), then judges baseline files alone.
           git diff "origin/${PR_BASE}...HEAD" > "${RUNNER_TEMP}/ratchet.diff"
           out="$(node dist/cli.js ratchet.monotonicGuard --diffPath="${RUNNER_TEMP}/ratchet.diff")"
           printf '%s\n' "$out"

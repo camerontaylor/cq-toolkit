@@ -128,6 +128,39 @@ describe('makeMetricSource', () => {
     await expect(source('/ws')).resolves.toBe(text);
   });
 
+  test('command tsc-text: compiler configuration/project-loading failures are non-passing (null)', async () => {
+    // The legacy classifier refused to count `error TSxxxx:` heads and
+    // `<file>.json(line,col): error TSxxxx:` heads as ordinary diagnostics
+    // (I5): a broken tsconfig must never masquerade as N real errors once a
+    // baseline is non-zero. Restored here for the JSON op boundary.
+    for (const text of [
+      "error TS18003: No inputs were found in configuration file 'tsconfig.json'.",
+      "tsconfig.json(1,2): error TS5023: Unknown compiler option 'x'.",
+      "error TS5083: Cannot read file 'tsconfig.json'.",
+    ]) {
+      for (const exitCode of [1, 2]) {
+        const source = makeMetricSource(runnerOf({ stdout: text, stderr: '', exitCode }), {
+          kind: 'command',
+          command: 'tsc',
+          args: [],
+          parse: 'tsc-text',
+        });
+        await expect(source('/ws')).resolves.toBeNull();
+      }
+    }
+    // A genuine diagnostic on the same exit still hands the text over — the
+    // guard is scoped to the configuration/project-loading shapes, not to
+    // every `error TS` prefix.
+    const real = 'src/a.ts(1,7): error TS2322: Type string is not assignable.\n';
+    const normal = makeMetricSource(runnerOf({ stdout: real, stderr: '', exitCode: 1 }), {
+      kind: 'command',
+      command: 'tsc',
+      args: [],
+      parse: 'tsc-text',
+    });
+    await expect(normal('/ws')).resolves.toBe(real);
+  });
+
   test('file reads a workspace-relative path and parses json; missing/unparsable are null', async () => {
     const ws = await makeTmpDir();
     await writeFile(join(ws, 'coverage-summary.json'), '{"total":{"lines":{"pct":87}}}', 'utf8');

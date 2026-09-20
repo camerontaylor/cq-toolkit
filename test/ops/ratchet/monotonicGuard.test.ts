@@ -61,7 +61,11 @@ import { spawnSync } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
+import {
+  baselineRelPath,
+  normalizeBaselineDiffValues,
+  renderBaseline,
+} from '../../../src/ops/ratchet/format.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
 import {
   checkDiffMonotonicity,
@@ -1330,5 +1334,73 @@ describe('formatViolations', () => {
     expect(formatViolations(verdict.violations)).toEqual([
       `${REL}: unparsable baseline diff — non-passing evidence (I5)`,
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coverage diff re-basis (review finding 1): the ONE normalizer shared by
+// the ratchet.monotonicGuard CLI op and the local ratchet-check driver.
+// ---------------------------------------------------------------------------
+
+const REL_CX = baselineRelPath('complexity', 'complexity');
+
+function cxBody(value: number): string {
+  return renderBaseline({
+    schemaVersion: 1,
+    target: 'complexity',
+    metric: 'complexity',
+    direction: 'lower-is-better',
+    value,
+    unit: 'avg-cx',
+    capturedAt: CAPTURED_AT,
+  });
+}
+
+describe('normalizeBaselineDiffValues (coverage integer-percent comparison basis)', () => {
+  test('a fractional re-basis 93.46 → 93 reads as the equal no-op it is', () => {
+    const raw = fullRewrite(REL_COV, covBody(93.46), covBody(93));
+    // Without a uniform basis the fractional old side reads as a loosening.
+    expect(checkDiffMonotonicity(raw).ok).toBe(false);
+    const normalized = normalizeBaselineDiffValues(raw, REL_COV);
+    expect(checkDiffMonotonicity(normalized)).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 1,
+    });
+  });
+
+  test('a TRUE loosening 93 → 92 still fails after normalization', () => {
+    const normalized = normalizeBaselineDiffValues(
+      fullRewrite(REL_COV, covBody(93), covBody(92)),
+      REL_COV,
+    );
+    const verdict = checkDiffMonotonicity(normalized);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) throw new Error('unreachable');
+    expect(formatViolations(verdict.violations)).toEqual([
+      `${REL_COV}: metric coverage loosened 93 → 92 — only tightening diffs pass`,
+    ]);
+  });
+
+  test('a fractional tighten 92.4 → 93 still passes (old side normalizes to 92)', () => {
+    const normalized = normalizeBaselineDiffValues(
+      fullRewrite(REL_COV, covBody(92.4), covBody(93)),
+      REL_COV,
+    );
+    expect(checkDiffMonotonicity(normalized)).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 1,
+    });
+  });
+
+  test('non-coverage sections are byte-identical: complexity keeps full precision', () => {
+    const raw = fullRewrite(REL_CX, cxBody(2.4), cxBody(2.49));
+    expect(normalizeBaselineDiffValues(raw, REL_COV)).toBe(raw);
+    // The real 2.40 → 2.49 loosening is NOT rounded into an equal no-op.
+    const verdict = checkDiffMonotonicity(normalizeBaselineDiffValues(raw, REL_COV));
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) throw new Error('unreachable');
+    expect(verdict.violations[0]?.why).toBe('loosened');
   });
 });

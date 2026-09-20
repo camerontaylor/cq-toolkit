@@ -186,9 +186,14 @@ export const registry: OpRegistryEntry[] = [
     inputSchema: MonotonicGuardCommandInputSchema,
     // Pure guard; the only I/O is reading a diff FILE when the caller hands a
     // path (keeping a large diff out of argv). An unreadable file is an
-    // honest `failed`, never a fabricated pass.
+    // honest `failed`, never a fabricated pass. The diff is rewritten to the
+    // coverage integer-percent comparison basis BEFORE the pure guard judges
+    // it (the same normalization the local ratchet-check driver applies), so
+    // a fractional `93.46 → 93` re-basis cannot read as a loosening while
+    // the live coverage reading is rounded to 93 (review finding 1).
     importer: () =>
-      import('./monotonicGuard.js').then((m) => {
+      Promise.all([import('./monotonicGuard.js'), import('./format.js')]).then(([m, format]) => {
+        const coverageBaselinePath = format.baselineRelPath('coverage', 'coverage');
         const op: Op<MonotonicGuardCommandInput, DiffVerdict> = async (input) => {
           let diff: string;
           if (input.diff !== undefined) {
@@ -209,7 +214,12 @@ export const registry: OpRegistryEntry[] = [
               };
             }
           }
-          return { status: 'ok', value: m.checkDiffMonotonicity(diff) };
+          return {
+            status: 'ok',
+            value: m.checkDiffMonotonicity(
+              format.normalizeBaselineDiffValues(diff, coverageBaselinePath),
+            ),
+          };
         };
         return op as Op<unknown, unknown>;
       }),
@@ -224,7 +234,11 @@ export const registry: OpRegistryEntry[] = [
       Promise.all([import('./proposeBaselineUpdate.js'), import('./effects.js')]).then(
         ([m, effects]) => {
           const op: Op<ProposeInput, ProposeOutcome> = async (input) =>
-            m.createProposeBaselineUpdate(effects.makeSubprocessBaselinePrEffects(input.ws))(input);
+            m.createProposeBaselineUpdate(
+              // The effects capture the proposal's base so findOpenPrByHead can
+              // disambiguate the (head, base) pair (one head, several bases).
+              effects.makeSubprocessBaselinePrEffects(input.ws, input.base),
+            )(input);
           return op as Op<unknown, unknown>;
         },
       ),

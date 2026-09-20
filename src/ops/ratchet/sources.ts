@@ -93,17 +93,33 @@ function parseCaptured(text: string, parse: 'text' | 'json' | 'coverage-json'): 
 }
 
 /**
+ * Compiler configuration / project-loading failures named by the legacy
+ * classifier (`scripts/ratchet-lib.mjs` `typecheckEvidence`): a location-free
+ * `error TSxxxx:` (e.g. TS18003) or a `<file>.json(line,col): error TSxxxx:`
+ * (e.g. TS5023 unknown option, TS5083 cannot read project). These are
+ * NON-PASSING evidence, never counted as ordinary diagnostics — a future
+ * non-zero baseline must not let a broken tsconfig masquerade as N errors
+ * (I5).
+ */
+const TSC_CONFIG_ERROR = /^error TS\d+:|^.*\.json\(\d+,\d+\): error TS\d+:/m;
+
+/**
  * The tsc evidence classification over one captured check (the JSON-boundary
  * mirror of `scripts/ratchet-lib.mjs`'s `typecheckEvidence`): exit 0 certifies
  * zero errors, and only over an EMPTY capture (non-empty success output is a
  * configuration/banner fault, never a clean zero); exits 1/2 carry the raw
- * diagnostic text the adapter counts; every other outcome (null exit — signal/
- * timeout/spawn fault — or an abnormal code) is non-passing evidence.
+ * diagnostic text the adapter counts — UNLESS the capture is a compiler
+ * configuration/project-loading failure, which is non-passing evidence
+ * (null); every other outcome (null exit — signal/timeout/spawn fault — or
+ * an abnormal code) is non-passing evidence.
  */
 function parseTscCaptured(raw: RawCheckOutput): unknown | null {
   const text = `${raw.stdout}${raw.stderr}`;
   if (raw.exitCode === 0) return text.trim() === '' ? { count: 0 } : null;
-  if (raw.exitCode === 1 || raw.exitCode === 2) return text;
+  if (raw.exitCode === 1 || raw.exitCode === 2) {
+    if (TSC_CONFIG_ERROR.test(text)) return null;
+    return text;
+  }
   return null;
 }
 

@@ -12,6 +12,7 @@
 //      CheckRunner/gh/git seams are bound per dispatch and are closure-only
 //      at construction (the inertness proof).
 import { describe, expect, test } from 'vitest';
+import { baselineRelPath, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import { registry } from '../../../src/ops/ratchet/registry.js';
 
 const ENTRY_NAMES = [
@@ -92,4 +93,49 @@ describe('ratchet family op registry entries', () => {
       expect(typeof op).toBe('function');
     },
   );
+
+  test('ratchet.monotonicGuard normalizes the coverage re-basis before judging (review finding 1)', async () => {
+    // A hand-committed fractional coverage baseline re-based to the integer
+    // the live `coverage-json` reading uses must read as an equal no-op, not
+    // a loosening — the op normalizes before the pure guard judges.
+    const op = await entryByName('ratchet.monotonicGuard').importer();
+    const reBasis = await op({ diff: coverageDiff(93.46, 93) });
+    expect(reBasis).toMatchObject({
+      status: 'ok',
+      value: { ok: true, violations: [], filesChecked: 1 },
+    });
+    const loosened = await op({ diff: coverageDiff(93, 92) });
+    expect(loosened).toMatchObject({
+      status: 'ok',
+      value: { ok: false, violations: [{ why: 'loosened' }] },
+    });
+  });
 });
+
+/** A full-file-rewrite diff over the committed coverage baseline path. */
+function coverageDiff(oldValue: number, newValue: number): string {
+  const rel = baselineRelPath('coverage', 'coverage');
+  const body = (value: number): string[] =>
+    renderBaseline({
+      schemaVersion: 1,
+      target: 'coverage',
+      metric: 'coverage',
+      direction: 'higher-is-better',
+      value,
+      unit: 'pct',
+      capturedAt: '2026-09-15T19:20:25.084Z',
+    })
+      .split('\n')
+      .filter((line) => line !== '');
+  return (
+    [
+      `diff --git a/${rel} b/${rel}`,
+      'index 1111111..2222222 100644',
+      `--- a/${rel}`,
+      `+++ b/${rel}`,
+      '@@ -1,7 +1,7 @@',
+      ...body(oldValue).map((line) => `-${line}`),
+      ...body(newValue).map((line) => `+${line}`),
+    ].join('\n') + '\n'
+  );
+}

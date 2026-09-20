@@ -149,11 +149,12 @@ export async function withGitAskpass(token, fn) {
 
 /**
  * Build (ensureDist) then import the BUILT engine. Returns the op factories,
- * the adapter registry, the format helpers, the diff monotonic guard, the
- * baseline-proposal factory, and the first-party adapters this lane's
- * runners register (registration is the caller's job — registerAdapter
- * throws on a duplicate id, and the registry is per-process runtime wiring,
- * exactly as the engine's own docs require).
+ * the adapter registry, the format helpers (including the shared diff-side
+ * coverage re-basis normalizer `normalizeBaselineDiffValues`), the diff
+ * monotonic guard, the baseline-proposal factory, and the first-party
+ * adapters this lane's runners register (registration is the caller's job —
+ * registerAdapter throws on a duplicate id, and the registry is per-process
+ * runtime wiring, exactly as the engine's own docs require).
  */
 export async function loadEngine() {
   ensureDist();
@@ -179,6 +180,7 @@ export async function loadEngine() {
     parseBaseline: format.parseBaseline,
     renderBaseline: format.renderBaseline,
     tightens: format.tightens,
+    normalizeBaselineDiffValues: format.normalizeBaselineDiffValues,
     checkDiffMonotonicity: guard.checkDiffMonotonicity,
     formatViolations: guard.formatViolations,
     createProposeBaselineUpdate: propose.createProposeBaselineUpdate,
@@ -277,111 +279,11 @@ export function normalizeCoverageSummary(summary) {
   return summary;
 }
 
-// The diff-side twin of normalizeCoverageSummary's granularity law — and it
-// applies to COVERAGE baselines ONLY: integer-pct is the coverage reading's
-// granularity (normalizeCoverageSummary rounds the live reading the same
-// way), so only a fractional COVERAGE baseline is normalized on the diff
-// side. A fractional NON-coverage metric (complexity avg-cx lives at 2
-// decimals) must pass through untouched — normalizing it would round
-// `2.40 → 2.49` into an equal no-op and MASK a real loosening; complexity's
-// meaningful step is far below 1. The value-token shape mirrors the engine
-// guard's own VALUE_RE (monotonicGuard) exactly — strict JSON number,
-// terminator lookahead — so normalization can only ever rewrite a token the
-// guard would read.
-const DIFF_VALUE_TOKEN =
-  /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
-const COVERAGE_BASELINE_SECTION = /^baselines\/coverage/;
-const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
-
-/** Path after a `+++ `/`--- ` header, prefix- and timestamp-stripped; null for /dev/null. */
-function diffHeaderPath(line) {
-  const raw = line.slice(4);
-  if (raw.startsWith('/dev/null')) return null;
-  const path = raw.split('\t')[0];
-  for (const prefix of DIFF_PATH_PREFIXES) {
-    if (path.startsWith(prefix)) return path.slice(prefix.length);
-  }
-  return path;
-}
-
-/**
- * Uniform comparison basis for the diff-mode guard — COVERAGE baselines
- * only: rewrite every `"value": <non-integer>` token to the SAME integer
- * normalization the live coverage readings use (Math.round), on every
- * `-`/`+`/context line inside baselines/coverage* sections only.
- *
- * Rationale: a baseline and a reading must be compared in the SAME
- * granularity, and integer-pct is the COVERAGE reading's granularity
- * (normalizeCoverageSummary) — a fractional committed coverage baseline
- * would be judged against a differently-scaled number. The re-basis hunk
- * `93.46 → 93` must read as the no-op it is (both sides normalize to 93:
- * equal passes), while a TRUE loosening (`93 → 92`) still fails and a
- * genuine tighten in fractional clothing (`92.4 → 93`, old side normalizes
- * to 92) still passes as a tighten.
- *
- * SCOPE IS DELIBERATELY NARROW (PR-105 round-2 finding 4): other metrics'
- * granularity is their own — complexity avg-cx lives at 2 decimals, where
- * `2.40 → 2.49` is a REAL change, not noise — so their sections pass through
- * byte-identical and the guard judges them at full precision. Normalizing
- * them would round the loosening into an equal no-op and mask it.
- *
- * This is a symmetric COMPARISON-BASIS normalization applied to both diff
- * sides alike — never a guard exception: it cannot flip a loosening into a
- * pass, only remove sub-granularity float noise from both sides. The engine
- * (monotonicGuard) is untouched; the rewritten text is what it judges.
- * Sections are attributed by their `---`/`+++` file headers (before the
- * first `@@` — after it, `---`-prefixed lines are removed CONTENT and are
- * normalized like any other content line); every other file's diff passes
- * through byte-identical, so a `"value": 1.5` in a source-file hunk is
- * never touched.
- */
-export function normalizeBaselineDiffValues(diff, exactCoverageBaselinePath) {
-  const out = [];
-  let isCoverageSection = false;
-  let inHunk = false;
-  for (const line of String(diff).split('\n')) {
-    if (line.startsWith('diff --git ')) {
-      isCoverageSection = false; // re-resolved by this section's own headers
-      inHunk = false;
-      out.push(line);
-      continue;
-    }
-    if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
-      const path = diffHeaderPath(line);
-      // Assigned PER HEADER, never only-if-matches: a sibling file's header
-      // must RESET the flag, so a non-coverage section following a coverage
-      // one can never inherit its normalization. Keyed on the EXACT
-      // coverage-baseline path when the caller provides it (review-debt
-      // #120: a path-prefix regex would also catch an unrelated baseline
-      // whose target merely starts with 'coverage' — exact identity, not
-      // similarity); the prefix remains the fallback for callers without
-      // an engine at hand.
-      isCoverageSection =
-        path !== null &&
-        (exactCoverageBaselinePath !== undefined
-          ? path === exactCoverageBaselinePath
-          : COVERAGE_BASELINE_SECTION.test(path));
-      out.push(line);
-      continue;
-    }
-    if (line.startsWith('@@')) {
-      inHunk = true; // from here on, `---`-prefixed lines are removed content
-      out.push(line);
-      continue;
-    }
-    if (
-      isCoverageSection &&
-      (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))
-    ) {
-      out.push(
-        line.replace(DIFF_VALUE_TOKEN, (_, head, num) => head + String(Math.round(Number(num)))),
-      );
-      continue;
-    }
-    out.push(line);
-  }
-  return out.join('\n');
-}
+// The diff-side coverage re-basis normalizer now lives ONCE in the engine
+// (dist/ops/ratchet/format.js: normalizeBaselineDiffValues) and is surfaced
+// through loadEngine above, so the required-workflow CLI op
+// (ratchet.monotonicGuard) and this local driver share one implementation
+// (review finding 1).
 
 /**
  * Edit-then-create recovery for the proposal upsert (PR-105 round-2 finding

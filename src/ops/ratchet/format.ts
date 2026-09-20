@@ -183,3 +183,122 @@ export function tightens(prev: number, next: number, d: Direction): boolean {
 export function loosens(prev: number, next: number, d: Direction): boolean {
   return d === 'lower-is-better' ? next > prev : next < prev;
 }
+
+// ---------------------------------------------------------------------------
+// Coverage diff re-basis — the uniform comparison basis for the diff guard
+// ---------------------------------------------------------------------------
+
+/**
+ * Strict JSON-number token with a terminator lookahead (the guard's own
+ * VALUE_RE shape, mirrored): a fractional baseline `"value"` is the only
+ * thing this rewrites. Global for `replace` reuse (String.replace resets
+ * `lastIndex`), never shared across a live `exec`.
+ */
+const DIFF_VALUE_TOKEN =
+  /("value"\s*:\s*)(-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)(?=[,}\s]|$)/g;
+
+/** Fallback coverage-section matcher for callers without an engine-computed exact path. */
+const COVERAGE_BASELINE_SECTION = /^baselines\/coverage/;
+
+/** Every git path prefix a `+++`/`---` header may carry. */
+const DIFF_PATH_PREFIXES = ['b/', 'a/', 'i/', 'w/', 'c/', 'o/'];
+
+/** Path after a `+++ `/`--- ` header, prefix- and timestamp-stripped; null for /dev/null. */
+function diffHeaderPath(line: string): string | null {
+  const raw = line.slice(4);
+  if (raw.startsWith('/dev/null')) return null;
+  const path = raw.split('\t')[0];
+  if (path === undefined) return null;
+  for (const prefix of DIFF_PATH_PREFIXES) {
+    if (path.startsWith(prefix)) return path.slice(prefix.length);
+  }
+  return path;
+}
+
+/**
+ * Uniform comparison basis for the diff-mode guard — COVERAGE baselines
+ * only: rewrite every `"value": <non-integer>` token to the SAME integer
+ * normalization the live coverage reading uses (`Math.round`), on every
+ * `-`/`+`/context line inside `baselines/coverage*` sections only.
+ *
+ * Rationale: a baseline and a reading must be compared in the SAME
+ * granularity, and integer-pct is the COVERAGE reading's granularity (the
+ * `coverage-json` source rounds `total.lines.pct` the same way) — a
+ * fractional committed coverage baseline would be judged against a
+ * differently-scaled number. The re-basis hunk `93.46 → 93` must read as the
+ * no-op it is (both sides normalize to 93: equal passes), while a TRUE
+ * loosening (`93 → 92`) still fails and a genuine tighten in fractional
+ * clothing (`92.4 → 93`, old side normalizes to 92) still passes as a
+ * tighten.
+ *
+ * SCOPE IS DELIBERATELY NARROW (PR-105 round-2 finding 4): other metrics'
+ * granularity is their own — complexity avg-cx lives at 2 decimals, where
+ * `2.40 → 2.49` is a REAL change, not noise — so their sections pass through
+ * byte-identical and the guard judges them at full precision. Normalizing
+ * them would round the loosening into an equal no-op and mask it.
+ *
+ * This is a symmetric COMPARISON-BASIS normalization applied to both diff
+ * sides alike — never a guard exception: it cannot flip a loosening into a
+ * pass, only remove sub-granularity float noise from both sides. The engine
+ * (monotonicGuard) is untouched; the rewritten text is what it judges.
+ * Sections are attributed by their `---`/`+++` file headers (before the
+ * first `@@` — after it, `---`-prefixed lines are removed CONTENT and are
+ * normalized like any other content line); every other file's diff passes
+ * through byte-identical, so a `"value": 1.5` in a source-file hunk is
+ * never touched.
+ *
+ * This is the ONE implementation shared by the `ratchet.monotonicGuard` op
+ * (the required workflow's path) and the local `scripts/ratchet-check.mjs`
+ * driver (through `loadEngine`).
+ */
+export function normalizeBaselineDiffValues(
+  diff: string,
+  exactCoverageBaselinePath?: string,
+): string {
+  const out: string[] = [];
+  let isCoverageSection = false;
+  let inHunk = false;
+  for (const line of String(diff).split('\n')) {
+    if (line.startsWith('diff --git ')) {
+      isCoverageSection = false; // re-resolved by this section's own headers
+      inHunk = false;
+      out.push(line);
+      continue;
+    }
+    if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
+      const path = diffHeaderPath(line);
+      // Assigned PER HEADER, never only-if-matches: a sibling file's header
+      // must RESET the flag, so a non-coverage section following a coverage
+      // one can never inherit its normalization. Keyed on the EXACT
+      // coverage-baseline path when the caller provides it (review-debt
+      // #120: a path-prefix regex would also catch an unrelated baseline
+      // whose target merely starts with 'coverage').
+      isCoverageSection =
+        path !== null &&
+        (exactCoverageBaselinePath !== undefined
+          ? path === exactCoverageBaselinePath
+          : COVERAGE_BASELINE_SECTION.test(path));
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith('@@')) {
+      inHunk = true; // from here on, `---`-prefixed lines are removed content
+      out.push(line);
+      continue;
+    }
+    if (
+      isCoverageSection &&
+      (line.startsWith('+') || line.startsWith('-') || line.startsWith(' '))
+    ) {
+      out.push(
+        line.replace(
+          DIFF_VALUE_TOKEN,
+          (_, head: string, num: string) => head + String(Math.round(Number(num))),
+        ),
+      );
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join('\n');
+}

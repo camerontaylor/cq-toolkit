@@ -13,15 +13,29 @@
 //      JSON-serializes (round-trips again) — the validated value the op runs
 //      on is plain data;
 //   3. the entry's importer resolves to an op function (lazy, side-effect
-//      free at bind time).
+//      free at bind time);
+//   4. the op is INVOKED and its returned OpResult is JSON-lossless: it
+//      passes the frozen OpResultSchema, satisfies the CLI's own
+//      `assertJsonLossless` walk, and round-trips through JSON.
 //
-// The op RESULT serialization is pinned over the pure sample (the same lane
-// the parity suite dispatches): every returned OpResult must pass the frozen
-// OpResultSchema, satisfy the CLI's own `assertJsonLossless` walk, and
-// round-trip through JSON. Invoking effectful ops (gh/git/model/filesystem)
-// from a unit test would not be hermetic, so the sample is the pure lane —
-// the effectful lanes' artifacts are covered by their own family suites.
-import { describe, expect, test } from 'vitest';
+// HERMETIC INVOCATION (item 4, the auditor's FAIL): every entry is invoked
+// under a fail-fast sandbox — a fresh temp cwd (relative paths in the
+// generated input stay inside it), PATH pointed at an EMPTY bin dir (so
+// git/gh/npx/agent binaries ENOENT immediately), CQ_GH_BIN pointed at a
+// missing binary (the review/merge/pr/ratchet gh seam), HOME redirected into
+// the sandbox, every model-provider credential (ANTHROPIC/OPENAI/DEEPSEEK/
+// ZAI/CLAUDE/*_API_KEY) stripped, and both GITHUB_TOKEN and GH_TOKEN removed.
+// A returned result is then asserted lossless. An op that instead THROWS its
+// fail-loud contract is accepted: no result exists, so there is nothing to
+// serialize — and the throw is exactly the documented "never fabricated ok"
+// behavior. NO entry needs an exclusion, so no ownerless deferral exists; if
+// a future entry cannot run under this sandbox it must be added with BOTH a
+// reason here and the owning workstream/plan §5 row (the WS-C..H family
+// suites own the real effectful behavior today).
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { assertJsonLossless } from '../../src/cli/output.js';
 import { OpResultSchema } from '../../src/kernel/schema.js';
 import { clusterErrorsOp } from '../../src/ops/analyze/clusterErrors.js';
@@ -111,6 +125,23 @@ function isPlainObject(value: unknown): boolean {
   return proto === Object.prototype || proto === null;
 }
 
+/** Bound one op invocation; a timeout is treated as a thrown fail-loud outcome. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`op invocation exceeded ${ms}ms`)), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 const cases = entries.map((entry) => [entry.name, entry] as const);
 
 describe('every registry entry: schema-generated plain-object input round-trips', () => {
@@ -158,4 +189,60 @@ describe('pure sample: op results are JSON-serializable (OpResultSchema + the CL
   function emptyTscSet(): { tool: string; failures: never[]; exitCode: number } {
     return { tool: 'tsc', failures: [], exitCode: 0 };
   }
+});
+
+describe('every registry entry: the op result JSON-serializes (hermetic fail-fast invocation)', () => {
+  let savedCwd = '';
+  let savedEnv: NodeJS.ProcessEnv = {};
+  let sandbox = '';
+
+  beforeAll(async () => {
+    savedCwd = process.cwd();
+    savedEnv = { ...process.env };
+    sandbox = await mkdtemp(join(tmpdir(), 'cq-registry-props-'));
+    await mkdir(join(sandbox, 'empty-bin'), { recursive: true });
+    process.chdir(sandbox);
+    // Fail-fast sandbox (see the header): relative writes stay in the temp
+    // cwd, every external binary ENOENTs, and no credential is reachable.
+    process.env.PATH = join(sandbox, 'empty-bin');
+    process.env.HOME = sandbox;
+    process.env.CQ_GH_BIN = join(sandbox, 'definitely-missing-gh');
+    process.env.CQ_AUTOMATION_TOKEN = 'hermetic-test-token';
+    process.env.GIT_CONFIG_GLOBAL = '/dev/null';
+    process.env.GIT_CONFIG_SYSTEM = '/dev/null';
+    delete process.env.GH_TOKEN;
+    delete process.env.GITHUB_TOKEN;
+    for (const key of Object.keys(process.env)) {
+      if (/(API_KEY|ANTHROPIC|OPENAI|DEEPSEEK|ZAI|Z_AI|CLAUDE)/i.test(key)) delete process.env[key];
+    }
+  });
+
+  afterAll(async () => {
+    if (savedCwd !== '') process.chdir(savedCwd);
+    if (Object.keys(savedEnv).length > 0) {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, savedEnv);
+    }
+    if (sandbox !== '') await rm(sandbox, { recursive: true, force: true });
+  });
+
+  test.each(cases)(
+    '%s: returned OpResult is JSON-lossless (a throw is an accepted fail-loud)',
+    async (_name, entry) => {
+      const input = sampleFor(entry.inputSchema);
+      const op = await entry.importer();
+      let result: unknown;
+      try {
+        result = await withTimeout(op(input), 10_000);
+      } catch {
+        // Fail-loud contract: no result exists, so there is nothing to
+        // serialize. Never a fabricated artifact.
+        return;
+      }
+      expect(OpResultSchema.safeParse(result).success).toBe(true);
+      assertJsonLossless(result);
+      expect(JSON.parse(JSON.stringify(result))).toEqual(result);
+    },
+    20_000,
+  );
 });

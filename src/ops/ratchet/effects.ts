@@ -5,18 +5,28 @@
 // runs until an effect is called).
 //
 // TOKEN DOCTRINE (inherited from proposeBaselineUpdate's header, load-bearing
-// for I4): `gh` authenticates with `CQ_AUTOMATION_TOKEN` mapped to `GH_TOKEN`,
-// and `GITHUB_TOKEN` is scrubbed from the child environment — a
+// for I4): `gh` authenticates with `CQ_AUTOMATION_TOKEN` mapped to `GH_TOKEN`.
+// An ambient `GITHUB_TOKEN` or `GH_TOKEN` is NEVER inherited or used — a
 // GITHUB_TOKEN-authored PR suppresses workflow runs, so its required ratchet
-// check would never run (an uncheckable-baseline bypass). The token travels
-// only in the child env; it is never echoed, and it never appears in a URL or
-// in git state. `git` uses the ambient credential configuration (the
-// stage-2 propose workflow wires the token through GIT_ASKPASS at the script
-// layer).
+// check would never run (an uncheckable-baseline bypass) — and the effects
+// throw loudly when `CQ_AUTOMATION_TOKEN` is absent, exactly like
+// scripts/ratchet-propose.mjs's token gate. The token travels only in the
+// child env; it is never echoed, and it never appears in a URL or in git
+// state. `git` uses the ambient credential configuration (the stage-2
+// propose workflow wires the token through GIT_ASKPASS at the script layer).
+//
+// PAIR CONTRACT: the effects capture the proposal's `base` at construction so
+// {@link BaselinePrEffects.findOpenPrByHead} can disambiguate the
+// (head, base) pair — GitHub allows one head with several open PRs against
+// different bases.
 //
 // Every fault THROWS: the op's own containment maps a thrown effect to an
 // honest `failed` (never a fabricated ok), so this adapter never invents a
-// result. The checkout is restored to its original branch in a `finally`.
+// result. Re-runs are IDEMPOTENT: the existing REMOTE head is fetched and
+// checked out before the commit, so a fresh CI checkout updates the branch in
+// place (a fast-forward no-op for byte-identical files) instead of recreating
+// it from the base and failing the push non-fast-forward. The checkout is
+// restored to its original branch in a `finally`.
 import { execFile } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -54,18 +64,35 @@ function exec(
   });
 }
 
-/** The gh child env: CQ_AUTOMATION_TOKEN as GH_TOKEN, GITHUB_TOKEN scrubbed. */
+/** The gh binary: CQ_GH_BIN (the review/merge family seam), else `gh`. */
+function ghBin(): string {
+  return process.env['CQ_GH_BIN'] ?? 'gh';
+}
+
+/**
+ * The gh child env: `CQ_AUTOMATION_TOKEN` as `GH_TOKEN`, with BOTH the
+ * ambient `GITHUB_TOKEN` and any ambient `GH_TOKEN` scrubbed. Throws loudly
+ * when `CQ_AUTOMATION_TOKEN` is absent — there is no ambient-token fallback
+ * (scripts/ratchet-propose.mjs's token gate, mirrored).
+ */
 function ghEnv(): NodeJS.ProcessEnv {
+  const token = process.env['CQ_AUTOMATION_TOKEN'];
+  if (token === undefined || token === '') {
+    throw new Error(
+      'ratchet: CQ_AUTOMATION_TOKEN is required for gh effects — GITHUB_TOKEN/GH_TOKEN are never ' +
+        'inherited (a GITHUB_TOKEN-authored PR suppresses its own required workflow run)',
+    );
+  }
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['GITHUB_TOKEN'];
-  const token = process.env['CQ_AUTOMATION_TOKEN'];
-  if (token !== undefined && token !== '') env['GH_TOKEN'] = token;
+  delete env['GH_TOKEN'];
+  env['GH_TOKEN'] = token;
   return env;
 }
 
 /** One `gh` invocation, throwing on a non-zero exit (the op contains the throw). */
 async function runGh(repoRoot: string, args: readonly string[]): Promise<string> {
-  const res = await exec('gh', args, { cwd: repoRoot, env: ghEnv() });
+  const res = await exec(ghBin(), args, { cwd: repoRoot, env: ghEnv() });
   if (!res.ok) {
     throw new Error(`gh ${args[0] ?? ''} failed: ${res.stderr.trim() || res.stdout.trim()}`);
   }
@@ -95,44 +122,55 @@ function prIdentity(url: string): { number: number; url: string } {
 }
 
 /**
- * Build the real BaselinePrEffects over the checkout at `repoRoot`. Inert at
- * construction: subprocesses spawn only when an effect is called.
+ * Build the real BaselinePrEffects over the checkout at `repoRoot`, scoped to
+ * the proposal's `base`. Inert at construction: subprocesses spawn only when
+ * an effect is called.
  */
-export function makeSubprocessBaselinePrEffects(repoRoot: string): BaselinePrEffects {
+export function makeSubprocessBaselinePrEffects(repoRoot: string, base: string): BaselinePrEffects {
   const findOpenPrByHead: BaselinePrEffects['findOpenPrByHead'] = async (head) => {
     const out = await runGh(repoRoot, [
       'pr',
       'list',
       '--head',
       head,
+      '--base',
+      base,
       '--state',
       'open',
       '--limit',
       '100',
       '--json',
-      'number,url',
+      'number,url,baseRefName',
     ]);
     const parsed: unknown = JSON.parse(out);
-    if (!Array.isArray(parsed) || parsed.length === 0) return null;
-    const first = parsed[0] as { number?: unknown; url?: unknown };
-    if (typeof first.number !== 'number' || typeof first.url !== 'string') return null;
-    return { number: first.number, url: first.url };
+    if (!Array.isArray(parsed)) return null;
+    // The (head, base) PAIR is the identity: GitHub allows one head with
+    // several open PRs against DIFFERENT bases, so the base request is
+    // filtered locally too (belt) on top of the server-side `--base` (braces).
+    const matching = parsed.find((candidate) => {
+      const pr = candidate as { number?: unknown; url?: unknown; baseRefName?: unknown };
+      return typeof pr.number === 'number' && typeof pr.url === 'string' && pr.baseRefName === base;
+    }) as { number: number; url: string } | undefined;
+    return matching === undefined ? null : { number: matching.number, url: matching.url };
   };
 
   const commitAndUpsertPr: BaselinePrEffects['commitAndUpsertPr'] = async (input) => {
     const original = (await runGit(repoRoot, ['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.trim();
     try {
       await runGit(repoRoot, ['fetch', 'origin', input.base]);
-      const localHead = await runGit(
+      // Reuse the REMOTE head when it exists. A fresh CI checkout has no
+      // local refs/heads/<head>, and the old create-from-base path
+      // re-committed the byte-identical files on a divergent root — the push
+      // was then rejected non-fast-forward, so the documented "an open PR is
+      // UPDATED in place" contradicted the observed outcome. Fetching the
+      // head and checking IT out keeps a re-run a fast-forward no-op.
+      const remoteHead = await runGit(
         repoRoot,
-        ['rev-parse', '--verify', '--quiet', `refs/heads/${input.head}`],
+        ['fetch', 'origin', `+refs/heads/${input.head}:refs/remotes/origin/${input.head}`],
         true,
       );
-      if (localHead.ok && localHead.stdout.trim() !== '') {
-        await runGit(repoRoot, ['checkout', input.head]);
-      } else {
-        await runGit(repoRoot, ['checkout', '-b', input.head, `origin/${input.base}`]);
-      }
+      const start = remoteHead.ok ? `refs/remotes/origin/${input.head}` : `origin/${input.base}`;
+      await runGit(repoRoot, ['checkout', '-B', input.head, start]);
       for (const file of input.files) {
         const path = join(repoRoot, file.path);
         await mkdir(dirname(path), { recursive: true });
@@ -158,7 +196,11 @@ export function makeSubprocessBaselinePrEffects(repoRoot: string): BaselinePrEff
       if (!commit.ok && /nothing to commit/.test(combined) === false) {
         throw new Error(`git commit failed: ${combined.trim() || commit.stderr.trim()}`);
       }
-      await runGit(repoRoot, ['push', 'origin', `${input.head}:refs/heads/${input.head}`]);
+      await runGit(repoRoot, [
+        'push',
+        'origin',
+        `refs/heads/${input.head}:refs/heads/${input.head}`,
+      ]);
     } finally {
       // Restore the checkout unless this run never switched (already on the
       // proposal head, or a detached HEAD).
