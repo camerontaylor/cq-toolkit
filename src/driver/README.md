@@ -157,15 +157,21 @@ Files:
 
 Child environment is DEFAULT-DENY (issue #183): `spawnManaged` copies
 ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
-terminal + locale basics, XDG dirs, Windows equivalents) from the entry
-process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`,
-`NPM_TOKEN`, or `NODE_OPTIONS`. Per-Route endpoint/auth vars are composed
-explicitly into `SpawnOptions.env` and always win over the allowlist, so
-configured driver keys still reach the worker; a deployment extends the
-copied names with `SubprocessDriverOptions.envAllowlist` (names only,
-never values). A marker secret in the entry process env therefore cannot
-reach a spawned CLI worker, where prompt-injected PR content could
-exfiltrate it.
+terminal + locale basics, XDG dirs, network-egress/TLS config
+(`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
+from the entry process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`,
+`AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, or `NODE_OPTIONS`/`NODE_PATH`.
+Per-Route endpoint/auth vars are composed explicitly into
+`SpawnOptions.env` and always win over the allowlist, so configured
+driver keys still reach the worker; a deployment extends the copied names
+with `SubprocessDriverOptions.envAllowlist` (names only, never values) —
+e.g. for a corporate `SSH_AUTH_SOCK` or `NPM_CONFIG_*`. A marker secret in
+the entry process env therefore cannot reach a spawned CLI worker, where
+prompt-injected PR content could exfiltrate it. RESIDUAL CHANNEL (issue
+#183 r1): `HOME` stays inherited because the CLI reads its own config
+there, so a worker with file-read tools can still reach
+`~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, … — that
+boundary is the `ToolPolicy`/sandbox surface, not this env allowlist.
 
 Argv surface (headless reference): `-p` (prompt rides stdin),
 `--output-format stream-json`, `--verbose` (the real CLI refuses stream-json

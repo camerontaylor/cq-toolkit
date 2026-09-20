@@ -57,11 +57,14 @@ export const DEFAULT_MAX_RETAINED_BYTES = 1_048_576; // 1 MiB
  * The default-deny child-env allowlist (issue #183): the ONLY names copied
  * from the parent process env into a spawned worker. Deliberately EXCLUDES
  * credential-shaped names (`GH_TOKEN`, `*_API_KEY`, `*_SECRET`, `AWS_*`,
- * `NPM_TOKEN`, …) and `NODE_OPTIONS` (a code-execution vector). A per-Route
- * auth var reaches the child through `SpawnOptions.env` — an explicit VALUE
- * the driver composed — not through this list.
+ * `NPM_TOKEN`, `SSH_AUTH_SOCK`, `GOOGLE_APPLICATION_CREDENTIALS`, …) and
+ * `NODE_OPTIONS`/`NODE_PATH` (code-execution vectors). A per-Route auth var
+ * reaches the child through `SpawnOptions.env` — an explicit VALUE the driver
+ * composed — not through this list. FROZEN: a mutable export would let any
+ * in-process consumer push a credential name and weaken default-deny for
+ * every later spawn (issue #183 r1).
  */
-export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = [
+export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
   // Executable resolution, home, identity, temp dirs — a CLI cannot run
   // without these. PWD is deliberately ABSENT: node's spawn does not rewrite
   // it for `cwd`, so an inherited PWD would be the PARENT's directory — a
@@ -91,6 +94,21 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = [
   'XDG_CACHE_HOME',
   'XDG_DATA_HOME',
   'XDG_STATE_HOME',
+  // Network egress + TLS trust config (issue #183 r1): a routed CLI on a
+  // proxied or TLS-inspecting host cannot reach its endpoint without these.
+  // The CA vars are non-secret paths. NOTE the proxy vars MAY embed egress
+  // credentials — a worker can then read them; an operator who must not
+  // expose those clears them in the entry env. Anything else a deployment
+  // needs (e.g. SSH_AUTH_SOCK, NPM_CONFIG_*) is added explicitly through
+  // `envAllowlist`, never inherited by default.
+  'NODE_EXTRA_CA_CERTS',
+  'SSL_CERT_FILE',
+  'SSL_CERT_DIR',
+  'HTTP_PROXY',
+  'HTTPS_PROXY',
+  'ALL_PROXY',
+  'NO_PROXY',
+  'no_proxy',
   // Windows equivalents: a spawned CLI on win32 needs these to run at all.
   'SystemRoot',
   'windir',
@@ -108,7 +126,7 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = [
   'NUMBER_OF_PROCESSORS',
   'OS',
   'PROCESSOR_ARCHITECTURE',
-];
+]);
 
 /**
  * Compose a child environment with default-deny semantics (issue #183):
@@ -116,14 +134,20 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = [
  * the caller's explicit `overrides` — which ALWAYS win, because a Route
  * value is composed deliberately and the allowlist must never filter it.
  * `extraAllowlist` extends the copied names for a deployment without
- * weakening the default. The result is a fresh object; the parent env is
- * never mutated.
+ * weakening the default; a malformed entry is rejected at the seam (r1) so a
+ * direct `spawnManaged` consumer cannot bypass the constructor's validation.
+ * The result is a fresh object; the parent env is never mutated.
  */
 export function buildChildEnv(
   parentEnv: Readonly<Record<string, string | undefined>>,
   overrides?: Readonly<Record<string, string>>,
   extraAllowlist: readonly string[] = [],
 ): Record<string, string> {
+  if (extraAllowlist.some((name) => name === '' || name.includes('='))) {
+    throw new Error(
+      `envAllowlist entries must be non-empty env var names without '=', got ${JSON.stringify(extraAllowlist)}`,
+    );
+  }
   const child: Record<string, string> = {};
   for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist]) {
     const value = parentEnv[name];

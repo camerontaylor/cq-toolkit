@@ -134,6 +134,7 @@ function allowedToolsArg(args: readonly string[]): string {
 interface SpawnCall {
   args: string[];
   env: Record<string, string>;
+  envAllowlist: string[] | undefined;
 }
 
 /**
@@ -144,7 +145,13 @@ interface SpawnCall {
  */
 function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {}): SpawnFn {
   return (opts) => {
-    calls.push({ args: [...opts.args], env: { ...opts.env } });
+    calls.push({
+      args: [...opts.args],
+      env: { ...opts.env },
+      // Recorded so a test can prove the driver's public envAllowlist option
+      // reaches the spawn seam (issue #183 r1).
+      envAllowlist: opts.envAllowlist === undefined ? undefined : [...opts.envAllowlist],
+    });
     // The fixture's permission simulation reads FAKE_AGENT_ALLOWED, so the
     // driver's --allowedTools value is forwarded verbatim — the fixture now
     // simulates --permission-prompts none faithfully.
@@ -230,6 +237,13 @@ async function narrationOf(store: SessionStore, sessionId: string): Promise<stri
   const record = await store.load(sessionId);
   const entry = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'cli-narration');
   return entry === undefined ? [] : (JSON.parse(entry.content) as string[]);
+}
+
+/** Parse the env-probe line a spawned worker wrote (issue #183 test). */
+function probeEnvOf(narration: readonly string[]): Record<string, string> {
+  const line = narration.find((entry) => entry.startsWith('CQ_ENV_PROBE:'));
+  if (line === undefined) throw new Error('env probe line missing from narration');
+  return JSON.parse(line.slice('CQ_ENV_PROBE:'.length)) as Record<string, string>;
 }
 
 describe('subprocess driver specifics (fake agent CLI)', () => {
@@ -963,11 +977,15 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       TERM: 'xterm-256color',
       LANG: 'en_US.UTF-8',
       PWD: '/parent/dir',
+      NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
+      HTTPS_PROXY: 'http://proxy.example:8080',
       GH_TOKEN: 'ghp_marker_secret',
       CQ_ENV_LEAK_MARKER: 'do-not-leak',
       AWS_SECRET_ACCESS_KEY: 'aws-marker',
       NPM_TOKEN: 'npm-marker',
+      SSH_AUTH_SOCK: '/tmp/agent.sock',
       NODE_OPTIONS: '--require=/tmp/evil.cjs',
+      NODE_PATH: '/tmp/evil-modules',
     };
     const child = buildChildEnv(parent, { ANTHROPIC_API_KEY: 'route-key-value' });
     // Allowlisted basics are inherited…
@@ -975,6 +993,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     expect(child['HOME']).toBe('/home/worker');
     expect(child['TERM']).toBe('xterm-256color');
     expect(child['LANG']).toBe('en_US.UTF-8');
+    // …including network-egress/TLS config a routed CLI needs (r1)…
+    expect(child['NODE_EXTRA_CA_CERTS']).toBe('/etc/ssl/corp.pem');
+    expect(child['HTTPS_PROXY']).toBe('http://proxy.example:8080');
     // …the explicit route value passes (it is composed deliberately, so the
     // allowlist must never filter it)…
     expect(child['ANTHROPIC_API_KEY']).toBe('route-key-value');
@@ -983,23 +1004,60 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     expect(child['CQ_ENV_LEAK_MARKER']).toBeUndefined();
     expect(child['AWS_SECRET_ACCESS_KEY']).toBeUndefined();
     expect(child['NPM_TOKEN']).toBeUndefined();
+    expect(child['SSH_AUTH_SOCK']).toBeUndefined();
     expect(child['NODE_OPTIONS']).toBeUndefined(); // code-execution vector, deliberately excluded
+    expect(child['NODE_PATH']).toBeUndefined(); // module-resolution vector
     // PWD is NOT inherited: spawn does not rewrite it for cwd, so a copied
     // PWD would be the parent's stale directory (CodeRabbit r1).
     expect(child['PWD']).toBeUndefined();
-    // The shipped allowlist itself must not carry credential-shaped names.
+    // The override layer ALWAYS wins over a copied allowlist value (r1).
+    expect(buildChildEnv(parent, { PATH: '/route/bin' })['PATH']).toBe('/route/bin');
+    // The shipped allowlist itself must not carry credential-shaped names —
+    // an explicit deny-set (the regex alone misses AWS_PROFILE,
+    // GOOGLE_APPLICATION_CREDENTIALS, SSH_AUTH_SOCK, …) plus a shape guard.
+    for (const name of [
+      'GH_TOKEN',
+      'GITHUB_TOKEN',
+      'NPM_TOKEN',
+      'AWS_ACCESS_KEY_ID',
+      'AWS_SECRET_ACCESS_KEY',
+      'AWS_SESSION_TOKEN',
+      'AWS_PROFILE',
+      'GOOGLE_APPLICATION_CREDENTIALS',
+      'SSH_AUTH_SOCK',
+      'KRB5CCNAME',
+      'ANTHROPIC_API_KEY',
+      'OPENAI_API_KEY',
+      'DEEPSEEK_API_KEY',
+      'ZAI_API_KEY',
+      'NODE_OPTIONS',
+      'NODE_PATH',
+      'LD_PRELOAD',
+      'LD_LIBRARY_PATH',
+    ]) {
+      expect(DEFAULT_CHILD_ENV_ALLOWLIST).not.toContain(name);
+    }
     expect(
       DEFAULT_CHILD_ENV_ALLOWLIST.some((name) => /TOKEN|SECRET|KEY|PASSWORD/i.test(name)),
     ).toBe(false);
+    // FROZEN (r1): an in-process push cannot weaken default-deny for later spawns.
+    expect(Object.isFrozen(DEFAULT_CHILD_ENV_ALLOWLIST)).toBe(true);
     // The explicit extra allowlist is the only route for a non-default name.
     const extended = buildChildEnv(parent, undefined, ['CQ_ENV_LEAK_MARKER']);
     expect(extended['CQ_ENV_LEAK_MARKER']).toBe('do-not-leak');
     expect(extended['GH_TOKEN']).toBeUndefined();
+    // A malformed extra name is rejected at the seam, not silently no-oped (r1).
+    expect(() => buildChildEnv(parent, undefined, [''])).toThrow(
+      /envAllowlist entries must be non-empty env var names without '='/,
+    );
+    expect(() => buildChildEnv(parent, undefined, ['A=B'])).toThrow(
+      /envAllowlist entries must be non-empty env var names without '='/,
+    );
     // The parent env object is never mutated.
     expect(parent.GH_TOKEN).toBe('ghp_marker_secret');
   });
 
-  test('a REAL spawned worker cannot see a marker secret in the entry env, while route env still reaches it (#183)', async () => {
+  test('a REAL spawned worker cannot see a marker secret in the entry env, while route env still reaches it; envAllowlist opts a name back in (#183)', async () => {
     await withScratch(async (scratchDir, store) => {
       // A probe worker: dumps its OWN process.env as a narration line (the
       // driver folds non-JSON lines into the session record) and then emits
@@ -1018,37 +1076,48 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const marker = 'cq-env-leak-marker-7f3a';
       const savedMarker = process.env.CQ_ENV_LEAK_MARKER;
       const savedGh = process.env.GH_TOKEN;
+      // GLOBAL process.env mutation, deliberately: the real spawnManaged path
+      // reads the LIVE parent env, so withholding can only be proven against
+      // it. Restored in finally; this file's tests run sequentially (no
+      // vitest .concurrent), so no concurrent test observes the markers.
       process.env.CQ_ENV_LEAK_MARKER = marker;
       process.env.GH_TOKEN = 'ghp_marker_secret';
+      const probeOptions: SubprocessDriverOptions = {
+        binary: ['node', probePath],
+        routingTable: conformanceRoutingTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: {
+          ...defaultHarnessConfig,
+          workspaceRoot: join(scratchDir, 'workspaces'),
+        },
+      };
       try {
         // NO spawn override: this is the production spawnManaged path.
-        const driver = new SubprocessDriver({
-          binary: ['node', probePath],
-          routingTable: conformanceRoutingTable(),
-          sessionsDir: join(scratchDir, SESSIONS_DIR),
-          harnessConfig: {
-            ...defaultHarnessConfig,
-            workspaceRoot: join(scratchDir, 'workspaces'),
-          },
-        });
-        const result = await driver.run(invocation({ prompt: 'env probe run' }));
-        expect(result.stopReason).toBe('complete');
-        const narration = await narrationOf(store, result.sessionId as string);
-        const probeLine = narration.find((line) => line.startsWith('CQ_ENV_PROBE:'));
-        expect(probeLine).toBeDefined();
-        const childEnv = JSON.parse((probeLine as string).slice('CQ_ENV_PROBE:'.length)) as Record<
-          string,
-          string
-        >;
+        const denied = await new SubprocessDriver(probeOptions).run(
+          invocation({ prompt: 'env probe run' }),
+        );
+        expect(denied.stopReason).toBe('complete');
+        const deniedEnv = probeEnvOf(await narrationOf(store, denied.sessionId as string));
         // The marker secret never reaches the worker…
-        expect(childEnv['CQ_ENV_LEAK_MARKER']).toBeUndefined();
-        expect(childEnv['GH_TOKEN']).toBeUndefined();
-        expect(JSON.stringify(childEnv)).not.toContain(marker);
+        expect(deniedEnv['CQ_ENV_LEAK_MARKER']).toBeUndefined();
+        expect(deniedEnv['GH_TOKEN']).toBeUndefined();
+        expect(JSON.stringify(deniedEnv)).not.toContain(marker);
         // …while terminal basics and the configured route env do.
-        expect(typeof childEnv['PATH']).toBe('string');
-        expect(childEnv['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:1/anthropic');
-        expect(childEnv['ANTHROPIC_API_KEY']).toBe('conformance-fake-key');
-        expect(childEnv['ANTHROPIC_AUTH_TOKEN']).toBe('conformance-fake-key');
+        expect(typeof deniedEnv['PATH']).toBe('string');
+        expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:1/anthropic');
+        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe('conformance-fake-key');
+        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe('conformance-fake-key');
+
+        // The documented escape hatch is real end-to-end (r1): naming the
+        // marker in envAllowlist copies ONLY that parent name back in.
+        const allowed = await new SubprocessDriver({
+          ...probeOptions,
+          envAllowlist: ['CQ_ENV_LEAK_MARKER'],
+        }).run(invocation({ prompt: 'allowlist probe run' }));
+        expect(allowed.stopReason).toBe('complete');
+        const allowedEnv = probeEnvOf(await narrationOf(store, allowed.sessionId as string));
+        expect(allowedEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
+        expect(allowedEnv['GH_TOKEN']).toBeUndefined(); // only the named extra is added
       } finally {
         if (savedMarker === undefined) delete process.env.CQ_ENV_LEAK_MARKER;
         else process.env.CQ_ENV_LEAK_MARKER = savedMarker;
