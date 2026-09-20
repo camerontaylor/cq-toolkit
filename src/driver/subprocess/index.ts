@@ -303,15 +303,16 @@ export class SubprocessDriver implements Driver {
         `subprocess driver: binary must be a non-empty string or a non-empty array of non-empty strings, got ${JSON.stringify(options.binary)}`,
       );
     }
-    // An env-allowlist entry is a NAME copied from the parent env; an empty
-    // name would silently do nothing and a '='-bearing name is malformed
-    // argv env (issue #183). Validate HERE, loudly, like the binary template.
+    // An env-allowlist entry is a NAME copied from the parent env; a name
+    // that is not a well-formed env var identifier (empty, '='-bearing,
+    // whitespace/NUL) would silently do nothing or explode at spawn (issue
+    // #183 r1/r2). Validate HERE, loudly, like the binary template.
     if (
       options.envAllowlist !== undefined &&
-      options.envAllowlist.some((name) => name === '' || name.includes('='))
+      options.envAllowlist.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
     ) {
       throw new Error(
-        `subprocess driver: envAllowlist entries must be non-empty env var names without '=', got ${JSON.stringify(options.envAllowlist)}`,
+        `subprocess driver: envAllowlist entries must be env var names matching /^[A-Za-z_][A-Za-z0-9_]*$/, got ${JSON.stringify(options.envAllowlist)}`,
       );
     }
     // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud

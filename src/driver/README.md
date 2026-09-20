@@ -136,7 +136,8 @@ Files:
 - `index.ts` — `SubprocessDriver implements Driver` (constructor options:
   `binary?` default `'claude'`, `outputSchema?` → `--json-schema`,
   `routingTable?`, `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
-  `harnessConfig?`, `pricing?`, and a `spawn?` override hook for tests).
+  `harnessConfig?`, `pricing?`, `envAllowlist?`, and a `spawn?` override
+  hook for tests).
 - `routing.ts` — env-based model routing as CONFIG (`RoutingTable`,
   `defaultRoutingTable()`, `routeFor`). Endpoints are anthropic-compat
   (zai / deepseek / anthropic, values from provider docs, as-of

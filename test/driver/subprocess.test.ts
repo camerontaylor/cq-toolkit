@@ -1044,13 +1044,23 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     const extended = buildChildEnv(parent, undefined, ['CQ_ENV_LEAK_MARKER']);
     expect(extended['CQ_ENV_LEAK_MARKER']).toBe('do-not-leak');
     expect(extended['GH_TOKEN']).toBeUndefined();
-    // A malformed extra name is rejected at the seam, not silently no-oped (r1).
+    // A malformed extra name is rejected at the seam, not silently no-oped (r1/r2).
     expect(() => buildChildEnv(parent, undefined, [''])).toThrow(
-      /envAllowlist entries must be non-empty env var names without '='/,
+      /envAllowlist entries must be env var names matching/,
     );
     expect(() => buildChildEnv(parent, undefined, ['A=B'])).toThrow(
-      /envAllowlist entries must be non-empty env var names without '='/,
+      /envAllowlist entries must be env var names matching/,
     );
+    expect(() => buildChildEnv(parent, undefined, ['BAD NAME'])).toThrow(
+      /envAllowlist entries must be env var names matching/,
+    );
+    // A null-prototype child carries a `__proto__` override as an OWN property
+    // instead of silently dropping it through the inherited setter (r2).
+    const protoOverride = Object.create(null) as Record<string, string>;
+    protoOverride['__proto__'] = 'carried';
+    const protoChild = buildChildEnv(parent, protoOverride);
+    expect(Object.prototype.hasOwnProperty.call(protoChild, '__proto__')).toBe(true);
+    expect(protoChild['__proto__']).toBe('carried');
     // The parent env object is never mutated.
     expect(parent.GH_TOKEN).toBe('ghp_marker_secret');
   });
@@ -1100,11 +1110,15 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         expect(deniedEnv['CQ_ENV_LEAK_MARKER']).toBeUndefined();
         expect(deniedEnv['GH_TOKEN']).toBeUndefined();
         expect(JSON.stringify(deniedEnv)).not.toContain(marker);
-        // …while terminal basics and the configured route env do.
+        // …while terminal basics and the configured route env do. Derive the
+        // expected values from the live env so an ambient CONFORMANCE_* var
+        // cannot flip this test (r2).
+        const expectedKey = process.env.CONFORMANCE_API_KEY as string;
+        const expectedBaseUrl = process.env.CONFORMANCE_BASE_URL ?? 'http://127.0.0.1:1/anthropic';
         expect(typeof deniedEnv['PATH']).toBe('string');
-        expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe('http://127.0.0.1:1/anthropic');
-        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe('conformance-fake-key');
-        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe('conformance-fake-key');
+        expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe(expectedBaseUrl);
+        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe(expectedKey);
+        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe(expectedKey);
 
         // The documented escape hatch is real end-to-end (r1): naming the
         // marker in envAllowlist copies ONLY that parent name back in.
@@ -1116,6 +1130,19 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         const allowedEnv = probeEnvOf(await narrationOf(store, allowed.sessionId as string));
         expect(allowedEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
         expect(allowedEnv['GH_TOKEN']).toBeUndefined(); // only the named extra is added
+
+        // The per-instance list is a FROZEN COPY (r2): mutating the caller's
+        // array after construction cannot weaken later spawns.
+        const mutableAllowlist = ['CQ_ENV_LEAK_MARKER'];
+        const frozenDriver = new SubprocessDriver({
+          ...probeOptions,
+          envAllowlist: mutableAllowlist,
+        });
+        mutableAllowlist.push('GH_TOKEN');
+        const frozen = await frozenDriver.run(invocation({ prompt: 'frozen allowlist probe run' }));
+        const frozenEnv = probeEnvOf(await narrationOf(store, frozen.sessionId as string));
+        expect(frozenEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
+        expect(frozenEnv['GH_TOKEN']).toBeUndefined(); // pushed AFTER construction — not honored
       } finally {
         if (savedMarker === undefined) delete process.env.CQ_ENV_LEAK_MARKER;
         else process.env.CQ_ENV_LEAK_MARKER = savedMarker;
@@ -1125,12 +1152,15 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
-  test('envAllowlist validation: empty and malformed names throw at construction (#183)', () => {
+  test('envAllowlist validation: malformed names throw at construction (#183)', () => {
     expect(() => new SubprocessDriver({ envAllowlist: [''] })).toThrow(
-      /envAllowlist entries must be non-empty env var names without '='/,
+      /envAllowlist entries must be env var names matching/,
     );
     expect(() => new SubprocessDriver({ envAllowlist: ['A=B'] })).toThrow(
-      /envAllowlist entries must be non-empty env var names without '='/,
+      /envAllowlist entries must be env var names matching/,
+    );
+    expect(() => new SubprocessDriver({ envAllowlist: ['BAD NAME'] })).toThrow(
+      /envAllowlist entries must be env var names matching/,
     );
     expect(() => new SubprocessDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
   });
