@@ -342,7 +342,11 @@ export class SubprocessDriver implements Driver {
     this.sessionsDir = options.sessionsDir;
     this.harnessConfig = options.harnessConfig ?? defaultHarnessConfig;
     this.pricingOverride = options.pricing;
-    this.envAllowlist = options.envAllowlist;
+    // Frozen COPY (issue #183 r2): the default allowlist is frozen for the
+    // same reason — a caller mutating its array after construction must not
+    // weaken default-deny for every later spawn on a "stateless" instance.
+    this.envAllowlist =
+      options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
     this.spawnImpl = options.spawn ?? spawnManaged;
   }
 

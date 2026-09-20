@@ -99,8 +99,9 @@ function conformanceRoutingTable(): RoutingTable {
 // ---------------------------------------------------------------------------
 // Directive → FAKE_AGENT_* env (the conformance script contract, scripted
 // into the fixture). The spawn override injects these per driver instance —
-// process.env is never mutated per-run (vitest runs tests concurrently
-// within a file's worker; per-driver env keeps runs isolated).
+// process.env is never mutated per-run (vitest runs tests sequentially
+// within a file and `fileParallelism: false` serializes files; per-driver
+// env keeps runs isolated).
 // ---------------------------------------------------------------------------
 
 function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
@@ -134,7 +135,6 @@ function allowedToolsArg(args: readonly string[]): string {
 interface SpawnCall {
   args: string[];
   env: Record<string, string>;
-  envAllowlist: string[] | undefined;
 }
 
 /**
@@ -145,13 +145,7 @@ interface SpawnCall {
  */
 function recordingSpawn(calls: SpawnCall[], extraEnv: Record<string, string> = {}): SpawnFn {
   return (opts) => {
-    calls.push({
-      args: [...opts.args],
-      env: { ...opts.env },
-      // Recorded so a test can prove the driver's public envAllowlist option
-      // reaches the spawn seam (issue #183 r1).
-      envAllowlist: opts.envAllowlist === undefined ? undefined : [...opts.envAllowlist],
-    });
+    calls.push({ args: [...opts.args], env: { ...opts.env } });
     // The fixture's permission simulation reads FAKE_AGENT_ALLOWED, so the
     // driver's --allowedTools value is forwarded verbatim — the fixture now
     // simulates --permission-prompts none faithfully.
@@ -979,6 +973,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       PWD: '/parent/dir',
       NODE_EXTRA_CA_CERTS: '/etc/ssl/corp.pem',
       HTTPS_PROXY: 'http://proxy.example:8080',
+      https_proxy: 'http://proxy.example:8080',
       GH_TOKEN: 'ghp_marker_secret',
       CQ_ENV_LEAK_MARKER: 'do-not-leak',
       AWS_SECRET_ACCESS_KEY: 'aws-marker',
@@ -996,6 +991,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     // …including network-egress/TLS config a routed CLI needs (r1)…
     expect(child['NODE_EXTRA_CA_CERTS']).toBe('/etc/ssl/corp.pem');
     expect(child['HTTPS_PROXY']).toBe('http://proxy.example:8080');
+    // …both proxy spellings: curl ignores uppercase HTTP_PROXY and honors
+    // only lowercase (r2).
+    expect(child['https_proxy']).toBe('http://proxy.example:8080');
     // …the explicit route value passes (it is composed deliberately, so the
     // allowlist must never filter it)…
     expect(child['ANTHROPIC_API_KEY']).toBe('route-key-value');

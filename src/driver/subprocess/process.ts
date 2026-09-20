@@ -107,6 +107,9 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
   'HTTP_PROXY',
   'HTTPS_PROXY',
   'ALL_PROXY',
+  'http_proxy',
+  'https_proxy',
+  'all_proxy',
   'NO_PROXY',
   'no_proxy',
   // Windows equivalents: a spawned CLI on win32 needs these to run at all.

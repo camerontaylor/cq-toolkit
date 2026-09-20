@@ -155,8 +155,10 @@ Files:
   markers; grace delays injectable for tests). The governor decides
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
 
-Child environment is DEFAULT-DENY (issue #183): `spawnManaged` copies
-ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
+Child environment is DEFAULT-DENY (issue #183) for `spawnManaged` — the
+subprocess driver only; the sibling ACP/claude-agent drivers still inherit
+the parent env (a separate surface, not changed here). `spawnManaged`
+copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
 terminal + locale basics, XDG dirs, network-egress/TLS config
 (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
 from the entry process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`,
@@ -166,9 +168,11 @@ Per-Route endpoint/auth vars are composed explicitly into
 driver keys still reach the worker; a deployment extends the copied names
 with `SubprocessDriverOptions.envAllowlist` (names only, never values) —
 e.g. for a corporate `SSH_AUTH_SOCK` or `NPM_CONFIG_*`. A marker secret in
-the entry process env therefore cannot reach a spawned CLI worker, where
-prompt-injected PR content could exfiltrate it. RESIDUAL CHANNEL (issue
-#183 r1): `HOME` stays inherited because the CLI reads its own config
+the entry process env therefore cannot reach a `spawnManaged` worker,
+where prompt-injected PR content could exfiltrate it. TWO CAVEATS (issue
+#183 r1/r2): proxy vars are inherited because egress needs them and their
+URL MAY embed credentials a worker can read (leave them unset to avoid
+that); and `HOME` stays inherited because the CLI reads its own config
 there, so a worker with file-read tools can still reach
 `~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, … — that
 boundary is the `ToolPolicy`/sandbox surface, not this env allowlist.
