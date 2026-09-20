@@ -24,37 +24,75 @@
 // (help is derived from the registry, not a hand-written list) and the smoke
 // table below must cover exactly the discovered set.
 //
-// HERMETIC HARNESS: the forge seam is the fake gh
-// (test/fixtures/gh/fake-gh.mjs) via CQ_GH_BIN for the two forge-touching
-// floors (review-loop, merge-prs), and the agent seam is the fake agent CLI
-// fixture (test/fixtures/fake-agent-cli.mjs) — the same stream-json fixture
-// the subprocess conformance suite and the from-source smoke drive. A
-// companion leg runs a plan JSON through the SAME built CLI with the
-// cli-smoke-ops fixture, so the real SubprocessDriver + fake agent path is
-// exercised here too (the shipped floors are agent-free by construction:
-// plans are parameterized builders whose real instances are authored per run
-// in the SDK/entry modules, and the registry entry is the discoverable floor).
+// HERMETIC HARNESS: the forge seam is ROUTED to the fake gh
+// (test/fixtures/gh/fake-gh.mjs) via CQ_GH_BIN for the two forge-capable
+// floors (review-loop, merge-prs) — the shipped floors are empty passes and
+// spawn no gh, so this only guarantees that IF one ever spawns, it can never
+// reach a live forge (the fake gh itself is exercised by test/ops/review/**
+// and the live-review drill). The agent seam is the fake sweep agent
+// (test/fixtures/scratch-repo/sweep-agent.mjs) driven by the REAL
+// SubprocessDriver in the real-instance leg below.
+//
+// REAL-INSTANCE COVERAGE (the goal's "via the subprocess driver + fake
+// agent" acceptance): the floor runs above are agent-free by construction,
+// so a separate leg builds the REAL sweep and test-fix instances (phase-A
+// planner over the scratch repo → phase-B expanded graph with the driver/
+// check bindings) and runs each through the same built CLI via
+// `run-plan --plan=<file>`; the real SubprocessDriver then spawns the fake
+// sweep agent once per unit (asserted from the driver's session files).
+// review-loop, merge-prs and analyze have no hermetic real instance here:
+// their real builders need per-run state (fetched review threads, conflicting
+// PRs, a real analysis target) and, for the agent-backed review/merge ops, a
+// driver-BINARY injection the op input does not expose — so running them
+// through the CLI would require a per-plan CLI input/injection surface the
+// goal did not specify. Owner: goal T4.3 / ws-i scope item 2 ("all five
+// shipped plans exposed as subcommands" + "each shipped plan has a smoke
+// test"). Their real instances stay pinned in-process by test/plans/** and
+// test/e2e/** (D4/E4/F4/G3 lanes).
 //
 // BUILD ON DEMAND: CI's static job runs the suite BEFORE its build step, and
 // a dist-gated skip would make this smoke green because it was omitted (the
 // plan's explicit stop condition). So the suite builds dist/ once when it is
-// missing (fileParallelism is false — no competing build) and never silently
-// skips.
+// missing OR STALE (older than the newest src/** file — a stale dist would
+// certify obsolete code) and never silently skips.
 import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import { exitCodeForRunReport } from '../../src/cli/exit.js';
 import { RunReportSchema } from '../../src/kernel/schema.js';
+import type { Plan } from '../../src/kernel/types.js';
+import {
+  makePlanSweep,
+  makeSubprocessSweepPlannerDeps,
+  SWEEP_UNIT_OP,
+} from '../../src/ops/sweep/planSweep.js';
+import type {
+  SweepUnitCheckConfig,
+  SweepUnitDispatchInput,
+  SweepUnitDriverConfig,
+} from '../../src/ops/sweep/unit.js';
 import { listPlans } from '../../src/plans/registry.js';
-import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
+import {
+  buildSweepPlan,
+  SWEEP_PLAN_ID,
+  SWEEP_PLAN_JOB_IDS,
+  sweepPlannerInput,
+} from '../../src/plans/sweep.js';
+import { buildTestFixPlan, TEST_FIX_FIXER, TEST_FIX_PLAN_ID } from '../../src/plans/test-fix.js';
+import {
+  generateScratchRepo,
+  SCRATCH_PACKAGES,
+  SCRATCH_PACKAGE_FILES,
+} from '../fixtures/scratch-repo/generate.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST_CLI = join(ROOT, 'dist', 'cli.js');
 const FAKE_GH = join(ROOT, 'test', 'fixtures', 'gh', 'fake-gh.mjs');
 const SMOKE_OPS = join(ROOT, 'test', 'fixtures', 'cli-smoke-ops');
+const SWEEP_AGENT = join(ROOT, 'test', 'fixtures', 'scratch-repo', 'sweep-agent.mjs');
 
 /** Hard per-CLI budget: a hung plan child must fail the smoke, not stall CI. */
 const CLI_TIMEOUT_MS = 180_000;
@@ -63,9 +101,10 @@ const BUILD_TIMEOUT_MS = 300_000;
 
 /**
  * The smoke table: every plan the registry discovers, the exit code its floor
- * is expected to reach on the scratch repo, and whether its floor may touch a
- * forge (so CQ_GH_BIN routes it to the fake gh). The `covers every discovered
- * plan` test below fails if a new plan lands without a row here.
+ * is expected to reach on the scratch repo, and whether its floor is
+ * forge-capable (CQ_GH_BIN routes any spawn to the fake gh; the empty floors
+ * spawn none). The `covers every discovered plan` test below fails if a new
+ * plan lands without a row here.
  */
 const PLANS = [
   { name: 'sweep', exit: 0, forge: false },
@@ -78,12 +117,17 @@ const PLANS = [
 let scratchRepo = '';
 let planDir = '';
 
-beforeAll(async () => {
-  ensureBuiltCli();
-  scratchRepo = mkdtempSync(join(tmpdir(), 'cq-plans-smoke-repo-'));
-  planDir = mkdtempSync(join(tmpdir(), 'cq-plans-smoke-plan-'));
-  await generateScratchRepo(scratchRepo);
-}, BUILD_TIMEOUT_MS);
+beforeAll(
+  async () => {
+    ensureBuiltCli();
+    scratchRepo = mkdtempSync(join(tmpdir(), 'cq-plans-smoke-repo-'));
+    planDir = mkdtempSync(join(tmpdir(), 'cq-plans-smoke-plan-'));
+    await generateScratchRepo(scratchRepo);
+  },
+  // A margin over the build budget: a near-limit build must not starve the
+  // scratch-repo setup and misreport the failure as a hook timeout.
+  BUILD_TIMEOUT_MS + 120_000,
+);
 
 afterAll(() => {
   for (const dir of [scratchRepo, planDir]) {
@@ -91,13 +135,26 @@ afterAll(() => {
   }
 });
 
+/** Newest mtime (ms) across a directory tree; 0 when it holds no files. */
+function newestMtimeMs(dir: string): number {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) newest = Math.max(newest, newestMtimeMs(full));
+    else if (entry.isFile()) newest = Math.max(newest, statSync(full).mtimeMs);
+  }
+  return newest;
+}
+
 /**
- * Build dist/ once when the BUILT CLI is absent. CI's static job tests before
- * it builds, so this is the only way the smoke can run there without a
- * dist-gated skip.
+ * Build dist/ when the BUILT CLI is missing OR STALE (older than the newest
+ * src/** file): a dist built from older sources would make the whole smoke
+ * certify obsolete code. CI's static job tests before it builds, so this is
+ * the only way the smoke can run there without a dist-gated skip.
  */
 function ensureBuiltCli(): void {
-  if (existsSync(DIST_CLI)) return;
+  const distMtime = existsSync(DIST_CLI) ? statSync(DIST_CLI).mtimeMs : 0;
+  if (distMtime > 0 && distMtime >= newestMtimeMs(join(ROOT, 'src'))) return;
   try {
     execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
       cwd: ROOT,
@@ -114,18 +171,26 @@ function ensureBuiltCli(): void {
 }
 
 /**
- * The child environment: the host env minus the volatile fake-agent scripting
- * knobs (a stray FAKE_AGENT_MODE could script a hang) and minus any ambient
- * CQ_GH_BIN (each forge case sets the fake explicitly). The repo's
- * node_modules/.bin leads PATH so the analyze floor's placeholder probe
- * resolves `tsc` deterministically.
+ * The child environment, scrubbed of every ambient knob that could script or
+ * leak into the plan children: all `CQ_*` (CQ_GH_BIN / CQ_GH_SCENARIO /
+ * CQ_GH_LOG / …), the fake-agent scripting vars, the smoke route's key and
+ * URL, and the forge credentials. The repo's node_modules/.bin leads PATH so
+ * the analyze floor's placeholder probe resolves `tsc` deterministically.
  */
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  delete env.FAKE_AGENT_MODE;
-  delete env.FAKE_AGENT_SERVED_MODEL;
-  delete env.CQ_GH_BIN;
-  delete env.SMOKE_API_KEY;
+  for (const key of Object.keys(env)) {
+    if (
+      key.startsWith('CQ_') ||
+      key.startsWith('FAKE_AGENT_') ||
+      key === 'SMOKE_API_KEY' ||
+      key === 'SMOKE_BASE_URL' ||
+      key === 'GH_TOKEN' ||
+      key === 'GITHUB_TOKEN'
+    ) {
+      delete env[key];
+    }
+  }
   const bin = join(ROOT, 'node_modules', '.bin');
   env.PATH = env.PATH === undefined ? bin : `${bin}${delimiter}${env.PATH}`;
   return env;
@@ -148,6 +213,86 @@ function context(res: SpawnSyncReturns<string>): string {
     `error=${res.error instanceof Error ? res.error.message : String(res.error)}\n` +
     `--- stdout ---\n${res.stdout}\n--- stderr ---\n${res.stderr}`
   );
+}
+
+interface RealSweepFamilyPlan {
+  plan: Plan;
+  sessionsDir: string;
+}
+
+/**
+ * Build a REAL instance of a sweep-family shipped plan (sweep / test-fix)
+ * over the scratch repo: phase A runs the planner with its real subprocess
+ * deps, phase B expands it, and the caller's documented post-build enrichment
+ * layers the driver/check bindings the `sweep.unit` op needs. The declared
+ * tracker-branch/assemble legs are dropped — a real forge is out of scope for
+ * this hermetic leg (the per-plan D4 e2e owns the forge composition). The
+ * result is a JSON-serializable Plan whose unit jobs dispatch through the
+ * REAL SubprocessDriver against the fake sweep agent.
+ */
+async function buildRealSweepFamilyPlan(kind: 'sweep' | 'test-fix'): Promise<RealSweepFamilyPlan> {
+  const fixer = kind === 'sweep' ? 'fix' : TEST_FIX_FIXER;
+  const config = {
+    repoRoot: scratchRepo,
+    worktreesDir: kind === 'sweep' ? 'worktrees' : 'worktrees-test-fix',
+    runPrefix: kind === 'sweep' ? 'cq/t43-sweep' : 'cq/t43-test-fix',
+    base: 'main',
+    packages: SCRATCH_PACKAGES,
+    selector: { mode: 'workspace-all' as const },
+    fixers: [fixer],
+    packageFiles: SCRATCH_PACKAGE_FILES,
+  };
+  const plannerOp = makePlanSweep(makeSubprocessSweepPlannerDeps(scratchRepo));
+  const planned = await plannerOp(sweepPlannerInput(config));
+  if (planned.status !== 'ok') {
+    throw new Error(`real ${kind} plan: the phase-A planner failed — ${JSON.stringify(planned)}`);
+  }
+  const sessionsDir = join(planDir, `sessions-${kind}`);
+  const runStateDir = join(planDir, `run-state-${kind}`);
+  const driver: SweepUnitDriverConfig = {
+    binary: [process.execPath, SWEEP_AGENT],
+    provider: 'cq-t43-smoke',
+    model: 'sweep-fake',
+    sessionsDir,
+    routingTable: {
+      endpoints: {
+        'cq-t43-smoke': {
+          baseUrlEnv: 'CQ_T43_SMOKE_URL',
+          baseUrlDefault: 'http://127.0.0.1:9',
+          keyEnv: 'CQ_T43_SMOKE_KEY',
+          models: ['sweep-fake'],
+          notes:
+            'T4.3 real-plan smoke: the sweep agent fixture is the model; the URL is never contacted',
+        },
+      },
+    },
+  };
+  const check: SweepUnitCheckConfig = {
+    adapter: 'tsc-lines',
+    command: process.execPath,
+    args: ['scripts/check.js', '{package}'],
+    timeoutMs: 30_000,
+  };
+  const full =
+    kind === 'sweep'
+      ? buildSweepPlan(config, planned.value)
+      : buildTestFixPlan(config, planned.value);
+  // The caller's post-build enrichment + the #174 run-state vouch, exactly
+  // as the D4 e2e composes it (the frozen Job has no cross-job data channel).
+  const jobs = full.jobs.filter(
+    (job) => job.id !== SWEEP_PLAN_JOB_IDS.assemble && job.id !== SWEEP_PLAN_JOB_IDS.trackerBranch,
+  );
+  for (const job of jobs) {
+    if (job.op !== SWEEP_UNIT_OP) continue;
+    Object.assign(job.input as SweepUnitDispatchInput, {
+      driver,
+      check,
+      push: false,
+      runStateDir,
+    });
+  }
+  const planId = kind === 'sweep' ? SWEEP_PLAN_ID : TEST_FIX_PLAN_ID;
+  return { plan: { ...full, id: planId, jobs }, sessionsDir };
 }
 
 describe('the plan smoke table covers the registry (generation contract)', () => {
@@ -191,10 +336,14 @@ describe('every shipped plan runs through the built CLI (ws-i item 2)', () => {
           expect(report.stoppedEarly).toBe(false);
         }
         if (plan.name === 'analyze') {
-          // The floor's honest pin: probe → collect, and collect fails on the
-          // empty-sets policy (nothing was ever wired to the probe).
+          // The floor's honest pin: collect fails on its OWN empty-sets policy
+          // — not merely because the probe failed and left it blocked (a
+          // blocked row is also 'failed' but its error says 'blocked:').
           const collect = report.jobs.find((row) => row.jobId === 'analyze-collect');
           expect(collect?.result.status, context(res)).toBe('failed');
+          if (collect?.result.status === 'failed') {
+            expect(collect.result.error, context(res)).toContain('no input sets');
+          }
         }
       },
       CLI_TIMEOUT_MS,
@@ -259,4 +408,44 @@ describe('the built CLI still drives the subprocess driver + fake agent', () => 
     },
     CLI_TIMEOUT_MS,
   );
+
+  for (const kind of ['sweep', 'test-fix'] as const) {
+    test(
+      `run-plan of a REAL ${kind} plan spawns the fake sweep agent through the real SubprocessDriver`,
+      async () => {
+        const built = await buildRealSweepFamilyPlan(kind);
+        const planPath = join(planDir, `real-${kind}-plan.json`);
+        writeFileSync(planPath, JSON.stringify(built.plan), 'utf8');
+        const env = hermeticEnv();
+        // The driver route's key VALUE (fake — the URL is a black hole; the
+        // fake sweep agent IS the model).
+        env.CQ_T43_SMOKE_KEY = 't43-smoke-fake-key';
+        const res = runCli(
+          ['run-plan', `--plan=${planPath}`, '--json', '--concurrency=1'],
+          env,
+          scratchRepo,
+        );
+        expect(res.error, context(res)).toBeUndefined();
+        expect(res.status, context(res)).toBe(0);
+        expect(res.stderr, context(res)).toBe('');
+        const report = RunReportSchema.parse(JSON.parse(res.stdout));
+        for (const row of report.jobs) {
+          expect(row.result.status, `${row.jobId}: ${context(res)}`).toBe('ok');
+        }
+        // Every selected package dispatched one sweep.unit job.
+        const unitRows = report.jobs.filter((row) => row.op === SWEEP_UNIT_OP);
+        expect(unitRows.length, context(res)).toBe(SCRATCH_PACKAGES.length);
+        // The REAL SubprocessDriver wrote a session per unit: the fake agent
+        // CLI was genuinely spawned, not stubbed.
+        expect(
+          existsSync(built.sessionsDir),
+          `the driver wrote no sessions — the fake agent never spawned:\n${context(res)}`,
+        ).toBe(true);
+        expect(readdirSync(built.sessionsDir).length, context(res)).toBeGreaterThanOrEqual(
+          SCRATCH_PACKAGES.length,
+        );
+      },
+      CLI_TIMEOUT_MS,
+    );
+  }
 });
