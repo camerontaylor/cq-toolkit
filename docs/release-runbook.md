@@ -43,12 +43,15 @@ Run from a clean checkout of the promoted `main` SHA (`93bbf19`); the
 `prepack` hook builds `dist/` automatically, so no manual build is needed.
 
 ```sh
-git clone https://github.com/camerontaylor/cq-toolkit && cd cq-toolkit
+set -euo pipefail
+pack_dir="$(mktemp -d)"                        # fresh dir: no stale tarball can be hashed
+git clone https://github.com/camerontaylor/cq-toolkit
+cd cq-toolkit
 git checkout 93bbf19cda7ec84720f048d67679c150a4658ba1
 npm ci
-npm whoami                                   # confirm the publish identity
-npm pack --pack-destination /tmp/cq-release   # sanity: dist/ present, sha256 matches
-shasum -a 256 /tmp/cq-release/*.tgz           # expect 699a72da… (dist+policy+LICENSE+README+package.json)
+npm whoami                                     # confirm the publish identity
+npm pack --pack-destination "$pack_dir"         # sanity: dist/ present, sha256 matches
+shasum -a 256 "$pack_dir"/*.tgz                  # expect 699a72da… (dist+policy+LICENSE+README+package.json)
 npm publish --access public
 npm view @camerontaylor/cq-toolkit@1.0.0 version dist.tarball
 ```
@@ -62,11 +65,14 @@ is the pre-publish evidence; `npm pack` must reproduce the recorded sha256
 Only after step 1 succeeds:
 
 ```sh
-cd cq-fixtures
+set -euo pipefail
+cd cq-fixtures                         # a failed cd aborts before any rm
 git switch -c lane/p5-flip origin/main
 scripts/flip-to-published.sh 1.0.0     # now resolves; rewrites pkg+lock, removes toolkit.lock
-rm -rf vendor node_modules && npm ci && npm run build && npm test
-git add package.json package-lock.json && git rm toolkit.lock
+rm -rf vendor node_modules
+npm ci && npm run build && npm test
+git add package.json package-lock.json
+git rm toolkit.lock
 git commit -m "chore(release): flip to published @camerontaylor/cq-toolkit@1.0.0"
 ```
 
