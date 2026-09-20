@@ -1,6 +1,8 @@
 === pack-audit — cq-toolkit release candidate v1.0.0 ===
 repo: camerontaylor/cq-toolkit
-head: ac261fce3c4a13a67c7517d685f7db80f6c09b9b (lane/p5-release, caught up to merge-queue 0d76ed5)
+head: ac261fce3c4a13a67c7517d685f7db80f6c09b9b (committed at capture; lane/p5-release caught up to merge-queue 0d76ed5)
+dirty-diff identity: 9797acdf1fd1579d7c40526d5837422d334c3991d5b22864c215c9935116c9b2 (git diff --binary --full-index ac261fc 88dc0e3 | shasum -a 256 — the CLIENT_VERSION alignment, uncommitted at capture, committed as 88dc0e3)
+artifact content committed as: 88dc0e3
 base: origin/main 51c81eb (T4.4); catch-up merge ac261fc brings #195 + #198
 date: 2026-09-20T18:11:11Z
 npm: 11.19.0  node: v24.21.0

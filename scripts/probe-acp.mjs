@@ -49,7 +49,7 @@ import { join } from 'node:path';
 // version that binds. The installed server's SDK exports PROTOCOL_VERSION = 1;
 // the probe sends exactly this and records whatever comes back.
 const PROTOCOL_VERSION = 1;
-const CLIENT_INFO = { name: 'cq-acp-probe', version: '0.0.0' };
+const CLIENT_INFO = { name: 'cq-acp-probe', version: '1.0.0' };
 // The v1 client posture (strategy §1.3): no fs serving, no terminal hosting,
 // and deliberately NO elicitation capability — the server falls back from
 // elicitation/create to session/request_permission precisely when the client

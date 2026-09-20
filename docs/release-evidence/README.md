@@ -12,6 +12,8 @@ PR carries the artifacts rather than only describing them.
 
 The base is `origin/main` `51c81eb` (T4.4, ff-promoted); the branch is
 caught up to `merge-queue` `0d76ed5` by merge commit `ac261fc` (brings PRs
-#195 and #198). The logs are regenerated at the caught-up release-candidate
-head, so the audited tarball matches what a publish of this PR would ship.
-The CI equivalents are linked from `RELEASE.md`.
+#195 and #198). The logs were captured with the round-1 `CLIENT_VERSION`
+alignment still uncommitted (recorded as a dirty-diff identity in each log);
+that content is committed as `88dc0e3`, so the audited tarball matches what a
+publish of this PR would ship. The CI equivalents are linked from
+`RELEASE.md`.

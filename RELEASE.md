@@ -106,27 +106,33 @@ critical/major finding coexists with this PR.
   "Round-1 dispositions"); fresh reviewer `53b7f81` (paseo
   `pi-opencode/opencode-go/deepseek-v4.1-flash`, thinking medium), posted as
   a PR comment.
-- round 2: _pending_ (fresh paseo reviewer, thinking high — the diff now
-  touches `src/driver/acp/index.ts`).
+- round 2: 5 findings (2 medium, 3 low) — **all fixed** (evidence-log
+  identity + dirty-diff recording, PR-body regeneration, CodeRabbit
+  rate-limit wording, `scripts/probe-acp.mjs` client version, gate-row
+  labelling); fresh reviewer `6cf37ae` (paseo
+  `pi-opencode/opencode-go/deepseek-v4.1-flash`, thinking high), posted as a
+  PR comment. The round-2 fixes are in the commit immediately following the
+  reviewed head; the final head is re-reviewed in round 3.
+- round 3: _pending_ (fresh paseo reviewer on the final head).
 - VB5 batch gate (final goal T5.3): _pending_.
 
 ### Round-1 dispositions
 
-| #   | Sev    | Fix                                                                                                                                            |
-| --- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | high   | Fixed — caught up to `merge-queue` `0d76ed5`; pack-audit + dry-run regenerated at the caught-up head; new tarball sha256 inlined (§6 row 6).   |
-| 2   | medium | Fixed — `CHANGELOG.md` adds #195 (RD) and #198 (WS-H); every merged PR is now present.                                                         |
-| 3   | medium | Fixed — `CHANGELOG.md` intro qualifies the plan/breakdown paths as the private research repo (dead relative links removed).                    |
-| 4   | medium | Fixed — the `AUTOPUBLISH=no` basis is inlined; `STATUS.md` qualified as the private research repo.                                             |
-| 5   | medium | Fixed — the three deterministic gate runs are recorded under "Verification"; dangling "Cycle gate runs"/"spec audit below" references removed. |
-| 6   | low    | Fixed — the tarball sha256 is inlined instead of the log path.                                                                                 |
-| 7   | low    | Fixed — `docs/naming.md` version claim updated; ACP `clientInfo.version` aligned via `CLIENT_VERSION = '1.0.0'`.                               |
+| #   | Sev    | Fix                                                                                                                                                                                                                                                               |
+| --- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | high   | Fixed — caught up to `merge-queue` `0d76ed5`; pack-audit + dry-run regenerated for the final content (the `CLIENT_VERSION` fix, uncommitted at capture, committed as `88dc0e3`; dirty-diff identity recorded in each log); new tarball sha256 inlined (§6 row 6). |
+| 2   | medium | Fixed — `CHANGELOG.md` adds #195 (RD) and #198 (WS-H); every merged PR is now present.                                                                                                                                                                            |
+| 3   | medium | Fixed — `CHANGELOG.md` intro qualifies the plan/breakdown paths as the private research repo (dead relative links removed).                                                                                                                                       |
+| 4   | medium | Fixed — the `AUTOPUBLISH=no` basis is inlined; `STATUS.md` qualified as the private research repo.                                                                                                                                                                |
+| 5   | medium | Fixed — the three deterministic gate runs are recorded under "Verification"; dangling "Cycle gate runs"/"spec audit below" references removed.                                                                                                                    |
+| 6   | low    | Fixed — the tarball sha256 is inlined instead of the log path.                                                                                                                                                                                                    |
+| 7   | low    | Fixed — `docs/naming.md` version claim updated; ACP `clientInfo.version` aligned via `CLIENT_VERSION = '1.0.0'`.                                                                                                                                                  |
 
 ## Review threads (bots)
 
-_pending_ — the CodeRabbit App skipped review while this is a draft; threads
-are listed and each given one fate (fix / dismiss / defer→issue) before merge
-once the PR is ready.
+_pending_ — the CodeRabbit App was rate-limited when the PR was opened
+(`Review limit reached`); threads are listed and each given one fate (fix /
+dismiss / defer→issue) before merge once the App review posts.
 
 ## Dismissed findings
 
@@ -153,7 +159,7 @@ cycle 1, between cycles, after cycle-2 addressing); all commands exit 0:
 | pre-cycle-1                | 0              | 0 (`0 error(s) <= baseline 0`) | 0      | 0 (`tree scan clean, 9 classes`) |
 | between cycles (`b488cb7`) | 0              | 0                              | 0      | 0                                |
 | post-cycle-2 (`04b67fd`)   | 0              | 0                              | 0      | 0                                |
-| post-catch-up (RC head)    | 0              | 0                              | 0      | 0                                |
+| post-catch-up (`88dc0e3`)  | 0              | 0                              | 0      | 0                                |
 
 Plus the three whitespace/conflict-marker checks
 (`git diff --check BASE HEAD`, `--cached`, unstaged) — all clean; `npm ci`
@@ -178,9 +184,10 @@ commit as any code).
   lane then promoted #195 and #198 to `merge-queue`/`main` (`0d76ed5`).
   Because the two CLI cycles are capped at two and the CLI base is immutable
   per task, no third cycle was run; instead the branch was caught up by merge
-  commit `ac261fc` (never a force-push), evidence was regenerated at the
-  caught-up head, and the final head is covered by the fresh non-author
-  reviewer rounds plus the spec audit. The upstream delta (#195/#198) was
+  commit `ac261fc` (never a force-push), evidence was regenerated for the
+  final content (committed as `88dc0e3`, dirty-diff identity recorded in the
+  logs), and the final head is covered by the fresh non-author reviewer
+  rounds plus the spec audit. The upstream delta (#195/#198) was
   independently reviewed and merged under its own protocol.
 - **No in-harness Agent/Task tool** on the `pi-opencode` lane harness
   (provider exposes no selectable modes and no in-process subagent tool), so
