@@ -43,6 +43,13 @@ jobs:
       # deliberate, boring-safe choice.
       - name: Build
         run: npm run build
+      # Generated-artifact drift gate (ws-i scope item 5): the generator's
+      # --check mode recomputes the per-op reference and fails on any drift
+      # (missing, changed, or stale docs/ops/*.md) without writing. It reads
+      # the BUILT registry, so this step follows the build above; its output
+      # is deterministic (no timestamps, no absolute paths).
+      - name: Check generated op docs
+        run: npm run gen:op-docs:check
 
   # Stage-1 self-hosting (T1.7 / ws-k stage 1 item 6): CI runs the toolkit
   # FROM SOURCE — the built artifact drives a real governed plan (two jobs
