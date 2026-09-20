@@ -465,6 +465,27 @@ describe('runSelfReviewLoop — real run', () => {
     expect(calls).toHaveLength(1); // only the numbered PR reached the loop
   });
 
+  test('a listing row without a head ref is recorded as excluded, never dispatched on an unverifiable head', async () => {
+    // CLI-substitute finding: an absent `head.ref` maps to an empty
+    // headRefName; without the pre-loop guard it would pass every gate
+    // (`''` !== the protected branch, and the revalidation's `'' === ''`
+    // compare vouches for itself) and dispatch with an empty branch.
+    const calls: RecordedCall[] = [];
+    const gh = fakeGh([pullRow(8, { ref: '' }), pullRow(7)]);
+    const summary = await runSelfReviewLoop(
+      baseDeps(
+        gh,
+        fakeLoop(calls, async (pr) => fakeOutcome(pr)),
+      ),
+      baseCfg({ journalRoot: tempJournalRoot() }),
+    );
+    expect(summary.excluded).toEqual([
+      { pr: 8, reason: 'fetch-failed: listing row without a head ref' },
+    ]);
+    expect(summary.results.map((row) => row.pr)).toEqual([7]);
+    expect(calls).toHaveLength(1); // only the head-ref'd PR reached the loop
+  });
+
   test('driverRegistryView injection rides through to the loop opts', async () => {
     const calls: RecordedCall[] = [];
     const view: OpRegistryView = { get: () => undefined };

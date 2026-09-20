@@ -260,6 +260,13 @@ export interface SelfReviewLoopSummary {
 /** The no-number exclusion reason (shared verbatim by both run modes). */
 const EXCLUDE_NO_NUMBER = 'fetch-failed: listing row without a PR number';
 
+/** The no-head-ref exclusion reason (shared verbatim by both run modes): a
+ * listing row whose `head.ref` is absent maps to an empty headRefName, which
+ * can never be dispatched — an unverifiable head is not a dispatchable head
+ * (and the pre-dispatch revalidation's `'' === ''` compare would otherwise
+ * vouch for it). */
+const EXCLUDE_NO_HEAD_REF = 'fetch-failed: listing row without a head ref';
+
 /** The fork exclusion reason (shared verbatim by both run modes). */
 const excludeForked = (headRepoFullName: string): string =>
   `forked-pr (head repo ${headRepoFullName === '' ? 'unknown' : headRepoFullName})`;
@@ -309,6 +316,7 @@ const preLoopExclusion = (
   repo: string,
 ): string | null => {
   if (row.pr === 0) return EXCLUDE_NO_NUMBER;
+  if (row.headRefName === '') return EXCLUDE_NO_HEAD_REF;
   if (row.headRepoFullName !== `${owner}/${repo}`) return excludeForked(row.headRepoFullName);
   if (row.draft) return EXCLUDE_DRAFT;
   if (row.headRefName === SelfhostDefaults.protectedBranch) return EXCLUDE_PROTECTED_HEAD;

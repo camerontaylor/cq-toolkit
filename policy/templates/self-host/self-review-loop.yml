@@ -144,14 +144,14 @@ jobs:
           # (bad args, a failed listing) exits 1. pipefail below turns that
           # throw into a red step despite tee.
           set -euo pipefail
-          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
-          test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
-          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.)
+          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the secret asserts: a delayed fire with rotated/absent secrets is a scheduling fact (honest no-op), not a credential failure.
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
             exit 0
           fi
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
+          test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
           # Review-fix pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           gh auth setup-git
           # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
