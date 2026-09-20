@@ -1,10 +1,18 @@
 === npm publish --dry-run — cq-toolkit v1.0.0 (no publish performed) ===
-head: ac261fce3c4a13a67c7517d685f7db80f6c09b9b (committed at capture; lane/p5-release caught up to merge-queue 0d76ed5)
-dirty-diff identity: 9797acdf1fd1579d7c40526d5837422d334c3991d5b22864c215c9935116c9b2 (git diff --binary --full-index ac261fc 88dc0e3 | shasum -a 256 — the CLIENT_VERSION alignment, uncommitted at capture, committed as 88dc0e3)
-artifact content committed as: 88dc0e3
-date: 2026-09-20T18:11:19Z
+head: 900043a5abb842860d45d953afb3ff00819ab2cb (clean tree)
+deps: npm ci (installed this task); the prepack hook builds dist/ before packing
+date: 2026-09-20T20:14:30Z
 registry: https://registry.npmjs.org/
 
+
+> @camerontaylor/cq-toolkit@1.0.0 prepack
+> npm run build
+
+
+> @camerontaylor/cq-toolkit@1.0.0 build
+> tsc -p tsconfig.build.json && node scripts/copy-prompt-assets.mjs
+
+copy-prompt-assets: 1 prompt asset(s) → dist/ops/merge/prompts/
 npm notice
 npm notice package: @camerontaylor/cq-toolkit@1.0.0
 npm notice Tarball Contents
@@ -287,8 +295,8 @@ npm notice version: 1.0.0
 npm notice filename: camerontaylor-cq-toolkit-1.0.0.tgz
 npm notice package size: 743.4 kB
 npm notice unpacked size: 2.5 MB
-npm notice shasum: c6a0e21eddc60cac0bcd40ba9aae268c3e18c1c0
-npm notice integrity: sha512-HVu7KeVbvxkzR[...]dnhmgsXNPZ3jA==
+npm notice shasum: 1bc3274e2afc12f69599a5440f483084040fa0ca
+npm notice integrity: sha512-u7guC3qUSiRr0[...]sq1k8+3ezUV4w==
 npm notice total files: 273
 npm notice
 npm warn publish This command requires you to be logged in to https://registry.npmjs.org/ (dry-run)
