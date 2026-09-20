@@ -252,7 +252,7 @@ function splitKeyValue(s, where) {
 // (NUL, NUL.txt, and nul all address the device), so the probe-path check
 // compares the extension-stripped uppercased stem against this set.
 const WINDOWS_DEVICE_NAMES = new Set([
-  'CON', 'PRN', 'AUX', 'NUL',
+  'CON', 'PRN', 'AUX', 'NUL', 'CONIN$', 'CONOUT$',
   'COM1', 'COM2', 'COM3', 'COM4', 'COM5', 'COM6', 'COM7', 'COM8', 'COM9',
   'LPT1', 'LPT2', 'LPT3', 'LPT4', 'LPT5', 'LPT6', 'LPT7', 'LPT8', 'LPT9',
 ]);
@@ -1201,7 +1201,9 @@ function selfTestParserGuards(rules) {
     'a>b.txt',
     'quo"te.txt',
     'NUL .txt',
+    'conin$.txt',
     'a\x01b.txt',
+    'a\x00b.txt',
   ];
   for (const probe of rejectCases) {
     const text = [
@@ -1210,7 +1212,10 @@ function selfTestParserGuards(rules) {
       "    description: 'parser guard fixture rule'",
       "    regex: '(?i)guard[_-]secret'",
       "    sample: 'guard_secret=not-a-real-value'",
-      `    probe_path: ${probe}`,
+      // Quoted like the accept-cases below: an unquoted shape containing
+      // ": " or " #" would trip parseScalar's reserved-characters guard
+      // instead of the Windows guard under test.
+      `    probe_path: '${probe}'`,
       'clean_probes:',
       "  - 'clean/probes/none.txt'",
     ].join('\n');
