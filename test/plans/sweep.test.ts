@@ -344,6 +344,26 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(() => buildSweepPlan(CONFIG, misaligned)).toThrow(/misaligned/);
   });
 
+  test('an ORDER-mismatched report of equal length is plan corruption (#175 item 6)', () => {
+    const units: Array<WorkUnit> = [
+      { package: 'alpha', fixer: 'fix', files: [] },
+      { package: 'beta', fixer: 'fix', files: [] },
+    ];
+    // Equal length, but job 0 embeds beta while unit 0 is alpha: the old
+    // length-only guard would attach alpha's resolved kind/slug to beta's
+    // job and mis-slug the unit.
+    const swapped: PlanSweepReport = {
+      jobs: [
+        { id: 'sweep-beta-fix', op: SWEEP_UNIT_OP, input: units[1], dependsOn: [] },
+        { id: 'sweep-alpha-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] },
+      ],
+      units,
+      suppressed: [],
+      needsHuman: [],
+    };
+    expect(() => buildSweepPlan(CONFIG, swapped)).toThrow(/misaligned at index 0/);
+  });
+
   test('slug normalization and deterministic collision disambiguation (jTPa1)', () => {
     // '@scope/pkg' normalizes to the DISPATCHABLE slug 'scope-pkg' (the old
     // fold produced '-scope-pkg', which SEGMENT_RE refuses).

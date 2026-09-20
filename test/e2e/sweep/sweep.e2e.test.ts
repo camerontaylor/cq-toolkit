@@ -159,6 +159,7 @@ function optsFor(
   extra?: {
     push?: boolean;
     stagePathAllowlist?: { patterns: string[] };
+    runStateDir?: string | null;
     concurrency?: number;
   },
 ): RunSweepOpts {
@@ -192,6 +193,20 @@ function optsFor(
     ...(promptTemplate !== undefined ? { promptTemplate } : {}),
     ...extra,
   };
+}
+
+/**
+ * Strand alpha's verified fix: run 1 with NO origin (the commit lands, the
+ * push fails), then restore the origin so a run-2 refusal branch can be
+ * exercised (review-debt #174).
+ */
+async function strandAlpha(scene: Scenario, runPrefix: string): Promise<void> {
+  await gitOut(['-C', scene.repo, 'remote', 'remove', 'origin'], scene.repo);
+  const first = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
+  const alpha = unitRow(first.run, 'alpha');
+  expect(alpha.status).toBe('failed');
+  expect(alpha.error).toContain(`git push of '${runPrefix}/fix/alpha' failed`);
+  await gitOut(['-C', scene.repo, 'remote', 'add', 'origin', scene.origin], scene.repo);
 }
 
 /** The unit job's report row (by package + fixer), unwrapped as SweepUnitReport. */
@@ -927,6 +942,72 @@ describe('sweep e2e: assemble guard, stranded commits, concurrency', () => {
       const assembled = assembleReport(second.assembleRun as RunReport);
       expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
       expect(second.output).toContain('0 failing unit(s) of 2');
+    },
+  );
+
+  test(
+    'strand-retry REFUSES with no caller-vouched runStateDir: an ahead-of-base branch is never pushed (no-vouch, #174)',
+    { timeout: 600_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-novouch');
+      await strandAlpha(scene, 'cq/e2e-novouch');
+      // Run 2 (origin restored, NO vouch): the fixer no-ops, the branch is
+      // ahead of base, and the strand-retry refuses because the record could
+      // not be trusted from the derived (driver-reachable) location.
+      const second = await runSweepPlan(
+        optsFor(scene, prompts({ edit: ALPHA_FIX }, {}), { runStateDir: null }),
+      );
+      const alpha = unitRow(second.run, 'alpha');
+      expect(alpha.status).toBe('failed');
+      expect(alpha.error).toMatch(
+        /stranded pushes require an explicit caller-supplied runStateDir/,
+      );
+      expect(alpha.error).toMatch(/needs-human evidence/);
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).not.toContain('cq/e2e-novouch/fix/alpha');
+      expect(second.assembleRun).toBeUndefined();
+    },
+  );
+
+  test(
+    'strand-retry REFUSES a stripped scanned-commit record: a divergent tip is never pushed (#174)',
+    { timeout: 600_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-stripped');
+      await strandAlpha(scene, 'cq/e2e-stripped');
+      // The run-state `scanned/` record is the ONLY push authorization: strip
+      // it and the retry fails TAMPER instead of trusting the ahead-of-base
+      // tip.
+      rmSync(join(scene.repo, 'cq-run-state', 'scanned', 'fix', 'alpha.json'));
+      const second = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
+      const alpha = unitRow(second.run, 'alpha');
+      expect(alpha.status).toBe('failed');
+      expect(alpha.error).toMatch(/no scanned-commit record exists for this unit/);
+      expect(alpha.error).toMatch(/unscanned commit must not be pushed/);
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).not.toContain('cq/e2e-stripped/fix/alpha');
+    },
+  );
+
+  test(
+    'strand-retry REFUSES a divergent tip: the recorded sha must still be HEAD (#174)',
+    { timeout: 600_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-divergent');
+      await strandAlpha(scene, 'cq/e2e-divergent');
+      // Move the branch tip with a clean (empty) commit: the record still
+      // exists, but it no longer names the tip — fail closed, never push.
+      const worktree = resolve(scene.repo, 'worktrees', 'fix', 'alpha');
+      await gitOut(
+        ['-C', worktree, 'commit', '--allow-empty', '-m', 'unscanned tip move'],
+        scene.repo,
+      );
+      const second = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
+      const alpha = unitRow(second.run, 'alpha');
+      expect(alpha.status).toBe('failed');
+      expect(alpha.error).toMatch(/diverges from the recorded scanned sha/);
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).not.toContain('cq/e2e-divergent/fix/alpha');
     },
   );
 

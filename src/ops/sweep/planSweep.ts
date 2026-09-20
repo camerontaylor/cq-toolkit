@@ -48,7 +48,9 @@ export interface PlanSweepPackage {
    * Repo-root-relative directory prefix (posix separators, as git reports
    * paths); '.' names the repo root. A single leading './' is accepted and
    * normalized; other non-normalized forms ('..' segments, trailing '/',
-   * '././') are refused.
+   * '././') are refused, and a BACKSLASH is refused outright (review-debt
+   * #150: a win32-spelled path can never prefix-match git's posix output, so
+   * its files would report as orphans and its jobs would never plan).
    */
   path: string;
 }
@@ -127,12 +129,14 @@ export interface PlanSweepReport {
 /**
  * The injected-effects seam — the ONE place this module touches the world.
  * `changedFiles` lists repo-root-relative posix paths changed against a base
- * ref; `queryLedger` is typically `makeLedgerQuery(store)` from the ledger
- * family. Optional only because a sweep may run without a ledger: when
- * input.ledger is set the dep is REQUIRED and its absence is `failed`.
+ * ref, each paired with its git status so deletion is selection evidence but
+ * never a fixer target (review-debt #150); `queryLedger` is typically
+ * `makeLedgerQuery(store)` from the ledger family. Optional only because a
+ * sweep may run without a ledger: when input.ledger is set the dep is
+ * REQUIRED and its absence is `failed`.
  */
 export interface PlanSweepDeps {
-  changedFiles: (base: string) => Promise<string[]>;
+  changedFiles: (base: string) => Promise<ChangedFile[]>;
   queryLedger?: (input: LedgerQueryInput) => Promise<OpResult<LedgerView>>;
 }
 
@@ -224,7 +228,7 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
         break;
       }
       case 'changed-vs-base': {
-        let changed: string[];
+        let changed: ChangedFile[];
         try {
           changed = await deps.changedFiles(input.selector.base);
         } catch (err) {
@@ -233,20 +237,27 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
             error: `sweep: could not list files changed against "${input.selector.base}" — ${messageOf(err)}`,
           };
         }
-        const mapped = new Map<string, string[]>();
-        for (const file of changed) {
-          const pkg = longestPrefixPackage(file, manifest);
+        // Deletion is SELECTION evidence but never a fixer target
+        // (review-debt #150): a 'D' path — and the SOURCE side of a rename —
+        // selects its package, yet is filtered from the unit's file-set
+        // because a fixer cannot open a path the working tree no longer has.
+        const fileSets = new Map<string, string[]>();
+        const touched = new Set<string>();
+        for (const change of changed) {
+          const pkg = longestPrefixPackage(change.path, manifest);
           if (pkg === undefined) {
-            orphans.push(file);
+            orphans.push(change.path);
             continue;
           }
-          const bucket = mapped.get(pkg.name);
-          if (bucket === undefined) mapped.set(pkg.name, [file]);
-          else bucket.push(file);
+          touched.add(pkg.name);
+          if (change.deleted) continue;
+          const bucket = fileSets.get(pkg.name);
+          if (bucket === undefined) fileSets.set(pkg.name, [change.path]);
+          else bucket.push(change.path);
         }
         selected = manifest.flatMap((pkg) => {
-          const files = mapped.get(pkg.name);
-          return files === undefined ? [] : [{ pkg, files }];
+          if (!touched.has(pkg.name)) return [];
+          return [{ pkg, files: fileSets.get(pkg.name) ?? [] }];
         });
         break;
       }
@@ -409,8 +420,11 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     ) {
       return `sweep: packages[${String(index)}] must have a non-empty name and path`;
     }
+    if (pkg.path.includes('\\')) {
+      return `sweep: packages[${String(index)}] path '${pkg.path}' contains a backslash — manifest paths are repo-root-relative POSIX (git reports posix separators); a backslash cannot be safely reinterpreted as a separator on posix or as a literal on win32, so the entry can never prefix-match git's output`;
+    }
     if (normalizedManifestPath(pkg.path) === null) {
-      return `sweep: packages[${String(index)}] path '${pkg.path}' must be a normalized repo-root-relative posix path — an optional leading './' is normalized; '..' segments, empty segments, and trailing '/' are refused`;
+      return `sweep: packages[${String(index)}] path '${pkg.path}' must be a normalized repo-root-relative posix path — an optional leading './' is normalized; '..' segments, empty segments, trailing '/' and backslashes are refused`;
     }
     if (seen.includes(pkg.name)) {
       return `sweep: duplicate package name in the manifest: ${pkg.name}`;
@@ -455,7 +469,7 @@ function inputFaultOf(input: PlanSweepInput): string | null {
     if (typeof input.selector.base !== 'string' || input.selector.base === '') {
       return 'sweep: changed-vs-base requires a non-empty base ref';
     }
-    // The base lands verbatim in `git diff --name-only -z <base> --` — a
+    // The base lands verbatim in `git diff --name-status -z <base> --` — a
     // dash-leading ref would be parsed as an OPTION before the trailing
     // `--` terminator ever applies (see the
     // makeSubprocessSweepPlannerDeps JSDoc for the two different `--`
@@ -525,6 +539,10 @@ function fileSetOf(name: string, packageFiles?: Record<string, string[]>): strin
  */
 function normalizedManifestPath(path: string): string | null {
   if (path === '.') return '.';
+  // A backslash is REFUSED, not converted (the worktreeFor
+  // baselineCacheDirs rule): on posix it is a legal filename character and on
+  // win32 it is a separator, so reinterpreting it either way is unsafe.
+  if (path.includes('\\')) return null;
   let candidate = path;
   if (candidate.startsWith('./')) candidate = candidate.slice(2);
   if (
@@ -605,7 +623,13 @@ const SWEEP_GIT_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const SWEEP_GIT_TIMEOUT_MS = 600_000;
 
 /**
- * The argv of the changed-file listing: `git diff --name-only -z <base> --`.
+ * The argv of the changed-file listing: `git diff --name-status -z <base> --`.
+ * STATUS-aware since review-debt #150: `--name-only` emitted the pathname of
+ * a DELETED file, which the planner then put into a unit's file-set — a
+ * fixer cannot open a path the working tree no longer has. `--name-status`
+ * pairs each path (and each side of a rename/copy) with its status letter so
+ * deletion stays selection evidence without becoming a fixer target.
+ *
  * The TRAILING `--` is a REV-LIST terminator — `base` stays a REVISION and
  * the empty tail means "all paths" — and it exists because a tracked file
  * spelled exactly like the base ref would otherwise die with "ambiguous
@@ -616,21 +640,64 @@ const SWEEP_GIT_TIMEOUT_MS = 600_000;
  * dash-leading value is parsed as an OPTION before any terminator applies).
  */
 export function changedFilesArgs(base: string): string[] {
-  return ['diff', '--name-only', '-z', base, '--'];
+  return ['diff', '--name-status', '-z', base, '--'];
 }
 
 /**
- * The changed-file listing of the shipped planner deps: the NAMES of the
- * working-tree files that differ from `base` (--name-only), as
- * repo-root-relative paths (argv built by {@link changedFilesArgs}).
- * Name-ONLY is load-bearing: the status-letter variant (`--name-status`)
- * would put `M\tpath`-style rows into {@link parseNullDelimitedPaths}'s
- * output and corrupt its path contract. NUL-delimited (`-z`) so filenames
- * with spaces, quotes, or newlines survive intact; empty entries from the
- * trailing NUL are dropped by {@link parseNullDelimitedPaths}.
+ * One entry of the changed-file listing: a repo-root-relative posix path
+ * with the git status code(s) it was reported under and whether the path
+ * still exists in the working tree. A rename/copy record yields TWO entries
+ * (source then destination); the SOURCE of a rename is `deleted: true` (the
+ * rename removed it), the destination is not. Selection maps EVERY entry's
+ * path onto packages (a rename touches both sides); only non-deleted entries
+ * enter a unit's fixer file-set (review-debt #150).
  */
-export function parseNullDelimitedPaths(text: string): string[] {
-  return text.split('\0').filter((path) => path !== '');
+export interface ChangedFile {
+  /** Repo-root-relative posix path. */
+  path: string;
+  /** The git status code ('M', 'A', 'D', 'R100', 'C75', …). */
+  status: string;
+  /** True when the path no longer exists in the working tree (a 'D' record, or the source side of a rename). */
+  deleted: boolean;
+}
+
+/**
+ * Parse `git diff --name-status -z` output into {@link ChangedFile} entries.
+ * Records are `STATUS NUL path [NUL path2] NUL`; an R/C (rename/copy) record
+ * carries the OLD then the NEW path — the old side of an R is DELETED, the
+ * old side of a C still exists. NUL-delimited (`-z`) so filenames with
+ * spaces, quotes, or newlines survive intact; empty entries from the trailing
+ * NUL are dropped. This REPLACES the old name-only parser (review-debt #150):
+ * the name-only contract silently admitted deleted paths into fixer
+ * file-sets.
+ */
+export function parseNullDelimitedChangedFiles(text: string): ChangedFile[] {
+  const tokens = text.split('\0');
+  const files: ChangedFile[] = [];
+  for (let index = 0; index < tokens.length;) {
+    const status = tokens[index] as string;
+    index += 1;
+    if (status === '') continue; // trailing NUL / empty entry
+    if (/^[RC]/.test(status)) {
+      const source = tokens[index] as string | undefined;
+      index += 1;
+      const destination = tokens[index] as string | undefined;
+      index += 1;
+      if (source !== undefined && source !== '') {
+        files.push({ path: source, status, deleted: status.startsWith('R') });
+      }
+      if (destination !== undefined && destination !== '') {
+        files.push({ path: destination, status, deleted: false });
+      }
+      continue;
+    }
+    const path = tokens[index] as string | undefined;
+    index += 1;
+    if (path !== undefined && path !== '') {
+      files.push({ path, status, deleted: status.startsWith('D') });
+    }
+  }
+  return files;
 }
 
 /**
@@ -706,7 +773,7 @@ function runSweepGit(args: string[], cwd: string): Promise<string> {
 /**
  * The REAL effects binding of the sweep planner (the registry importer's
  * input-driven binding): the changed-file listing runs the
- * {@link changedFilesArgs} argv — `git diff --name-only -z <base> --`,
+ * {@link changedFilesArgs} argv — `git diff --name-status -z <base> --`,
  * the trailing `--` a REV-LIST terminator (see that JSDoc for the two
  * different `--` traps) — bound to the DISPATCHED input's repoRoot, and the
  * ledger view consults the ledger family's own store — `makeLedgerQuery`
@@ -728,7 +795,7 @@ function runSweepGit(args: string[], cwd: string): Promise<string> {
 export function makeSubprocessSweepPlannerDeps(repoRoot: string): PlanSweepDeps {
   return {
     changedFiles: (base: string) =>
-      runSweepGit(changedFilesArgs(base), repoRoot).then(parseNullDelimitedPaths),
+      runSweepGit(changedFilesArgs(base), repoRoot).then(parseNullDelimitedChangedFiles),
     queryLedger: (input: LedgerQueryInput) =>
       makeLedgerQuery((i) => pathLedgerStore(i.root, i.storePath))(input),
   };

@@ -163,6 +163,13 @@ export interface RunSweepOpts {
   push?: boolean;
   /** Optional staged-path allowlist overlay (the test-fix scope pin). */
   stagePathAllowlist?: { patterns: string[] };
+  /**
+   * The explicit run-state dir every unit job carries (review-debt #174's
+   * trust vouch). Default `<repoRoot>/cq-run-state`. `null` OMITS the field
+   * entirely — the derived (driver-reachable) location — so the strand-retry
+   * refuses (the no-vouch refusal branch under test).
+   */
+  runStateDir?: string | null;
   /** The units dispatch's concurrency; default 1 (the e2e's serial default). */
   concurrency?: number;
 }
@@ -220,8 +227,14 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     }
     // The #174 trust vouch: the harness supplies the run-state dir EXPLICITLY
     // (outside the worktrees dir) so the strand-retry's scanned-commit record
-    // is trustworthy — the same decision the phase-4 runner must make.
-    (job.input as SweepUnitDispatchInput).runStateDir = join(opts.config.repoRoot, 'cq-run-state');
+    // is trustworthy — the same decision the phase-4 runner must make. A
+    // `runStateDir: null` OMITS it (the no-vouch refusal branch).
+    if (opts.runStateDir === null) {
+      delete (job.input as SweepUnitDispatchInput).runStateDir;
+    } else {
+      (job.input as SweepUnitDispatchInput).runStateDir =
+        opts.runStateDir ?? join(opts.config.repoRoot, 'cq-run-state');
+    }
     if (opts.promptTemplate !== undefined) {
       (job.input as SweepUnitDispatchInput).promptTemplate = opts.promptTemplate(
         job.input as WorkUnit,
@@ -357,7 +370,9 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       opts.config.repoRoot,
       opts.config.worktreesDir,
       opts.config.runPrefix,
-      join(opts.config.repoRoot, 'cq-run-state'),
+      opts.runStateDir === null
+        ? undefined
+        : (opts.runStateDir ?? join(opts.config.repoRoot, 'cq-run-state')),
     );
     const templateInput = assembleTemplate.input as AssemblePrsInput;
     const assembleInput: AssemblePrsInput = {

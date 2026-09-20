@@ -114,6 +114,14 @@ function normalizedSegment(raw: string): string {
  * carries no untracked tool state: a tree's strict-clean is unpolluted by
  * bookkeeping, a reuse is automatically I7-clean, and salvage never sees a
  * completed unit as dirty because of it.
+ *
+ * COLLISION-RESISTANT (review-debt #175 item 4): the namespace segment is
+ * INJECTIVELY encoded, not folded. The old fold mapped `cq/run.one` and
+ * `cq/run-one` onto the same `.cq-state/cq/run-one`, so sequential runs
+ * overwrote each other's baseline snapshots — fabricated evidence (I7). The
+ * encoder keeps `[A-Za-z0-9_-]` verbatim (so `cq/one` and `cq/09-16a` keep
+ * their familiar paths) and percent-encodes every other UTF-8 byte, which
+ * also neutralises `.`/`..` path segments.
  */
 export function sweepRunStateDir(
   repoRoot: string,
@@ -122,9 +130,27 @@ export function sweepRunStateDir(
 ): string {
   const namespace = runPrefix
     .split('/')
-    .map((segment) => normalizedSegment(segment))
+    .map((segment) => stateNamespaceSegment(segment))
     .join('/');
   return resolve(repoRoot, worktreesDir, '.cq-state', namespace);
+}
+
+/**
+ * Injective, filesystem-safe encoding of one run-state namespace segment:
+ * `[A-Za-z0-9_-]` pass through verbatim and every other UTF-8 byte becomes
+ * `%XX`. Distinct run prefixes therefore ALWAYS derive distinct state dirs
+ * (review-debt #175 item 4), and a literal `%` is itself encoded (`%25`) so
+ * the encoding cannot alias. `.` is encoded — which keeps `.`/`..` from ever
+ * acting as path segments and keeps the namespace free of dot-files.
+ */
+function stateNamespaceSegment(raw: string): string {
+  let encoded = '';
+  for (const byte of Buffer.from(raw, 'utf8')) {
+    const character = String.fromCharCode(byte);
+    if (/[A-Za-z0-9_-]/.test(character)) encoded += character;
+    else encoded += `%${byte.toString(16).toUpperCase().padStart(2, '0')}`;
+  }
+  return encoded;
 }
 
 /** The baseline-snapshot subdir of the run-state dir (sweepRunStateDir-scoped). */
@@ -880,6 +906,19 @@ async function stageUnitFiles(
 }
 
 /**
+ * Compile the staged-path allowlist pattern SOURCES (jSKJY) CASE-SENSITIVELY
+ * (review-debt #175 item 3): the patterns are built from manifest paths and
+ * declared files, which carry the checkout's exact case. The old `i` flag let
+ * a case-differing sibling package (`packages/Alpha/x` matching
+ * `^packages/alpha/`) stage outside its scope on a case-sensitive checkout.
+ * Exported as the case-sensitivity seam; a non-compiling source throws and
+ * the caller folds it into a `failed` result.
+ */
+export function compileStagePathPatterns(patterns: readonly string[]): RegExp[] {
+  return patterns.map((source) => new RegExp(source));
+}
+
+/**
  * The staged-path allowlist (jSKJY, rename-hardened per jVgCj): enumerate
  * what is staged with `diff --cached --name-status -z` — `--name-only` shows
  * only a rename's DESTINATION, so a worker renaming production code into a
@@ -899,7 +938,7 @@ async function enforceStagePathAllowlist(
   if (allowlist === undefined || allowlist.patterns.length === 0) return null;
   let compiled: RegExp[];
   try {
-    compiled = allowlist.patterns.map((source) => new RegExp(source, 'i'));
+    compiled = compileStagePathPatterns(allowlist.patterns);
   } catch (err) {
     return `sweep.unit ${unit.package}: invalid stage-path allowlist pattern — ${messageOf(err)}`;
   }
@@ -1293,7 +1332,10 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     runCheck: subprocessRunCheck,
     checkCommand: (unit, worktreePath) => ({
       command: input.check?.command ?? '',
-      args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', unit.package)),
+      // A FUNCTION replacer, never a replacement string (review-debt #175
+      // item 7): `$&`, `` $` `` and `$'` in a package name would otherwise be
+      // reinterpreted as replacement tokens.
+      args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', () => unit.package)),
       cwd: worktreePath,
       ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
     }),
@@ -1306,9 +1348,12 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     ...(input.driver.budget !== undefined ? { budget: input.driver.budget } : {}),
     prompt: (unit, worktree) =>
       (input.promptTemplate ?? DEFAULT_UNIT_PROMPT_TEMPLATE)
-        .replaceAll('{package}', unit.package)
-        .replaceAll('{fixer}', unit.fixer)
-        .replaceAll('{worktree}', worktree.path),
+        // FUNCTION replacers (review-debt #175 item 7): a worktree path or
+        // package/fixer name containing `$&`, `` $` `` or `$'` must land
+        // literally, not as a replacement-pattern token.
+        .replaceAll('{package}', () => unit.package)
+        .replaceAll('{fixer}', () => unit.fixer)
+        .replaceAll('{worktree}', () => worktree.path),
     git: makeGhRunner({
       bin: 'git',
       timeoutMs: input.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,

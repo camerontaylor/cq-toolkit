@@ -40,9 +40,10 @@ import {
   makePlanSweep,
   makeSubprocessSweepPlannerDeps,
   mapSweepGitFault,
-  parseNullDelimitedPaths,
+  parseNullDelimitedChangedFiles,
 } from '../../../src/ops/sweep/planSweep.js';
 import type {
+  ChangedFile,
   PlanSweepDeps,
   PlanSweepInput,
   PlanSweepPackage,
@@ -69,6 +70,16 @@ function baseInput(overrides?: Partial<PlanSweepInput>): PlanSweepInput {
     fixers: ['lint'],
     ...overrides,
   };
+}
+
+/** Changed-file entries for a fake listing: modified paths (never deleted). */
+function changed(...paths: string[]): ChangedFile[] {
+  return paths.map((path) => ({ path, status: 'M', deleted: false }));
+}
+
+/** A DELETED changed-file entry — selection evidence, never a fixer target. */
+function deleted(path: string): ChangedFile {
+  return { path, status: 'D', deleted: true };
 }
 
 function makePlanner(overrides?: Partial<PlanSweepDeps>): Op<PlanSweepInput, PlanSweepReport> {
@@ -328,7 +339,7 @@ describe('planSweep selection', () => {
   });
 
   test('changed-vs-base maps by LONGEST path-prefix, boundary-aware, and reports orphans', async () => {
-    const changed = [
+    const changedPaths = [
       'packages/core/src/a.ts', // → core (core-tests' prefix does not reach)
       'packages/core/test/a.test.ts', // → core-tests (longer prefix beats core)
       'packages/cli/main.ts', // → cli
@@ -339,7 +350,7 @@ describe('planSweep selection', () => {
     const planner = makePlanSweep({
       changedFiles: async (base) => {
         askedBase = base;
-        return changed;
+        return changed(...changedPaths);
       },
     });
     const report = await okPlan(
@@ -361,7 +372,7 @@ describe('planSweep selection', () => {
 
   test('changed-vs-base units carry the mapped changed files as their file-set', async () => {
     const report = await okPlan(
-      makePlanner({ changedFiles: async () => ['packages/cli/main.ts'] }),
+      makePlanner({ changedFiles: async () => changed('packages/cli/main.ts') }),
       baseInput({
         selector: { mode: 'changed-vs-base', base: 'HEAD~1' },
         packageFiles: { cli: ['packages/cli/stale.ts'] },
@@ -376,7 +387,7 @@ describe('planSweep selection', () => {
   test("a '.' package path names the repo ROOT: it owns everything no nested prefix claims", async () => {
     const report = await okPlan(
       makePlanner({
-        changedFiles: async () => ['packages/core/src/a.ts', 'README.md', 'docs/guide.md'],
+        changedFiles: async () => changed('packages/core/src/a.ts', 'README.md', 'docs/guide.md'),
       }),
       baseInput({
         packages: [
@@ -402,7 +413,7 @@ describe('planSweep selection', () => {
   test("a './'-prefixed manifest path is normalized and matches git's repo-relative paths", async () => {
     const report = await okPlan(
       makePlanner({
-        changedFiles: async () => ['packages/core/x.ts'],
+        changedFiles: async () => changed('packages/core/x.ts'),
       }),
       baseInput({
         packages: [{ name: 'core', path: './packages/core' }],
@@ -427,6 +438,56 @@ describe('planSweep selection', () => {
       baseInput({ packages: [{ name: 'esc', path: '../esc' }] }),
     );
     expect(escaping).toMatch(/packages\[0\] path/);
+  });
+
+  test('a DELETED path selects its package but is filtered from the file-set (#150)', async () => {
+    const report = await okPlan(
+      makePlanner({
+        changedFiles: async () => [
+          deleted('packages/cli/old.ts'),
+          ...changed('packages/cli/main.ts'),
+        ],
+      }),
+      baseInput({ selector: { mode: 'changed-vs-base', base: 'origin/main' } }),
+    );
+    expect(report.units).toEqual([
+      { package: 'cli', fixer: 'lint', files: ['packages/cli/main.ts'] },
+    ]);
+    expect(report.orphans).toBeUndefined();
+  });
+
+  test('a deletion-only package is still SELECTED with an empty file-set (#150)', async () => {
+    const report = await okPlan(
+      makePlanner({ changedFiles: async () => [deleted('packages/cli/old.ts')] }),
+      baseInput({ selector: { mode: 'changed-vs-base', base: 'origin/main' } }),
+    );
+    expect(report.units).toEqual([{ package: 'cli', fixer: 'lint', files: [] }]);
+  });
+
+  test('a rename selects BOTH packages; the source side is never a fixer target (#150)', async () => {
+    const report = await okPlan(
+      makePlanner({
+        changedFiles: async () => [
+          { path: 'packages/cli/old.ts', status: 'R100', deleted: true },
+          { path: 'apps/web/new.ts', status: 'R100', deleted: false },
+        ],
+      }),
+      baseInput({ selector: { mode: 'changed-vs-base', base: 'origin/main' } }),
+    );
+    expect(report.units).toEqual([
+      { package: 'cli', fixer: 'lint', files: [] },
+      { package: 'web', fixer: 'lint', files: ['apps/web/new.ts'] },
+    ]);
+  });
+
+  test('a backslash-containing manifest path is refused at the op boundary (#150)', async () => {
+    const error = await failedPlan(
+      makePlanner(),
+      baseInput({ packages: [{ name: 'core', path: 'packages\\core' }] }),
+    );
+    expect(error).toMatch(/packages\[0\] path/);
+    expect(error).toMatch(/backslash/);
+    expect(error).toMatch(/posix separators/);
   });
 
   test('explicit selects exactly the named manifest packages (deduplicated)', async () => {
@@ -578,7 +639,7 @@ describe('planSweep ledger suppression (UC §1 row 8 / R2 D6)', () => {
     // Only cli has a changed file; core is NOT selected — its escalated
     // baseline signature must still route to the report's needsHuman rows.
     const planner = makePlanSweep({
-      changedFiles: async () => ['packages/cli/main.ts'],
+      changedFiles: async () => changed('packages/cli/main.ts'),
       queryLedger: makeLedgerQuery(() => memoryStore(LEDGER)),
     });
     const report = await okPlan(
@@ -601,7 +662,7 @@ describe('planSweep ledger suppression (UC §1 row 8 / R2 D6)', () => {
 
   test('needsHuman routing is bounded by the MANIFEST: a ghost-package baseline routes nothing', async () => {
     const planner = makePlanSweep({
-      changedFiles: async () => ['packages/cli/main.ts'],
+      changedFiles: async () => changed('packages/cli/main.ts'),
       queryLedger: makeLedgerQuery(() => memoryStore(LEDGER)),
     });
     const report = await okPlan(
@@ -675,7 +736,7 @@ describe('planSweep jobs are dispatch-ready', () => {
         // The changed-vs-base selector needs a changed file that actually
         // maps — the default empty listing would plan ZERO jobs and the
         // dispatch-behavior loop below would pass vacuously.
-        changedFiles: async () => ['packages/core/src/a.ts'],
+        changedFiles: async () => changed('packages/core/src/a.ts'),
       }),
       baseInput({
         fixers: ['lint'],
@@ -784,13 +845,28 @@ describe('ledgerSignature (the gates→ledger signature recipe)', () => {
 // ---------------------------------------------------------------------------
 
 describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
-  test('NUL-delimited diff parse: spaces survive, empty entries from the trailing NUL drop', () => {
-    expect(parseNullDelimitedPaths('packages/core/src/a.ts\0docs/my file.md\0')).toEqual([
-      'packages/core/src/a.ts',
-      'docs/my file.md',
+  test('NUL-delimited name-status parse: spaces survive, empty entries from the trailing NUL drop', () => {
+    expect(
+      parseNullDelimitedChangedFiles('M\0packages/core/src/a.ts\0A\0docs/my file.md\0'),
+    ).toEqual([
+      { path: 'packages/core/src/a.ts', status: 'M', deleted: false },
+      { path: 'docs/my file.md', status: 'A', deleted: false },
     ]);
-    expect(parseNullDelimitedPaths('only-one.ts')).toEqual(['only-one.ts']);
-    expect(parseNullDelimitedPaths('')).toEqual([]);
+    expect(parseNullDelimitedChangedFiles('D\0gone.ts\0')).toEqual([
+      { path: 'gone.ts', status: 'D', deleted: true },
+    ]);
+    // A rename record carries the OLD then the NEW path; the old side is
+    // DELETED (review-debt #150).
+    expect(parseNullDelimitedChangedFiles('R100\0old.ts\0new.ts\0')).toEqual([
+      { path: 'old.ts', status: 'R100', deleted: true },
+      { path: 'new.ts', status: 'R100', deleted: false },
+    ]);
+    // A copy's source still exists.
+    expect(parseNullDelimitedChangedFiles('C75\0src.ts\0copy.ts\0')).toEqual([
+      { path: 'src.ts', status: 'C75', deleted: false },
+      { path: 'copy.ts', status: 'C75', deleted: false },
+    ]);
+    expect(parseNullDelimitedChangedFiles('')).toEqual([]);
   });
 
   test('the shipped binding exposes both seams; effects bind input-driven at dispatch', () => {
@@ -801,7 +877,7 @@ describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
 
   test('the changed-files argv terminates the rev list AFTER the base', () => {
     const args = changedFilesArgs('origin/main');
-    expect(args).toEqual(['diff', '--name-only', '-z', 'origin/main', '--']);
+    expect(args).toEqual(['diff', '--name-status', '-z', 'origin/main', '--']);
     // The base is a REVISION (before the terminator); the trailing `--`
     // ends the rev list with an empty pathspec — never `-- <base>`, which
     // would read the base as a PATH.

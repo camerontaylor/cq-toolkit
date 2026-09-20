@@ -23,6 +23,7 @@ import {
 } from '../../../src/ops/sweep/registry.js';
 import {
   bindingsFromDispatch,
+  compileStagePathPatterns,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
   pushLockOptions,
@@ -152,6 +153,29 @@ describe('sweep.unit registry entry (jSKJF)', () => {
       } as never),
     ).toBe(expected);
   });
+
+  test('placeholder substitution is literal — `$&`/`` $` `` never become replacement tokens (#175 item 7)', () => {
+    const bindings = bindingsFromDispatch({
+      ...VALID,
+      promptTemplate: 'pkg={package} fixer={fixer} wt={worktree}',
+    });
+    const unit = { package: 'a$&b', fixer: 'f$`g', files: [] };
+    // The OLD string-replacer form would turn `$&` into the matched
+    // placeholder and `` $` `` into the pre-match text — corrupting the prompt.
+    expect(bindings.prompt(unit, { path: '/wt/$&x`y' } as never)).toBe(
+      'pkg=a$&b fixer=f$`g wt=/wt/$&x`y',
+    );
+    // The check-command args use the same literal substitution.
+    expect(bindings.checkCommand(unit, '/wt').args).toEqual(['scripts/check.js', 'a$&b']);
+  });
+
+  test('the staged-path allowlist compiles CASE-SENSITIVELY (#175 item 3)', () => {
+    const compiled = compileStagePathPatterns(['^packages/alpha/']);
+    expect(compiled.some((regex) => regex.test('packages/alpha/test/suite.test.js'))).toBe(true);
+    // A case-differing sibling package must NOT match on a case-sensitive
+    // checkout (the old `i` flag admitted it).
+    expect(compiled.some((regex) => regex.test('packages/Alpha/test/suite.test.js'))).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -217,6 +241,19 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
     // covers the trees AND the state; a dot-prefixed sibling of the kind
     // dirs cannot collide with a derived `<dir>/<kind>/<slug>` tree).
     expect(one).toBe('/repo/worktrees/.cq-state/cq/one');
+  });
+
+  test('distinct prefixes that used to fold together get DISTINCT state dirs (#175 item 4)', () => {
+    const dot = sweepRunStateDir('/repo', 'worktrees', 'cq/run.one');
+    const dash = sweepRunStateDir('/repo', 'worktrees', 'cq/run-one');
+    // The old fold mapped both onto `cq/run-one`, so sequential runs
+    // overwrote each other's baseline snapshots (fabricated evidence, I7).
+    expect(dot).not.toBe(dash);
+    expect(dot).toBe('/repo/worktrees/.cq-state/cq/run%2Eone');
+    // `..` cannot escape the state namespace either.
+    expect(sweepRunStateDir('/repo', 'worktrees', 'cq/..')).toBe(
+      '/repo/worktrees/.cq-state/cq/%2E%2E',
+    );
   });
 
   test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {

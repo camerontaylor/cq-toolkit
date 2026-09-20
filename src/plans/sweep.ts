@@ -298,6 +298,24 @@ export function buildSweepPlan(
       `buildSweepPlan: the phase-A report is misaligned — ${String(report.jobs.length)} job(s) vs ${String(report.units.length)} unit(s); planSweep emits exactly one job per unit`,
     );
   }
+  // IDENTITY pairing, not just length (review-debt #175 item 6): an
+  // order-mismatched report of equal length would attach each unit's
+  // resolved kind/slug to the WRONG job and mis-slug the unit. Every job's
+  // embedded WorkUnit must be the unit at the same index.
+  for (const [index, job] of report.jobs.entries()) {
+    const unit = report.units[index];
+    const embedded = job.input as Partial<WorkUnit> | undefined;
+    if (
+      embedded === undefined ||
+      unit === undefined ||
+      embedded.package !== unit.package ||
+      embedded.fixer !== unit.fixer
+    ) {
+      throw new Error(
+        `buildSweepPlan: the phase-A report is misaligned at index ${String(index)} — job '${job.id}' carries package/fixer ${JSON.stringify(embedded?.package)}/${JSON.stringify(embedded?.fixer)} but the unit there is ${JSON.stringify(unit?.package)}/${JSON.stringify(unit?.fixer)}; planSweep emits exactly one job per unit in unit order`,
+      );
+    }
+  }
   const reserved = new Set<string>(); // `${kind}/${slug}` actually handed out
   const resolvedSegments: SweepUnitSegments[] = report.units.map((unit) => {
     const base = sweepUnitSegments(config.runPrefix, unit);
