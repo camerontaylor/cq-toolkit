@@ -279,7 +279,6 @@ once-only flags), `RunOptionsSchema` accepts `maxTokens`, and seeded
 journaled usage with no `usdOf` under a configured `maxUsd` trips at seed
 time. Full disposition:
 `docs/dd-9-api-equivalent-budget.md`.
-||||||| parent of 431decb (fix(kernel): review-debt budget-seam fixes (issues #14, #15))
 **DD-9 result: CLOSED (T1.6b)** — the api-equivalent budget shipped. Every
 usage-bearing driver result carries `costUSD` labeled
 `costBasis: 'modeled'` (the list-price proxy from `src/driver/pricing`), so

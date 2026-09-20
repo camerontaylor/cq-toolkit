@@ -1327,7 +1327,9 @@ function governOp(
             // measurements observeResult will ACTUALLY fold (the same
             // sanitizer — a lying value is dropped, so it must not mark the
             // completion fold as already-counted), then apply DD-9.
-            if (isValidUsage(result.usage)) reportedUsage = true;
+            if (isValidUsage(result.usage) && totalTokensOf(result.usage) > 0) {
+              reportedUsage = true;
+            }
             if (isValidUsd(result.costUSD)) reportedCost = true;
             governor.observeResult(jobKey, result);
           },
