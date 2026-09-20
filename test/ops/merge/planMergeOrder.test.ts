@@ -131,8 +131,8 @@ describe('planMergeOrder — the order (roots first, parents before children)', 
     ]);
     expect(result.order).toEqual([
       { pr: 1, action: 'merge', basePr: null, depth: 0 },
-      { pr: 2, action: 'merge', basePr: 1, depth: 1 },
-      { pr: 3, action: 'merge', basePr: 2, depth: 2 },
+      { pr: 2, action: 'merge', basePr: 1, depth: 1, baseRefName: 'a' },
+      { pr: 3, action: 'merge', basePr: 2, depth: 2, baseRefName: 'b' },
     ]);
     expect(result.needsHuman).toEqual([]);
   });
@@ -167,7 +167,7 @@ describe('planMergeOrder — closed-ancestor retarget-self', () => {
     ]);
     expect(result.order).toEqual([
       { pr: 5, action: 'merge', basePr: null, depth: 0 },
-      { pr: 11, action: 'retarget-self', basePr: null, depth: 0 },
+      { pr: 11, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'gone' },
     ]);
     expect(result.needsHuman).toEqual([]);
   });
@@ -179,8 +179,8 @@ describe('planMergeOrder — closed-ancestor retarget-self', () => {
       planned(11, 'retarget-me', 'on-top'),
     ]);
     expect(result.order).toEqual([
-      { pr: 10, action: 'retarget-self', basePr: null, depth: 0 },
-      { pr: 11, action: 'merge', basePr: 10, depth: 1 },
+      { pr: 10, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'merged-rung' },
+      { pr: 11, action: 'merge', basePr: 10, depth: 1, baseRefName: 'retarget-me' },
     ]);
   });
 
@@ -452,7 +452,7 @@ describe('planMergeOrder — duplicate head names', () => {
     expect(result.order).toEqual([
       { pr: 1, action: 'merge', basePr: null, depth: 0 },
       { pr: 2, action: 'merge', basePr: null, depth: 0 },
-      { pr: 3, action: 'merge', basePr: 1, depth: 1 },
+      { pr: 3, action: 'merge', basePr: 1, depth: 1, baseRefName: 'shared' },
     ]);
     expect(result.needsHuman).toEqual([]);
   });
@@ -467,7 +467,7 @@ describe('planMergeOrder — duplicate head names', () => {
     // turn the rung into a retarget-self.
     expect(result.order).toEqual([
       { pr: 11, action: 'merge', basePr: null, depth: 0 },
-      { pr: 12, action: 'merge', basePr: 11, depth: 1 },
+      { pr: 12, action: 'merge', basePr: 11, depth: 1, baseRefName: 'shared' },
     ]);
     expect(result.needsHuman).toEqual([]);
   });
@@ -480,7 +480,9 @@ describe('planMergeOrder — duplicate head names', () => {
     ]);
     // Both closed owners claim 'old'; the lowest-numbered one anchors, and
     // the child's plan is the same either way: retarget-self at root depth.
-    expect(result.order).toEqual([{ pr: 22, action: 'retarget-self', basePr: null, depth: 0 }]);
+    expect(result.order).toEqual([
+      { pr: 22, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'old' },
+    ]);
     expect(result.needsHuman).toEqual([]);
   });
 });
@@ -509,8 +511,8 @@ describe('planMergeOrder — the base branch is config, not a constant', () => {
     expect(trunkResult.baseBranch).toBe('trunk');
     expect(trunkResult.order).toEqual([
       { pr: 1, action: 'merge', basePr: null, depth: 0 },
-      { pr: 3, action: 'retarget-self', basePr: null, depth: 0 },
-      { pr: 2, action: 'merge', basePr: 1, depth: 1 },
+      { pr: 3, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'merged-rung' },
+      { pr: 2, action: 'merge', basePr: 1, depth: 1, baseRefName: 'a' },
     ]);
     // Same graph, other name: identical plan shape — only the echoed
     // baseBranch differs. Whatever the queue branch is called, the plan

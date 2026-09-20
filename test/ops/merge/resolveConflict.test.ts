@@ -171,6 +171,13 @@ class FakeMergeEffects implements MergeEffects {
     return { code: this.verifyFetchCode, stdout: '', stderr: '' };
   }
 
+  async readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }> {
+    // The resolve op never reads a base ref — only executeMerges does. The
+    // method exists to satisfy the seam; it answers the trunk.
+    this.calls.push(`readBase:${String(pr)}`);
+    return { ok: true, baseRefName: 'main' };
+  }
+
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {
     this.calls.push(`prepare:${String(pr)}@${ref}`);
     if (this.prepareThrows !== null) throw this.prepareThrows;

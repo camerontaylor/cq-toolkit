@@ -152,6 +152,14 @@ class FakeMergeEffects implements MergeEffects {
     return { code: this.fetchCode, stdout: '', stderr: this.fetchStderr };
   }
 
+  async readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }> {
+    this.calls.push(`readBase:${String(pr)}`);
+    // Every executing merge in these scenarios is a root on the trunk; a
+    // stacked child that would name another base is always withheld or
+    // planned retarget-self (which never reads).
+    return { ok: true, baseRefName: 'main' };
+  }
+
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {
     this.calls.push(`prepare:${String(pr)}@${ref}`);
     return { path: `/wt/pr-${String(pr)}` };
