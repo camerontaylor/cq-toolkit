@@ -1,5 +1,6 @@
 === npm publish --dry-run — cq-toolkit v1.0.0 (no publish performed) ===
-date: 2026-09-20T17:54:49Z
+head: ac261fce3c4a13a67c7517d685f7db80f6c09b9b (lane/p5-release, caught up to merge-queue 0d76ed5)
+date: 2026-09-20T18:11:19Z
 registry: https://registry.npmjs.org/
 
 npm notice
@@ -22,7 +23,7 @@ npm notice 16.9kB dist/cli/run-plan.js
 npm notice 3.8kB dist/driver/acp/binaries.d.ts
 npm notice 11.9kB dist/driver/acp/binaries.js
 npm notice 10.9kB dist/driver/acp/index.d.ts
-npm notice 97.1kB dist/driver/acp/index.js
+npm notice 97.4kB dist/driver/acp/index.js
 npm notice 6.4kB dist/driver/acp/process.d.ts
 npm notice 11.4kB dist/driver/acp/process.js
 npm notice 16.9kB dist/driver/acp/protocol.d.ts
@@ -263,7 +264,7 @@ npm notice 10.5kB dist/selfhost/self-merge-prs.js
 npm notice 4.7kB dist/selfhost/self-review-loop.d.ts
 npm notice 26.5kB dist/selfhost/self-review-loop.js
 npm notice 1.8kB package.json
-npm notice 4.5kB policy/denylist/patterns.yml
+npm notice 4.6kB policy/denylist/patterns.yml
 npm notice 10.9kB policy/DOCTRINE.md
 npm notice 6.6kB policy/README.md
 npm notice 4.5kB policy/templates/affected-tests.md
@@ -282,10 +283,10 @@ npm notice Tarball Details
 npm notice name: @camerontaylor/cq-toolkit
 npm notice version: 1.0.0
 npm notice filename: camerontaylor-cq-toolkit-1.0.0.tgz
-npm notice package size: 743.3 kB
+npm notice package size: 743.4 kB
 npm notice unpacked size: 2.5 MB
-npm notice shasum: 2d570b543b5496362fe2f0cf74bf5809d576d6cc
-npm notice integrity: sha512-1p6zOzMTNno/h[...]57hT4RAQJGnXg==
+npm notice shasum: c6a0e21eddc60cac0bcd40ba9aae268c3e18c1c0
+npm notice integrity: sha512-HVu7KeVbvxkzR[...]dnhmgsXNPZ3jA==
 npm notice total files: 273
 npm notice
 npm warn publish This command requires you to be logged in to https://registry.npmjs.org/ (dry-run)

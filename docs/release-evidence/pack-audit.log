@@ -1,10 +1,9 @@
 === pack-audit — cq-toolkit release candidate v1.0.0 ===
 repo: camerontaylor/cq-toolkit
-base: origin/main 51c81eb (T4.4, ff-promoted)
-date: 2026-09-20T17:54:58Z
+head: ac261fce3c4a13a67c7517d685f7db80f6c09b9b (lane/p5-release, caught up to merge-queue 0d76ed5)
+base: origin/main 51c81eb (T4.4); catch-up merge ac261fc brings #195 + #198
+date: 2026-09-20T18:11:11Z
 npm: 11.19.0  node: v24.21.0
-note: CI workflow .github/workflows/pack-audit.yml green on main:
-      https://github.com/camerontaylor/cq-toolkit/actions/runs/35526170637
 
 --- npm pack --pack-destination /tmp/p5-pack ---
 npm notice
@@ -27,7 +26,7 @@ npm notice 16.9kB dist/cli/run-plan.js
 npm notice 3.8kB dist/driver/acp/binaries.d.ts
 npm notice 11.9kB dist/driver/acp/binaries.js
 npm notice 10.9kB dist/driver/acp/index.d.ts
-npm notice 97.1kB dist/driver/acp/index.js
+npm notice 97.4kB dist/driver/acp/index.js
 npm notice 6.4kB dist/driver/acp/process.d.ts
 npm notice 11.4kB dist/driver/acp/process.js
 npm notice 16.9kB dist/driver/acp/protocol.d.ts
@@ -268,7 +267,7 @@ npm notice 10.5kB dist/selfhost/self-merge-prs.js
 npm notice 4.7kB dist/selfhost/self-review-loop.d.ts
 npm notice 26.5kB dist/selfhost/self-review-loop.js
 npm notice 1.8kB package.json
-npm notice 4.5kB policy/denylist/patterns.yml
+npm notice 4.6kB policy/denylist/patterns.yml
 npm notice 10.9kB policy/DOCTRINE.md
 npm notice 6.6kB policy/README.md
 npm notice 4.5kB policy/templates/affected-tests.md
@@ -287,15 +286,15 @@ npm notice Tarball Details
 npm notice name: @camerontaylor/cq-toolkit
 npm notice version: 1.0.0
 npm notice filename: camerontaylor-cq-toolkit-1.0.0.tgz
-npm notice package size: 743.3 kB
+npm notice package size: 743.4 kB
 npm notice unpacked size: 2.5 MB
-npm notice shasum: 2d570b543b5496362fe2f0cf74bf5809d576d6cc
-npm notice integrity: sha512-1p6zOzMTNno/h[...]57hT4RAQJGnXg==
+npm notice shasum: c6a0e21eddc60cac0bcd40ba9aae268c3e18c1c0
+npm notice integrity: sha512-HVu7KeVbvxkzR[...]dnhmgsXNPZ3jA==
 npm notice total files: 273
 npm notice
 camerontaylor-cq-toolkit-1.0.0.tgz
 TARBALL=/tmp/p5-pack/camerontaylor-cq-toolkit-1.0.0.tgz
-tarball sha256: f6909495a47dcf69928bd13d98f8674614e3359af549c3815da7a739848f169a
+tarball sha256: 34dca185901e037a3ccad5c853ad49f40e9297b41db9f99aa9e6c565a2441138
 
 --- tarball listing (tar -tzf) ---
 package/LICENSE

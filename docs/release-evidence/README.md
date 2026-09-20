@@ -10,5 +10,8 @@ PR carries the artifacts rather than only describing them.
 | `tarball-listing.txt` | the `tar -tzf` listing audited by `pack-audit.log` (273 paths).                                                                                                                                                                                                  |
 | `publish-dry-run.log` | `npm publish --dry-run` at `1.0.0` — builds the tarball, contacts the registry in dry-run mode, uploads nothing. Result: exit 0.                                                                                                                                 |
 
-The base is `origin/main` `51c81eb` (T4.4, ff-promoted). The CI equivalents
-are linked from `RELEASE.md`.
+The base is `origin/main` `51c81eb` (T4.4, ff-promoted); the branch is
+caught up to `merge-queue` `0d76ed5` by merge commit `ac261fc` (brings PRs
+#195 and #198). The logs are regenerated at the caught-up release-candidate
+head, so the audited tarball matches what a publish of this PR would ship.
+The CI equivalents are linked from `RELEASE.md`.

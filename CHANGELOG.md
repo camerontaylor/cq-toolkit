@@ -2,8 +2,9 @@
 
 All notable changes to `@camerontaylor/cq-toolkit`. Entries are generated
 from merged pull-request titles, grouped by the v1 workstreams of
-[`plans/toolkit-v1-plan.md`](plans/toolkit-v1-plan.md) §7 and the
-`plans/breakdown/ws-*.md` files. Links default to the
+`plans/toolkit-v1-plan.md` §7 and the `plans/breakdown/ws-*.md` files
+(both in the private research repo — they are not published here).
+Links default to the
 `camerontaylor/cq-toolkit` repository; WS-J links are repo-qualified.
 
 ## v1.0.0 — 2026-09-21
@@ -98,6 +99,7 @@ release tooling — together with the fixtures/eval repo.
 - fix: close the PR #124/#126/#127 follow-ups — template-first edit, delimiter-aware key anchors, all coverage roots ([#128](https://github.com/camerontaylor/cq-toolkit/pull/128))
 - test(ratchet): the discriminating key-presence pin for the delimiter-aware anchors (PR #128 review) ([#129](https://github.com/camerontaylor/cq-toolkit/pull/129))
 - test(ratchet): pin the direction-key delimiter path (PR #129 review) ([#130](https://github.com/camerontaylor/cq-toolkit/pull/130))
+- chore(ratchet): tighten baselines (1 metric) ([#198](https://github.com/camerontaylor/cq-toolkit/pull/198))
 
 ### WS-I — CLI and shipped plan library
 
@@ -140,6 +142,7 @@ release tooling — together with the fixtures/eval repo.
 - fix(pr): tracker-body serialization + sweep tracker-branch create/push (#171, #173) ([#188](https://github.com/camerontaylor/cq-toolkit/pull/188))
 - fix(sweep): review-debt sweep 3 — #150 #174 #175 #176 ([#189](https://github.com/camerontaylor/cq-toolkit/pull/189))
 - fix(driver): default-deny child env for subprocess workers (#183) ([#190](https://github.com/camerontaylor/cq-toolkit/pull/190))
+- fix(denylist): reject Windows-plain-name probe_path segments (fixes #187) ([#195](https://github.com/camerontaylor/cq-toolkit/pull/195))
 
 ### WS-J — Fixtures/eval repo (cq-fixtures)
 
