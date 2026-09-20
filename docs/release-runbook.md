@@ -8,16 +8,16 @@ of record (plan §6 + §11).
 
 ## What the run did
 
-| step                       | result                                                                                                                                                                                                                      | evidence                                                                                                        |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| T5.1 publication checklist | release PR [#200](https://github.com/camerontaylor/cq-toolkit/pull/200) `release: v1.0.0`, merged `93bbf19cda7ec84720f048d67679c150a4658ba1`, ff-promoted (`main` = `93bbf19`)                                              | PR checks green; [RELEASE.md](../RELEASE.md)                                                                    |
-| version bump               | `package.json` + `package-lock.json` `0.0.0` → `1.0.0`; `bin` fixed to `dist/cli.js`; `prepack` build hook added                                                                                                            | [package.json](../package.json)                                                                                 |
-| tarball audit              | `npm pack` at the release-candidate head: 273 paths, only `dist/`, `policy/`, `LICENSE`, `README.md`, `package.json`; denylist clean (9 classes); sha256 `699a72dab4e48bacb5b6c59946da5ef701e88883e2bb2e073c5cfd0087ff71c4` | [`docs/release-evidence/pack-audit.log`](release-evidence/pack-audit.log), CI pack-audit run                    |
-| publish dry-run            | `npm publish --dry-run` exit 0 at `1.0.0`, no `bin` correction warning, nothing uploaded                                                                                                                                    | [`docs/release-evidence/publish-dry-run.log`](release-evidence/publish-dry-run.log)                             |
-| CHANGELOG                  | v1.0.0 entry generated from merged PR titles grouped by workstream                                                                                                                                                          | [CHANGELOG.md](../CHANGELOG.md)                                                                                 |
-| tag                        | annotated `v1.0.0` on `main` `93bbf19` (`c320a17d5239733bd80abd32d9478e96c709a8cb`)                                                                                                                                         | `git ls-remote --tags origin v1.0.0`                                                                            |
-| fixtures flip              | **NOT executed — publish-gated** (see below)                                                                                                                                                                                | [`docs/release-checklist.md`](https://github.com/camerontaylor/cq-fixtures/blob/main/docs/release-checklist.md) |
-| publish                    | **NOT performed** — `AUTOPUBLISH=no` (owner decision 2026-09-14, final)                                                                                                                                                     | [`RELEASE.md`](../RELEASE.md) "For the owner"                                                                   |
+| step                       | result                                                                                                                                                                                                                                                                             | evidence                                                                                                        |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| T5.1 publication checklist | release PR [#200](https://github.com/camerontaylor/cq-toolkit/pull/200) `release: v1.0.0`, merged `93bbf19cda7ec84720f048d67679c150a4658ba1`, ff-promoted (`main` = `93bbf19`)                                                                                                     | PR checks green; [RELEASE.md](../RELEASE.md)                                                                    |
+| version bump               | `package.json` + `package-lock.json` `0.0.0` → `1.0.0`; `bin` fixed to `dist/cli.js`; `prepack` build hook added                                                                                                                                                                   | [package.json](../package.json)                                                                                 |
+| tarball audit              | `npm pack` at audited head `900043a` (packed paths byte-identical to the release SHA `93bbf19`): 273 paths, only `dist/`, `policy/`, `LICENSE`, `README.md`, `package.json`; denylist clean (9 classes); sha256 `699a72dab4e48bacb5b6c59946da5ef701e88883e2bb2e073c5cfd0087ff71c4` | [`docs/release-evidence/pack-audit.log`](release-evidence/pack-audit.log), CI pack-audit run                    |
+| publish dry-run            | `npm publish --dry-run` exit 0 at `1.0.0`, no `bin` correction warning, nothing uploaded                                                                                                                                                                                           | [`docs/release-evidence/publish-dry-run.log`](release-evidence/publish-dry-run.log)                             |
+| CHANGELOG                  | v1.0.0 entry generated from merged PR titles grouped by workstream                                                                                                                                                                                                                 | [CHANGELOG.md](../CHANGELOG.md)                                                                                 |
+| tag                        | annotated `v1.0.0` on `main` `93bbf19` (`c320a17d5239733bd80abd32d9478e96c709a8cb`)                                                                                                                                                                                                | `git ls-remote --tags origin v1.0.0`                                                                            |
+| fixtures flip              | **NOT executed — publish-gated** (see below)                                                                                                                                                                                                                                       | [`docs/release-checklist.md`](https://github.com/camerontaylor/cq-fixtures/blob/main/docs/release-checklist.md) |
+| publish                    | **NOT performed** — `AUTOPUBLISH=no` (owner decision 2026-09-14, final)                                                                                                                                                                                                            | [`RELEASE.md`](../RELEASE.md) "For the owner"                                                                   |
 
 ### Deviations recorded during the release
 
@@ -28,7 +28,7 @@ of record (plan §6 + §11).
   `package-lock.json` and keeps `toolkit.lock` by design. No half-flip PR was
   fabricated. The flip is therefore a post-publish step (below), exactly as
   `cq-fixtures/docs/release-checklist.md` already labels it ("prepared, NOT
-  executed — phase-5 human step").
+  executed (phase-5 human step)").
 - **CLI review base vs. moving `merge-queue`.** The two CodeRabbit CLI cycles
   were pinned at task-start `51c81eb`; `merge-queue` advanced with #195/#198
   and later T4.5 (#201) during review. The branch was caught up by merge
@@ -50,10 +50,12 @@ cd cq-toolkit
 git checkout 93bbf19cda7ec84720f048d67679c150a4658ba1
 npm ci
 npm whoami                                     # confirm the publish identity
+node -v && npm -v                               # expect v24.x / 11.19.0 — the recorded toolchain
 npm pack --pack-destination "$pack_dir"         # sanity: dist/ present, sha256 matches
 shasum -a 256 "$pack_dir"/*.tgz                  # expect 699a72da… (dist+policy+LICENSE+README+package.json)
 npm publish --access public
-npm view @camerontaylor/cq-toolkit@1.0.0 version dist.tarball
+npm view @camerontaylor/cq-toolkit@1.0.0 version dist.tarball dist.shasum
+# the registry shasum must equal the dry-run log's 1bc3274e2afc12f69599a5440f483084040fa0ca
 ```
 
 The tarball audit in [`release-evidence/pack-audit.log`](release-evidence/pack-audit.log)
@@ -66,7 +68,10 @@ Only after step 1 succeeds:
 
 ```sh
 set -euo pipefail
-cd cq-fixtures                         # a failed cd aborts before any rm
+# from a fresh shell (step 1 left the cwd inside the cq-toolkit clone):
+git clone https://github.com/camerontaylor/cq-fixtures
+cd cq-fixtures
+git fetch origin
 git switch -c lane/p5-flip origin/main
 scripts/flip-to-published.sh 1.0.0     # now resolves; rewrites pkg+lock, removes toolkit.lock
 rm -rf vendor node_modules
@@ -108,8 +113,10 @@ be re-run and recorded. Evidence: [`SELF-HOSTING.md`](../SELF-HOSTING.md)
 The fixtures model-axis matrix carries honest zeros for the driver-axis lanes
 (they errored on CI) and a loud rc-4 for the ACP lane (backend dead). The
 phase-4 exit gate recorded 2 ws-j FAIL rows and 1 DEFERRED→T5.2. Fix the
-driver-side CI setup so those cells produce real scored rows; see the
-fixtures J5 record and `cq-fixtures/docs/release-checklist.md`.
+driver-side CI setup so those cells produce real scored rows; see
+`cq-fixtures/reports/snapshots/2026-09-18/README.md` and
+`cq-fixtures/DECISIONS.md` (the J5 disposition), with
+`cq-fixtures/docs/release-checklist.md` for the "Release lands whole" row.
 
 ## Post-release checklist (both repos)
 
