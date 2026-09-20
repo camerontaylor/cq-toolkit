@@ -136,12 +136,11 @@ jobs:
           # despite tee.
           set -euo pipefail
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
-          test -n "$ZAI_API_KEY" || { echo 'Z_AI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
+          test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
           # Window-end fail-closed guard: a delayed fire must not initiate operations at/after 01:00 UTC (09:00 SGT, the owner hard stop) — exiting 0 records the honest no-op, not a failure.
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
-            echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations'
             exit 0
           fi
           # Conflict-resolution pushes currently reach plain unauthenticated `git push` (the checkout drops its credential) — point git at gh's credential helper.
