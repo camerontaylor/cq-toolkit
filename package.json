@@ -1,6 +1,6 @@
 {
   "name": "@camerontaylor/cq-toolkit",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,7 +18,7 @@
     ".": "./dist/index.js"
   },
   "bin": {
-    "cq": "./dist/cli.js"
+    "cq": "dist/cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && node scripts/copy-prompt-assets.mjs",
