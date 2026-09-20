@@ -312,6 +312,25 @@ describe('sweep.worktreeFor reuse (UC row 20)', () => {
     expect(workspace.headSha).not.toBe(workspace.baseSha);
   });
 
+  test('a revParse fault on reuse is a failed result naming the HEAD-vs-base verification (#176 item 3)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      revParse: async () => {
+        throw new Error('fatal: bad revision');
+      },
+    };
+    const error = await failedAt(makeWorktreeFor(effects), INPUT);
+    expect(error).toMatch(/could not verify the reused worktree/);
+    expect(error).toMatch(/HEAD against base/);
+    expect(error).toContain('bad revision');
+    // Nothing was mutated: no eviction, no add.
+    expect(repo.removed).toHaveLength(0);
+    expect(repo.addCalls).toHaveLength(0);
+  });
+
   test('a DIRTY reused candidate is REFUSED with the tree named — never auto-cleaned', async () => {
     const repo = fakeRepo();
     repo.worktrees = [{ path: PATH, branch: BRANCH }];

@@ -263,6 +263,14 @@ describe('run-state namespacing and the dispatch mutex (jTPbC / jVgCc)', () => {
     expect(sweepRunStateDir('/repo', 'worktrees', '/one')).toBe(
       '/repo/worktrees/.cq-state/%EMPTY/one',
     );
+    // A LITERAL `%2E` segment must not alias the encoded `.`: `%` encodes to
+    // `%25`, so `cq/%2E` (→ cq/%252E) differs from `cq/.` (→ cq/%2E).
+    expect(sweepRunStateDir('/repo', 'worktrees', 'cq/%2E')).toBe(
+      '/repo/worktrees/.cq-state/cq/%252E',
+    );
+    expect(sweepRunStateDir('/repo', 'worktrees', 'cq/%2E')).not.toBe(
+      sweepRunStateDir('/repo', 'worktrees', 'cq/.'),
+    );
   });
 
   test('the dispatch mutex defaults to a repo-level lock; the input overrides', () => {
