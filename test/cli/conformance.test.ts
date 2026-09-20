@@ -239,6 +239,15 @@ describe('sample: plan subcommands through the governed kernel (T4.3)', () => {
     expect(out).toBe('');
     expect(err).toMatch(/invalid input for 'sweep'/);
   });
+
+  test('a plan subcommand rejects the run-plan-reserved --ops-root', async () => {
+    // --ops-root is a run-plan flag (the repo's CLI rule): the plan surface
+    // does not own it, so it is a usage error, never a silently accepted flag.
+    const { code, out, err } = await capture(['sweep', '--ops-root=/tmp/x']);
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/--ops-root is a run-plan flag/);
+  });
 });
 
 describe('plan-registry defects degrade help, never break it (T4.3)', () => {
@@ -259,5 +268,38 @@ describe('plan-registry defects degrade help, never break it (T4.3)', () => {
     expect(code).toBe(0);
     expect(outChunks.join('')).toContain('run-plan');
     expect(errChunks.join('')).toMatch(/plan registry scan failed/);
+  });
+
+  test('a malformed registry floor is a usage error (exit 2), not a kernel throw', async () => {
+    // The floor is validated with the same PlanSchema run-plan applies to a
+    // plan FILE, so malformed plan data exits 2 with no artifact — it never
+    // reaches the kernel as an opaque throw.
+    const dir = await mkdtemp(join(tmpdir(), 'cq-conformance-badfloor-'));
+    tmpDirs.push(dir);
+    await writeFile(join(dir, 'package.json'), '{"type":"module"}\n');
+    await writeFile(
+      join(dir, 'badfloor.js'),
+      "export const plan = { name: 'badfloor', importer: async () => ({ id: 'badfloor' }) };\n",
+    );
+    // Machine mode: exit 2, EMPTY stdout and stderr (narration suppressed).
+    const jsonOut: string[] = [];
+    const jsonErr: string[] = [];
+    const jsonIo: CliIo = {
+      stdout: (chunk) => jsonOut.push(chunk),
+      stderr: (chunk) => jsonErr.push(chunk),
+    };
+    expect(await runCli(['badfloor', '--json'], jsonIo, { plansRoot: dir })).toBe(2);
+    expect(jsonOut.join('')).toBe('');
+    expect(jsonErr.join('')).toBe('');
+    // Human mode narrates the input-class reason.
+    const humanOut: string[] = [];
+    const humanErr: string[] = [];
+    const humanIo: CliIo = {
+      stdout: (chunk) => humanOut.push(chunk),
+      stderr: (chunk) => humanErr.push(chunk),
+    };
+    expect(await runCli(['badfloor'], humanIo, { plansRoot: dir })).toBe(2);
+    expect(humanOut.join('')).toBe('');
+    expect(humanErr.join('')).toMatch(/registry floor is not a valid plan/);
   });
 });

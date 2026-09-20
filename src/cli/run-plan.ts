@@ -91,17 +91,29 @@ export const RunPlanInputSchema = z
   .strict();
 
 /**
- * run-plan's governed-run OPTIONS without the plan-file key: the shared flag
- * surface of every plan SUBCOMMAND (`cq <plan-name> …`, src/cli/plans.ts),
- * where the plan itself is the registry's floor instance rather than a JSON
- * file. Derived by OMIT so the two surfaces cannot drift; `.omit` preserves
- * the `.strict()` catchall and every field default (probed against zod 4 — the
- * unknown-key rejection and the defaults ride along).
+ * run-plan's governed-run OPTIONS without the plan-file key: the internal
+ * execution input shared by run-plan and the plan subcommands (it still
+ * carries `opsRoot`, which the governed composition reads — run-plan's flag
+ * and the runCli-level DI both land here). Derived by OMIT so the surfaces
+ * cannot drift; `.omit` preserves the `.strict()` catchall and every field
+ * default (probed against zod 4 — the unknown-key rejection and the defaults
+ * ride along).
  */
 export const RunPlanOptionsSchema = RunPlanInputSchema.omit({ plan: true });
 
 /** The parsed options of one governed run (the plan-file key excluded). */
 export type RunPlanOptions = z.infer<typeof RunPlanOptionsSchema>;
+
+/**
+ * The plan-SUBCOMMAND flag surface (`cq <plan-name> …`, src/cli/plans.ts):
+ * run-plan's options minus the plan-file key (the plan is the registry floor)
+ * and minus `opsRoot`. `--ops-root` is RESERVED for run-plan — the repo's own
+ * CLI rule (src/cli/README.md) — so a plan subcommand rejects it as a usage
+ * error (exit 2) rather than silently accepting a flag the op/plan surface
+ * does not own. Embedders can still inject an ops root through the runCli-level
+ * DI ({ opsRoot }), which the kernel composition reads.
+ */
+export const RunPlanCommandSchema = RunPlanOptionsSchema.omit({ opsRoot: true });
 
 /** Message of an unknown throwable, for narration and `invalid input` lines. */
 function messageOf(err: unknown): string {
@@ -116,9 +128,11 @@ function hasIssues(err: unknown): boolean {
 /**
  * Flattened zod issue message, accessed STRUCTURALLY (this module may import
  * zod, but main.ts — which shares this formatting style — may not, so the
- * helper stays cast-based): `<path>: <message>` joined by '; '.
+ * helper stays cast-based): `<path>: <message>` joined by '; '. EXPORTED for
+ * the plan-subcommand floor gate in src/cli/plans.ts, which shares this
+ * formatting without importing zod.
  */
-function issueMessage(error: unknown): string {
+export function issueMessage(error: unknown): string {
   const issues = (error as { issues?: unknown } | null | undefined)?.issues;
   if (!Array.isArray(issues) || issues.length === 0) return 'invalid input';
   return issues

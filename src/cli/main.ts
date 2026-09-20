@@ -19,10 +19,11 @@
 // PLAN SUBCOMMANDS (T4.3): every name the plan registry discovers is ALSO a
 // subcommand, generated at dispatch time (src/cli/plans.ts) — never a
 // hand-written list, so a new src/plans/<name>.ts registers itself. A plan
-// subcommand takes run-plan's governed-run flags minus --plan
-// (RunPlanOptionsSchema) and runs the registry entry's floor plan through the
-// SAME governed composition. Resolution order: op registry first (the
-// pre-T4.3 surface is unchanged), then the plan registry.
+// subcommand takes run-plan's governed-run flags minus --plan AND the
+// run-plan-reserved --ops-root (RunPlanCommandSchema) and runs the registry
+// entry's floor plan through the SAME governed composition. Resolution order:
+// op registry first (the pre-T4.3 surface is unchanged), then the plan
+// registry.
 //
 // KEY-SPELLING ASYMMETRY: op subcommands map flags by EXACT schema key
 // (--msg=, or --maxUsd= if a schema had such a field) — parseFlags keeps
@@ -83,7 +84,7 @@ import {
   type NarrationMode,
 } from './output.js';
 import { listPlanNames, runPlanEntryCommand } from './plans.js';
-import { RunPlanInputSchema, RunPlanOptionsSchema, runPlanCommand } from './run-plan.js';
+import { RunPlanCommandSchema, RunPlanInputSchema, runPlanCommand } from './run-plan.js';
 
 /**
  * Options for embedding the CLI (tests, tools): the ops-root and plan-root
@@ -364,18 +365,20 @@ function renderRunPlanHelp(): string {
 
 /**
  * Help for one plan SUBCOMMAND: the same governed-run flag surface as
- * run-plan (RunPlanOptionsSchema — everything but --plan), rendered in its
- * kebab-case canonical flag forms. The trailing note names the registry floor
- * the subcommand runs, so the surface never implies a per-plan file argument.
+ * run-plan (RunPlanCommandSchema — everything but --plan and the
+ * run-plan-reserved --ops-root), rendered in its kebab-case canonical flag
+ * forms. The trailing note names the registry floor the subcommand runs, so
+ * the surface never implies a per-plan file argument.
  */
 function renderPlanHelp(name: string): string {
   return renderSubHelp(
     name,
-    RunPlanOptionsSchema,
+    RunPlanCommandSchema,
     ['--json', '--help'],
     [
       JSON_VALUES_NOTE,
       `'${name}' runs the shipped '${name}' plan from the plan registry (its discoverable floor instance) through the governed kernel; use run-plan to run a plan JSON file.`,
+      '--ops-root is reserved for run-plan (a plan subcommand runs the registry floor; embedders inject an ops root through the runCli DI).',
     ],
     camelToKebab,
   );
@@ -490,6 +493,14 @@ async function dispatchCli(
       if (wantsHelp) {
         io.stdout(renderPlanHelp(sub));
         return EXIT_CODES.ok;
+      }
+      // --ops-root is RESERVED for run-plan (the repo's CLI rule): a plan
+      // subcommand runs the registry floor and takes no ops root flag — the
+      // runCli-level { opsRoot } DI is the embedding seam. The schema omits
+      // the key too (defense in depth); this check names the rule.
+      if (Object.hasOwn(parsed.flags, 'ops-root')) {
+        narrate(io, '--ops-root is a run-plan flag (plan subcommands run the registry floor)');
+        return EXIT_CODES.usage;
       }
       try {
         // Input defects are narrated exits 2 INSIDE runPlanEntryCommand (flag

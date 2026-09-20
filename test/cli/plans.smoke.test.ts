@@ -135,26 +135,41 @@ afterAll(() => {
   }
 });
 
-/** Newest mtime (ms) across a directory tree; 0 when it holds no files. */
-function newestMtimeMs(dir: string): number {
+/**
+ * The BUILD INPUTS whose change must invalidate a prebuilt dist/: the source
+ * tree plus the build configuration and asset step the build also reads
+ * (tsconfig.json, tsconfig.build.json, package.json, copy-prompt-assets.mjs).
+ */
+const BUILD_INPUTS = [
+  join(ROOT, 'src'),
+  join(ROOT, 'tsconfig.json'),
+  join(ROOT, 'tsconfig.build.json'),
+  join(ROOT, 'package.json'),
+  join(ROOT, 'scripts', 'copy-prompt-assets.mjs'),
+];
+
+/** Newest mtime (ms) across a file or directory tree; 0 when nothing counts. */
+function newestMtimeMs(target: string): number {
+  const stat = statSync(target);
+  if (stat.isFile()) return stat.mtimeMs;
+  if (!stat.isDirectory()) return 0;
   let newest = 0;
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) newest = Math.max(newest, newestMtimeMs(full));
-    else if (entry.isFile()) newest = Math.max(newest, statSync(full).mtimeMs);
+  for (const entry of readdirSync(target)) {
+    newest = Math.max(newest, newestMtimeMs(join(target, entry)));
   }
   return newest;
 }
 
 /**
  * Build dist/ when the BUILT CLI is missing OR STALE (older than the newest
- * src/** file): a dist built from older sources would make the whole smoke
- * certify obsolete code. CI's static job tests before it builds, so this is
- * the only way the smoke can run there without a dist-gated skip.
+ * build input): a dist built from older sources OR config would make the
+ * whole smoke certify obsolete code. CI's static job tests before it builds,
+ * so this is the only way the smoke can run there without a dist-gated skip.
  */
 function ensureBuiltCli(): void {
   const distMtime = existsSync(DIST_CLI) ? statSync(DIST_CLI).mtimeMs : 0;
-  if (distMtime > 0 && distMtime >= newestMtimeMs(join(ROOT, 'src'))) return;
+  const newestInput = Math.max(...BUILD_INPUTS.map(newestMtimeMs));
+  if (distMtime > 0 && distMtime >= newestInput) return;
   try {
     execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
       cwd: ROOT,
@@ -174,8 +189,11 @@ function ensureBuiltCli(): void {
  * The child environment, scrubbed of every ambient knob that could script or
  * leak into the plan children: all `CQ_*` (CQ_GH_BIN / CQ_GH_SCENARIO /
  * CQ_GH_LOG / …), the fake-agent scripting vars, the smoke route's key and
- * URL, and the forge credentials. The repo's node_modules/.bin leads PATH so
- * the analyze floor's placeholder probe resolves `tsc` deterministically.
+ * URL, the forge credentials, and the Node startup hooks (NODE_OPTIONS can
+ * inject a --require/--import preload into the CLI and every driver-spawned
+ * agent child; NODE_PATH can change module resolution). The repo's
+ * node_modules/.bin leads PATH so the analyze floor's placeholder probe
+ * resolves `tsc` deterministically.
  */
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -186,7 +204,9 @@ function hermeticEnv(): NodeJS.ProcessEnv {
       key === 'SMOKE_API_KEY' ||
       key === 'SMOKE_BASE_URL' ||
       key === 'GH_TOKEN' ||
-      key === 'GITHUB_TOKEN'
+      key === 'GITHUB_TOKEN' ||
+      key === 'NODE_OPTIONS' ||
+      key === 'NODE_PATH'
     ) {
       delete env[key];
     }
@@ -360,10 +380,14 @@ describe('every shipped plan runs through the built CLI (ws-i item 2)', () => {
     const res = runCli(['sweep', '--help'], hermeticEnv(), scratchRepo);
     expect(res.error, context(res)).toBeUndefined();
     expect(res.status, context(res)).toBe(0);
-    for (const flag of ['--ops-root=', '--concurrency=', '--journal-dir=', '--json', '--help']) {
+    for (const flag of ['--concurrency=', '--journal-dir=', '--json', '--help']) {
       expect(res.stdout).toContain(flag);
     }
+    // The plan surface advertises neither a plan file nor the run-plan-reserved
+    // --ops-root (it only mentions the reservation in the note text).
     expect(res.stdout).not.toContain('--plan=');
+    expect(res.stdout).not.toContain('--ops-root=');
+    expect(res.stdout).toContain('--ops-root is reserved for run-plan');
   });
 
   test('a plan subcommand rejects a plan-file flag (its plan comes from the registry)', () => {
@@ -371,6 +395,13 @@ describe('every shipped plan runs through the built CLI (ws-i item 2)', () => {
     expect(res.status, context(res)).toBe(2);
     expect(res.stdout).toBe('');
     expect(res.stderr).toMatch(/invalid input for 'sweep'/);
+  });
+
+  test('a plan subcommand rejects the run-plan-reserved --ops-root (exit 2)', () => {
+    const res = runCli(['sweep', '--ops-root=/tmp/whatever'], hermeticEnv(), scratchRepo);
+    expect(res.status, context(res)).toBe(2);
+    expect(res.stdout).toBe('');
+    expect(res.stderr, context(res)).toMatch(/--ops-root is a run-plan flag/);
   });
 });
 
