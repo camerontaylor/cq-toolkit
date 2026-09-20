@@ -1259,11 +1259,12 @@ function selfTestParserGuards(rules) {
       ok = false;
     } catch (e) {
       // Non-vacuity: a Windows shape rejected by any OTHER guard
-      // (parseScalar, empty, canonical) fails here — only the plain-name
-      // message proves the Windows guard fired. Non-ConfigError throws
-      // cannot match, so they fail the same way.
-      if (!(e instanceof ConfigError) || !/is not a plain name/.test(e.message)) {
-        console.error(`FAIL parser-guards: probe_path '${probe}' did not reach the plain-name guard: ${e instanceof Error ? e.message : e}`);
+      // (parseScalar, empty, canonical — whose message also says
+      // "plain name") fails here; only the Windows-guard messages prove
+      // the Windows guard fired. Non-ConfigError throws cannot match, so
+      // they fail the same way.
+      if (!(e instanceof ConfigError) || !/Windows-reserved|Windows device names/.test(e.message)) {
+        console.error(`FAIL parser-guards: probe_path '${probe}' did not reach the Windows guard: ${e instanceof Error ? e.message : e}`);
         ok = false;
       }
     }
