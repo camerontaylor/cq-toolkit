@@ -105,7 +105,9 @@ release follow-up) is a follow-up in the op's effects layer.
 ## Hand-merge log
 
 Every row's reason: the scheduled automations are red at their `GH_TOKEN`
-assert and never classified any PR, so the lane leader merged each PR by hand.
+assert and never classified any PR, so the lane leader merged each T4.x PR in
+the window by hand (the rd3 PRs #188–#191 and #195 were merged by their own
+lanes).
 A hand-merge counts as the recorded processing path only when the automation
 actually classified the PR `awaiting` under the single-identity I2 deviation;
 with the automation red, none of these count toward the soak criterion.
