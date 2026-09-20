@@ -169,7 +169,15 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   queueing; a dispatch queued when the budget trips is refused
   (`budget-while-queued`) rather than run.
 - **USD accounting.** Ops report usage and cost through the job context
-  (`reportUsage` / `reportCost`); the governor rolls up and trips at the
+  (`reportUsage` / `reportCost`); an op that maps a driver `WorkerResult`
+  into its OWN value shape (so the completion-time fold cannot see it)
+  reports BOTH in one call via `reportResult({ usage, costUSD })`, which
+  folds through the same DD-9 rules — real usage rolls the token cap, a
+  present `costUSD` rolls the USD cap, and real usage with no `costUSD`
+  under a configured `maxUsd` trips loudly (an unpriced model makes the cap
+  unenforceable). A lying (NaN/Infinity/negative) measurement is sanitized
+  to zero evidence, never a post-record throw. The governor rolls up and
+  trips at the
   EFFECTIVE cap = min(`RunOptions.maxUsd`, `Limits.maxUsd`) (frozen
   precedence; the cap is inclusive — the trip fires when the rollup EXCEEDS
   it). The kernel never derives cost itself: until the T1.4 price-map layer

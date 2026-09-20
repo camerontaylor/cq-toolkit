@@ -52,7 +52,7 @@ import type {
   WorkerResult,
 } from '../../../src/driver/types.js';
 import type { OpResult } from '../../../src/kernel/types.js';
-import { runLadder } from '../../../src/kernel/governor.js';
+import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
 import type { GhResult } from '../../../src/ops/review/gh.js';
 import type { MergeEffects } from '../../../src/ops/merge/effects.js';
 import { headRefFor } from '../../../src/ops/merge/effects.js';
@@ -837,6 +837,37 @@ describe('resolveConflict op', () => {
     // shape, so the governor's WorkerResult fold cannot see the spend — the
     // job-context report is the merge-plan governor's evidence (#185).
     expect(reported).toEqual([{ usage, costUSD: 0.11 }]);
+  });
+
+  test('a driver throw with the governed signal aborted → indeterminate (the ladder cancellation, #191 r2)', async () => {
+    const driver = new FakeDriver(new Error('cancelled mid-run'));
+    const op = makeResolveConflictOp({
+      effects: new FakeMergeEffects(),
+      driver,
+      createSession: fakeCreateSession().createSession,
+      loadPrompt: fakeLoadPrompt,
+    });
+    const outcome = await runLadder(
+      async () => {
+        const signal = currentJobContext()?.signal;
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted === true) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return op(baseInput());
+      },
+      { wallClockMs: 5, abortGraceMs: 60_000, killGraceMs: 60_000 },
+      { op: 'merge.resolveConflict', jobKey: 'resolve-abort', attempt: 1 },
+    );
+    expect(outcome.outcome).toBe('completed');
+    if (outcome.outcome === 'completed') {
+      // The aborted signal makes the thrown run the governed cancellation
+      // (I8) → indeterminate, not needs-human.
+      expect(outcome.value.status).toBe('indeterminate');
+    }
   });
 
   test('the parse dep is the output gate (an injected parser can read what the real one would refuse)', async () => {

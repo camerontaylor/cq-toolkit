@@ -1323,12 +1323,12 @@ function governOp(
             governor.observeCost(jobKey, usd);
           },
           onResult: (result) => {
-            // The op streamed its driver's evidence in ONE fold: mark the
-            // same measurements as counted so the completion-time
-            // WorkerResult fold below does not double-count them, and let
-            // observeResult apply DD-9 (including the unpriced-usage trip).
-            if (result.usage !== undefined) reportedUsage = true;
-            if (result.costUSD !== undefined) reportedCost = true;
+            // The op streamed its driver's evidence in ONE fold: mark only the
+            // measurements observeResult will ACTUALLY fold (the same
+            // sanitizer — a lying value is dropped, so it must not mark the
+            // completion fold as already-counted), then apply DD-9.
+            if (isValidUsage(result.usage)) reportedUsage = true;
+            if (isValidUsd(result.costUSD)) reportedCost = true;
             governor.observeResult(jobKey, result);
           },
         },

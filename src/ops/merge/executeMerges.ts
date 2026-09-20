@@ -440,10 +440,11 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     // PLAN observed when it carries a WELL-FORMED one (the reviewed head),
     // else the executor's own baseline observation. A malformed/empty plan
     // sha must not override the valid baseline and strand the PR in a false
-    // `stale` — it falls back. A retarget-self action does NOT pin the head
-    // (its forge base edit depends on no head content): it keeps the
-    // executor baseline, so a mid-flight head move never blocks a needed
-    // retarget (review r1).
+    // `stale` — it falls back. A retarget-self action does NOT take the
+    // PLAN-head pin (its forge base edit depends on no head content): it
+    // keeps the executor baseline, so the plan's reviewed-head pin never
+    // blocks a needed retarget (the executor's own baseline revalidation —
+    // the pre-existing drift guard — still applies; review r2).
     const planHead =
       entry.action === 'merge' && entry.headSha !== undefined && FULL_SHA_RE.test(entry.headSha)
         ? entry.headSha

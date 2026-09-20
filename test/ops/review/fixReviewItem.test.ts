@@ -52,7 +52,7 @@ import type {
   FixReviewItemInput,
   FixReviewItemResult,
 } from '../../../src/ops/review/fixReviewItem.js';
-import { runLadder } from '../../../src/kernel/governor.js';
+import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
 import { defaultFixPrompt } from '../../../src/ops/review/prompts/fix.default.js';
 import { registry } from '../../../src/ops/review/registry.js';
 
@@ -373,6 +373,40 @@ describe('fixReviewItem stop reasons', () => {
     // WorkerResult fold would see nothing — the job-context report is the
     // spend evidence (usage and cost together, once).
     expect(reported).toEqual([{ usage, costUSD: 0.07 }]);
+  });
+
+  test('a driver throw with the governed signal aborted → indeterminate (the ladder cancellation, #191 r2)', async () => {
+    const driver: Driver = {
+      run: async () => {
+        throw new Error('cancelled mid-run');
+      },
+    };
+    const outcome = await runLadder(
+      async () => {
+        const signal = currentJobContext()?.signal;
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted === true) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return makeFixReviewItem({ driver })(baseInput());
+      },
+      { wallClockMs: 5, abortGraceMs: 60_000, killGraceMs: 60_000 },
+      { op: 'review.fixItem', jobKey: 'fix-abort', attempt: 1 },
+    );
+    expect(outcome.outcome).toBe('completed');
+    if (outcome.outcome === 'completed') {
+      // The throw happened AFTER the rung-1 signal aborted, so it is the
+      // governed cancellation (I8) → indeterminate, NOT needs-human (which
+      // would terminate the run as guard-human-intervened).
+      expect(outcome.value.status).toBe('indeterminate');
+      if (outcome.value.status === 'indeterminate') {
+        expect(outcome.value.detail).toContain('driver crashed');
+        expect(outcome.value.detail).toContain('cancelled mid-run');
+      }
+    }
   });
 });
 
