@@ -378,6 +378,17 @@ export function makeAssemblePrs(
     try {
       const lock = trackerLock ?? makeTrackerBodyLock(input.repoRoot);
       await lock.withLock(trackerNumber, async () => {
+        // RE-VERIFY THE LIFECYCLE INSIDE THE LOCK (r4 finding 1 / CodeRabbit
+        // App thread): the adoption guard above ran before this writer could
+        // acquire the lock, so a tracker that landed while it waited must
+        // still not be rewritten — the landed-record promise is atomic with
+        // the write it guards.
+        const state = (await gh.getPrReadiness(trackerNumber)).meta.state;
+        if (state !== 'open') {
+          throw new Error(
+            `a tracker PR for branch '${input.tracker.branch}' is in state '${state}' — refusing to rewrite a landed record`,
+          );
+        }
         const current = await gh.getPrBody(trackerNumber);
         await gh.editPrBody(
           trackerNumber,

@@ -30,6 +30,9 @@ import { prBranchFaultOf, runPrefixFault } from './assemblePrs.js';
 /** The shipped git wall clock for the tracker-branch leg (ms). */
 export const DEFAULT_TRACKER_BRANCH_TIMEOUT_MS = 30_000;
 
+/** The all-zero old value: `update-ref`'s create-only (compare-and-swap) guard. */
+const ZERO_SHA = '0000000000000000000000000000000000000000';
+
 /** Disable git's detached auto-maintenance (the sweep family's env idiom). */
 const GIT_NO_AUTO_MAINTENANCE_ENV = {
   GIT_CONFIG_COUNT: '2',
@@ -244,7 +247,10 @@ export function makeSubprocessTrackerBranchEffects(
           `chore(sweep): open tracker branch ${branch}`,
         ])
       ).trim();
-      const updated = await run(['update-ref', `refs/heads/${branch}`, newSha]);
+      // CREATE-ONLY (compare-and-swap): the zero old value makes a lost race
+      // fail loudly instead of silently clobbering a concurrent first-invoke's
+      // local ref (r4 finding 2).
+      const updated = await run(['update-ref', `refs/heads/${branch}`, newSha, ZERO_SHA]);
       if (updated.code !== 0) {
         throw new Error(
           updated.stderr.trim() || `git update-ref refs/heads/${branch} ${newSha} failed`,

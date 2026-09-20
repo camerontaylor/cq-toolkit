@@ -280,6 +280,17 @@ export function makeRunReport(
       try {
         const lock = trackerLock ?? makeTrackerBodyLock(input.repoRoot);
         await lock.withLock(trackerNumber, async () => {
+          // RE-VERIFY THE LIFECYCLE INSIDE THE LOCK (r4 finding 1 / CodeRabbit
+          // App thread): the pre-check above ran before this writer could
+          // acquire the lock, so a tracker that landed while it waited must
+          // still not be rewritten — the landed-record promise is atomic with
+          // the write it guards.
+          const state = (await gh.getPrReadiness(trackerNumber)).meta.state;
+          if (state !== 'open') {
+            throw new Error(
+              `tracker PR #${String(trackerNumber)} is in state '${state}' — refusing to write the run report into a non-open tracker`,
+            );
+          }
           const current = await gh.getPrBody(trackerNumber);
           await gh.editPrBody(
             trackerNumber,

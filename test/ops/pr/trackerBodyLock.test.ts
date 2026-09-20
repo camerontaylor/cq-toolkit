@@ -65,6 +65,10 @@ interface SharedForge {
   releaseGate(): void;
   /** Fail the next tracker `editPrBody` once (the release-on-fault pin). */
   failNextTrackerEdit(): void;
+  /** Report the tracker as closed from now on (the in-lock lifecycle re-check pin). */
+  closeTracker(): void;
+  /** Report the tracker open once, then closed (a transition while the writer waits). */
+  closeTrackerAfterFirstRead(): void;
 }
 
 function sharedForge(): SharedForge {
@@ -76,6 +80,9 @@ function sharedForge(): SharedForge {
   let armed = false;
   let release: (() => void) | undefined;
   let failEdit = false;
+  let trackerState: 'open' | 'closed' = 'open';
+  let closeAfterFirstRead = false;
+  let readinessReads = 0;
   const effects: PrEffects = {
     searchPrByHead: async (head, base) => {
       calls.push(`search:${head}->${base}`);
@@ -111,10 +118,19 @@ function sharedForge(): SharedForge {
     comment: async () => {},
     getPrReadiness: async (number) => {
       calls.push(`readiness:${number}`);
+      const closed =
+        number === TRACKER &&
+        (trackerState === 'closed' || (closeAfterFirstRead && readinessReads > 0));
+      if (number === TRACKER) readinessReads += 1;
       return {
         checks: { state: 'pass' },
         review: { state: 'none' },
-        meta: { isDraft: false, state: 'open', mergeable: 'mergeable', mergeStateStatus: 'clean' },
+        meta: {
+          isDraft: false,
+          state: closed ? 'closed' : 'open',
+          mergeable: 'mergeable',
+          mergeStateStatus: 'clean',
+        },
       };
     },
   };
@@ -130,6 +146,12 @@ function sharedForge(): SharedForge {
     },
     failNextTrackerEdit: () => {
       failEdit = true;
+    },
+    closeTracker: () => {
+      trackerState = 'closed';
+    },
+    closeTrackerAfterFirstRead: () => {
+      closeAfterFirstRead = true;
     },
   };
 }
@@ -233,6 +255,34 @@ describe('tracker-body read-modify-write lock (review-debt #171)', () => {
 
     forge.releaseGate();
     await assembling;
+  });
+
+  test('the lifecycle is re-verified INSIDE the lock: a tracker that landed is refused (runReport)', async () => {
+    const forge = sharedForge();
+    // The pre-check sees OPEN; the in-lock re-check sees CLOSED (a transition
+    // while the writer waited for the lock).
+    forge.closeTrackerAfterFirstRead();
+    const report = makeRunReport(forge.effects);
+    const result = await report(reportInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toMatch(/refusing to write the run report into a non-open tracker/);
+    }
+    // The body was never read or edited: the landed record was not rewritten.
+    expect(forge.calls).not.toContain(`get:${TRACKER}`);
+  });
+
+  test('the lifecycle is re-verified INSIDE the lock: a tracker that landed is refused (assemblePrs)', async () => {
+    const forge = sharedForge();
+    // The adoption search sees OPEN; the in-lock re-check sees CLOSED.
+    forge.closeTracker();
+    const assemble = makeAssemblePrs(forge.effects);
+    const result = await assemble(assembleInput());
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') {
+      expect(result.error).toMatch(/refusing to rewrite a landed record/);
+    }
+    expect(forge.calls).not.toContain(`get:${TRACKER}`);
   });
 
   test('a fault inside the locked span releases the lock for the next writer', async () => {
