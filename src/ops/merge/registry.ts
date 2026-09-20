@@ -243,6 +243,10 @@ export const PlannedMergeEntrySchema: z.ZodType<PlannedMergeEntry> = z
     action: z.enum(['merge', 'retarget-self']),
     basePr: z.number().int().positive().nullable(),
     depth: z.number().int().nonnegative(),
+    // The expected forge base (review-debt #193); omitted means the plan's
+    // baseBranch (the common root case). Kept OPTIONAL so a caller that
+    // never recorded a base still dispatches — the executor defaults it.
+    baseRefName: z.string().min(1).exactOptional(),
     headSha: z
       .string()
       .regex(/^[0-9a-f]{40}$/i)
