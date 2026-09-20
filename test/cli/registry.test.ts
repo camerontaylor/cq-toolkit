@@ -241,13 +241,22 @@ describe('registry family scan (src/ops)', () => {
 describe('registry ⇄ CLI subcommand surface', () => {
   test('every registry entry has a subcommand', async () => {
     const entries = await list();
-    const names = subcommandNames(entries);
+    const planNames = (await listPlans()).map((entry) => entry.name);
+    const names = subcommandNames(entries, planNames);
     for (const entry of entries) {
       expect(names).toContain(entry.name);
     }
     expect(names).toContain('run-plan');
+    // T4.3 generation contract: the plan-registry names are on the subcommand
+    // surface too — generated from the registry, never a hand-written list.
+    for (const planName of planNames) {
+      expect(names).toContain(planName);
+    }
     // The built-in run-plan subcommand exists even with zero op families.
     expect(subcommandNames([])).toEqual(['run-plan']);
+    // Plan names ride the caller-supplied list (sorted, deduped, run-plan
+    // appended) — the signature stays backward compatible for op-only callers.
+    expect(subcommandNames([], ['sweep'])).toEqual(['sweep', 'run-plan']);
     // Convention closure (phase-4 T4.2): every planned family now exports a
     // `registry` array, so NO family is skipped — the diagnostics' skip list
     // is empty. ratchet's interim metric-adapter registry moved to
@@ -549,6 +558,27 @@ describe('plan registry (src/plans) — .ts discovery + skip rules', () => {
     const alpha = await getPlan('alpha', { plansRoot: root });
     expect(alpha?.name).toBe('alpha');
     expect(typeof alpha?.importer).toBe('function');
+  });
+
+  test('rejects a dispatcher-reserved plan name (run-plan, flag-shaped, whitespace)', async () => {
+    // The same guard the op registry applies: such a name can never be
+    // dispatched (run-plan is handled before the plan registry; a leading '-'
+    // parses as a flag; whitespace corrupts the plain-text help), so the scan
+    // must reject it loudly instead of listing a dead plan.
+    for (const [file, name] of [
+      ['reserved.ts', 'run-plan'],
+      ['flag.ts', '-dashed'],
+      ['space.ts', 'has space'],
+    ] as const) {
+      const root = await makeTmpPlansRoot('cq-plans-reserved-');
+      await writeFile(
+        join(root, file),
+        `export const plan = { name: '${name}', importer: async () => ({ id: 'x', jobs: [] }) };\n`,
+      );
+      await expect(listPlans({ plansRoot: root })).rejects.toThrow(
+        `plan name '${name}' is reserved`,
+      );
+    }
   });
 });
 

@@ -5,6 +5,18 @@ THE I1 CLI CONTRACT (landed):
 
 - bin = dist/cli.js — the src/cli.ts shim; all behavior lives in src/cli/.
 - One subcommand per registry entry, plus the built-in 'run-plan'.
+- One subcommand per SHIPPED PLAN, generated from the plan registry
+  (src/cli/plans.ts): every name the plan registry discovers is a
+  subcommand, so a new src/plans/<name>.ts registers itself with no CLI edit.
+  A plan subcommand takes run-plan's governed-run flags MINUS --plan AND the
+  run-plan-reserved --ops-root (RunPlanCommandSchema) and runs the registry
+  entry's discoverable floor plan through the same governed composition
+  (runPlan + withBudgetStop); the floor is validated with PlanSchema before
+  the run, so malformed plan data is a usage error (exit 2).
+  `run-plan --plan=<file>` remains the way to run an arbitrary plan JSON, and
+  --ops-root remains a run-plan flag (a plan subcommand rejects it with exit
+  2; embedders inject an ops root through the runCli DI).
+  Op names win on a name collision (the op registry is consulted first).
 - stdout = exactly ONE JSON artifact per invocation (an OpResult, or a
   RunReport for run-plan); the plain-text `--help` surface is the one
   sanctioned exception.
