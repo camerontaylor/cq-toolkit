@@ -50,10 +50,10 @@ git clone https://github.com/camerontaylor/cq-toolkit
 cd cq-toolkit
 git checkout 93bbf19cda7ec84720f048d67679c150a4658ba1
 npm ci
-npm whoami                                     # confirm the publish identity
+npm whoami --registry https://registry.npmjs.org/     # confirm the publish identity (pinned registry)
 node -v && npm -v                               # expect v24.x / 11.19.0 — the recorded toolchain
 npm pack --pack-destination "$pack_dir"         # sanity: dist/ present, sha256 matches
-shasum -a 256 "$pack_dir"/*.tgz                  # expect 699a72da… (dist+policy+LICENSE+README+package.json)
+test "$(shasum -a 256 "$pack_dir"/*.tgz | awk '{print $1}')" = 699a72dab4e48bacb5b6c59946da5ef701e88883e2bb2e073c5cfd0087ff71c4  # gate: abort before publish on any byte drift
 npm publish --access public --registry https://registry.npmjs.org/
 npm view @camerontaylor/cq-toolkit@1.0.0 version dist.tarball dist.shasum --registry https://registry.npmjs.org/
 # the registry shasum must equal the dry-run log's 1bc3274e2afc12f69599a5440f483084040fa0ca
