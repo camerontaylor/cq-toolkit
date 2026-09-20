@@ -61,7 +61,7 @@ queue branch), `merge-queue-gate.yml` (the only component that advances
 `required-check.md` (the I4 pattern), `affected-tests.md` (reduced-test
 selection and its blind spot), `ratchet.yml` + `ratchet-propose.yml` (the
 baseline ratchet), `live-merge.yml` (the live drill), and `self-host/` (the
-scheduled review-loop and merge-prs automation).
+scheduled `self-review-loop.yml` + `self-merge-prs.yml` automation).
 
 ## Adopting the ratchets (I5)
 

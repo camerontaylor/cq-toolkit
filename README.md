@@ -28,7 +28,7 @@ Every op is reachable from the package root, and the plan runner composes ops th
 ```ts
 import { getOp, listOps } from '@camerontaylor/cq-toolkit';
 
-const names = (await listOps()).map((entry) => entry.name); // 40 shipped ops
+const names = (await listOps()).map((entry) => entry.name); // every registered op
 
 const entry = await getOp('analyze.collectFailures');
 if (entry === undefined) throw new Error('op not registered');
@@ -37,10 +37,11 @@ const op = await entry.importer(); // lazy: no op module loads before this
 const result = await op({ sets: [] }); // OpResult — a status-tagged union
 ```
 
-The runner is exported too: `runPlan(plan, options, governedRegistry)` returns a
-serializable `RunReport` (per-job outcomes, usage rollup, honest-stop counts) and
-takes a registry view — see [`src/kernel/README.md`](src/kernel/README.md) for
-the composition contract and `scripts/smoke-run-plan.mjs` for a worked
+The runner is exported too: `runPlan(plan, opts, registry)` returns a
+serializable `RunReport` (per-job outcomes, usage rollup, honest-stop counts);
+its third argument is an `OpRegistryView`, and budget governance comes from
+wrapping the run with `withBudgetStop`. See [`src/kernel/README.md`](src/kernel/README.md)
+for the composition contract and `scripts/smoke-run-plan.mjs` for a worked
 governed run.
 
 ## CLI (secondary)
@@ -48,7 +49,7 @@ governed run.
 One subcommand per registry entry, plus one per shipped plan, plus the built-in `run-plan`. Flags map onto the op's schema keys; output honors invariant I1 (`stdout` = one JSON artifact, `stderr` = `cq:` narration, machine mode with `--json`):
 
 ```sh
-cq analyze.collectFailures --json='{"sets":[]}'   # one op
+cq analyze.collectFailures --sets='[]' --json   # one op (schema-key flags; bare --json = machine mode)
 cq --help                                        # global help
 cq analyze.collectFailures --help                # per-op input schema
 cq run-plan --plan=plan.json --json              # a governed plan
@@ -80,7 +81,7 @@ Enforcement. In brief:
 
 | #   | Invariant                                                                                                                                                                              |
 | --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human                                                                                          |
+| I1  | stdout is JSON, stderr is narration; exit codes 0 clean, 1 thrown, 2 arg error, 3 needs-human/budget-exhausted                                                                         |
 | I2  | No-privileged-reviewer acceptance: a non-author review of the exact head, plus a ≥10-minute settle or a postdating all-clear; unresolved threads block and truncated data fails closed |
 | I3  | Merge commits only; `merge-queue`→`main` promotion is a pure fast-forward behind merge-base guards — never squash, rewrite, or force-push                                              |
 | I4  | Required checks never filter triggers; the only sanctioned skip is a job-level `if:`                                                                                                   |
