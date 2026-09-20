@@ -266,7 +266,7 @@ function assertRelativeProbePath(value, where) {
   }
   // Windows-plain-name rejection (review-debt cq-toolkit#187, routed from
   // fixtures#15): probe placement must succeed on a Windows host too, where
-  // a segment carrying a reserved character (<>:"|?*), a control character,
+  // a segment carrying a reserved character (<>:"|?*), a C0-control character,
   // or a device name fails creation or addresses a device/ADS. The device
   // check runs on the extension-stripped stem (NUL.txt is reserved like NUL)
   // of the already-canonicalized segment, case-insensitively.
@@ -278,10 +278,15 @@ function assertRelativeProbePath(value, where) {
     if (canonical !== seg || canonical === '.' || canonical === '..') {
       throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (trailing dots/spaces and "."/".." spellings are rejected — the fs layer canonicalizes them)`);
     }
-    if (/[<>:\"|?*\x00-\x1f\x7f-\x9f]/.test(seg)) {
-      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows-reserved and control characters are rejected — probe placement must succeed on Windows hosts)`);
+    // C0 controls only (\x00-\x1f): DEL (\x7f) and C1 (\x80-\x9f) are
+    // legal in NTFS names, so rejecting them would over-reject.
+    if (/[<>:"|?*\x00-\x1f]/.test(seg)) {
+      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows-reserved and C0-control characters are rejected — probe placement must succeed on Windows hosts)`);
     }
-    const stem = seg.split('.')[0].toUpperCase();
+    // The stem strips trailing dots/spaces too: `NUL .txt` normalizes to
+    // the device once Win32 strips the space, so the bare split stem would
+    // miss it.
+    const stem = seg.split('.')[0].replace(/[ .]+$/, '').toUpperCase();
     if (WINDOWS_DEVICE_NAMES.has(stem)) {
       throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows device names are rejected with any extension — probe placement must succeed on Windows hosts)`);
     }
@@ -1158,7 +1163,7 @@ function selfTestWorkflowI4() {
 
 // Pure-text parser guards (no gitleaks): (a) probe_path must stay
 // repo-relative — absolute, backslash-separated, non-plain-segment (`..`,
-// trailing dots/spaces, empty), Windows-reserved and control characters,
+// trailing dots/spaces, empty), Windows-reserved and C0-control characters,
 // and device names (any extension, any case) are rejected at
 // parse time, so the self-test probe placement (writeProbes' path.join)
 // can never be steered outside its fixture directory on either platform,
@@ -1193,7 +1198,9 @@ function selfTestParserGuards(rules) {
     'que?.txt',
     'a:b.txt',
     'star*.txt',
+    'a>b.txt',
     'quo"te.txt',
+    'NUL .txt',
     'a\x01b.txt',
   ];
   for (const probe of rejectCases) {
@@ -1220,7 +1227,9 @@ function selfTestParserGuards(rules) {
   }
   // Accept-cases: legal relative paths must still parse — a flat name and a
   // nested directory path (the shapes patterns.yml actually uses).
-  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt']) {
+  // DEL (\x7f) and C1 are legal NTFS name characters: accepted here to pin
+  // the \x00-\x1f boundary of the control rejection above.
+  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt', 'ok\x7f.txt']) {
     const text = [
       'rules:',
       '  - id: guard-probe',
@@ -1240,8 +1249,13 @@ function selfTestParserGuards(rules) {
   }
   for (const r of rules) {
     if (r.probe_path === undefined) continue;
-    if (path.win32.isAbsolute(r.probe_path) || r.probe_path.includes('\\')) {
-      console.error(`FAIL parser-guards: shipped patterns.yml probe_path '${r.probe_path}' is not repo-relative`);
+    // The shipped value already passed assertRelativeProbePath at load, but
+    // re-check explicitly so the leg names the offending shipped value (and
+    // the current full class list) instead of relying on the load crash.
+    try {
+      assertRelativeProbePath(r.probe_path, 'shipped patterns.yml');
+    } catch (e) {
+      console.error(`FAIL parser-guards: shipped patterns.yml probe_path '${r.probe_path}' rejected: ${e.message}`);
       ok = false;
     }
   }
