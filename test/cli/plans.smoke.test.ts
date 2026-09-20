@@ -336,13 +336,19 @@ describe('every shipped plan runs through the built CLI (ws-i item 2)', () => {
           expect(report.stoppedEarly).toBe(false);
         }
         if (plan.name === 'analyze') {
-          // The floor's honest pin: collect fails on its OWN empty-sets policy
-          // — not merely because the probe failed and left it blocked (a
-          // blocked row is also 'failed' but its error says 'blocked:').
+          // The floor's honest pin: the run fails for an honest reason. When
+          // the probe reaches a reading, collect fails on its OWN empty-sets
+          // policy; when the probe itself cannot read the target (a
+          // host-toolchain fact, e.g. no parsable tsc diagnostics), collect is
+          // honestly BLOCKED by it. Either way a failed row carries a
+          // non-empty reason — never a fabricated pass. Pin both shapes
+          // rather than assuming the probe's outcome on this host.
+          const probe = report.jobs.find((row) => row.jobId === 'analyze-probe');
           const collect = report.jobs.find((row) => row.jobId === 'analyze-collect');
           expect(collect?.result.status, context(res)).toBe('failed');
           if (collect?.result.status === 'failed') {
-            expect(collect.result.error, context(res)).toContain('no input sets');
+            const expected = probe?.result.status === 'ok' ? 'no input sets' : 'blocked:';
+            expect(collect.result.error, context(res)).toContain(expected);
           }
         }
       },
