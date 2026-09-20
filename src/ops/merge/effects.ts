@@ -106,7 +106,9 @@ const isProtectedRef = (ref: string, protectedBranch: string): boolean =>
  *       the documented shape carries none, so `push origin --force
  *       feat:x` cannot ride a discarded-flag blind spot), and the
  *       destination must not be the protected branch
- *   gh pr merge <n> --merge                   — the ONLY merge method (I3)
+ *   gh pr merge <n> --merge [--match-head-commit <sha>]  — the ONLY merge
+ *       method (I3); the head-commit pin is allowed only as a 40-hex sha
+ *       (review-debt #186)
  *   gh pr edit <n> --base <base>              — the retarget
  * opts.protectedBranch (default 'main') names the branch pushes may never
  * land on, under either spelling.
@@ -216,23 +218,35 @@ export function safeArgs(args: readonly string[], opts: SafeArgsOpts = {}): read
       return args;
     }
     case 'pr': {
-      // The two gh shapes: the merge (I3's only method) and the retarget.
-      // rest[0] is 'pr' itself — the gh runner's argv starts at the
-      // subcommand (the binary is the runner), so skip it. EXACT ARITY:
-      // trailing tokens are how --admin/--squash/--delete-branch would ride
-      // an otherwise-legal shape past the guard (VB2F batch gate).
-      if (rest.length !== 4 && rest.length !== 5) throw unknown();
+      // The two gh shapes: the merge (I3's only method, optionally pinned by
+      // `--match-head-commit`) and the retarget. rest[0] is 'pr' itself — the
+      // gh runner's argv starts at the subcommand (the binary is the runner),
+      // so skip it. EXACT ARITY: trailing tokens are how --admin/--squash/
+      // --delete-branch would ride an otherwise-legal shape past the guard
+      // (VB2F batch gate).
       const [, verb, prNum, flag, base] = rest;
       if (
-        rest.length === 4 &&
+        (rest.length === 4 || rest.length === 6) &&
         verb === 'merge' &&
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
         flag === '--merge'
       ) {
-        return args;
+        if (rest.length === 4) {
+          return args;
+        }
+        const [, , , , , sha] = rest;
+        if (
+          rest[4] === '--match-head-commit' &&
+          typeof sha === 'string' &&
+          /^[0-9a-f]{40}$/i.test(sha)
+        ) {
+          return args;
+        }
+        throw unknown();
       }
       if (
+        rest.length === 5 &&
         verb === 'edit' &&
         typeof prNum === 'string' &&
         /^\d+$/.test(prNum) &&
@@ -293,9 +307,12 @@ export interface MergeEffects {
   worktreeRemove(path: string): Promise<void>;
   /** Merge PR `pr` on the forge, `method: 'merge'` EXCLUSIVELY (I3 — the
    * type admits no other method and safeArgs rejects `--squash`/`--rebase`
-   * argv regardless). Resolves with the exit code; executeMerges reads
-   * `stderr` to decide bounded-retry eligibility. */
-  mergePr(pr: number, opts: { method: 'merge' }): Promise<GhResult>;
+   * argv regardless). `matchHeadCommit` (review-debt #186) pins the merge to
+   * the reviewed head SHA (`gh pr merge --match-head-commit <sha>`): the
+   * forge refuses the merge when the head moved between plan and execution,
+   * closing the fixer-push race. Resolves with the exit code; executeMerges
+   * reads `stderr` to decide bounded-retry eligibility. */
+  mergePr(pr: number, opts: { method: 'merge'; matchHeadCommit?: string }): Promise<GhResult>;
   /** Retarget PR `pr` onto `newBase` — the forge base-edit operation
    * (`gh pr edit <pr> --base <newBase>` in the real implementation). This
    * is the retarget-self action's WHOLE body: forge metadata, so it never
@@ -403,7 +420,8 @@ export interface RealMergeEffectsOpts {
  *                   worktree, so it cannot host the trees)
  *   - worktreeRemove:  `git -C <root> worktree remove <path>` (no --force —
  *                   a refusing tree stays and throws)
- *   - mergePr:      `gh pr merge <pr> --merge`
+ *   - mergePr:      `gh pr merge <pr> --merge` (plus
+ *                   `--match-head-commit <sha>` when the caller pins the head)
  *   - retargetBase: `gh pr edit <pr> --base <newBase>`
  *   - pushRef:      `git -C <fromPath> push origin <src:dst>` (an explicit
  *                   refspec — round 2: bare/symbolic forms are refused)
@@ -506,8 +524,17 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     }
   };
 
-  const mergePr = (pr: number, method: { method: 'merge' }): Promise<GhResult> =>
-    gh(['pr', 'merge', String(pr), `--${method.method}`]);
+  const mergePr = (
+    pr: number,
+    opts: { method: 'merge'; matchHeadCommit?: string },
+  ): Promise<GhResult> =>
+    gh([
+      'pr',
+      'merge',
+      String(pr),
+      `--${opts.method}`,
+      ...(opts.matchHeadCommit !== undefined ? ['--match-head-commit', opts.matchHeadCommit] : []),
+    ]);
 
   const retargetBase = (pr: number, newBase: string): Promise<GhResult> =>
     gh(['pr', 'edit', String(pr), '--base', newBase]);
@@ -515,5 +542,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
   const pushRef = (ref: string, fromPath: string): Promise<GhResult> =>
     git(['-C', fromPath, 'push', 'origin', ref]);
 
-  return { validateRef, fetchRef, worktreePrepare, worktreeRemove, mergePr, retargetBase, pushRef };
+  return {
+    validateRef,
+    fetchRef,
+    worktreePrepare,
+    worktreeRemove,
+    mergePr,
+    retargetBase,
+    pushRef,
+  };
 }

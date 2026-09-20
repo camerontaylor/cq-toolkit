@@ -39,17 +39,19 @@
 //  11. state and authorLogin ride the SINGLE-PR payload too: a PR closed
 //      or re-authored between listing and GET enters with the payload's
 //      values, never the listing row's stale ones.
-//  12. The closed-ancestor sweep (#153): a parent merged within the last
-//      24h whose head.ref is an open candidate's base ref rides along as a
-//      `state: 'closed'` STRUCTURAL candidate through the same single-PR
-//      enrichment (payload state wins); unrelated closed rows (wrong
-//      branch, stale merge, absent/garbage merged_at, future merge,
-//      already-enriched number) are dropped by the bounded filter before
-//      any enrichment; the closed read is ONE page (never paginated); a
-//      failed closed-page read degrades to a `#0` audit row while the open
-//      candidates survive; a failing ancestor enrichment is isolated to
-//      its own `fetch-failed` row; no closed read at all when nothing open
-//      exists to anchor.
+//  12. The closed-ancestor sweep (#153): a merged parent whose head.ref is
+//      an open candidate's base ref rides along as a `state: 'closed'`
+//      STRUCTURAL candidate through the same single-PR enrichment (payload
+//      state wins), REGARDLESS OF AGE — the old 24h recency window was
+//      removed (review-debt #186) because it dropped a parent merged more
+//      than a day before an open/draft child, so retarget-self never fired.
+//      Unrelated closed rows (wrong branch, absent/garbage merged_at,
+//      future merge, already-enriched number) are dropped by the bounded
+//      filter before any enrichment; the closed read is ONE page (never
+//      paginated); a failed closed-page read degrades to a `#0` audit row
+//      while the open candidates survive; a failing ancestor enrichment is
+//      isolated to its own `fetch-failed` row; no closed read at all when
+//      nothing open exists to anchor.
 //
 // The gh seam is INJECTED (a fake GhFn routing on argv, recording every
 // call) — no spawned process anywhere.
@@ -652,37 +654,50 @@ describe('fetchMergeCandidates — closed-ancestor sweep (#153)', () => {
     ]);
   });
 
-  test('unrelated closed rows are dropped by the bounded filter before any enrichment', async () => {
+  test('ancestors are retained REGARDLESS OF AGE; unrelated/unmerged/skewed closed rows are dropped before enrichment (#186)', async () => {
     const calls: string[] = [];
     const gh = fakeGh(
       {
         list: () => [pullRow(41)],
         closed: () => [
           closedRow(42, { headRef: 'unrelated-branch' }), // wrong branch — anchors nothing
-          closedRow(43, { headRef: 'merge-queue', mergedAt: '2025-12-30T03:00:00Z' }), // merged 3 days ago
-          closedRow(44, { headRef: 'merge-queue', mergedAt: '2026-01-01T03:00:00Z' }), // exactly 24h — the window is half-open
-          closedRow(45, { mergedAt: null }), // no merged_at (closed unmerged)
+          closedRow(43, { headRef: 'merge-queue', mergedAt: '2025-12-30T03:00:00Z' }), // merged 3 days ago — RETAINED (#186)
+          closedRow(44, { headRef: 'merge-queue', mergedAt: '2026-01-01T03:00:00Z' }), // exactly 24h — RETAINED (#186)
+          closedRow(45, { mergedAt: null }), // no merged_at (closed unmerged) — dropped
           closedRow(46, { headRef: 'merge-queue', mergedAt: 'not-a-timestamp' }), // NaN-guarded parse
           closedRow(47, { headRef: 'merge-queue', mergedAt: '2026-01-02T09:00:00Z' }), // future — a skewed wire
-          closedRow(41, { headRef: 'merge-queue' }), // fresh + name match, but 41 is already an open candidate
+          closedRow(41, { headRef: 'merge-queue' }), // name match, but 41 is already an open candidate
         ],
+        singlePull: (pr) =>
+          pr === 41
+            ? singlePullPayload(41, 'clean')
+            : singlePullPayload(pr, 'clean', { state: 'closed', baseRef: 'merge-queue' }),
       },
       calls,
     );
 
     const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO, nowMs: CLOSED_NOW });
 
-    expect(result.candidates.map((c) => c.pr)).toEqual([41]);
-    // Dropped rows were never work items — they appear in NEITHER list,
-    // and none of them cost a single enrichment read (the duplicate-number
-    // guard kept 41 to its one open-loop enrichment).
+    // The old 24h window dropped 43/44 (the exact #186 bug: a parent merged
+    // >24h before an open child never anchored retarget-self); both now ride
+    // along as closed structural rows.
+    expect(result.candidates.map((c) => [c.pr, c.state])).toEqual([
+      [41, 'open'],
+      [43, 'closed'],
+      [44, 'closed'],
+    ]);
     expect(result.excluded).toEqual([]);
-    for (const n of [42, 43, 44, 45, 46, 47]) {
+    // The dropped rows cost no enrichment read; the retained ancestors do.
+    for (const n of [42, 45, 46, 47]) {
       expect(calls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/${String(n)}`))).toBe(
         false,
       );
     }
-    expect(calls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/41`))).toBe(true);
+    for (const n of [41, 43, 44]) {
+      expect(calls.some((line) => line.endsWith(`repos/${REPO_PATH}/pulls/${String(n)}`))).toBe(
+        true,
+      );
+    }
   });
 
   test('a closed structural row skips the draft gate (a draft can never merge — the flag gates nothing for a never-merge row)', async () => {

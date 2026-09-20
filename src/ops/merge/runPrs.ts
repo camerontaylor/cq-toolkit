@@ -121,6 +121,14 @@ export interface MergePrsCandidate extends PrCandidate {
   headRefName: string;
   /** The branch the pr proposes to merge into — its stack position. */
   baseRefName: string;
+  /**
+   * The observed head SHA from the authoritative single-PR read — carried
+   * into the plan so executeMerges can pin `gh pr merge --match-head-commit`
+   * to the reviewed head (review-debt #186). Optional: a wire that omitted
+   * it (the fetch always sets at least '') leaves the merge unpinned rather
+   * than failing a structural candidate.
+   */
+  headSha?: string;
   /** Open prs classify and merge; closed prs anchor the stack only. */
   state: 'open' | 'closed';
 }
@@ -225,6 +233,7 @@ const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedP
     pr: candidate.pr,
     headRefName: candidate.headRefName,
     baseRefName: candidate.baseRefName,
+    ...(candidate.headSha !== undefined ? { headSha: candidate.headSha } : {}),
     state: candidate.state,
     authorLogin: candidate.authorLogin,
     classification: candidate.state === 'open' ? classifyPr(candidate, nowMs) : null,

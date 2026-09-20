@@ -52,6 +52,7 @@ import type {
   FixReviewItemInput,
   FixReviewItemResult,
 } from '../../../src/ops/review/fixReviewItem.js';
+import { runLadder } from '../../../src/kernel/governor.js';
 import { defaultFixPrompt } from '../../../src/ops/review/prompts/fix.default.js';
 import { registry } from '../../../src/ops/review/registry.js';
 
@@ -338,17 +339,40 @@ describe('fixReviewItem stop reasons', () => {
     expect(result.status).toBe('indeterminate');
   });
 
-  test('a driver that rejects → indeterminate (no verdict on partial work)', async () => {
+  test('a driver that rejects → needs-human (no verdict on partial work; #186)', async () => {
     const driver: Driver = {
       run: async () => {
         throw new Error('boom below the seam');
       },
     };
     const result = await makeFixReviewItem({ driver })(baseInput());
-    expect(result.status).toBe('indeterminate');
-    if (result.status === 'indeterminate') {
-      expect(result.detail).toContain('boom below the seam');
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('boom below the seam');
+      expect(result.reason).toContain('driver could not dispatch the worker');
     }
+  });
+
+  test("the driver's usage + cost are reported to the job context in ONE fold (#185)", async () => {
+    const usage = { input: 10, output: 5, cacheRead: 1, cacheWrite: 2 };
+    const { driver } = scriptedDriver([
+      completeWorker(
+        { changed: true, summary: 'fixed', commits: ['a'.repeat(40)] },
+        { usage, costUSD: 0.07 },
+      ),
+    ]);
+    const reported: Array<{ usage?: unknown; costUSD?: number }> = [];
+    const outcome = await runLadder(
+      () => makeFixReviewItem({ driver })(baseInput()),
+      {},
+      { op: 'review.fixItem', jobKey: 'j1', attempt: 1 },
+      { onResult: (result) => reported.push(result) },
+    );
+    expect(outcome.outcome).toBe('completed');
+    // The mapped op returns its OWN value shape, so the governor's
+    // WorkerResult fold would see nothing — the job-context report is the
+    // spend evidence (usage and cost together, once).
+    expect(reported).toEqual([{ usage, costUSD: 0.07 }]);
   });
 });
 

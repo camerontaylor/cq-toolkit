@@ -42,12 +42,16 @@ on:
         default: false
         type: boolean
 
-# A cancelled mid-run merge could strand a half-executed plan — a queued
-# run waits rather than kills the in-flight dispatch (same discipline as
-# live-review.yml and self-review-loop.yml). Fixed group, not per-ref:
-# this workflow never fires on PRs, so there is nothing per-ref to isolate.
+# ONE shared serialization group across BOTH self-host workflows
+# (review-debt #186): the merge dispatch's server-side merges and the review
+# loop's fix pushes/replies mutate the same repo state, so they must never
+# interleave — a review push racing a merge executor would invalidate the
+# merge's head pin. A queued run WAITS rather than kills the in-flight sibling
+# (cancel-in-progress: false — cancelling mid-merge could strand a
+# half-executed plan, cancelling mid-loop half-dispatched replies). Fixed
+# group, not per-ref: neither workflow fires on PRs.
 concurrency:
-  group: self-merge-prs
+  group: self-host-automation
   cancel-in-progress: false
 
 permissions:

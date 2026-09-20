@@ -50,12 +50,17 @@
 //     guessed ok).
 //   'budget' → budget-exhausted; 'error' → failed; 'aborted' →
 //     indeterminate (no verdict on partial work). A driver that REJECTS
-//     (crash at or below the seam) is likewise indeterminate — the op
-//     cannot know whether the worker ran (baselineProbe's crashed-runner
-//     precedent).
-//   On ok, WorkerResult.usage becomes result.usage and denials pass
-//   through verbatim; on every other status the worker's evidence has no
-//   result to ride (the frozen OpResult carries none).
+//     (throws at or below the seam) is `needs-human`: the op cannot know
+//     whether the worker ran, and the common cause is a dispatch-time
+//     environment gap (unknown provider handle, missing key, no host CLI
+//     for the provider's route) a human must arrange — never `failed`
+//     (baselineProbe's crashed-runner precedent, review-debt #186).
+//   On ok, WorkerResult.usage becomes result.usage, WorkerResult.costUSD
+//   (when the driver's price map knew the model) becomes result.costUSD,
+//   and denials pass through verbatim; on every other status the worker's
+//   evidence has no result to ride (the frozen OpResult carries none) —
+//   but its USAGE/COST is still reported to the governor through the job
+//   context, so a bounded run's spend is observed (review-debt #185).
 import { mkdtempSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -76,6 +81,7 @@ import type {
   WorkerResult,
 } from '../../driver/types.js';
 import type { Op } from '../../kernel/types.js';
+import { currentJobContext } from '../../kernel/governor.js';
 import { defaultFixPrompt } from './prompts/fix.default.js';
 import type { ThreadComment } from './threads.js';
 
@@ -164,6 +170,15 @@ export interface FixReviewItemResult {
   denials: ToolDenial[];
   /** Worker-reported token usage, verbatim (never driver-trusted for USD — callers price it). */
   usage?: Usage;
+  /**
+   * The worker's DERIVED-ONLY USD cost (DD-2), passed through verbatim from
+   * the driver's WorkerResult when the driver's price map knew the model.
+   * Absent for an unpriced model — never a fabricated 0. The same figure is
+   * folded into the governor's run rollup through the job context
+   * (review-debt #185), so a caller reads it here for per-item reporting
+   * while the run-level total rides RunReport.costUSD.
+   */
+  costUSD?: number;
 }
 
 /**
@@ -464,19 +479,28 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
  *   - a plain {@link Driver} — the caller owns the seam entirely (tests,
  *     in-process callers that enforce the harness themselves);
  *   - `{ perHarness }` — the DISPATCHED form (the registry binds it): the
- *     driver is built FROM THE INPUT'S HARNESS AND WORKTREE per invocation.
- *     Needed because {@link toolPolicyFor} reduces the harness to tool
- *     NAMES — command/path restrictions (run.commandPatterns, pathPatterns)
- *     cannot ride the frozen OpInvocation (Codex P1) — and because the
- *     worker must run IN THE PR WORKTREE (round-2 finding 1, HIGH): the
- *     registry binds it to
+ *     driver is built FROM THE INPUT'S HARNESS, WORKTREE, AND ModelSpec per
+ *     invocation. Needed because {@link toolPolicyFor} reduces the harness
+ *     to tool NAMES — command/path restrictions (run.commandPatterns,
+ *     pathPatterns) cannot ride the frozen OpInvocation (Codex P1) — and
+ *     because the worker must run IN THE PR WORKTREE (round-2 finding 1,
+ *     HIGH): the registry binds it to
  *     `worktreeFixDriver({ harnessConfig: harness, worktreePath:
  *     worktree.path })`, whose session record makes the worktree the
- *     invocation's workspace.
+ *     invocation's workspace. The ModelSpec rides the binding so the
+ *     factory can select the DRIVER KIND from the provider handle (review-
+ *     debt #186): 'ai-sdk' binds the in-process AiSdkDriver (no host CLI),
+ *     any other handle binds the SubprocessDriver host-CLI lane.
  */
 export type FixDriverSource =
   | Driver
-  | { perHarness: (harness: HarnessConfig, worktree: { path: string; branch: string }) => Driver };
+  | {
+      perHarness: (
+        harness: HarnessConfig,
+        worktree: { path: string; branch: string },
+        modelSpec: ModelSpec,
+      ) => Driver;
+    };
 
 /**
  * Build the `review.fixItem` op over the injected runtime seam (see
@@ -564,7 +588,7 @@ export function makeFixReviewItem(deps: {
   const driverFor = (input: FixReviewItemInput): Driver => {
     const source = deps.driver;
     if ('perHarness' in source) {
-      return source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree);
+      return source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree, input.driver);
     }
     return source;
   };
@@ -588,14 +612,37 @@ export function makeFixReviewItem(deps: {
     try {
       worker = await driver.run(invocation);
     } catch (err) {
-      // A rejected run() is a crash at or below the seam — no verdict on
-      // whether the worker ran (never `failed`: that would claim a
-      // definitive outcome the op did not observe).
+      // A THROWN run() with the governor's signal already aborted is the
+      // governed cancellation (I8): no verdict on partial work →
+      // `indeterminate` (the pre-#186 behavior, preserved for the ladder).
+      if (currentJobContext()?.signal.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `fixReviewItem: driver crashed: ${messageOf(err)}`,
+        };
+      }
+      // Otherwise the throw is a PRE-DISPATCH misconfiguration (an unknown
+      // provider handle, a missing API key, a runtime with no host CLI for
+      // the provider's route) — the human's to arrange, so `needs-human`,
+      // never `failed` (which would claim a definitive worker outcome the op
+      // never observed; review-debt #186).
       return {
-        status: 'indeterminate',
-        detail: `fixReviewItem: driver crashed: ${messageOf(err)}`,
+        status: 'needs-human',
+        reason: `fixReviewItem: driver could not dispatch the worker: ${messageOf(err)}`,
       };
     }
+    // SPEND EVIDENCE (review-debt #185): the op maps the driver's
+    // WorkerResult into its OWN result shape, so the governor's completion-
+    // time WorkerResult fold cannot see the usage/cost. Report the SAME
+    // evidence through the job context in ONE fold — it applies the DD-9
+    // token/USD rollups and the unpriced-usage fail-loud trip (governor
+    // observeResult) exactly as the fold would. Reported for EVERY stop
+    // reason (a failed/aborted worker still spent), before the mapping
+    // below. Outside a governed invocation there is no context — a no-op.
+    currentJobContext()?.reportResult({
+      usage: worker.usage,
+      ...(worker.costUSD !== undefined ? { costUSD: worker.costUSD } : {}),
+    });
     if (worker.stopReason === 'budget') {
       return { status: 'budget-exhausted' };
     }
@@ -624,6 +671,7 @@ export function makeFixReviewItem(deps: {
         ...(parsed.summaryTruncated ? { summaryTruncated: true } : {}),
         denials: worker.denials,
         usage: worker.usage,
+        ...(worker.costUSD !== undefined ? { costUSD: worker.costUSD } : {}),
       },
     };
   };

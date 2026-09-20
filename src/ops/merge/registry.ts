@@ -197,6 +197,7 @@ export const PlannedPrSchema: z.ZodType<PlannedPr> = z
     pr: z.number().int().positive(),
     headRefName: z.string().min(1),
     baseRefName: z.string().min(1),
+    headSha: z.string().exactOptional(),
     state: z.enum(['open', 'closed']),
     authorLogin: z.string().nullable(),
     classification: PrClassificationSchema.nullable(),
@@ -239,6 +240,7 @@ export const PlannedMergeEntrySchema: z.ZodType<PlannedMergeEntry> = z
     action: z.enum(['merge', 'retarget-self']),
     basePr: z.number().int().positive().nullable(),
     depth: z.number().int().nonnegative(),
+    headSha: z.string().exactOptional(),
   })
   .strict();
 
@@ -368,6 +370,7 @@ export const MergePrsCandidateSchema: z.ZodType<MergePrsCandidate> = z
     ...PrCandidateObject.shape,
     headRefName: conservativeRefname(),
     baseRefName: conservativeRefname(),
+    headSha: z.string().exactOptional(),
     state: z.enum(['open', 'closed']),
   })
   .strict();

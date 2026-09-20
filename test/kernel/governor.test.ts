@@ -1223,6 +1223,51 @@ describe('governOp folds a returned WorkerResult through observeResult (#14-1/#1
     expect(governor.usage).toEqual(WORKER_USAGE); // once — not {input: 200, output: 100, …}
     expect(governor.usdSpent).toBe(0.02); // the returned cost folded (once)
   });
+
+  test("reportResult streams a value-mapping op's driver evidence through the job context (#185)", async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxUsd: 5 }, {}),
+    );
+    // The op maps the WorkerResult into its OWN value shape (review.fixItem /
+    // resolveConflict), so the completion-time WorkerResult fold cannot see
+    // it — it reports usage+cost in ONE fold through the job context.
+    const mappedOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportResult({ usage: WORKER_USAGE, costUSD: 0.03 });
+      return {
+        status: 'ok',
+        value: { changed: true, summary: 'fixed', commits: ['a'.repeat(40)] },
+      };
+    };
+    const plan = independentPlan('plan-mapped-cost', 1, 'mapped');
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 5 },
+      governRegistry(viewWith(entry('mapped', mappedOp)), governor),
+    );
+    expect(governor.usage).toEqual(WORKER_USAGE);
+    expect(governor.usdSpent).toBe(0.03);
+    expect(governor.tripped).toBe(false);
+  });
+
+  test('reportResult with UNPRICED usage under maxUsd still trips LOUD — DD-9 is not bypassed (#185)', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxUsd: 5 }, {}),
+    );
+    const mappedUnpricedOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportResult({ usage: WORKER_USAGE }); // no costUSD
+      return { status: 'ok', value: { changed: false, summary: 'nothing' } };
+    };
+    const plan = independentPlan('plan-mapped-unpriced', 1, 'mapped-unpriced');
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 5 },
+      governRegistry(viewWith(entry('mapped-unpriced', mappedUnpricedOp)), governor),
+    );
+    expect(governor.usage).toEqual(WORKER_USAGE);
+    expect(governor.usdSpent).toBe(0);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripReason).toMatch(/unpriced usage under a USD cap/);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1376,8 +1421,13 @@ describe('withBudgetStop — honest annotation, both directions (#15-4/#15-6)', 
     expect(governor.tripped).toBe(true);
     expect(rowStatuses(raw)).toEqual(['ok', 'budget-exhausted']);
     const report = withBudgetStop(raw, plan, governor);
-    // I9 honesty: no row was re-marked → the report is returned UNTOUCHED.
-    expect(report).toBe(raw);
+    // I9 honesty: no row was re-marked → no stoppedEarly claim. The report
+    // still gains the derived cost rollup the governor OBSERVED (#185);
+    // rows/counts are untouched.
+    expect(report).not.toBe(raw);
+    expect(report.costUSD).toBe(governor.usdSpent);
+    expect(report.jobs).toBe(raw.jobs);
+    expect(report.counts).toBe(raw.counts);
     expect(report.stoppedEarly).toBe(false);
     expect(report.earlyStopReason).toBeUndefined();
   });

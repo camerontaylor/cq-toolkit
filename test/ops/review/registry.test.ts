@@ -281,14 +281,15 @@ describe('review.fixItem dispatched worktree (round-2 finding 1)', () => {
     const op = await entry.importer();
     const input = minimalInput('review.fixItem');
     // The inner SubprocessDriver refuses the unknown model BEFORE any spawn
-    // (routeFor is pre-dispatch); the op adapter folds that into an
-    // indeterminate detail naming the routing — the proof the wiring ran
+    // (routeFor is pre-dispatch); the op adapter folds that into a
+    // needs-human reason naming the routing (a dispatch-environment gap is
+    // the human's to arrange — review-debt #186) — the proof the wiring ran
     // through the adapter's session store into the real inner driver.
-    const result = (await (op as (i: unknown) => Promise<{ status: string; detail?: string }>)(
+    const result = (await (op as (i: unknown) => Promise<{ status: string; reason?: string }>)(
       input,
-    )) as { status: string; detail?: string };
-    expect(result.status).toBe('indeterminate');
-    expect(result.detail).toContain('unknown provider');
+    )) as { status: string; reason?: string };
+    expect(result.status).toBe('needs-human');
+    expect(result.reason).toContain('unknown provider');
   });
 
   test('the perHarness binding produces an adapter whose session record workspace IS the input worktree', async () => {

@@ -585,3 +585,25 @@ describe('planMergeOrder — deterministic', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Head-SHA threading (review-debt #186)
+// ---------------------------------------------------------------------------
+
+describe('planMergeOrder — observed head SHA threading (#186)', () => {
+  test('a candidate headSha rides the planned entry verbatim', () => {
+    const head = 'a'.repeat(40);
+    const result = plan('main', [planned(7, 'main', 'feat-7', { headSha: head })]);
+    // The executor pins `gh pr merge --match-head-commit` with this sha, so a
+    // fixer push between plan and run cannot merge an unreviewed head.
+    expect(result.order).toEqual([
+      { pr: 7, action: 'merge', basePr: null, depth: 0, headSha: head },
+    ]);
+  });
+
+  test('a candidate WITHOUT a headSha leaves the entry unpinned (field omitted, never empty-string)', () => {
+    const result = plan('main', [planned(7, 'main', 'feat-7')]);
+    expect(result.order).toEqual([{ pr: 7, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.order[0]).not.toHaveProperty('headSha');
+  });
+});

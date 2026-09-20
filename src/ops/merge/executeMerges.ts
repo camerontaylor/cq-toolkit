@@ -25,7 +25,11 @@
 //      stale. A head that moved between the baseline and the merge — or
 //      vanished, even after its fetch — is drift between classify/plan
 //      and merge: the action is SKIPPED as `stale`, never merged, the
-//      reason recorded.
+//      reason recorded. The server-side merge is ALSO pinned: when the
+//      plan threaded the observed head SHA (the self-host fetch does),
+//      mergePr carries `--match-head-commit <sha>` so the forge itself
+//      refuses a merge whose head moved after this revalidation
+//      (review-debt #186).
 //   b. MERGE COMMITS ONLY (I3) — mergePr is called with method 'merge'
 //      exclusively; the production effects route every argv through
 //      safeArgs (./effects.js), which throws on squash/force/rebase/hard/
@@ -148,6 +152,9 @@ const stderrSuffix = (stderr: string): string => {
 /** The bounded-retry trigger (rule e): GitHub's base-moved refusal. */
 const RETRYABLE_MERGE_FAILURE = /base branch was modified/i;
 
+/** A full git commit sha — the only form `--match-head-commit` accepts. */
+const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
+
 /**
  * Execute the F2 plan through the injected effects. See the module doc for
  * semantics (a)–(f); the returned report is total — every plan.order pr in
@@ -232,7 +239,16 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     for (let attempt = 0; ; attempt += 1) {
       let result: GhResult;
       try {
-        result = await effects.mergePr(pr, { method: 'merge' });
+        result = await effects.mergePr(pr, {
+          method: 'merge',
+          // HEAD-SHA PIN (review-debt #186): the forge refuses the merge
+          // when the head is no longer `expectedSha`, closing the race
+          // between the per-action revalidation above and the server-side
+          // merge (a fixer push landing in that window). A non-sha baseline
+          // is still caught by the revalidation; there is nothing to pin
+          // against, so no flag rides.
+          ...(FULL_SHA_RE.test(expectedSha) ? { matchHeadCommit: expectedSha } : {}),
+        });
       } catch (err) {
         return { kind: 'failed', error: `mergePr for pr ${pr} threw: ${errorMessage(err)}` };
       }
@@ -402,8 +418,8 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(entry.pr);
       continue;
     }
-    const expectedSha = baseline.get(entry.pr);
-    if (expectedSha === undefined || expectedSha === null) {
+    const baselineSha = baseline.get(entry.pr);
+    if (baselineSha === undefined || baselineSha === null) {
       // The head was already unresolvable in the baseline sweep — drift
       // between plan and run before anything ran.
       report.stale.push({
@@ -413,6 +429,12 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(entry.pr);
       continue;
     }
+    // THE EXPECTED HEAD (review-debt #186): the sha the PLAN observed when
+    // it carries one (the reviewed head), else the executor's own baseline
+    // observation. A live head that differs is plan→run drift — stale, and
+    // the server-side merge is pinned to this sha either way.
+    const expectedSha =
+      entry.headSha !== undefined && entry.headSha !== '' ? entry.headSha : baselineSha;
     await mutexFor(effectiveBaseKey(entry)).run(() => runAction(entry, expectedSha));
   }
 

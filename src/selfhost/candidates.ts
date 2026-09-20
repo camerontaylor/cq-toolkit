@@ -41,17 +41,6 @@ import type { MergePrsCandidate } from '../ops/merge/runPrs.js';
 const PER_PAGE = 100;
 
 /**
- * How far back the closed-ancestor sweep looks. A parent PR merged within
- * the last day can still be the LIVE stack rung one of this fetch's open
- * children sits on (planMergeOrder's retarget-self needs the parent's
- * CLOSED structural row — the #153 family); a merge older than the window
- * cannot anchor a current sweep's stack (the child has been stuck for over
- * a day already and loses nothing by waiting for the next sweep). The
- * window is half-open: merged_at in `(now − 24h, now]` qualifies.
- */
-const CLOSED_ANCESTOR_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/**
  * Cap for the `fetch-failed: …` exclusion reason — an error (gh stderr, a
  * stack line) can spew pages into one line; the reason is a LOG FACT, not
  * the error itself. Mirrors review-loop's PUSH_REASON_MAX convention.
@@ -88,12 +77,11 @@ export interface FetchMergeCandidatesDeps {
   /** Repository name. */
   repo: string;
   /**
-   * The run's injected clock, reserved for the entry modules' uniform
-   * time seam. The fetch owns exactly ONE time comparison — the
-   * closed-ancestor freshness window (the sweep below; a fetch-scope
-   * row filter, not a classification judgment) — fed from this single
-   * reading; every classification-time comparison stays downstream.
-   * Absent → `Date.now()` at sweep time.
+   * the run's injected clock, used only to drop a FUTURE merged_at on the
+   * closed-ancestor sweep (a skewed wire is not a fact); there is no
+   * recency window (review-debt #186). A fetch-scope row filter, not a
+   * classification judgment; every classification-time comparison stays
+   * downstream. Absent → `Date.now()` at sweep time.
    */
   nowMs?: number;
 }
@@ -360,6 +348,12 @@ export async function fetchMergeCandidates(
         lastCommitAt,
         headRefName: asString(wireHead['ref']),
         baseRefName: asString(asRecord(pullWire['base'])['ref']),
+        // The observed head SHA (review-debt #186): carried through the
+        // candidate into the plan so the executor can pin
+        // `gh pr merge --match-head-commit` to the reviewed head. Empty when
+        // the wire omitted it — classifyPr's last_commit_unknown row fails
+        // such a PR closed before it can be ordered.
+        headSha: sha,
         // State rides the payload as well: a PR closed or merged between
         // the listing and this GET must not enter as open — and, for a
         // closed-ancestor row, one re-opened between the closed page and
@@ -429,10 +423,13 @@ export async function fetchMergeCandidates(
   // a SINGLE page — deliberately NOT `--paginate`/`--slurp`, so the sweep's
   // cost is capped at one request no matter how long the repo's closed
   // history is. A row is kept only when BOTH hold:
-  //   (a) it is actually MERGED and FRESH — `merged_at` present and
-  //       ISO-parseable (a NaN parse never compares), within the last
-  //       CLOSED_ANCESTOR_WINDOW_MS (future timestamps dropped too — a
-  //       wire with skewed clock reads must not pass on recency);
+  //   (a) it is actually MERGED — `merged_at` present and ISO-parseable (a
+  //       NaN parse never compares), and not in the future (a skewed wire
+  //       read is not a fact). The 24h recency window is GONE (review-debt
+  //       #186): it wrongly dropped a parent merged more than a day before
+  //       an open/draft child, so the child never reached retarget-self.
+  //       Within this ONE bounded page an ancestor is retained regardless
+  //       of age.
   //   (b) it is structurally RELEVANT — its `head.ref` is the BASE ref of
   //       one of this fetch's candidates, exactly the relation the stack
   //       graph reads (child.baseRefName === parent.headRefName). The set
@@ -449,9 +446,10 @@ export async function fetchMergeCandidates(
   // closed between the two reads must never enter twice — planMergeOrder's
   // duplicate_pr gate must never see the same number twice).
   //
-  // WHY BOUNDED: 24h of recency + one page + the name filter cap the sweep
-  // at one request and at most a handful of enrichments — a repository with
-  // years of merged stacks can never inflate the run's cost or its log.
+  // WHY BOUNDED: one page + the name filter cap the sweep at one request
+  // and at most a handful of enrichments — a repository with years of merged
+  // stacks can never inflate the run's cost or its log. Ancestors are
+  // retained regardless of age (review-debt #186: no recency window).
   //
   // Best-effort isolation (module doc): a failed closed-page read degrades
   // to the pre-sweep behavior (stacked children stall at unresolved_base —
@@ -474,16 +472,16 @@ export async function fetchMergeCandidates(
         const prNumber = row['number'];
         const pr = typeof prNumber === 'number' && Number.isSafeInteger(prNumber) ? prNumber : 0;
         if (pr === 0 || candidatePrs.has(pr)) continue; // unusable / already enriched
+        // STRUCTURAL RELEVANCE FIRST (#186): only a row whose head ref IS a
+        // candidate's base ref can anchor a stack, and it is retained
+        // regardless of age (the old 24h window is gone — see the sweep
+        // doc). A future merged_at is still a skewed wire, not a fact.
+        if (!ancestorBaseRefs.has(asString(asRecord(row['head'])['ref']))) continue;
         const mergedAt = asString(row['merged_at']);
         const mergedMs = mergedAt === '' ? Number.NaN : Date.parse(mergedAt);
-        if (
-          !Number.isFinite(mergedMs) || // absent or unparseable — never compare NaN
-          mergedMs > nowMs || // a future merge is a skewed wire, not a fresh one
-          nowMs - mergedMs >= CLOSED_ANCESTOR_WINDOW_MS // outside the live window
-        ) {
+        if (!Number.isFinite(mergedMs) || mergedMs > nowMs) {
           continue;
         }
-        if (!ancestorBaseRefs.has(asString(asRecord(row['head'])['ref']))) continue;
         // Same fault isolation as the open loop: a bad ancestor costs its
         // own `fetch-failed` row, never its siblings.
         try {
