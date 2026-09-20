@@ -27,7 +27,10 @@
 //     a `failed` result or a per-row fault; every input contract violation
 //     is a `failed` result naming the field (the worktreeFor boundary
 //     style).
+import { join } from 'node:path';
 import type { Op } from '../../kernel/types.js';
+import { makeGitMutex } from '../sweep/gitMutex.js';
+import type { GitMutexConfig } from '../sweep/gitMutex.js';
 
 /**
  * The injected `gh` seam — the ONE place this family touches GitHub. All
@@ -244,8 +247,18 @@ function refnameUnsafeSegment(segment: string): boolean {
  * reused tracker is touched, so a run never duplicates its tracker. The
  * refreshed body is written for created trackers too — the create body
  * lists the fleet as pending, the edit records the actual numbers.
+ *
+ * The tracker manifest upsert (read body → compose section → edit body) runs
+ * inside a tracker-scoped {@link TrackerBodyLock} (review-debt #171): the run
+ * report writes the readiness section of the SAME body, and two concurrent
+ * read-modify-write spans would otherwise restore a stale copy of the
+ * other's section. The lock defaults to the repo-rooted, tracker-number-
+ * scoped artifact; a caller with its own serialization strategy injects one.
  */
-export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrsReport> {
+export function makeAssemblePrs(
+  gh: PrEffects,
+  trackerLock?: TrackerBodyLock,
+): Op<AssemblePrsInput, AssemblePrsReport> {
   return async (input) => {
     const fault = inputFaultOf(input);
     if (fault !== null) return { status: 'failed', error: fault };
@@ -355,11 +368,14 @@ export function makeAssemblePrs(gh: PrEffects): Op<AssemblePrsInput, AssemblePrs
     // is a silently lying merge-readiness artifact — and the error names
     // every package PR already ensured so the caller can find them.
     try {
-      const current = await gh.getPrBody(trackerNumber);
-      await gh.editPrBody(
-        trackerNumber,
-        composeSection(current, manifestSection(input, manifestRows)),
-      );
+      const lock = trackerLock ?? makeTrackerBodyLock(input.repoRoot);
+      await lock.withLock(trackerNumber, async () => {
+        const current = await gh.getPrBody(trackerNumber);
+        await gh.editPrBody(
+          trackerNumber,
+          composeSection(current, manifestSection(input, manifestRows)),
+        );
+      });
     } catch (err) {
       const ensured = rows
         .filter((row) => row.number !== undefined)
@@ -571,7 +587,11 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
   if (CONTROL_CHARS_RE.test(input.tracker.title)) {
     return 'pr: tracker.title must not contain control characters — it feeds gh pr create --title';
   }
-  const trackerBranchFault = branchFaultOf(input.tracker.branch, input.runPrefix, 'tracker.branch');
+  const trackerBranchFault = prBranchFaultOf(
+    input.tracker.branch,
+    input.runPrefix,
+    'tracker.branch',
+  );
   if (trackerBranchFault !== null) return trackerBranchFault;
   if (!Array.isArray(input.packages)) {
     return 'pr: packages must be an array of { name, branch, title }';
@@ -592,7 +612,7 @@ function inputFaultOf(input: AssemblePrsInput): string | null {
     if (CONTROL_CHARS_RE.test(pkg.title)) {
       return `pr: packages[${String(index)}].title must not contain control characters — it feeds gh pr create --title`;
     }
-    const branchFault = branchFaultOf(
+    const branchFault = prBranchFaultOf(
       pkg.branch,
       input.runPrefix,
       `packages[${String(index)}].branch`,
@@ -653,7 +673,7 @@ export function runPrefixFault(prefix: string): string | null {
  * to the safe-segment rule (leading dash, '..' runs and '.lock' suffixes
  * refused; they feed a git refname).
  */
-function branchFaultOf(branch: string, runPrefix: string, field: string): string | null {
+export function prBranchFaultOf(branch: string, runPrefix: string, field: string): string | null {
   if (typeof branch !== 'string' || branch === '') {
     return `pr: ${field} must be a non-empty string`;
   }
@@ -682,4 +702,73 @@ function withUrl(
 /** Error message of an unknown throwable, for `failed` results. */
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// ---------------------------------------------------------------------------
+// The tracker-body read-modify-write LOCK (review-debt #171)
+// ---------------------------------------------------------------------------
+//
+// The tracker PR body hosts two independently owned sections: this module's
+// fleet manifest and runReport.ts's readiness report. Each writer reads the
+// CURRENT body, replaces ONLY its own section, and issues a full-body edit —
+// safe only when the read-modify-write span is not interleaved with the other
+// writer's. Two concurrent writers would each read the same pre-image and the
+// later full-body edit would restore a stale copy of the other's section,
+// silently discarding either the new manifest or the new readiness report.
+//
+// The lock is the makeGitMutex idiom (the sweep family's git-mutation mutex:
+// proper-lockfile, stale recovery, bounded acquire retries, a non-throwing
+// onCompromised) with the lockPath derived from the REPO ROOT and the TRACKER
+// NUMBER, so two separately constructed ops (makeAssemblePrs and
+// makeRunReport) — in one process or in different processes on the machine —
+// contend on the SAME on-disk artifact. It is TRACKER-SCOPED: different
+// trackers never block one another. A caller that already owns a
+// serialization strategy injects one; the default derives the repo-rooted
+// artifact. The artifact is `<lockPath>.lock` and lives under
+// `<repoRoot>/.cq/tracker-body/`, removed on release.
+
+/**
+ * Serializes one tracker PR's body read-modify-write span. Both tracker
+ * writers acquire this around their `getPrBody` → `composeSection` →
+ * `editPrBody` span; a tracker-scoped key means unrelated trackers never
+ * contend.
+ */
+export interface TrackerBodyLock {
+  /**
+   * Run `fn` while holding the tracker's lock. Concurrent holders — in this
+   * process or another — serialize on the on-disk artifact; a caller whose
+   * acquire retries run out REJECTS (never runs unlocked). The fn's value is
+   * returned; fn throwing releases best-effort and rethrows the fault.
+   */
+  withLock<T>(trackerNumber: number, fn: () => T | Promise<T>): Promise<T>;
+}
+
+/**
+ * The tracker-scoped lockPath (the artifact proper-lockfile derives is
+ * `<lockPath>.lock`). Derived from the repo root so every op and process
+ * guarding the same tracker agrees on one artifact; the tracker number
+ * scopes it so unrelated trackers never serialize.
+ */
+export function trackerBodyLockPath(repoRoot: string, trackerNumber: number): string {
+  return join(repoRoot, '.cq', 'tracker-body', String(trackerNumber));
+}
+
+/**
+ * Build a tracker-body lock over one repo root. Timings default to the
+ * git-mutex shipped values; a caller may override them (the same config
+ * surface, minus `lockPath`, which this factory owns).
+ */
+export function makeTrackerBodyLock(
+  repoRoot: string,
+  timings?: Pick<GitMutexConfig, 'staleMs' | 'retries' | 'retryBaseMs' | 'onEvent'>,
+): TrackerBodyLock {
+  return {
+    async withLock<T>(trackerNumber: number, fn: () => T | Promise<T>): Promise<T> {
+      const mutex = makeGitMutex({
+        lockPath: trackerBodyLockPath(repoRoot, trackerNumber),
+        ...timings,
+      });
+      return mutex.withLock(fn);
+    },
+  };
 }

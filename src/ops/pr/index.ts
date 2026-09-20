@@ -27,11 +27,25 @@ export type {
 export {
   composeSection,
   makeAssemblePrs,
+  makeTrackerBodyLock,
   MANIFEST_SECTION_END_MARKER,
   MANIFEST_SECTION_MARKER,
+  prBranchFaultOf,
   READINESS_SECTION_END_MARKER,
   READINESS_SECTION_MARKER,
+  trackerBodyLockPath,
 } from './assemblePrs.js';
+export type { TrackerBodyLock } from './assemblePrs.js';
+export type {
+  EnsureTrackerBranchInput,
+  EnsureTrackerBranchReport,
+  TrackerBranchEffects,
+} from './ensureTrackerBranch.js';
+export {
+  DEFAULT_TRACKER_BRANCH_TIMEOUT_MS,
+  makeEnsureTrackerBranch,
+  makeSubprocessTrackerBranchEffects,
+} from './ensureTrackerBranch.js';
 // The run report's value type is exported ALIASED: the kernel's frozen
 // runner report already owns `RunReport` on the root barrel, and a second
 // plain `RunReport` would be silently EXCLUDED from the root barrel's
@@ -55,6 +69,7 @@ export {
 } from './ghEffects.js';
 export {
   AssemblePrsInputSchema,
+  EnsureTrackerBranchInputSchema,
   registry as prRegistry,
   RunReportInputSchema,
 } from './registry.js';

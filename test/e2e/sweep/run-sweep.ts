@@ -210,9 +210,20 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       : {}),
   });
   const assembleTemplate = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.assemble);
+  const trackerBranchTemplate = fullPlan.jobs.find(
+    (job) => job.id === SWEEP_PLAN_JOB_IDS.trackerBranch,
+  );
+  // BOTH the declared tracker-branch leg and the declared assembler are
+  // removed here: the reference wiring recomposes the ACTUAL assemble leg
+  // post-run from the committed markers (jTPa8), so the tracker branch is
+  // pushed only when a non-empty fleet actually assembles (review-debt
+  // #173) — never for an all-no-op fleet.
   const plan = {
     ...fullPlan,
-    jobs: fullPlan.jobs.filter((job) => job.id !== SWEEP_PLAN_JOB_IDS.assemble),
+    jobs: fullPlan.jobs.filter(
+      (job) =>
+        job.id !== SWEEP_PLAN_JOB_IDS.assemble && job.id !== SWEEP_PLAN_JOB_IDS.trackerBranch,
+    ),
   };
   for (const job of plan.jobs) {
     if (job.op !== SWEEP_UNIT_OP) {
@@ -352,7 +363,12 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     return unitStatusAfterRescue.get(job.id) === 'ok';
   });
   let assembleRun: RunReport | undefined;
-  if (fleetOk && planner.units.length > 0 && assembleTemplate !== undefined) {
+  if (
+    fleetOk &&
+    planner.units.length > 0 &&
+    assembleTemplate !== undefined &&
+    trackerBranchTemplate !== undefined
+  ) {
     const markers = await readCommittedMarkers(
       opts.config.repoRoot,
       opts.config.worktreesDir,
@@ -367,10 +383,28 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
       ),
     };
     if (assembleInput.packages.length > 0) {
+      // The tracker-branch leg FIRST (review-debt #173): the tracker-first
+      // assembler needs the tracker head on the remote before it opens the
+      // PR. Its declared unit dependencies are dropped (the units are not
+      // jobs of this composed run) — the fleet gate above already proved
+      // every unit succeeded.
       const assemblePlan = {
         id: SWEEP_PLAN_ID,
-        label: 'sweep: marker-filtered fleet assembly (the committed units only)',
-        jobs: [{ id: SWEEP_PLAN_JOB_IDS.assemble, op: 'pr.assemblePrs', input: assembleInput }],
+        label:
+          'sweep: tracker-branch push + marker-filtered fleet assembly (the committed units only)',
+        jobs: [
+          {
+            id: SWEEP_PLAN_JOB_IDS.trackerBranch,
+            op: 'pr.ensureTrackerBranch',
+            input: trackerBranchTemplate.input,
+          },
+          {
+            id: SWEEP_PLAN_JOB_IDS.assemble,
+            op: 'pr.assemblePrs',
+            input: assembleInput,
+            dependsOn: [SWEEP_PLAN_JOB_IDS.trackerBranch],
+          },
+        ],
       };
       assembleRun = await runPlan(
         assemblePlan,
