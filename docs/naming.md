@@ -95,7 +95,7 @@ package name.
 - https://registry.npmjs.org/@camerontaylor%2fcq-toolkit — 404 at T0.5 check time (published by the owner later the same day — see the owner decision above)
 - https://registry.npmjs.org/cq — exists, version 0.0.1
 - https://api.github.com/search/repositories?q=cq-toolkit+in:name — 17 results
-- package.json of this repository — `"name": "@camerontaylor/cq-toolkit"`, `"version": "0.0.0"` (unscoped `cq-toolkit` was the T0.5-era name; see the owner decision above)
+- package.json of this repository — `"name": "@camerontaylor/cq-toolkit"`, `"version": "1.0.0"` (the v1.0.0 release line; it was `0.0.0` from the T0.5 placeholder until then — unscoped `cq-toolkit` was the T0.5-era name; see the owner decision above)
 
 ## Owner decision 2026-09-14 — scoped name adopted
 

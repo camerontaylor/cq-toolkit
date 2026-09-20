@@ -280,6 +280,14 @@ export const ACP_SESSION_FILE = '.cq-cli-session';
 /** Session-message toolName under which narration + stderr diagnostics are recorded. */
 export const NARRATION_TOOL = 'acp-narration';
 
+/**
+ * The client version advertised in the ACP `initialize` handshake. Kept in
+ * lockstep with the root `package.json` `version` (the v1.0.0 release PR
+ * aligns both); deriving it from the manifest at runtime is a post-v1
+ * candidate, not a release blocker.
+ */
+const CLIENT_VERSION = '1.0.0';
+
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AcpDriverOptions {
   /**
@@ -1247,7 +1255,7 @@ export class AcpDriver implements Driver {
             fs: { readTextFile: false, writeTextFile: false },
             terminal: false,
           },
-          clientInfo: { name: 'cq-toolkit', version: '0.0.0' },
+          clientInfo: { name: 'cq-toolkit', version: CLIENT_VERSION },
         });
         const init = InitializeResultSchema.parse(initRaw);
         negotiatedVersion = init.protocolVersion;
