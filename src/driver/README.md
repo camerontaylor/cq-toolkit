@@ -136,7 +136,8 @@ Files:
 - `index.ts` — `SubprocessDriver implements Driver` (constructor options:
   `binary?` default `'claude'`, `outputSchema?` → `--json-schema`,
   `routingTable?`, `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
-  `harnessConfig?`, `pricing?`, and a `spawn?` override hook for tests).
+  `harnessConfig?`, `pricing?`, `envAllowlist?`, and a `spawn?` override
+  hook for tests).
 - `routing.ts` — env-based model routing as CONFIG (`RoutingTable`,
   `defaultRoutingTable()`, `routeFor`). Endpoints are anthropic-compat
   (zai / deepseek / anthropic, values from provider docs, as-of
@@ -154,6 +155,28 @@ Files:
   that EXECUTES an already-decided kill (rungs observable via `onRung`
   markers; grace delays injectable for tests). The governor decides
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
+
+Child environment is DEFAULT-DENY (issue #183) for `spawnManaged` — the
+subprocess driver only; the sibling ACP/claude-agent drivers still inherit
+the parent env (a separate surface, not changed here). `spawnManaged`
+copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
+terminal + locale basics, XDG dirs, network-egress/TLS config
+(`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
+from the entry process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`,
+`AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, or `NODE_OPTIONS`/`NODE_PATH`.
+Per-Route endpoint/auth vars are composed explicitly into
+`SpawnOptions.env` and always win over the allowlist, so configured
+driver keys still reach the worker; a deployment extends the copied names
+with `SubprocessDriverOptions.envAllowlist` (names only, never values) —
+e.g. for a corporate `SSH_AUTH_SOCK` or `NPM_CONFIG_*`. A marker secret in
+the entry process env therefore cannot reach a `spawnManaged` worker,
+where prompt-injected PR content could exfiltrate it. TWO CAVEATS (issue
+#183 r1/r2): proxy vars are inherited because egress needs them and their
+URL MAY embed credentials a worker can read (leave them unset to avoid
+that); and `HOME` stays inherited because the CLI reads its own config
+there, so a worker with file-read tools can still reach
+`~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, … — that
+boundary is the `ToolPolicy`/sandbox surface, not this env allowlist.
 
 Argv surface (headless reference): `-p` (prompt rides stdin),
 `--output-format stream-json`, `--verbose` (the real CLI refuses stream-json
