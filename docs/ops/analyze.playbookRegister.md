@@ -4,7 +4,7 @@ Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `analyze`
-- **CLI:** `cq analyze.playbookRegister --json` (a secondary interface over the SDK; see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq analyze.playbookRegister [--<schema-key>=<value> ...] [--json]`; run `cq analyze.playbookRegister --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 

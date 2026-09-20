@@ -69,15 +69,19 @@ function messageOf(err) {
 /**
  * Extract the frozen `OpResult` status literals from the kernel types source
  * and assert they match the description table exactly (no missing, no extra,
- * no duplicate). The union body is read up to the blank line that follows it,
- * so the `status: '…'` keys inside each member are all captured.
+ * no duplicate). The union is read up to its TERMINATING `;` — the first
+ * semicolon that ends a line — so the `status: '…'` keys inside each member
+ * (whose own semicolons sit mid-line) are all captured, and a comment or
+ * formatting edit near the union cannot make the match drift onto a
+ * neighbouring type. The anchor is the type NAME, not a literal generic
+ * spelling, so a changed generic arity cannot silently break the assertion.
  */
 function readOpResultStatuses(typesSource) {
-  const union = typesSource.match(/export type OpResult<[^>]*>\s*=([\s\S]*?)\n\s*\n/);
+  const union = typesSource.match(/export type OpResult\b[\s\S]*?;[ \t]*(?:\n|$)/);
   if (union === null) {
     throw new Error(`cannot locate the OpResult union in ${TYPES_PATH}`);
   }
-  const found = [...union[1].matchAll(/status:\s*'([^']+)'/g)].map((match) => match[1]);
+  const found = [...union[0].matchAll(/status:\s*'([^']+)'/g)].map((match) => match[1]);
   const unique = [...new Set(found)];
   if (unique.length === 0) {
     throw new Error(`the OpResult union in ${TYPES_PATH} declares no status literals`);
@@ -118,7 +122,7 @@ function renderDoc(entry, statuses) {
     'Do not edit by hand — run `npm run gen:op-docs`.',
     '',
     `- **Family:** \`${family}\``,
-    `- **CLI:** \`cq ${name} --json\` (a secondary interface over the SDK; see [\`src/cli/README.md\`](../../src/cli/README.md))`,
+    `- **CLI:** \`cq ${name} [--<schema-key>=<value> ...] [--json]\`; run \`cq ${name} --help\` for the input schema (a secondary interface over the SDK — see [\`src/cli/README.md\`](../../src/cli/README.md))`,
     '',
     '## Input schema',
     '',
@@ -187,13 +191,19 @@ async function main(argv) {
   }
   if (skippedFamilies.length > 0) {
     console.error(
-      `gen-op-docs: WARNING — families contributed no entries: ${skippedFamilies.join(', ')}`,
+      `gen-op-docs: FAIL — families contributed no registry entries: ${skippedFamilies.join(', ')}; ` +
+        'refusing to generate docs from an INCOMPLETE registry (a skipped family would ' +
+        'silently drop its committed docs)',
     );
+    return 1;
   }
 
   const statuses = readOpResultStatuses(readFileSync(TYPES_PATH, 'utf8'));
   const docs = new Map();
-  for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+  // Code-unit ordering, not localeCompare: the rendered order (and so the
+  // drift check) must not depend on the host ICU locale.
+  const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+  for (const entry of [...entries].sort(byName)) {
     docs.set(`${entry.name}.md`, renderDoc(entry, statuses));
   }
   const existing = existsSync(DOCS_DIR)

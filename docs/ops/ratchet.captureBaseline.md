@@ -4,7 +4,7 @@ Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `ratchet`
-- **CLI:** `cq ratchet.captureBaseline --json` (a secondary interface over the SDK; see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq ratchet.captureBaseline [--<schema-key>=<value> ...] [--json]`; run `cq ratchet.captureBaseline --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 

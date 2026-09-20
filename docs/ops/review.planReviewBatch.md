@@ -4,7 +4,7 @@ Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `review`
-- **CLI:** `cq review.planReviewBatch --json` (a secondary interface over the SDK; see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq review.planReviewBatch [--<schema-key>=<value> ...] [--json]`; run `cq review.planReviewBatch --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 

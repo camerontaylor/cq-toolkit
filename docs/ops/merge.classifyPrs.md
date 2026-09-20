@@ -4,7 +4,7 @@ Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `merge`
-- **CLI:** `cq merge.classifyPrs --json` (a secondary interface over the SDK; see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq merge.classifyPrs [--<schema-key>=<value> ...] [--json]`; run `cq merge.classifyPrs --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 

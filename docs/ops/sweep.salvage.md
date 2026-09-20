@@ -4,7 +4,7 @@ Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `sweep`
-- **CLI:** `cq sweep.salvage --json` (a secondary interface over the SDK; see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq sweep.salvage [--<schema-key>=<value> ...] [--json]`; run `cq sweep.salvage --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 
