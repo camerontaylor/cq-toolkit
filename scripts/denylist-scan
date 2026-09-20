@@ -281,14 +281,16 @@ function assertRelativeProbePath(value, where) {
     // C0 controls only (\x00-\x1f): DEL (\x7f) and C1 (\x80-\x9f) are
     // legal in NTFS names, so rejecting them would over-reject.
     if (/[<>:"|?*\x00-\x1f]/.test(seg)) {
-      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows-reserved and C0-control characters are rejected — probe placement must succeed on Windows hosts)`);
+      // JSON.stringify, not raw interpolation: the segment can carry C0
+      // bytes, which must never reach stderr/logs verbatim.
+      throw new ConfigError(`${where}: probe_path segment ${JSON.stringify(seg)} is not a plain name (Windows-reserved and C0-control characters are rejected — probe placement must succeed on Windows hosts)`);
     }
     // The stem strips trailing dots/spaces too: `NUL .txt` normalizes to
     // the device once Win32 strips the space, so the bare split stem would
     // miss it.
     const stem = seg.split('.')[0].replace(/[ .]+$/, '').toUpperCase();
     if (WINDOWS_DEVICE_NAMES.has(stem)) {
-      throw new ConfigError(`${where}: probe_path segment "${seg}" is not a plain name (Windows device names are rejected with any extension — probe placement must succeed on Windows hosts)`);
+      throw new ConfigError(`${where}: probe_path segment ${JSON.stringify(seg)} is not a plain name (Windows device names are rejected with any extension — probe placement must succeed on Windows hosts)`);
     }
   }
 }
@@ -1187,11 +1189,20 @@ function selfTestParserGuards(rules) {
     '. ..',
     'probe..',
     'a//b.txt',
-    // Windows-plain-name rejection (review-debt #187): reserved characters,
-    // control characters, and device names (any extension, any case).
+  ];
+  // Windows-plain-name rejection (review-debt #187): reserved characters,
+  // C0 controls, and device names (any extension, any case). These shapes
+  // must fail in the Windows guard SPECIFICALLY — the loop asserts the
+  // plain-name message, so a parseScalar/empty/canonical rejection cannot
+  // silently satisfy a Windows case (self-test non-vacuity).
+  const windowsRejectCases = [
     'COM1.txt',
     'nul',
     'con',
+    'PRN.txt',
+    'aux',
+    'CONOUT$',
+    'conout$.log',
     'dir/LPT9.log',
     'a<b.txt',
     'a|b.txt',
@@ -1204,6 +1215,7 @@ function selfTestParserGuards(rules) {
     'conin$.txt',
     'a\x01b.txt',
     'a\x00b.txt',
+    'a\x1f.txt',
   ];
   for (const probe of rejectCases) {
     const text = [
@@ -1230,11 +1242,37 @@ function selfTestParserGuards(rules) {
       }
     }
   }
+  for (const probe of windowsRejectCases) {
+    const text = [
+      'rules:',
+      '  - id: guard-probe',
+      "    description: 'parser guard fixture rule'",
+      "    regex: '(?i)guard[_-]secret'",
+      "    sample: 'guard_secret=not-a-real-value'",
+      `    probe_path: '${probe}'`,
+      'clean_probes:',
+      "  - 'clean/probes/none.txt'",
+    ].join('\n');
+    try {
+      parsePatterns(text);
+      console.error(`FAIL parser-guards: probe_path '${probe}' was accepted (must be rejected)`);
+      ok = false;
+    } catch (e) {
+      // Non-vacuity: a Windows shape rejected by any OTHER guard
+      // (parseScalar, empty, canonical) fails here — only the plain-name
+      // message proves the Windows guard fired. Non-ConfigError throws
+      // cannot match, so they fail the same way.
+      if (!(e instanceof ConfigError) || !/is not a plain name/.test(e.message)) {
+        console.error(`FAIL parser-guards: probe_path '${probe}' did not reach the plain-name guard: ${e instanceof Error ? e.message : e}`);
+        ok = false;
+      }
+    }
+  }
   // Accept-cases: legal relative paths must still parse — a flat name and a
   // nested directory path (the shapes patterns.yml actually uses).
-  // DEL (\x7f) and C1 are legal NTFS name characters: accepted here to pin
-  // the \x00-\x1f boundary of the control rejection above.
-  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt', 'ok\x7f.txt']) {
+  // DEL (\x7f) and C1 (e.g. U+0085) are legal NTFS name characters:
+  // accepted here to pin the \x00-\x1f boundary of the control rejection.
+  for (const probe of ['probe.txt', '.zcode/probes/nested.txt', 'dir.name.v2/p.txt', 'ok\x7f.txt', 'ok\x85.txt']) {
     const text = [
       'rules:',
       '  - id: guard-probe',
