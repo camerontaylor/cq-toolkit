@@ -124,6 +124,15 @@ export interface PlanSweepReport {
   suppressed: Array<{ package: string; reason: string }>;
   needsHuman: Array<{ package: string; signature: string }>;
   orphans?: string[];
+  /**
+   * Per-package changed paths that are SELECTION evidence but NOT fixer
+   * targets — deleted paths, and the unchanged SOURCE side of a rename or
+   * copy (review-debt #150). Present only when at least one such path
+   * exists. The plan builder feeds these to `unitStagePathAllowlist` so a
+   * deletion-only package still gets a scope pin instead of an empty
+   * (fail-open) allowlist (r1 major).
+   */
+  selectionEvidence?: Record<string, string[]>;
 }
 
 /**
@@ -218,6 +227,7 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
     const fixers = [...new Set(input.fixers)];
     let selected: Array<{ pkg: PlanSweepPackage; files: string[] }>;
     let orphans: string[] = [];
+    const selectionEvidence = new Map<string, string[]>();
 
     switch (input.selector.mode) {
       case 'workspace-all': {
@@ -238,9 +248,12 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
           };
         }
         // Deletion is SELECTION evidence but never a fixer target
-        // (review-debt #150): a 'D' path — and the SOURCE side of a rename —
-        // selects its package, yet is filtered from the unit's file-set
-        // because a fixer cannot open a path the working tree no longer has.
+        // (review-debt #150): a 'D' path — and the unchanged SOURCE side of a
+        // rename/copy — selects its package, yet is filtered from the unit's
+        // fixer file-set because a fixer cannot open a path the working tree
+        // no longer has (or an unchanged one). The non-target paths are kept
+        // in `selectionEvidence` so the stage-path allowlist still has a
+        // scope pin for a deletion-only package (r1 major).
         const fileSets = new Map<string, string[]>();
         const touched = new Set<string>();
         for (const change of changed) {
@@ -250,7 +263,12 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
             continue;
           }
           touched.add(pkg.name);
-          if (change.deleted) continue;
+          if (!change.fixerTarget) {
+            const evidence = selectionEvidence.get(pkg.name);
+            if (evidence === undefined) selectionEvidence.set(pkg.name, [change.path]);
+            else evidence.push(change.path);
+            continue;
+          }
           const bucket = fileSets.get(pkg.name);
           if (bucket === undefined) fileSets.set(pkg.name, [change.path]);
           else bucket.push(change.path);
@@ -380,10 +398,10 @@ export function makePlanSweep(deps: PlanSweepDeps): Op<PlanSweepInput, PlanSweep
       }
     }
 
-    const report: PlanSweepReport =
-      orphans.length === 0
-        ? { jobs, units, suppressed, needsHuman }
-        : { jobs, units, suppressed, needsHuman, orphans: [...orphans].sort() };
+    const report: PlanSweepReport = { jobs, units, suppressed, needsHuman };
+    if (orphans.length > 0) report.orphans = [...orphans].sort();
+    if (selectionEvidence.size > 0)
+      report.selectionEvidence = Object.fromEntries(selectionEvidence);
     return { status: 'ok', value: report };
   };
 }
@@ -659,6 +677,13 @@ export interface ChangedFile {
   status: string;
   /** True when the path no longer exists in the working tree (a 'D' record, or the source side of a rename). */
   deleted: boolean;
+  /**
+   * True when the path is a legitimate FIXER target: it exists and the record
+   * changed it (an added/modified path, or the destination of a rename/copy).
+   * False for a deleted path and for the unchanged SOURCE side of a rename or
+   * copy — selection evidence only (review-debt #150; r1 finding 2).
+   */
+  fixerTarget: boolean;
 }
 
 /**
@@ -684,17 +709,29 @@ export function parseNullDelimitedChangedFiles(text: string): ChangedFile[] {
       const destination = tokens[index] as string | undefined;
       index += 1;
       if (source !== undefined && source !== '') {
-        files.push({ path: source, status, deleted: status.startsWith('R') });
+        // An R source is DELETED by the rename; a C source still exists but is
+        // UNCHANGED — either way it is selection evidence, not a fixer target.
+        files.push({
+          path: source,
+          status,
+          deleted: status.startsWith('R'),
+          fixerTarget: false,
+        });
       }
       if (destination !== undefined && destination !== '') {
-        files.push({ path: destination, status, deleted: false });
+        files.push({ path: destination, status, deleted: false, fixerTarget: true });
       }
       continue;
     }
     const path = tokens[index] as string | undefined;
     index += 1;
     if (path !== undefined && path !== '') {
-      files.push({ path, status, deleted: status.startsWith('D') });
+      files.push({
+        path,
+        status,
+        deleted: status.startsWith('D'),
+        fixerTarget: !status.startsWith('D'),
+      });
     }
   }
   return files;

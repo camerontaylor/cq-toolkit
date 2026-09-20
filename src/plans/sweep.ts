@@ -210,11 +210,19 @@ export function sweepPlannerInput(config: SweepPlanConfig): PlanSweepInput {
  * pattern (only its declared files constrain it). Wire order in
  * buildSweepPlan: the `unitJobOverlay`'s explicit stagePathAllowlist WINS —
  * a caller who genuinely wants fleet-wide scope overrides the default (the
- * test-fix plan does exactly that with the test-file patterns).
+ * test-fix plan does exactly that with the test-file patterns). Non-target
+ * changed paths (`selectionEvidence`) are included so a deletion-only root
+ * package keeps a scope pin instead of an empty, fail-open allowlist.
  */
 export function unitStagePathAllowlist(
   config: SweepPlanConfig,
   unit: Pick<WorkUnit, 'package' | 'files'>,
+  /**
+   * Non-target changed paths for the package (deleted paths and unchanged
+   * rename/copy sources) from `PlanSweepReport.selectionEvidence` — the
+   * scope pin a deletion-only package would otherwise lose (r1 major).
+   */
+  selectionEvidence: readonly string[] = [],
 ): { patterns: string[] } | undefined {
   const patterns: string[] = [];
   // planSweep normalizes a leading './' off manifest paths; mirror that so
@@ -225,6 +233,9 @@ export function unitStagePathAllowlist(
     patterns.push(`^${escapeRegex(manifestPath)}/`);
   }
   for (const file of unit.files) {
+    patterns.push(`^${escapeRegex(file)}$`);
+  }
+  for (const file of selectionEvidence) {
     patterns.push(`^${escapeRegex(file)}$`);
   }
   return patterns.length === 0 ? undefined : { patterns };
@@ -341,7 +352,9 @@ export function buildSweepPlan(
     // fleet-wide test-file patterns). ABSENT (never undefined-valued —
     // the registry schema's exactOptional keys reject undefined).
     const defaultScope =
-      overlay.stagePathAllowlist === undefined ? unitStagePathAllowlist(config, unit) : undefined;
+      overlay.stagePathAllowlist === undefined
+        ? unitStagePathAllowlist(config, unit, report.selectionEvidence?.[unit.package] ?? [])
+        : undefined;
     return {
       ...job,
       dependsOn: [SWEEP_PLAN_JOB_IDS.plan],

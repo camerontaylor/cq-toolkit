@@ -364,6 +364,23 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(() => buildSweepPlan(CONFIG, swapped)).toThrow(/misaligned at index 0/);
   });
 
+  test('a deletion-only root package keeps a scope pin from selection evidence (r1 major)', () => {
+    const units: Array<WorkUnit> = [{ package: 'monorepo', fixer: 'fix', files: [] }];
+    const report: PlanSweepReport = {
+      jobs: [{ id: 'sweep-monorepo-fix', op: SWEEP_UNIT_OP, input: units[0], dependsOn: [] }],
+      units,
+      suppressed: [],
+      needsHuman: [],
+      selectionEvidence: { monorepo: ['old.ts'] },
+    };
+    const plan = buildSweepPlan({ ...CONFIG, packages: [{ name: 'monorepo', path: '.' }] }, report);
+    const input = SweepUnitDispatchInputSchema.parse(plan.jobs[1]?.input);
+    // Pre-fix this was `undefined` (no allowlist at all → fail open) because a
+    // '.' package's only patterns come from `files`, which the #150 deletion
+    // filter had emptied.
+    expect(input.stagePathAllowlist?.patterns).toEqual(['^old\\.ts$']);
+  });
+
   test('slug normalization and deterministic collision disambiguation (jTPa1)', () => {
     // '@scope/pkg' normalizes to the DISPATCHABLE slug 'scope-pkg' (the old
     // fold produced '-scope-pkg', which SEGMENT_RE refuses).

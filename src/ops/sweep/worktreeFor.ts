@@ -142,10 +142,12 @@ export interface WorktreeEffects {
   /** Short names of origin's heads (`git ls-remote --heads origin`) — network-touching, still lazy per call. */
   listRemoteBranches(): Promise<string[]>;
   /**
-   * The full sha `ref` resolves to INSIDE the worktree at `worktreePath`
-   * (`git rev-parse <ref>`). The reuse leg records the tree's actual HEAD
-   * against the requested base with it (review-debt #176 item 3); a
-   * resolution fault is a `failed` result, never a fabricated match.
+   * The full commit sha `ref` resolves to INSIDE the worktree at
+   * `worktreePath` (`git rev-parse --verify <ref>^{commit}` — a path-shaped
+   * ref fails rather than echoing the pathname, and the peel guarantees a
+   * commit). The reuse leg records the tree's actual HEAD against the
+   * requested base with it (review-debt #176 item 3); a resolution fault is a
+   * `failed` result, never a fabricated match.
    */
   revParse(worktreePath: string, ref: string): Promise<string>;
   /**
@@ -897,7 +899,10 @@ export function makeSubprocessWorktreeEffects(
     listRemoteBranches: async () =>
       parseRemoteHeads(await runGit(['ls-remote', '--heads', 'origin'], repoRoot, timeoutMs)),
     revParse: async (worktreePath, ref) =>
-      (await runGit(['rev-parse', ref], worktreePath, timeoutMs)).trim(),
+      // `--verify` + `^{commit}` (r1 finding 3): a path-shaped ref that names
+      // an existing path must FAIL, not exit 0 echoing the pathname; the peel
+      // also guarantees a commit sha rather than a blob/tree oid.
+      (await runGit(['rev-parse', '--verify', `${ref}^{commit}`], worktreePath, timeoutMs)).trim(),
     remoteGetUrl: async () => {
       try {
         return (await runGit(['remote', 'get-url', 'origin'], repoRoot, timeoutMs)).trim();
