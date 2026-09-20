@@ -220,11 +220,19 @@ export function sweepPlannerInput(config: SweepPlanConfig): PlanSweepInput {
  * pattern (only its declared files constrain it). Wire order in
  * buildSweepPlan: the `unitJobOverlay`'s explicit stagePathAllowlist WINS —
  * a caller who genuinely wants fleet-wide scope overrides the default (the
- * test-fix plan does exactly that with the test-file patterns).
+ * test-fix plan does exactly that with the test-file patterns). Non-target
+ * changed paths (`selectionEvidence`) are included so a deletion-only root
+ * package keeps a scope pin instead of an empty, fail-open allowlist.
  */
 export function unitStagePathAllowlist(
   config: SweepPlanConfig,
   unit: Pick<WorkUnit, 'package' | 'files'>,
+  /**
+   * Non-target changed paths for the package (deleted paths and unchanged
+   * rename/copy sources) from `PlanSweepReport.selectionEvidence` — the
+   * scope pin a deletion-only package would otherwise lose (r1 major).
+   */
+  selectionEvidence: readonly string[] = [],
 ): { patterns: string[] } | undefined {
   const patterns: string[] = [];
   // planSweep normalizes a leading './' off manifest paths; mirror that so
@@ -235,6 +243,9 @@ export function unitStagePathAllowlist(
     patterns.push(`^${escapeRegex(manifestPath)}/`);
   }
   for (const file of unit.files) {
+    patterns.push(`^${escapeRegex(file)}$`);
+  }
+  for (const file of selectionEvidence) {
     patterns.push(`^${escapeRegex(file)}$`);
   }
   return patterns.length === 0 ? undefined : { patterns };
@@ -327,6 +338,24 @@ export function buildSweepPlan(
       `buildSweepPlan: the phase-A report is misaligned — ${String(report.jobs.length)} job(s) vs ${String(report.units.length)} unit(s); planSweep emits exactly one job per unit`,
     );
   }
+  // IDENTITY pairing, not just length (review-debt #175 item 6): an
+  // order-mismatched report of equal length would attach each unit's
+  // resolved kind/slug to the WRONG job and mis-slug the unit. Every job's
+  // embedded WorkUnit must be the unit at the same index.
+  for (const [index, job] of report.jobs.entries()) {
+    const unit = report.units[index];
+    const embedded = job.input as Partial<WorkUnit> | undefined;
+    if (
+      embedded === undefined ||
+      unit === undefined ||
+      embedded.package !== unit.package ||
+      embedded.fixer !== unit.fixer
+    ) {
+      throw new Error(
+        `buildSweepPlan: the phase-A report is misaligned at index ${String(index)} — job '${job.id}' carries package/fixer ${JSON.stringify(embedded?.package)}/${JSON.stringify(embedded?.fixer)} but the unit there is ${JSON.stringify(unit?.package)}/${JSON.stringify(unit?.fixer)}; planSweep emits exactly one job per unit in unit order`,
+      );
+    }
+  }
   const reserved = new Set<string>(); // `${kind}/${slug}` actually handed out
   const resolvedSegments: SweepUnitSegments[] = report.units.map((unit) => {
     const base = sweepUnitSegments(config.runPrefix, unit);
@@ -351,8 +380,19 @@ export function buildSweepPlan(
     // explicitly carries one (the test-fix plan overrides with the
     // fleet-wide test-file patterns). ABSENT (never undefined-valued —
     // the registry schema's exactOptional keys reject undefined).
+    // Object.hasOwn (r2 major): a package named 'toString'/'constructor'/
+    // '__proto__' would otherwise read an inherited Object.prototype member,
+    // and the `?? []` fallback would not fire — `for...of` on a function
+    // crashes buildSweepPlan. Only an OWN selection-evidence entry counts.
+    const evidence =
+      report.selectionEvidence !== undefined &&
+      Object.hasOwn(report.selectionEvidence, unit.package)
+        ? (report.selectionEvidence[unit.package] ?? [])
+        : [];
     const defaultScope =
-      overlay.stagePathAllowlist === undefined ? unitStagePathAllowlist(config, unit) : undefined;
+      overlay.stagePathAllowlist === undefined
+        ? unitStagePathAllowlist(config, unit, evidence)
+        : undefined;
     return {
       ...job,
       dependsOn: [SWEEP_PLAN_JOB_IDS.plan],

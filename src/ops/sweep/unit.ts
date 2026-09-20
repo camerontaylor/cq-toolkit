@@ -114,6 +114,19 @@ function normalizedSegment(raw: string): string {
  * carries no untracked tool state: a tree's strict-clean is unpolluted by
  * bookkeeping, a reuse is automatically I7-clean, and salvage never sees a
  * completed unit as dirty because of it.
+ *
+ * COLLISION-RESISTANT (review-debt #175 item 4): the namespace segment is
+ * INJECTIVELY encoded, not folded. The old fold mapped `cq/run.one` and
+ * `cq/run-one` onto the same `.cq-state/cq/run-one`, so sequential runs
+ * overwrote each other's baseline snapshots — fabricated evidence (I7). The
+ * encoder keeps `[a-z0-9_-]` verbatim (so `cq/one` and `cq/09-16a` keep
+ * their familiar paths) and percent-encodes every other UTF-8 byte as
+ * lowercase `%xx` — which neutralises `.`/`..` path segments AND keeps the
+ * output case-insensitive-safe: uppercase input is encoded (`Foo` → `%46oo`),
+ * so `cq/Foo` and `cq/foo` never share a dir on a case-insensitive
+ * filesystem. An EMPTY segment gets a reserved `%empty` marker so `cq//one`
+ * cannot collapse onto `cq/one` and a leading empty segment cannot make the
+ * joined namespace absolute.
  */
 export function sweepRunStateDir(
   repoRoot: string,
@@ -122,9 +135,38 @@ export function sweepRunStateDir(
 ): string {
   const namespace = runPrefix
     .split('/')
-    .map((segment) => normalizedSegment(segment))
+    .map((segment) => stateNamespaceSegment(segment))
     .join('/');
   return resolve(repoRoot, worktreesDir, '.cq-state', namespace);
+}
+
+/**
+ * Injective, filesystem-safe encoding of one run-state namespace segment:
+ * `[a-z0-9_-]` pass through verbatim and every other UTF-8 byte becomes
+ * lowercase `%xx`. Distinct run prefixes therefore ALWAYS derive distinct
+ * state dirs (review-debt #175 item 4) — including on a case-insensitive
+ * filesystem, because UPPERCASE input is encoded (`Foo` → `%46oo`) and the
+ * escape alphabet is lowercase-only, so two outputs can never differ only by
+ * case. A literal `%` is itself encoded (`%25`) so the encoding cannot
+ * alias. `.` is encoded — which keeps `.`/`..` from ever acting as path
+ * segments and keeps the namespace free of dot-files.
+ *
+ * An EMPTY segment is reserved as `%empty` (CLI r1 major): encoding `''` as
+ * `''` let `cq//one` collapse onto `cq/one` when the segments are joined and
+ * resolved, and a leading empty segment (`/one`) made the joined namespace
+ * ABSOLUTE — escaping the state dir entirely. `%empty` cannot be produced by
+ * any non-empty input because the encoder only ever emits `%` as part of a
+ * two-hex-digit escape.
+ */
+function stateNamespaceSegment(raw: string): string {
+  if (raw === '') return '%empty';
+  let encoded = '';
+  for (const byte of Buffer.from(raw, 'utf8')) {
+    const character = String.fromCharCode(byte);
+    if (/[a-z0-9_-]/.test(character)) encoded += character;
+    else encoded += `%${byte.toString(16).padStart(2, '0')}`;
+  }
+  return encoded;
 }
 
 /** The baseline-snapshot subdir of the run-state dir (sweepRunStateDir-scoped). */
@@ -880,6 +922,19 @@ async function stageUnitFiles(
 }
 
 /**
+ * Compile the staged-path allowlist pattern SOURCES (jSKJY) CASE-SENSITIVELY
+ * (review-debt #175 item 3): the patterns are built from manifest paths and
+ * declared files, which carry the checkout's exact case. The old `i` flag let
+ * a case-differing sibling package (`packages/Alpha/x` matching
+ * `^packages/alpha/`) stage outside its scope on a case-sensitive checkout.
+ * Exported as the case-sensitivity seam; a non-compiling source throws and
+ * the caller folds it into a `failed` result.
+ */
+export function compileStagePathPatterns(patterns: readonly string[]): RegExp[] {
+  return patterns.map((source) => new RegExp(source));
+}
+
+/**
  * The staged-path allowlist (jSKJY, rename-hardened per jVgCj): enumerate
  * what is staged with `diff --cached --name-status -z` — `--name-only` shows
  * only a rename's DESTINATION, so a worker renaming production code into a
@@ -899,7 +954,7 @@ async function enforceStagePathAllowlist(
   if (allowlist === undefined || allowlist.patterns.length === 0) return null;
   let compiled: RegExp[];
   try {
-    compiled = allowlist.patterns.map((source) => new RegExp(source, 'i'));
+    compiled = compileStagePathPatterns(allowlist.patterns);
   } catch (err) {
     return `sweep.unit ${unit.package}: invalid stage-path allowlist pattern — ${messageOf(err)}`;
   }
@@ -1111,11 +1166,13 @@ export interface SweepUnitDispatchInput {
    * caller VOUCHES the location is outside the fixer driver's write reach —
    * it is where the scanned-commit-sha record (the strand-retry's push
    * authorization) lives, and only a caller-controlled location can make
-   * that record trustworthy. When ABSENT the derived
-   * `sweepRunStateDir(...)` location (inside the worktrees dir, within the
-   * driver's reach) is used for baseline snapshots and committed markers,
-   * but the STRAND-RETRY refuses to push (no trustworthy record can exist
-   * there — fail closed, needs-human).
+   * that record trustworthy. The op CANNOT verify "outside the driver's
+   * reach" (the sandbox level is caller-chosen and may be 'none'), so the
+   * vouch is a CALLER CONTRACT, not an enforced property (r2 info). When
+   * ABSENT the derived `sweepRunStateDir(...)` location (inside the
+   * worktrees dir, within the driver's reach) is used for baseline snapshots
+   * and committed markers, but the STRAND-RETRY refuses to push (no
+   * trustworthy record can exist there — fail closed, needs-human).
    */
   runStateDir?: string;
   /** The run-state dir's git-mutex lockfile (`<runStateDir>/git-mutex.lock`,
@@ -1293,7 +1350,10 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     runCheck: subprocessRunCheck,
     checkCommand: (unit, worktreePath) => ({
       command: input.check?.command ?? '',
-      args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', unit.package)),
+      // A FUNCTION replacer, never a replacement string (review-debt #175
+      // item 7): `$&`, `` $` `` and `$'` in a package name would otherwise be
+      // reinterpreted as replacement tokens.
+      args: (input.check?.args ?? []).map((arg) => arg.replaceAll('{package}', () => unit.package)),
       cwd: worktreePath,
       ...(input.check?.timeoutMs !== undefined ? { timeoutMs: input.check.timeoutMs } : {}),
     }),
@@ -1306,9 +1366,12 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
     ...(input.driver.budget !== undefined ? { budget: input.driver.budget } : {}),
     prompt: (unit, worktree) =>
       (input.promptTemplate ?? DEFAULT_UNIT_PROMPT_TEMPLATE)
-        .replaceAll('{package}', unit.package)
-        .replaceAll('{fixer}', unit.fixer)
-        .replaceAll('{worktree}', worktree.path),
+        // FUNCTION replacers (review-debt #175 item 7): a worktree path or
+        // package/fixer name containing `$&`, `` $` `` or `$'` must land
+        // literally, not as a replacement-pattern token.
+        .replaceAll('{package}', () => unit.package)
+        .replaceAll('{fixer}', () => unit.fixer)
+        .replaceAll('{worktree}', () => worktree.path),
     git: makeGhRunner({
       bin: 'git',
       timeoutMs: input.gitTimeoutMs ?? DEFAULT_UNIT_GIT_TIMEOUT_MS,

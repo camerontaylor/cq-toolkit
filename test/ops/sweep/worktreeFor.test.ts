@@ -94,6 +94,8 @@ interface FakeRepo {
   remoteBranches: string[];
   dirs: Set<string>;
   clean: Set<string>;
+  /** seeded per `${worktreePath}|${ref}`: the sha `revParse` reports */
+  heads: Map<string, string>;
   /** seeded per absolute target path: the tracked files the effect reports */
   tracked: Map<string, string[]>;
   calls: string[];
@@ -109,6 +111,7 @@ function fakeRepo(): FakeRepo {
     remoteBranches: [],
     dirs: new Set<string>(),
     clean: new Set<string>(),
+    heads: new Map<string, string>(),
     tracked: new Map<string, string[]>(),
     calls: [],
     addCalls: [],
@@ -130,6 +133,10 @@ function effectsOf(repo: FakeRepo): WorktreeEffects {
     listRemoteBranches: async () => {
       repo.calls.push('listRemoteBranches');
       return [...repo.remoteBranches];
+    },
+    revParse: async (worktreePath, ref) => {
+      repo.calls.push(`revParse:${worktreePath}|${ref}`);
+      return repo.heads.get(`${worktreePath}|${ref}`) ?? `sha:${ref}`;
     },
     pathExists: async (p) => {
       repo.calls.push(`pathExists:${p}`);
@@ -273,6 +280,8 @@ describe('sweep.worktreeFor reuse (UC row 20)', () => {
     const repo = fakeRepo();
     repo.worktrees = [{ path: PATH, branch: BRANCH }];
     repo.clean.add(PATH);
+    repo.heads.set(`${PATH}|HEAD`, 'sha-head');
+    repo.heads.set(`${PATH}|origin/main`, 'sha-base');
     const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), INPUT);
     expect(workspace).toEqual({
       path: PATH,
@@ -281,9 +290,45 @@ describe('sweep.worktreeFor reuse (UC row 20)', () => {
       reused: true,
       clearedBaselineCaches: [],
       refusedBaselineCaches: [],
+      headSha: 'sha-head',
+      baseSha: 'sha-base',
     });
     expect(repo.addCalls).toHaveLength(0);
     expect(repo.prunes).toHaveLength(0);
+  });
+
+  test('reuse records HEAD vs input.base so a CHANGED base is visible, never silent (#176 item 3)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    // The tree was created at an OLD base: HEAD is one commit on top of it,
+    // while input.base now resolves to a different sha.
+    repo.heads.set(`${PATH}|HEAD`, 'sha-head-advanced');
+    repo.heads.set(`${PATH}|origin/main`, 'sha-base-moved');
+    const workspace = await okWorkspace(makeWorktreeFor(effectsOf(repo)), INPUT);
+    expect(workspace.reused).toBe(true);
+    expect(workspace.headSha).toBe('sha-head-advanced');
+    expect(workspace.baseSha).toBe('sha-base-moved');
+    expect(workspace.headSha).not.toBe(workspace.baseSha);
+  });
+
+  test('a revParse fault on reuse is a failed result naming the HEAD-vs-base verification (#176 item 3)', async () => {
+    const repo = fakeRepo();
+    repo.worktrees = [{ path: PATH, branch: BRANCH }];
+    repo.clean.add(PATH);
+    const effects: WorktreeEffects = {
+      ...effectsOf(repo),
+      revParse: async () => {
+        throw new Error('fatal: bad revision');
+      },
+    };
+    const error = await failedAt(makeWorktreeFor(effects), INPUT);
+    expect(error).toMatch(/could not verify the reused worktree/);
+    expect(error).toMatch(/HEAD against base/);
+    expect(error).toContain('bad revision');
+    // Nothing was mutated: no eviction, no add.
+    expect(repo.removed).toHaveLength(0);
+    expect(repo.addCalls).toHaveLength(0);
   });
 
   test('a DIRTY reused candidate is REFUSED with the tree named — never auto-cleaned', async () => {

@@ -91,10 +91,21 @@ export interface SweepWorkspace {
   path: string;
   /** The derived branch `<runPrefix>/<kind>/<slug>`. */
   branch: string;
-  /** The base the tree checks out. REQUESTED, verbatim input: on reuse the op never re-checks-out — the tree's actual HEAD is whatever the reused worktree carries (a rev-verify is a later salvage/D2-class surface). */
+  /** The base the tree checks out. REQUESTED, verbatim input: on reuse the op never re-checks-out — the tree's actual HEAD is whatever the reused worktree carries; `headSha`/`baseSha` below record that HEAD against this base (review-debt #176 item 3). */
   requestedBase: string;
   /** true when an existing strictly-clean tree was reused; false when freshly created. */
   reused: boolean;
+  /**
+   * REVIEW-DEBT #176 item 3: on REUSE, the tree's actual HEAD sha and the
+   * resolved sha of `input.base`. Recorded — never silently assumed — so a
+   * re-invoke against a changed base is VISIBLE to the caller instead of
+   * surfacing later as a mergeability conflict. NOT a refusal: a completed
+   * unit's tree is legitimately one commit ahead of the base (the fixer's
+   * own commit), so `headSha !== baseSha` is expected there. Absent on a
+   * fresh create (its HEAD IS the base by construction).
+   */
+  headSha?: string;
+  baseSha?: string;
   /** I7: baseline cache dirs evicted from a reused tree (input-relative names). Empty on create. */
   clearedBaselineCaches: string[];
   /**
@@ -130,6 +141,15 @@ export interface WorktreeEffects {
   listBranches(): Promise<string[]>;
   /** Short names of origin's heads (`git ls-remote --heads origin`) — network-touching, still lazy per call. */
   listRemoteBranches(): Promise<string[]>;
+  /**
+   * The full commit sha `ref` resolves to INSIDE the worktree at
+   * `worktreePath` (`git rev-parse --verify <ref>^{commit}` — a path-shaped
+   * ref fails rather than echoing the pathname, and the peel guarantees a
+   * commit). The reuse leg records the tree's actual HEAD against the
+   * requested base with it (review-debt #176 item 3); a resolution fault is a
+   * `failed` result, never a fabricated match.
+   */
+  revParse(worktreePath: string, ref: string): Promise<string>;
   /**
    * OPTIONAL missing-remote classifier: the URL configured for `origin`, or
    * null when NO origin is configured. When absent, the op falls back to
@@ -288,6 +308,22 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
           error: `sweep: worktree '${candidate.real}' on branch '${branch}' is dirty (git status --porcelain non-empty, untracked files included) — refusing reuse; salvage is the caller's next step, never auto-clean (UC row 20)`,
         };
       }
+      // HEAD-vs-base verification (review-debt #176 item 3): a re-invoke with
+      // a CHANGED base used to reuse the stale-base tree silently. Record the
+      // tree's actual HEAD and the resolved base so the caller sees the
+      // divergence. (Not a refusal — a completed unit's tree is legitimately
+      // ahead of the base by its own commit.)
+      let headSha: string;
+      let baseSha: string;
+      try {
+        headSha = await git.revParse(candidate.real, 'HEAD');
+        baseSha = await git.revParse(candidate.real, input.base);
+      } catch (err) {
+        return {
+          status: 'failed',
+          error: `sweep: could not verify the reused worktree '${candidate.real}' HEAD against base '${input.base}' — ${messageOf(err)}`,
+        };
+      }
       // I7: the baseline is never cached on reuse — evict, list, and hand
       // the caller a tree it must re-probe. PASS ONE validates every entry:
       // containment (normalized non-empty relative, strictly inside the
@@ -375,6 +411,8 @@ export function makeWorktreeFor(git: WorktreeEffects): Op<WorktreeForInput, Swee
           reused: true,
           clearedBaselineCaches,
           refusedBaselineCaches: [],
+          headSha,
+          baseSha,
         },
       };
     }
@@ -860,6 +898,11 @@ export function makeSubprocessWorktreeEffects(
       ),
     listRemoteBranches: async () =>
       parseRemoteHeads(await runGit(['ls-remote', '--heads', 'origin'], repoRoot, timeoutMs)),
+    revParse: async (worktreePath, ref) =>
+      // `--verify` + `^{commit}` (r1 finding 3): a path-shaped ref that names
+      // an existing path must FAIL, not exit 0 echoing the pathname; the peel
+      // also guarantees a commit sha rather than a blob/tree oid.
+      (await runGit(['rev-parse', '--verify', `${ref}^{commit}`], worktreePath, timeoutMs)).trim(),
     remoteGetUrl: async () => {
       try {
         return (await runGit(['remote', 'get-url', 'origin'], repoRoot, timeoutMs)).trim();
