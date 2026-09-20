@@ -77,12 +77,46 @@ set.
 
 ## Pre-PR CLI review
 
-(Filled during the two CodeRabbit CLI cycles / owner-authorized
-substitutions per `docs/coderabbit-review.md` §3b.)
+Two CodeRabbit CLI cycles (`coderabbit review --agent --base-commit`), the
+second mandatory even though the first was non-empty; stopped at two per
+`docs/coderabbit-review.md` §5. Same immutable base both cycles:
+`BASE = git merge-base origin/merge-queue HEAD = 51c81eb`.
 
-- pinned base: `origin/merge-queue` @ `51c81eb`
-- cycle 1: _pending_
-- cycle 2: _pending_
+| cycle | reviewed HEAD | dirty-diff identity | NDJSON log                 | terminal                                                          | findings | dispositions                                         |
+| ----- | ------------- | ------------------- | -------------------------- | ----------------------------------------------------------------- | -------- | ---------------------------------------------------- |
+| 1     | `3d6455b`     | clean tree          | `/tmp/p5-cr-cycle1.ndjson` | `complete` / `review_completed`, exit 0, no error/action_required | 3 minor  | 1 fixed (`b488cb7`), 2 rejected (Dismissed findings) |
+| 2     | `b488cb7`     | clean tree          | `/tmp/p5-cr-cycle2.ndjson` | `complete` / `review_completed`, exit 0, no error/action_required | 1 major  | fixed (`04b67fd`)                                    |
+
+No unresolved critical/major finding coexists with this PR. Fixes made while
+addressing cycle 2 are not themselves CLI-reviewed (recorded per §5); the
+fresh non-author reviewer rounds and the spec audit below cover the final
+head.
+
+## Review rounds
+
+- round 1: _pending_ (fresh paseo reviewer over `gh pr diff`)
+- round 2: _pending_
+- VB5 batch gate (final goal T5.3): _pending_
+
+## Review threads (bots)
+
+_pending_ — CodeRabbit App threads on the opened PR are listed and each given
+one fate (fix / dismiss / defer→issue) before merge.
+
+## Dismissed findings
+
+- **Cycle-1 finding 2** (minor, `CHANGELOG.md`): use an `Unreleased` heading
+  until the `v1.0.0` tag exists. **Rejected** — the dated `v1.0.0` heading is
+  the release this PR cuts; the tag is created in T5.2 on the promoted SHA as
+  part of the same release event (plan §1 "no staging", §6 "release lands
+  whole"). Renaming it to `Unreleased` would require a further post-review
+  commit after tagging to restore the dated heading.
+- **Cycle-1 finding 3** (minor, `docs/release-evidence/README.md`): the
+  referenced `pack-audit.log` and `publish-dry-run.log` must be tracked.
+  **Rejected** — both are committed in `3d6455b`
+  (`git show --stat 3d6455b` lists `docs/release-evidence/pack-audit.log`
+  582 lines, `publish-dry-run.log` 295 lines, `tarball-listing.txt` 273
+  lines) and are in the reviewed diff; the README claim is accurate.
 
 ## Verification
 
