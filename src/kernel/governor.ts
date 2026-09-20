@@ -1397,7 +1397,10 @@ export function governRegistry(view: OpRegistryView, governor: BudgetGovernor): 
 }
 
 // ---------------------------------------------------------------------------
-// Honest stop (I9) — report annotation on a REAL trip only
+// Honest stop (I9) — report annotation on a REAL trip only (the
+// stoppedEarly/earlyStopReason claim; `withBudgetStop` additionally annotates
+// the DERIVED costUSD rollup on every path — review-debt #185 — which is not
+// a trip claim).
 // ---------------------------------------------------------------------------
 
 // The runner's never-dispatched row markers (runner.ts is frozen for this

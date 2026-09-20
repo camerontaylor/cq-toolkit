@@ -2145,4 +2145,17 @@ describe('review-loop propagated spend (onSpend)', () => {
     expect(spent[spent.length - 1]).toBeCloseTo(0.07);
     expect(outcome.fixReport?.costUSD).toBeCloseTo(0.07);
   });
+
+  test("a THROWING onSpend observer never masks the fix run's outcome (#186 review r2)", async () => {
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 'Guarded the abort path.', [NEW_SHA]))],
+      onSpend: () => {
+        throw new Error('observer boom');
+      },
+    });
+    // The observer is advisory: its throw is swallowed, and the loop's own
+    // outcome (and any original throw) propagates untouched.
+    expect(outcome.status).toBe('ok');
+    expect(outcome.fixReport?.counts.done).toBe(1);
+  });
 });

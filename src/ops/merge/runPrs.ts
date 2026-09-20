@@ -233,7 +233,7 @@ const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedP
     pr: candidate.pr,
     headRefName: candidate.headRefName,
     baseRefName: candidate.baseRefName,
-    ...(candidate.headSha !== undefined && candidate.headSha !== ''
+    ...(candidate.headSha !== undefined && /^[0-9a-f]{40}$/i.test(candidate.headSha)
       ? { headSha: candidate.headSha }
       : {}),
     state: candidate.state,

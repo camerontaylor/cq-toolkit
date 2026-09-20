@@ -622,9 +622,9 @@ describe('fetchMergeCandidates — closed-ancestor sweep (#153)', () => {
     expect(parent?.baseRefName).toBe('merge-queue');
     expect(parent?.mergeState).toBe('CLEAN');
     expect(parent?.lastCommitAt).toBe('2026-01-02T00:00:00Z');
-    // The observed head SHA rides the candidate too (review-debt #186), so
-    // the plan can thread it into the executor's --match-head-commit pin.
-    expect(parent?.headSha).toBe('sha-20');
+    // A non-40-hex wire sha is DROPPED (review-debt #186): the fixture's
+    // short 'sha-20' is not a valid pin, so the plan would carry none.
+    expect(parent?.headSha).toBeUndefined();
     // The closed read is ONE bounded page — a single request, never
     // paginated, never slurped.
     const closedCalls = calls.filter((line) => line.includes('state=closed'));

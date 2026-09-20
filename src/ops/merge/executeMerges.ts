@@ -293,7 +293,11 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       } catch (err) {
         return { kind: 'failed', error: `revalidation for pr ${pr} threw: ${errorMessage(err)}` };
       }
-      if (!again.ok || again.sha === undefined || again.sha !== expectedSha) {
+      if (
+        !again.ok ||
+        again.sha === undefined ||
+        again.sha.toLowerCase() !== expectedSha.toLowerCase()
+      ) {
         return {
           kind: 'stale',
           detail: `head moved while revalidating pr ${pr} before a retry (expected ${expectedSha})`,
@@ -387,7 +391,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(pr);
       return;
     }
-    if (live.sha !== expectedSha) {
+    if (live.sha.toLowerCase() !== expectedSha.toLowerCase()) {
       // Drift between classify/plan and merge — caught here, NOT merged.
       report.stale.push({
         pr,

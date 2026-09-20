@@ -351,9 +351,9 @@ export async function fetchMergeCandidates(
         // The observed head SHA (review-debt #186): carried through the
         // candidate into the plan so the executor can pin
         // `gh pr merge --match-head-commit` to the reviewed head. OMITTED
-        // when the wire did not observe one (never '') — a blank sha is no
-        // pin, and the registry schema admits only 40-hex.
-        ...(sha !== '' ? { headSha: sha } : {}),
+        // unless the wire observed a full 40-hex sha (never '' or garbage) —
+        // the registry schema admits only 40-hex.
+        ...(/^[0-9a-f]{40}$/i.test(sha) ? { headSha: sha } : {}),
         // State rides the payload as well: a PR closed or merged between
         // the listing and this GET must not enter as open — and, for a
         // closed-ancestor row, one re-opened between the closed page and

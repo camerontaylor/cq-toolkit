@@ -373,7 +373,9 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
       action,
       basePr,
       depth,
-      ...(headSha !== undefined && headSha !== '' ? { headSha } : {}),
+      // Only a 40-hex head rides (the consumer's schema admits no other) —
+      // an unobserved/garbage head is omitted rather than emitted invalid.
+      ...(headSha !== undefined && /^[0-9a-f]{40}$/i.test(headSha) ? { headSha } : {}),
     };
   };
   for (const pr of roots) {

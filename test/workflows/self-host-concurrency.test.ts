@@ -47,6 +47,7 @@ describe('self-host workflows share ONE concurrency group (#186)', () => {
   it('the two instantiated workflows declare the same group and never cancel in progress', () => {
     const [review, merge] = INSTANTIATED.map((path) => concurrencyOf(readFileSync(path, 'utf8')));
     expect(review?.group).toBeDefined();
+    expect(review?.group).toBe('self-host-automation');
     expect(review?.group).toBe(merge?.group);
     expect(review?.cancelInProgress).toBe('false');
     expect(merge?.cancelInProgress).toBe('false');
