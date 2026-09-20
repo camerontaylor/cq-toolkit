@@ -11,6 +11,11 @@ coverage/
 *.env*
 .DS_Store
 
+# --- selfhost runtime state (scheduled-run journals, dispatch logs, the
+# worktree registry, PR worktrees; owned by the T4.1 entry modules — never
+# commit) ---
+.selfhost/
+
 # --- agent scratch (runtime tooling; never commit) ---
 # .zcode/ and .paseo/ are pure runtime agent scratch — ignored wholesale.
 .zcode/

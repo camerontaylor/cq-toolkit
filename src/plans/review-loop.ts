@@ -255,6 +255,17 @@ export interface ReviewLoopOpts {
    * no resume in v1 wiring (journalDir is an audit trail, not a resume key).
    */
   runOptions?: { journalDir?: string; maxUsd?: number; maxTokens?: number };
+  /**
+   * The governor's LIMITS half for the fix run — the second
+   * `governorConfig(runOptions, limits)` argument (`runOptions` above stays
+   * the RunOptions half). Plain data; review-debt #137's arming surface for
+   * the REVIEW path (I8/I9 seam): `perJobWallClockMs` arms the governor's
+   * wall-clock escalation ladder at rung 1, so a wedged fixer is signaled,
+   * escalated, and settled by the ladder instead of stalling the scheduled
+   * run until the workflow's own (much longer) timeout kills it. Absent →
+   * no ladder — the pre-arming behavior, exactly `governorConfig(opts, {})`.
+   */
+  limits?: { perJobWallClockMs?: number };
   /** The responder login for verify's strict attribution (null/absent = author-blind). */
   responderLogin?: string | null;
   /** The injected clock stamping snapshots, registry entries, and dispatch records. */
@@ -795,7 +806,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     ...(opts.runOptions?.maxUsd !== undefined ? { maxUsd: opts.runOptions.maxUsd } : {}),
     ...(opts.runOptions?.maxTokens !== undefined ? { maxTokens: opts.runOptions.maxTokens } : {}),
   };
-  const governor = new BudgetGovernor(governorConfig(runOptions, {}));
+  // The LIMITS half rides opts.limits (review-debt #137): the review path's
+  // arming surface for the wall-clock ladder — absent opts.limits keeps the
+  // historical no-ladder behavior ({}, the empty Limits half).
+  const governor = new BudgetGovernor(governorConfig(runOptions, opts.limits ?? {}));
   // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
   // are checked against the OBSERVED worktree movement, not trusted.
   const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
