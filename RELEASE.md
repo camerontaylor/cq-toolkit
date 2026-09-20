@@ -20,14 +20,14 @@ parent: `merge-queue`; children: none (T5.2 branches from the promoted
 
 ## Claims (acceptance checks this PR satisfies)
 
-- [ ] ws-k stage 3 item 9: `npm pack` tarball inspected against the denylist,
+- [x] ws-k stage 3 item 9: `npm pack` tarball inspected against the denylist,
       `files` allowlist, publish dry-run — **met** (see §6 rows below).
-- [ ] ws-k acceptance "Release PR maps every DoD item to its evidence link
+- [x] ws-k acceptance "Release PR maps every DoD item to its evidence link
       (plan §11 table instantiated)" — **met** (table below; unproduced rows
       are explicitly `MISSING`).
-- [ ] plan §6 "npm publish dry-run + `npm pack` inspection shows no
+- [x] plan §6 "npm publish dry-run + `npm pack` inspection shows no
       denylisted strings in the tarball; `files` allowlist" — **met**.
-- [ ] plan §6 "README doctrine sections present (I1–I11)" — **met**.
+- [x] plan §6 "README doctrine sections present (I1–I11)" — **met**.
 - [ ] plan §6 "release lands whole: single version tag on each repo; DoD
       checklist verified in the release PR description" — tag lands in **T5.2**.
 
