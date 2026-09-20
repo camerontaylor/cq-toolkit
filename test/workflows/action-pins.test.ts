@@ -147,4 +147,38 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
       );
     }
   });
+
+  it('the self-host driver-key env NAME is consistent within and across template/instantiation', () => {
+    // Batch-gate finding (VB4K #1): the templates declared env
+    // `Z_AI_API_KEY:` while their own guard asserted `$ZAI_API_KEY` (the name
+    // the drivers read), so an adopter's run refused to start. Pin the
+    // declaration and the assertion to the SAME key, and pin each template
+    // to its instantiation: the declaration NAME is fixed (`ZAI_API_KEY`);
+    // only the secret name is the `{{SELFHOST_DRIVER_KEY}}` placeholder.
+    const declared = (text: string): string | undefined =>
+      text.match(/^\s*([A-Z_]*AI_API_KEY):\s*\$\{\{\s*secrets\./m)?.[1];
+    const asserted = (text: string): string | undefined =>
+      text.match(/test -n "\$([A-Z_]*AI_API_KEY)"/)?.[1];
+    const pairs = ['self-review-loop.yml', 'self-merge-prs.yml'].map((name) => ({
+      name,
+      template: join(ROOT, `policy/templates/self-host/${name}`),
+      instantiated: join(WORKFLOWS_DIR, name),
+    }));
+    for (const { name, template, instantiated } of pairs) {
+      const templateText = readFileSync(template, 'utf8');
+      const instantiatedText = readFileSync(instantiated, 'utf8');
+      const templateDecl = declared(templateText);
+      const instantiatedDecl = declared(instantiatedText);
+      expect(templateDecl, `${name}: template driver env declaration`).toBe('ZAI_API_KEY');
+      expect(instantiatedDecl, `${name}: instantiated driver env declaration`).toBe('ZAI_API_KEY');
+      expect(templateDecl, `${name}: template declaration must match its guard assert`).toBe(
+        asserted(templateText),
+      );
+      expect(
+        instantiatedDecl,
+        `${name}: instantiated declaration must match its guard assert`,
+      ).toBe(asserted(instantiatedText));
+      expect(instantiatedDecl, `${name}: template and instantiation must agree`).toBe(templateDecl);
+    }
+  });
 });
