@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test } from 'vitest';
 import { runCli } from '../../src/cli/main.js';
 import type { CliIo } from '../../src/cli/output.js';
+import { RunReportSchema } from '../../src/kernel/schema.js';
 
 const fixtureOps = fileURLToPath(new URL('../fixtures/cli-ops/', import.meta.url));
 
@@ -209,5 +210,33 @@ describe('sample: plan through the governed kernel', () => {
     expect(code).toBe(0);
     expect(err).toBe('');
     expect(JSON.parse(out)).toHaveProperty('jobs.0.result.status', 'ok');
+  });
+});
+
+describe('sample: plan subcommands through the governed kernel (T4.3)', () => {
+  test("review-loop's empty floor yields one RunReport artifact, exit 0", async () => {
+    const { code, out, err } = await capture(['review-loop', '--json']);
+    expect(code).toBe(0);
+    // Machine mode: narration is suppressed entirely.
+    expect(err).toBe('');
+    const report = RunReportSchema.parse(JSON.parse(out));
+    expect(report.jobs).toEqual([]);
+    expect(report.runId.startsWith('review-loop--')).toBe(true);
+  });
+
+  test('a plan subcommand is resolved only after the op registry misses', async () => {
+    // 'no-such-plan' is neither an op nor a discovered plan → the documented
+    // unknown-subcommand usage path (exit 2, NO stdout artifact).
+    const { code, out, err } = await capture(['no-such-plan'], { opsRoot: fixtureOps });
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/unknown subcommand/);
+  });
+
+  test('a plan subcommand rejects --plan (its plan comes from the registry)', async () => {
+    const { code, out, err } = await capture(['sweep', '--plan=x.json'], { opsRoot: fixtureOps });
+    expect(code).toBe(2);
+    expect(out).toBe('');
+    expect(err).toMatch(/invalid input for 'sweep'/);
   });
 });

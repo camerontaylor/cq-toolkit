@@ -16,6 +16,14 @@
 // --tags=["a"] → an array). A positional (non-flag) token is a usage error;
 // a duplicate flag is a usage error (both exit 2).
 //
+// PLAN SUBCOMMANDS (T4.3): every name the plan registry discovers is ALSO a
+// subcommand, generated at dispatch time (src/cli/plans.ts) — never a
+// hand-written list, so a new src/plans/<name>.ts registers itself. A plan
+// subcommand takes run-plan's governed-run flags minus --plan
+// (RunPlanOptionsSchema) and runs the registry entry's floor plan through the
+// SAME governed composition. Resolution order: op registry first (the
+// pre-T4.3 surface is unchanged), then the plan registry.
+//
 // KEY-SPELLING ASYMMETRY: op subcommands map flags by EXACT schema key
 // (--msg=, or --maxUsd= if a schema had such a field) — parseFlags keeps
 // keys verbatim. run-plan is the ONE exception: its schema defines
@@ -61,6 +69,7 @@
 // narrated, and returned as 1 with stdout left EMPTY — no result ever
 // existed.
 import { get, list } from '../registry/index.js';
+import { getPlan } from '../registry/plans.js';
 import { OpResultSchema } from '../kernel/schema.js';
 import type { OpRegistryEntry } from '../kernel/types.js';
 import { EXIT_CODES, exitCodeForOpResult } from './exit.js';
@@ -73,11 +82,17 @@ import {
   type CliIo,
   type NarrationMode,
 } from './output.js';
-import { RunPlanInputSchema, runPlanCommand } from './run-plan.js';
+import { listPlanNames, runPlanEntryCommand } from './plans.js';
+import { RunPlanInputSchema, RunPlanOptionsSchema, runPlanCommand } from './run-plan.js';
 
-/** Options for embedding the CLI (tests, tools): the ops-root DI override. */
+/**
+ * Options for embedding the CLI (tests, tools): the ops-root and plan-root
+ * DI overrides.
+ */
 export interface RunCliOptions {
   opsRoot?: string;
+  /** Plan-registry root override (the plan subcommands; default src/plans|dist/plans). */
+  plansRoot?: string;
 }
 
 /** Message of an unknown throwable, for narration lines. */
@@ -179,12 +194,16 @@ export function parseFlags(tokens: string[]): {
 }
 
 /**
- * Subcommand names for the help surface: sorted registry entry names with
- * 'run-plan' appended (deduped — the built-in wins if an op ever takes the
- * name).
+ * Subcommand names for the help surface: the sorted, deduped union of the op
+ * entry names, the plan-registry names (generated — never hand-listed), and
+ * the built-in 'run-plan' (appended; the built-in wins if an entry ever took
+ * the name).
  */
-export function subcommandNames(entries: OpRegistryEntry[]): string[] {
-  const names = entries.map((entry) => entry.name).sort();
+export function subcommandNames(
+  entries: OpRegistryEntry[],
+  planNames: readonly string[] = [],
+): string[] {
+  const names = [...new Set([...entries.map((entry) => entry.name), ...planNames])].sort();
   if (!names.includes('run-plan')) names.push('run-plan');
   return names;
 }
@@ -343,6 +362,25 @@ function renderRunPlanHelp(): string {
   );
 }
 
+/**
+ * Help for one plan SUBCOMMAND: the same governed-run flag surface as
+ * run-plan (RunPlanOptionsSchema — everything but --plan), rendered in its
+ * kebab-case canonical flag forms. The trailing note names the registry floor
+ * the subcommand runs, so the surface never implies a per-plan file argument.
+ */
+function renderPlanHelp(name: string): string {
+  return renderSubHelp(
+    name,
+    RunPlanOptionsSchema,
+    ['--json', '--help'],
+    [
+      JSON_VALUES_NOTE,
+      `'${name}' runs the shipped '${name}' plan from the plan registry (its discoverable floor instance) through the governed kernel; use run-plan to run a plan JSON file.`,
+    ],
+    camelToKebab,
+  );
+}
+
 // --- Dispatch --------------------------------------------------------------
 
 /**
@@ -366,9 +404,8 @@ async function dispatchCli(
   // Global help: --help/-h as the leading argument (lenient about what
   // follows — help wins).
   if (sub === '--help' || sub === '-h') {
-    io.stdout(
-      renderGlobalHelp(subcommandNames(await list(opsRoot === undefined ? {} : { opsRoot }))),
-    );
+    const opEntries = await list(opsRoot === undefined ? {} : { opsRoot });
+    io.stdout(renderGlobalHelp(subcommandNames(opEntries, await listPlanNames(opts?.plansRoot))));
     return EXIT_CODES.ok;
   }
 
@@ -432,6 +469,30 @@ async function dispatchCli(
   // --- Op subcommands -------------------------------------------------------
   const entry = await get(sub, opsRoot === undefined ? {} : { opsRoot });
   if (entry === undefined) {
+    // --- Plan subcommands (generated from the plan registry) -----------------
+    // Op lookup wins (the pre-T4.3 behavior is preserved): a plan name only
+    // reaches this branch when no op registers it. The plan surface is
+    // DERIVED — main.ts never hand-lists plan names.
+    const planEntry = await getPlan(
+      sub,
+      opts?.plansRoot === undefined ? {} : { plansRoot: opts.plansRoot },
+    );
+    if (planEntry !== undefined) {
+      if (wantsHelp) {
+        io.stdout(renderPlanHelp(sub));
+        return EXIT_CODES.ok;
+      }
+      try {
+        // Input defects are narrated exits 2 INSIDE runPlanEntryCommand (flag
+        // schema, duplicates); runtime throws (an importer that throws, a
+        // journal failure) escape as throws → narrated exit 1 below.
+        return await runPlanEntryCommand(sub, parsed.flags, io, mode, opts);
+      } catch (err) {
+        // Runtime throw → 1; machine mode suppresses the narration line.
+        narrateIfHuman(io, mode, `${sub} threw: ${messageOf(err)}`);
+        return EXIT_CODES.thrown;
+      }
+    }
     // Unknown subcommand: narrate to stderr, NOTHING on stdout, exit 2.
     narrate(io, `unknown subcommand '${sub}' (try --help)`);
     return EXIT_CODES.usage;

@@ -241,13 +241,22 @@ describe('registry family scan (src/ops)', () => {
 describe('registry ⇄ CLI subcommand surface', () => {
   test('every registry entry has a subcommand', async () => {
     const entries = await list();
-    const names = subcommandNames(entries);
+    const planNames = (await listPlans()).map((entry) => entry.name);
+    const names = subcommandNames(entries, planNames);
     for (const entry of entries) {
       expect(names).toContain(entry.name);
     }
     expect(names).toContain('run-plan');
+    // T4.3 generation contract: the plan-registry names are on the subcommand
+    // surface too — generated from the registry, never a hand-written list.
+    for (const planName of planNames) {
+      expect(names).toContain(planName);
+    }
     // The built-in run-plan subcommand exists even with zero op families.
     expect(subcommandNames([])).toEqual(['run-plan']);
+    // Plan names ride the caller-supplied list (sorted, deduped, run-plan
+    // appended) — the signature stays backward compatible for op-only callers.
+    expect(subcommandNames([], ['sweep'])).toEqual(['sweep', 'run-plan']);
     // Convention closure (phase-4 T4.2): every planned family now exports a
     // `registry` array, so NO family is skipped — the diagnostics' skip list
     // is empty. ratchet's interim metric-adapter registry moved to
