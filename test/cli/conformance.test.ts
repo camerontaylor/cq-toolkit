@@ -62,7 +62,7 @@ describe('taxonomy → exit code + I1 streams (fixture family)', () => {
     { argv: ['budget'], status: 'budget-exhausted', code: 3 },
   ] as const;
 
-  test.each(cases)('$argv[0] → $status / exit $code', async ({ argv, status, code }) => {
+  test.each(cases)('$status → exit $code', async ({ argv, status, code }) => {
     const { code: actual, out, err } = await capture([...argv], { opsRoot: fixtureOps });
     expect(actual).toBe(code);
     const parsed: unknown = JSON.parse(out);
