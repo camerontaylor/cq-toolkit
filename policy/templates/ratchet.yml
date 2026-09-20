@@ -98,7 +98,7 @@ jobs:
           printf '%s\n' "$out"
           printf '%s' "$out" | jq -e '.status == "ok" and .value.verdict == "pass"' >/dev/null
       - name: 'Baseline monotonicity guard (CLI: ratchet.monotonicGuard)'
-        if: github.event_name == 'pull_request'
+        if: ${{ github.event_name == 'pull_request' && !cancelled() }}
         env:
           # Env-indirection doctrine: expression values reach the shell as
           # env vars, never as interpolated text (an empty expression inside

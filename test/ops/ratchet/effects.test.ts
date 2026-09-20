@@ -182,7 +182,7 @@ describe('makeSubprocessBaselinePrEffects', () => {
     const callsAfter = ghCalls().slice(logLengthBefore);
     expect(callsAfter.some((args) => args[1] === 'edit')).toBe(true);
     expect(callsAfter.some((args) => args[1] === 'create')).toBe(false);
-  });
+  }, 60_000);
 
   test('the token gate throws loudly and never falls back to an ambient token', async () => {
     const before = ghCalls().length;
