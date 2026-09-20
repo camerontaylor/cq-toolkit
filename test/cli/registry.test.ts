@@ -248,12 +248,12 @@ describe('registry ⇄ CLI subcommand surface', () => {
     expect(names).toContain('run-plan');
     // The built-in run-plan subcommand exists even with zero op families.
     expect(subcommandNames([])).toEqual(['run-plan']);
-    // Integration visibility (PR 64): a family that loads clean but does not
-    // conform — lane-H ratchet's registry.ts is an interim metric-adapter
-    // registry with no `registry` array export — is SKIPPED, not thrown, and
-    // must stay visible in the diagnostics rather than silently swallowed.
+    // Convention closure (phase-4 T4.2): every planned family now exports a
+    // `registry` array, so NO family is skipped — the diagnostics' skip list
+    // is empty. ratchet's interim metric-adapter registry moved to
+    // metricRegistry.ts and the family's registry.ts is the op registry.
     const { entries: diagEntries, skippedFamilies } = await listWithDiagnostics();
-    expect(skippedFamilies).toContain('ratchet');
+    expect(skippedFamilies).toEqual([]);
     // list() is exactly the diagnostics' entry half (same cached scan).
     expect(diagEntries).toEqual(entries);
   });

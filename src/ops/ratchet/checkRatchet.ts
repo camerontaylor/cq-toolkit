@@ -43,7 +43,7 @@ import { resolveBaselinesDir } from './captureBaseline.js';
 import type { SourceCatalog } from './captureBaseline.js';
 import { baselineRelPath, loosens, parseBaseline } from './format.js';
 import type { BaselineFile } from './format.js';
-import { getAdapter } from './registry.js';
+import { getAdapter } from './metricRegistry.js';
 
 function isEnoent(err: unknown): boolean {
   return (

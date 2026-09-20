@@ -162,7 +162,7 @@ export async function loadEngine() {
     await Promise.all([
       imp('checkRatchet.js'),
       imp('captureBaseline.js'),
-      imp('registry.js'),
+      imp('metricRegistry.js'),
       imp('format.js'),
       imp('monotonicGuard.js'),
       imp('proposeBaselineUpdate.js'),

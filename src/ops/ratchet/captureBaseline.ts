@@ -55,8 +55,8 @@ import { basename, dirname, join, sep } from 'node:path';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { baselineRelPath, isIso8601Instant, parseBaseline, renderBaseline } from './format.js';
 import type { BaselineFile } from './format.js';
-import { getAdapter } from './registry.js';
-import type { MetricReading, MetricSource } from './registry.js';
+import { getAdapter } from './metricRegistry.js';
+import type { MetricReading, MetricSource } from './metricRegistry.js';
 
 function isEnoent(err: unknown): boolean {
   return (

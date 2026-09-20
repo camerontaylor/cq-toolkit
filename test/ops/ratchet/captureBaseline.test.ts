@@ -61,8 +61,8 @@ import type {
 } from '../../../src/ops/ratchet/captureBaseline.js';
 import { baselineRelPath, parseBaseline, renderBaseline } from '../../../src/ops/ratchet/format.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
-import type { MetricReading, MetricSource } from '../../../src/ops/ratchet/registry.js';
-import { registerAdapter } from '../../../src/ops/ratchet/registry.js';
+import type { MetricReading, MetricSource } from '../../../src/ops/ratchet/metricRegistry.js';
+import { registerAdapter } from '../../../src/ops/ratchet/metricRegistry.js';
 
 const CAPTURED_AT = '2026-09-15T00:00:00.000Z';
 const CAPTURED_AT_2 = '2026-09-15T01:00:00.000Z';
@@ -644,7 +644,7 @@ describe('captureBaseline', () => {
     vi.resetModules();
     try {
       const captureMod = await import('../../../src/ops/ratchet/captureBaseline.js');
-      const registryMod = await import('../../../src/ops/ratchet/registry.js');
+      const registryMod = await import('../../../src/ops/ratchet/metricRegistry.js');
       registryMod.registerAdapter(typecheckCount);
       const captureFresh = captureMod.createCaptureBaseline(
         new Map([[METRIC, () => Promise.resolve(sourceRaw)]]),
@@ -703,7 +703,7 @@ describe('captureBaseline', () => {
     vi.resetModules();
     try {
       const captureMod = await import('../../../src/ops/ratchet/captureBaseline.js');
-      const registryMod = await import('../../../src/ops/ratchet/registry.js');
+      const registryMod = await import('../../../src/ops/ratchet/metricRegistry.js');
       registryMod.registerAdapter(typecheckCount);
       const captureFresh = captureMod.createCaptureBaseline(
         new Map([[METRIC, () => Promise.resolve(sourceRaw)]]),
