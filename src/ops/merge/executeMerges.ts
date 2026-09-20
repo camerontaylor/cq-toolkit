@@ -436,13 +436,19 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(entry.pr);
       continue;
     }
-    // THE EXPECTED HEAD (review-debt #186): the sha the PLAN observed when
-    // it carries a WELL-FORMED one (the reviewed head), else the executor's
-    // own baseline observation. A malformed/empty plan sha must not override
-    // the valid baseline and strand the PR in a false `stale` — it falls
-    // back (and the merge then pins the baseline).
-    const expectedSha =
-      entry.headSha !== undefined && FULL_SHA_RE.test(entry.headSha) ? entry.headSha : baselineSha;
+    // THE EXPECTED HEAD (review-debt #186): for a MERGE entry, the sha the
+    // PLAN observed when it carries a WELL-FORMED one (the reviewed head),
+    // else the executor's own baseline observation. A malformed/empty plan
+    // sha must not override the valid baseline and strand the PR in a false
+    // `stale` — it falls back. A retarget-self action does NOT pin the head
+    // (its forge base edit depends on no head content): it keeps the
+    // executor baseline, so a mid-flight head move never blocks a needed
+    // retarget (review r1).
+    const planHead =
+      entry.action === 'merge' && entry.headSha !== undefined && FULL_SHA_RE.test(entry.headSha)
+        ? entry.headSha
+        : undefined;
+    const expectedSha = planHead ?? baselineSha;
     await mutexFor(effectiveBaseKey(entry)).run(() => runAction(entry, expectedSha));
   }
 

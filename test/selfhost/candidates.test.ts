@@ -657,6 +657,19 @@ describe('fetchMergeCandidates — closed-ancestor sweep (#153)', () => {
     ]);
   });
 
+  test('the observed head SHA rides the candidate when the wire reports a full 40-hex sha (#186 review r1)', async () => {
+    const head = 'a'.repeat(40);
+    const gh = fakeGh({
+      list: () => [pullRow(60)],
+      singlePull: () => singlePullPayload(60, 'clean', { headSha: head }),
+    });
+    const result = await fetchMergeCandidates({ gh, owner: OWNER, repo: REPO });
+    const candidate = result.candidates.find((c) => c.pr === 60);
+    // The authoritative single-PR payload's head.sha is captured verbatim, so
+    // the plan can pin the server-side merge to it.
+    expect(candidate?.headSha).toBe(head);
+  });
+
   test('ancestors are retained REGARDLESS OF AGE; unrelated/unmerged/skewed closed rows are dropped before enrichment (#186)', async () => {
     const calls: string[] = [];
     const gh = fakeGh(

@@ -702,6 +702,29 @@ function assertValidUsage(prefix: string, usage: Usage): void {
   }
 }
 
+/**
+ * Non-throwing twins of the assertValid* probes (the DEFENSIVE-FOLD guard):
+ * `observeResult` may receive evidence an op streamed through
+ * reportResult, i.e. raw driver data the `workerResultOfValue` guard at the
+ * completion boundary never vetted. A lying measurement (NaN/Infinity/
+ * negative) folds as ZERO EVIDENCE — the guard rejects it so no post-record
+ * throw escapes the op (review round: reportResult bypassed the guard).
+ */
+const isValidTokensValue = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0;
+
+const isValidUsd = (usd: unknown): usd is number => isValidTokensValue(usd);
+
+const isValidUsage = (usage: unknown): usage is Usage => {
+  if (typeof usage !== 'object' || usage === null) return false;
+  const record = usage as Record<string, unknown>;
+  for (const field of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
+    if (!isValidTokensValue(record[field])) return false;
+  }
+  const reasoning = record['reasoning'];
+  return reasoning === undefined || isValidTokensValue(reasoning);
+};
+
 // ---------------------------------------------------------------------------
 // BudgetGovernor — the stateful per-run enforcer
 // ---------------------------------------------------------------------------
@@ -907,20 +930,26 @@ export class BudgetGovernor {
    * only when THIS invocation's usage has no cost evidence either way — a
    * `costAlreadyCounted` flag means cost evidence existed and was counted,
    * so there is nothing left to fail loud about.
+   *
+   * DEFENSIVE FOLD (review round): evidence arriving through the job
+   * context (reportResult) is raw driver data that never passed
+   * `workerResultOfValue`; a lying measurement (NaN/Infinity/negative) is
+   * sanitized to ZERO EVIDENCE here instead of throwing out of the op.
    */
   observeResult(
     jobKey: string,
     result: { usage?: Usage; costUSD?: number },
     counts?: { usageAlreadyCounted?: boolean; costAlreadyCounted?: boolean },
   ): void {
-    const usage = result.usage;
+    const usage = isValidUsage(result.usage) ? result.usage : undefined;
+    const costUSD = isValidUsd(result.costUSD) ? result.costUSD : undefined;
     const hasRealUsage = usage !== undefined && totalTokensOf(usage) > 0;
     if (hasRealUsage && usage !== undefined && counts?.usageAlreadyCounted !== true) {
       this.observeUsage(jobKey, usage);
     }
-    if (result.costUSD !== undefined) {
+    if (costUSD !== undefined) {
       if (counts?.costAlreadyCounted !== true) {
-        this.observeCost(jobKey, result.costUSD);
+        this.observeCost(jobKey, costUSD);
       }
     } else if (
       hasRealUsage &&

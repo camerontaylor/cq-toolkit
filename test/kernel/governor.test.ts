@@ -1268,6 +1268,31 @@ describe('governOp folds a returned WorkerResult through observeResult (#14-1/#1
     expect(governor.tripped).toBe(true);
     expect(governor.tripReason).toMatch(/unpriced usage under a USD cap/);
   });
+
+  test('a LYING reportResult measurement folds as ZERO evidence, never throws past the op (#185 review r1)', async () => {
+    const governor = new BudgetGovernor(
+      governorConfig({ concurrency: 1, stopOnError: false, maxUsd: 5 }, {}),
+    );
+    const lyingOp = async (): Promise<OpResult<unknown>> => {
+      // NaN/negative measurements an op streamed through the job context
+      // never passed the workerResultOfValue guard; observeResult sanitizes
+      // them instead of letting assertValid* throw out of the op.
+      currentJobContext()?.reportResult({
+        usage: { input: Number.NaN, output: -1, cacheRead: 0, cacheWrite: 0 },
+        costUSD: -3,
+      });
+      return { status: 'ok', value: { changed: false, summary: 'nothing' } };
+    };
+    const plan = independentPlan('plan-lying-report', 1, 'lying-report');
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, maxUsd: 5 },
+      governRegistry(viewWith(entry('lying-report', lyingOp)), governor),
+    );
+    expect(governor.usage).toBeUndefined();
+    expect(governor.usdSpent).toBe(0);
+    expect(governor.tripped).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -68,6 +68,9 @@ on:
 # (cancel-in-progress: false — cancelling mid-merge could strand a
 # half-executed plan, cancelling mid-loop half-dispatched replies). Fixed
 # group, not per-ref: neither workflow fires on PRs.
+# ACCEPTED (review r1): GitHub keeps ONE pending run per group, so a queued
+# sibling can replace an older pending run; a dropped cycle simply re-enters
+# on the next slot with the persisted journal (no state is lost).
 concurrency:
   group: self-host-automation
   cancel-in-progress: false
