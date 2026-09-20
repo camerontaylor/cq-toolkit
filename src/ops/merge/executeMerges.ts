@@ -72,9 +72,12 @@
 //      base ref (effects.readBaseRef) and compares it against the base the
 //      plan recorded (entry.baseRefName, defaulting to plan.baseBranch): a
 //      move means the stack premise is gone — the action is SKIPPED as
-//      `stale`, never merged into the changed base. A read failure is
-//      `failed` (fail closed: an unconfirmed base is not a mergeable one).
-//      Retarget-self entries merge nothing, so they do not pay the read.
+//      `stale`, never merged into the changed base. The re-read repeats
+//      after each retryable failure's head revalidation, before any further
+//      merge attempt (a retarget can land between attempts too). A read
+//      failure is `failed` (fail closed: an unconfirmed base is not a
+//      mergeable one). Retarget-self entries merge nothing, so they do not
+//      pay the read.
 //
 // TOTALITY: every PR in plan.order lands in EXACTLY ONE of merged /
 // retargeted / stale / failed / blocked. Effect methods that REJECT
@@ -169,7 +172,7 @@ const FULL_SHA_RE = /^[0-9a-f]{40}$/i;
 
 /**
  * Execute the F2 plan through the injected effects. See the module doc for
- * semantics (a)–(f); the returned report is total — every plan.order pr in
+ * semantics (a)–(g); the returned report is total — every plan.order pr in
  * exactly one bucket, each bucket in plan order.
  */
 export async function executeMerges(input: ExecuteMergeInput): Promise<ExecutionReport> {
@@ -248,7 +251,12 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
 
   // (e)+(b) THE MERGE, with its bounded retry. Total: never throws — a
   // rejecting mergePr is a `failed` outcome, not an escaped exception.
-  const mergeWithRetry = async (pr: number, ref: string, expectedSha: string): Promise<Outcome> => {
+  const mergeWithRetry = async (
+    pr: number,
+    ref: string,
+    expectedSha: string,
+    expectedBase: string,
+  ): Promise<Outcome> => {
     for (let attempt = 0; ; attempt += 1) {
       let result: GhResult;
       try {
@@ -311,6 +319,35 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
         return {
           kind: 'stale',
           detail: `head moved while revalidating pr ${pr} before a retry (expected ${expectedSha})`,
+        };
+      }
+      // (g) re-read the forge base between attempts too (review-debt #193):
+      // a retarget landing after attempt 1 must not be merged into on the
+      // retry. A read that fails or answers an unreadable payload is
+      // fail-closed `failed`; a moved base is `stale`. Never a blind retry.
+      let retryBase: { ok: boolean; baseRefName?: string };
+      try {
+        retryBase = await effects.readBaseRef(pr);
+      } catch (err) {
+        return {
+          kind: 'failed',
+          error: `retry-revalidation readBaseRef for pr ${pr} threw: ${errorMessage(err)}`,
+        };
+      }
+      if (
+        !retryBase.ok ||
+        typeof retryBase.baseRefName !== 'string' ||
+        retryBase.baseRefName === ''
+      ) {
+        return {
+          kind: 'failed',
+          error: `retry revalidation: readBaseRef for pr ${pr} unavailable — cannot confirm the forge base before retrying`,
+        };
+      }
+      if (retryBase.baseRefName !== expectedBase) {
+        return {
+          kind: 'stale',
+          detail: `base moved while revalidating pr ${pr} before a retry (plan saw ${expectedBase}, forge has ${retryBase.baseRefName})`,
         };
       }
     }
@@ -435,7 +472,11 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
       withheld.add(pr);
       return;
     }
-    if (!forgeBase.ok || forgeBase.baseRefName === undefined) {
+    if (
+      !forgeBase.ok ||
+      typeof forgeBase.baseRefName !== 'string' ||
+      forgeBase.baseRefName === ''
+    ) {
       report.failed.push({
         pr,
         error: `readBaseRef for pr ${pr} unavailable — cannot confirm the forge base before merging`,
@@ -457,7 +498,7 @@ export async function executeMerges(input: ExecuteMergeInput): Promise<Execution
     // merge is the whole body (see rule f in the module doc; worktree
     // lifecycle enters with F4's resolver via withPreparedWorktree).
     // mergeWithRetry is total (never throws), so the outcome files clean.
-    fileOutcome(pr, await mergeWithRetry(pr, ref, expectedSha));
+    fileOutcome(pr, await mergeWithRetry(pr, ref, expectedSha, expectedBase));
   };
 
   // THE LOOP — plan order, strictly sequential (rule d's determinism), with

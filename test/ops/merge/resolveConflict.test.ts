@@ -131,6 +131,8 @@ const lateBoundInput = (): ResolveConflictInput => ({
  */
 class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
+  /** pr → forge base ref (what readBaseRef answers); absent → 'main'. */
+  readonly baseRefs = new Map<number, string>();
   fetchCode = 0;
   fetchStderr = '';
   fetchThrows: Error | null = null;
@@ -173,9 +175,10 @@ class FakeMergeEffects implements MergeEffects {
 
   async readBaseRef(pr: number): Promise<{ ok: boolean; baseRefName?: string }> {
     // The resolve op never reads a base ref — only executeMerges does. The
-    // method exists to satisfy the seam; it answers the trunk.
+    // method exists to satisfy the seam; absent an explicit entry it answers
+    // the trunk (a stacked scenario seeds baseRefs).
     this.calls.push(`readBase:${String(pr)}`);
-    return { ok: true, baseRefName: 'main' };
+    return { ok: true, baseRefName: this.baseRefs.get(pr) ?? 'main' };
   }
 
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {

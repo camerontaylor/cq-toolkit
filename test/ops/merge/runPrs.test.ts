@@ -127,6 +127,8 @@ const baseInput = (prs: MergePrsCandidate[], modelSpec?: typeof MODEL_SPEC): Run
  */
 class FakeMergeEffects implements MergeEffects {
   readonly calls: string[] = [];
+  /** pr → forge base ref (what readBaseRef answers); absent → 'main'. */
+  readonly baseRefs = new Map<number, string>();
   fetchCode = 0;
   fetchStderr = '';
   readonly mergeFailures = new Set<number>();
@@ -156,8 +158,9 @@ class FakeMergeEffects implements MergeEffects {
     this.calls.push(`readBase:${String(pr)}`);
     // Every executing merge in these scenarios is a root on the trunk; a
     // stacked child that would name another base is always withheld or
-    // planned retarget-self (which never reads).
-    return { ok: true, baseRefName: 'main' };
+    // planned retarget-self (which never reads). A future stacked-merge
+    // scenario seeds baseRefs rather than silently going stale.
+    return { ok: true, baseRefName: this.baseRefs.get(pr) ?? 'main' };
   }
 
   async worktreePrepare(pr: number, ref: string): Promise<{ path: string }> {

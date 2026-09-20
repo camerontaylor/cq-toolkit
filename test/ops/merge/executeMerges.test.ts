@@ -61,7 +61,7 @@
 //      refused (push.default could pick the protected branch); bundled
 //      short flags carrying an 'f' (-qf) are force; '--amend' is a
 //      forbidden token (history rewrite).
-//  16. ALLOWLIST GUARD (round 2): only the seven documented argv shapes
+//  16. ALLOWLIST GUARD (round 2): only the eight documented argv shapes
 //      execute — everything else is `refused: unknown argv shape`; push
 //      refspecs must be explicit src:dst and never '+'-marked; fetch
 //      refspecs may carry '+' but never a protected-branch destination.
@@ -181,6 +181,16 @@ class FakeMergeEffects implements MergeEffects {
   readonly baseRefs = new Map<number, string>();
   /** pr → readBaseRef fails (`{ ok: false }`). */
   readonly baseReadFailures = new Set<number>();
+  /** readBaseRef call count per pr — the base-drift scripting hook. */
+  readonly baseReadCalls = new Map<number, number>();
+  /** When set, every readBaseRef call for a pr AT/AFTER baseDriftFromCall
+   * (0-based) answers baseDriftRef instead of the baseRefs entry — the
+   * between-attempts retarget. Default null (no drift). */
+  baseDriftRef: string | null = null;
+  baseDriftFromCall = 1;
+  /** When true, readBaseRef answers `{ ok: true, baseRefName: <number> }` —
+   * the misbehaving-seam hook (the executor must not trust the seam type). */
+  baseReadNonString = false;
   /** When set, readBaseRef THROWS with this error — the rejecting-read
    * scripting hook. */
   baseReadThrows: Error | null = null;
@@ -270,6 +280,12 @@ class FakeMergeEffects implements MergeEffects {
     this.calls.push(`readBase:${String(pr)}`);
     if (this.baseReadThrows !== null) throw this.baseReadThrows;
     if (this.baseReadFailures.has(pr)) return { ok: false };
+    if (this.baseReadNonString) return { ok: true, baseRefName: 42 as unknown as string };
+    const seen = this.baseReadCalls.get(pr) ?? 0;
+    this.baseReadCalls.set(pr, seen + 1);
+    if (this.baseDriftRef !== null && seen >= this.baseDriftFromCall) {
+      return { ok: true, baseRefName: this.baseDriftRef };
+    }
     return { ok: true, baseRefName: this.baseRefs.get(pr) ?? 'main' };
   }
 
@@ -575,6 +591,20 @@ describe('executeMerges — (g) forge base-ref re-read (#193): a retarget is ski
     expect(mergeCalls(fake)).toEqual([]);
   });
 
+  test('a seam that answers { ok: true } with a NON-string base → failed (the guard does not trust the type)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.baseReadNonString = true;
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.stale).toEqual([]);
+    expect(report.failed).toEqual([
+      { pr: 7, error: match.stringContaining('readBaseRef for pr 7 unavailable') },
+    ]);
+    expect(mergeCalls(fake)).toEqual([]);
+  });
+
   test('a read that THROWS → failed (fail closed), never merged', async () => {
     const fake = new FakeMergeEffects();
     fake.heads.set(7, sha('a'));
@@ -648,10 +678,38 @@ describe('executeMerges — (e) bounded retry on "base branch was modified"', ()
       'merge:7:merge', // attempt 1 — base modified
       'fetch:refs/pull/7/head', // revalidation fetch FIRST (round 1)
       'validate:refs/pull/7/head', // revalidate
+      'readBase:7', // base re-read between attempts (#193)
       'merge:7:merge', // attempt 2 — base modified
       'fetch:refs/pull/7/head',
       'validate:refs/pull/7/head',
+      'readBase:7', // base re-read between attempts (#193)
       'merge:7:merge', // attempt 3 — merged
+    ]);
+  });
+
+  test('a base that moves between attempt 1 and the retry → stale, never a second merge (#193)', async () => {
+    const fake = new FakeMergeEffects();
+    fake.heads.set(7, sha('a'));
+    fake.mergeQueue.set(7, [baseModified, OK]); // attempt 1 fails retryably; attempt 2 would succeed
+    fake.baseDriftRef = 'release'; // the forge retargets between attempts
+    fake.baseDriftFromCall = 1; // call 0 (pre-merge) sees the planned base; call 1 (retry) sees the move
+
+    const report = await executeMerges({ plan: handPlan([entry(7)]), effects: fake });
+
+    expect(report.merged).toEqual([]);
+    expect(report.failed).toEqual([]);
+    expect(report.stale).toEqual([
+      { pr: 7, detail: match.stringContaining('base moved while revalidating') },
+    ]);
+    // Exactly ONE merge attempt: the moved base stopped the retry before a
+    // second merge could land in the changed base.
+    expect(mergeCalls(fake)).toEqual(['merge:7:merge']);
+    // The retry re-read happened AFTER the head revalidation.
+    const afterFirstMerge = fake.calls.slice(fake.calls.indexOf('merge:7:merge') + 1);
+    expect(afterFirstMerge).toEqual([
+      'fetch:refs/pull/7/head',
+      'validate:refs/pull/7/head',
+      'readBase:7',
     ]);
   });
 
@@ -1427,6 +1485,35 @@ describe('safeArgs — the I3 guard, one test per forbidden shape', () => {
       run: async () => ({ code: 0, stdout: '{}', stderr: '' }),
     });
     expect(await missing.readBaseRef(7)).toEqual({ ok: false });
+
+    // A whitespace-padded value is TRIMMED (no false stale at the
+    // consumer); a whitespace-only value is empty-after-trim → fail closed.
+    const padded = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: '{"baseRefName":"  main  "}', stderr: '' }),
+    });
+    expect(await padded.readBaseRef(7)).toEqual({ ok: true, baseRefName: 'main' });
+
+    const blank = realMergeEffects({
+      repoRoot: '/repo',
+      run: async () => ({ code: 0, stdout: '{"baseRefName":"   "}', stderr: '' }),
+    });
+    expect(await blank.readBaseRef(7)).toEqual({ ok: false });
+
+    // An invalid pr is refused BEFORE any process: the read validates its
+    // own input rather than trusting the caller.
+    const noCall: string[][] = [];
+    const invalid = realMergeEffects({
+      repoRoot: '/repo',
+      run: async (args: string[]) => {
+        noCall.push(args);
+        return { code: 0, stdout: '{"baseRefName":"main"}', stderr: '' };
+      },
+    });
+    expect(await invalid.readBaseRef(0)).toEqual({ ok: false });
+    expect(await invalid.readBaseRef(-1)).toEqual({ ok: false });
+    expect(await invalid.readBaseRef(1.5)).toEqual({ ok: false });
+    expect(noCall).toEqual([]);
   });
 
   test('realMergeEffects git argv shapes: validate/fetch/push (injected runner — zero processes, no fs)', async () => {

@@ -509,8 +509,11 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
 
   // The forge base-ref read (review-debt #193). `gh pr view --json` prints
   // a JSON document; a nonzero exit, unparseable stdout, or an absent/empty
-  // field is `{ ok: false }` — fail closed, never a guessed base.
+  // field is `{ ok: false }` — fail closed, never a guessed base. The
+  // parsed ref is TRIMMED (a whitespace-padded value must not false-`stale`
+  // at the consumer) and an empty-after-trim value is `{ ok: false }`.
   const readBaseRef = async (pr: number): Promise<{ ok: boolean; baseRefName?: string }> => {
+    if (!Number.isInteger(pr) || pr <= 0) return { ok: false };
     const result = await gh(['pr', 'view', String(pr), '--json', 'baseRefName']);
     if (result.code !== 0) return { ok: false };
     let parsed: unknown;
@@ -519,11 +522,13 @@ export function realMergeEffects(opts: RealMergeEffectsOpts): MergeEffects {
     } catch {
       return { ok: false };
     }
-    const baseRefName =
+    const raw =
       typeof parsed === 'object' && parsed !== null
         ? (parsed as { baseRefName?: unknown }).baseRefName
         : undefined;
-    if (typeof baseRefName !== 'string' || baseRefName === '') return { ok: false };
+    if (typeof raw !== 'string') return { ok: false };
+    const baseRefName = raw.trim();
+    if (baseRefName === '') return { ok: false };
     return { ok: true, baseRefName };
   };
 
