@@ -138,6 +138,14 @@ export interface WorkerResult {
   costBasis?: 'modeled' | 'billed';
   sessionId?: string;
   denials: ToolDenial[];
+  /**
+   * Underlying failure cause, when the driver caught one. Present only on a
+   * driver-level failure verdict (stopReason 'error'): the message of the
+   * thrown cause, so a failing lane surfaces loudly instead of as a bare
+   * 'error'. Never set on a successful run, and never used to turn a driver
+   * failure into a model score.
+   */
+  error?: string;
   stopReason: DriverStopReason;
 }
 

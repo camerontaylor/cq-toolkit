@@ -218,6 +218,13 @@ function genWorkerResult(r: Rng): WorkerResult {
   }
   const sessionId = sometimes(r, () => id(r, 'sess-'));
   if (sessionId !== undefined) result.sessionId = sessionId;
+  // A driver-level failure carries its caught cause (issues #203/#204); the
+  // generator only sets it on an 'error' verdict, honoring the wire
+  // refinement (error present only when stopReason is 'error').
+  if (result.stopReason === 'error') {
+    const error = sometimes(r, () => id(r, 'err-'));
+    if (error !== undefined) result.error = error;
+  }
   return result;
 }
 
@@ -906,6 +913,29 @@ describe('WorkerResultSchema costUSD/costBasis pairing (DD-9 wire coupling)', ()
       { ...base, costUSD: 0.5 },
       'costUSD without costBasis',
     );
+  });
+});
+
+describe('WorkerResult.error surfaces a driver-level failure cause (issues #203/#204)', () => {
+  test('a WorkerResult carrying error round-trips JSON and parses through the strict mirror', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      usage: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error',
+      error: 'ai-sdk driver: run failed — Error: scripted model failure',
+    });
+  });
+
+  test('error on a non-error stopReason is rejected, naming the error path', () => {
+    const parsed = kernelSchema.WorkerResultSchema.safeParse({
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'complete',
+      error: 'ai-sdk driver: run failed — Error: boom',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return; // narrow for TS
+    expect(parsed.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
   });
 });
 
