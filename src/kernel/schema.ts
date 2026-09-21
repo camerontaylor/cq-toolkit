@@ -146,6 +146,7 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),
     sessionId: z.string().exactOptional(),
     denials: z.array(ToolDenialSchema),
+    // Mirror-only tightening: the frozen doc says "message", not "non-empty" — a caught `new Error()` has message '' and must not persist as a cause.
     error: z.string().min(1).exactOptional(),
     stopReason: DriverStopReasonSchema,
   })
