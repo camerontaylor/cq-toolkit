@@ -153,7 +153,7 @@
 // (modeled — list price for the tokens consumed), never presented as billed
 // (DD-9; docs/dd-9-api-equivalent-budget.md). The driver never fabricates
 // or reports trusted USD.
-import { generateText, Output, stepCountIs, tool } from 'ai';
+import { APICallError, generateText, Output, stepCountIs, tool } from 'ai';
 import type {
   FinishReason,
   LanguageModel,
@@ -824,17 +824,27 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
  * structured-output miss from a loud endpoint absence without the frozen
  * seam carrying a new field. ORDER MATTERS: the structured-output miss wins
  * first (the getter's NoOutputGeneratedError / NoObjectGeneratedError), then
- * the SDK-retryable transient class (the specific endpoint-header-timeout /
- * network phrases, or a TimeoutError name — the SDK step-timeout DOMException),
- * and anything else is a provider error. A plain governed AbortError never
- * reaches this classifier (the outer catch short-circuits to `aborted`), so
- * there is no bare-`abort` match to over-fire on.
+ * a NON-retryable APICallError is a permanent provider failure regardless of
+ * incidental wording in its message (structured signal over unanchored
+ * text), then the SDK-retryable transient class (the specific
+ * endpoint-header-timeout / network phrases, or a TimeoutError name — the
+ * SDK step-timeout DOMException), and anything else is a provider error. A
+ * plain governed AbortError never reaches this classifier (the outer catch
+ * short-circuits to `aborted`), so there is no bare-`abort` match to
+ * over-fire on. When the SDK exhausts its retry the caught error is a
+ * RetryError (not an APICallError), whose message names the attempt count
+ * and the last error — that path still classifies from the last error's
+ * transient wording.
  */
 export function classifyRunFailure(
   err: unknown,
 ): 'endpoint-timeout' | 'structured-output-miss' | 'provider-error' {
   const name = err instanceof Error ? err.name : '';
   if (/No(Output|Object)Generated/i.test(name)) return 'structured-output-miss';
+  // STRUCTURED SIGNAL FIRST: a non-retryable API error is permanent, even
+  // when its diagnostic text happens to contain a transient phrase
+  // ('fetch failed', 'socket hang up', …). describeError stays diagnostics.
+  if (APICallError.isInstance(err) && err.isRetryable === false) return 'provider-error';
   const message = describeError(err);
   if (
     /headers timeout|cannot connect to api|etimedout|econnreset|socket hang up|fetch failed/i.test(

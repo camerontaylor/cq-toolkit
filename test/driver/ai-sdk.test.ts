@@ -788,6 +788,19 @@ describe('ai-sdk driver failure classes (#210)', () => {
       classifyRunFailure(Object.assign(new Error('timed out'), { name: 'TimeoutError' })),
     ).toBe('endpoint-timeout');
 
+    // STRUCTURED SIGNAL BEATS UNANCHORED TEXT: a non-retryable APICallError
+    // is permanent even when its message embeds a transient phrase.
+    expect(
+      classifyRunFailure(
+        new APICallError({
+          message: 'invalid request: fetch failed',
+          url: 'https://example.test',
+          requestBodyValues: {},
+          isRetryable: false,
+        }),
+      ),
+    ).toBe('provider-error');
+
     // Anything else — including a bare abort with no timeout wording (the
     // governed abort is handled before this classifier).
     expect(classifyRunFailure(new Error('scripted model failure'))).toBe('provider-error');
