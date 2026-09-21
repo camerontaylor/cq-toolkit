@@ -22,6 +22,10 @@
 //      (mirror-only tightening, .positive()), and WorkerResultSchema
 //      encodes the DD-9 wire coupling — costBasis present exactly when
 //      costUSD is.
+//   8. Post-freeze seam migration: WorkerResultSchema encodes the new wire
+//      coupling — `error` is present only on a `stopReason: 'error'`
+//      verdict, and it is non-empty and bounded to the producer's
+//      500-chars-plus-marker shape.
 //
 // Determinism: hand-rolled mulberry32 PRNG, fixed seeds derived from test
 // names. No Date.now(), no Math.random(), no new dependencies — vitest only.
@@ -218,6 +222,13 @@ function genWorkerResult(r: Rng): WorkerResult {
   }
   const sessionId = sometimes(r, () => id(r, 'sess-'));
   if (sessionId !== undefined) result.sessionId = sessionId;
+  // A driver-level failure carries its caught cause (post-freeze seam
+  // migration); the generator only sets it on an 'error' verdict, honoring
+  // the wire refinement (error present only when stopReason is 'error').
+  if (result.stopReason === 'error') {
+    const error = sometimes(r, () => id(r, 'err-'));
+    if (error !== undefined) result.error = error;
+  }
   return result;
 }
 
@@ -909,6 +920,74 @@ describe('WorkerResultSchema costUSD/costBasis pairing (DD-9 wire coupling)', ()
   });
 });
 
+describe('WorkerResult.error — post-freeze seam migration wire contract', () => {
+  test('a WorkerResult carrying error round-trips JSON and parses through the strict mirror', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      usage: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error',
+      error: 'ai-sdk driver: run failed — Error: scripted model failure',
+    });
+  });
+
+  test('an error verdict with NO error parses — the field is present-only, not required', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error',
+    });
+  });
+
+  test.each(['complete', 'aborted', 'budget'] as const)(
+    'error on a %s stopReason is rejected, naming the error path',
+    (stopReason) => {
+      const parsed = kernelSchema.WorkerResultSchema.safeParse({
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason,
+        error: 'ai-sdk driver: run failed — Error: boom',
+      });
+      expect(parsed.success).toBe(false);
+      if (parsed.success) return; // narrow for TS
+      expect(parsed.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
+    },
+  );
+
+  test("an empty error on an 'error' verdict is rejected, naming the error path", () => {
+    const parsed = kernelSchema.WorkerResultSchema.safeParse({
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error',
+      error: '',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return; // narrow for TS
+    expect(parsed.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
+  });
+
+  test('the error message length bound matches the producer shape (513 incl. marker)', () => {
+    const base = {
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error' as const,
+    };
+    // 500 is the producer's raw cap; 513 is its truncated output (500 plus
+    // the 13-char '… [truncated]' marker), which the old .max(500) rejected.
+    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base, error: 'x'.repeat(500) });
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      ...base,
+      error: 'x'.repeat(500) + '… [truncated]',
+    });
+    const tooLong = kernelSchema.WorkerResultSchema.safeParse({
+      ...base,
+      error: 'x'.repeat(514),
+    });
+    expect(tooLong.success).toBe(false);
+    if (tooLong.success) return; // narrow for TS
+    expect(tooLong.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
+  });
+});
+
 describe('exact optional schema boundaries', () => {
   test('absence survives parsing while explicit undefined cannot satisfy a typed optional field', () => {
     expect(kernelSchema.BudgetSchema.parse({})).toEqual({});
@@ -918,5 +997,15 @@ describe('exact optional schema boundaries', () => {
     expect(kernelSchema.PlanSchema.parse(plan)).toEqual(plan);
     expect(kernelSchema.PlanSchema.safeParse({ ...plan, label: undefined }).success).toBe(false);
     expect(kernelSchema.PlanSchema.parse({ ...plan, label: '' }).label).toBe('');
+    // The post-freeze seam-migration optional follows the same rule.
+    const workerResult = {
+      usage: { input: 1, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error' as const,
+    };
+    expect(kernelSchema.WorkerResultSchema.parse(workerResult)).toEqual(workerResult);
+    expect(
+      kernelSchema.WorkerResultSchema.safeParse({ ...workerResult, error: undefined }).success,
+    ).toBe(false);
   });
 });

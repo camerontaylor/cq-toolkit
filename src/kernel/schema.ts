@@ -146,6 +146,8 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),
     sessionId: z.string().exactOptional(),
     denials: z.array(ToolDenialSchema),
+    // Mirror-only tightening: the frozen doc says "message", not "non-empty" — and the producer bound is 500 chars plus the 13-char '… [truncated]' marker from PR-B's error-text.ts, so the mirror allows 513.
+    error: z.string().min(1).max(513).exactOptional(),
     stopReason: DriverStopReasonSchema,
   })
   .strict()
@@ -167,6 +169,15 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
         code: 'custom',
         message: 'costBasis must be omitted when costUSD is absent',
         path: ['costBasis'],
+      });
+    }
+    // Mirror the frozen type's documented contract: `error` rides only a
+    // driver-level failure verdict (stopReason 'error').
+    if (result.error !== undefined && result.stopReason !== 'error') {
+      ctx.addIssue({
+        code: 'custom',
+        message: "error is only allowed when stopReason is 'error'",
+        path: ['error'],
       });
     }
   });

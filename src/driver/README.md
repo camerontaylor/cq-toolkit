@@ -27,6 +27,7 @@ parts live in `src/kernel/schema.ts`.
 - `costBasis?: 'modeled' | 'billed'` — what `costUSD` is, when it is present (DD-9)
 - `sessionId?: string`
 - `denials: ToolDenial[]` — `{ tool, reason }` per denied tool use
+- `error?: string` — the caught underlying cause on a driver-level failure (present only with `stopReason: 'error'`); never scored
 - `stopReason: DriverStopReason` — `'complete' | 'aborted' | 'budget' | 'error'`
 
 ## Seam rules

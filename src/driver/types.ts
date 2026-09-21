@@ -138,6 +138,14 @@ export interface WorkerResult {
   costBasis?: 'modeled' | 'billed';
   sessionId?: string;
   denials: ToolDenial[];
+  /**
+   * Underlying failure cause, when the driver caught one. Present only on a
+   * driver-level failure verdict (stopReason 'error'), as a NON-EMPTY message.
+   * Drivers truncate the cause to a bounded length (500 chars plus a
+   * truncation marker) and secret-redact it before assigning it; it is never
+   * used to turn a driver failure into a model score.
+   */
+  error?: string;
   stopReason: DriverStopReason;
 }
 
