@@ -147,7 +147,8 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     sessionId: z.string().exactOptional(),
     denials: z.array(ToolDenialSchema),
     // Mirror-only tightening: the frozen doc says "message", not "non-empty" — a caught `new Error()` has message '' and must not persist as a cause.
-    error: z.string().min(1).exactOptional(),
+    // The max is the producer bound from PR-B's `error-text.ts` (the frozen doc names no length).
+    error: z.string().min(1).max(500).exactOptional(),
     stopReason: DriverStopReasonSchema,
   })
   .strict()

@@ -963,6 +963,22 @@ describe('WorkerResult.error — post-freeze seam migration wire contract', () =
     if (parsed.success) return; // narrow for TS
     expect(parsed.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
   });
+
+  test('the error message length bound is enforced (500 chars, not 501)', () => {
+    const base = {
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error' as const,
+    };
+    const tooLong = kernelSchema.WorkerResultSchema.safeParse({
+      ...base,
+      error: 'x'.repeat(501),
+    });
+    expect(tooLong.success).toBe(false);
+    if (tooLong.success) return; // narrow for TS
+    expect(tooLong.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
+    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base, error: 'x'.repeat(500) });
+  });
 });
 
 describe('exact optional schema boundaries', () => {
