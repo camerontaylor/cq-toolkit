@@ -7,6 +7,14 @@ from merged pull-request titles, grouped by the v1 workstreams of
 Links default to the
 `camerontaylor/cq-toolkit` repository; WS-J links are repo-qualified.
 
+## v1.0.1 — 2026-09-21
+
+Post-v1.0.0 patches for the WB-1 eval-matrix lanes.
+
+- fix(driver): ai-sdk structured output is decoupled from the tool loop; a missing object is a driver error carrying its cause, never a bare error ([#203](https://github.com/camerontaylor/cq-toolkit/issues/203))
+- fix(driver): claude-agent surfaces the SDK error on the error verdict ([#204](https://github.com/camerontaylor/cq-toolkit/issues/204))
+- feat(pricing): vendor `deepseek-flash` and `glm-5.3-flash` rates from models.dev (fetched 2026-09-21)
+
 ## v1.0.0 — 2026-09-21
 
 First coherent v1 release: the frozen kernel contracts, the pluggable driver

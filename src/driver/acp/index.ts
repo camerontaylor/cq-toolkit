@@ -282,11 +282,11 @@ export const NARRATION_TOOL = 'acp-narration';
 
 /**
  * The client version advertised in the ACP `initialize` handshake. Kept in
- * lockstep with the root `package.json` `version` (the v1.0.0 release PR
- * aligns both); deriving it from the manifest at runtime is a post-v1
- * candidate, not a release blocker.
+ * lockstep with the root `package.json` `version` (the post-v1.0.0 1.0.1
+ * patch PR aligns both); deriving it from the manifest at runtime is a
+ * post-v1 candidate, not a release blocker.
  */
-const CLIENT_VERSION = '1.0.0';
+const CLIENT_VERSION = '1.0.1';
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AcpDriverOptions {
