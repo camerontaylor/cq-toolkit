@@ -272,7 +272,11 @@ accounting. Stop reasons: governed abort → `aborted`; folded usage ≥
 status, no result event, or a spawn failure → `error`. Once spawned,
 `run()` never throws past the seam — and a SYNCHRONOUS spawn failure is a
 verdict too: it returns stopReason `error` with the failure narrated,
-never a rejection.
+never a rejection. Every `error` verdict also populates
+`WorkerResult.error` (bounded, secret-redacted): the cause from the CLI
+result event when it carries one, else the child's exit code/signal or
+spawn error, plus the retained stderr tail — so a 0-token failure is
+diagnosable from the journal (#208).
 
 Isolation (I6): no `sessionRef` → fresh temp workspace +
 `SessionStore.create` (cwd = workspace); `sessionRef` →

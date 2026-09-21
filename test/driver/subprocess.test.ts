@@ -442,6 +442,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
       expect(outcome.value.stopReason).toBe('aborted');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(outcome.value.error).toBeUndefined();
       const narration = await narrationOf(store, outcome.value.sessionId as string);
       const rungs = narration
         .filter((line) => line.includes('"termination-rung"'))
@@ -546,6 +548,42 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   });
 
+  test('result-event error path: the error verdict names the result cause and stays bounded (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'result error run' }));
+      expect(result.stopReason).toBe('error');
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      // The failed result frame (is_error:true, subtype error_during_execution)
+      // is what the journal must show — not a bare "no cause".
+      expect(error).toContain('result event error');
+      expect(error).toContain('error_during_execution');
+      // boundedErrorText contract: ≤500 chars, or the truncation marker.
+      expect(/… \[truncated\]$/.test(error) || error.length <= 513).toBe(true);
+    });
+  });
+
+  test('result-event cause precedence: result string wins over errors over subtype (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const resultString = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-result' }, []),
+      ).run(invocation({ prompt: 'result-string run' }));
+      // The `result` string outranks the `errors` entries and the subtype.
+      expect(resultString.error).toContain('result-string-cause');
+      expect(resultString.error).not.toContain('errors-entry-cause');
+
+      const errorsOnly = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-errors' }, []),
+      ).run(invocation({ prompt: 'errors run' }));
+      // No `result` string → the joined `errors` entries are the cause.
+      expect(errorsOnly.error).toContain('errors-entry-cause');
+      expect(errorsOnly.error).not.toContain('error_during_execution');
+    });
+  });
+
   test('structured output: --json-schema + the fixture structured_output land in the result', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
@@ -596,6 +634,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
       const result = await driver.run(invocation({ prompt: 'usage run' }));
       expect(result.stopReason).toBe('complete');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(result.error).toBeUndefined();
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
       expect(typeof result.sessionId).toBe('string');
       const record = await store.load(result.sessionId as string);
@@ -632,6 +672,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         invocation({ prompt: 'budget run', budget: { maxTokens: 1000 } }),
       );
       expect(result.stopReason).toBe('budget');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(result.error).toBeUndefined();
       expect(result.usage.input).toBe(120_000);
     });
   });
@@ -645,6 +687,58 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.costUSD).toBeUndefined(); // no cost claim without a measurement
+      // #208: the verdict POPULATES WorkerResult.error — the nonzero exit code
+      // plus the CLI's stderr text — instead of an unexplained "no cause".
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).toMatch(/exited with code 1/);
+      expect(error).toContain('fake-agent-cli');
+      expect(error).toContain('not served by this endpoint');
+    });
+  });
+
+  test('error-cause text is bounded and never echoes an environment secret (#208)', async () => {
+    const secret = 'cq-test-secret-value-9f3a';
+    process.env.CQ_TEST_API_KEY = secret;
+    onTestFinished(() => {
+      delete process.env.CQ_TEST_API_KEY;
+    });
+    await withScratch(async (scratchDir) => {
+      // POSITIVE redaction + bound exercise: a spawn failure whose message
+      // carries the secret value and overshoots the 500-char bound, so the
+      // persisted cause must contain the redaction marker AND the truncation
+      // marker (the shared boundedErrorText contract).
+      const throwingSpawn: SpawnFn = () => {
+        throw new Error(`spawn blew up with ${secret}: ${'x'.repeat(600)}`);
+      };
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: throwingSpawn,
+      });
+      const result = await driver.run(invocation({ prompt: 'secret run' }));
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).not.toContain(secret);
+      expect(error).toContain('[redacted]');
+      expect(error.length).toBeLessThanOrEqual(513);
+      expect(error.endsWith('… [truncated]')).toBe(true);
+    });
+  });
+
+  test('a signal death with no result event names the signal in error (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'self-kill' }, []),
+      );
+      // NOT a governed run: no governor signal fires, so this cannot settle
+      // 'aborted' — the child dies by its own real SIGKILL and the error
+      // cause must name the signal.
+      const result = await driver.run(invocation({ prompt: 'signal run' }));
+      expect(result.stopReason).toBe('error');
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).toContain('killed by signal');
+      expect(error).toContain('SIGKILL');
     });
   });
 
@@ -766,6 +860,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.costUSD).toBeUndefined(); // nothing was measured — no cost claim
+      // #208: the spawn cause reaches WorkerResult.error too, not just narration.
+      expect(result.error).toContain('spawn failed');
+      expect(result.error).toContain('spawn args must be strings');
       // The failure is narrated best-effort (same swallow rule as persistence).
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"spawn-failed"'));
