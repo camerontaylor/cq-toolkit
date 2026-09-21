@@ -442,6 +442,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
       expect(outcome.value.stopReason).toBe('aborted');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(outcome.value.error).toBeUndefined();
       const narration = await narrationOf(store, outcome.value.sessionId as string);
       const rungs = narration
         .filter((line) => line.includes('"termination-rung"'))
@@ -632,6 +634,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const driver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
       const result = await driver.run(invocation({ prompt: 'usage run' }));
       expect(result.stopReason).toBe('complete');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(result.error).toBeUndefined();
       expect(result.usage).toEqual({ input: 10, output: 5, cacheRead: 2, cacheWrite: 3 });
       expect(typeof result.sessionId).toBe('string');
       const record = await store.load(result.sessionId as string);
@@ -668,6 +672,8 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         invocation({ prompt: 'budget run', budget: { maxTokens: 1000 } }),
       );
       expect(result.stopReason).toBe('budget');
+      // error rides only stopReason 'error' (frozen WorkerResultSchema contract).
+      expect(result.error).toBeUndefined();
       expect(result.usage.input).toBe(120_000);
     });
   });
@@ -716,6 +722,23 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(error).toContain('[redacted]');
       expect(error.length).toBeLessThanOrEqual(513);
       expect(error.endsWith('… [truncated]')).toBe(true);
+    });
+  });
+
+  test('a signal death with no result event names the signal in error (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'self-kill' }, []),
+      );
+      // NOT a governed run: no governor signal fires, so this cannot settle
+      // 'aborted' — the child dies by its own real SIGKILL and the error
+      // cause must name the signal.
+      const result = await driver.run(invocation({ prompt: 'signal run' }));
+      expect(result.stopReason).toBe('error');
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).toContain('killed by signal');
+      expect(error).toContain('SIGKILL');
     });
   });
 

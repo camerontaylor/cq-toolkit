@@ -55,6 +55,8 @@
 //   unknown-model    stderr error naming the model, exit 1 — the silent-
 //                    remap footgun's outcome, simulated
 //   fail             stderr error, exit 1, no result event
+//   self-kill        kill the CLI with SIGKILL, emitting NO result event —
+//                    the driver's signal-death error cause (#208)
 //   slow-exit-ms     stay alive FAKE_AGENT_SLOW_EXIT_MS ms, then a normal
 //                    ok completion (default SIGTERM kills it mid-run)
 //   block-until-abort|ignore-sigterm
@@ -370,6 +372,13 @@ async function main() {
   if (MODE === 'fail') {
     err('fake-agent-cli: simulated hard failure before any result');
     process.exitCode = 1;
+    return;
+  }
+  if (MODE === 'self-kill') {
+    // Die by a REAL signal with NO result event (#208): the driver's error
+    // cause must name the signal, not a governed abort (this run is not
+    // governed). SIGKILL is uncatchable and leaves no exit code.
+    process.kill(process.pid, 'SIGKILL');
     return;
   }
 
