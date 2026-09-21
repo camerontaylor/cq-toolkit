@@ -138,7 +138,11 @@ structured-output miss from a loud endpoint absence without the frozen seam
 carrying a new field. `[structured-output-miss]` — the required structured
 object was not produced / did not parse (the `result.output` getter threw
 `NoOutputGeneratedError` / `NoObjectGeneratedError`); the verdict stays
-`error` and `structuredOutput` is never fabricated. `[endpoint-timeout]` —
+`error` and `structuredOutput` is never fabricated. A token cap or a
+governed abort that leaves the final step on tool-calls is the honest
+`budget`/`aborted` verdict instead — the missing object is its consequence,
+not a driver failure — and `structuredOutput` is likewise never fabricated
+on those paths. `[endpoint-timeout]` —
 a transient network / endpoint-header timeout (the SDK-retryable class,
 including the non-retryable step-timeout abort). `[provider-error]` —
 anything else. The classification lives in

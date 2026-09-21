@@ -353,7 +353,12 @@ export class AiSdkDriver implements Driver {
         // recorded deviation from the earlier "no driver-side retries"
         // note: the same endpoint is healthy on the classifier cell, so one
         // retry recovers the hiccup while a governed abort still surfaces
-        // immediately.
+        // immediately. USAGE ACCOUNTING: `usage` remains the observed
+        // completed steps (the SDK reports no usage for a request that
+        // never produced a response) and `costBasis: 'modeled'` never
+        // claims billed spend — a retried request is exactly the DD-9
+        // api-equivalent caveat the modeled label records, not a hidden
+        // second charge.
         maxRetries: 1,
         // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
         // hung request cannot stall the loop. The step-timeout abort is not
