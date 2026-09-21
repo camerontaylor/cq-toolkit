@@ -546,6 +546,24 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   });
 
+  test('result-event error path: the error verdict names the result cause and stays bounded (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'result error run' }));
+      expect(result.stopReason).toBe('error');
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      // The failed result frame (is_error:true, subtype error_during_execution)
+      // is what the journal must show — not a bare "no cause".
+      expect(error).toContain('result event error');
+      expect(error).toContain('error_during_execution');
+      // boundedErrorText contract: ≤500 chars, or the truncation marker.
+      expect(/… \[truncated\]$/.test(error) || error.length <= 513).toBe(true);
+    });
+  });
+
   test('structured output: --json-schema + the fixture structured_output land in the result', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
@@ -645,6 +663,32 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.costUSD).toBeUndefined(); // no cost claim without a measurement
+      // #208: the verdict POPULATES WorkerResult.error — the nonzero exit code
+      // plus the CLI's stderr text — instead of an unexplained "no cause".
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      expect(error).toMatch(/exited with code 1/);
+      expect(error).toContain('fake-agent-cli');
+      expect(error).toContain('not served by this endpoint');
+    });
+  });
+
+  test('error-cause text is bounded and never echoes an environment secret (#208)', async () => {
+    const secret = 'cq-test-secret-value-9f3a';
+    process.env.CQ_TEST_API_KEY = secret;
+    onTestFinished(() => {
+      delete process.env.CQ_TEST_API_KEY;
+    });
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'unknown-model' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'secret run' }));
+      const error = result.error;
+      if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
+      // The persisted cause is bounded and redacted (boundedErrorText contract).
+      expect(error.length).toBeLessThanOrEqual(513);
+      expect(error).not.toContain(secret);
     });
   });
 
@@ -766,6 +810,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       expect(result.costUSD).toBeUndefined(); // nothing was measured — no cost claim
+      // #208: the spawn cause reaches WorkerResult.error too, not just narration.
+      expect(result.error).toContain('spawn failed');
+      expect(result.error).toContain('spawn args must be strings');
       // The failure is narrated best-effort (same swallow rule as persistence).
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"spawn-failed"'));

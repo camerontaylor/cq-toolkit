@@ -147,7 +147,12 @@
 // returns stopReason 'error' with the spawn error recorded as narration,
 // never a rejection. A spawn failure reports zero usage (nothing was
 // measured); an 'error' verdict from a real result event KEEPS the
-// CLI-reported usage (real evidence). Only PRE-DISPATCH validation throws
+// CLI-reported usage (real evidence). Every 'error' verdict also POPULATES
+// WorkerResult.error (bounded + secret-redacted, issue #208): the CLI result
+// event's own cause, else the child's exit code/signal or spawn error, plus
+// the retained stderr tail — so a 0-token failure is diagnosable from the
+// journal instead of an unexplained "driver reported no cause".
+// Only PRE-DISPATCH validation throws
 // (unknown model — the routing footgun; missing key env; unknown
 // sessionRef; a non-positive Budget.maxTokens; invalid grace windows or
 // binary template at construction; a schema that cannot become JSON Schema
@@ -186,6 +191,7 @@ import { buildTools } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
+import { boundedErrorText, describeError } from '../error-text.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -200,7 +206,7 @@ import type {
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
 import { spawnManaged, terminateGracefully } from './process.js';
-import type { ManagedChild, SpawnOptions, TerminationRungMarker } from './process.js';
+import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from './process.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -457,7 +463,13 @@ export class SubprocessDriver implements Driver {
       } catch {
         // deliberately swallowed — the verdict still reaches the caller
       }
-      return { usage: zeroUsage(), sessionId: record.sessionId, denials: [], stopReason: 'error' };
+      return {
+        usage: zeroUsage(),
+        sessionId: record.sessionId,
+        denials: [],
+        stopReason: 'error',
+        error: boundedErrorText(`subprocess driver: spawn failed — ${describeError(err)}`),
+      };
     }
 
     let aborted = false;
@@ -498,6 +510,19 @@ export class SubprocessDriver implements Driver {
     child.onStdoutLine((line) => handleStdoutLine(observation, line));
     child.onStderrLine((line) => observation.stderr.push(line));
 
+    // Capture the settled close value WITHOUT adding an unbounded await: a
+    // stubborn child the ladder force-resolved may never close, so this is
+    // best-effort error-cause evidence (issue #208) — the race semantics
+    // below are unchanged.
+    void child.close.then(
+      (closed) => {
+        observation.close = closed;
+      },
+      () => {
+        // child.close always settles (spawn failure included); a rejection is
+        // impossible in practice and must never affect the verdict.
+      },
+    );
     // Settle whichever channel lands first: the child closing (its result
     // event already folded) or the governed ladder finishing the kill.
     // The termination path deliberately does NOT await a stubborn child.
@@ -615,6 +640,19 @@ export class SubprocessDriver implements Driver {
       usage,
       resultStatus: resultStatusOf(observation.result),
     });
+    // The error field is present ONLY on a driver-level failure verdict (the
+    // frozen contract allows `error` only with stopReason 'error'): the cause
+    // is derived from the result frame, else the child's exit evidence, else
+    // the narration tail — a bare 'error' tells the caller nothing (issue
+    // #208, mirroring the claude-agent derivation).
+    let error: string | undefined;
+    if (stopReason === 'error') {
+      error = errorCauseOf(observation);
+      if (observation.stderr.length > 0) {
+        error = `${error}; stderr: ${observation.stderr.slice(-3).join(' | ')}`;
+      }
+      error = boundedErrorText(error);
+    }
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/spawn-failure verdict.
     // Price the model that was actually SERVED when one was observed (the
@@ -639,6 +677,7 @@ export class SubprocessDriver implements Driver {
       sessionId,
       denials: observation.denials,
       stopReason,
+      ...(error !== undefined ? { error } : {}),
     };
   }
 
@@ -766,6 +805,8 @@ interface RunObservation {
   assistantUsage: Usage | undefined;
   /** The terminal result event, when it arrived. */
   result: ResultEvent | undefined;
+  /** The child's settled close (exit code/signal/spawn error), when it closed — error-cause evidence (#208). */
+  close: ProcessClose | undefined;
   /** tool_use id → tool name (to attribute tool_result activity/denials). */
   toolUseNameById: Map<string, string>;
   /** tool_use blocks in arrival order (id, name, declared input). */
@@ -787,6 +828,7 @@ function newObservation(): RunObservation {
     stderr: [],
     assistantUsage: undefined,
     result: undefined,
+    close: undefined,
     toolUseNameById: new Map(),
     toolUses: [],
     toolResults: [],
@@ -1041,6 +1083,46 @@ export function resultStatusOf(result: ResultEvent | undefined): ResultStatus {
   if (result === undefined) return 'none';
   if (result['is_error'] === true) return 'error';
   return asString(result['subtype']) === 'success' ? 'success' : 'error';
+}
+
+/**
+ * The error CAUSE for an 'error' verdict (issue #208): what actually went
+ * wrong, in precedence order — a failed result frame's own `result` string,
+ * then its joined `errors` entries, then its subtype; else the child's spawn
+ * error, else its exit code or terminating signal, else the narration tail.
+ * The caller appends the retained stderr tail and redacts/bounds the result
+ * (`boundedErrorText`), so a 0-token failure is diagnosable from the journal.
+ */
+function errorCauseOf(observation: RunObservation): string {
+  const result = observation.result;
+  if (result !== undefined && resultStatusOf(result) === 'error') {
+    const rawResult = asString(result['result']);
+    const errorEntries = (asArray(result['errors']) ?? []).filter(
+      (entry): entry is string => typeof entry === 'string' && entry.trim() !== '',
+    );
+    const subtype = asString(result['subtype']);
+    const cause =
+      rawResult !== undefined && rawResult.trim() !== ''
+        ? rawResult
+        : errorEntries.length > 0
+          ? errorEntries.join('; ')
+          : `subtype '${subtype ?? 'unknown'}'`;
+    return `subprocess driver: result event error — ${cause}`;
+  }
+  const close = observation.close;
+  if (close?.spawnError !== undefined) {
+    return `subprocess driver: spawn failed — ${describeError(close.spawnError)}`;
+  }
+  if (close !== undefined && (close.code !== 0 || close.signal !== null)) {
+    if (close.signal !== null) {
+      return `subprocess driver: CLI killed by signal ${String(close.signal)}`;
+    }
+    return `subprocess driver: CLI exited with code ${String(close.code)}`;
+  }
+  const narration = observation.narration.at(-1);
+  return narration !== undefined && narration !== ''
+    ? `subprocess driver: no result event — ${narration}`
+    : 'subprocess driver: no result event';
 }
 
 /** Σ of the frozen Usage fields — the fold Budget.maxTokens is checked against. */
