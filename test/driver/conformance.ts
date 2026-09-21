@@ -233,6 +233,7 @@ export function runDriverConformance(
         expect(outcome.outcome).toBe('completed');
         if (outcome.outcome !== 'completed') return; // narrow for TS
         expect(outcome.value.stopReason).toBe('aborted');
+        expect(outcome.value.error).toBeUndefined();
       });
     });
 

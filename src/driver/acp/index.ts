@@ -286,7 +286,7 @@ export const NARRATION_TOOL = 'acp-narration';
  * aligns both); deriving it from the manifest at runtime is a post-v1
  * candidate, not a release blocker.
  */
-const CLIENT_VERSION = '1.0.0';
+const CLIENT_VERSION = '1.0.1';
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AcpDriverOptions {
