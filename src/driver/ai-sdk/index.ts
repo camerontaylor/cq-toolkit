@@ -112,8 +112,9 @@
 // 'error'. Only PRE-DISPATCH validation (unknown provider, missing key,
 // over-budget op prompt, unknown sessionRef) throws.
 //
-// CAUSE CLASSES (#210) — every error verdict's WorkerResult.error STARTS with
-// one stable class token, so the fixtures runner can reclassify an honest
+// CAUSE CLASSES (#210) — every error verdict's WorkerResult.error starts with
+// `ai-sdk driver: [<token>]` (the class token is the SECOND component, after
+// the lane prefix), so the fixtures runner can reclassify an honest
 // structured-output miss as a scored DD-4 miss while a transient endpoint
 // failure stays a loud absence — WITHOUT the frozen seam or
 // WorkerResultSchema carrying a new field (both forbid `error` on a
@@ -125,8 +126,9 @@
 //     (the SDK's own retryable transient class).
 //   - `[provider-error]` — anything else.
 // TRANSIENT RETRY (#210 Ask 1): the generateText call runs
-// `maxRetries: 1` — a BOUNDED retry-once for the SDK-retryable transient
-// class (endpoint header timeout / network). This is a deliberate, recorded
+// `maxRetries: 1` — ONE retry per step request (bounded; ≤ DEFAULT_MAX_STEPS
+// per run) for the SDK-retryable transient class (endpoint header timeout /
+// network). This is a deliberate, recorded
 // deviation from the earlier "no driver-side retries" note: the classifier
 // cell on the same endpoint is healthy, so a single retry recovers the
 // endpoint hiccup; the SDK's own retry machinery classifies retryability
@@ -345,7 +347,8 @@ export class AiSdkDriver implements Driver {
         model,
         system,
         messages: transcript,
-        // BOUNDED retry-once (#210 Ask 1): the SDK retries ONLY its
+        // ONE retry per step request (bounded; ≤ DEFAULT_MAX_STEPS per run)
+        // (#210 Ask 1): the SDK retries ONLY its
         // retryable transient class (endpoint header timeout / network),
         // and an exhausted retry still surfaces the attempt count and last
         // error in the thrown message, so the cause reaches
@@ -821,9 +824,9 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
  * structured-output miss from a loud endpoint absence without the frozen
  * seam carrying a new field. ORDER MATTERS: the structured-output miss wins
  * first (the getter's NoOutputGeneratedError / NoObjectGeneratedError), then
- * the SDK-retryable transient class (endpoint header timeout / network /
- * connection reset / any timeout wording or a TimeoutError name), and
- * anything else is a provider error. A plain governed AbortError never
+ * the SDK-retryable transient class (the specific endpoint-header-timeout /
+ * network phrases, or a TimeoutError name — the SDK step-timeout DOMException),
+ * and anything else is a provider error. A plain governed AbortError never
  * reaches this classifier (the outer catch short-circuits to `aborted`), so
  * there is no bare-`abort` match to over-fire on.
  */
@@ -834,7 +837,7 @@ export function classifyRunFailure(
   if (/No(Output|Object)Generated/i.test(name)) return 'structured-output-miss';
   const message = describeError(err);
   if (
-    /headers timeout|cannot connect to api|etimedout|econnreset|socket hang up|fetch failed|timeout/i.test(
+    /headers timeout|cannot connect to api|etimedout|econnreset|socket hang up|fetch failed/i.test(
       message,
     ) ||
     name === 'TimeoutError'

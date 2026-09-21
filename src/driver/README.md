@@ -118,9 +118,10 @@ The one driver-side temporal bound is the SDK call's per-request
 but a bound on each step of the tool loop so a hung HTTP request cannot
 stall the loop.
 
-Transient retry (#210): the SDK call runs `maxRetries: 1` — a BOUNDED
-retry-once for the SDK's own retryable transient class (endpoint header
-timeout / network). The SDK classifies retryability itself and its
+Transient retry (#210): the SDK call runs `maxRetries: 1` — ONE retry per
+step request (bounded; ≤ DEFAULT_MAX_STEPS per run) for the SDK's own
+retryable transient class (endpoint header timeout / network). The SDK
+classifies retryability itself and its
 exhausted-retry error names the attempt count and the last error
 (`Failed after N attempts. Last error: …`), so the cause still reaches
 `WorkerResult.error`. This is a deliberate, recorded deviation from the
@@ -132,8 +133,9 @@ Stop reasons: governed abort or abort-shaped failure → `aborted`; token
 budget tripped or SDK `length` → `budget`; SDK `error`/`content-filter` or
 a mid-run throw → `error`; otherwise `complete`.
 
-Failure classes (#210): every `error` verdict's `WorkerResult.error` STARTS
-with one stable class token, so the fixtures runner can tell an honest
+Failure classes (#210): every `error` verdict's `WorkerResult.error` starts
+with `ai-sdk driver: [<token>]` — the class token is the second component,
+after the lane prefix — so the fixtures runner can tell an honest
 structured-output miss from a loud endpoint absence without the frozen seam
 carrying a new field. `[structured-output-miss]` — the required structured
 object was not produced / did not parse (the `result.output` getter threw
@@ -144,7 +146,8 @@ governed abort that leaves the final step on tool-calls is the honest
 not a driver failure — and `structuredOutput` is likewise never fabricated
 on those paths. `[endpoint-timeout]` —
 a transient network / endpoint-header timeout (the SDK-retryable class,
-including the non-retryable step-timeout abort). `[provider-error]` —
+including the non-retryable step-timeout abort, classified via its
+`TimeoutError` name). `[provider-error]` —
 anything else. The classification lives in
 the exported pure `classifyRunFailure(err)`.
 

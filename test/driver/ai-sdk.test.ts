@@ -21,6 +21,7 @@ import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import { z } from 'zod';
 import { MockLanguageModelV4 } from 'ai/test';
+import { APICallError } from '@ai-sdk/provider';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   AiSdkDriver,
@@ -31,6 +32,8 @@ import {
   usageFromSdk,
 } from '../../src/driver/ai-sdk/index.js';
 import type { AiSdkDriverOptions } from '../../src/driver/ai-sdk/index.js';
+import { runLadder } from '../../src/kernel/governor.js';
+import type { Clock } from '../../src/kernel/governor.js';
 import {
   type ConformanceSpec,
   CONFORMANCE_PROVIDER,
@@ -587,12 +590,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// #210 — bounded retry-once + per-request step timeout + machine-classifiable
-// failure classes (`WorkerResult.error` tokens)
+// #210 — one retry per step request + per-request step timeout +
+// machine-classifiable failure classes (`WorkerResult.error` tokens)
 // ---------------------------------------------------------------------------
 
 describe('ai-sdk driver failure classes (#210)', () => {
-  test('the SDK call runs a bounded retry-once and a per-request step timeout', async () => {
+  test('the SDK call runs one retry per step request and a per-request step timeout', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
       const driver = new AiSdkDriver({
@@ -601,8 +604,9 @@ describe('ai-sdk driver failure classes (#210)', () => {
       });
       await driver.run(invocation());
       const args = lastGenerateTextArgs();
-      // A BOUNDED retry-once for the SDK-retryable transient class — the
-      // exhausted-retry error still names the attempt count and last error.
+      // ONE retry per step request for the SDK-retryable transient class —
+      // the exhausted-retry error still names the attempt count and last
+      // error (and the bound is per step, so ≤ DEFAULT_MAX_STEPS per run).
       expect(args.maxRetries).toBe(1);
       // Per-request bound for EACH step of the tool loop.
       expect(args.timeout).toEqual({ stepMs: DEFAULT_STEP_TIMEOUT_MS });
@@ -632,6 +636,105 @@ describe('ai-sdk driver failure classes (#210)', () => {
       expect(result.error?.startsWith('ai-sdk driver: [endpoint-timeout] run failed —')).toBe(true);
       expect(result.error).toContain('Cannot connect to API: Headers Timeout Error');
       expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a RETRYABLE endpoint timeout is retried once, then classified [endpoint-timeout] (#210)', async () => {
+    // The SDK's own retry machinery classifies this APICallError retryable:
+    // attempt 1 fails, the SDK backs off, attempt 2 fails, and the exhausted
+    // retry throws a RetryError naming the attempt count and the last error.
+    const retryable = new APICallError({
+      message: 'Cannot connect to API: Headers Timeout Error',
+      url: 'https://example.test',
+      requestBodyValues: {},
+      isRetryable: true,
+    });
+    let calls = 0;
+    const retryableModel = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        calls += 1;
+        throw retryable;
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => retryableModel },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(calls).toBe(2); // maxRetries: 1 really retried the transient class
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith('ai-sdk driver: [endpoint-timeout] run failed —')).toBe(true);
+      expect(result.error).toContain('Failed after 2 attempts');
+      expect(result.error).toContain('Headers Timeout Error');
+      expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  test('a governed abort that leaves the final step on tool-calls settles aborted, not a miss (#210)', async () => {
+    // Deterministic governed-context mechanics: an injected clock CAPTURES the
+    // ladder's rung-1 callback WITHOUT arming a real timer, so the mock model
+    // fires the abort synchronously on its single step. The token cap then ends
+    // the loop on that tool-call step (no next iteration re-checks the signal),
+    // generateText resolves, result.output throws, and stopReasonOf sees
+    // `aborted` FIRST — the INNER miss catch's carve-out, not the outer catch
+    // (which the conformance abort test already covers).
+    let fireGovernedSignal: (() => void) | undefined;
+    const manualClock: Clock = {
+      now: () => 0,
+      setTimeout: (fn) => {
+        fireGovernedSignal ??= fn; // rung 1 only; rungs 2/3 never arm
+        return 0;
+      },
+      clearTimeout: () => {},
+    };
+    const toolCallThenAbort = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => {
+        fireGovernedSignal?.();
+        return toolCallResult('read', { path: 'absent.txt' });
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => toolCallThenAbort },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+        // A priced model DISCRIMINATES the inner carve-out (full-result usage +
+        // derived cost) from the outer catch (partial fold, never fabricated
+        // cost) — so the test proves the branch, not just the verdict.
+        pricing: () => ({ input: 3, output: 15 }),
+      });
+      const outcome = await runLadder(
+        () =>
+          driver.run(
+            invocation({
+              toolPolicy: { allow: ['read'], mode: 'allowlist' },
+              budget: { maxTokens: 1 },
+            }),
+          ),
+        { wallClockMs: 1_000 },
+        { op: 'ai-sdk-failure-class', jobKey: 'ai-sdk-failure-class', attempt: 1 },
+        { clock: manualClock },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return; // narrow for TS
+      expect(fireGovernedSignal).toBeDefined(); // the rung really was captured
+      expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.error).toBeUndefined();
+      expect(outcome.value.structuredOutput).toBeUndefined();
+      // The inner carve-out priced the FULL result usage — the outer catch
+      // would have no costUSD (and no served model).
+      expect(typeof outcome.value.costUSD).toBe('number');
+      expect(outcome.value.costBasis).toBe('modeled');
+      expect(outcome.value.model).toBe('mock-1');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
@@ -671,8 +774,15 @@ describe('ai-sdk driver failure classes (#210)', () => {
     expect(classifyRunFailure(new Error('read ECONNRESET'))).toBe('endpoint-timeout');
     expect(classifyRunFailure(new Error('socket hang up'))).toBe('endpoint-timeout');
     expect(classifyRunFailure(new Error('fetch failed'))).toBe('endpoint-timeout');
+    // The SDK step-timeout DOMException carries name TimeoutError; a bare
+    // `timeout` substring in a provider message is NOT a transient signal.
+    expect(
+      classifyRunFailure(
+        Object.assign(new Error('Step timeout of 120000ms exceeded'), { name: 'TimeoutError' }),
+      ),
+    ).toBe('endpoint-timeout');
     expect(classifyRunFailure(new Error('Step timeout of 120000ms exceeded'))).toBe(
-      'endpoint-timeout',
+      'provider-error',
     );
     expect(
       classifyRunFailure(Object.assign(new Error('timed out'), { name: 'TimeoutError' })),
