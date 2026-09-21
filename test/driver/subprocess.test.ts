@@ -680,15 +680,24 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       delete process.env.CQ_TEST_API_KEY;
     });
     await withScratch(async (scratchDir) => {
-      const driver = new SubprocessDriver(
-        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'unknown-model' }, []),
-      );
+      // POSITIVE redaction + bound exercise: a spawn failure whose message
+      // carries the secret value and overshoots the 500-char bound, so the
+      // persisted cause must contain the redaction marker AND the truncation
+      // marker (the shared boundedErrorText contract).
+      const throwingSpawn: SpawnFn = () => {
+        throw new Error(`spawn blew up with ${secret}: ${'x'.repeat(600)}`);
+      };
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: throwingSpawn,
+      });
       const result = await driver.run(invocation({ prompt: 'secret run' }));
       const error = result.error;
       if (error === undefined) throw new Error('an error verdict must carry a cause (#208)');
-      // The persisted cause is bounded and redacted (boundedErrorText contract).
-      expect(error.length).toBeLessThanOrEqual(513);
       expect(error).not.toContain(secret);
+      expect(error).toContain('[redacted]');
+      expect(error.length).toBeLessThanOrEqual(513);
+      expect(error.endsWith('… [truncated]')).toBe(true);
     });
   });
 
