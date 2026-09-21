@@ -564,6 +564,24 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   });
 
+  test('result-event cause precedence: result string wins over errors over subtype (#208)', async () => {
+    await withScratch(async (scratchDir) => {
+      const resultString = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-result' }, []),
+      ).run(invocation({ prompt: 'result-string run' }));
+      // The `result` string outranks the `errors` entries and the subtype.
+      expect(resultString.error).toContain('result-string-cause');
+      expect(resultString.error).not.toContain('errors-entry-cause');
+
+      const errorsOnly = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'error-errors' }, []),
+      ).run(invocation({ prompt: 'errors run' }));
+      // No `result` string → the joined `errors` entries are the cause.
+      expect(errorsOnly.error).toContain('errors-entry-cause');
+      expect(errorsOnly.error).not.toContain('error_during_execution');
+    });
+  });
+
   test('structured output: --json-schema + the fixture structured_output land in the result', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];

@@ -46,6 +46,9 @@
 //                    'note.txt' (the tool_use read of a workspace file)
 //   deny-tool        scripted permission denial: tool_use 'edit' + is_error
 //                    tool_result + result is_error:true (no execution)
+//   error-result     result is_error:true with result + errors + subtype set
+//                    (the driver's result→errors→subtype cause precedence)
+//   error-errors     result is_error:true with only errors set (middle leg)
 //   emit-junk        non-JSON lines interleaved into an ok run
 //   budget-usage     ok run reporting usage far above any small cap
 //   resume-echo      ok run whose reply echoes the received --resume id
@@ -409,6 +412,26 @@ async function main() {
     emitToolUse('tu-deny', 'edit', { path: 'x' });
     emitToolResult('tu-deny', true, 'permission denied: edit is not allowed');
     emitResult({ is_error: true, subtype: 'error_during_execution' });
+    return;
+  }
+  if (MODE === 'error-result') {
+    // A failed result frame carrying ALL THREE cause sources so the driver's
+    // precedence (result → errors → subtype) is observable (#208).
+    emitResult({
+      is_error: true,
+      subtype: 'error_during_execution',
+      result: 'result-string-cause',
+      errors: ['errors-entry-cause'],
+    });
+    return;
+  }
+  if (MODE === 'error-errors') {
+    // A failed frame with only `errors` set (the middle precedence leg).
+    emitResult({
+      is_error: true,
+      subtype: 'error_during_execution',
+      errors: ['errors-entry-cause'],
+    });
     return;
   }
   if (MODE === 'emit-junk') {
