@@ -99,6 +99,53 @@ describe('stripMetaSchema — removes the meta URI, deep-clones everything else'
     });
   });
 
+  test('value-bearing keywords (const/default/examples/enum) are copied verbatim', () => {
+    const payload = { $schema: DRAFT_2020_12, $ref: DRAFT_2020_12 };
+    const input: Record<string, unknown> = {
+      $schema: DRAFT_2020_12,
+      type: 'object',
+      const: payload,
+      default: { $schema: DRAFT_2020_12 },
+      examples: [payload, { nested: { $ref: DRAFT_2020_12 } }],
+      enum: [{ $schema: DRAFT_2020_12 }],
+    };
+    const out = stripMetaSchema(input);
+    // The top-level (real) $schema is gone; every value keyword is intact.
+    expect(out).toEqual({
+      type: 'object',
+      const: payload,
+      default: { $schema: DRAFT_2020_12 },
+      examples: [payload, { nested: { $ref: DRAFT_2020_12 } }],
+      enum: [{ $schema: DRAFT_2020_12 }],
+    });
+    // Still a deep clone — the data values are not aliased to the input.
+    expect(out['const']).not.toBe(payload);
+    expect(out['examples']).not.toBe(input['examples']);
+  });
+
+  test('a property literally named $schema survives (name→schema map keys are verbatim)', () => {
+    const input: Record<string, unknown> = {
+      type: 'object',
+      properties: {
+        $schema: { type: 'string' },
+        $ref: { type: 'string' },
+        nested: { $schema: DRAFT_2020_12, type: 'number' },
+      },
+      $defs: { $schema: { type: 'string' } },
+      dependentSchemas: { $schema: { type: 'string' } },
+    };
+    expect(stripMetaSchema(input)).toEqual({
+      type: 'object',
+      properties: {
+        $schema: { type: 'string' }, // the KEY is data, kept
+        $ref: { type: 'string' },
+        nested: { type: 'number' }, // the VALUE is a schema, $schema stripped
+      },
+      $defs: { $schema: { type: 'string' } },
+      dependentSchemas: { $schema: { type: 'string' } },
+    });
+  });
+
   test("zod's real output: the emitted $schema is stripped, the body survives", () => {
     const schema = z.object({ answer: z.string() }).strict();
     const emitted = z.toJSONSchema(schema) as Record<string, unknown>;

@@ -13,21 +13,73 @@
 // The CLI resolves internal `#/...` references (zod's `#/$defs/...`) but has
 // no network/registry lookup for the external meta URI, so the URI — and any
 // `$ref` pointing at it — must be gone before the schema leaves this process.
+//
+// SCHEMA-POSITION AWARENESS: `$schema`/`$ref` are keywords, not data. A blind
+// deep walk would also strip them out of JSON VALUES that merely LOOK like
+// schemas (a `const`/`default`/`enum`/`examples` payload, or a property
+// literally NAMED `$schema`). The walk therefore knows the schema grammar:
+// value-bearing keywords are copied verbatim, name→schema maps keep their
+// keys verbatim, and only genuine subschema positions are recursed.
 
 /** An absolute JSON-Schema meta URI (`http(s)://json-schema.org/...`). */
 const META_SCHEMA_URI = /^https?:\/\/json-schema\.org\//;
 
-/** `$schema` / meta-URI `$ref` blind deep clone (never the input object). */
-function cloneWithoutMetaSchema(value: unknown): unknown {
+/** Keywords whose content is arbitrary DATA, never a subschema — copied verbatim. */
+const VALUE_KEYWORDS = new Set(['const', 'default', 'examples', 'enum']);
+
+/** Keywords whose value is a name→schema map — keys kept verbatim, values walked. */
+const SCHEMA_MAP_KEYWORDS = new Set([
+  'properties',
+  'patternProperties',
+  '$defs',
+  'definitions',
+  'dependentSchemas',
+]);
+
+/** Deep clone of arbitrary DATA (never the input object) — strips nothing. */
+function cloneData(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return value.map((entry) => cloneWithoutMetaSchema(entry));
+    return value.map((entry) => cloneData(entry));
+  }
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = cloneData(entry);
+    }
+    return out;
+  }
+  return value;
+}
+
+/** A name→schema map: KEYS verbatim (a key named `$schema` survives), VALUES walked. */
+function cloneSchemaMap(value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return cloneData(value); // malformed map — clone it verbatim
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = cloneSchema(entry);
+  }
+  return out;
+}
+
+/** A SCHEMA position: `$schema` / meta-URI `$ref` dropping deep clone (never the input). */
+function cloneSchema(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => cloneSchema(entry));
   }
   if (value !== null && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       if (key === '$schema') continue;
       if (key === '$ref' && typeof entry === 'string' && META_SCHEMA_URI.test(entry)) continue;
-      out[key] = cloneWithoutMetaSchema(entry);
+      if (VALUE_KEYWORDS.has(key)) {
+        out[key] = cloneData(entry);
+      } else if (SCHEMA_MAP_KEYWORDS.has(key)) {
+        out[key] = cloneSchemaMap(entry);
+      } else {
+        out[key] = cloneSchema(entry);
+      }
     }
     return out;
   }
@@ -35,16 +87,21 @@ function cloneWithoutMetaSchema(value: unknown): unknown {
 }
 
 /**
- * Return a DEEP CLONE of `schema` with every `$schema` property (top level
- * and nested, in objects or arrays) and every absolute JSON-Schema meta
- * `$ref` removed. `$defs`, `properties`, `required`,
- * `additionalProperties` and internal `#/...` refs are left untouched —
- * those ARE resolvable by the CLI.
+ * Return a DEEP CLONE of `schema` with every `$schema` property and every
+ * absolute JSON-Schema meta `$ref` removed from genuine SCHEMA positions —
+ * top level and nested, in objects or arrays. `$defs`, `properties`,
+ * `required`, `additionalProperties` and internal `#/...` refs are left
+ * untouched — those ARE resolvable by the CLI.
+ *
+ * The walk is schema-position aware: `const`/`default`/`examples`/`enum`
+ * values and the KEYS of `properties`/`patternProperties`/`$defs`/
+ * `definitions`/`dependentSchemas` are copied verbatim, so data that merely
+ * looks like a schema — or a property literally named `$schema` — survives.
  *
  * The ORIGINAL zod schema remains the post-settle validator: a payload that
  * fails its `safeParse` is dropped to narration, never trusted and never
  * fabricated. This function only shapes the schema the CLI sees.
  */
 export function stripMetaSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  return cloneWithoutMetaSchema(schema) as Record<string, unknown>;
+  return cloneSchema(schema) as Record<string, unknown>;
 }
