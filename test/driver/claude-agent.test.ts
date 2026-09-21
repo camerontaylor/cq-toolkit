@@ -649,6 +649,15 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       }).run(invocation({ prompt: 'structured bad' }));
       expect(bad.structuredOutput).toBeUndefined();
       expect(bad.stopReason).toBe('complete');
+      // The rejection is evidence, not silence: the driver persists the
+      // narration marker into the SessionStore under its own sessionsDir
+      // (the subprocess sibling's pattern).
+      const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+      const record = await store.load(bad.sessionId as string);
+      const narration = record?.messages.find(
+        (m) => m.role === 'tool' && m.toolName === 'agent-narration',
+      );
+      expect(narration?.content).toContain('structured-output-rejected');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

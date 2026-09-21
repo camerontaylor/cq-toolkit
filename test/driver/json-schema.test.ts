@@ -69,6 +69,24 @@ describe('stripMetaSchema — removes the meta URI, deep-clones everything else'
     });
   });
 
+  test('absolute meta $dynamicRef/$recursiveRef are dropped; internal dynamic refs survive', () => {
+    const input: Record<string, unknown> = {
+      $defs: { x: { type: 'string' } },
+      type: 'object',
+      $ref: DRAFT_2020_12,
+      $dynamicRef: DRAFT_2020_12,
+      $recursiveRef: DRAFT_2020_12,
+      properties: {
+        internal: { $dynamicRef: '#/$defs/x' },
+      },
+    };
+    expect(stripMetaSchema(input)).toEqual({
+      $defs: { x: { type: 'string' } },
+      type: 'object',
+      properties: { internal: { $dynamicRef: '#/$defs/x' } },
+    });
+  });
+
   test('does not mutate the input, at any depth', () => {
     const input: Record<string, unknown> = {
       $schema: DRAFT_2020_12,

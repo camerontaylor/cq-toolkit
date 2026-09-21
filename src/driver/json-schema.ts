@@ -12,19 +12,24 @@
 //
 // The CLI resolves internal `#/...` references (zod's `#/$defs/...`) but has
 // no network/registry lookup for the external meta URI, so the URI — and any
-// `$ref` pointing at it — must be gone before the schema leaves this process.
+// reference keyword pointing at it — must be gone before the schema leaves
+// this process.
 //
-// SCHEMA-POSITION AWARENESS: `$schema`/`$ref` are keywords, not data. A blind
-// deep walk would also strip them out of JSON VALUES that merely LOOK like
-// schemas (a `const`/`default`/`enum`/`examples`/`dependentRequired` payload,
-// or a property literally NAMED `$schema`). The walk therefore knows the
-// schema grammar: value-bearing keywords are copied verbatim, name→schema
-// maps keep their keys verbatim, and only genuine subschema positions are
-// recursed. Output objects are null-prototype so an own `__proto__` key
-// parsed from JSON survives as a property instead of mutating the prototype.
+// SCHEMA-POSITION AWARENESS: `$schema` and the reference keywords are not
+// data. A blind deep walk would also strip them out of JSON VALUES that
+// merely LOOK like schemas (a `const`/`default`/`enum`/`examples`/
+// `dependentRequired` payload, or a property literally NAMED `$schema`). The
+// walk therefore knows the schema grammar: value-bearing keywords are copied
+// verbatim, name→schema maps keep their keys verbatim, and only genuine
+// subschema positions are recursed. Output objects are null-prototype so an
+// own `__proto__` key parsed from JSON survives as a property instead of
+// mutating the prototype.
 
 /** An absolute JSON-Schema meta URI (`http(s)://json-schema.org/...`). */
 const META_SCHEMA_URI = /^https?:\/\/json-schema\.org\//;
+
+/** Reference keywords the CLI cannot resolve when they point at the meta URI. */
+const REF_KEYWORDS = new Set(['$ref', '$dynamicRef', '$recursiveRef']);
 
 /** Keywords whose content is arbitrary DATA, never a subschema — copied verbatim. */
 const VALUE_KEYWORDS = new Set(['const', 'default', 'examples', 'enum', 'dependentRequired']);
@@ -65,7 +70,7 @@ function cloneSchemaMap(value: unknown): unknown {
   return out;
 }
 
-/** A SCHEMA position: `$schema` / meta-URI `$ref` dropping deep clone (never the input). */
+/** A SCHEMA position: `$schema` / meta-URI reference dropping deep clone (never the input). */
 function cloneSchema(value: unknown): unknown {
   if (Array.isArray(value)) {
     return value.map((entry) => cloneSchema(entry));
@@ -74,7 +79,9 @@ function cloneSchema(value: unknown): unknown {
     const out = Object.create(null) as Record<string, unknown>;
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       if (key === '$schema') continue;
-      if (key === '$ref' && typeof entry === 'string' && META_SCHEMA_URI.test(entry)) continue;
+      if (REF_KEYWORDS.has(key) && typeof entry === 'string' && META_SCHEMA_URI.test(entry)) {
+        continue;
+      }
       if (VALUE_KEYWORDS.has(key)) {
         out[key] = cloneData(entry);
       } else if (SCHEMA_MAP_KEYWORDS.has(key)) {
@@ -90,10 +97,10 @@ function cloneSchema(value: unknown): unknown {
 
 /**
  * Return a DEEP CLONE of `schema` with every `$schema` property and every
- * absolute JSON-Schema meta `$ref` removed from genuine SCHEMA positions —
- * top level and nested, in objects or arrays. `$defs`, `properties`,
- * `required`, `additionalProperties` and internal `#/...` refs are left
- * untouched — those ARE resolvable by the CLI.
+ * absolute JSON-Schema meta reference (`$ref`, `$dynamicRef`, `$recursiveRef`)
+ * removed from genuine SCHEMA positions — top level and nested, in objects or
+ * arrays. `$defs`, `properties`, `required`, `additionalProperties` and
+ * internal `#/...` refs are left untouched — those ARE resolvable by the CLI.
  *
  * The walk is schema-position aware: `const`/`default`/`examples`/`enum`/
  * `dependentRequired` values and the KEYS of `properties`/`patternProperties`/
