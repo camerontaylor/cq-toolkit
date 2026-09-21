@@ -141,9 +141,9 @@ export interface WorkerResult {
   /**
    * Underlying failure cause, when the driver caught one. Present only on a
    * driver-level failure verdict (stopReason 'error'), as a NON-EMPTY message.
-   * Drivers truncate (<= 500 chars) and secret-redact the cause before
-   * assigning it; it is never used to turn a driver failure into a model
-   * score.
+   * Drivers truncate the cause to a bounded length (500 chars plus a
+   * truncation marker) and secret-redact it before assigning it; it is never
+   * used to turn a driver failure into a model score.
    */
   error?: string;
   stopReason: DriverStopReason;
