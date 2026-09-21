@@ -138,8 +138,9 @@ Files:
   `binary?` default `'claude'`, `outputSchema?` → `--json-schema`,
   `routingTable?`, `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
   `harnessConfig?`, `pricing?`, `envAllowlist?`, and a `spawn?` override
-  hook for tests). The draft-2020-12 meta-schema `$schema` key is stripped
-  from the JSON Schema before the CLI sees the schema.
+  hook for tests). Before the CLI receives the JSON Schema, the driver
+  removes `$schema` properties and absolute `http(s)://json-schema.org/`
+  values under `$ref`, `$dynamicRef`, and `$recursiveRef` (`stripMetaSchema`).
 - `routing.ts` — env-based model routing as CONFIG (`RoutingTable`,
   `defaultRoutingTable()`, `routeFor`). Endpoints are anthropic-compat
   (zai / deepseek / anthropic, values from provider docs, as-of
@@ -275,8 +276,10 @@ Files:
 - `index.ts` — `ClaudeAgentDriver implements Driver` (constructor options:
   `sdkLoader?`, `endpointTable?`, `outputSchema?` → the SDK's native
   `outputFormat: { type: 'json_schema' }`, `harnessConfig?`,
-  `sessionsDir?`, `pricing?`). The draft-2020-12 meta-schema `$schema` key
-  is stripped from that schema before the CLI sees it.
+  `sessionsDir?`, `pricing?`). Before the CLI receives the schema, the
+  driver removes `$schema` properties and absolute
+  `http(s)://json-schema.org/` values under `$ref`, `$dynamicRef`, and
+  `$recursiveRef` (`stripMetaSchema`).
 - `routing.ts` — PROVIDER-only endpoint routing as CONFIG
   (`EndpointTable`, `defaultEndpointTable()` — zai / deepseek / anthropic,
   values from provider docs, as-of 2026-09; `resolveEndpoint`). Resolves
