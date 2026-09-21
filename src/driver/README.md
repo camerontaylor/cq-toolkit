@@ -138,7 +138,8 @@ Files:
   `binary?` default `'claude'`, `outputSchema?` → `--json-schema`,
   `routingTable?`, `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
   `harnessConfig?`, `pricing?`, `envAllowlist?`, and a `spawn?` override
-  hook for tests).
+  hook for tests). The draft-2020-12 meta-schema `$schema` key is stripped
+  from the JSON Schema before the CLI sees the schema.
 - `routing.ts` — env-based model routing as CONFIG (`RoutingTable`,
   `defaultRoutingTable()`, `routeFor`). Endpoints are anthropic-compat
   (zai / deepseek / anthropic, values from provider docs, as-of
@@ -274,7 +275,8 @@ Files:
 - `index.ts` — `ClaudeAgentDriver implements Driver` (constructor options:
   `sdkLoader?`, `endpointTable?`, `outputSchema?` → the SDK's native
   `outputFormat: { type: 'json_schema' }`, `harnessConfig?`,
-  `sessionsDir?`, `pricing?`).
+  `sessionsDir?`, `pricing?`). The draft-2020-12 meta-schema `$schema` key
+  is stripped from that schema before the CLI sees it.
 - `routing.ts` — PROVIDER-only endpoint routing as CONFIG
   (`EndpointTable`, `defaultEndpointTable()` — zai / deepseek / anthropic,
   values from provider docs, as-of 2026-09; `resolveEndpoint`). Resolves

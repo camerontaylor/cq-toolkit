@@ -185,6 +185,7 @@ import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import { stripMetaSchema } from '../json-schema.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -323,7 +324,7 @@ export class SubprocessDriver implements Driver {
     this.outputJsonSchema =
       options.outputSchema === undefined
         ? undefined
-        : JSON.stringify(z.toJSONSchema(options.outputSchema));
+        : JSON.stringify(stripMetaSchema(z.toJSONSchema(options.outputSchema)));
     // An invalid table throws HERE (construction is the closest thing to
     // compile time a data table has) — never silently at route time.
     this.routingTable = RoutingTableSchema.parse(options.routingTable ?? defaultRoutingTable());

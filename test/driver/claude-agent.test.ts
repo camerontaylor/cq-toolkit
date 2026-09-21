@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
+import { stripMetaSchema } from '../../src/driver/json-schema.js';
 import {
   AGENT_SESSION_FILE,
   allowedToolNames,
@@ -633,7 +634,11 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         schema: Record<string, unknown>;
       };
       expect(sent.type).toBe('json_schema');
-      expect(sent.schema).toEqual(z.toJSONSchema(schema));
+      // The draft-2020-12 meta `$schema` URI is stripped before the SDK
+      // hands the schema to the CLI (the CLI rejects that URI pre-model,
+      // #209); the schema body survives intact.
+      expect(sent.schema['$schema']).toBeUndefined();
+      expect(sent.schema).toEqual(stripMetaSchema(z.toJSONSchema(schema)));
       expect(ok.structuredOutput).toEqual({ answer: 'ok' });
 
       // Second run: a payload that fails the schema is dropped, never trusted.

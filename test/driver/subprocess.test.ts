@@ -52,6 +52,7 @@ import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
+import { stripMetaSchema } from '../../src/driver/json-schema.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { realClock, runLadder } from '../../src/kernel/governor.js';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
@@ -129,6 +130,13 @@ function directiveEnv(directive: ModelDirective | undefined): Record<string, str
 function allowedToolsArg(args: readonly string[]): string {
   const index = args.indexOf('--allowedTools');
   return index !== -1 && index + 1 < args.length ? (args[index + 1] as string) : '';
+}
+
+/** The parsed --json-schema value of a built argv (the CLI's structured-output contract). */
+function jsonSchemaArgOf(args: readonly string[]): Record<string, unknown> {
+  const index = args.indexOf('--json-schema');
+  if (index === -1 || index + 1 >= args.length) throw new Error('--json-schema missing from argv');
+  return JSON.parse(args[index + 1] as string) as Record<string, unknown>;
 }
 
 /** One recorded spawn call: the exact argv + env the driver handed over. */
@@ -540,13 +548,20 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
 
   test('structured output: --json-schema + the fixture structured_output land in the result', async () => {
     await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const schema = z.object({ answer: z.string() }).strict();
       const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, []),
-        outputSchema: z.object({ answer: z.string() }).strict(),
+        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'structured-ok' }, calls),
+        outputSchema: schema,
       });
       const result = await driver.run(invocation({ prompt: 'structured run' }));
       expect(result.stopReason).toBe('complete');
       expect(result.structuredOutput).toEqual({ answer: 'ok' });
+      // The serialized --json-schema arg carries NO draft-2020-12 meta key —
+      // the CLI rejects that URI before the model runs (#209).
+      const arg = jsonSchemaArgOf(calls[0]?.args ?? []);
+      expect(arg['$schema']).toBeUndefined();
+      expect(arg).toEqual(stripMetaSchema(z.toJSONSchema(schema)));
     });
   });
 
