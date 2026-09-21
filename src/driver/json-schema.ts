@@ -16,16 +16,18 @@
 //
 // SCHEMA-POSITION AWARENESS: `$schema`/`$ref` are keywords, not data. A blind
 // deep walk would also strip them out of JSON VALUES that merely LOOK like
-// schemas (a `const`/`default`/`enum`/`examples` payload, or a property
-// literally NAMED `$schema`). The walk therefore knows the schema grammar:
-// value-bearing keywords are copied verbatim, name→schema maps keep their
-// keys verbatim, and only genuine subschema positions are recursed.
+// schemas (a `const`/`default`/`enum`/`examples`/`dependentRequired` payload,
+// or a property literally NAMED `$schema`). The walk therefore knows the
+// schema grammar: value-bearing keywords are copied verbatim, name→schema
+// maps keep their keys verbatim, and only genuine subschema positions are
+// recursed. Output objects are null-prototype so an own `__proto__` key
+// parsed from JSON survives as a property instead of mutating the prototype.
 
 /** An absolute JSON-Schema meta URI (`http(s)://json-schema.org/...`). */
 const META_SCHEMA_URI = /^https?:\/\/json-schema\.org\//;
 
 /** Keywords whose content is arbitrary DATA, never a subschema — copied verbatim. */
-const VALUE_KEYWORDS = new Set(['const', 'default', 'examples', 'enum']);
+const VALUE_KEYWORDS = new Set(['const', 'default', 'examples', 'enum', 'dependentRequired']);
 
 /** Keywords whose value is a name→schema map — keys kept verbatim, values walked. */
 const SCHEMA_MAP_KEYWORDS = new Set([
@@ -42,7 +44,7 @@ function cloneData(value: unknown): unknown {
     return value.map((entry) => cloneData(entry));
   }
   if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
+    const out = Object.create(null) as Record<string, unknown>;
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       out[key] = cloneData(entry);
     }
@@ -56,7 +58,7 @@ function cloneSchemaMap(value: unknown): unknown {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     return cloneData(value); // malformed map — clone it verbatim
   }
-  const out: Record<string, unknown> = {};
+  const out = Object.create(null) as Record<string, unknown>;
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
     out[key] = cloneSchema(entry);
   }
@@ -69,7 +71,7 @@ function cloneSchema(value: unknown): unknown {
     return value.map((entry) => cloneSchema(entry));
   }
   if (value !== null && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
+    const out = Object.create(null) as Record<string, unknown>;
     for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
       if (key === '$schema') continue;
       if (key === '$ref' && typeof entry === 'string' && META_SCHEMA_URI.test(entry)) continue;
@@ -93,10 +95,12 @@ function cloneSchema(value: unknown): unknown {
  * `required`, `additionalProperties` and internal `#/...` refs are left
  * untouched — those ARE resolvable by the CLI.
  *
- * The walk is schema-position aware: `const`/`default`/`examples`/`enum`
- * values and the KEYS of `properties`/`patternProperties`/`$defs`/
- * `definitions`/`dependentSchemas` are copied verbatim, so data that merely
- * looks like a schema — or a property literally named `$schema` — survives.
+ * The walk is schema-position aware: `const`/`default`/`examples`/`enum`/
+ * `dependentRequired` values and the KEYS of `properties`/`patternProperties`/
+ * `$defs`/`definitions`/`dependentSchemas` are copied verbatim, so data that
+ * merely looks like a schema — or a property literally named `$schema` —
+ * survives. Output objects are null-prototype, so an own `__proto__` key is
+ * preserved as a property rather than reaching the prototype setter.
  *
  * The ORIGINAL zod schema remains the post-settle validator: a payload that
  * fails its `safeParse` is dropped to narration, never trusted and never

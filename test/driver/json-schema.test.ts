@@ -146,6 +146,29 @@ describe('stripMetaSchema — removes the meta URI, deep-clones everything else'
     });
   });
 
+  test('dependentRequired is data, not a schema — its entries are copied verbatim', () => {
+    const input: Record<string, unknown> = {
+      type: 'object',
+      dependentRequired: { $schema: ['x'], other: ['y', 'z'] },
+    };
+    expect(stripMetaSchema(input)).toEqual({
+      type: 'object',
+      dependentRequired: { $schema: ['x'], other: ['y', 'z'] },
+    });
+  });
+
+  test('an own __proto__ key survives as a property (null-prototype output)', () => {
+    const input = JSON.parse('{"type":"object","__proto__":{"type":"string"}}') as Record<
+      string,
+      unknown
+    >;
+    expect(Object.hasOwn(input, '__proto__')).toBe(true); // JSON.parse makes it own
+    const out = stripMetaSchema(input);
+    expect(Object.hasOwn(out, '__proto__')).toBe(true);
+    expect(out['__proto__']).toEqual({ type: 'string' });
+    expect(Object.getPrototypeOf(out)).toBeNull(); // no prototype pollution
+  });
+
   test("zod's real output: the emitted $schema is stripped, the body survives", () => {
     const schema = z.object({ answer: z.string() }).strict();
     const emitted = z.toJSONSchema(schema) as Record<string, unknown>;
