@@ -24,7 +24,8 @@
 //      costUSD is.
 //   8. Post-freeze seam migration: WorkerResultSchema encodes the new wire
 //      coupling — `error` is present only on a `stopReason: 'error'`
-//      verdict, and it is non-empty.
+//      verdict, and it is non-empty and bounded to the producer's
+//      500-chars-plus-marker shape.
 //
 // Determinism: hand-rolled mulberry32 PRNG, fixed seeds derived from test
 // names. No Date.now(), no Math.random(), no new dependencies — vitest only.
@@ -964,20 +965,26 @@ describe('WorkerResult.error — post-freeze seam migration wire contract', () =
     expect(parsed.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
   });
 
-  test('the error message length bound is enforced (500 chars, not 501)', () => {
+  test('the error message length bound matches the producer shape (513 incl. marker)', () => {
     const base = {
       usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
       denials: [],
       stopReason: 'error' as const,
     };
+    // 500 is the producer's raw cap; 513 is its truncated output (500 plus
+    // the 13-char '… [truncated]' marker), which the old .max(500) rejected.
+    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base, error: 'x'.repeat(500) });
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      ...base,
+      error: 'x'.repeat(500) + '… [truncated]',
+    });
     const tooLong = kernelSchema.WorkerResultSchema.safeParse({
       ...base,
-      error: 'x'.repeat(501),
+      error: 'x'.repeat(514),
     });
     expect(tooLong.success).toBe(false);
     if (tooLong.success) return; // narrow for TS
     expect(tooLong.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
-    roundTripsThrough(kernelSchema.WorkerResultSchema, { ...base, error: 'x'.repeat(500) });
   });
 });
 
