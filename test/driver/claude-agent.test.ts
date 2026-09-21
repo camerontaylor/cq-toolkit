@@ -743,6 +743,48 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
+  test('a query throw surfaces its cause on the error verdict (#204)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: () => {
+            throw new Error('sdk boundary exploded');
+          },
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error).toContain('sdk boundary exploded');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a query that yields no result event says so on the error verdict (#204)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: (): AsyncGenerator<unknown, void> => (async function* () {})(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error).toContain('without a result event');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('non-positive budget.maxTokens throws pre-dispatch', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
@@ -1295,6 +1337,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       narration: [] as string[],
       assistantUsage: undefined,
       result: undefined,
+      error: undefined as string | undefined,
       deniedToolUseIds: new Set<string>(),
       denials: [],
     };

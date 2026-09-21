@@ -491,6 +491,9 @@ export class ClaudeAgentDriver implements Driver {
       // signal may fire mid-iteration — flow analysis of the pre-dispatch
       // check cannot see that).
       aborted = abortRoot?.controller.signal.aborted === true || isAbortShaped(err);
+      if (!aborted) {
+        observation.error = `claude-agent driver: query failed — ${describeError(err)}`;
+      }
     }
     // Mapping-table alignment (governed signal fired → 'aborted'): the
     // exception path above is not the ONLY way an abort manifests — the SDK
@@ -542,6 +545,28 @@ export class ClaudeAgentDriver implements Driver {
       await persistObservation(store, record, observation, resumeAgentSessionId);
     } catch {
       // deliberately swallowed — the honest verdict outranks the record
+    }
+
+    // --- A result event that reports failure must carry a cause (issue
+    // #204): derive one from the frame when the dispatch catch saw nothing.
+    // Precedence: the result's own `result` string, then the joined
+    // `errors` entries, then the subtype — the SDK supplies whichever it
+    // surfaces, and a bare 'error' verdict is exactly the dishonesty this
+    // field exists to remove.
+    if (observation.error === undefined && resultStatusOf(observation.result) === 'error') {
+      const resultFrame = observation.result;
+      const rawResult = asString(resultFrame?.['result']);
+      const errorEntries = (asArray(resultFrame?.['errors']) ?? []).filter(
+        (entry): entry is string => typeof entry === 'string',
+      );
+      const subtype = asString(resultFrame?.['subtype']);
+      const cause =
+        rawResult !== undefined && rawResult !== ''
+          ? rawResult
+          : errorEntries.length > 0
+            ? errorEntries.join('; ')
+            : `subtype '${subtype ?? 'unknown'}'`;
+      observation.error = `claude-agent driver: SDK result status error — ${cause}`;
     }
 
     return this.verdict(modelSpec, budget, observation, record.sessionId, aborted, structured);
@@ -597,6 +622,16 @@ export class ClaudeAgentDriver implements Driver {
       usage,
       resultStatus: resultStatusOf(observation.result),
     });
+    // The error field is present ONLY on a driver-level failure verdict (the
+    // frozen contract): a token-budget 'budget' stop is not a driver failure.
+    // Within that verdict the cause may already be captured (dispatch throw,
+    // or a failed result frame); otherwise say the query ended without a
+    // result event — a bare 'error' tells the caller nothing.
+    const error =
+      stopReason === 'error'
+        ? (observation.error ??
+          'claude-agent driver: the SDK query ended without a result event (the SDK surfaced no error text)')
+        : undefined;
     // Derived-only cost (DD-2): only on a verdict carrying a REAL usage
     // measurement — never on an unmeasured abort/dispatch-failure verdict.
     // Price the model that was actually SERVED when one was observed (the
@@ -622,6 +657,7 @@ export class ClaudeAgentDriver implements Driver {
       sessionId,
       denials: observation.denials,
       stopReason,
+      ...(error !== undefined ? { error } : {}),
     };
   }
 
@@ -819,6 +855,12 @@ interface RunObservation {
   assistantUsage: Usage | undefined;
   /** The terminal result event, when it arrived (defensively read at use sites). */
   result: Record<string, unknown> | undefined;
+  /**
+   * The underlying failure cause, when one was observed (a dispatch throw,
+   * or a result event that reports failure). Present only on an 'error'
+   * verdict; never on a successful run (issue #204).
+   */
+  error: string | undefined;
   /** tool_use ids already denied via permission_denials (dedupe). */
   deniedToolUseIds: Set<string>;
   /** The frozen denials, in denial order (execute-boundary + permission-gate). */
@@ -833,6 +875,7 @@ function newObservation(): RunObservation {
     narration: [],
     assistantUsage: undefined,
     result: undefined,
+    error: undefined,
     deniedToolUseIds: new Set(),
     denials: [],
   };
@@ -1129,4 +1172,9 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
 function isAbortShaped(err: unknown): boolean {
   const name = err instanceof Error ? err.name : undefined;
   return name === 'AbortError';
+}
+
+/** The caught cause as `Name: message`, or the raw value when it is not an Error. */
+function describeError(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }

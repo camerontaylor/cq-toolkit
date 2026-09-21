@@ -19,6 +19,7 @@ import { mkdtemp, mkdir, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
+import { z } from 'zod';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
@@ -459,6 +460,67 @@ describe('ai-sdk driver specifics (mock model)', () => {
       await rm(scratchDir, { recursive: true, force: true });
     }
   });
+
+  test('structured output is decoupled from the tool loop: the final step disables tools (#203)', async () => {
+    let calls = 0;
+    const mock = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async (options) => {
+        calls += 1;
+        const tools = options.tools;
+        return tools !== undefined && tools.length > 0
+          ? toolCallResult('read', { path: 'absent.txt' })
+          : textResult('{"fixed":true,"notes":"ok"}');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => mock },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+      });
+      const result = await driver.run(
+        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(result.structuredOutput).toEqual({ fixed: true, notes: 'ok' });
+      // With tools live every step the model answers tool-calls forever and
+      // never emits the object; the tool-free final step is what makes the
+      // structured output reachable — the model is called exactly to the cap.
+      expect(calls).toBe(DEFAULT_MAX_STEPS);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a missing structured object is an error verdict carrying the cause, never a model score (#203)', async () => {
+    const alwaysToolCalls = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => toolCallResult('read', { path: 'absent.txt' }),
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => alwaysToolCalls },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+      });
+      const result = await driver.run(
+        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(typeof result.error).toBe('string');
+      expect(result.error).toContain('structured output');
+      // The usage is the REAL per-step fold from every completed step — an
+      // error verdict reporting zeros after real work would be dishonest
+      // evidence (8 steps × {100 in, 12 out, 15 cacheRead, 5 cacheWrite}).
+      expect(result.usage).toEqual({ input: 800, output: 96, cacheRead: 120, cacheWrite: 40 });
+      expect(result.costUSD).toBeUndefined(); // never fabricated on a non-complete run
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -724,20 +786,14 @@ describe.skipIf(!process.env.LIVE_DRIVERS)('live ai-sdk driver (opt-in: LIVE_DRI
       expect(typeof parsed.usage.input).toBe('number');
       expect(typeof parsed.usage.output).toBe('number');
       expect(parsed.stopReason).toBe('complete');
-      // Per-leg cost posture: `deepseek-flash` (the wire's served id) has NO
-      // published rates (models.dev/deepseek lists no such id, checked
-      // 2026-09-15) — under never-fabricate its cost stays absent and the run
-      // is bounded by the declared maxUsd/maxTokens instead; the priced legs
-      // (e.g. the anthropic entry) assert a real figure under the cap. The
-      // observed-model identity asserts what the SDK SURFACES (a remap it
-      // does not surface is recorded, not caught — the fold falls back to the
-      // requested id).
-      if (model === 'deepseek-flash') {
-        expect(parsed.costUSD).toBeUndefined();
-      } else {
-        expect(parsed.costUSD).toBeDefined();
-        expect(parsed.costUSD as number).toBeLessThan(2);
-      }
+      // Every live leg is now priced — `deepseek-flash` was vendored from
+      // models.dev (fetched 2026-09-21), closing the old no-published-rates
+      // gap — so each leg asserts a real derived figure under the declared
+      // maxUsd cap. The observed-model identity asserts what the SDK
+      // SURFACES (a remap it does not surface is recorded, not caught — the
+      // fold falls back to the requested id).
+      expect(parsed.costUSD).toBeDefined();
+      expect(parsed.costUSD as number).toBeLessThan(2);
       expect(parsed.model).toBe(model);
     },
     60_000,

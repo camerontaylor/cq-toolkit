@@ -104,9 +104,10 @@
 // A caught throw returns stopReason 'error' (never throw past the seam
 // mid-run): the result keeps the usage of every completed step (folded via
 // onStepFinish — all-zero only when truly nothing completed) plus the
-// denials + sessionId gathered so far. Only PRE-DISPATCH validation
-// (unknown provider, missing key, over-budget op prompt, unknown
-// sessionRef) throws.
+// denials + sessionId gathered so far, and the caught cause's message rides
+// WorkerResult.error so a failing lane surfaces loudly instead of as a bare
+// 'error'. Only PRE-DISPATCH validation (unknown provider, missing key,
+// over-budget op prompt, unknown sessionRef) throws.
 //
 // COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
 // model id ({ ...modelSpec, model: servedModel ?? modelSpec.model } — a
@@ -309,6 +310,18 @@ export class AiSdkDriver implements Driver {
         // a governed abort must surface immediately.
         maxRetries: 0,
         ...(selected.length > 0 ? { tools: toolSet } : {}),
+        // DECOUPLE the mandatory structured object from the tool loop (#203):
+        // with tools available on the final step the model tends to call one
+        // more tool instead of emitting the required object, and `result.output`
+        // then throws. Disabling tools on that step nudges the model into
+        // prose the Output.object path can parse. Pure step-number function —
+        // no scheduling primitive (I8).
+        ...(this.outputSchema !== undefined && selected.length > 0
+          ? {
+              prepareStep: ({ stepNumber }: { stepNumber: number }) =>
+                stepNumber >= DEFAULT_MAX_STEPS - 1 ? { activeTools: [] } : undefined,
+            }
+          : {}),
         stopWhen,
         onStepFinish: (step) => {
           stepUsage = addUsage(stepUsage, usageFromSdk(step.usage));
@@ -329,13 +342,57 @@ export class AiSdkDriver implements Driver {
           ? result.response.modelId
           : undefined;
       const finishReason: FinishReason = result.finishReason;
+      const text = result.text;
       let structuredOutput: unknown;
       if (this.outputSchema !== undefined) {
-        structuredOutput = result.output; // parsed plain JSON per Output.object
+        // Reading `output` can throw (ai@7.0.99): NoOutputGeneratedError when
+        // the final step ended on tool-calls, NoObjectGeneratedError when the
+        // text does not parse against the schema. Both are DRIVER-LEVEL
+        // failures, not scored model outcomes — never fabricate a
+        // structuredOutput, never fall through to a 'complete' verdict.
+        try {
+          structuredOutput = result.output; // parsed plain JSON per Output.object
+        } catch (err) {
+          // Persist the assistant turn exactly as the success path does
+          // (result.text when non-empty) — the model's text is real evidence
+          // even though the required object never arrived.
+          if (text !== '') {
+            await store.appendMessage(record.sessionId, {
+              role: 'assistant',
+              content: text,
+              at: nowIso(),
+            });
+          }
+          const mapped = stopReasonOf({
+            finishReason,
+            aborted: abortSignal?.aborted === true,
+            tokenBudget: budget.maxTokens,
+            totalTokens: totalTokensOf(usage),
+          });
+          // Budget/abort carve-out: a cap or cancellation that leaves the
+          // final step on tool-calls is the honest stop reason — the missing
+          // object is its consequence, not a driver failure.
+          if (mapped === 'budget' || mapped === 'aborted') {
+            return {
+              ...(servedModel !== undefined ? { model: servedModel } : {}),
+              usage,
+              sessionId: record.sessionId,
+              denials,
+              stopReason: mapped,
+            };
+          }
+          return {
+            ...(servedModel !== undefined ? { model: servedModel } : {}),
+            usage,
+            sessionId: record.sessionId,
+            denials,
+            stopReason: 'error',
+            error: `ai-sdk driver: structured output was not produced (final step finishReason '${String(finishReason)}', steps ${result.steps.length}): ${describeError(err)}`,
+          };
+        }
       }
 
       // Assistant turn persisted in OUR vocabulary before the verdict.
-      const text = result.text;
       await store.appendMessage(record.sessionId, {
         role: 'assistant',
         content: text !== '' ? text : JSON.stringify(structuredOutput ?? ''),
@@ -380,6 +437,9 @@ export class AiSdkDriver implements Driver {
         sessionId: record.sessionId,
         denials,
         stopReason: aborted ? 'aborted' : 'error',
+        // The abort branch is the governor's cancellation (I8), not a
+        // failure — only a real error carries its cause forward.
+        ...(!aborted ? { error: `ai-sdk driver: run failed — ${describeError(err)}` } : {}),
       };
     }
   }
@@ -443,6 +503,11 @@ const SYSTEM_PREAMBLE =
 /** ISO-8601 timestamp for session messages. */
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/** The caught cause as `Name: message`, or the raw value when it is not an Error. */
+function describeError(err: unknown): string {
+  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
 /** Default sessions dir (sibling of the harness temp-workspace root). */

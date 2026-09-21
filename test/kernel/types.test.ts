@@ -218,6 +218,10 @@ function genWorkerResult(r: Rng): WorkerResult {
   }
   const sessionId = sometimes(r, () => id(r, 'sess-'));
   if (sessionId !== undefined) result.sessionId = sessionId;
+  // A driver-level failure carries its caught cause (issues #203/#204); the
+  // generator sets it on some results so the round-trip covers the field.
+  const error = sometimes(r, () => id(r, 'err-'));
+  if (error !== undefined) result.error = error;
   return result;
 }
 
@@ -906,6 +910,17 @@ describe('WorkerResultSchema costUSD/costBasis pairing (DD-9 wire coupling)', ()
       { ...base, costUSD: 0.5 },
       'costUSD without costBasis',
     );
+  });
+});
+
+describe('WorkerResult.error surfaces a driver-level failure cause (issues #203/#204)', () => {
+  test('a WorkerResult carrying error round-trips JSON and parses through the strict mirror', () => {
+    roundTripsThrough(kernelSchema.WorkerResultSchema, {
+      usage: { input: 7, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'error',
+      error: 'ai-sdk driver: run failed — Error: scripted model failure',
+    });
   });
 });
 
