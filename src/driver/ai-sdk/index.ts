@@ -113,15 +113,16 @@
 // model id ({ ...modelSpec, model: servedModel ?? modelSpec.model } — a
 // silently-remapped gateway is priced off the id the response reports;
 // the provider handle stays ModelSpec.provider, the price table's key) —
-// present only on a COMPLETED run whose usage is real, and only when the
-// price map (src/driver/pricing; overridable via the `pricing` constructor
-// option) knows that id. The ERROR/ABORT path keeps the USAGE evidence of
-// every completed step but reports NO costUSD: the run did not complete,
-// so no cost figure is claimed (never fabricate — 0 would be as invented
-// as any other number). The derived figure is api-equivalent (modeled —
-// list price for the tokens consumed), never presented as billed (DD-9;
-// docs/dd-9-api-equivalent-budget.md). The driver never fabricates or
-// reports trusted USD.
+// derived whenever the SDK returned a FULL result usage: the success path
+// (whatever stop reason it maps to) and the structured-output miss, whose
+// result usage is equally whole. A mid-run THROW keeps only the partial
+// per-step fold — which understates the run — so it reports NO costUSD
+// (never fabricate: 0 would be as invented as any other number), as does
+// an id the price map (src/driver/pricing; overridable via the `pricing`
+// constructor option) does not know. The derived figure is api-equivalent
+// (modeled — list price for the tokens consumed), never presented as billed
+// (DD-9; docs/dd-9-api-equivalent-budget.md). The driver never fabricates
+// or reports trusted USD.
 import { generateText, Output, stepCountIs, tool } from 'ai';
 import type {
   FinishReason,
@@ -145,6 +146,7 @@ import { buildTools } from '../../harness/tools.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import { boundedErrorText, describeError } from '../error-text.js';
 import { priceOf } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type { Driver, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
@@ -369,6 +371,14 @@ export class AiSdkDriver implements Driver {
             tokenBudget: budget.maxTokens,
             totalTokens: totalTokensOf(usage),
           });
+          // The SDK returned a FULL result usage here (not the partial
+          // per-step fold), so price it exactly as the success path does —
+          // the miss changes the verdict, not the spend.
+          const cost = costField(
+            this.pricing,
+            { ...modelSpec, model: servedModel ?? modelSpec.model },
+            usage,
+          );
           // Budget/abort carve-out: a cap or cancellation that leaves the
           // final step on tool-calls is the honest stop reason — the missing
           // object is its consequence, not a driver failure.
@@ -376,6 +386,7 @@ export class AiSdkDriver implements Driver {
             return {
               ...(servedModel !== undefined ? { model: servedModel } : {}),
               usage,
+              ...cost,
               sessionId: record.sessionId,
               denials,
               stopReason: mapped,
@@ -384,10 +395,13 @@ export class AiSdkDriver implements Driver {
           return {
             ...(servedModel !== undefined ? { model: servedModel } : {}),
             usage,
+            ...cost,
             sessionId: record.sessionId,
             denials,
             stopReason: 'error',
-            error: `ai-sdk driver: structured output was not produced (final step finishReason '${String(finishReason)}', steps ${result.steps.length}): ${describeError(err)}`,
+            error: boundedErrorText(
+              `ai-sdk driver: structured output was not produced (final step finishReason '${String(finishReason)}', steps ${result.steps.length}): ${describeError(err)}`,
+            ),
           };
         }
       }
@@ -427,9 +441,9 @@ export class AiSdkDriver implements Driver {
       // USAGE EVIDENCE IS KEPT: onStepFinish folded every completed step,
       // so the verdict carries the real tokens spent before the failure —
       // all-zero only when truly nothing completed. COST is NOT fabricated
-      // (never-fabricate): the run did not complete, so no derived figure
-      // is claimed — cost stays derived-only on completed runs, where the
-      // usage is whole.
+      // (never-fabricate): cost is derived only from a FULL result usage
+      // (the success and structured-output-miss paths); this partial fold
+      // understates the run, so no figure is claimed.
       const aborted =
         abortSignal?.aborted === true || (err instanceof Error && err.name === 'AbortError');
       return {
@@ -439,7 +453,9 @@ export class AiSdkDriver implements Driver {
         stopReason: aborted ? 'aborted' : 'error',
         // The abort branch is the governor's cancellation (I8), not a
         // failure — only a real error carries its cause forward.
-        ...(!aborted ? { error: `ai-sdk driver: run failed — ${describeError(err)}` } : {}),
+        ...(!aborted
+          ? { error: boundedErrorText(`ai-sdk driver: run failed — ${describeError(err)}`) }
+          : {}),
       };
     }
   }
@@ -503,11 +519,6 @@ const SYSTEM_PREAMBLE =
 /** ISO-8601 timestamp for session messages. */
 function nowIso(): string {
   return new Date().toISOString();
-}
-
-/** The caught cause as `Name: message`, or the raw value when it is not an Error. */
-function describeError(err: unknown): string {
-  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }
 
 /** Default sessions dir (sibling of the harness temp-workspace root). */

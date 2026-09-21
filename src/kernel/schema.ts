@@ -146,7 +146,7 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
     costBasis: z.enum(['modeled', 'billed']).exactOptional(),
     sessionId: z.string().exactOptional(),
     denials: z.array(ToolDenialSchema),
-    error: z.string().exactOptional(),
+    error: z.string().min(1).exactOptional(),
     stopReason: DriverStopReasonSchema,
   })
   .strict()

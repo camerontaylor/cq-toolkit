@@ -743,6 +743,36 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
+  test('a failed result frame derives its cause from the errors array (#204)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: (): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              yield {
+                type: 'result',
+                subtype: 'error_during_execution',
+                is_error: true,
+                session_id: 'agent-cli-err',
+                usage: AGENT_USAGE,
+                errors: ['boom one', 'boom two'],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error).toContain('boom one; boom two');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a query throw surfaces its cause on the error verdict (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {

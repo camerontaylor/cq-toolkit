@@ -205,6 +205,7 @@ import { buildTools } from '../../harness/tools.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
+import { boundedErrorText, describeError } from '../error-text.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -657,7 +658,7 @@ export class ClaudeAgentDriver implements Driver {
       sessionId,
       denials: observation.denials,
       stopReason,
-      ...(error !== undefined ? { error } : {}),
+      ...(error !== undefined ? { error: boundedErrorText(error) } : {}),
     };
   }
 
@@ -1172,9 +1173,4 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
 function isAbortShaped(err: unknown): boolean {
   const name = err instanceof Error ? err.name : undefined;
   return name === 'AbortError';
-}
-
-/** The caught cause as `Name: message`, or the raw value when it is not an Error. */
-function describeError(err: unknown): string {
-  return err instanceof Error ? `${err.name}: ${err.message}` : String(err);
 }

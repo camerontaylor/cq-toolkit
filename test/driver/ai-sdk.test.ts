@@ -521,6 +521,58 @@ describe('ai-sdk driver specifics (mock model)', () => {
       await rm(scratchDir, { recursive: true, force: true });
     }
   });
+
+  test('a token cap that leaves the final step on tool-calls reports budget, not error (#203)', async () => {
+    const alwaysToolCalls = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => toolCallResult('read', { path: 'absent.txt' }),
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => alwaysToolCalls },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+      });
+      // Per-step usage folds 132 tokens, so the 200 cap trips after step 2 and
+      // the final step stays on tool-calls — the missing object is the cap's
+      // consequence, not a driver failure.
+      const result = await driver.run(
+        invocation({
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+          budget: { maxTokens: 200 },
+        }),
+      );
+      expect(result.stopReason).toBe('budget');
+      expect(result.error).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a priced structured-output miss derives cost from the full result usage (#203)', async () => {
+    const alwaysToolCalls = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      doGenerate: async () => toolCallResult('read', { path: 'absent.txt' }),
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => alwaysToolCalls },
+        sessionsDir: join(scratchDir, 'sessions'),
+        outputSchema: z.object({ fixed: z.boolean(), notes: z.string() }).strict(),
+        pricing: () => ({ input: 3, output: 15 }),
+      });
+      const result = await driver.run(
+        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(typeof result.costUSD).toBe('number');
+      expect(result.costBasis).toBe('modeled');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -551,6 +603,7 @@ describe('ai-sdk driver review fixes (#18/#24)', () => {
       const result = await driver.run(invocation({ prompt: 'fails on step two' }));
       expect(calls).toBe(2); // step 1 completed, step 2 threw
       expect(result.stopReason).toBe('error');
+      expect(result.error).toContain('scripted step-two failure');
       // step 1's usage (folded through onStepFinish → usageFromSdk), NOT zeros.
       // reasoning is absent by design (merge-queue 11ea275): it is a subset of
       // outputTokens, so the frozen field stays unset on this lane.
