@@ -17,7 +17,10 @@
 // not wired to a cancellation source. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED here — the governor's escalation ladder
 //     is the wall-clock owner; a driver-owned deadline would duplicate and
-//     races it.
+//     races it. The SDK call's per-request `timeout.stepMs`
+//     (DEFAULT_STEP_TIMEOUT_MS) is NOT a run deadline — it bounds one HTTP
+//     request so a hung connection cannot stall the loop; WHEN to abort the
+//     RUN remains the governor's decision.
 //   - Budget.maxTokens is ENFORCED here, timer-free: it becomes a
 //     `stopWhen` stop condition over the SDK's accumulated step usage (a
 //     pure token fold — no scheduling primitive involved). stopWhen is
@@ -109,6 +112,31 @@
 // 'error'. Only PRE-DISPATCH validation (unknown provider, missing key,
 // over-budget op prompt, unknown sessionRef) throws.
 //
+// CAUSE CLASSES (#210) — every error verdict's WorkerResult.error STARTS with
+// one stable class token, so the fixtures runner can reclassify an honest
+// structured-output miss as a scored DD-4 miss while a transient endpoint
+// failure stays a loud absence — WITHOUT the frozen seam or
+// WorkerResultSchema carrying a new field (both forbid `error` on a
+// non-error verdict):
+//   - `[structured-output-miss]` — the required structured object was not
+//     produced / did not parse (the result.output getter threw
+//     NoOutputGeneratedError / NoObjectGeneratedError).
+//   - `[endpoint-timeout]` — a transient network / endpoint-header timeout
+//     (the SDK's own retryable transient class).
+//   - `[provider-error]` — anything else.
+// TRANSIENT RETRY (#210 Ask 1): the generateText call runs
+// `maxRetries: 1` — a BOUNDED retry-once for the SDK-retryable transient
+// class (endpoint header timeout / network). This is a deliberate, recorded
+// deviation from the earlier "no driver-side retries" note: the classifier
+// cell on the same endpoint is healthy, so a single retry recovers the
+// endpoint hiccup; the SDK's own retry machinery classifies retryability
+// and its exhausted-retry error names the attempt count and the last error
+// (`Failed after N attempts. Last error: …`), so the cause still reaches
+// WorkerResult.error. Each step of the tool loop is also bounded by
+// DEFAULT_STEP_TIMEOUT_MS (a hung HTTP request cannot stall the loop); that
+// per-request step-timeout abort is NOT SDK-retryable and therefore
+// classifies as [endpoint-timeout] on the way out.
+//
 // COST (DD-2, derived-only): costUSD is computed over the OBSERVED served
 // model id ({ ...modelSpec, model: servedModel ?? modelSpec.model } — a
 // silently-remapped gateway is priced off the id the response reports;
@@ -169,6 +197,16 @@ export type ProviderFactory = (modelId: string) => LanguageModel;
  * still the governor's ladder; Budget.maxTokens is the token-side bound).
  */
 export const DEFAULT_MAX_STEPS = 8;
+
+/**
+ * Per-request wall-clock bound for EACH step of the SDK tool loop
+ * (`timeout.stepMs`, ai@7.0.99). This is NOT a run deadline — the governor's
+ * escalation ladder owns WHEN to abort the run (I8; Budget.wallClockMs is
+ * ignored here). It bounds a single provider HTTP request so a hung
+ * connection cannot stall the loop indefinitely; the SDK aborts that step
+ * and surfaces the cause, which the classifier maps to [endpoint-timeout].
+ */
+export const DEFAULT_STEP_TIMEOUT_MS = 120_000;
 
 /** Constructor options — everything optional; defaults are production-real. */
 export interface AiSdkDriverOptions {
@@ -307,10 +345,20 @@ export class AiSdkDriver implements Driver {
         model,
         system,
         messages: transcript,
-        // NO driver-side retries: attempts are the runner/governor's
-        // business (a retry here would hide attempts from the journal), and
-        // a governed abort must surface immediately.
-        maxRetries: 0,
+        // BOUNDED retry-once (#210 Ask 1): the SDK retries ONLY its
+        // retryable transient class (endpoint header timeout / network),
+        // and an exhausted retry still surfaces the attempt count and last
+        // error in the thrown message, so the cause reaches
+        // WorkerResult.error rather than being hidden. This is a deliberate,
+        // recorded deviation from the earlier "no driver-side retries"
+        // note: the same endpoint is healthy on the classifier cell, so one
+        // retry recovers the hiccup while a governed abort still surfaces
+        // immediately.
+        maxRetries: 1,
+        // Per-request bound for EACH step (see DEFAULT_STEP_TIMEOUT_MS): a
+        // hung request cannot stall the loop. The step-timeout abort is not
+        // SDK-retryable, so it surfaces as [endpoint-timeout].
+        timeout: { stepMs: DEFAULT_STEP_TIMEOUT_MS },
         ...(selected.length > 0 ? { tools: toolSet } : {}),
         // DECOUPLE the mandatory structured object from the tool loop (#203):
         // with tools available on the final step the model tends to call one
@@ -405,7 +453,7 @@ export class AiSdkDriver implements Driver {
             denials,
             stopReason: 'error',
             error: boundedErrorText(
-              `ai-sdk driver: structured output was not produced (final step finishReason '${String(finishReason)}', steps ${result.steps.length}): ${describeError(err)}`,
+              `ai-sdk driver: [structured-output-miss] structured output was not produced (final step finishReason '${String(finishReason)}', steps ${result.steps.length}): ${describeError(err)}`,
             ),
           };
         }
@@ -459,7 +507,11 @@ export class AiSdkDriver implements Driver {
         // The abort branch is the governor's cancellation (I8), not a
         // failure — only a real error carries its cause forward.
         ...(!aborted
-          ? { error: boundedErrorText(`ai-sdk driver: run failed — ${describeError(err)}`) }
+          ? {
+              error: boundedErrorText(
+                `ai-sdk driver: [${classifyRunFailure(err)}] run failed — ${describeError(err)}`,
+              ),
+            }
           : {}),
       };
     }
@@ -756,4 +808,33 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
   if (inputs.finishReason === 'length') return 'budget';
   if (inputs.finishReason === 'error' || inputs.finishReason === 'content-filter') return 'error';
   return 'complete';
+}
+
+/**
+ * The stable cause class of a caught run failure (#210) — the token that
+ * prefixes WorkerResult.error so the fixtures runner can tell an honest
+ * structured-output miss from a loud endpoint absence without the frozen
+ * seam carrying a new field. ORDER MATTERS: the structured-output miss wins
+ * first (the getter's NoOutputGeneratedError / NoObjectGeneratedError), then
+ * the SDK-retryable transient class (endpoint header timeout / network /
+ * connection reset / any timeout wording or a TimeoutError name), and
+ * anything else is a provider error. A plain governed AbortError never
+ * reaches this classifier (the outer catch short-circuits to `aborted`), so
+ * there is no bare-`abort` match to over-fire on.
+ */
+export function classifyRunFailure(
+  err: unknown,
+): 'endpoint-timeout' | 'structured-output-miss' | 'provider-error' {
+  const name = err instanceof Error ? err.name : '';
+  if (/No(Output|Object)Generated/i.test(name)) return 'structured-output-miss';
+  const message = describeError(err);
+  if (
+    /headers timeout|cannot connect to api|etimedout|econnreset|socket hang up|fetch failed|timeout/i.test(
+      message,
+    ) ||
+    name === 'TimeoutError'
+  ) {
+    return 'endpoint-timeout';
+  }
+  return 'provider-error';
 }

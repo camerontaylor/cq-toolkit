@@ -25,6 +25,8 @@ import type { LanguageModelV4GenerateResult } from '@ai-sdk/provider';
 import {
   AiSdkDriver,
   DEFAULT_MAX_STEPS,
+  DEFAULT_STEP_TIMEOUT_MS,
+  classifyRunFailure,
   stopReasonOf,
   usageFromSdk,
 } from '../../src/driver/ai-sdk/index.js';
@@ -66,6 +68,8 @@ function lastGenerateTextArgs(): {
   system?: string;
   messages?: Array<{ role: string; content: string }>;
   stopWhen?: unknown;
+  maxRetries?: number;
+  timeout?: unknown;
 } {
   const last = captured.generateTextArgs[captured.generateTextArgs.length - 1];
   if (last === undefined) throw new Error('no generateText call was captured');
@@ -73,6 +77,8 @@ function lastGenerateTextArgs(): {
     system?: string;
     messages?: Array<{ role: string; content: string }>;
     stopWhen?: unknown;
+    maxRetries?: number;
+    timeout?: unknown;
   };
 }
 
@@ -511,7 +517,12 @@ describe('ai-sdk driver specifics (mock model)', () => {
       );
       expect(result.stopReason).toBe('error');
       expect(typeof result.error).toBe('string');
-      expect(result.error).toContain('structured output');
+      // #210: the miss is machine-classifiable — the stable token prefixes
+      // the bounded cause text; the parse cause still rides after it.
+      expect(result.error?.startsWith('ai-sdk driver: [structured-output-miss]')).toBe(true);
+      expect(result.error).toContain('structured output was not produced');
+      // never a model score: no fabricated structuredOutput on an error verdict.
+      expect(result.structuredOutput).toBeUndefined();
       // The usage is the REAL per-step fold from every completed step — an
       // error verdict reporting zeros after real work would be dishonest
       // evidence (8 steps × {100 in, 12 out, 15 cacheRead, 5 cacheWrite}).
@@ -572,6 +583,107 @@ describe('ai-sdk driver specifics (mock model)', () => {
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #210 — bounded retry-once + per-request step timeout + machine-classifiable
+// failure classes (`WorkerResult.error` tokens)
+// ---------------------------------------------------------------------------
+
+describe('ai-sdk driver failure classes (#210)', () => {
+  test('the SDK call runs a bounded retry-once and a per-request step timeout', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'reply', text: 'ok' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      await driver.run(invocation());
+      const args = lastGenerateTextArgs();
+      // A BOUNDED retry-once for the SDK-retryable transient class — the
+      // exhausted-retry error still names the attempt count and last error.
+      expect(args.maxRetries).toBe(1);
+      // Per-request bound for EACH step of the tool loop.
+      expect(args.timeout).toEqual({ stepMs: DEFAULT_STEP_TIMEOUT_MS });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('an endpoint header timeout is classified [endpoint-timeout] on the outer catch', async () => {
+    const timeoutModel = new MockLanguageModelV4({
+      modelId: 'mock-1',
+      // The exact transient class #210 observed (glm-5.3-flash 3/5). After
+      // maxRetries: 1 is exhausted the SDK rethrows a message naming the
+      // attempts; a plain throw here exercises the same classifier branch.
+      doGenerate: async () => {
+        throw new Error('Cannot connect to API: Headers Timeout Error');
+      },
+    });
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => timeoutModel },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith('ai-sdk driver: [endpoint-timeout] run failed —')).toBe(true);
+      expect(result.error).toContain('Cannot connect to API: Headers Timeout Error');
+      expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a non-transient failure is classified [provider-error] on the outer catch', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: () => modelFor({ kind: 'fail' }) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith('ai-sdk driver: [provider-error] run failed —')).toBe(true);
+      expect(result.error).toContain('scripted model failure');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('classifyRunFailure: structured-output miss wins, then the transient class, else provider-error', () => {
+    // The miss FIRST — even when the message would otherwise look transient.
+    const missByName = Object.assign(new Error('No object generated: could not parse'), {
+      name: 'NoObjectGeneratedError',
+    });
+    expect(classifyRunFailure(missByName)).toBe('structured-output-miss');
+    expect(
+      classifyRunFailure(Object.assign(new Error('no output'), { name: 'NoOutputGeneratedError' })),
+    ).toBe('structured-output-miss');
+
+    // The SDK-retryable transient class — message and name variants.
+    expect(classifyRunFailure(new Error('Cannot connect to API: Headers Timeout Error'))).toBe(
+      'endpoint-timeout',
+    );
+    expect(classifyRunFailure(new Error('connect ETIMEDOUT 1.2.3.4:443'))).toBe('endpoint-timeout');
+    expect(classifyRunFailure(new Error('read ECONNRESET'))).toBe('endpoint-timeout');
+    expect(classifyRunFailure(new Error('socket hang up'))).toBe('endpoint-timeout');
+    expect(classifyRunFailure(new Error('fetch failed'))).toBe('endpoint-timeout');
+    expect(classifyRunFailure(new Error('Step timeout of 120000ms exceeded'))).toBe(
+      'endpoint-timeout',
+    );
+    expect(
+      classifyRunFailure(Object.assign(new Error('timed out'), { name: 'TimeoutError' })),
+    ).toBe('endpoint-timeout');
+
+    // Anything else — including a bare abort with no timeout wording (the
+    // governed abort is handled before this classifier).
+    expect(classifyRunFailure(new Error('scripted model failure'))).toBe('provider-error');
+    expect(classifyRunFailure(new Error('Request was aborted'))).toBe('provider-error');
+    expect(classifyRunFailure(new Error('op prompt is over budget'))).toBe('provider-error');
+    expect(classifyRunFailure('a plain string failure')).toBe('provider-error');
   });
 });
 
