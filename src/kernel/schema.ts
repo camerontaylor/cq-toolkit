@@ -170,6 +170,15 @@ export const WorkerResultSchema: z.ZodType<WorkerResult> = z
         path: ['costBasis'],
       });
     }
+    // Mirror the frozen type's documented contract: `error` rides only a
+    // driver-level failure verdict (stopReason 'error').
+    if (result.error !== undefined && result.stopReason !== 'error') {
+      ctx.addIssue({
+        code: 'custom',
+        message: "error is only allowed when stopReason is 'error'",
+        path: ['error'],
+      });
+    }
   });
 
 // ---------------------------------------------------------------------------

@@ -219,9 +219,12 @@ function genWorkerResult(r: Rng): WorkerResult {
   const sessionId = sometimes(r, () => id(r, 'sess-'));
   if (sessionId !== undefined) result.sessionId = sessionId;
   // A driver-level failure carries its caught cause (issues #203/#204); the
-  // generator sets it on some results so the round-trip covers the field.
-  const error = sometimes(r, () => id(r, 'err-'));
-  if (error !== undefined) result.error = error;
+  // generator only sets it on an 'error' verdict, honoring the wire
+  // refinement (error present only when stopReason is 'error').
+  if (result.stopReason === 'error') {
+    const error = sometimes(r, () => id(r, 'err-'));
+    if (error !== undefined) result.error = error;
+  }
   return result;
 }
 
@@ -921,6 +924,18 @@ describe('WorkerResult.error surfaces a driver-level failure cause (issues #203/
       stopReason: 'error',
       error: 'ai-sdk driver: run failed — Error: scripted model failure',
     });
+  });
+
+  test('error on a non-error stopReason is rejected, naming the error path', () => {
+    const parsed = kernelSchema.WorkerResultSchema.safeParse({
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'complete',
+      error: 'ai-sdk driver: run failed — Error: boom',
+    });
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return; // narrow for TS
+    expect(parsed.error.issues.some((issue) => issue.path[0] === 'error')).toBe(true);
   });
 });
 
