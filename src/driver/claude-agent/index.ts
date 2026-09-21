@@ -558,11 +558,11 @@ export class ClaudeAgentDriver implements Driver {
       const resultFrame = observation.result;
       const rawResult = asString(resultFrame?.['result']);
       const errorEntries = (asArray(resultFrame?.['errors']) ?? []).filter(
-        (entry): entry is string => typeof entry === 'string',
+        (entry): entry is string => typeof entry === 'string' && entry.trim() !== '',
       );
       const subtype = asString(resultFrame?.['subtype']);
       const cause =
-        rawResult !== undefined && rawResult !== ''
+        rawResult !== undefined && rawResult.trim() !== ''
           ? rawResult
           : errorEntries.length > 0
             ? errorEntries.join('; ')

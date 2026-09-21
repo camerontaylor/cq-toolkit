@@ -9,7 +9,7 @@
 //
 // Redaction is WHOLE-TOKEN: the value floor is short (4 chars), so a bare
 // substring replace would shred unrelated words that merely contain the
-// value — a match is bounded by non-alphanumerics instead.
+// value — a match is bounded by non-identifier characters instead.
 const MAX_ERROR_CHARS = 500;
 const SECRET_ENV_SUFFIXES = [
   '_API_KEY',
@@ -37,7 +37,10 @@ export function boundedErrorText(text: string): string {
       SECRET_ENV_SUFFIXES.some((suffix) => name.endsWith(suffix))
     ) {
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'g'), '[redacted]');
+      out = out.replace(
+        new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, 'g'),
+        '[redacted]',
+      );
     }
   }
   return out.length <= MAX_ERROR_CHARS ? out : `${out.slice(0, MAX_ERROR_CHARS)}… [truncated]`;

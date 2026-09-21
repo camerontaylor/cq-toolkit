@@ -363,7 +363,7 @@ export class AiSdkDriver implements Driver {
           // turn — the success path's JSON fallback exists only because a
           // structuredOutput is present there, and an empty placeholder here
           // would fabricate a turn.
-          if (text !== '') {
+          if (text.trim() !== '') {
             await store.appendMessage(record.sessionId, {
               role: 'assistant',
               content: text,

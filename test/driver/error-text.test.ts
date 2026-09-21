@@ -42,4 +42,15 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
       else process.env.CQ_TEST_KEY = prior;
     }
   });
+
+  test('boundedErrorText keeps snake_case identifiers intact around a short value', () => {
+    const prior = process.env.CQ_TEST_KEY;
+    process.env.CQ_TEST_KEY = 'abcd';
+    try {
+      expect(boundedErrorText('my_abcd_var abcd')).toBe('my_abcd_var [redacted]');
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_KEY;
+      else process.env.CQ_TEST_KEY = prior;
+    }
+  });
 });
