@@ -657,7 +657,18 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const narration = record?.messages.find(
         (m) => m.role === 'tool' && m.toolName === 'agent-narration',
       );
-      expect(narration?.content).toContain('structured-output-rejected');
+      expect(narration).toBeDefined();
+      // The persisted narration is a JSON array of marker lines; the
+      // structured-output-rejected marker carries the zod issue count and
+      // the offending field paths. The bad payload {"nope":true} fails the
+      // strict schema on the missing `answer` at least — the marker's shape
+      // is pinned without assuming zod's issue ORDER.
+      const lines = JSON.parse(narration?.content as string) as string[];
+      const markerLine = lines.find((line) => line.includes('structured-output-rejected'));
+      expect(markerLine).toBeDefined();
+      const marker = JSON.parse(markerLine as string) as { issues: number; paths: string[] };
+      expect(marker.issues).toBeGreaterThanOrEqual(1);
+      expect(marker.paths).toContain('answer');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

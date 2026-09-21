@@ -25,7 +25,12 @@
 // own `__proto__` key parsed from JSON survives as a property instead of
 // mutating the prototype.
 
-/** An absolute JSON-Schema meta URI (`http(s)://json-schema.org/...`). */
+/**
+ * An absolute JSON-Schema host reference. The breadth is INTENTIONAL: the CLI
+ * resolves no external references at all, so ANY absolute
+ * `http(s)://json-schema.org/...` reference is dropped, not just the
+ * draft-2020-12 meta path.
+ */
 const META_SCHEMA_URI = /^https?:\/\/json-schema\.org\//;
 
 /** Reference keywords the CLI cannot resolve when they point at the meta URI. */
