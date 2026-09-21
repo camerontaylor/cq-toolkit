@@ -140,10 +140,10 @@ export interface WorkerResult {
   denials: ToolDenial[];
   /**
    * Underlying failure cause, when the driver caught one. Present only on a
-   * driver-level failure verdict (stopReason 'error'): the message of the
-   * thrown cause, so a failing lane surfaces loudly instead of as a bare
-   * 'error'. Never set on a successful run, and never used to turn a driver
-   * failure into a model score.
+   * driver-level failure verdict (stopReason 'error'), as a NON-EMPTY message.
+   * Drivers truncate (<= 500 chars) and secret-redact the cause before
+   * assigning it; it is never used to turn a driver failure into a model
+   * score.
    */
   error?: string;
   stopReason: DriverStopReason;
