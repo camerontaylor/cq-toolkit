@@ -358,6 +358,11 @@ export class AiSdkDriver implements Driver {
           // Persist the assistant turn exactly as the success path does
           // (result.text when non-empty) — the model's text is real evidence
           // even though the required object never arrived.
+          // Deliberate skip when there is no text: on this path the model
+          // produced NEITHER text NOR the object, so there is no assistant
+          // turn — the success path's JSON fallback exists only because a
+          // structuredOutput is present there, and an empty placeholder here
+          // would fabricate a turn.
           if (text !== '') {
             await store.appendMessage(record.sessionId, {
               role: 'assistant',

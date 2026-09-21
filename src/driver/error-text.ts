@@ -6,8 +6,21 @@
 // record verbatim. describeError keeps the MESSAGE only — a vendor class
 // name (NoOutputGeneratedError, …) is SDK vocabulary in persisted data (I10);
 // each driver already prefixes its own lane-specific context.
+//
+// Redaction is WHOLE-TOKEN: the value floor is short (4 chars), so a bare
+// substring replace would shred unrelated words that merely contain the
+// value — a match is bounded by non-alphanumerics instead.
 const MAX_ERROR_CHARS = 500;
-const SECRET_ENV_SUFFIXES = ['_API_KEY', '_TOKEN', '_AUTH_TOKEN', '_SECRET'];
+const SECRET_ENV_SUFFIXES = [
+  '_API_KEY',
+  '_TOKEN',
+  '_AUTH_TOKEN',
+  '_SECRET',
+  '_KEY',
+  '_PASSWORD',
+  '_CREDENTIALS',
+  'PRIVATE_KEY',
+];
 
 /** The caught cause as plain message text (never a vendor class name). */
 export function describeError(err: unknown): string {
@@ -20,10 +33,11 @@ export function boundedErrorText(text: string): string {
   for (const [name, value] of Object.entries(process.env)) {
     if (
       value !== undefined &&
-      value.length >= 8 &&
+      value.length >= 4 &&
       SECRET_ENV_SUFFIXES.some((suffix) => name.endsWith(suffix))
     ) {
-      out = out.split(value).join('[redacted]');
+      const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      out = out.replace(new RegExp(`(?<![A-Za-z0-9])${escaped}(?![A-Za-z0-9])`, 'g'), '[redacted]');
     }
   }
   return out.length <= MAX_ERROR_CHARS ? out : `${out.slice(0, MAX_ERROR_CHARS)}… [truncated]`;

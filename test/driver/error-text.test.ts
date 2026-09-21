@@ -22,11 +22,24 @@ describe('driver error text — plain, bounded, secret-redacted', () => {
   });
 
   test('boundedErrorText redacts an environment secret value it echoes', () => {
+    const prior = process.env.CQ_TEST_API_KEY;
     process.env.CQ_TEST_API_KEY = 'super-secret-value';
     try {
       expect(boundedErrorText('failed with super-secret-value')).toBe('failed with [redacted]');
     } finally {
-      delete process.env.CQ_TEST_API_KEY;
+      if (prior === undefined) delete process.env.CQ_TEST_API_KEY;
+      else process.env.CQ_TEST_API_KEY = prior;
+    }
+  });
+
+  test('boundedErrorText redacts whole tokens only, so a short value cannot shred a longer word', () => {
+    const prior = process.env.CQ_TEST_KEY;
+    process.env.CQ_TEST_KEY = 'abcd';
+    try {
+      expect(boundedErrorText('xabcdx abcd')).toBe('xabcdx [redacted]');
+    } finally {
+      if (prior === undefined) delete process.env.CQ_TEST_KEY;
+      else process.env.CQ_TEST_KEY = prior;
     }
   });
 });

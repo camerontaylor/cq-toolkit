@@ -773,6 +773,67 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     }
   });
 
+  test('a failed result frame prefers the result string over the errors array (#204)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: (): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              yield {
+                type: 'result',
+                subtype: 'error_during_execution',
+                is_error: true,
+                session_id: 'agent-cli-err',
+                usage: AGENT_USAGE,
+                result: 'boom from result string',
+                errors: ['ignored'],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error).toContain('boom from result string');
+      expect(result.error).not.toContain('ignored');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a failed result frame with no text falls back to the subtype (#204)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: (): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              yield {
+                type: 'result',
+                subtype: 'error_during_execution',
+                is_error: true,
+                session_id: 'agent-cli-err',
+                usage: AGENT_USAGE,
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error).toContain("subtype 'error_during_execution'");
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('a query throw surfaces its cause on the error verdict (#204)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
