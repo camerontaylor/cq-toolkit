@@ -123,7 +123,8 @@
 //     produced / did not parse (the result.output getter threw
 //     NoOutputGeneratedError / NoObjectGeneratedError).
 //   - `[endpoint-timeout]` — a transient network / endpoint-header timeout
-//     (the SDK's own retryable transient class).
+//     (the SDK's own retryable transient class: header timeout, network,
+//     rate limit / 429, 5xx).
 //   - `[provider-error]` — anything else.
 // TRANSIENT RETRY (#210 Ask 1): the generateText call runs
 // `maxRetries: 1` — ONE retry per step request (bounded; ≤ DEFAULT_MAX_STEPS
@@ -847,7 +848,7 @@ export function classifyRunFailure(
   if (APICallError.isInstance(err) && err.isRetryable === false) return 'provider-error';
   const message = describeError(err);
   if (
-    /headers timeout|cannot connect to api|etimedout|econnreset|socket hang up|fetch failed/i.test(
+    /headers timeout|cannot connect to api|etimedout|econnreset|socket hang up|fetch failed|rate ?limit|too many requests|\b(408|409|429|5\d\d)\b/i.test(
       message,
     ) ||
     name === 'TimeoutError'

@@ -774,6 +774,15 @@ describe('ai-sdk driver failure classes (#210)', () => {
     expect(classifyRunFailure(new Error('read ECONNRESET'))).toBe('endpoint-timeout');
     expect(classifyRunFailure(new Error('socket hang up'))).toBe('endpoint-timeout');
     expect(classifyRunFailure(new Error('fetch failed'))).toBe('endpoint-timeout');
+    // The other SDK-retryable transient signals (rate limit / 5xx) also
+    // classify endpoint-timeout after retry exhaustion — the exhausted-retry
+    // wrapper preserves the last error's wording.
+    expect(
+      classifyRunFailure(new Error('Failed after 2 attempts. Last error: 429 Too Many Requests')),
+    ).toBe('endpoint-timeout');
+    expect(
+      classifyRunFailure(new Error('Failed after 2 attempts. Last error: 503 Service Unavailable')),
+    ).toBe('endpoint-timeout');
     // The SDK step-timeout DOMException carries name TimeoutError; a bare
     // `timeout` substring in a provider message is NOT a transient signal.
     expect(

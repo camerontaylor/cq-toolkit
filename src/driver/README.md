@@ -145,9 +145,9 @@ governed abort that leaves the final step on tool-calls is the honest
 `budget`/`aborted` verdict instead — the missing object is its consequence,
 not a driver failure — and `structuredOutput` is likewise never fabricated
 on those paths. `[endpoint-timeout]` —
-a transient network / endpoint-header timeout (the SDK-retryable class,
-including the non-retryable step-timeout abort, classified via its
-`TimeoutError` name). `[provider-error]` —
+the SDK-retryable transient class (endpoint header timeout, network error,
+rate limit / 429, 5xx), plus the non-retryable step-timeout abort (classified
+via its `TimeoutError` name). `[provider-error]` —
 anything else. The classification lives in
 the exported pure `classifyRunFailure(err)`.
 
