@@ -37,6 +37,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
+import { stripMetaSchema } from '../../src/driver/json-schema.js';
 import {
   AGENT_SESSION_FILE,
   allowedToolNames,
@@ -633,7 +634,11 @@ describe('claude-agent driver specifics (mock sdk)', () => {
         schema: Record<string, unknown>;
       };
       expect(sent.type).toBe('json_schema');
-      expect(sent.schema).toEqual(z.toJSONSchema(schema));
+      // The draft-2020-12 meta `$schema` URI is stripped before the SDK
+      // hands the schema to the CLI (the CLI rejects that URI pre-model,
+      // #209); the schema body survives intact.
+      expect(sent.schema['$schema']).toBeUndefined();
+      expect(sent.schema).toEqual(stripMetaSchema(z.toJSONSchema(schema)));
       expect(ok.structuredOutput).toEqual({ answer: 'ok' });
 
       // Second run: a payload that fails the schema is dropped, never trusted.
@@ -644,6 +649,26 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       }).run(invocation({ prompt: 'structured bad' }));
       expect(bad.structuredOutput).toBeUndefined();
       expect(bad.stopReason).toBe('complete');
+      // The rejection is evidence, not silence: the driver persists the
+      // narration marker into the SessionStore under its own sessionsDir
+      // (the subprocess sibling's pattern).
+      const store = new SessionStore(join(scratchDir, SESSIONS_DIR));
+      const record = await store.load(bad.sessionId as string);
+      const narration = record?.messages.find(
+        (m) => m.role === 'tool' && m.toolName === 'agent-narration',
+      );
+      expect(narration).toBeDefined();
+      // The persisted narration is a JSON array of marker lines; the
+      // structured-output-rejected marker carries the zod issue count and
+      // the offending field paths. The bad payload {"nope":true} fails the
+      // strict schema on the missing `answer` at least — the marker's shape
+      // is pinned without assuming zod's issue ORDER.
+      const lines = JSON.parse(narration?.content as string) as string[];
+      const markerLine = lines.find((line) => line.includes('structured-output-rejected'));
+      expect(markerLine).toBeDefined();
+      const marker = JSON.parse(markerLine as string) as { issues: number; paths: string[] };
+      expect(marker.issues).toBeGreaterThanOrEqual(1);
+      expect(marker.paths).toContain('answer');
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

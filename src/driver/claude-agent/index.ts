@@ -206,6 +206,7 @@ import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
+import { stripMetaSchema } from '../json-schema.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
@@ -1108,9 +1109,10 @@ async function readAgentSessionId(
   }
 }
 
-/** zod → JSON Schema (the structured-output option's schema form). */
+/** zod → CLI-safe JSON Schema (the structured-output option's schema form). */
 function zToJsonSchema(schema: ZodType): Record<string, unknown> {
-  return z.toJSONSchema(schema);
+  // The CLI rejects the draft-2020-12 meta `$schema` URI zod emits (#209).
+  return stripMetaSchema(z.toJSONSchema(schema));
 }
 
 /** The terminal result event's status class for the stop-reason table. */
