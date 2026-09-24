@@ -13,8 +13,8 @@
 # it in SELF-HOSTING.md (repo root). THE RECORDED DEVIATION: an
 # intervention is not a failure — a silent stall is. Scheduled runs carry
 # the maxUsd budget cap (I9 — an honest, reported stop) and the governor
-# wall-clock ladder (#137's arming: a wedged conflict-agent job is
-# escalated by the ladder instead of stalling the slot).
+# wall-clock ladder (#137's arming: a wedged governed job is escalated by
+# the ladder instead of stalling the slot).
 name: self-merge-prs
 
 on:
@@ -99,7 +99,7 @@ jobs:
       # persists the journal root between runs (each run saves under its
       # own run-id key; the next run restores by the state- prefix).
       # Deliberately ephemeral: per-run audit trails ride along but are not
-      # the point, and the conflict worktrees are NOT cached — they live
+      # the point, and no conflict worktrees are cached — the stage is disabled
       # OUTSIDE the journal, and cached worktree paths go stale as main
       # advances (a fresh worktree is prepared per resolution). Restore
       # runs at this step, before the run step; the save is a SEPARATE
@@ -107,7 +107,7 @@ jobs:
       # the combined action's post-save runs only on job success, so a
       # failed run would lose exactly the session state the next run must
       # resume from.
-      - name: Restore the journal state (conflict-agent session store)
+      - name: Restore the journal state (merge run journal)
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
         with:
           path: .selfhost/journal
@@ -147,10 +147,6 @@ jobs:
           # never use this workflow and therefore never inherit this skip.
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
           # Conflict-resolution pushes currently reach plain unauthenticated `git push` (the checkout drops its credential) — point git at gh's credential helper.
-          gh auth setup-git
-          # Worker-created commits currently fail (no identity on hosted runners; the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
-          git config --global user.name 'cq-automation'
-          git config --global user.email 'cq-automation@users.noreply.github.com'
           # Bash ARRAY, never a string: the expansions stay single words
           # even if a future value carries spaces (an unquoted $ARGS
           # word-splits).
@@ -163,7 +159,7 @@ jobs:
           fi
           node dist/selfhost/self-merge-prs.js "${ARGS[@]}" | tee "$GITHUB_STEP_SUMMARY"
       # always() persists a failed run's journal (a success-only post-save would lose the exact session state the next run resumes from); the rolling restore-keys prefix keeps newest state winning.
-      - name: Save the journal state (conflict-agent session store)
+      - name: Save the journal state (merge run journal)
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
         if: always()
         with:

@@ -39,7 +39,11 @@ import type { OpRegistryEntry, OpResult } from '../../src/kernel/types.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import { RunMergePrsInputSchema } from '../../src/ops/merge/registry.js';
 import type { MergePrsOutcome, RunMergePrsInput } from '../../src/ops/merge/runPrs.js';
-import { buildRunInput, runSelfMergePrs } from '../../src/selfhost/self-merge-prs.js';
+import {
+  buildRunInput,
+  runSelfMergePrs,
+  SELFHOST_DISABLES_CONFLICT_RESOLUTION,
+} from '../../src/selfhost/self-merge-prs.js';
 import { SelfhostDefaults } from '../../src/selfhost/config.js';
 
 const OWNER = 'octo';
@@ -203,6 +207,10 @@ describe('buildRunInput (the pure input builder)', () => {
 });
 
 describe('runSelfMergePrs — real run', () => {
+  test('pins the production conflict-disable policy constant', () => {
+    expect(SELFHOST_DISABLES_CONFLICT_RESOLUTION).toBe(true);
+  });
+
   test('forwards the shipped conflict-disable policy into the parsed merge input', async () => {
     const seen: RunMergePrsInput[] = [];
     const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });

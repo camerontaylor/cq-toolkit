@@ -50,6 +50,9 @@ import { makeMergePrsPlan } from '../plans/merge-prs.js';
 import { fetchMergeCandidates, type ExcludedCandidate } from './candidates.js';
 import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
 
+/** Production self-host policy: conflict resolution is always withheld. */
+export const SELFHOST_DISABLES_CONFLICT_RESOLUTION = true;
+
 /** The merge plan's single job id (makeMergePrsPlan's shape, kept in sync). */
 const MERGE_PRS_PLAN_RUN_JOB_ID = 'merge-prs-run';
 
@@ -259,7 +262,7 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
-      disableConflictResolution: true,
+      disableConflictResolution: SELFHOST_DISABLES_CONFLICT_RESOLUTION,
     },
   );
   const payload =

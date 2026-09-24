@@ -51,10 +51,10 @@ a failed listing) exits 1.
 Names only in the templates — values live in the adopting repo's Actions
 secrets.
 
-| token                     | secret holds                                                                                                                                                                                                                                                                                                          |
-| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write, the conflict path pushes resolved branches). Referenced by the workflows as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                   |
+| token                     | secret holds                                                                                                                                                                                                                                                                                           |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path). Referenced by the workflows as `GH_TOKEN` (gh). |
+| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                    |
 
 Both are step-scoped in the workflows: they reach only the run step, never
 `npm ci`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
