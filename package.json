@@ -26,6 +26,8 @@
     "typecheck": "npm run check:static",
     "lint": "npm run check:static",
     "test": "vitest run",
+    "test:unit": "vitest run --exclude \"test/e2e/**\" --exclude \"test/driver/acp.test.ts\"",
+    "test:e2e": "vitest run test/e2e test/driver/acp.test.ts",
     "denylist": "./scripts/denylist-scan",
     "gen:op-docs": "node scripts/gen-op-docs.mjs",
     "gen:op-docs:check": "node scripts/gen-op-docs.mjs --check",

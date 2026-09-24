@@ -29,6 +29,7 @@ export default defineConfig({
       // a completely untested module never lowered coverage, so the
       // ratchet could not see it.
       include: ['src/**'],
+      exclude: ['src/**/*.md', '**/*.prompt'],
     },
   },
 });
