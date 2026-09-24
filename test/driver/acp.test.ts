@@ -45,6 +45,7 @@
 //      structured rawOutput folds at the protocol boundary (#49), an
 //      oversized frame fails the connection (#42), relative PATH entries
 //      resolve absolute (#46), and win32 PATHEXT candidates (#40).
+import type { ChildProcess } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
@@ -140,6 +141,74 @@ function driverOptions(
     spawn: recordingSpawn(calls, extraEnv),
   };
 }
+
+/** Calls `onInFlight` once the child observably holds the prompt the driver dispatched. */
+type PromptInFlight = (child: ChildProcess, onInFlight: () => void) => void;
+
+/**
+ * A governed deadline that lands MID-PROMPT by construction: a manual clock
+ * whose first rung (the signal) fires only once `inFlight` observes the
+ * prompt on the real child. A wall-clock deadline races the handshake — on
+ * a loaded host it fired before the prompt (the pre-prompt-abort branch,
+ * no session/cancel), so a mid-prompt assertion measured the host, not the
+ * driver. Later rungs never fire: a driver that cannot settle hangs into
+ * the test timeout, the regression signal these tests document.
+ */
+function midPromptDeadline(
+  options: AcpDriverOptions,
+  inFlight: PromptInFlight,
+): { options: AcpDriverOptions; clock: Clock } {
+  let fireSignal: (() => void) | undefined;
+  const clock: Clock = {
+    now: () => 0,
+    setTimeout: (fn) => {
+      fireSignal ??= fn; // only rung 1 is flushable — the later rungs must never fire
+      return { rung: 'signal' };
+    },
+    clearTimeout: () => undefined,
+  };
+  const inner = options.spawn ?? spawnAcpProcess;
+  const spawn: AcpSpawnFn = (opts) => {
+    const child = inner(opts);
+    // setImmediate, not a synchronous fire: this seam attaches its taps
+    // BEFORE the driver's own stdout listener (AcpWire, constructed with no
+    // await after the spawn), so it sees each chunk first. Deferring past
+    // the current I/O callback lets the driver fold the chunk that proves
+    // the prompt is in flight before the abort lands — a deadline firing
+    // on an idle mid-prompt wait, not inside the driver's frame handling.
+    inFlight(child, () => setImmediate(() => fireSignal?.()));
+    return child;
+  };
+  return { options: { ...options, spawn }, clock };
+}
+
+/** The fixture HOLDS the prompt: it emits usage_update only from its session/prompt flows. */
+const fixtureHoldsPrompt: PromptInFlight = (child, onInFlight) => {
+  let seen = '';
+  const tap = (chunk: string): void => {
+    seen += chunk;
+    if (!seen.includes('"usage_update"')) return;
+    child.stdout?.off('data', tap);
+    onInFlight();
+  };
+  child.stdout?.on('data', tap);
+};
+
+/**
+ * The prompt write is WEDGED: the stalled-stdin fixture never reads the
+ * prompt, so the 1 MiB write leaves a backlog in the driver's stdin queue
+ * that never drains (handshake frames flush synchronously, so a backlog
+ * seen between turns of the loop is the prompt). A state predicate polled
+ * until true or the child exits — never a deadline.
+ */
+const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
+  const poll = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if ((child.stdin?.writableLength ?? 0) > 0) onInFlight();
+    else setTimeout(poll, 10);
+  };
+  poll();
+};
 
 /** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
@@ -1229,25 +1298,28 @@ describe('acp driver specifics (fake ACP server)', () => {
   test('cancel maps to aborted: the governed signal settles via session/cancel + the cancelled response (§2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
-        termGraceMs: 500,
-        killGraceMs: 500,
-      });
-      // wallClockMs lands MID-PROMPT (after the handshake): the governed
-      // signal fires → session/cancel → the cancelled prompt response
-      // (usage null) settles the run.
+      const { options, clock } = midPromptDeadline(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
+        fixtureHoldsPrompt,
+      );
+      const driver = new AcpDriver({ ...options, termGraceMs: 500, killGraceMs: 500 });
+      // The deadline lands MID-PROMPT (the fixture holds the prompt): the
+      // governed signal fires → session/cancel → the cancelled prompt
+      // response (usage null) settles the run.
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'cancel run' })),
-        { wallClockMs: 1000 },
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-cancel', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // usage: null — unmeasured
       expect(outcome.value.costUSD).toBeUndefined(); // never a cost on an unmeasured verdict
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
     });
   }, 20_000);
@@ -1260,25 +1332,28 @@ describe('acp driver specifics (fake ACP server)', () => {
       // child → the pending prompt rejects on the wire's exit path → the
       // run settles 'aborted'. Without the mid-prompt kill rung (Codex P1)
       // THIS test hangs into its timeout.
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const { options, clock } = midPromptDeadline(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_IGNORE_CANCEL: '1' },
           [],
         ),
-        termGraceMs: 300,
-        killGraceMs: 300,
-      });
+        fixtureHoldsPrompt,
+      );
+      const driver = new AcpDriver({ ...options, termGraceMs: 300, killGraceMs: 300 });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'ignore-cancel run' })),
-        { wallClockMs: 1000 },
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-ignore-cancel', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       // The courtesy write landed BEFORE the ladder fired (the settled-write
       // ordering), then the kill settled the run.
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
@@ -1356,26 +1431,33 @@ describe('acp driver specifics (fake ACP server)', () => {
       // (THIS test times out on that regression). The fixed driver races
       // the write against cancelWriteGraceMs and runs the ladder
       // regardless of which wins.
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const { options, clock } = midPromptDeadline(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_STOP_READ_BEFORE_PROMPT: '1' },
           [],
         ),
+        promptWriteWedged,
+      );
+      const driver = new AcpDriver({
+        ...options,
         termGraceMs: 300,
         killGraceMs: 300,
         cancelWriteGraceMs: 100,
       });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) })),
-        { wallClockMs: 1000 },
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       // The grace won the race: the record says the vendor never consumed
       // the cancel before the SIGTERM — and the kill happened anyway.
       expect(narration.some((line) => line.includes('"cancel-write-stalled"'))).toBe(true);
