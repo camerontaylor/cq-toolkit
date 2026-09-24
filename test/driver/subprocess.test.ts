@@ -35,6 +35,8 @@ import {
   usageFromCli,
 } from '../../src/driver/subprocess/index.js';
 import type { SpawnFn, SubprocessDriverOptions } from '../../src/driver/subprocess/index.js';
+import { fakeManagedSpawn, runFakeTool } from '../helpers/transport-fakes.js';
+import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import { CLI_SESSION_FILE } from '../../src/driver/subprocess/index.js';
 import {
   RoutingTableSchema,
@@ -181,10 +183,100 @@ function baseOptions(
 }
 
 /** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
+function fakeManagedScript(
+  opts: { cwd: string; args: readonly string[] },
+  directive: ModelDirective | undefined,
+  hasOutputSchema: boolean,
+): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
+  const modelIndex = opts.args.indexOf('--model');
+  const model =
+    modelIndex === -1 ? 'conformance-1' : (opts.args[modelIndex + 1] ?? 'conformance-1');
+  const allowedIndex = opts.args.indexOf('--allowedTools');
+  const allowed = new Set(
+    allowedIndex === -1 ? [] : (opts.args[allowedIndex + 1] ?? '').split(' ').filter(Boolean),
+  );
+  const sessionId = `fake-cli-${Math.random().toString(36).slice(2)}`;
+  const usage = {
+    input_tokens: 10,
+    output_tokens: 5,
+    cache_read_input_tokens: 2,
+    cache_creation_input_tokens: 3,
+  };
+  return (frame, peer) => {
+    if (frame['method'] !== 'stdin') return;
+    if (directive?.kind === 'block-until-abort') return;
+    if (directive?.kind === 'fail') {
+      peer.stderr('simulated hard failure');
+      peer.finish(1);
+      return;
+    }
+    peer.send({ type: 'system', subtype: 'init', session_id: sessionId, model });
+    if (directive?.kind === 'tool-then-reply' && allowed.has(directive.tool)) {
+      peer.send({
+        type: 'assistant',
+        message: {
+          content: [
+            { type: 'tool_use', id: 'fake-tool', name: directive.tool, input: directive.input },
+          ],
+        },
+      });
+      void runFakeTool(opts.cwd, directive.tool, directive.input)
+        .then((outcome) => {
+          peer.send({
+            type: 'user',
+            message: {
+              content: [
+                {
+                  type: 'tool_result',
+                  tool_use_id: 'fake-tool',
+                  is_error: !outcome.ok,
+                  content: outcome.text,
+                },
+              ],
+            },
+          });
+          peer.send({
+            type: 'assistant',
+            message: { content: [{ type: 'text', text: directive.reply }] },
+          });
+          peer.send({
+            type: 'result',
+            subtype: 'success',
+            is_error: false,
+            session_id: sessionId,
+            model,
+            usage,
+            ...(hasOutputSchema ? { structured_output: { answer: 'ok' } } : {}),
+          });
+          peer.finish();
+        })
+        .catch((error: unknown) => {
+          peer.stderr(`fake tool error: ${String(error)}`);
+          peer.finish(1);
+        });
+      return;
+    }
+    const text = directive?.kind === 'reply' ? directive.text : 'ok';
+    peer.send({ type: 'assistant', message: { content: [{ type: 'text', text }] } });
+    peer.send({
+      type: 'result',
+      subtype: 'success',
+      is_error: false,
+      session_id: sessionId,
+      model,
+      usage,
+      ...(hasOutputSchema ? { structured_output: { answer: 'ok' } } : {}),
+    });
+    peer.finish();
+  };
+}
+
 function makeDriver(spec: ConformanceSpec): Driver {
-  const calls: SpawnCall[] = [];
   return new SubprocessDriver({
-    ...baseOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
+    ...baseOptions(spec.scratchDir, directiveEnv(spec.directive), []),
+    spawn: fakeManagedSpawn((opts) =>
+      fakeManagedScript(opts, spec.directive, spec.outputSchema !== undefined),
+    ),
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
@@ -531,7 +623,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect((await readFile(sidecarPath, 'utf8')).trim()).toBe(cliId);
       await noSidecarInWorkspace();
     });
-  });
+    // Real CLI resume argv plus the sidecar filesystem contract; this budget
+    // covers two child process startups, not an in-process decision.
+  }, 15_000);
 
   test('deny-tool: the CLI tool_result denial maps to the frozen {tool, reason} shape', async () => {
     await withScratch(async (scratchDir) => {
