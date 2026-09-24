@@ -19,12 +19,11 @@
 //   6. THE BINDINGS RIDE THE SEAMS: the unit composition's sandboxPolicy
 //      binding (default `none`, caller-overridable for production) lands
 //      verbatim in the Driver's OpInvocation.
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
-import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
 import type { OpRegistryEntry, Plan } from '../../src/kernel/types.js';
@@ -487,7 +486,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
       const root = mkdtempSync(join(tmpdir(), 'd4-unit-bindings-'));
       try {
         const repo = join(root, 'repo');
-        await generateScratchRepo(repo);
+        const worktree = join(repo, 'worktrees', 'fix', 'alpha');
+        mkdirSync(repo, { recursive: true });
+        mkdirSync(worktree, { recursive: true });
         const captured: OpInvocation[] = [];
         // A capturing fake driver: records the invocation, then stops the
         // pipeline (the op folds the throw into a `failed` result — the
@@ -504,6 +505,17 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
           runPrefix: 'cq/unit-bind',
           base: 'main',
           adapter: 'tsc-lines' as const,
+          worktreeEffects: {
+            listWorktrees: async () => [{ path: worktree, branch: 'cq/unit-bind/fix/alpha' }],
+            listBranches: async () => [],
+            listRemoteBranches: async () => [],
+            pathExists: async () => false,
+            trackedFilesUnder: async () => [],
+            isStrictClean: async () => true,
+            worktreeAdd: async () => undefined,
+            worktreePrune: async () => undefined,
+            rmDir: async () => undefined,
+          },
           // A clean probe — no subprocess needed for this pin.
           runCheck: async () => ({ stdout: '', stderr: '', exitCode: 0 }),
           checkCommand: (unit: WorkUnit, worktreePath: string) => ({
