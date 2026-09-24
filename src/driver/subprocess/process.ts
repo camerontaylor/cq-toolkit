@@ -138,6 +138,7 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
 
 /** The POSIX/Windows-standard environment variable NAME shape (r2). */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_PASSTHROUGH = 'CQ_RUN_ENV_PASSTHROUGH';
 
 /**
  * Compose a child environment with default-deny semantics (issue #183):
@@ -164,7 +165,17 @@ export function buildChildEnv(
     }
   }
   const child = Object.create(null) as Record<string, string>;
-  for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist]) {
+  const configuredAllowlist = (parentEnv[ENV_PASSTHROUGH] ?? '')
+    .split(/[,\s]+/)
+    .filter((name) => name.length > 0);
+  for (const name of configuredAllowlist) {
+    if (!ENV_NAME.test(name)) {
+      throw new Error(
+        `${ENV_PASSTHROUGH} entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
+      );
+    }
+  }
+  for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist, ...configuredAllowlist]) {
     const value = parentEnv[name];
     if (value !== undefined) child[name] = value;
   }

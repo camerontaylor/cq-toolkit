@@ -140,7 +140,6 @@ jobs:
           # driver key and its presence assert ride here too. The env NAME is
           # fixed (`ZAI_API_KEY`, what the drivers read); only the SECRET name
           # is the adopter's placeholder.
-          ZAI_API_KEY: ${{ secrets.{{SELFHOST_DRIVER_KEY}} }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}
@@ -163,8 +162,10 @@ jobs:
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
             exit 0
           fi
-          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
-          test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
+          # Self-host automation is optional. A repository without its automation token
+          # is not broken: the non-required job skips honestly. Required I4 checks
+          # never use this workflow and therefore never inherit this skip.
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
           # Conflict-resolution pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           gh auth setup-git
           # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.

@@ -81,6 +81,8 @@ export interface SelfMergePrsCfg {
   journalRoot?: string;
   /** Fetch + classify only — never build the plan, never execute a merge. */
   dryRun?: boolean;
+  /** Disable model-dispatched conflict resolution; DIRTY rows become needs-human. */
+  disableConflictResolution?: boolean;
 }
 
 /**
@@ -115,7 +117,7 @@ export type SelfMergePrsResult =
  */
 export function buildRunInput(
   candidates: MergePrsCandidate[],
-  cfg: { repoRoot: string; journalRoot?: string },
+  cfg: { repoRoot: string; journalRoot?: string; disableConflictResolution?: boolean },
   nowMs: number,
 ): RunMergePrsInput {
   return {
@@ -124,7 +126,7 @@ export function buildRunInput(
     prs: candidates,
     protectedBranch: SelfhostDefaults.protectedBranch,
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
-    modelSpec: SelfhostDefaults.driver,
+    ...(cfg.disableConflictResolution === true ? {} : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
   };
@@ -255,6 +257,7 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
+      disableConflictResolution: true,
     },
   );
   const payload =

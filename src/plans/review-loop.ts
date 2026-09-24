@@ -534,6 +534,7 @@ type CommitVerificationFailure =
   | 'not-40-hex'
   | 'not-descendant'
   | 'not-ancestor'
+  | 'empty-diff'
   | 'attribution-missing';
 
 /**
@@ -584,6 +585,13 @@ export const commitVerificationFailure = async (
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
   if (ancestor.code !== 0) {
     return 'not-ancestor';
+  }
+  const changed = await git(['-C', worktreePath, 'diff', '--quiet', `${sha}^..${sha}`]);
+  if (changed.code === 0) {
+    return 'empty-diff';
+  }
+  if (changed.code !== 1) {
+    return 'not-descendant';
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this

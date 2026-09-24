@@ -54,11 +54,12 @@ secrets.
 | token                     | secret holds                                                                                                                                                                                                                                                                                                          |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write, the conflict path pushes resolved branches). Referenced by the workflows as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving every agent dispatch (the review loop's fix workers; the merge path's conflict agent) through the ai-sdk route.                                                                                                                                                                    |
+| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                   |
 
 Both are step-scoped in the workflows: they reach only the run step, never
-`npm ci`'s lifecycle scripts, and their presence is asserted before any
-effect. A classic PAT with the blanket `repo` scope is the documented
+`npm ci`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
+non-required automation jobs skip successfully; required I4 checks are separate
+and never use this optional skip. A classic PAT with the blanket `repo` scope is the documented
 FALLBACK, not the recommendation — it reaches every repo the account can
 touch, so grant it only where fine-grained PATs are unavailable.
 
