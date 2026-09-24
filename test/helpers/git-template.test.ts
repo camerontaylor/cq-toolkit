@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { rmSync, writeFileSync } from 'node:fs';
+import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
@@ -55,4 +55,21 @@ describe('git-template clone smoke', () => {
       }
     },
   );
+
+  test('rejects a copied gitfile before rewriting the origin', { timeout: 30_000 }, async () => {
+    let template: Awaited<ReturnType<typeof createGitTemplate>> | undefined;
+    try {
+      template = await createGitTemplate(async (repo) => {
+        await generateScratchRepo(repo);
+        const externalGitDir = join(repo, 'external-git-dir');
+        renameSync(join(repo, '.git'), externalGitDir);
+        writeFileSync(join(repo, '.git'), `gitdir: ${externalGitDir}\n`);
+      });
+      await expect(cloneTemplate(template)).rejects.toThrow(
+        'cloned git template .git must be a real directory, not a symlink or gitfile',
+      );
+    } finally {
+      if (template !== undefined) rmSync(template.root, { recursive: true, force: true });
+    }
+  });
 });

@@ -3,7 +3,15 @@
 // pointer would contain an absolute path from the source checkout, so the
 // helper deliberately refuses to be used as a post-worktree snapshot.
 import { execFile, spawnSync } from 'node:child_process';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -65,11 +73,16 @@ export async function createGitTemplate(seedRepo: SeedRepo): Promise<GitTemplate
   const root = mkdtempSync(join(tmpdir(), 'cq-git-template-'));
   const repo = join(root, 'repo');
   const origin = join(root, 'origin.git');
-  mkdirSync(repo, { recursive: true });
-  await seedRepo(repo);
-  await resilient(() => git(['init', '-q', '--bare', origin], root));
-  await resilient(() => git(['-C', repo, 'remote', 'add', 'origin', origin], repo));
-  return { root, repo, origin };
+  try {
+    mkdirSync(repo, { recursive: true });
+    await seedRepo(repo);
+    await resilient(() => git(['init', '-q', '--bare', origin], root));
+    await resilient(() => git(['-C', repo, 'remote', 'add', 'origin', origin], repo));
+    return { root, repo, origin };
+  } catch (err) {
+    rmSync(root, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 /**
@@ -83,12 +96,28 @@ export async function cloneTemplate(template: GitTemplate): Promise<ClonedGitTem
   const origin = join(root, 'origin.git');
   try {
     cpSync(template.root, root, { recursive: true, verbatimSymlinks: true });
+    assertRealGitDirectory(repo);
     await resilient(() => git(['-C', repo, 'remote', 'set-url', 'origin', origin], repo));
     assertCleanClone(repo);
     return { root, repo, origin };
   } catch (err) {
     rmSync(root, { recursive: true, force: true });
     throw err;
+  }
+}
+
+function assertRealGitDirectory(repo: string): void {
+  const gitEntry = join(repo, '.git');
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(gitEntry);
+  } catch (err) {
+    throw new Error(
+      `cloned git template requires a real .git directory: ${String((err as NodeJS.ErrnoException).message)}`,
+    );
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error('cloned git template .git must be a real directory, not a symlink or gitfile');
   }
 }
 
