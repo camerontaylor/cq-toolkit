@@ -25,7 +25,7 @@
 //      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
 //      scan and its unit fails uncommitted.
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -48,7 +48,7 @@ import {
   makeSweepUnitOp,
   type SweepUnitReport,
 } from '../../../src/ops/sweep/unit.js';
-import type { SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
+import type { SweepUnitDispatchInput, SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import { subprocessRunCheck } from '../../../src/ops/gates/checkRunner.js';
@@ -91,8 +91,17 @@ const AGENT_CLI = [
 ];
 
 const CLEANUP: string[] = [];
-const gitTemplate: GitTemplate = await createGitTemplate(generateScratchRepo);
-CLEANUP.push(gitTemplate.root);
+let gitTemplate: GitTemplate;
+beforeAll(
+  async () => {
+    gitTemplate = await createGitTemplate(generateScratchRepo);
+    CLEANUP.push(gitTemplate.root);
+  },
+  // Structural process-lifecycle setup: the template seeds one repository and
+  // bare origin through bounded git calls before any test can start. The
+  // 30s budget is headroom for host load, not a deadline for any assertion.
+  30_000,
+);
 afterAll(() => {
   for (const dir of CLEANUP) rmSync(dir, { recursive: true, force: true });
 });
@@ -792,6 +801,71 @@ describe('sweep e2e: driver self-commit vs the strand-retry trust pin (#174)', (
 
 describe('sweep e2e: scoped packages and rename-side scope', () => {
   test(
+    '@scope/gamma derives the slug scope-gamma: the unit runs, commits, and pushes on the normalized branch',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-scoped');
+      const pkgDir = join(scene.repo, 'packages', '@scope', 'gamma');
+      mkdirSync(join(pkgDir, 'test'), { recursive: true });
+      writeFileSync(
+        join(pkgDir, 'package.json'),
+        `${JSON.stringify({ name: '@scope/gamma', version: '1.0.0', private: true }, null, 2)}\n`,
+      );
+      writeFileSync(
+        join(pkgDir, 'test', 'suite.test.js'),
+        [
+          "'use strict';",
+          'const sum = (a, b) => a + b;',
+          'if (sum(1, 1) !== 3) {',
+          "  throw new Error('expected 3, got ' + sum(1, 1));",
+          '}',
+          '',
+        ].join('\n'),
+      );
+      await gitOut(['-C', scene.repo, 'add', '-A'], scene.repo);
+      await gitOut(['-C', scene.repo, 'commit', '-q', '-m', 'seed: @scope/gamma'], scene.repo);
+
+      const GAMMA_FIX = {
+        file: 'packages/@scope/gamma/test/suite.test.js',
+        oldText: 'if (sum(1, 1) !== 3) {',
+        newText: 'if (sum(1, 1) !== 2) {',
+      };
+      const config: SweepPlanConfig = {
+        ...scene.config,
+        packages: [{ name: '@scope/gamma', path: 'packages/@scope/gamma' }],
+        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/test/suite.test.js'] },
+      };
+      const outcome = await runSweepPlan(
+        optsFor({ ...scene, config }, (unit) =>
+          [
+            `You are the ${unit.fixer} fixer for package ${unit.package}.`,
+            'Apply exactly the edit in the instruction line, then report.',
+            `@SWEEP-AGENT ${JSON.stringify({ edit: GAMMA_FIX })}`,
+          ].join('\n'),
+        ),
+      );
+
+      const gamma = unitRow(outcome.run, '@scope/gamma');
+      expect(gamma.status).toBe('ok');
+      expect(gamma.report?.baseline.verdict).toBe('failing');
+      expect(gamma.report?.committed).toBe(true);
+      expect(gamma.report?.pushed).toBe(true);
+      expect(gamma.report?.prBranch).toBe('cq/e2e-scoped/fix/scope-gamma');
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads).toContain('cq/e2e-scoped/fix/scope-gamma');
+      expect(outcome.assembleRun).toBeDefined();
+      const assembled = assembleReport(outcome.assembleRun as RunReport);
+      expect(assembled.packages.map((row) => row.name)).toEqual(['@scope/gamma']);
+      expectTrackerFirstFleet(
+        scene,
+        'cq/e2e-scoped',
+        ['cq/e2e-scoped/fix/scope-gamma'],
+        assembled.packages,
+      );
+    },
+  );
+
+  test(
     'a working-tree RENAME production → test shape: the allowlist flags the SOURCE path',
     { timeout: 120_000 },
     async () => {
@@ -829,6 +903,28 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
 // ---------------------------------------------------------------------------
 // 5. Stranded-commit retry
 // ---------------------------------------------------------------------------
+
+describe('sweep e2e: assemble guard and stranded commits', () => {
+  test(
+    'an all-no-op fleet (nothing commits) dispatches NO assemble: zero gh calls',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-clean');
+      const config: SweepPlanConfig = {
+        ...scene.config,
+        packages: [SCRATCH_PACKAGES[1] as { name: string; path: string }],
+        packageFiles: { beta: SCRATCH_PACKAGE_FILES['beta'] ?? [] },
+      };
+      const outcome = await runSweepPlan(optsFor({ ...scene, config }, prompts({}, {})));
+      const beta = unitRow(outcome.run, 'beta');
+      expect(beta.status).toBe('ok');
+      expect(beta.report?.committed).toBe(false);
+      expect(outcome.assembleRun).toBeUndefined();
+      expect(scene.gh.calls).toHaveLength(0);
+      expect(outcome.output).toContain('0 failing unit(s) of 1');
+    },
+  );
+});
 
 describe('sweep e2e: stranded commit retry', () => {
   test(
@@ -934,6 +1030,140 @@ describe('sweep e2e: stranded commit retry', () => {
     },
   );
 });
+
+describe('sweep e2e: rescue lane and prep mode', () => {
+  test(
+    'a transient fault is rescued: the -r2 re-dispatch runs, the unit lands ok, and the fleet assembles',
+    { timeout: 180_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-rescue');
+      const faultMarker = join(scene.root, 'alpha-faulted');
+      const outcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config: { ...scene.config, rescue: { maxRedispatch: 1 } } },
+          prompts(
+            {
+              edit: ALPHA_FIX,
+              faultOnce: { marker: faultMarker, why: 'transient crash on alpha' },
+            },
+            {},
+          ),
+        ),
+      );
+      const alpha = unitRow(outcome.run, 'alpha');
+      expect(alpha.status).toBe('failed');
+      expect(alpha.error).toMatch(
+        /\[INFRA\] sweep.unit alpha: the fixer worker stopped with reason 'error'/,
+      );
+      expect(outcome.rescueRuns).toHaveLength(1);
+      const rescueRow = outcome.rescueRuns?.[0]?.jobs[0];
+      expect(rescueRow?.jobId).toBe('sweep-alpha-fix-r2');
+      expect(rescueRow?.result.status).toBe('ok');
+      expect(outcome.assembleRun).toBeDefined();
+      const assembled = assembleReport(outcome.assembleRun as RunReport);
+      expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
+    },
+  );
+
+  test(
+    'a TAMPER fault is never re-dispatched: no rescue run, straight to preserve',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-tamper-rescue');
+      const config: SweepPlanConfig = { ...scene.config, rescue: { maxRedispatch: 1 } };
+      const outcome: SweepRunOutcome = await runSweepPlan(
+        optsFor(
+          { ...scene, config },
+          prompts(
+            { edit: ALPHA_FIX },
+            {
+              write: {
+                file: 'packages/beta/test/added.test.js',
+                text: "it.skip('gaming the run', () => {});\n",
+              },
+            },
+          ),
+        ),
+      );
+      const beta = unitRow(outcome.run, 'beta');
+      expect(beta.status).toBe('failed');
+      expect(beta.error).toMatch(/\[TAMPER\]/);
+      expect(outcome.rescueRuns).toBeUndefined();
+      const salvaged = await salvageInterruptedRun({
+        journalDir: scene.journalDir,
+        planId: SWEEP_PLAN_ID,
+        config: scene.config,
+        planner: outcome.planner,
+        enrichedJobs: outcome.plan.jobs,
+        runIndex: 0,
+      });
+      expect(salvaged.rows.find((row) => row.path.endsWith('fix/beta'))?.class).toBe('preserve');
+    },
+  );
+
+  test(
+    'prep mode runs probes only: baseline evidence for both packages, zero agents, zero commits, zero PRs',
+    { timeout: 120_000 },
+    async () => {
+      const scene = await scenario('cq/e2e-prep');
+      const config: SweepPlanConfig = { ...scene.config, mode: 'prep' };
+      const outcome = await runSweepPlan(
+        optsFor({ ...scene, config }, prompts({ edit: ALPHA_FIX }, {})),
+      );
+      expect(outcome.run.counts).toMatchObject({ done: 3, failed: 0, blocked: 0 });
+      for (const pkg of ['alpha', 'beta']) {
+        const row = unitRow(outcome.run, pkg);
+        expect(row.status).toBe('ok');
+        expect(row.report?.mode).toBe('prep');
+        expect(row.report?.baseline.failureSet).toBeDefined();
+        expect(row.report?.final).toBeUndefined();
+        expect(row.report?.regression).toBeUndefined();
+        expect(row.report?.committed).toBeUndefined();
+        expect(row.report?.pushed).toBeUndefined();
+      }
+      expect(existsSync(scene.sessionsDir)).toBe(false);
+      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
+      expect(originHeads.trim()).toBe('');
+      expect(scene.gh.calls).toHaveLength(0);
+      expect(outcome.assembleRun).toBeUndefined();
+      for (const pkg of ['alpha', 'beta']) {
+        expect(
+          existsSync(
+            join(
+              sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-prep'),
+              SWEEP_RUN_STATE_BASELINE_DIR,
+              'fix',
+              `${pkg}.json`,
+            ),
+          ),
+        ).toBe(true);
+      }
+    },
+  );
+});
+
+test(
+  'the default per-unit scope: an alpha worker editing beta fails naming the path (jZ59w)',
+  { timeout: 120_000 },
+  async () => {
+    const scene = await scenario('cq/e2e-uniscope');
+    const CROSS = {
+      file: 'packages/beta/test/suite.test.js',
+      oldText: 'const expected = 4;',
+      newText: 'const expected = 4; // touched by the alpha worker',
+    };
+    const outcome = await runSweepPlan(optsFor(scene, prompts({ edit: CROSS }, {})));
+    const alphaInput = outcome.plan.jobs.find((job) => job.id === 'sweep-alpha-fix')
+      ?.input as SweepUnitDispatchInput;
+    expect(alphaInput.stagePathAllowlist?.patterns).toContain('^packages/alpha/');
+    const alpha = unitRow(outcome.run, 'alpha');
+    expect(alpha.status).toBe('failed');
+    expect(alpha.error).toMatch(/outside the allowlist/);
+    expect(alpha.error).toContain('packages/beta/test/suite.test.js');
+    expect(outcome.assembleRun).toBeUndefined();
+    expect(scene.gh.created).toHaveLength(0);
+  },
+);
 
 // The journal-file shape sanity: one NDJSON file per dispatch (units + the
 // marker-filtered assemble), every line parseable.
