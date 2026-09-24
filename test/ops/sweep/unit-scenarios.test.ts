@@ -5,8 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
-import { JournalEventSchema } from '../../../src/kernel/schema.js';
+import type { Driver, WorkerResult } from '../../../src/driver/types.js';
 import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import { makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
@@ -15,18 +14,11 @@ import type { WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import type { WorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import type { GhFn } from '../../../src/ops/review/gh.js';
 import { makeSalvage } from '../../../src/ops/sweep/salvage.js';
+import { unitStagePathAllowlist } from '../../../src/plans/sweep.js';
 
 interface CheckOutput {
   failing: boolean;
   message?: string;
-}
-
-interface GitState {
-  staged: boolean;
-  stagedDiff: string;
-  stagedNameStatus: string;
-  commitFault: boolean;
-  committed: boolean;
 }
 
 interface FakeWorld {
@@ -37,10 +29,10 @@ interface FakeWorld {
   driverFactory: () => Driver;
   gitCalls: string[][];
   checks: string[];
-  driverCalls: OpInvocation[];
   pushCalls: Array<{ repoRoot: string; branch: string }>;
   worktreePath: string;
-  state: GitState;
+  /** The `git diff --cached --name-status -z` output the allowlist parses. */
+  staged: { nameStatus: string };
   worktreeState: Array<{ path: string; branch: string }>;
   dirty: { value: boolean };
 }
@@ -72,17 +64,10 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
   const worktreePath = join(root, 'worktrees', 'fix', 'alpha');
   const gitCalls: string[][] = [];
   const checks: string[] = [];
-  const driverCalls: OpInvocation[] = [];
   const pushCalls: Array<{ repoRoot: string; branch: string }> = [];
   const worktreeState: Array<{ path: string; branch: string }> = [];
   const dirty = { value: false };
-  const state: GitState = {
-    staged: true,
-    stagedDiff: 'diff --git a/src/a.js b/src/a.js\n',
-    stagedNameStatus: '',
-    commitFault: false,
-    committed: false,
-  };
+  const staged = { nameStatus: '' };
 
   const effectsFactory = (): WorktreeEffects => ({
     listWorktrees: async () => worktreeState.map((entry) => ({ ...entry })),
@@ -102,16 +87,12 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
   const gitFactory = (): GhFn => async (args) => {
     gitCalls.push(args);
     if (args.includes('rev-list')) return { code: 0, stdout: '0\n', stderr: '' };
-    if (args.includes('--quiet')) return { code: state.staged ? 1 : 0, stdout: '', stderr: '' };
-    if (args.includes('--name-status'))
-      return { code: 0, stdout: state.stagedNameStatus, stderr: '' };
+    // The worker always leaves a staged change: `diff --cached --quiet` exits 1.
+    if (args.includes('--quiet')) return { code: 1, stdout: '', stderr: '' };
+    if (args.includes('--name-status')) return { code: 0, stdout: staged.nameStatus, stderr: '' };
     if (args.includes('diff') && args.includes('--cached')) {
-      return { code: 0, stdout: state.stagedDiff, stderr: '' };
+      return { code: 0, stdout: 'diff --git a/src/a.js b/src/a.js\n', stderr: '' };
     }
-    if (args.includes('commit') && state.commitFault) {
-      return { code: 1, stdout: '', stderr: 'commit failed' };
-    }
-    if (args.includes('commit')) state.committed = true;
     return { code: 0, stdout: '', stderr: '' };
   };
 
@@ -131,14 +112,11 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
   };
 
   const driverFactory = (): Driver => ({
-    run: async (invocation: OpInvocation): Promise<WorkerResult> => {
-      driverCalls.push(invocation);
-      return {
-        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        denials: [],
-        stopReason: 'complete',
-      };
-    },
+    run: async (): Promise<WorkerResult> => ({
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      denials: [],
+      stopReason: 'complete',
+    }),
   });
 
   return {
@@ -149,10 +127,9 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     driverFactory,
     gitCalls,
     checks,
-    driverCalls,
     pushCalls,
     worktreePath,
-    state,
+    staged,
     worktreeState,
     dirty,
   };
@@ -172,7 +149,7 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
     worktreeEffects: world.effectsFactory(),
     runCheck: world.runCheckFactory(),
     checkCommand: (unit, cwd) => ({ command: 'vitest', args: [unit.package], cwd }),
-    driver: extra.driver ?? world.driverFactory(),
+    driver: world.driverFactory(),
     modelSpec: { model: 'fake', provider: 'test' },
     sessionsDir: join(world.root, 'sessions'),
     prompt: () => 'fix it',
@@ -184,8 +161,8 @@ function bindingsOf(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}): S
   };
 }
 
-async function runUnit(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}, unit = UNIT) {
-  return makeSweepUnitOp(bindingsOf(world, extra))(unit);
+async function runUnit(world: FakeWorld, extra: Partial<SweepUnitBindings> = {}) {
+  return makeSweepUnitOp(bindingsOf(world, extra))(UNIT);
 }
 
 describe('sweep unit in-process scenarios', () => {
@@ -214,9 +191,12 @@ describe('sweep unit in-process scenarios', () => {
       }
       expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
       expect(world.dirty.value).toBe(true);
+      // Salvage reads the state the unit LEFT: the tree it created and its
+      // cleanliness — never a stub that answers 'dirty' regardless.
+      expect(world.worktreeState.map((entry) => entry.path)).toEqual([world.worktreePath]);
       const salvage = makeSalvage({
-        pathExists: async () => true,
-        isStrictClean: async () => false,
+        pathExists: async (path) => world.worktreeState.some((entry) => entry.path === path),
+        isStrictClean: async () => !world.dirty.value,
         canonicalize: async (path) => path,
       });
       const preserved = await salvage({
@@ -225,7 +205,7 @@ describe('sweep unit in-process scenarios', () => {
       });
       expect(preserved.status).toBe('ok');
       if (preserved.status === 'ok') expect(preserved.value.rows[0]?.class).toBe('preserve');
-      const later = await makeSweepUnitOp(bindingsOf(world))(UNIT);
+      const later = await runUnit(world);
       expect(later.status).toBe('failed');
       if (later.status === 'failed') expect(later.error).toMatch(/dirty .*refusing reuse/);
     } finally {
@@ -236,7 +216,7 @@ describe('sweep unit in-process scenarios', () => {
   test('ordinary stage-path allowlist rejection names the exact offending path', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
-      world.state.stagedNameStatus = 'M\0packages/beta/index.js';
+      world.staged.nameStatus = 'M\0packages/beta/index.js';
       const result = await runUnit(world, {
         stagePathAllowlist: { patterns: ['^src/'] },
       });
@@ -254,7 +234,7 @@ describe('sweep unit in-process scenarios', () => {
   test('a valid in-scope test-file edit is accepted, committed, and pushed', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
-      world.state.stagedNameStatus = 'M\0packages/alpha/test/suite.test.js';
+      world.staged.nameStatus = 'M\0packages/alpha/test/suite.test.js';
       const result = await runUnit(world, {
         stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] },
       });
@@ -273,10 +253,23 @@ describe('sweep unit in-process scenarios', () => {
   test('the default package scope names the exact cross-package path', async () => {
     const world = await makeWorld([{ failing: true }, { failing: false }]);
     try {
-      world.state.stagedNameStatus = 'M\0packages/beta/test/suite.test.js';
-      const result = await runUnit(world, {
-        stagePathAllowlist: { patterns: ['^packages/alpha/', 'packages/alpha/test/suite.js'] },
-      });
+      world.staged.nameStatus = 'M\0packages/beta/test/suite.test.js';
+      // The production default (jZ59w), derived exactly as buildSweepPlan does.
+      const scope = unitStagePathAllowlist(
+        {
+          repoRoot: world.root,
+          worktreesDir: 'worktrees',
+          runPrefix: 'cq/unit',
+          base: 'main',
+          packages: [{ name: 'alpha', path: 'packages/alpha' }],
+          selector: { mode: 'workspace-all' },
+          fixers: ['fix'],
+        },
+        UNIT,
+      );
+      if (scope === undefined) throw new Error('alpha must derive a default scope');
+      expect(scope.patterns).toContain('^packages/alpha/');
+      const result = await runUnit(world, { stagePathAllowlist: scope });
       expect(result.status).toBe('failed');
       if (result.status === 'failed') {
         expect(result.error).toMatch(/outside the allowlist/);
@@ -285,36 +278,5 @@ describe('sweep unit in-process scenarios', () => {
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }
-  });
-
-  test('journal lifecycle frames satisfy the frozen journal schema', () => {
-    const at = new Date(1_700_000_000_000).toISOString();
-    const events = [
-      { type: 'run-started', runId: 'r', at, planId: 'sweep' },
-      {
-        type: 'job-started',
-        runId: 'r',
-        at,
-        jobId: 'sweep-alpha-fix',
-        op: 'sweep.unit',
-        attempt: 1,
-      },
-      {
-        type: 'job-finished',
-        runId: 'r',
-        at,
-        jobId: 'sweep-alpha-fix',
-        opId: 'sweep.unit',
-        inputsHash: 'h',
-        result: { status: 'ok', value: {} },
-      },
-      { type: 'run-finished', runId: 'r', at, stoppedEarly: false },
-    ];
-    expect(events.map((event) => JournalEventSchema.safeParse(event).success)).toEqual([
-      true,
-      true,
-      true,
-      true,
-    ]);
   });
 });

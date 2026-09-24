@@ -13,11 +13,13 @@
 //      and beta's half-done tree `resume`; the re-invoke REUSES both trees
 //      and RE-PROBES their baselines (I7 — asserted by probe-call counting
 //      and the reuse's baseline-cache eviction), then assembles 3 PRs.
-//   3. DIRTY TREES ARE PRESERVED: the breaking-edit fault makes beta's fix a
-//      REGRESSION — the unit fails uncommitted, the tree stays dirty, and
-//      salvage classifies it `preserve` while alpha stays `reuse`.
+//   3. DIRTY TREES ARE PRESERVED: the focused tamper run leaves beta's tree
+//      staged but uncommitted, and the REAL salvage (subprocess effects)
+//      classifies it `preserve`. The regression decision that withholds the
+//      commit is pinned in-process (test/ops/sweep/unit-scenarios.test.ts).
 //   4. EVIDENCE QUALITY: every journaled line parses through the frozen
-//      JournalEventSchema (not just a type-field sniff), and the salvage
+//      JournalEventSchema (openRunLog.read validates each line, not just a
+//      type-field sniff), and the salvage
 //      journal tail takes lastStep from the LAST job-finished event in
 //      journal order — jobs can finish out of plan order, and a multi-fixer
 //      fleet yields ONE salvage entry per unit tree.
@@ -322,31 +324,29 @@ async function expectCompleteJournal(
       expect(finished[0].result.status).toBe('ok');
       expect(finished[0].opId).toBe(op);
     }
+    // Per-job order: this job's start precedes its own finish.
+    expect(
+      events.findIndex((e) => e.type === 'job-started' && e.jobId === jobId),
+      `job-started precedes job-finished for ${jobId}`,
+    ).toBeLessThan(events.findIndex((e) => e.type === 'job-finished' && e.jobId === jobId));
   }
-  // Started and finished events stay inside the run-started/finished frame;
-  // concurrent units may start together, so only per-job ordering is fixed.
-  const frame = events
-    .slice(1, -1)
-    .map((e) => (e.type === 'run-started' || e.type === 'run-finished' ? 'run' : e.type));
-  expect(frame.every((kind) => kind === 'job-started' || kind === 'job-finished')).toBe(true);
 }
 
-/** Two unit jobs were in flight together (not merely both completed). */
+/**
+ * The unit jobs were in flight together (not merely both completed): every
+ * start precedes the first finish in JOURNAL ORDER. The run log serializes
+ * appends in call order, so line order is event order — no clock involved.
+ * A serial dispatch (start, finish, start, ...) fails this.
+ */
 async function expectUnitOverlap(journalDir: string, runIndex: number, jobIds: string[]) {
   const events = await runEventsAt(journalDir, SWEEP_PLAN_ID, runIndex);
-  const starts = jobIds.map((jobId) =>
-    events.find((event) => event.type === 'job-started' && event.jobId === jobId),
-  );
-  const finishes = jobIds.map((jobId) =>
-    events.find((event) => event.type === 'job-finished' && event.jobId === jobId),
-  );
-  expect(starts.every((event) => event?.type === 'job-started')).toBe(true);
-  expect(finishes.every((event) => event?.type === 'job-finished')).toBe(true);
-  const startedAt = starts.map((event) => Date.parse((event as JournalEvent & { at: string }).at));
-  const finishedAt = finishes.map((event) =>
-    Date.parse((event as JournalEvent & { at: string }).at),
-  );
-  expect(Math.max(...startedAt)).toBeLessThan(Math.min(...finishedAt));
+  const indexOf = (type: 'job-started' | 'job-finished', jobId: string): number =>
+    events.findIndex((event) => event.type === type && event.jobId === jobId);
+  const starts = jobIds.map((jobId) => indexOf('job-started', jobId));
+  const finishes = jobIds.map((jobId) => indexOf('job-finished', jobId));
+  expect(starts.every((index) => index >= 0)).toBe(true);
+  expect(finishes.every((index) => index >= 0)).toBe(true);
+  expect(Math.max(...starts)).toBeLessThan(Math.min(...finishes));
 }
 
 /** The fleet assertion: tracker-first order, tracker + the given packages' PRs, manifest updated in place. */
@@ -805,6 +805,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-scoped');
+      // Seed ONE scoped package with alpha's failing-suite shape.
       const pkgDir = join(scene.repo, 'packages', '@scope', 'gamma');
       mkdirSync(join(pkgDir, 'test'), { recursive: true });
       writeFileSync(
@@ -845,6 +846,9 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
         ),
       );
 
+      // The scoped unit RAN (the old fold derived the undeliverable
+      // `-scope-gamma`, which SEGMENT_RE refuses): fixed, committed, pushed
+      // on the normalized branch.
       const gamma = unitRow(outcome.run, '@scope/gamma');
       expect(gamma.status).toBe('ok');
       expect(gamma.report?.baseline.verdict).toBe('failing');
@@ -853,6 +857,8 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
       expect(gamma.report?.prBranch).toBe('cq/e2e-scoped/fix/scope-gamma');
       const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
       expect(originHeads).toContain('cq/e2e-scoped/fix/scope-gamma');
+      // The marker-filtered assemble covers the scoped unit under its
+      // normalized branch.
       expect(outcome.assembleRun).toBeDefined();
       const assembled = assembleReport(outcome.assembleRun as RunReport);
       expect(assembled.packages.map((row) => row.name)).toEqual(['@scope/gamma']);
@@ -901,10 +907,10 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Stranded-commit retry
+// 5. Assemble-empty guard and stranded-commit retry
 // ---------------------------------------------------------------------------
 
-describe('sweep e2e: assemble guard and stranded commits', () => {
+describe('sweep e2e: assemble guard', () => {
   test(
     'an all-no-op fleet (nothing commits) dispatches NO assemble: zero gh calls',
     { timeout: 120_000 },
@@ -1029,12 +1035,17 @@ describe('sweep e2e: stranded commit retry', () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// 6. Rescue lane (arm-a §4.2 step 5) and prep mode (UC §1 row 3)
+// ---------------------------------------------------------------------------
+
 describe('sweep e2e: rescue lane and prep mode', () => {
   test(
     'a transient fault is rescued: the -r2 re-dispatch runs, the unit lands ok, and the fleet assembles',
     { timeout: 180_000 },
     async () => {
       const scene = await scenario('cq/e2e-rescue');
+      // Attempt 1 faults (marker consumed); a re-dispatch proceeds to the fix.
       const faultMarker = join(scene.root, 'alpha-faulted');
       const outcome = await runSweepPlan(
         optsFor(
@@ -1048,6 +1059,8 @@ describe('sweep e2e: rescue lane and prep mode', () => {
           ),
         ),
       );
+      // Run 1: alpha FAILED (the transient fault); the RESCUE run re-dispatched
+      // sweep-alpha-fix-r2 and it landed OK.
       const alpha = unitRow(outcome.run, 'alpha');
       expect(alpha.status).toBe('failed');
       expect(alpha.error).toMatch(
@@ -1057,6 +1070,7 @@ describe('sweep e2e: rescue lane and prep mode', () => {
       const rescueRow = outcome.rescueRuns?.[0]?.jobs[0];
       expect(rescueRow?.jobId).toBe('sweep-alpha-fix-r2');
       expect(rescueRow?.result.status).toBe('ok');
+      // The fleet assembles the rescued unit.
       expect(outcome.assembleRun).toBeDefined();
       const assembled = assembleReport(outcome.assembleRun as RunReport);
       expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
@@ -1083,10 +1097,13 @@ describe('sweep e2e: rescue lane and prep mode', () => {
           ),
         ),
       );
+      // Beta's unit failed with a TAMPER verdict: NOT retryable — no rescue
+      // run exists for it.
       const beta = unitRow(outcome.run, 'beta');
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/\[TAMPER\]/);
       expect(outcome.rescueRuns).toBeUndefined();
+      // And the tree state routes it to preserve.
       const salvaged = await salvageInterruptedRun({
         journalDir: scene.journalDir,
         planId: SWEEP_PLAN_ID,
@@ -1111,6 +1128,7 @@ describe('sweep e2e: rescue lane and prep mode', () => {
       const outcome = await runSweepPlan(
         optsFor({ ...scene, config }, prompts({ edit: ALPHA_FIX }, {})),
       );
+      // Both prep units landed ok with probe evidence only.
       expect(outcome.run.counts).toMatchObject({ done: 3, failed: 0, blocked: 0 });
       for (const pkg of ['alpha', 'beta']) {
         const row = unitRow(outcome.run, pkg);
@@ -1122,11 +1140,14 @@ describe('sweep e2e: rescue lane and prep mode', () => {
         expect(row.report?.committed).toBeUndefined();
         expect(row.report?.pushed).toBeUndefined();
       }
+      // Zero agent invocations: the sessions dir was never created.
       expect(existsSync(scene.sessionsDir)).toBe(false);
+      // Zero commits pushed and zero PRs: prep's product is the evidence.
       const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
       expect(originHeads.trim()).toBe('');
       expect(scene.gh.calls).toHaveLength(0);
       expect(outcome.assembleRun).toBeUndefined();
+      // The baseline snapshots exist for BOTH packages (run-state, namespaced).
       for (const pkg of ['alpha', 'beta']) {
         expect(
           existsSync(

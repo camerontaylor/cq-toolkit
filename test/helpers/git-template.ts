@@ -82,7 +82,7 @@ export async function cloneTemplate(template: GitTemplate): Promise<ClonedGitTem
   const repo = join(root, 'repo');
   const origin = join(root, 'origin.git');
   try {
-    cpSync(template.root, root, { recursive: true });
+    cpSync(template.root, root, { recursive: true, verbatimSymlinks: true });
     await resilient(() => git(['-C', repo, 'remote', 'set-url', 'origin', origin], repo));
     assertCleanClone(repo);
     return { root, repo, origin };
@@ -105,7 +105,7 @@ function assertCleanClone(repo: string): void {
     throw new Error('cloned git template carried linked-worktree metadata');
   }
   // `core.worktree` is a linked-worktree pointer; it must not survive a copy.
-  const worktree = execFileSyncSafe(['-C', repo, 'config', '--get', 'core.worktree']);
+  const worktree = execFileSyncSafe(['-C', repo, 'config', '--local', '--get', 'core.worktree']);
   if (worktree.trim() !== '') throw new Error('cloned git template carried core.worktree');
   const status = execFileSyncSafe(['-C', repo, 'status', '--porcelain']);
   if (status !== '') throw new Error(`cloned git template is dirty: ${status}`);

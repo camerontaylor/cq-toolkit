@@ -231,7 +231,7 @@ export interface SweepUnitBindings {
   /**
    * Optional worktree/git effects seam. The dispatch registry omits this and
    * therefore keeps the shipped subprocess adapter; SDK callers can inject a
-   * fresh per-invocation fake when they need to exercise unit orchestration
+   * a fresh fake per op instance when they need to exercise unit orchestration
    * without spawning git.
    */
   worktreeEffects?: WorktreeEffects;
