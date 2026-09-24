@@ -91,11 +91,8 @@ const AGENT_CLI = [
 ];
 
 const CLEANUP: string[] = [];
-let gitTemplate: GitTemplate;
-beforeAll(async () => {
-  gitTemplate = await createGitTemplate(generateScratchRepo);
-  CLEANUP.push(gitTemplate.root);
-});
+const gitTemplate: GitTemplate = await createGitTemplate(generateScratchRepo);
+CLEANUP.push(gitTemplate.root);
 afterAll(() => {
   for (const dir of CLEANUP) rmSync(dir, { recursive: true, force: true });
 });
@@ -735,6 +732,9 @@ describe('sweep e2e: tamper guard on new files', () => {
       });
       expect(salvage.status).toBe('ok');
       if (salvage.status === 'ok') expect(salvage.value.rows[0]?.class).toBe('preserve');
+      // The focused real-git run never publishes a branch; the prep/no-op
+      // plan contract above separately proves the plan emits no push leg.
+      expect((await gitOut(['ls-remote', '--heads', 'origin'], scene.repo)).trim()).toBe('');
       expect(scene.gh.created).toHaveLength(0);
     },
   );
