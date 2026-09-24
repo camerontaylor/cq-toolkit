@@ -126,7 +126,9 @@ export function buildRunInput(
     prs: candidates,
     protectedBranch: SelfhostDefaults.protectedBranch,
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
-    ...(cfg.disableConflictResolution === true ? {} : { modelSpec: SelfhostDefaults.driver }),
+    ...(cfg.disableConflictResolution === true
+      ? { conflictResolutionDisabled: true }
+      : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
   };

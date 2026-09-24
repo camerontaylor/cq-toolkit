@@ -398,6 +398,7 @@ export const RunMergePrsInputSchema: z.ZodType<RunMergePrsInput> = z
     protectedBranch: z.string().min(1).exactOptional(),
     wallClockMs: z.number().int().positive().exactOptional(),
     modelSpec: ModelSpecSchema.exactOptional(),
+    conflictResolutionDisabled: z.boolean().exactOptional(),
     sessionsDir: z.string().min(1).exactOptional(),
     nowMs: z.number().exactOptional(),
   })

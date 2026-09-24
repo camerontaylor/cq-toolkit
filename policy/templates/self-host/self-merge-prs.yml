@@ -134,12 +134,6 @@ jobs:
           # Step-scoped on purpose: the token must never reach npm ci's
           # lifecycle scripts — it reaches ONLY this step.
           GH_TOKEN: ${{ secrets.{{SELFHOST_TOKEN}} }}
-          # The conflict agent is a real worker: RunMergePrsInput.modelSpec
-          # is set from SelfhostDefaults.driver, and its dispatches ride
-          # the same ai-sdk route as the review loop's fix workers — so the
-          # driver key and its presence assert ride here too. The env NAME is
-          # fixed (`ZAI_API_KEY`, what the drivers read); only the SECRET name
-          # is the adopter's placeholder.
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}

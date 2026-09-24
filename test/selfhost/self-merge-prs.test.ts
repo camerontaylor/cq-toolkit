@@ -187,6 +187,16 @@ describe('buildRunInput (the pure input builder)', () => {
       '/checkout/.selfhost/journal/sessions',
     );
   });
+
+  test('disableConflictResolution omits modelSpec and marks the policy', () => {
+    const input = buildRunInput(
+      [],
+      { repoRoot: '/checkout', journalRoot: '/j', disableConflictResolution: true },
+      1234,
+    );
+    expect(input.modelSpec).toBeUndefined();
+    expect(input.conflictResolutionDisabled).toBe(true);
+  });
 });
 
 describe('runSelfMergePrs — real run', () => {

@@ -535,6 +535,7 @@ type CommitVerificationFailure =
   | 'not-descendant'
   | 'not-ancestor'
   | 'empty-diff'
+  | 'diff-unreadable'
   | 'attribution-missing';
 
 /**
@@ -591,7 +592,7 @@ export const commitVerificationFailure = async (
     return 'empty-diff';
   }
   if (changed.code !== 1) {
-    return 'not-descendant';
+    return 'diff-unreadable';
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this

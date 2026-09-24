@@ -145,8 +145,9 @@ const ENV_PASSTHROUGH = 'CQ_RUN_ENV_PASSTHROUGH';
  * copy ONLY the allowlisted names actually set in `parentEnv`, then apply
  * the caller's explicit `overrides` — which ALWAYS win, because a Route
  * value is composed deliberately and the allowlist must never filter it.
- * `extraAllowlist` extends the copied names for a deployment without
- * weakening the default; an entry that is not a well-formed env var name is
+ * `extraAllowlist` and the comma/space-separated `CQ_RUN_ENV_PASSTHROUGH`
+ * parent variable extend the copied names for a deployment without weakening
+ * the default; an entry that is not a well-formed env var name is
  * rejected at the seam (r1/r2) so a direct `spawnManaged` consumer cannot
  * bypass the constructor's validation. The result is a fresh NULL-PROTOTYPE
  * object (r2) so an override named `__proto__` lands as an own property

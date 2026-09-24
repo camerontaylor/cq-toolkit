@@ -159,6 +159,8 @@ interface LoopWorld {
   revListByBase?: Record<string, string[]>;
   /** Shas whose `<sha>..HEAD` ancestry the fake git REFUSES (drives the not-ancestor stage). */
   ancestorFails?: string[];
+  /** `git diff --quiet <sha>^..<sha>`: 0 empty, 1 non-empty, other unreadable. */
+  diffCode?: number;
   /**
    * Worktree-path `rev-parse HEAD` reads after this count FAIL (round 3:
    * the loop's post-run read is read 3 — read 1 is resolvePrWorktree's
@@ -409,6 +411,9 @@ const fakeGit = (world: LoopWorld, log: string[][], worktreePath: string): GhFn 
         ? (world.revListShas ?? [world.worktreeAdvancesTo ?? '4444'.repeat(10)])
         : [];
       return ok(`${shas.join('\n')}${shas.length > 0 ? '\n' : ''}`);
+    }
+    if (rest[0] === 'diff' && rest[1] === '--quiet') {
+      return { code: world.diffCode ?? 1, stdout: '', stderr: '' };
     }
     if (rest[0] === 'log' && rest[1] === '-1') {
       // Per-item attribution (round-3 finding 3): the commit message the
@@ -1739,7 +1744,7 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
   const gate = async (git: GhFn, sha: string, itemId: string) =>
     commitVerificationFailure(git, '/wt', sha, BEFORE_SHA, itemId);
 
-  test('all four stages are named, in gate order', async () => {
+  test('all five stages are named, in gate order', async () => {
     // notAncestorGit: NEW_SHA resolves and descends but its HEAD-ancestry is
     // refused; attributedGit: NEW_SHA's message names T1.
     const notAncestorGit = fakeGit(
@@ -1760,9 +1765,22 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
     expect(await gate(notAncestorGit, BEEF_SHA, 'T1')).toBe('not-descendant');
     // not-ancestor — resolvable + descendant, but refused against HEAD.
     expect(await gate(notAncestorGit, NEW_SHA, 'T1')).toBe('not-ancestor');
+    // empty-diff — a valid descendant commit with no file changes is rejected.
+    const emptyGit = fakeGit(
+      { ...defaultWorld(), knownShas: [SHA, NEW_SHA], diffCode: 0 },
+      [],
+      '/wt',
+    );
+    expect(await gate(emptyGit, NEW_SHA, 'T1')).toBe('empty-diff');
     // attribution-missing — the message must name THIS item.
     expect(await gate(attributedGit, NEW_SHA, 'T1')).toBeNull();
     expect(await gate(attributedGit, NEW_SHA, 'T2')).toBe('attribution-missing');
+    const unreadableGit = fakeGit(
+      { ...defaultWorld(), knownShas: [SHA, NEW_SHA], diffCode: 2 },
+      [],
+      '/wt',
+    );
+    expect(await gate(unreadableGit, NEW_SHA, 'T1')).toBe('diff-unreadable');
   });
 
   test('numeric item ids match at NON-DIGIT boundaries (round 3 low)', async () => {
