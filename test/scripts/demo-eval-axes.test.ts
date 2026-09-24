@@ -46,6 +46,11 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
     cwd: ROOT,
     encoding: 'utf8',
     env: envFor(keys),
+    // This is a bounded refusal before dispatch, not a provider call. A
+    // shorter structural deadline prevents a wedged child from consuming
+    // Vitest's default five-second lifecycle budget.
+    timeout: 4_000,
+    killSignal: 'SIGKILL',
   });
 }
 
@@ -111,13 +116,11 @@ describe('demo-eval-axes: the #30 selective credential gate (spawn e2e)', () => 
   // The global setup builds ../dist/index.js before collection, making this
   // real spawn wiring mandatory in local runs and CI alike.
 
-  it('usage guard: --only without a value exits 1 listing the valid cells', () => {
-    const res = runDemo(['--only']);
-    expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-    expect(res.stderr).toContain('valid cells:');
-  });
-
-  it('#30 discriminator: a zai-only selection demands only ZAI_API_KEY, never DEEPSEEK_API_KEY', () => {
+  // One spawned refusal is the wiring proof (U3): the gate's decision logic
+  // — usage-arg handling and per-provider key demands — is asserted at
+  // module level above; this case proves the real spawned script actually
+  // runs that gate before any dispatch.
+  it('#30 discriminator: a zai-only refusal proves the spawned credential wiring', () => {
     // No keys in env at all: the OLD unconditional gate listed BOTH key vars
     // here; the selective gate must name ZAI_API_KEY only (the glm cells
     // never contact DeepSeek).
@@ -125,14 +128,5 @@ describe('demo-eval-axes: the #30 selective credential gate (spawn e2e)', () => 
     expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
     expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
     expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
-  });
-
-  it('a selected deepseek cell still demands DEEPSEEK_API_KEY (refusal precedes any dispatch)', () => {
-    // ZAI_API_KEY='x' is never used: the credential gate refuses before
-    // makeDriver — the selected deepseek cells are never constructed, no
-    // network is touched, no paid call is made.
-    const res = runDemo(['--only', 'deepseek-flash'], { ZAI_API_KEY: 'x' });
-    expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-    expect(res.stderr).toContain('DEEPSEEK_API_KEY');
   });
 });

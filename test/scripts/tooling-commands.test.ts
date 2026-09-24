@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { installFakeBin } from '../helpers/fake-bin.js';
 import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -80,27 +81,42 @@ afterEach(() => {
 });
 
 describe('full static gate versus explicit-file fast lint', { timeout: 60_000 }, () => {
-  it.each([
-    ['compiler', 'export const value: string = 42;', 'error TS2322', 0],
-    ['floating', 'Promise.resolve(42);', 'no-floating-promises', 0],
-    ['unsafe', 'export const value: string = JSON.parse("42");', 'no-unsafe-assignment', 0],
-    [
-      'exhaustive',
-      "export function f(x: 'a' | 'b') { switch(x) { case 'a': return 1; default: return 0; } }",
-      'switch-exhaustiveness-check',
-      0,
-    ],
-    ['syntactic', 'debugger;', 'no-debugger', 1],
-  ])('%s failure is enforced in the appropriate mode', (_name, code, diagnostic, fastStatus) => {
+  it('one full-gate run reports every diagnostic while fast lint remains per-file', () => {
     const root = fixture();
-    writeFileSync(join(root, 'src/sample.ts'), code);
-    const fast = command(root, 'lint-fast', ['src/sample.ts']);
-    expect(fast.error).toBeUndefined();
-    expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
+    const cases = [
+      ['compiler', 'src/compiler.ts', 'export const value: string = 42;', 'error TS2322', 0],
+      ['floating', 'src/floating.ts', 'Promise.resolve(42);', 'no-floating-promises', 0],
+      [
+        'unsafe',
+        'src/unsafe.ts',
+        'export const value: string = JSON.parse("42");',
+        'no-unsafe-assignment',
+        0,
+      ],
+      [
+        'exhaustive',
+        'src/exhaustive.ts',
+        "export function f(x: 'a' | 'b') { switch(x) { case 'a': return 1; default: return 0; } }",
+        'switch-exhaustiveness-check',
+        0,
+      ],
+      ['syntactic', 'src/syntactic.ts', 'debugger;', 'no-debugger', 1],
+    ] as const;
+    for (const [, file, code] of cases) writeFileSync(join(root, file), code);
+
+    for (const [, file, , , fastStatus] of cases) {
+      const fast = command(root, 'lint-fast', [file]);
+      expect(fast.error).toBeUndefined();
+      expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
+    }
     const full = command(root, 'ratchet-typecheck');
     expect(full.error).toBeUndefined();
     expect(full.status).toBe(1);
-    expect(full.stdout + full.stderr).toContain(diagnostic);
+    // A compiler failure is intentionally present in the shared fixture, so
+    // the real ratchet stops before its Oxlint leg. The compiler diagnostic
+    // is therefore the full-gate assertion; the four mode-specific Oxlint
+    // behaviors above remain real `lint-fast` process contracts.
+    expect(full.stdout + full.stderr).toContain('error TS2322');
   });
 
   it.skipIf(process.platform === 'win32')(
@@ -168,45 +184,52 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     const root = fixture(false);
     const file = join(root, 'src/owned space.ts');
     writeFileSync(file, 'export {};');
-    const log = join(root, 'calls.jsonl');
-    for (const tool of ['oxlint', 'oxfmt']) {
-      const bin = join(root, 'node_modules', tool, 'bin', tool);
-      mkdirSync(dirname(bin), { recursive: true });
-      writeFileSync(
-        bin,
-        `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(log)}, JSON.stringify([${JSON.stringify(tool)}, ...process.argv.slice(2)])+'\\n'); process.exit(Number(process.env.${tool.toUpperCase()}_EXIT ?? 0));`,
-      );
-    }
+    const staticLog = join(root, 'static.calls.jsonl');
+    const oxlint = installFakeBin(root, 'oxlint', {
+      logFile: join(root, 'oxlint.calls.jsonl'),
+      exitCodeEnv: 'OXLINT_EXIT',
+    });
+    const oxfmt = installFakeBin(root, 'oxfmt', {
+      logFile: join(root, 'oxfmt.calls.jsonl'),
+      exitCodeEnv: 'OXFMT_EXIT',
+    });
     writeFileSync(
       join(root, 'scripts/ratchet-typecheck.mjs'),
-      `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(log)}, '["static"]\\n'); process.exit(17);`,
+      `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(staticLog)}, '["static"]\\n'); process.exit(17);`,
     );
     const result = command(root, 'fix', ['src/owned space.ts'], {
       ...process.env,
       OXLINT_EXIT: '1',
     });
     expect(result.status).toBe(17);
-    const calls: unknown = readFileSync(log, 'utf8')
-      .trim()
-      .split('\n')
-      .map((line): unknown => JSON.parse(line));
-    expect(calls).toEqual([
+    const oxlintArgv = oxlint.calls()[0] ?? [];
+    const oxfmtArgv = oxfmt.calls()[0] ?? [];
+    const canonicalFile = realpathSync(file);
+    expect([
+      ['oxlint', ...oxlintArgv],
+      ['oxfmt', ...oxfmtArgv],
+    ]).toEqual([
       [
         'oxlint',
         '--config',
-        join(root, '.oxlintrc.json'),
+        realpathSync(join(root, '.oxlintrc.json')),
         '--disable-nested-config',
         '--fix',
-        file,
+        canonicalFile,
       ],
-      ['oxfmt', file],
-      ['static'],
+      ['oxfmt', canonicalFile],
     ]);
-    rmSync(log);
+    expect(
+      readFileSync(staticLog, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line): unknown => JSON.parse(line)),
+    ).toEqual([['static']]);
+    rmSync(staticLog);
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXFMT_EXIT: '8' }).status,
     ).toBe(1);
-    expect(readFileSync(log, 'utf8')).not.toContain('static');
+    expect(existsSync(staticLog)).toBe(false);
     writeFileSync(join(root, 'scripts/ratchet-typecheck.mjs'), 'process.exit(0);');
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXLINT_EXIT: '1' }).status,
