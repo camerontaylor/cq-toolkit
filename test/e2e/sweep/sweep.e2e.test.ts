@@ -910,18 +910,16 @@ describe('sweep e2e: assemble guard and stranded commits', () => {
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-clean');
-      const config: SweepPlanConfig = {
-        ...scene.config,
-        packages: [SCRATCH_PACKAGES[1] as { name: string; path: string }],
-        packageFiles: { beta: SCRATCH_PACKAGE_FILES['beta'] ?? [] },
-      };
-      const outcome = await runSweepPlan(optsFor({ ...scene, config }, prompts({}, {})));
+      const outcome = await runSweepPlan(optsFor(scene, prompts({}, {})));
+      const alpha = unitRow(outcome.run, 'alpha');
       const beta = unitRow(outcome.run, 'beta');
+      expect(alpha.status).toBe('ok');
+      expect(alpha.report?.committed).toBe(false);
       expect(beta.status).toBe('ok');
       expect(beta.report?.committed).toBe(false);
       expect(outcome.assembleRun).toBeUndefined();
       expect(scene.gh.calls).toHaveLength(0);
-      expect(outcome.output).toContain('0 failing unit(s) of 1');
+      expect(outcome.output).toContain('0 failing unit(s) of 2');
     },
   );
 });
@@ -1098,6 +1096,9 @@ describe('sweep e2e: rescue lane and prep mode', () => {
         runIndex: 0,
       });
       expect(salvaged.rows.find((row) => row.path.endsWith('fix/beta'))?.class).toBe('preserve');
+      // Alpha succeeded, but beta's tamper still blocks the whole fleet gate.
+      expect(outcome.assembleRun).toBeUndefined();
+      expect(scene.gh.calls).toHaveLength(0);
     },
   );
 

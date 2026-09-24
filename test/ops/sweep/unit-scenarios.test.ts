@@ -262,6 +262,7 @@ describe('sweep unit in-process scenarios', () => {
       if (result.status === 'ok') {
         expect(result.value).toMatchObject({ committed: true, pushed: true });
       }
+      expect(world.checks).toHaveLength(2); // fresh baseline and final probes
       expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(true);
       expect(world.pushCalls.map((push) => push.branch)).toEqual(['cq/unit/fix/alpha']);
     } finally {
