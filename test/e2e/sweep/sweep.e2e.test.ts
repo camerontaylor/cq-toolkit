@@ -894,6 +894,21 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
         }),
         stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] },
       })({ package: 'beta', fixer: 'test-fix', files: ['packages/beta/package.json'] });
+
+      const betaPath = resolve(scene.repo, 'worktrees', 'test-fix', 'beta');
+      const nameStatus = (
+        await gitOut(['-C', betaPath, 'diff', '--cached', '--name-status', '-z'], scene.repo)
+      )
+        .split('\0')
+        .filter((token) => token !== '');
+      const renameIndex = nameStatus.findIndex((token) => token.startsWith('R'));
+      expect(renameIndex).toBeGreaterThanOrEqual(0);
+      expect(nameStatus.slice(renameIndex, renameIndex + 3)).toEqual([
+        expect.stringMatching(/^R/),
+        'packages/beta/package.json',
+        'packages/beta/test/manifest.test.js',
+      ]);
+
       expect(result.status).toBe('failed');
       if (result.status === 'failed') {
         // The destination alone matches; the real git rename framing must
