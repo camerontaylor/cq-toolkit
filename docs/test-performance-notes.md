@@ -1,66 +1,101 @@
-# Test-suite performance notes (2026-09-20)
+# Test-suite performance notes (U4 driver transport inventory)
 
-Question: is the suite getting slow enough to need an impacted-only
-protocol and/or slow-test marking?
+## Before / after
 
-## Verdict
+The baseline was measured on the loaded host recorded in the viability plan:
+the full suite took **1,344s**, `test/e2e/sweep` took **918s**, and
+`test/driver/acp.test.ts` took **105s with one failure**. Those figures are
+ordering evidence, not a quiet-run SLA: other Paseo worktrees were active and
+the measured load was about 4.5.
 
-Yes. Full `npx vitest run` did not finish in 600s. The
-`policy/templates/affected-tests.md` premise ("the suite is
-seconds-sized, so selection buys nothing yet") is stale. Recommend:
+The current U4 driver run was measured on this worktree with the transport
+fakes enabled for the shared conformance suite and with the real contracts
+retained. The serial `test/driver/` run completed in **85.5s wall**; its
+per-file measured portions were 44.2s ACP, 20.1s subprocess, and under 0.6s
+for each remaining file. The fake-backed conformance cases are now in-process;
+the real fixture contracts remain in the driver-specific tests.
 
-1. Instantiate the affected-tests advisory (non-required per-PR
-   `vitest related --run`; merge-queue full suite stays required).
-2. Gate or lane the slowest real-process tests
-   (`test/e2e/sweep`, `test/scripts/tooling-commands`).
-3. Give real-git/subprocess tests explicit timeouts instead of the
-   5s default.
+| Area                                    |                 Baseline |       U4 current measurement | Interpretation                                                                                                         |
+| --------------------------------------- | -----------------------: | ---------------------------: | ---------------------------------------------------------------------------------------------------------------------- |
+| Full suite                              |                   1,344s | not re-measured in this unit | The U4 change is scoped to the driver transport boundary; the full-suite target belongs to the stacked PR measurement. |
+| `test/e2e/sweep`                        |                     918s |            not changed by U4 | PR-2's process-count work owns this area.                                                                              |
+| `test/driver/acp.test.ts`               |          105s, 1 failure |                        44.2s | Conformance protocol decisions use the in-process ACP adapter; retained real OS/wire contracts remain.                 |
+| `test/driver/subprocess.test.ts`        | not separately baselined |                        20.1s | Conformance stream-json decisions use the in-process managed-child adapter.                                            |
+| `test/driver/ai-sdk.test.ts`            | not separately baselined |                        0.39s | No U4 transport change.                                                                                                |
+| `test/driver/claude-agent.test.ts`      | not separately baselined |                        0.51s | No U4 transport change.                                                                                                |
+| `test/driver/process-inventory.test.ts` |                      new |                        0.08s | Cheap guard over the committed process-entry list.                                                                     |
 
-## Evidence (per-dir `vitest run`, serial per config)
+Per-file durations are advisory measurements only. Host load, filesystem
+caches, and other worktrees can dominate them; do not turn this table into a
+new timeout or ratchet.
 
-| Area                                  | Time                       | Notes                                                               |
-| ------------------------------------- | -------------------------- | ------------------------------------------------------------------- |
-| Full suite                            | >600s, unfinished          | `fileParallelism: false` makes this additive                        |
-| `test/e2e/sweep`                      | >60s, unfinished           | 6 tests at 120–180s timeouts, no `skipIf`; worst case ~12 min alone |
-| `test/scripts/tooling-commands`       | >120s, hung                | each test `spawnSync`s real `lint-fast` + `ratchet-typecheck`       |
-| `test/plans`                          | ~95s                       | `review-loop` + `sweep` dominate                                    |
-| `test/ops/sweep/worktreeFor`          | ~94s                       | one real `git init → worktree add → clean → prune` ~41s             |
-| `test/ops/ratchet/monotonicGuard`     | ~91s                       | real-`git diff` fixtures ~20s each                                  |
-| `test/workflows`                      | ~50s                       |                                                                     |
-| `test/scripts` (knip+oxlint+demo)     | ~46s                       | real tool spawns                                                    |
-| `test/kernel`                         | ~34s                       | `governor` is the anchor                                            |
-| `test/ops/gates`                      | ~30s                       |                                                                     |
-| `test/driver`                         | slow + 5s-timeout failures | grace-ladder/sidecar tests hit default timeout under load           |
-| `test/ops/analyze`, `merge/pr/ledger` | 4–9s                       | not the problem                                                     |
-| `test/cli`                            | 1–2s                       | not the problem                                                     |
-| `test/e2e/analyze`                    | ~7s                        | fine                                                                |
+## Real-contract inventory
 
-Scale: 98 test files / ~58k test lines; 20 files spawn real
-subprocesses, 48 use real fs/git/tsc.
+The shared conformance suite now drives the production driver seams with the
+two thin adapters in `test/helpers/transport-fakes.ts`. The JSON-line engine
+is shared; only the `ChildProcess` and `ManagedChild` adapters differ. Every
+external boundary still has at least one real fixture-process contract:
 
-## Structural drivers
+| Boundary                                         | Shim                                                                                                             | Real contract retained                                                                                                                            | What the real test proves                                                                                                                      |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| ACP JSON-RPC handshake and session establishment | `fakeAcpSpawn` in `test/helpers/transport-fakes.ts`; conformance factory in `test/driver/acp.test.ts`            | `test/driver/acp.test.ts` — `resume sidecar` (the initialize → session/new → session/load path)                                                   | Real child stdio, JSON-RPC frames, ACP session id, and the sidecar on disk.                                                                    |
+| ACP stdout framing                               | Same ACP adapter                                                                                                 | `test/driver/acp.test.ts` — `stdout frame straddle`                                                                                               | A real child flushes one large frame across pipe writes; the wire buffer preserves both halves.                                                |
+| ACP broken pipe / process death                  | Same ACP adapter                                                                                                 | `test/driver/acp.test.ts` — `a foreign-session ask whose REJECTION write fails`                                                                   | A real closed stdin produces the EPIPE/error-channel behavior observed by the driver.                                                          |
+| ACP SIGTERM → SIGKILL cancellation ladder        | Same ACP adapter; the cancellation tests remain real                                                             | `test/driver/acp.test.ts` — the three governed cancel tests (`cancel maps to aborted`, `IGNORES session/cancel`, and `a cancel write stalled...`) | Real child process signals, grace windows, and kill escalation. These three tests are deliberately not shimmed.                                |
+| Subprocess stream-json parsing and usage         | `fakeManagedSpawn` in `test/helpers/transport-fakes.ts`; conformance factory in `test/driver/subprocess.test.ts` | `test/driver/subprocess.test.ts` — `structured output`, `usage mapping`, and `costUSD via the pricing override`                                   | The retained real cases prove that a real CLI stream, result event, usage shape, and schema boundary agree with the adapter's scripted frames. |
+| Subprocess argv and sidecar                      | Same managed-child adapter                                                                                       | `test/driver/subprocess.test.ts` — `resume: the second run passes --resume`                                                                       | Real child argv, a real sidecar file, and the persisted resume id.                                                                             |
+| Subprocess signal ladder                         | Same managed-child adapter                                                                                       | `test/driver/subprocess.test.ts` — `grace ladder: a SIGTERM-ignoring child escalates to SIGKILL`                                                  | Real OS signals, both ladder rungs, and one real spawn.                                                                                        |
+| Subprocess process-group kill                    | Same managed-child adapter                                                                                       | `test/driver/subprocess.test.ts` — `abort kills the whole process GROUP`                                                                          | A real grandchild is killed with its process group.                                                                                            |
+| ACP/subprocess transport shape                   | Shared JSON-line engine plus one adapter per seam                                                                | `test/driver/process-inventory.test.ts`                                                                                                           | The known process-backed test-file inventory remains explicit and reviewable.                                                                  |
 
-- `vitest.config.ts`: `fileParallelism: false` (deliberate — process-backed
-  suites with termination deadlines). Total time = sum of files.
-- Slowness concentrates in real-process tests (git, tsc, oxlint,
-  subprocess), not unit tests.
-- Several 5s-default-timeout failures (`driver`, `review/registry`
-  rev-parse) are load-flaky, not real regressions — they need explicit
-  timeouts.
+The inventory guard scans `*.test.ts` files for direct `node:child_process`
+imports and the known real-effect entry points (`spawnAcpProcess`,
+`spawnManaged`, `makeSubprocessWorktreeEffects`, `generateScratchRepo`,
+`createGitTemplate`, and `runSweepPlan`). It deliberately guards **known
+entry points only**: a new or transitive spawn helper can evade this scan, so
+adding one requires conscious inventory review rather than pretending the
+regex is complete.
 
-## Caveats
+## Classification
 
-- Timings taken with other Paseo worktrees running vitest concurrently;
-  absolute numbers are inflated. Ordering (which areas dominate) is the
-  signal. Re-measure on quiet CI runners before setting thresholds.
-- `static-conformance` failed at 31s then passed at 12s on retry —
-  flaky under load, same caveat.
+| Area                                                                                                                                                                                                                 | Classification                                            | Reason                                                                                                                                |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Shared ACP/subprocess conformance decisions: structured output, budget, abort verdict, denial shape, usage, serialized seam, isolation, resume record, cost, error verdict, tool policy, path escape, observed model | **Moved to transport fakes**                              | These are our parsing, folding, policy, and verdict logic over wire shapes; the real twin cases below preserve the external boundary. |
+| ACP frame straddle, ACP resume/sidecar, ACP EPIPE, and the three ACP cancel/kill cases                                                                                                                               | **Kept real**                                             | These prove OS process, stdio, signal, and sidecar contracts rather than only our decision logic.                                     |
+| Subprocess resume/argv/sidecar, SIGTERM→SIGKILL, and process-group grandchild kill                                                                                                                                   | **Kept real**                                             | These prove process startup, argv, filesystem sidecars, signals, and descendant cleanup.                                              |
+| Other driver-specific ACP/subprocess cases                                                                                                                                                                           | **Retained real until a case-specific boundary is named** | When in doubt, the real fixture is safer than silently replacing a process contract.                                                  |
 
-## Constraints on the fix
+The three governed ACP cancel tests remain real exactly as required. The
+future PR-1 rebase's `midPromptDeadline` helper must preserve their
+mid-prompt semantics; U4 does not rewrite or remove those tests.
 
-- Workflow changes go through `policy/templates/` — never edit
-  `.github/workflows/` directly.
-- Keep any affected-tests job advisory (I4 interplay in the template);
-  the merge-queue full suite is the completeness gate.
-- Do not parallelize files without evidence the process-backed suites
-  tolerate it.
+## Process-entry inventory
+
+The committed list lives in `test/driver/process-inventory.test.ts` and is
+checked against the known entry-point scan. The current list is:
+
+- `test/cli/i1.test.ts`
+- `test/driver/acp.test.ts`
+- `test/driver/subprocess.test.ts`
+- `test/e2e/analyze/analyze.e2e.test.ts`
+- `test/e2e/merge/live.test.ts`
+- `test/e2e/sweep/sweep.e2e.test.ts`
+- `test/helpers/git-template.test.ts`
+- `test/ops/ratchet/captureBaseline.test.ts`
+- `test/ops/ratchet/monotonicGuard.test.ts`
+- `test/ops/review/registry.test.ts`
+- `test/ops/sweep/cleanup.test.ts`
+- `test/ops/sweep/ledger-suppression.test.ts`
+- `test/ops/sweep/unit-registry.test.ts`
+- `test/ops/sweep/worktreeFor.test.ts`
+- `test/scripts/demo-eval-axes.test.ts`
+- `test/scripts/knip.test.ts`
+- `test/scripts/oxlint-boundaries.test.ts`
+- `test/scripts/ratchet-baseline.test.ts`
+- `test/scripts/static-conformance.test.ts`
+- `test/scripts/tooling-commands.test.ts`
+- `test/workflows/merge-queue-gate.test.ts`
+
+This list is a guard, not a claim that every transitive process launch is
+found. The limitation is stated above so a future helper cannot make the
+inventory look stronger than it is.
