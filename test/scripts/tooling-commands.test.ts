@@ -6,6 +6,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -17,9 +18,10 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const TMPDIR = realpathSync(tmpdir());
 const roots: string[] = [];
 function fixture(realTools = true): string {
-  const root = mkdtempSync(join(tmpdir(), 'cq-command-contract-'));
+  const root = mkdtempSync(join(TMPDIR, 'cq-command-contract-'));
   roots.push(root);
   for (const dir of ['src', 'test', 'lint', 'scripts/lib', 'baselines'])
     mkdirSync(join(root, dir), { recursive: true });
@@ -154,7 +156,7 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
 
   it('rejects paths and missing leaves routed outside by a parent symlink', () => {
     const root = fixture();
-    const outside = mkdtempSync(join(tmpdir(), 'cq-outside-'));
+    const outside = mkdtempSync(join(TMPDIR, 'cq-outside-'));
     roots.push(outside);
     writeFileSync(join(outside, 'outside.ts'), 'debugger;');
     symlinkSync(outside, join(root, 'linked'), process.platform === 'win32' ? 'junction' : 'dir');

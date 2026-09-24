@@ -34,8 +34,10 @@ jobs:
         run: npm run check:static
       - name: Check formatting
         run: npm run format:check
-      - name: Test
-        run: npm run test
+      - name: Test unit
+        run: npm run test:unit
+      - name: Test e2e/acp
+        run: npm run test:e2e
       - name: Check unused files and dependencies
         run: npm run knip
       # Emit gate: the ratchet step above is the typecheck gate; this step
