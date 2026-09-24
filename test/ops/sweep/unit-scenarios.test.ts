@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
+import { JournalEventSchema } from '../../../src/kernel/schema.js';
 import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
 import {
   makeSweepUnitOp,
@@ -292,11 +293,49 @@ describe('sweep unit in-process scenarios', () => {
       if (result.status === 'failed') {
         expect(sweepUnitFaultClass(result.error)).toBe('infra');
         expect(RETRYABLE_FAULT_CLASSES).toContain('infra');
+      }
+      world.state.stagedDiff =
+        'diff --git a/added.test.js b/added.test.js\nnew file mode 100644\n--- /dev/null\n+++ b/added.test.js\n@@ -0,0 +1 @@\n+it.skip("gaming the run", () => {});\n';
+      const tamper = await runUnit(world);
+      expect(tamper.status).toBe('failed');
+      if (tamper.status === 'failed') {
+        expect(sweepUnitFaultClass(tamper.error)).toBe('tamper');
         expect(RETRYABLE_FAULT_CLASSES).not.toContain('tamper');
       }
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }
+  });
+
+  test('journal lifecycle frames satisfy the frozen journal schema', () => {
+    const at = new Date(1_700_000_000_000).toISOString();
+    const events = [
+      { type: 'run-started', runId: 'r', at, planId: 'sweep' },
+      {
+        type: 'job-started',
+        runId: 'r',
+        at,
+        jobId: 'sweep-alpha-fix',
+        op: 'sweep.unit',
+        attempt: 1,
+      },
+      {
+        type: 'job-finished',
+        runId: 'r',
+        at,
+        jobId: 'sweep-alpha-fix',
+        opId: 'sweep.unit',
+        inputsHash: 'h',
+        result: { status: 'ok', value: {} },
+      },
+      { type: 'run-finished', runId: 'r', at, stoppedEarly: false },
+    ];
+    expect(events.map((event) => JournalEventSchema.safeParse(event).success)).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
   });
 
   test('prep mode writes baseline evidence and stops before the fixer', async () => {
