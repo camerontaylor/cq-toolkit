@@ -81,10 +81,24 @@ afterEach(() => {
 });
 
 describe('full static gate versus explicit-file fast lint', { timeout: 60_000 }, () => {
-  it('one full-gate run reports every diagnostic while fast lint remains per-file', () => {
-    const root = fixture();
-    const cases = [
-      ['compiler', 'src/compiler.ts', 'export const value: string = 42;', 'error TS2322', 0],
+  it('asserts the compiler diagnostic and all four Oxlint diagnostics in two full gates', () => {
+    // Fixture A isolates the compiler leg. Its real tsc failure short-circuits
+    // the gate before Oxlint, exactly as the production ratchet does.
+    const compilerRoot = fixture();
+    const compilerFile = 'src/compiler.ts';
+    writeFileSync(join(compilerRoot, compilerFile), 'export const value: string = 42;');
+    const compilerFast = command(compilerRoot, 'lint-fast', [compilerFile]);
+    expect(compilerFast.error).toBeUndefined();
+    expect(compilerFast.status, compilerFast.stdout + compilerFast.stderr).toBe(0);
+    const compilerFull = command(compilerRoot, 'ratchet-typecheck');
+    expect(compilerFull.error).toBeUndefined();
+    expect(compilerFull.status).toBe(1);
+    expect(compilerFull.stdout + compilerFull.stderr).toContain('error TS2322');
+
+    // Fixture B is tsc-clean, so one real full gate reaches Oxlint and emits
+    // every type-aware and syntactic diagnostic across the four files.
+    const oxlintRoot = fixture();
+    const oxlintCases = [
       ['floating', 'src/floating.ts', 'Promise.resolve(42);', 'no-floating-promises', 0],
       [
         'unsafe',
@@ -102,21 +116,20 @@ describe('full static gate versus explicit-file fast lint', { timeout: 60_000 },
       ],
       ['syntactic', 'src/syntactic.ts', 'debugger;', 'no-debugger', 1],
     ] as const;
-    for (const [, file, code] of cases) writeFileSync(join(root, file), code);
+    for (const [, file, code] of oxlintCases) writeFileSync(join(oxlintRoot, file), code);
 
-    for (const [, file, , , fastStatus] of cases) {
-      const fast = command(root, 'lint-fast', [file]);
+    for (const [, file, , , fastStatus] of oxlintCases) {
+      const fast = command(oxlintRoot, 'lint-fast', [file]);
       expect(fast.error).toBeUndefined();
       expect(fast.status, fast.stdout + fast.stderr).toBe(fastStatus);
+      if (file === 'src/syntactic.ts') expect(fast.stdout).toContain('no-debugger');
     }
-    const full = command(root, 'ratchet-typecheck');
-    expect(full.error).toBeUndefined();
-    expect(full.status).toBe(1);
-    // A compiler failure is intentionally present in the shared fixture, so
-    // the real ratchet stops before its Oxlint leg. The compiler diagnostic
-    // is therefore the full-gate assertion; the four mode-specific Oxlint
-    // behaviors above remain real `lint-fast` process contracts.
-    expect(full.stdout + full.stderr).toContain('error TS2322');
+    const oxlintFull = command(oxlintRoot, 'ratchet-typecheck');
+    expect(oxlintFull.error).toBeUndefined();
+    expect(oxlintFull.status).toBe(1);
+    for (const [name, , , diagnostic] of oxlintCases) {
+      expect(oxlintFull.stdout, name).toContain(diagnostic);
+    }
   });
 
   it.skipIf(process.platform === 'win32')(
