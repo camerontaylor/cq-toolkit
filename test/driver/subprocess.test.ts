@@ -1057,7 +1057,10 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       }
       expect(dead).toBe(true);
     });
-  }, 30_000);
+    // Structural OS-signal-ladder budget: SIGTERM grace, then SIGKILL, then
+    // descendant teardown are each subject to host-load swings beyond the
+    // five-second process-death poll above.
+  }, 20_000);
 
   test('stdout retention is a bounded TAIL: droppedBytes counted, every line still observed (#19-10)', async () => {
     await withScratch(async (scratchDir) => {
