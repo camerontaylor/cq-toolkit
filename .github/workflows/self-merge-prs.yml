@@ -7,14 +7,15 @@
 # withBudgetStop, exactly the recorded src/cli/run-plan.ts composition,
 # with the frozen SelfhostDefaults as the caps.
 #
-# I2 (no-privileged-reviewer acceptance) governs the repo's OWN merges —
-# and with ONE GitHub identity every automation-eligible PR classifies
-# `awaiting`: the lane leader hand-merges it after full gates and records
-# it in SELF-HOSTING.md (repo root). THE RECORDED DEVIATION: an
-# intervention is not a failure — a silent stall is. Scheduled runs carry
-# the maxUsd budget cap (I9 — an honest, reported stop) and the governor
-# wall-clock ladder (#137's arming: a wedged governed job is escalated by
-# the ladder instead of stalling the slot).
+# I2 (no-privileged-reviewer acceptance) governs the repo's OWN merges.
+# W0.6 disables the self-host conflict stage: DIRTY candidates are reported
+# as needs-human rather than dispatched to a model. Reviews are counted under
+# the trust rules; the former blanket `awaiting` premise was incorrect. The
+# lane leader hand-merges only after the full gates and records evidence in
+# SELF-HOSTING.md (repo root). Scheduled runs carry the maxUsd budget cap
+# (I9 — an honest, reported stop) and the governor wall-clock ladder (#137's
+# arming: a wedged governed job is escalated by the ladder instead of
+# stalling the slot).
 name: self-merge-prs
 
 on:

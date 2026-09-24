@@ -5,7 +5,10 @@
 # withBudgetStop, the recorded src/cli/run-plan.ts composition) with the
 # frozen SelfhostDefaults as the caps. Wiring, secrets, the cron-window
 # rule, the budget caps, and the I2 single-identity caveat: README.md in
-# this directory (policy/templates/self-host/).
+# this directory (policy/templates/self-host/). W0.6 disables the self-host
+# conflict stage: DIRTY candidates are reported as needs-human rather than
+# dispatched to a model. Reviews are counted under the trust rules; the former
+# blanket `awaiting` premise was incorrect.
 #
 # Instantiate:
 #   {{SELFHOST_TOKEN}}      -> NAME of the repository secret holding a PAT
