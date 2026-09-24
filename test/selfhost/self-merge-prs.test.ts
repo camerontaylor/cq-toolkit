@@ -39,7 +39,11 @@ import type { OpRegistryEntry, OpResult } from '../../src/kernel/types.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import { RunMergePrsInputSchema } from '../../src/ops/merge/registry.js';
 import type { MergePrsOutcome, RunMergePrsInput } from '../../src/ops/merge/runPrs.js';
-import { buildRunInput, runSelfMergePrs } from '../../src/selfhost/self-merge-prs.js';
+import {
+  buildRunInput,
+  runSelfMergePrs,
+  SELFHOST_DISABLES_CONFLICT_RESOLUTION,
+} from '../../src/selfhost/self-merge-prs.js';
 import { SelfhostDefaults } from '../../src/selfhost/config.js';
 
 const OWNER = 'octo';
@@ -187,9 +191,38 @@ describe('buildRunInput (the pure input builder)', () => {
       '/checkout/.selfhost/journal/sessions',
     );
   });
+
+  test('disableConflictResolution omits modelSpec and marks the policy', () => {
+    const input = buildRunInput(
+      [],
+      { repoRoot: '/checkout', journalRoot: '/j', disableConflictResolution: true },
+      1234,
+    );
+    expect(input.modelSpec).toBeUndefined();
+    expect(input.conflictResolutionDisabled).toBe(true);
+    expect(
+      RunMergePrsInputSchema.safeParse({ ...input, modelSpec: SelfhostDefaults.driver }).success,
+    ).toBe(false);
+  });
 });
 
 describe('runSelfMergePrs — real run', () => {
+  test('pins the production conflict-disable policy constant', () => {
+    expect(SELFHOST_DISABLES_CONFLICT_RESOLUTION).toBe(true);
+  });
+
+  test('forwards the shipped conflict-disable policy into the parsed merge input', async () => {
+    const seen: RunMergePrsInput[] = [];
+    const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });
+    const journalRoot = tmpJournalRoot();
+    await runSelfMergePrs(
+      { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
+      { ...baseCfg, journalRoot, disableConflictResolution: true },
+    );
+    expect(seen[0]?.modelSpec).toBeUndefined();
+    expect(seen[0]?.conflictResolutionDisabled).toBe(true);
+  });
+
   test('fetches candidates, dispatches the built input through the scripted op, rides the outcome + report + exclusions', async () => {
     const seen: RunMergePrsInput[] = [];
     const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });

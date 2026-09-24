@@ -50,6 +50,9 @@ import { makeMergePrsPlan } from '../plans/merge-prs.js';
 import { fetchMergeCandidates, type ExcludedCandidate } from './candidates.js';
 import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
 
+/** Production self-host policy: conflict resolution is always withheld. */
+export const SELFHOST_DISABLES_CONFLICT_RESOLUTION = true;
+
 /** The merge plan's single job id (makeMergePrsPlan's shape, kept in sync). */
 const MERGE_PRS_PLAN_RUN_JOB_ID = 'merge-prs-run';
 
@@ -81,6 +84,8 @@ export interface SelfMergePrsCfg {
   journalRoot?: string;
   /** Fetch + classify only — never build the plan, never execute a merge. */
   dryRun?: boolean;
+  /** Disable model-dispatched conflict resolution; DIRTY rows become needs-human. */
+  disableConflictResolution?: boolean;
 }
 
 /**
@@ -115,7 +120,7 @@ export type SelfMergePrsResult =
  */
 export function buildRunInput(
   candidates: MergePrsCandidate[],
-  cfg: { repoRoot: string; journalRoot?: string },
+  cfg: { repoRoot: string; journalRoot?: string; disableConflictResolution?: boolean },
   nowMs: number,
 ): RunMergePrsInput {
   return {
@@ -124,7 +129,9 @@ export function buildRunInput(
     prs: candidates,
     protectedBranch: SelfhostDefaults.protectedBranch,
     wallClockMs: SelfhostDefaults.perJobWallClockMs,
-    modelSpec: SelfhostDefaults.driver,
+    ...(cfg.disableConflictResolution === true
+      ? { conflictResolutionDisabled: true }
+      : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
   };
@@ -255,6 +262,7 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
+      disableConflictResolution: SELFHOST_DISABLES_CONFLICT_RESOLUTION,
     },
   );
   const payload =

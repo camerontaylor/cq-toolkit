@@ -1076,6 +1076,21 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   // Child env is default-deny (issue #183)
   // -------------------------------------------------------------------------
 
+  test('buildChildEnv: CQ_RUN_ENV_PASSTHROUGH copies only validated, configured names', () => {
+    const parent = { FOO: 'foo', BAR: 'bar', MISSING: undefined, GH_TOKEN: 'must-not-copy' };
+    const child = buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'FOO BAR,MISSING' });
+    expect(child['FOO']).toBe('foo');
+    expect(child['BAR']).toBe('bar');
+    expect(child['MISSING']).toBeUndefined();
+    expect(child['GH_TOKEN']).toBeUndefined();
+    expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'A=1' })).toThrow(
+      /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
+    );
+    expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'BAD.NAME' })).toThrow(
+      /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
+    );
+  });
+
   test('buildChildEnv: allowlisted basics + explicit route values pass, credential-shaped parent names are withheld (#183)', () => {
     const parent = {
       PATH: '/usr/bin',

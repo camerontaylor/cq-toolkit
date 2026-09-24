@@ -5,7 +5,10 @@
 # withBudgetStop, the recorded src/cli/run-plan.ts composition) with the
 # frozen SelfhostDefaults as the caps. Wiring, secrets, the cron-window
 # rule, the budget caps, and the I2 single-identity caveat: README.md in
-# this directory (policy/templates/self-host/).
+# this directory (policy/templates/self-host/). W0.6 disables the self-host
+# conflict stage: DIRTY candidates are reported as needs-human rather than
+# dispatched to a model. Reviews are counted under the trust rules; the former
+# blanket `awaiting` premise was incorrect.
 #
 # Instantiate:
 #   {{SELFHOST_TOKEN}}      -> NAME of the repository secret holding a PAT
@@ -15,10 +18,9 @@
 #                              as `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that
 #                              embeds a token value is a denylist-class bug.
-#   {{SELFHOST_DRIVER_KEY}} -> NAME of the repository secret holding the
-#                              model provider API key (the conflict agent's
-#                              driver through the ai-sdk route — the
-#                              conflict agent is a real worker).
+#   {{SELFHOST_DRIVER_KEY}} -> Reserved only for adopter documentation; this
+#                              merge template does not dispatch conflict
+#                              agents, so it declares no driver secret.
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
 #                              convention from ../README.md): the template
 #                              carries THIS repo's two literal crons
@@ -114,7 +116,7 @@ jobs:
       # persists the journal root between runs (each run saves under its
       # own run-id key; the next run restores by the state- prefix).
       # Deliberately ephemeral: per-run audit trails ride along but are not
-      # the point, and the conflict worktrees are NOT cached — they live
+      # the point, and no conflict worktrees are cached — the stage is disabled
       # OUTSIDE the journal, and cached worktree paths go stale as main
       # advances (a fresh worktree is prepared per resolution). Restore
       # runs at this step, before the run step; the save is a SEPARATE
@@ -122,7 +124,7 @@ jobs:
       # the combined action's post-save runs only on job success, so a
       # failed run would lose exactly the session state the next run must
       # resume from.
-      - name: Restore the journal state (conflict-agent session store)
+      - name: Restore the journal state (merge run journal)
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
         with:
           path: .selfhost/journal
@@ -134,13 +136,6 @@ jobs:
           # Step-scoped on purpose: the token must never reach npm ci's
           # lifecycle scripts — it reaches ONLY this step.
           GH_TOKEN: ${{ secrets.{{SELFHOST_TOKEN}} }}
-          # The conflict agent is a real worker: RunMergePrsInput.modelSpec
-          # is set from SelfhostDefaults.driver, and its dispatches ride
-          # the same ai-sdk route as the review loop's fix workers — so the
-          # driver key and its presence assert ride here too. The env NAME is
-          # fixed (`ZAI_API_KEY`, what the drivers read); only the SECRET name
-          # is the adopter's placeholder.
-          ZAI_API_KEY: ${{ secrets.{{SELFHOST_DRIVER_KEY}} }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
           GH_REPO: ${{ github.repository }}
@@ -163,13 +158,11 @@ jobs:
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
             exit 0
           fi
-          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set' >&2; exit 1; }
-          test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — the conflict agent cannot dispatch; refusing to start' >&2; exit 1; }
+          # Self-host automation is optional. A repository without its automation token
+          # is not broken: the non-required job skips honestly. Required I4 checks
+          # never use this workflow and therefore never inherit this skip.
+          test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
           # Conflict-resolution pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
-          gh auth setup-git
-          # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
-          git config --global user.name 'cq-automation'
-          git config --global user.email 'cq-automation@users.noreply.github.com'
           # Bash ARRAY, never a string: the expansions stay single words
           # even if a future value carries spaces (an unquoted $ARGS
           # word-splits).
@@ -182,7 +175,7 @@ jobs:
           fi
           node dist/selfhost/self-merge-prs.js "${ARGS[@]}" | tee "$GITHUB_STEP_SUMMARY"
       # always() persists a failed run's journal (a success-only post-save would lose the exact session state the next run resumes from); the rolling restore-keys prefix keeps newest state winning.
-      - name: Save the journal state (conflict-agent session store)
+      - name: Save the journal state (merge run journal)
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0 (immutable commit pin; repo policy)
         if: always()
         with:

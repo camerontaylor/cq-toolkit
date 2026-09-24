@@ -23,7 +23,9 @@
 // (endpoint base URL, auth token) are composed deliberately and always ride
 // that override map, so they reach the child regardless of the allowlist. A
 // GH_TOKEN or repo secret in the entry process env is NOT inherited unless a
-// Route or an explicit `envAllowlist` entry names it.
+// Route or an explicit `envAllowlist` entry names it. The parent
+// `CQ_RUN_ENV_PASSTHROUGH` variable may add validated names to the copied set;
+// blank/unset leaves the default-deny behavior unchanged.
 //
 // PROCESS GROUPS (issue #19): on POSIX the child is spawned `detached` —
 // it becomes the leader of its OWN process group, so a kill can take the
@@ -138,14 +140,16 @@ export const DEFAULT_CHILD_ENV_ALLOWLIST: readonly string[] = Object.freeze([
 
 /** The POSIX/Windows-standard environment variable NAME shape (r2). */
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const ENV_PASSTHROUGH = 'CQ_RUN_ENV_PASSTHROUGH';
 
 /**
  * Compose a child environment with default-deny semantics (issue #183):
  * copy ONLY the allowlisted names actually set in `parentEnv`, then apply
  * the caller's explicit `overrides` — which ALWAYS win, because a Route
  * value is composed deliberately and the allowlist must never filter it.
- * `extraAllowlist` extends the copied names for a deployment without
- * weakening the default; an entry that is not a well-formed env var name is
+ * `extraAllowlist` and the comma/space-separated `CQ_RUN_ENV_PASSTHROUGH`
+ * parent variable extend the copied names for a deployment without weakening
+ * the default; an entry that is not a well-formed env var name is
  * rejected at the seam (r1/r2) so a direct `spawnManaged` consumer cannot
  * bypass the constructor's validation. The result is a fresh NULL-PROTOTYPE
  * object (r2) so an override named `__proto__` lands as an own property
@@ -164,7 +168,17 @@ export function buildChildEnv(
     }
   }
   const child = Object.create(null) as Record<string, string>;
-  for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist]) {
+  const configuredAllowlist = (parentEnv[ENV_PASSTHROUGH] ?? '')
+    .split(/[,\s]+/)
+    .filter((name) => name.length > 0);
+  for (const name of configuredAllowlist) {
+    if (!ENV_NAME.test(name)) {
+      throw new Error(
+        `${ENV_PASSTHROUGH} entries must be env var names matching ${String(ENV_NAME)}, got ${JSON.stringify(name)}`,
+      );
+    }
+  }
+  for (const name of [...DEFAULT_CHILD_ENV_ALLOWLIST, ...extraAllowlist, ...configuredAllowlist]) {
     const value = parentEnv[name];
     if (value !== undefined) child[name] = value;
   }

@@ -110,6 +110,10 @@ export const DEFAULT_RESOLVE_CONCURRENCY = 2;
 export const MODEL_SPEC_REQUIRED_REASON =
   'conflict agent requires a modelSpec (model/provider) — none configured';
 
+/** Self-host policy deliberately withholds the disabled conflict stage. */
+export const CONFLICT_RESOLUTION_DISABLED_REASON =
+  'conflict resolution disabled by self-host policy — needs human';
+
 /**
  * A candidate as the fetch layer delivered it: the full F1 evidence
  * (PrCandidate) PLUS the stack graph edges — what this pr's head branch
@@ -164,6 +168,8 @@ export interface RunMergePrsInput {
    * vendor default).
    */
   modelSpec?: ModelSpec;
+  /** Self-host policy: withhold conflict resolution for a human. */
+  conflictResolutionDisabled?: boolean;
   /** resolveConflict passthrough — the SessionStore dir. */
   sessionsDir?: string;
   /** The classify clock; default Date.now() read once at call time (the
@@ -322,7 +328,13 @@ export async function runMergePrs(
       // prs are NOT resolved (no fabricated vendor default); they divert
       // to needsHuman at escalation priority. secondPass stays null.
       for (const candidate of conflictSet) {
-        undispatched.push({ pr: candidate.pr, reason: MODEL_SPEC_REQUIRED_REASON });
+        undispatched.push({
+          pr: candidate.pr,
+          reason:
+            input.conflictResolutionDisabled === true
+              ? CONFLICT_RESOLUTION_DISABLED_REASON
+              : MODEL_SPEC_REQUIRED_REASON,
+        });
       }
     } else {
       const { modelSpec } = input;

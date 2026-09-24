@@ -528,12 +528,15 @@ const COMMIT_SHA_RE = /^[0-9a-f]{40}$/i;
  * rejected before any git call), 'not-descendant' (the sha does not resolve
  * to a commit, is the before-head itself, or is not a STRICT descendant of
  * the before-head), 'not-ancestor' (not an ancestor of the pushed worktree
- * HEAD), 'attribution-missing' (the commit message does not name the item).
+ * HEAD), 'empty-diff' (the claimed commit changes no files), 'diff-unreadable'
+ * (git could not classify the diff), and 'attribution-missing' (the commit message does not name the item).
  */
 type CommitVerificationFailure =
   | 'not-40-hex'
   | 'not-descendant'
   | 'not-ancestor'
+  | 'empty-diff'
+  | 'diff-unreadable'
   | 'attribution-missing';
 
 /**
@@ -549,6 +552,8 @@ type CommitVerificationFailure =
  *     the pre-existing base commit is not a fix ('not-descendant');
  *   - `merge-base --is-ancestor <sha> HEAD` must exit 0 (the worktree HEAD
  *     is the exact tree the stage-5 publish pushed) ('not-ancestor');
+ *   - `git diff --quiet <sha>^..<sha>` must exit 1 for a non-empty change
+ *     (exit 0 is 'empty-diff'; an unexpected git failure is 'diff-unreadable');
  *   - PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
  *     worktree, so a sibling's strict-new commit would otherwise satisfy
  *     this item's gate — the commit MESSAGE must name THIS item's id at a
@@ -584,6 +589,13 @@ export const commitVerificationFailure = async (
   const ancestor = await git(['-C', worktreePath, 'merge-base', '--is-ancestor', sha, 'HEAD']);
   if (ancestor.code !== 0) {
     return 'not-ancestor';
+  }
+  const changed = await git(['-C', worktreePath, 'diff', '--quiet', `${sha}^..${sha}`]);
+  if (changed.code === 0) {
+    return 'empty-diff';
+  }
+  if (changed.code !== 1) {
+    return 'diff-unreadable';
   }
   // PER-ITEM ATTRIBUTION (round-3 finding 3): sequential jobs share one
   // worktree, so a sibling's strict-new commit would otherwise satisfy this
