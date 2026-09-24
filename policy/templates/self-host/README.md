@@ -128,18 +128,19 @@ adopter owns it by hand.
 
 ### The single-identity caveat (I2)
 
-- Rule: until the adopting repo runs a SECOND identity, every
-  automation-eligible PR classifies `awaiting` and a human lane leader
-  hand-merges it after full gates, recording the hand-merge in the evidence
-  log; adopt automation-authored-PR conventions (title prefix,
-  distinguishing label) so the shared account's work stays attributable.
-- Why: with one account there is no independent reviewer of automation's
-  work — I2's no-privileged-reviewer acceptance is degraded, and this is a
-  recorded deviation, not a configuration error; a hand-merge under it is
-  recorded processing, not an intervention failure (a silent stall is the
-  failure mode).
-- Enforcement: `manual:` — the operator's hand-merge log in the evidence
-  log (`SELF-HOSTING.md`, per "The evidence convention" below); no
+- Rule: the self-host conflict stage is disabled; DIRTY candidates are
+  reported as `needs-human` rather than dispatched to a model. Reviews are
+  counted under the trust rules landing in W1.1; there is no blanket
+  `awaiting` premise. A human hand-merge after full gates is recorded as an
+  intervention, not as automated processing. Adopt automation-authored-PR
+  conventions (title prefix, distinguishing label) so shared-account work
+  stays attributable.
+- Why: a single identity does not make every review irrelevant, and the
+  disabled conflict stage is a deliberate safety policy rather than a
+  credential or configuration failure. The operator must judge the
+  no-privileged-reviewer condition and record any intervention.
+- Enforcement: `manual:` — the operator's review and hand-merge log in the
+  evidence log (`SELF-HOSTING.md`, per "The evidence convention" below); no
   workflow can enforce a human's judgment.
 
 ### Secret step-scoping
