@@ -23,7 +23,9 @@
 // (endpoint base URL, auth token) are composed deliberately and always ride
 // that override map, so they reach the child regardless of the allowlist. A
 // GH_TOKEN or repo secret in the entry process env is NOT inherited unless a
-// Route or an explicit `envAllowlist` entry names it.
+// Route or an explicit `envAllowlist` entry names it. The parent
+// `CQ_RUN_ENV_PASSTHROUGH` variable may add validated names to the copied set;
+// blank/unset leaves the default-deny behavior unchanged.
 //
 // PROCESS GROUPS (issue #19): on POSIX the child is spawned `detached` —
 // it becomes the leader of its OWN process group, so a kill can take the

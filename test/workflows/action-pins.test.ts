@@ -169,6 +169,25 @@ describe('action pins: every uses: is an immutable commit SHA', () => {
       const instantiatedText = readFileSync(instantiated, 'utf8');
       const templateDecl = declared(templateText);
       const instantiatedDecl = declared(instantiatedText);
+      if (name === 'self-merge-prs.yml') {
+        expect(
+          templateDecl,
+          `${name}: disabled conflict stage must not declare driver key`,
+        ).toBeUndefined();
+        expect(
+          instantiatedDecl,
+          `${name}: disabled conflict stage must not declare driver key`,
+        ).toBeUndefined();
+        expect(
+          asserted(templateText),
+          `${name}: disabled conflict stage must not guard driver key`,
+        ).toBeUndefined();
+        expect(
+          asserted(instantiatedText),
+          `${name}: disabled conflict stage must not guard driver key`,
+        ).toBeUndefined();
+        continue;
+      }
       expect(templateDecl, `${name}: template driver env declaration`).toBe('ZAI_API_KEY');
       expect(instantiatedDecl, `${name}: instantiated driver env declaration`).toBe('ZAI_API_KEY');
       expect(templateDecl, `${name}: template declaration must match its guard assert`).toBe(

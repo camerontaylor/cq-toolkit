@@ -1077,11 +1077,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
   // -------------------------------------------------------------------------
 
   test('buildChildEnv: CQ_RUN_ENV_PASSTHROUGH copies only validated, configured names', () => {
-    const parent = { FOO: 'foo', BAR: 'bar', MISSING: undefined };
+    const parent = { FOO: 'foo', BAR: 'bar', MISSING: undefined, GH_TOKEN: 'must-not-copy' };
     const child = buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'FOO BAR,MISSING' });
     expect(child['FOO']).toBe('foo');
     expect(child['BAR']).toBe('bar');
     expect(child['MISSING']).toBeUndefined();
+    expect(child['GH_TOKEN']).toBeUndefined();
     expect(() => buildChildEnv({ ...parent, CQ_RUN_ENV_PASSTHROUGH: 'A=1' })).toThrow(
       /CQ_RUN_ENV_PASSTHROUGH entries must be env var names matching/,
     );

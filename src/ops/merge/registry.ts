@@ -402,7 +402,10 @@ export const RunMergePrsInputSchema: z.ZodType<RunMergePrsInput> = z
     sessionsDir: z.string().min(1).exactOptional(),
     nowMs: z.number().exactOptional(),
   })
-  .strict();
+  .strict()
+  .refine((input) => input.conflictResolutionDisabled !== true || input.modelSpec === undefined, {
+    message: 'conflictResolutionDisabled cannot be combined with modelSpec',
+  });
 
 // ---------------------------------------------------------------------------
 // The entries

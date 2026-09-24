@@ -1744,7 +1744,7 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
   const gate = async (git: GhFn, sha: string, itemId: string) =>
     commitVerificationFailure(git, '/wt', sha, BEFORE_SHA, itemId);
 
-  test('all five stages are named, in gate order', async () => {
+  test('all six stages are named, in gate order', async () => {
     // notAncestorGit: NEW_SHA resolves and descends but its HEAD-ancestry is
     // refused; attributedGit: NEW_SHA's message names T1.
     const notAncestorGit = fakeGit(
@@ -1772,15 +1772,15 @@ describe('commitVerificationFailure stage taxonomy (round 2)', () => {
       '/wt',
     );
     expect(await gate(emptyGit, NEW_SHA, 'T1')).toBe('empty-diff');
-    // attribution-missing — the message must name THIS item.
-    expect(await gate(attributedGit, NEW_SHA, 'T1')).toBeNull();
-    expect(await gate(attributedGit, NEW_SHA, 'T2')).toBe('attribution-missing');
     const unreadableGit = fakeGit(
       { ...defaultWorld(), knownShas: [SHA, NEW_SHA], diffCode: 2 },
       [],
       '/wt',
     );
     expect(await gate(unreadableGit, NEW_SHA, 'T1')).toBe('diff-unreadable');
+    // attribution-missing — the message must name THIS item.
+    expect(await gate(attributedGit, NEW_SHA, 'T1')).toBeNull();
+    expect(await gate(attributedGit, NEW_SHA, 'T2')).toBe('attribution-missing');
   });
 
   test('numeric item ids match at NON-DIGIT boundaries (round 3 low)', async () => {

@@ -15,10 +15,9 @@
 #                              as `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that
 #                              embeds a token value is a denylist-class bug.
-#   {{SELFHOST_DRIVER_KEY}} -> NAME of the repository secret holding the
-#                              model provider API key (the conflict agent's
-#                              driver through the ai-sdk route — the
-#                              conflict agent is a real worker).
+#   {{SELFHOST_DRIVER_KEY}} -> Reserved only for adopter documentation; this
+#                              merge template does not dispatch conflict
+#                              agents, so it declares no driver secret.
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
 #                              convention from ../README.md): the template
 #                              carries THIS repo's two literal crons
