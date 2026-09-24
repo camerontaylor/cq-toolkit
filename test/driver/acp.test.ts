@@ -194,17 +194,28 @@ const fixtureHoldsPrompt: PromptInFlight = (child, onInFlight) => {
   child.stdout?.on('data', tap);
 };
 
+/** The stalled-write test's prompt size: large enough to wedge behind any OS pipe buffer. */
+const WEDGED_PROMPT_CHARS = 1024 * 1024;
+
+/**
+ * Backlog that only the wedged prompt can produce. The handshake frames
+ * (initialize, session establishment, the mode pin) total a few KiB, so
+ * even all of them queued at once stay far below this; the pipe buffer
+ * (16–64 KiB) is irrelevant because writableLength counts a chunk in full
+ * until its write callback, and the unread prompt's callback never fires.
+ */
+const WEDGED_PROMPT_BACKLOG = WEDGED_PROMPT_CHARS / 2;
+
 /**
  * The prompt write is WEDGED: the stalled-stdin fixture never reads the
- * prompt, so the 1 MiB write leaves a backlog in the driver's stdin queue
- * that never drains (handshake frames flush synchronously, so a backlog
- * seen between turns of the loop is the prompt). A state predicate polled
- * until true or the child exits — never a deadline.
+ * prompt, so the driver's stdin holds a prompt-scale backlog that never
+ * drains. A state predicate polled until true or the child exits — never
+ * a deadline.
  */
 const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
   const poll = (): void => {
     if (child.exitCode !== null || child.signalCode !== null) return;
-    if ((child.stdin?.writableLength ?? 0) > 0) onInFlight();
+    if ((child.stdin?.writableLength ?? 0) > WEDGED_PROMPT_BACKLOG) onInFlight();
     else setTimeout(poll, 10);
   };
   poll();
@@ -1446,7 +1457,7 @@ describe('acp driver specifics (fake ACP server)', () => {
         cancelWriteGraceMs: 100,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) })),
+        () => driver.run(invocation({ prompt: 'x'.repeat(WEDGED_PROMPT_CHARS) })),
         { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
         { clock },
