@@ -25,12 +25,12 @@
 //      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
 //      scan and its unit fails uncommitted.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import type { Driver } from '../../../src/driver/types.js';
+import { cloneTemplate, createGitTemplate, type GitTemplate } from '../../helpers/git-template.js';
 import {
   ALPHA_FAILURE_MESSAGE,
   ALPHA_FIX,
@@ -91,6 +91,11 @@ const AGENT_CLI = [
 ];
 
 const CLEANUP: string[] = [];
+let gitTemplate: GitTemplate;
+beforeAll(async () => {
+  gitTemplate = await createGitTemplate(generateScratchRepo);
+  CLEANUP.push(gitTemplate.root);
+});
 afterAll(() => {
   for (const dir of CLEANUP) rmSync(dir, { recursive: true, force: true });
 });
@@ -108,16 +113,9 @@ interface Scenario {
 
 /** A fresh scratch repo (with a local bare origin) + dirs; the run prefix names the scenario. */
 async function scenario(runPrefix: string): Promise<Scenario> {
-  const root = mkdtempSync(join(tmpdir(), `d4-e2e-${runPrefix.replaceAll('/', '-')}-`));
+  const cloned = await cloneTemplate(gitTemplate);
+  const { root, repo, origin } = cloned;
   CLEANUP.push(root);
-  const repo = join(root, 'repo');
-  await generateScratchRepo(repo);
-  // The push recorder: a LOCAL BARE origin — the real `git push -u origin`
-  // binding works offline against it, and the tests read its refs back as
-  // evidence of what was pushed (and what correctly was not).
-  const origin = join(root, 'origin.git');
-  await gitOut(['init', '-q', '--bare', origin], root);
-  await gitOut(['-C', repo, 'remote', 'add', 'origin', origin], root);
   return {
     root,
     repo,
