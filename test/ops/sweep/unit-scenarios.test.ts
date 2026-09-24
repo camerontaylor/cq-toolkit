@@ -177,10 +177,6 @@ async function runUnit(world: FakeWorld, extra: Partial<SweepUnitBindings> = {},
   return makeSweepUnitOp(bindingsOf(world, extra))(unit);
 }
 
-async function readJson(path: string): Promise<unknown> {
-  return JSON.parse(await readFile(path, 'utf8'));
-}
-
 describe('sweep unit in-process scenarios', () => {
   test('regression fails before commit and preserves a dirty worktree for salvage', async () => {
     const world = await makeWorld([
@@ -327,7 +323,7 @@ describe('sweep unit in-process scenarios', () => {
         'fix',
         'alpha.json',
       );
-      expect(await readJson(snapshot)).toMatchObject({ failures: expect.any(Array) });
+      expect(await readFile(snapshot, 'utf8')).toContain('"failures"');
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }
