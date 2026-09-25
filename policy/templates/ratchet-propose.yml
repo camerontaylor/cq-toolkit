@@ -109,4 +109,4 @@ jobs:
         run: node scripts/ratchet-propose.mjs --measurement="${RUNNER_TEMP}/ratchet-propose/measurement.json"
         env:
           CQ_AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN }}
-          CQ_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}
+          RATCHET_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}

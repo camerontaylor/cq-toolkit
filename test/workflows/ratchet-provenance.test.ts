@@ -287,7 +287,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(body).toContain('measured_sha="$(jq -r \'.head_sha\' <<<"$run")"');
       expect(body).toContain('[ "$measured_sha" = "$TRUST" ]');
       expect(body).toContain('run-id: ${{ steps.run.outputs.run_id }}');
-      expect(body).toContain('CQ_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}');
+      expect(body).toContain('RATCHET_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}');
       expect(body).toMatch(/node scripts\/ratchet-propose\.mjs --measurement=/);
       expect(body).toMatch(/CQ_AUTOMATION_TOKEN: \$\{\{ secrets\.CQ_AUTOMATION_TOKEN \}\}/);
       expect(body).not.toMatch(/GITHUB_TOKEN:/);

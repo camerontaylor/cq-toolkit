@@ -49,7 +49,7 @@ afterAll(() => {
 
 function baseEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of ['CQ_AUTOMATION_TOKEN', 'CQ_MEASURED_SHA', 'GITHUB_TOKEN', 'GH_TOKEN']) {
+  for (const key of ['CQ_AUTOMATION_TOKEN', 'RATCHET_MEASURED_SHA', 'GITHUB_TOKEN', 'GH_TOKEN']) {
     delete env[key];
   }
   return env;
@@ -101,10 +101,12 @@ describe('ratchet-propose: gate and arguments', () => {
 
   it('rejects an unsafe measured SHA before reading the artifact or invoking git/gh', () => {
     const res = runRecorded(['--measurement=/unused'], true, {
-      CQ_MEASURED_SHA: 'abc`\nInjected PR body',
+      RATCHET_MEASURED_SHA: 'abc`\nInjected PR body',
     });
     expect(res.status, res.stderr).toBe(1);
-    expect(res.stderr).toContain('CQ_MEASURED_SHA must be a 40-character lowercase commit SHA');
+    expect(res.stderr).toContain(
+      'RATCHET_MEASURED_SHA must be a 40-character lowercase commit SHA',
+    );
     expect(res.calls).toBe('');
   });
 });
@@ -303,7 +305,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
           ...baseEnv(),
           ...GIT_ENV,
           CQ_AUTOMATION_TOKEN: 'test-token-not-real',
-          ...(measuredSha === undefined ? {} : { CQ_MEASURED_SHA: measuredSha }),
+          ...(measuredSha === undefined ? {} : { RATCHET_MEASURED_SHA: measuredSha }),
           PATH: `${ctx.bin}:${process.env.PATH ?? ''}`,
         },
       },

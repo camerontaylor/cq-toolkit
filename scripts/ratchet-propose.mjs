@@ -134,9 +134,9 @@ const measurementPath = argv[0].slice(MEASUREMENT_FLAG.length);
 // run from the API and binding its head_sha to the current trust ref. Keep
 // local invocations compatible, but never render an unvalidated env value
 // into a privileged proposal PR body.
-const measuredSha = process.env.CQ_MEASURED_SHA;
+const measuredSha = process.env.RATCHET_MEASURED_SHA;
 if (measuredSha !== undefined && /^[0-9a-f]{40}$/.test(measuredSha) === false) {
-  fail('CQ_MEASURED_SHA must be a 40-character lowercase commit SHA');
+  fail('RATCHET_MEASURED_SHA must be a 40-character lowercase commit SHA');
 }
 
 if (process.env.GITHUB_TOKEN) {
