@@ -142,7 +142,7 @@ const PR_STATE_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $thre
           path
           line
           comments(first: 1) {
-            nodes { databaseId author { login } body createdAt }
+            nodes { databaseId author { login __typename } body createdAt }
           }
         }
       }
@@ -178,7 +178,7 @@ interface GraphqlPullRequest {
       comments: {
         nodes: Array<{
           databaseId: number | null;
-          author: { login: string } | null;
+          author: { login: string; __typename?: string | null } | null;
           body: string;
           createdAt: string | null;
         }>;
@@ -253,7 +253,7 @@ const toReviewThread = (node: {
   comments: {
     nodes: Array<{
       databaseId: number | null;
-      author: { login: string } | null;
+      author: { login: string; __typename?: string | null } | null;
       body: string;
       createdAt: string | null;
     }>;
@@ -270,6 +270,7 @@ const toReviewThread = (node: {
     isOutdated: node.isOutdated,
     // Deleted root comment (no nodes) → nulls/empty body; never throw.
     authorLogin: root?.author?.login ?? null,
+    authorType: root?.author?.__typename ?? null,
     createdAt: root?.createdAt ?? null,
     body: root?.body ?? '',
     replies: [],

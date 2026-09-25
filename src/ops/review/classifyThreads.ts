@@ -330,7 +330,7 @@ const botSkipThreadRow: RowFn<ReviewThread> = (thread, ctx) =>
 
 /** Untrusted or path-anchored input must never reach a fixer. */
 const trustThreadRow: RowFn<ReviewThread> = (thread, ctx) => {
-  if (!isTrusted(thread.authorLogin, null, ctx.config))
+  if (!isTrusted(thread.authorLogin, thread.authorType ?? null, ctx.config))
     return threadItem(thread, 'blocked', 'untrusted_reviewer');
   if (ctx.config.claimedPaths !== undefined) {
     if (thread.path === null || thread.line === null) {
@@ -484,7 +484,7 @@ const responderAuthoredCommentRow: RowFn<RestComment> = (comment, ctx) =>
 
 /** Row 14 — a bot skip/failure notice is not a review (I2). */
 const trustCommentRow: RowFn<RestComment> = (comment, ctx) =>
-  isTrusted(comment.authorLogin, null, ctx.config)
+  isTrusted(comment.authorLogin, comment.authorType ?? null, ctx.config)
     ? null
     : commentItem(comment, 'blocked', 'untrusted_reviewer');
 

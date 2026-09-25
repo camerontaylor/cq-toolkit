@@ -193,9 +193,6 @@ const isTrustedReviewer = (review: ReviewSummary, ctx: ReviewContext): boolean =
   );
 };
 
-const isAutomation = (review: ReviewSummary, config: ClassifyPrConfig): boolean =>
-  config.automationLogin !== undefined && review.authorLogin === config.automationLogin;
-
 const isTrustedLogin = (login: string | null, config: ClassifyPrConfig): boolean => {
   if (config.trustedBots === undefined && config.trustedAssociations === undefined) return true;
   if (login === null || login === config.automationLogin) return false;
@@ -246,11 +243,7 @@ interface ReviewContext {
 const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolean => {
   if (ctx.authorLogin !== null && review.authorLogin === ctx.authorLogin) return false;
   if (!isTrustedReviewer(review, ctx)) return false;
-  if (
-    matchesSkipPattern(review.body, ctx.config) &&
-    (ctx.config.automationLogin === undefined || !isAutomation(review, ctx.config))
-  )
-    return false;
+  if (matchesSkipPattern(review.body, ctx.config)) return false;
   if (
     ctx.headRefOid !== undefined &&
     ctx.headRefOid !== null &&
@@ -392,9 +385,18 @@ export function classifyPr(
     config,
     headRefOid: candidate.headRefOid,
   };
+  const foldInput = candidate.reviews.filter((review) => {
+    if (config.trustedBots === undefined && config.trustedAssociations === undefined) return true;
+    if (!isTrustedReviewer(review, ctx)) return false;
+    if (matchesSkipPattern(review.body, config)) return false;
+    if (candidate.headRefOid !== undefined && candidate.headRefOid !== null) {
+      return review.commitOid === candidate.headRefOid;
+    }
+    return true;
+  });
   const foldedReviews =
     config.trustedBots !== undefined || config.trustedAssociations !== undefined
-      ? latestReviewPerActor(candidate.reviews)
+      ? latestReviewPerActor(foldInput)
       : candidate.reviews;
   // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
   // CHANGES_REQUESTED against the last commit's head state, not yet

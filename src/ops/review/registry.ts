@@ -92,6 +92,7 @@ const awaitOp =
 const ThreadCommentSchema: z.ZodType<ThreadComment> = z
   .object({
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     // NO min(1): the mirror must accept what the family actually produces.
     body: z.string(),
     createdAt: z.string().nullable(),
@@ -104,6 +105,7 @@ const RestCommentSchema: z.ZodType<RestComment> = z
     id: z.number().int(),
     nodeId: z.string().nullable(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     body: z.string(),
     createdAt: z.string().nullable(),
     inReplyToId: z.number().int().nullable(),
@@ -126,6 +128,7 @@ const ReviewThreadSchema: z.ZodType<ReviewThread> = z
     isResolved: z.boolean(),
     isOutdated: z.boolean(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     createdAt: z.string().nullable(),
     body: z.string(),
     replies: z.array(ThreadCommentSchema),
