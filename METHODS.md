@@ -24,8 +24,8 @@ CQ_SANDBOX support is implemented according to the accepted RS-13 matrix and the
   secret in the entry process never reaches a run child; the launcher allowlist plus the
   gate's explicit passthrough do; a policy knob (`SANDBOX_POLICY_ENV_NAMES`) is refused on both
   the passthrough and a manifest's declared `envNames`, so a child cannot read the knobs that
-  govern it. Declared non-knob names (the `HarnessManifest.envNames` contract the MCP surface
-  already relied on) still ride through, so the mcp-bin env-scrub test is unchanged.
+  govern it. The MCP startup scrub now validates and preserves the same resolved passthrough
+  names, independent of `manifest.envNames`, while stripping the resolver knob itself.
 - **`CQ_SANDBOX_NETWORK` is advisory.** No transport boundary exists in front of a run child —
   no proxy, no netfilter, no loopback-only launcher — so the resolved value records the
   INTENDED posture for a future certified launcher and nothing claims it is enforced. The
@@ -40,6 +40,7 @@ CQ_SANDBOX support is implemented according to the accepted RS-13 matrix and the
 - `npx vitest run test/sandbox test/harness/tools.test.ts test/harness/surface.test.ts test/harness/mcp-bin.test.ts test/driver/ai-sdk.test.ts` — 6 files, 136 tests passed, 2 skipped.
 - `npm run check:static` and `npm run format:check` — passed; ratchet reports 0 errors against the 0-error baseline.
 - `test/sandbox/config.test.ts` covers blank-to-required resolution, per-call precedence, RS-13 auto order, uncertified backend refusal, cc-native scope, `CQ_RUN_TOOL`, and launcher env scrubbing.
+- `test/harness/mcp-bin.test.ts` additionally runs the real MCP subprocess: `CQ_RUN_ENV_PASSTHROUGH=FOO` reaches an allowed child even when `FOO` is absent from `manifest.envNames`, while provider secrets and `CQ_*` knobs do not.
 - `test/workflows/self-host-sandbox.test.ts` checks both the adoptable template and instantiated workflow: the unprivileged preparation job has no secret reference, uploads the trusted build, and the privileged job owns the token-bearing step and `contents: write` permission.
 - `AiSdkDriver` resolves the conservative environment policy when no explicit sandbox config is supplied and passes it to the shared gate rather than deciding for itself; focused driver tests cover withheld and enabled surfaces.
 - `npx vitest run test/driver/ai-sdk.test.ts test/sandbox/config.test.ts test/workflows/self-host-sandbox.test.ts` — 3 files, 47 tests passed, 2 skipped.
