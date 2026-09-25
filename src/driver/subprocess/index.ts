@@ -1170,8 +1170,9 @@ export interface StopReasonInputs {
 /** THE mapping (checked in order): aborted → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
+  if (inputs.oversizedLine === true) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
     return 'budget';
-  if (inputs.oversizedLine === true || inputs.resultStatus !== 'success') return 'error';
+  if (inputs.resultStatus !== 'success') return 'error';
   return 'complete';
 }

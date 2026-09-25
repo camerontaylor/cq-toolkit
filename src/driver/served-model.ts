@@ -4,6 +4,7 @@
 // silently substitute the requested id when that observation is absent or
 // differs. This wrapper is deliberately fail-closed and has no record mode:
 // the only safe action is to return an error verdict.
+import { boundedErrorText } from './error-text.js';
 import type { Driver, OpInvocation, WorkerResult } from './types.js';
 
 export type ServedModelLane = 'default' | 'acp';
@@ -33,22 +34,22 @@ export function assertServedModel(
 ): WorkerResult {
   const requireObserved = policy.requireObserved ?? lane !== 'acp';
   const normalize = policy.normalizeVendorPrefix ?? lane === 'acp';
+  if (result.stopReason !== 'complete') return result;
   if (result.model === undefined) {
     if (!requireObserved) return result;
     return {
       ...result,
       stopReason: 'error',
-      error: 'served model assertion: no served model was observed',
+      error: boundedErrorText('served model assertion: no served model was observed'),
     };
   }
-  if (
-    normalizeModel(result.model, normalize) !==
-    normalizeModel(invocation.modelSpec.model, normalize)
-  ) {
+  if (normalizeModel(result.model, normalize) !== invocation.modelSpec.model) {
     return {
       ...result,
       stopReason: 'error',
-      error: `served model assertion: requested '${invocation.modelSpec.model}' but observed '${result.model}'`,
+      error: boundedErrorText(
+        `served model assertion: requested '${invocation.modelSpec.model}' but observed '${result.model}'`,
+      ),
     };
   }
   return result;

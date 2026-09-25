@@ -271,6 +271,9 @@ type CommandVerdict =
 function unsafeGitDiff(command: string, workspace: string): boolean {
   const tokens = command.trim().split(/\s+/);
   if (tokens[0] !== 'git' || tokens[1] !== 'diff') return false;
+  // The command runs through a shell, so quoted arguments could hide a
+  // dangerous token or path from this deliberately conservative matcher.
+  if (/["'`]/.test(command)) return true;
   if (
     tokens.some(
       (token) => token === '--no-index' || token === '--output' || token.startsWith('--output='),

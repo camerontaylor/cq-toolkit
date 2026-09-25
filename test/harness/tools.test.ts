@@ -143,7 +143,7 @@ describe('git diff workspace escape hardening', () => {
           (t) => t.name === 'run',
         );
         const result = await run?.execute({ command });
-        expect(result).toBeDefined();
+        expect(result?.ok).toBe(false);
         if (result && !result.ok) expect(result.denial.reason).toContain('command not allowed');
       });
     },
