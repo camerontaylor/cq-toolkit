@@ -7,6 +7,20 @@
 // own SDK tool format. Driver-agnostic by construction: NO vendor imports
 // in src/harness/**; the ai-sdk driver (slice 2) adapts these descriptors.
 //
+// THE SHARED RUN GATE (W1.11 / D14): every surface that builds these tools —
+// the ai-sdk driver, the subprocess driver's harness surface, the MCP harness
+// surface — reaches the same decision through `buildTools(..., gate)`. The
+// default gate is `harnessRunGate()` (src/sandbox), which withholds `run`
+// entirely whenever the environment expresses a CQ_SANDBOX policy and no
+// certified launcher backs it, so a driver choice cannot bypass the policy.
+// A withheld run tool is OMITTED, not denied: an unreachable tool never
+// reaches child_process.
+//
+// THE LAUNCHER ENV SCRUB: an allowed command's child gets a default-deny
+// environment (src/sandbox `buildSandboxLauncherEnv`): a small launcher
+// allowlist plus the names the gate's policy passed through, and never a
+// `CQ_*` knob — a model-directed child cannot reconfigure its own boundary.
+//
 // DENIAL FLOW — executors never throw. Every refusal (sandbox, bad input,
 // path escape (lexical or via symlink), allowlist miss, shell metacharacters
 // under a token pattern, missing file, missing target text, failed command
@@ -106,6 +120,8 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
+import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
+import type { HarnessRunGate } from '../sandbox/index.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 
@@ -322,6 +338,12 @@ type ShellOutcome =
 /** Inputs to one shell command execution — plain data plus the cancellation signal. */
 interface ShellCommandOptions {
   cwd: string;
+  /**
+   * The child's COMPLETE environment: a default-deny launcher allowlist plus
+   * the policy's explicit passthrough (src/sandbox). Required, not optional —
+   * absent would silently inherit the whole parent env.
+   */
+  env: Readonly<Record<string, string>>;
   /** Per-stream retention bound in bytes. */
   maxBytes: number;
   /** Per-command wall clock; on expiry the whole process group is killed. */
@@ -332,7 +354,8 @@ interface ShellCommandOptions {
 
 /**
  * Run `command` through the platform shell (`/bin/sh -c` on POSIX, as
- * `exec` did), cwd = workspace, stdin closed. On POSIX the shell LEADS ITS
+ * `exec` did), cwd = workspace, stdin closed, and with the DEFAULT-DENY child
+ * env the caller built (never the parent's full environment). On POSIX the shell LEADS ITS
  * OWN PROCESS GROUP, so a timeout or an abort signals `-pid` and reaches
  * every descendant; Windows has no groups in v1 and kills the direct child
  * only (the same limitation the subprocess lane records). The kill is
@@ -350,6 +373,7 @@ function runShellCommand(command: string, opts: ShellCommandOptions): Promise<Sh
     try {
       child = spawn(command, {
         cwd: opts.cwd,
+        env: { ...opts.env },
         shell: true,
         stdio: ['ignore', 'pipe', 'pipe'],
         ...(POSIX ? { detached: true } : {}),
@@ -464,6 +488,7 @@ export function buildTools(
   config: HarnessConfig,
   workspace: string,
   sandbox: SandboxLevel = 'workspace-write',
+  gate: HarnessRunGate = harnessRunGate(),
 ): ToolkitTool[] {
   const cfg: HarnessConfig = HarnessConfigSchema.parse(config);
   const workspaceAbs = resolve(workspace);
@@ -683,7 +708,11 @@ export function buildTools(
   }
 
   // --- run --------------------------------------------------------------------
-  if (cfg.tools.run.enabled) {
+  if (cfg.tools.run.enabled && gate.enabled) {
+    // Validate the complete launcher environment before exposing an executor.
+    // A malformed or policy-bearing passthrough must fail during tool
+    // construction, never later inside a model-directed command.
+    buildSandboxLauncherEnv({}, gate);
     const runCfg = cfg.tools.run;
     const patterns = compileCommandPatterns(runCfg.commandPatterns); // loud on config corruption
     const formatOutcome = (
@@ -724,6 +753,9 @@ export function buildTools(
         }
         const outcome = await runShellCommand(command, {
           cwd: workspaceAbs,
+          // Default-deny child env: the launcher allowlist plus only the
+          // names this gate's policy passed through (never a CQ_* knob).
+          env: buildSandboxLauncherEnv(process.env, gate),
           // Retention is BYTES; the output cap is CHARS. Retain comfortably
           // above the cap so capOutput does the truncating (4 bytes/char
           // covers UTF-8's worst case, +64KiB slack for the exit/stdout

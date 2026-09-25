@@ -73,6 +73,7 @@ function lastGenerateTextArgs(): {
   stopWhen?: unknown;
   maxRetries?: number;
   timeout?: unknown;
+  tools?: Record<string, unknown>;
 } {
   const last = captured.generateTextArgs[captured.generateTextArgs.length - 1];
   if (last === undefined) throw new Error('no generateText call was captured');
@@ -82,6 +83,7 @@ function lastGenerateTextArgs(): {
     stopWhen?: unknown;
     maxRetries?: number;
     timeout?: unknown;
+    tools?: Record<string, unknown>;
   };
 }
 
@@ -238,6 +240,13 @@ function makeDriver(spec: ConformanceSpec): AiSdkDriver {
       : {}),
     sessionsDir: join(spec.scratchDir, SESSIONS_DIR),
     harnessConfig: conformanceHarnessConfig(spec.scratchDir),
+    sandboxConfig: {
+      mode: 'off',
+      backend: 'auto',
+      network: 'model-only',
+      runTool: 'on',
+      envPassthrough: [],
+    },
   });
 }
 
@@ -264,6 +273,77 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 }
 
 describe('ai-sdk driver specifics (mock model)', () => {
+  test('omits run from the model surface when CQ policy withholds it', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sandbox-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        sandboxConfig: {
+          mode: 'required',
+          backend: 'auto',
+          network: 'model-only',
+          runTool: 'withheld',
+          envPassthrough: [],
+          configHint: 'CQ_SANDBOX=required needs a certified RS-13 backend',
+        },
+      });
+      await driver.run(invocation());
+      const tools = lastGenerateTextArgs().tools ?? {};
+      expect(tools).not.toHaveProperty('run');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves the run surface when CQ policy resolves it on', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sandbox-'));
+    try {
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(scratchDir, 'sessions'),
+        sandboxConfig: {
+          mode: 'off',
+          backend: 'auto',
+          network: 'model-only',
+          runTool: 'on',
+          envPassthrough: [],
+        },
+      });
+      await driver.run(invocation());
+      expect(lastGenerateTextArgs().tools).toHaveProperty('run');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('preserves the pre-W1.11 run surface when no sandbox policy is expressed', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sandbox-'));
+    const policyNames = [
+      'CQ_SANDBOX',
+      'CQ_SANDBOX_BACKEND',
+      'CQ_SANDBOX_NETWORK',
+      'CQ_RUN_TOOL',
+      'CQ_RUN_ENV_PASSTHROUGH',
+    ] as const;
+    const saved = policyNames.map((name) => [name, process.env[name]] as const);
+    try {
+      for (const name of policyNames) delete process.env[name];
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      await driver.run(invocation());
+      expect(lastGenerateTextArgs().tools).toHaveProperty('run');
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('unknown provider throws BEFORE dispatch — no session record is created', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
