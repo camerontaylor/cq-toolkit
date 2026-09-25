@@ -1,6 +1,6 @@
 # Test suite viability: shim what is ours, keep one real contract per tool
 
-Status: consensus draft after gpt-6-sol review, 2026-09-24. Implementation delegated to the GLM-5.3-Flash orchestrator on user instruction.
+Status: consensus draft after gpt-6-sol review, 2026-09-24. Implementation delivered as #217–#227; residual timing goals are carried by plan 003.
 
 ## Objective
 
@@ -61,6 +61,12 @@ Ordered by delivery. Each unit lists what stays real.
 - The failing test "a vendor that IGNORES session/cancel cannot hang the governed cancel: the kill rung reaches the child mid-prompt" (`test/driver/acp.test.ts:1348` area). Determine whether it is a race in the test (asserting before the child is observably mid-prompt) or a real driver bug. Fix the cause; do not raise the deadline. It must pass on all three acceptance runs.
 
 ### U2 — `sweep.e2e` (918s → target ≤120s) (PR-2)
+
+The ≤60s/file criterion is a goal, not a delivered result: the residual
+`sweep.e2e` runtime is carried by follow-up plan 003 (sweep composition
+extraction), being implemented on branch `test-viability/followup-sweep-composition`.
+U2's ≤120s is the current working target; the residual fix is planned, not
+done.
 
 - Add optional `worktreeEffects?: WorktreeEffects` to `SweepUnitBindings` (`src/ops/sweep/unit.ts:382-387` hardcodes `makeSubprocessWorktreeEffects`). Production default and dispatch schema unchanged. Fakes fresh per invocation, failures reported honestly, no vendor types in shared seams (I1/I5/I6/I10).
 - **Retained real contracts** (full-plan runs through `runSweepPlan`, which stays real):
