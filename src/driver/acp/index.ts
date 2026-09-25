@@ -306,9 +306,11 @@ export interface AcpDriverOptions {
   /**
    * Host env var NAMES copied into the child env at run() time (the
    * routing discipline every lane shares: names in config, never values;
-   * a missing value throws pre-dispatch). Default: none — the harness
-   * inherits the driver's process env (the vendor reads its own
-   * credentials app-side, OQ-1).
+   * a missing or empty value throws pre-dispatch). Default: no extra
+   * names. The vendor process receives only the default child-env
+   * allowlist plus these names and deployment CQ_RUN_ENV_PASSTHROUGH
+   * names. Include vendor credential names here when the vendor reads
+   * authentication from env (OQ-1); ambient credentials are not inherited.
    */
   envNames?: readonly string[];
   /**
@@ -779,12 +781,13 @@ export class AcpDriver implements Driver {
       );
     }
 
-    // --- Child env: the host environment rides (the vendor reads its own
-    // credentials app-side, OQ-1); envNames adds explicitly configured
-    // NAMES (values read AT run time — the one place a secret value is
-    // ever touched); modelEnv hands the REQUESTED model id to the harness.
-    // Validated BEFORE the session exists: a missing envNames entry is a
-    // PRE-DISPATCH throw and must never leave a dangling record.
+    // --- Vendor-process env: default-deny via buildChildEnv's runtime
+    // allowlist plus explicit envNames and CQ_RUN_ENV_PASSTHROUGH names.
+    // Values are read AT run time; modelEnv explicitly overrides its
+    // variable with the REQUESTED model id. This is the ACP vendor process,
+    // not a command launched through the shared harness tool core.
+    // Validated BEFORE the session exists: a missing or empty envNames
+    // value is a PRE-DISPATCH throw and leaves no dangling record.
     const extraNames = [...this.envNames];
     for (const name of extraNames) {
       const value = process.env[name];

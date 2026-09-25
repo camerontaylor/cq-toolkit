@@ -195,8 +195,10 @@ Files:
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
 
 Child environment is DEFAULT-DENY (issue #183) for the subprocess CLI,
-the claude-agent SDK child, and every harness `run` child. They use the
-shared `buildChildEnv` policy; the ACP vendor process is a separate surface.
+the claude-agent SDK child, the ACP vendor process, and every harness `run`
+child. All use the shared `buildChildEnv` policy. ACP configures its vendor
+process with `envNames`; its tools run in that vendor process, separately
+from the shared harness tool core.
 The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
 terminal + locale basics, XDG dirs, network-egress/TLS config
 (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
@@ -516,6 +518,18 @@ Files:
   absent binary is a PRE-DISPATCH throw naming the binary + install hint.
 - `process.ts` — the I8 scan's exempt file for this lane: the shell-less
   spawn and the SIGTERM→SIGKILL settle-time termination ladder.
+
+ACP environment migration: the vendor process no longer inherits the full
+host environment. It receives the default child-env allowlist plus
+`envNames` and deployment `CQ_RUN_ENV_PASSTHROUGH` names (comma- or
+whitespace-separated). Operators using environment-based vendor
+authentication must include the credential variable names in `envNames`.
+Configure names only; values are read at `run()` time, and a missing or
+empty explicitly named value throws before dispatch or session creation.
+`modelEnv`, when configured, explicitly sets its variable to the requested
+model id. These options govern the ACP vendor process and its tools;
+they do not bind a shared harness manifest or configure harness `run`
+children.
 
 Lane specifics (all cited in the strategy doc): THE MODE PIN — sessions
 open in `yolo`, which never asks, so the driver pins

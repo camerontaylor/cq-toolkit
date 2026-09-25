@@ -257,7 +257,11 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
     (ctx.config.automationLogin === undefined || review.authorLogin === ctx.config.automationLogin)
   )
     return false;
-  if (ctx.headRefOid !== undefined && review.commitOid !== ctx.headRefOid) return false;
+  if (
+    ctx.headRefOid !== undefined &&
+    (ctx.headRefOid === null || review.commitOid !== ctx.headRefOid)
+  )
+    return false;
   const submittedMs = parseMs(review.submittedAt);
   return submittedMs !== null && ctx.lastCommitMs !== null && submittedMs > ctx.lastCommitMs;
 };
@@ -410,7 +414,8 @@ export function classifyPr(
       (config.automationLogin === undefined || review.authorLogin === config.automationLogin)
     )
       return false;
-    if (candidate.headRefOid !== undefined) return review.commitOid === candidate.headRefOid;
+    if (candidate.headRefOid !== undefined)
+      return candidate.headRefOid !== null && review.commitOid === candidate.headRefOid;
     return true;
   });
   const foldedReviews = policyActive ? latestReviewPerActor(foldInput) : candidate.reviews;

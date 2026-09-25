@@ -48,7 +48,7 @@ export interface AcpSpawnOptions {
   args: readonly string[];
   /** Working directory: the invocation's workspace (I6 isolation boundary). */
   cwd: string;
-  /** The FULL child environment (process.env + the driver's resolved additions). */
+  /** The full child environment, already filtered and explicitly composed by the driver. */
   env: Readonly<Record<string, string>>;
 }
 
