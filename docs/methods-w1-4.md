@@ -75,6 +75,36 @@ isolated `HOME`), 4/4 passed:
   the route token.
 - **A `sessionRef` resume** re-spawned the server on the same workspace and read a file written between the runs.
 
+## Additional live finding — oversized MCP output
+
+A harness `read` of a 184,799-character file, which is under the default `read.maxOutputChars` of 200,000, came
+back from CLI 2.1.280 as `Error: result (184,799 characters across 2,200 lines) exceeds maximum allowed tokens.
+Output has been saved to <HOME>/.claude/projects/…/tool-results/…txt`. `is_error` was **not** set, so the fold
+treats it as an ordinary result: no false transport-failure termination and no false denial. Two consequences
+are recorded rather than fixed here, because the harness defaults are shared across lanes:
+
+- **Usability:** on this lane, the model never sees harness output above the CLI's MCP token budget. Deployments
+  should keep `read`/`run` `maxOutputChars` below about 80k chars (roughly the CLI's default budget).
+- **Data remnant:** the CLI copies the full oversized output into `HOME/.claude/projects/…`, outside the
+  workspace, even with `--no-session-persistence`. The closed surface gives the model no tool that reaches that
+  path, because the harness `read` is contained to the workspace. The copy still outlives the run.
+
+## Post-review changes (after CodeRabbit cycle 2 — not CLI-reviewed)
+
+The mandatory Opus improvement pass (a fresh read-only critic) found one major issue and four minor ones. All are
+fixed in `79247f4`, and gate run 3 was taken after that commit:
+
+1. **Major, fail-open:** two concurrent runs on one session shared the config path. Run B's stale-file
+   rm-and-retry could swap run A's binding, for example serving `workspace-write` to a `read-only` run. The
+   config name is now unique per run (`<sessionId>.<uuid>.cq-harness-mcp.json`), and `EEXIST` is a hard error.
+2. A call cancelled while it waited in the queue still executed. It now returns the stable denial `cancelled: …`
+   without running.
+3. EPIPE on the server's stdout is now treated as EOF, so in-flight groups are killed. `bin` aborts in-flight
+   calls on an uncaught exception.
+4. Uncapped `run` output retention is now bounded at 1 MiB per stream, and output past that is truncated. The
+   old `exec` path had a 1 MiB buffer.
+5. A reused in-flight JSON-RPC id is refused with `-32600`.
+
 ## Named limitations (carried from the design)
 
 - A same-uid `run` command can still read an ancestor's environment (`ps eww`, `/proc/<pid>/environ`). Closing
