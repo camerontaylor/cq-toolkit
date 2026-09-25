@@ -87,44 +87,6 @@ import type { Driver, OpInvocation, OutputSchema, WorkerResult } from '../../src
 // element-built; the resolved binary rides the spawn seam's command).
 const FAKE_ACP_SERVER = fileURLToPath(new URL('../fixtures/fake-acp-server.mjs', import.meta.url));
 
-// ---------------------------------------------------------------------------
-// Directive → FAKE_ACP_* env (the conformance script contract, scripted
-// into the fixture). The spawn seam injects these per driver instance —
-// process.env is never mutated per-run.
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_ACP_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_ACP_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_ACP_MODE: 'tool-then-reply',
-        FAKE_ACP_TOOL: directive.tool,
-        ...(directive.toolIdentity !== undefined
-          ? { FAKE_ACP_TOOL_KIND: directive.toolIdentity }
-          : {}),
-        FAKE_ACP_INPUT: JSON.stringify(directive.input),
-        FAKE_ACP_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: directive.text };
-    // No output-invalid legs ship yet (seam v2 goal F): until then the fake
-    // harness answers the directive with a prose reply that is NOT the JSON
-    // object a structured-output schema demands.
-    case 'reply-invalid-json':
-      return {
-        FAKE_ACP_MODE: 'ok',
-        FAKE_ACP_REPLY: 'this reply is prose, not the required JSON object',
-      };
-    case undefined:
-    default:
-      return { FAKE_ACP_MODE: 'ok' };
-  }
-}
-
 /** One recorded spawn call: the exact argv + env the driver handed over. */
 interface SpawnCall {
   command: string;
@@ -250,7 +212,6 @@ const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
   poll();
 };
 
-/** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function fakeAcpScript(
   opts: { cwd: string; env: Record<string, string> },
   directive: ModelDirective | undefined,
@@ -429,9 +390,10 @@ function fakeAcpScript(
   };
 }
 
+/** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
   return new AcpDriver({
-    ...driverOptions(spec.scratchDir, directiveEnv(spec.directive), []),
+    ...driverOptions(spec.scratchDir, {}, []),
     spawn: fakeAcpSpawn((opts) => fakeAcpScript(opts, spec.directive)),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
