@@ -1,10 +1,22 @@
 // Sandbox launcher helpers.  Backend launchers receive this scrubbed
 // environment; CQ_* policy knobs are intentionally absent so a model-directed
 // child cannot reconfigure its own boundary.
-import { resolveSandboxConfig } from './config.js';
+import { resolveSandboxConfig, SANDBOX_POLICY_ENV_NAMES } from './config.js';
 import type { SandboxConfig } from './config.js';
 
-const SAFE_ENV = new Set(['HOME', 'LANG', 'LC_ALL', 'PATH', 'SHELL', 'TERM', 'TMPDIR']);
+const SAFE_ENV = new Set([
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'PATH',
+  'Path',
+  'SHELL',
+  'TERM',
+  'TMPDIR',
+  'SystemRoot',
+  'COMSPEC',
+  'PATHEXT',
+]);
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -66,23 +78,7 @@ export interface HarnessRunGate {
 }
 
 /** The CQ_SANDBOX / CQ_SANDBOX_* / CQ_RUN_TOOL env names that express a policy. */
-const POLICY_ENV_NAMES = [
-  'CQ_SANDBOX',
-  'CQ_SANDBOX_BACKEND',
-  'CQ_SANDBOX_NETWORK',
-  'CQ_RUN_TOOL',
-  'CQ_RUN_ENV_PASSTHROUGH',
-] as const;
-
-/**
- * The policy knob NAMES no child environment may carry: a model-directed
- * command that could read — or a descendant that could re-export — one of
- * these could steer its own boundary. Exported because a harness manifest's
- * declared `envNames` rides the same child-env seam, and a declared name that
- * collides with a knob must be refused there too (CQ_TEST_KEEP is a declared
- * name; CQ_SANDBOX is a knob).
- */
-export const SANDBOX_POLICY_ENV_NAMES: ReadonlySet<string> = new Set(POLICY_ENV_NAMES);
+const POLICY_ENV_NAMES = SANDBOX_POLICY_ENV_NAMES;
 
 /**
  * The gate the harness `buildTools` seam applies when the caller names none.
@@ -104,7 +100,9 @@ export function harnessRunGate(
 ): HarnessRunGate {
   const env = options.env ?? process.env;
   if (options.sandboxConfig === undefined) {
-    const expressed = POLICY_ENV_NAMES.some((name) => (env[name] ?? '').trim() !== '');
+    const expressed = [...POLICY_ENV_NAMES].some(
+      (name) => Object.prototype.hasOwnProperty.call(env, name) && env[name] !== undefined,
+    );
     if (!expressed) return { enabled: true, envPassthrough: [] };
   }
   const config = options.sandboxConfig ?? resolveSandboxConfig({ env });

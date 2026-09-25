@@ -1,33 +1,11 @@
-# Template: self-review-loop — the adoptable scheduled review-loop
-# automation: the toolkit, built from source, runs its OWN review loop
-# (runReviewLoop over the frozen SelfhostDefaults) against the ADOPTING
-# repository's open PRs — fetch → classify → respond → resolve, one
-# ≤20-minute scheduled run per slot. Wiring, secrets, the cron-window rule,
-# the budget caps, and the I2 single-identity caveat: README.md in this
-# directory (policy/templates/self-host/).
+# instantiated from policy/templates/self-host/self-review-loop.yml — edit the template, not this file
+# PROVENANCE: this is the repository-owned instantiated self-host review-loop
+# workflow. Its trusted build and privileged loop are intentionally split;
+# the template is the adoptable source of record.
 #
-# Instantiate:
-#   GH_TOKEN      -> NAME of the repository secret holding a PAT
-#                              with repo scope on the target repo (the loop
-#                              posts review replies and resolves threads as
-#                              its user; gh rides it as GH_TOKEN).
-#                              Instantiated files reference it as
-#                              `${{ secrets.<name> }}` — a name, never a
-#                              value; a template or instantiation that
-#                              embeds a token value is a denylist-class bug.
-#   Z_AI_API_KEY -> NAME of the repository secret holding the
-#                              model provider API key (the fix workers'
-#                              driver through the ai-sdk route).
-#   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
-#                              convention from ../README.md): the template
-#                              carries THIS repo's two literal crons
-#                              (15:00–01:00 UTC); an adopter replaces them
-#                              BY HAND with their model provider's off-peak
-#                              window. No placeholder text is substituted.
-# No ${{ }} expression is ever interpolated into a run: script in this
-# workflow — inputs and secrets reach scripts through env: indirection
-# only. Drop the result into .github/workflows/. Edit the template, not
-# the instantiation.
+# The self-hosting review-loop automation runs the toolkit's own scheduled
+# review loop over this repository's open PRs. Secret-bearing effects are
+# isolated to the main-only privileged job below.
 name: self-review-loop
 
 on:

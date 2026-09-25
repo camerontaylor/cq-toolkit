@@ -64,6 +64,15 @@ const BACKENDS = new Set<SandboxBackend>([
 
 const ENV_NAMES = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+/** Policy controls must never be copied into a model-directed child. */
+export const SANDBOX_POLICY_ENV_NAMES: ReadonlySet<string> = new Set([
+  'CQ_SANDBOX',
+  'CQ_SANDBOX_BACKEND',
+  'CQ_SANDBOX_NETWORK',
+  'CQ_RUN_TOOL',
+  'CQ_RUN_ENV_PASSTHROUGH',
+]);
+
 function platformOf(platform: NodeJS.Platform): SandboxPlatform {
   if (platform === 'linux') return 'linux';
   if (platform === 'darwin') return 'darwin';
@@ -108,6 +117,9 @@ function parsePassthrough(raw: string | undefined): readonly string[] {
   for (const name of names) {
     if (!ENV_NAMES.test(name)) {
       throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH contains invalid env name '${name}'`);
+    }
+    if (SANDBOX_POLICY_ENV_NAMES.has(name)) {
+      throw new Error(`sandbox: CQ_RUN_ENV_PASSTHROUGH may not expose policy env '${name}'`);
     }
   }
   return [...new Set(names)];

@@ -289,6 +289,11 @@ export class AiSdkDriver implements Driver {
     // partial state).
     const model = this.resolveModel(modelSpec);
     const system = this.composeSystemPrompt(prompt);
+    // Resolve policy before creating session/workspace state: malformed
+    // sandbox configuration must fail before any partial run state exists.
+    const runGate = harnessRunGate(
+      this.sandboxConfig === undefined ? {} : { sandboxConfig: this.sandboxConfig },
+    );
 
     // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
     const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
@@ -331,7 +336,7 @@ export class AiSdkDriver implements Driver {
       this.harnessConfig,
       record.workspace,
       sandboxPolicy.level,
-      harnessRunGate(this.sandboxConfig === undefined ? {} : { sandboxConfig: this.sandboxConfig }),
+      runGate,
     );
     const selected = selectTools(harnessTools, toolPolicy);
     const toolSet: ToolSet = {};

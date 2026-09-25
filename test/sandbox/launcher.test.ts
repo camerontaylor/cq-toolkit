@@ -66,6 +66,12 @@ describe('the shared run gate withholds `run` on every harness surface', () => {
     );
   });
 
+  test('an explicitly blank CQ_SANDBOX is still a required policy', () => {
+    process.env['CQ_SANDBOX'] = '';
+    expect(harnessRunGate().enabled).toBe(false);
+    expect(harnessRunGate().configHint).toMatch(/certified backend launcher/);
+  });
+
   test('CQ_RUN_TOOL=off withholds it even with the sandbox off', () => {
     process.env['CQ_SANDBOX'] = 'off';
     process.env['CQ_RUN_TOOL'] = 'off';
@@ -124,6 +130,25 @@ describe('the launcher env scrub reaches the actual run child', () => {
     }
   });
 
+  test('the launcher keeps Windows executable essentials while scrubbing secrets', () => {
+    const env = buildSandboxLauncherEnv(
+      {
+        Path: 'C:\\Windows',
+        SystemRoot: 'C:\\Windows',
+        COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+        PATHEXT: '.COM;.EXE',
+        GH_TOKEN: 'secret',
+      },
+      { envPassthrough: [] },
+    );
+    expect(env).toEqual({
+      Path: 'C:\\Windows',
+      SystemRoot: 'C:\\Windows',
+      COMSPEC: 'C:\\Windows\\System32\\cmd.exe',
+      PATHEXT: '.COM;.EXE',
+    });
+  });
+
   test('a policy knob is refused on the passthrough and on a declared manifest name', () => {
     const parent = { PATH: '/bin', CQ_SANDBOX: 'required', CQ_TEST_KEEP: 'kept' };
     expect(() => buildSandboxLauncherEnv(parent, { envPassthrough: ['CQ_RUN_TOOL'] })).toThrow(
@@ -137,6 +162,21 @@ describe('the launcher env scrub reaches the actual run child', () => {
     expect(
       buildSandboxLauncherEnv(parent, { envPassthrough: [], declaredEnvNames: ['CQ_TEST_KEEP'] }),
     ).toEqual({ PATH: '/bin', CQ_TEST_KEEP: 'kept' });
+  });
+
+  test('an invalid policy passthrough fails before run is exposed', () => {
+    expect(() =>
+      buildTools(runConfig(['env']), process.cwd(), 'workspace-write', {
+        enabled: true,
+        envPassthrough: ['CQ_SANDBOX'],
+      }),
+    ).toThrow(/not permitted/);
+    expect(() =>
+      resolveSandboxConfig({
+        env: { CQ_SANDBOX: 'off', CQ_RUN_ENV_PASSTHROUGH: 'CQ_SANDBOX' },
+        platform: 'linux',
+      }),
+    ).toThrow(/may not expose policy env/);
   });
 });
 

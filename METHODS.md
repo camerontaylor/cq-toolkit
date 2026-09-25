@@ -16,7 +16,8 @@ CQ_SANDBOX support is implemented according to the accepted RS-13 matrix and the
   `child_process`.
 - **Opt-in by construction.** `harnessRunGate()` reads the process env only when a sandbox knob
   is actually expressed (`CQ_SANDBOX`, `CQ_SANDBOX_BACKEND`, `CQ_SANDBOX_NETWORK`, `CQ_RUN_TOOL`,
-  `CQ_RUN_ENV_PASSTHROUGH`); an environment that names none keeps the pre-W1.11 behaviour where
+  `CQ_RUN_ENV_PASSTHROUGH`); an explicitly blank `CQ_SANDBOX` still goes through the conservative
+  `required` resolver. An environment that names none keeps the pre-W1.11 behaviour where
   the command allowlist is the only gate. A driver may also pass an already-resolved
   `SandboxConfig`, which pins the same decision from data.
 - **The scrub is wired to the spawn, not just the resolver.** `runShellCommand` now REQUIRES an
@@ -33,8 +34,9 @@ CQ_SANDBOX support is implemented according to the accepted RS-13 matrix and the
 
 ## Verification
 
-- `test/sandbox/launcher.test.ts` — the shared-gate cases (required policy, `CQ_RUN_TOOL=off`,
-  `CQ_SANDBOX=off`, an unexpressed environment, a driver-supplied config), the live
+- `test/sandbox/launcher.test.ts` — the shared-gate cases (required policy, explicitly blank
+  `CQ_SANDBOX`, `CQ_RUN_TOOL=off`, `CQ_SANDBOX=off`, an unexpressed environment, a driver-supplied
+  config), the live
   launcher-env case (an allowed `env` run: `PATH` and the passthrough present, the secret and
   every `CQ_*` knob absent), and the advisory-network cases.
 - `npx vitest run test/sandbox test/harness/tools.test.ts test/harness/surface.test.ts test/harness/mcp-bin.test.ts test/driver/ai-sdk.test.ts` — 6 files, 136 tests passed, 2 skipped.

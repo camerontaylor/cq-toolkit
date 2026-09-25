@@ -709,6 +709,10 @@ export function buildTools(
 
   // --- run --------------------------------------------------------------------
   if (cfg.tools.run.enabled && gate.enabled) {
+    // Validate the complete launcher environment before exposing an executor.
+    // A malformed or policy-bearing passthrough must fail during tool
+    // construction, never later inside a model-directed command.
+    buildSandboxLauncherEnv({}, gate);
     const runCfg = cfg.tools.run;
     const patterns = compileCommandPatterns(runCfg.commandPatterns); // loud on config corruption
     const formatOutcome = (
