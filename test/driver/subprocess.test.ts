@@ -24,7 +24,7 @@
 // pin the DeepSeek footgun to the shipped config.
 import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, onTestFinished, test, vi } from 'vitest';
 import { z } from 'zod';
@@ -1858,6 +1858,37 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
       expect(
         await markersOf(store, result.sessionId as string, 'harness-surface-unverified'),
       ).toEqual([{ cq: 'harness-surface-unverified', errorClass: 'harness' }]);
+    });
+  });
+
+  test('a harness failure voids structured output: an unverified run never exposes the payload (review r1)', async () => {
+    await withScratch(async (scratchDir) => {
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'structured-ok', FAKE_AGENT_NO_INIT: '1' },
+          [],
+        ),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      const result = await driver.run(invocation({ prompt: 'unverified structured run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.structuredOutput).toBeUndefined();
+    });
+  });
+
+  test('a RELATIVE sessionsDir still yields an absolute --mcp-config the CLI (cwd = workspace) can open (review r1)', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
+        sessionsDir: relative(process.cwd(), join(scratchDir, SESSIONS_DIR)),
+      });
+      const result = await driver.run(invocation({ prompt: 'relative sessionsDir run' }));
+      expect(result.stopReason).toBe('complete');
+      const args = calls[0]?.args ?? [];
+      expect(isAbsolute(args[args.indexOf('--mcp-config') + 1] as string)).toBe(true);
     });
   });
 

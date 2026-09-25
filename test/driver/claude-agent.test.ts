@@ -1920,12 +1920,14 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
                 result: 'looks fine',
                 usage: AGENT_USAGE,
                 permission_denials: [],
+                structured_output: { answer: 'ok' }, // schema-valid, but unverified
               };
             })(),
         }),
         endpointTable: conformanceEndpointTable(),
         sessionsDir: join(scratchDir, SESSIONS_DIR),
         harnessConfig: conformanceHarnessConfig(scratchDir),
+        outputSchema: z.object({ answer: z.string() }).strict(),
       });
       const result = await driver.run(invocation());
       expect(result.stopReason).toBe('error');
@@ -1933,8 +1935,10 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
       expect(result.error).toContain('never reported its init surface');
       const markers = await narrationMarkers(scratchDir, result.sessionId);
       expect(markers).toContainEqual({ cq: 'harness-surface-unverified', errorClass: 'harness' });
-      // A real measurement still rides the error verdict (usage is honest).
+      // A real measurement still rides the error verdict (usage is honest)…
       expect(result.usage).toEqual({ input: 120, output: 12, cacheRead: 15, cacheWrite: 5 });
+      // …but the payload produced on an unverified surface never does (review r1).
+      expect(result.structuredOutput).toBeUndefined();
     } finally {
       await rm(scratchDir, { recursive: true, force: true });
     }

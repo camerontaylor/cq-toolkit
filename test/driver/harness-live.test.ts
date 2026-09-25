@@ -44,6 +44,13 @@ interface LiveDriverModule {
   SubprocessDriver: new (options: Record<string, unknown>) => {
     run(invocation: Record<string, unknown>): Promise<Record<string, unknown>>;
   };
+  SessionStore: new (sessionsDir: string) => {
+    load(
+      sessionId: string,
+    ): Promise<
+      { messages: Array<{ role: string; toolName?: string; content: string }> } | undefined
+    >;
+  };
   defaultHarnessConfig: Record<string, unknown>;
 }
 
@@ -177,7 +184,19 @@ describe.skipIf(!LIVE)(
             ),
           );
           expect(result['stopReason']).toBe('complete');
+          expect(result['denials']).toEqual([]);
           expect(result['structuredOutput']).toEqual({ tokenVisible: false });
+          // The model's boolean is not the evidence: read the RAW `run`
+          // output from the session record (the driver's execute-boundary
+          // record) and assert on it directly.
+          const { SessionStore } = await loadDist();
+          const record = await new SessionStore(sessionsDir).load(result['sessionId'] as string);
+          const runOutputs = (record?.messages ?? [])
+            .filter((m) => m.role === 'tool' && m.toolName === 'run')
+            .map((m) => (JSON.parse(m.content) as { output: string }).output);
+          expect(runOutputs.length).toBeGreaterThan(0);
+          expect(runOutputs.some((out) => /^PATH=/m.test(out))).toBe(true); // env really ran
+          expect(runOutputs.join('\n')).not.toMatch(/ANTHROPIC_(AUTH_TOKEN|API_KEY)/);
         });
       },
       TIMEOUT,

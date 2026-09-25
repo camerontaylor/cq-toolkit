@@ -224,7 +224,7 @@
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
@@ -828,8 +828,12 @@ export class SubprocessDriver implements Driver {
     const measured =
       observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
+    // A harness failure voids the payload: output produced on an unverified
+    // or broken tool surface is not a model outcome.
     const structured =
-      observation.result === undefined ? undefined : observation.result.structured_output;
+      observation.result === undefined || observation.harnessFailure !== undefined
+        ? undefined
+        : observation.result.structured_output;
     const stopReason = stopReasonOf({
       aborted,
       harnessFailure: observation.harnessFailure !== undefined,
@@ -949,7 +953,9 @@ async function writeMcpConfig(
   sessionId: string,
   manifest: HarnessManifest,
 ): Promise<string> {
-  const path = join(sessionsDir, `${sessionId}.${randomUUID()}${HARNESS_MCP_CONFIG_FILE}`);
+  // ABSOLUTE: the CLI runs with cwd = the workspace, so a relative
+  // sessionsDir would resolve --mcp-config beneath the workspace.
+  const path = resolve(sessionsDir, `${sessionId}.${randomUUID()}${HARNESS_MCP_CONFIG_FILE}`);
   const launch = harnessServerLaunch();
   const config = {
     mcpServers: {

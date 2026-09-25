@@ -617,6 +617,7 @@ export class ClaudeAgentDriver implements Driver {
     const rawStructured = observation.result?.['structured_output'];
     if (
       this.outputSchema !== undefined &&
+      observation.harnessFailure === undefined &&
       observation.result !== undefined &&
       rawStructured !== undefined
     ) {

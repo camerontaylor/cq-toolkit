@@ -29,6 +29,11 @@
 import { serveStdio } from './server.js';
 import { checkStartup, EXIT_CONFIG, EXIT_PROTOCOL, oneLine, scrubEnvironment } from './startup.js';
 
+/** Write one stderr line, then exit once it is flushed (macOS pipes are async). */
+function exitWithLine(line: string, code: number): void {
+  process.stderr.write(`${line}\n`, () => process.exit(code));
+}
+
 /** Exit after stdout drains (async pipes must flush their last response). */
 function exitAfterFlush(code: number): void {
   process.stdout.write('', () => process.exit(code));
@@ -37,15 +42,15 @@ function exitAfterFlush(code: number): void {
 function main(argv: readonly string[]): void {
   const startup = checkStartup(argv);
   if (!startup.ok) {
-    process.stderr.write(`cq-harness-mcp: refusing to start — ${startup.reason}\n`);
-    process.exit(EXIT_CONFIG);
+    exitWithLine(`cq-harness-mcp: refusing to start — ${startup.reason}`, EXIT_CONFIG);
+    return; // never serve: stdin is not read while the refusal flushes
   }
   try {
     process.chdir(startup.manifest.workspace);
     scrubEnvironment(startup.manifest.envNames);
   } catch (err) {
-    process.stderr.write(`cq-harness-mcp: refusing to start — ${oneLine(err)}\n`);
-    process.exit(EXIT_CONFIG);
+    exitWithLine(`cq-harness-mcp: refusing to start — ${oneLine(err)}`, EXIT_CONFIG);
+    return;
   }
   const server = serveStdio(startup.surface, process.stdin, process.stdout, {
     log: (line) => process.stderr.write(`${line}\n`),
@@ -59,9 +64,8 @@ function main(argv: readonly string[]): void {
   // Backstop: an unexpected throw must still abort in-flight calls (killing
   // their detached process groups) before the process dies.
   process.once('uncaughtException', (err) => {
-    process.stderr.write(`cq-harness-mcp: fatal — ${oneLine(err)}\n`);
     server.shutdown();
-    process.exit(70);
+    exitWithLine(`cq-harness-mcp: fatal — ${oneLine(err)}`, 70);
   });
   server.done.then(
     (end) => {
