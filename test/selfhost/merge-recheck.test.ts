@@ -109,6 +109,8 @@ interface PrSpec {
   baseNameOnLaterPages: string | null;
   /** Extra REST review entries (beyond the snapshot's) — reviews-lag probes. */
   restExtraReviews: unknown[];
+  /** When set, REST reports this state for every snapshot review (a dismissal GraphQL lags). */
+  restStateOverride: string | null;
   /** Extra REST review-comment entries (beyond the snapshot's) — thread-lag probes. */
   restExtraComments: unknown[];
 }
@@ -134,6 +136,7 @@ const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
   baseOnLaterPages: null,
   baseNameOnLaterPages: null,
   restExtraReviews: [],
+  restStateOverride: null,
   restExtraComments: [],
   ...over,
 });
@@ -160,7 +163,10 @@ const rootDatabaseId = (index: number): number => 1000 + index;
  * one reply chained to it.
  */
 const restReviewsFor = (spec: PrSpec): unknown[] => [
-  ...spec.reviews.map((r, i) => ({ node_id: reviewNodeId(r, i), state: r.state })),
+  ...spec.reviews.map((r, i) => ({
+    node_id: reviewNodeId(r, i),
+    state: spec.restStateOverride ?? r.state,
+  })),
   ...spec.restExtraReviews,
 ];
 const restCommentsFor = (spec: PrSpec): unknown[] => [
@@ -1417,6 +1423,16 @@ describe('recheckBeforeMerge — the I11 REST lag cross-check', () => {
     });
     // Unchanged tuple: the lag refusal writes nothing.
     expect(writes(forge)).toEqual([]);
+  });
+
+  test('a review whose REST state disagrees with the snapshot refuses (a lagging dismissal)', async () => {
+    const forge = await settledForge({ restStateOverride: 'DISMISSED' });
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+    expect(result).toEqual({
+      ok: false,
+      reason:
+        'review data lag: reviews.stateMismatch (1 review(s) whose REST state or commit disagrees with the snapshot)',
+    });
   });
 
   test('PENDING REST reviews are ignored; a node_id-less REST review is no lag evidence', async () => {

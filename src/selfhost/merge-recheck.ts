@@ -743,6 +743,25 @@ const checkReviewDataLag = async (
       `reviews.lag (${String(missing)} of ${String(submitted.length)} REST review(s) missing from ${String(snapshot.reviews.length)} snapshot review(s))`,
     );
   }
+  // A review present on both sides must also AGREE: a dismissal REST already
+  // reports while the lagging GraphQL node still says APPROVED would
+  // otherwise pass the id check and let the withdrawn approval count.
+  const byNodeId = new Map(snapshot.reviews.map((review) => [review.nodeId, review]));
+  const disagreeing = submitted.filter((entry) => {
+    const nodeId = entry['node_id'];
+    const bound = typeof nodeId === 'string' ? byNodeId.get(nodeId) : undefined;
+    if (bound === undefined) return false;
+    const commitId = asString(entry['commit_id']).toLowerCase();
+    return (
+      asString(entry['state']) !== (bound.state ?? '') ||
+      (commitId !== '' && commitId !== (bound.commitOid ?? ''))
+    );
+  }).length;
+  if (disagreeing > 0) {
+    traps.push(
+      `reviews.stateMismatch (${String(disagreeing)} review(s) whose REST state or commit disagrees with the snapshot)`,
+    );
+  }
   const { unmatchedRoots } = attachRestReplies(snapshot.threads.map(asReviewThread), parsed);
   if (unmatchedRoots.length > 0) {
     traps.push(
