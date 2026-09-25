@@ -30,7 +30,7 @@ import type { OpRegistryEntry } from '../../src/kernel/types.js';
 import { REVIEW_ACCEPT_SETTLE_MS } from '../../src/ops/merge/classify.config.js';
 import type { MergeEffects } from '../../src/ops/merge/effects.js';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
-import { PR_SNAPSHOT_QUERY } from '../../src/selfhost/merge-recheck.js';
+import { PR_SNAPSHOT_QUERY, trustPolicyFromConfig } from '../../src/selfhost/merge-recheck.js';
 import { recheckedRegistryView, runSelfMergePrs } from '../../src/selfhost/self-merge-prs.js';
 import {
   emptySettleState,
@@ -523,6 +523,31 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     expect(row?.reason).toContain(
       'automation identity unresolved: gh exit 1: gh: Bad credentials (HTTP 401)',
     );
+  });
+
+  test('an integration token with trustedBots configured fails closed (the App bot is unknowable)', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects();
+    const result = await runSelfMergePrs(
+      {
+        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7) }], [], {
+          code: 1,
+          stdout: '',
+          stderr: 'gh: Resource not accessible by integration (HTTP 403)',
+        }),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      {
+        ...cfg(tmpJournalRoot()),
+        trustPolicy: trustPolicyFromConfig({ trustedBots: ['coderabbitai[bot]'] }),
+      },
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(effects.merges).toEqual([]);
+    const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
+    expect(row?.reason).toContain('integration token with trustedBots configured');
   });
 
   test('a non-integration 403 fails closed like any other identity failure', async () => {

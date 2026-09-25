@@ -49,7 +49,9 @@
 // (`gh api user`) and excludes it from trust — the automation can never
 // accept its own work. An integration (App) token cannot read /user
 // (HTTP 403 "Resource not accessible by integration" — only that exact
-// message; any other 403 fails closed); that is fine: App
+// message; any other 403 fails closed); that is fine only while NO bot is
+// trusted (the App's own bot login is unknowable, so with any trustedBots
+// entry the run fails closed): App
 // bot identities are never trusted unless allowlisted, and the structural
 // automation bots are always excluded. Any OTHER failure fails closed —
 // every merge-time recheck refuses 'automation identity unresolved'. The
@@ -169,11 +171,15 @@ const IDENTITY_REASON_MAX = 500;
 
 /**
  * Resolve the automation identity. `refusal` is null when the run may
- * proceed (resolved, or an integration token — see the module doc) and the
- * one-line refusal every recheck must answer otherwise. Never throws.
+ * proceed (resolved, or an integration token under a policy that trusts NO
+ * bot — see the module doc) and the one-line refusal every recheck must
+ * answer otherwise. An integration token cannot name its own App bot, so
+ * with any `trustedBots` entry the App could be one of them and accept its
+ * own work: that case fails closed. Never throws.
  */
 export async function resolveAutomationIdentity(
   gh: GhFn,
+  policy: Pick<TrustPolicy, 'trustedBots'> = CONSERVATIVE_TRUST_POLICY,
 ): Promise<{ identity: AutomationIdentity; refusal: string | null }> {
   const cap = (text: string): string =>
     (text.split('\n', 1)[0] ?? '').slice(0, IDENTITY_REASON_MAX);
@@ -191,12 +197,15 @@ export async function resolveAutomationIdentity(
   } catch (error) {
     const stderr = error instanceof GhError ? error.stderr : '';
     if (/Resource not accessible by integration/.test(stderr)) {
+      const reason = cap(`integration token (no /user): ${stderr.trim()}`);
       return {
-        identity: {
-          resolved: false,
-          reason: cap(`integration token (no /user): ${stderr.trim()}`),
-        },
-        refusal: null,
+        identity: { resolved: false, reason },
+        // The App's own bot login is unknowable here; proceed only when no
+        // bot can grant acceptance at all.
+        refusal:
+          policy.trustedBots.size === 0
+            ? null
+            : cap(`integration token with trustedBots configured: ${reason}`),
       };
     }
     const reason = cap(
@@ -358,7 +367,7 @@ export async function runSelfMergePrs(
   // be attempted; an unresolved identity (other than an integration token)
   // refuses every recheck rather than throwing the run.
   const { identity: automationIdentity, refusal: identityRefusal } =
-    await resolveAutomationIdentity(deps.gh);
+    await resolveAutomationIdentity(deps.gh, cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY);
   // RUN-START DURABLE OBSERVATION (W1.2): one snapshot per open candidate,
   // at most ONE state-branch write, and only for a new/reset anchor or a
   // pruned record (records of PRs outside this set are pruned — a PR
