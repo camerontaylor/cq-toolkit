@@ -45,6 +45,15 @@ describe('served-model assertion', () => {
     expect((await prefixed.run(invocation())).stopReason).toBe('complete');
   });
 
+  test.each(['default', 'acp'] as const)(
+    'construction path for the %s lane is wrapped',
+    async (lane) => {
+      const model = lane === 'acp' ? 'vendor/model-a' : 'model-a';
+      const run = await DriverFactory(driverReturning(result(model)), lane).run(invocation());
+      expect(run.stopReason).toBe('complete');
+    },
+  );
+
   test('DriverFactory applies the wrapper rather than only exporting it', async () => {
     const factoryDriver = DriverFactory(driverReturning(result('model-b')));
     const run = await factoryDriver.run(invocation());

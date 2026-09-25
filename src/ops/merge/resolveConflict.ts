@@ -499,7 +499,10 @@ export function makeResolveConflictOp(
         const record = await new SessionStore(sessionsDir).create(workspace);
         return record.sessionId;
       });
-    const driver = deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec);
+    const driver = withServedModelAssertion(
+      deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec),
+      'default',
+    );
 
     // (b) Truth first: fetch the PR head ref. A nonzero exit means the
     // truth is unavailable — fail closed before any worktree exists.

@@ -328,19 +328,16 @@ function createCollector(
   // tail's trim drops anyway — counting both would inflate.
   const trimToCap = (buf: { text: string; bytes: number }): void => {
     if (buf.bytes <= maxRetainedBytes) return;
-    const chars = Array.from(buf.text);
-    let keepBytes = 0;
-    let firstKept = chars.length;
-    for (let index = chars.length - 1; index >= 0; index -= 1) {
-      const width = Buffer.byteLength(chars[index]!);
-      if (keepBytes + width > maxRetainedBytes) break;
-      keepBytes += width;
-      firstKept = index;
-    }
-    const cutBytes = buf.bytes - keepBytes;
-    if (buf === tailBuf) droppedBytes += cutBytes;
-    buf.text = chars.slice(firstKept).join('');
-    buf.bytes = keepBytes;
+    // Trim from the byte representation once per bounded buffer update. This
+    // avoids rebuilding an Array of code points on every chunk (the old
+    // repeated full-string scan was quadratic under noisy output).
+    const bytes = Buffer.from(buf.text, 'utf8');
+    const start = Math.max(0, bytes.length - maxRetainedBytes);
+    let kept = bytes.subarray(start).toString('utf8');
+    if (start > 0 && kept.charCodeAt(0) === 0xfffd) kept = kept.slice(1);
+    if (buf === tailBuf) droppedBytes += buf.bytes - Buffer.byteLength(kept);
+    buf.text = kept;
+    buf.bytes = Buffer.byteLength(kept);
   };
   return {
     onChunk(chunk: string): void {

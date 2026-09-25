@@ -140,6 +140,7 @@ describe('git diff workspace escape hardening', () => {
     'git diff --output=/tmp/cq-escape',
     'git diff --output "$OUTSIDE"',
     'git diff --${DIFF_FLAG}',
+    'git diff {--,--}output=/tmp/cq-escape',
   ])('rejects the escape shape %j even under an anchored allowlist', async (command) => {
     await withScratch(async (scratchDir) => {
       const run = buildTools(runConfig([`re:^git diff.*$`]), scratchDir).find(
@@ -151,16 +152,19 @@ describe('git diff workspace escape hardening', () => {
     });
   });
 
-  test.each(['git diff', 'git diff -- src', 'git diff --cached -- src'])(
-    'keeps the legitimate workspace diff form %j allowed',
-    async (command) => {
-      await withScratch(async (scratchDir) => {
-        const run = buildTools(runConfig(['git diff']), scratchDir).find((t) => t.name === 'run');
-        const result = await run?.execute({ command });
-        expect(result?.ok).toBe(true);
-      });
-    },
-  );
+  test.each([
+    'git diff',
+    'git diff -- src',
+    'git diff --cached -- src',
+    'git diff --stat',
+    'git diff --name-only',
+  ])('keeps the legitimate workspace diff form %j allowed', async (command) => {
+    await withScratch(async (scratchDir) => {
+      const run = buildTools(runConfig(['git diff']), scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({ command });
+      expect(result?.ok).toBe(true);
+    });
+  });
 });
 
 describe('symlink hardening (fix 5)', () => {
