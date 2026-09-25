@@ -45,9 +45,21 @@
 //
 // TOOL POLICY → SDK MAPPING (the governed surface, exact):
 //   - `tools: []` ALWAYS — every BUILT-IN agent tool is disabled. The only
-//     tool surface this lane ever offers is the harness surface
-//     (buildTools(config, workspace, sandbox level): read/edit/run), so the
-//     frozen policy is the WHOLE truth about what can execute.
+//     tool surface this lane ever offers is the harness surface, bound by
+//     the SHARED CORE (src/harness/surface.ts — W1.4, ADR-0002 Annex A.1):
+//     `buildManifest` (workspace realpath, sandbox level, harness ∩ policy,
+//     harness config) → `createHarnessSurface`, the same core the
+//     subprocess lane serves over stdio; the handler is `surface.call`, so
+//     both lanes return byte-identical CallToolResults (the parity test).
+//     The frozen policy is the WHOLE truth about what can execute.
+//   - `settingSources: []` + `strictMcpConfig: true` ALWAYS (live leg
+//     A.5j): without them subscription auth attaches the account's
+//     claude.ai connectors to the worker's surface. The FIRST init frame is
+//     then asserted fail-closed: exactly `cq-harness`/connected (or no
+//     server) and exactly the qualified selected tools (+ StructuredOutput
+//     with outputFormat) — a mismatch ends the query and settles 'error'
+//     with a HARNESS_ERROR_PREFIX cause ('harness-surface-mismatch'); a
+//     result with no init frame is 'harness-surface-unverified'.
 //   - The selected harness tools ride the SDK's in-process custom-tool path
 //     (`createSdkMcpServer` + `tool(name, description, inputSchema,
 //     handler)` — the harness zod object schema's raw `.shape` is the
@@ -201,8 +213,16 @@ import type { ZodType } from 'zod';
 import { currentJobContext } from '../../kernel/governor.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
-import { buildTools } from '../../harness/tools.js';
-import type { ToolkitTool } from '../../harness/tools.js';
+import {
+  HARNESS_MCP_SERVER_NAME,
+  buildManifest,
+  compareInitSurface,
+  createHarnessSurface,
+  harnessToolName,
+  qualifiedToolName,
+  selectToolNames,
+} from '../../harness/surface.js';
+import type { ExpectedInitSurface, HarnessSurface } from '../../harness/surface.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
@@ -230,8 +250,8 @@ import { abortRootFollowing } from './process.js';
 /** The optional peer this lane loads lazily — never statically imported. */
 export const SDK_MODULE_SPECIFIER = '@anthropic-ai/claude-agent-sdk';
 
-/** SDK MCP server name under which the harness tool surface is registered. */
-export const MCP_SERVER_NAME = 'cq-harness';
+/** SDK MCP server name under which the harness tool surface is registered (the shared core's name). */
+export const MCP_SERVER_NAME = HARNESS_MCP_SERVER_NAME;
 
 /**
  * The file-name SUFFIX of the agent-session sidecar — the `Options.resume`
@@ -248,6 +268,21 @@ export const AGENT_SESSION_FILE = '.cq-cli-session';
 
 /** Session-message toolName under which unknown-frame narration is recorded. */
 export const NARRATION_TOOL = 'agent-narration';
+
+/**
+ * The SDK-internal tool the init frame lists whenever `outputFormat` is
+ * set (W1.4 live leg A.5j, agent-sdk 0.3.270 — its native structured-output
+ * tool). Pinned into the init-surface assertion's expected set.
+ */
+export const SDK_STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
+
+/**
+ * The stable leading text of a harness-classified error verdict
+ * (`WorkerResult.error`) — ADR-0002 §2.2's `errorClass: 'harness'` lands
+ * with the seam-v2 types bump (W3.3); until then this prefix and the
+ * narration marker's `errorClass` field carry the classification.
+ */
+export const HARNESS_ERROR_PREFIX = 'claude-agent driver: harness failure';
 
 /**
  * One MCP tool-call result (the subset of the SDK's CallToolResult this
@@ -389,15 +424,21 @@ export class ClaudeAgentDriver implements Driver {
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
-    // --- Tool surface: the harness surface ∩ per-op ToolPolicy, registered
-    // as the SDK's in-process custom tools; built-ins are disabled
-    // wholesale (the governed surface is the WHOLE surface, header).
-    const harnessTools = buildTools(this.harnessConfig, workspace, sandboxPolicy.level);
-    const allowed = allowedToolNames(
-      harnessTools.map((t) => t.name),
+    // --- Tool surface: the SHARED CORE (src/harness/surface.ts) — the one
+    // manifest constructor binds the workspace realpath, the sandbox level,
+    // harness ∩ per-op ToolPolicy and the harness config; the bound surface
+    // is registered as the SDK's in-process custom tools. The subprocess
+    // lane serves the SAME core over stdio (two-level parity test). An
+    // empty selection yields no manifest and no server. Built-ins are
+    // disabled wholesale (the governed surface is the WHOLE surface, header).
+    const manifest = await buildManifest({
+      workspace,
+      sandbox: sandboxPolicy.level,
       toolPolicy,
-    );
-    const selected = harnessTools.filter((t) => allowed.includes(t.name));
+      harness: this.harnessConfig,
+    });
+    const surface = manifest === undefined ? undefined : createHarnessSurface(manifest);
+    const allowed = manifest?.tools ?? [];
 
     // --- Agent-level resume: the agent session id recorded in the -------
     // SESSIONS STORE sidecar by a prior run (absent → workspace-only
@@ -421,16 +462,36 @@ export class ClaudeAgentDriver implements Driver {
     // The per-run observation — created before the options assembly because
     // the harness-tool closures accumulate denials into it directly.
     const observation = newObservation();
+    // Fail-closed init-surface assertion (Annex A.2, enabled after A.5j):
+    // exactly the harness server (when registered) and exactly the selected
+    // tools, plus the SDK's structured-output tool when outputFormat is set.
+    observation.expectedSurface = {
+      harness: surface !== undefined,
+      tools: allowed,
+      internalTools: this.outputJsonSchema === undefined ? [] : [SDK_STRUCTURED_OUTPUT_TOOL],
+    };
 
     // --- The one SDK call: options assembly. ------------------------------
     const sandbox = sandboxOption(sandboxPolicy.level);
-    const sdkTools = selected.map((harnessTool) =>
+    const sdkTools = (surface?.tools ?? []).map((harnessTool) =>
       sdk.tool(
         harnessTool.name,
         harnessTool.description,
-        harnessTool.inputSchema.shape, // the zod raw shape — the SDK's declared-input form
+        // The zod raw shape — the SDK's declared-input form. Deliberately the
+        // NON-strict shape (what the model sees as the tool's schema): the
+        // SDK pre-validates it, so a type-invalid call never reaches the core
+        // and extra keys are stripped — the parity test's one scoped
+        // transport difference (nothing executes either way).
+        harnessTool.inputSchema.shape,
         (args: unknown): Promise<SdkToolCallResult> =>
-          runHarnessTool(harnessTool, args, store, record, observation.denials),
+          runHarnessTool(
+            surface as HarnessSurface,
+            harnessTool.name,
+            args,
+            store,
+            record,
+            observation.denials,
+          ),
       ),
     );
     const options: Record<string, unknown> = {
@@ -446,6 +507,13 @@ export class ClaudeAgentDriver implements Driver {
       // Headless posture: un-pre-approved tools are auto-DENIED, never
       // prompted; the denials map into WorkerResult.denials post-settle.
       permissionMode: 'default',
+      // CLOSED SURFACE (W1.4 live leg A.5j): without these two, subscription
+      // auth attaches the account's claude.ai connectors (dozens of extra
+      // tools — mail, drive, calendar) to the worker's surface; with them the
+      // init frame lists exactly the harness tools (+ StructuredOutput), on
+      // API-key and subscription auth alike.
+      settingSources: [],
+      strictMcpConfig: true,
       // Endpoint injection: the SDK's env REPLACES the child environment,
       // so the host environment rides along and the endpoint plan is laid
       // over it (base URL + both auth spellings, values from the host env
@@ -457,7 +525,7 @@ export class ClaudeAgentDriver implements Driver {
         ANTHROPIC_API_KEY: keyValue,
       },
       systemPrompt: systemPreamble(this.harnessConfig.promptBudget.maxSystemPromptChars),
-      ...(selected.length > 0
+      ...(surface !== undefined
         ? {
             mcpServers: {
               [MCP_SERVER_NAME]: sdk.createSdkMcpServer({ name: MCP_SERVER_NAME, tools: sdkTools }),
@@ -485,6 +553,9 @@ export class ClaudeAgentDriver implements Driver {
     try {
       for await (const message of sdk.query({ prompt, options })) {
         foldMessage(observation, message);
+        // A surface mismatch ends the run: leaving the loop returns the
+        // query's generator, which closes the SDK session.
+        if (observation.harnessFailure !== undefined) break;
       }
     } catch (err) {
       // An abort-shaped failure is the governor's cancellation, not an
@@ -508,6 +579,25 @@ export class ClaudeAgentDriver implements Driver {
     // state is captured.
     aborted = aborted || abortRoot?.controller.signal.aborted === true;
     abortRoot?.dispose();
+
+    // Fail closed: a run whose SDK never reported an init surface ran
+    // unverified — whatever it reports is not a model outcome.
+    if (
+      !aborted &&
+      observation.expectedSurface !== undefined &&
+      !observation.initSeen &&
+      observation.harnessFailure === undefined &&
+      observation.result !== undefined
+    ) {
+      observation.harnessFailure = { cq: 'harness-surface-unverified', errorClass: 'harness' };
+    }
+    if (observation.harnessFailure !== undefined) {
+      observation.narration.push(JSON.stringify(observation.harnessFailure));
+      observation.error =
+        observation.harnessFailure.cq === 'harness-surface-mismatch'
+          ? `${HARNESS_ERROR_PREFIX} — init surface mismatch: expected ${JSON.stringify(observation.harnessFailure.expected)}, observed ${JSON.stringify(observation.harnessFailure.observed)}`
+          : `${HARNESS_ERROR_PREFIX} — the SDK never reported its init surface`;
+    }
 
     // --- SDK-side permission denials → frozen shape (post-settle, deduped
     // per tool_use id). These are tools the agent's permission gate refused
@@ -620,6 +710,7 @@ export class ClaudeAgentDriver implements Driver {
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
     const stopReason = stopReasonOf({
       aborted,
+      harnessFailure: observation.harnessFailure !== undefined,
       maxTokens: budget.maxTokens,
       usage,
       resultStatus: resultStatusOf(observation.result),
@@ -757,28 +848,14 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
 /**
  * Frozen ToolPolicy → the allowed tool-name subset: 'none' → nothing;
  * 'unrestricted' → the whole harness surface; 'allowlist' (the default
- * reading when mode is omitted) → harness names in `allow` only.
+ * reading when mode is omitted) → harness names in `allow` only. The shared
+ * core's `selectToolNames` — one implementation for every lane.
  */
 export function allowedToolNames(
   harnessToolNames: readonly string[],
   policy: ToolPolicy,
 ): string[] {
-  const mode = policy.mode ?? 'allowlist';
-  if (mode === 'none') return [];
-  if (mode === 'unrestricted') return [...harnessToolNames];
-  const allowed = new Set(policy.allow);
-  return harnessToolNames.filter((name) => allowed.has(name));
-}
-
-/** The addressable spelling of a registered harness tool (the MCP prefix). */
-function qualifiedToolName(name: string): string {
-  return `mcp__${MCP_SERVER_NAME}__${name}`;
-}
-
-/** A permission-denial tool name → the harness name (prefix stripped; vendor names verbatim). */
-function harnessToolName(deniedName: string): string {
-  const prefix = `mcp__${MCP_SERVER_NAME}__`;
-  return deniedName.startsWith(prefix) ? deniedName.slice(prefix.length) : deniedName;
+  return selectToolNames(harnessToolNames, policy);
 }
 
 /** SandboxPolicy → the SDK sandbox option (undefined = nothing requested). */
@@ -799,39 +876,40 @@ function systemPreamble(maxChars: number): string {
 }
 
 /**
- * Execute one harness tool inside the SDK's tool loop (the MCP handler):
- * persist the outcome as a session message (our vocabulary), surface
- * denials to the model as the tool's isError output text AND accumulate
- * them verbatim for WorkerResult.denials. Persist errors are swallowed:
- * the verdict outranks the record (post-dispatch posture).
+ * Execute one harness tool inside the SDK's tool loop (the MCP handler)
+ * through the SHARED CORE: `surface.call` executes (serialized) and maps
+ * the outcome to the CallToolResult — byte-identical to what the stdio
+ * server returns on the subprocess lane. Here the lane adds its
+ * execute-boundary duties: persist the outcome as a session message (our
+ * vocabulary) and accumulate denials verbatim for WorkerResult.denials.
+ * Persist errors are swallowed: the verdict outranks the record
+ * (post-dispatch posture).
  */
-async function runHarnessTool(
-  harnessTool: ToolkitTool,
+export async function runHarnessTool(
+  surface: HarnessSurface,
+  name: string,
   input: unknown,
   store: SessionStore,
   record: SessionRecord,
   denials: ToolDenial[],
 ): Promise<SdkToolCallResult> {
-  const result = await harnessTool.execute(input);
+  const { result, outcome } = await surface.call(name, input);
   try {
     await store.appendMessage(record.sessionId, {
       role: 'tool',
-      toolName: harnessTool.name,
+      toolName: name,
       content: JSON.stringify({
         input: input ?? null,
-        ok: result.ok,
-        output: result.ok ? result.output : result.denial.reason,
+        ok: outcome.ok,
+        output: outcome.ok ? outcome.output : outcome.denial.reason,
       }),
       at: nowIso(),
     });
   } catch {
     // deliberately swallowed — the honest verdict outranks the record
   }
-  if (result.ok) {
-    return { content: [{ type: 'text', text: result.output }] };
-  }
-  denials.push(result.denial);
-  return { content: [{ type: 'text', text: result.denial.reason }], isError: true };
+  if (!outcome.ok) denials.push(outcome.denial);
+  return result;
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */
@@ -867,6 +945,20 @@ interface RunObservation {
   deniedToolUseIds: Set<string>;
   /** The frozen denials, in denial order (execute-boundary + permission-gate). */
   denials: ToolDenial[];
+  /** The init surface the SDK must report (fail-closed assertion); undefined = not asserted. */
+  expectedSurface: ExpectedInitSurface | undefined;
+  /** True once the first init frame was folded. */
+  initSeen: boolean;
+  /** The init-surface failure that ended the run, when one did. */
+  harnessFailure:
+    | {
+        cq: 'harness-surface-mismatch';
+        errorClass: 'harness';
+        expected: unknown;
+        observed: unknown;
+      }
+    | { cq: 'harness-surface-unverified'; errorClass: 'harness' }
+    | undefined;
 }
 
 function newObservation(): RunObservation {
@@ -880,6 +972,9 @@ function newObservation(): RunObservation {
     error: undefined,
     deniedToolUseIds: new Set(),
     denials: [],
+    expectedSurface: undefined,
+    initSeen: false,
+    harnessFailure: undefined,
   };
 }
 
@@ -957,6 +1052,25 @@ export function foldMessage(observation: RunObservation, message: unknown): void
       if (event['subtype'] === 'init') {
         observation.agentSessionId = asString(event['session_id']) ?? observation.agentSessionId;
         observation.servedModel = asString(event['model']) ?? observation.servedModel;
+        if (!observation.initSeen) {
+          observation.initSeen = true;
+          const expected = observation.expectedSurface;
+          const verdict =
+            expected === undefined
+              ? ({ ok: true } as const)
+              : compareInitSurface(expected, {
+                  mcp_servers: event['mcp_servers'],
+                  tools: event['tools'],
+                });
+          if (!verdict.ok) {
+            observation.harnessFailure = {
+              cq: 'harness-surface-mismatch',
+              errorClass: 'harness',
+              expected: verdict.expected,
+              observed: verdict.observed,
+            };
+          }
+        }
         return;
       }
       observation.narration.push(JSON.stringify(event)); // known type, unhandled subtype — evidence
@@ -1156,14 +1270,17 @@ function costField(
 /** Inputs to the frozen stop-reason mapping (header table). */
 export interface StopReasonInputs {
   aborted: boolean;
+  /** The init-surface assertion failed (always an 'error'). */
+  harnessFailure?: boolean;
   maxTokens: number | undefined;
   usage: Usage;
   resultStatus: ResultStatus;
 }
 
-/** THE mapping (checked in order): aborted → budget → error → complete. */
+/** THE mapping (checked in order): aborted → harness failure → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
+  if (inputs.harnessFailure === true) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
     return 'budget';
   if (inputs.resultStatus === 'success') return 'complete';

@@ -22,15 +22,18 @@
 // 'conformance-priced' endpoint extension of the default table) so no test
 // needs a real provider key; the remap test alone uses the DEFAULT table to
 // pin the DeepSeek footgun to the shipped config.
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, onTestFinished, test } from 'vitest';
+import { describe, expect, onTestFinished, test, vi } from 'vitest';
 import { z } from 'zod';
 import {
+  HARNESS_ERROR_PREFIX,
+  HARNESS_MCP_CONFIG_FILE,
   SubprocessDriver,
   buildArgs,
+  handleStdoutLine,
   stopReasonOf,
   usageFromCli,
 } from '../../src/driver/subprocess/index.js';
@@ -56,6 +59,32 @@ import { stripMetaSchema } from '../../src/driver/json-schema.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { realClock, runLadder } from '../../src/kernel/governor.js';
 import type { Driver, OpInvocation } from '../../src/driver/types.js';
+
+// The harness MCP server runs from TypeScript SOURCE in these process-level
+// runs (no build): the launch spec is mocked onto `node --import <the test
+// TS loader> src/harness/mcp/bin.ts` — the real server, the real shared core.
+// `launchControl.extraArgs` lets one test append a stray argument so the
+// REAL server refuses its argv at startup (exit 78 → status 'failed').
+const launchControl = vi.hoisted(() => ({ extraArgs: [] as string[] }));
+vi.mock('../../src/harness/mcp/launch.js', () => {
+  const fromHere = (rel: string): string =>
+    decodeURIComponent(new URL(rel, import.meta.url).pathname);
+  return {
+    harnessServerLaunch: () => ({
+      command: process.execPath,
+      args: [
+        '--import',
+        fromHere('../helpers/ts-source-loader.mjs'),
+        fromHere('../../src/harness/mcp/bin.ts'),
+        ...launchControl.extraArgs,
+      ],
+    }),
+  };
+});
+
+// Every run spawns TWO node processes (the fake CLI + the source-loaded MCP
+// server); on a loaded machine that outgrows vitest's 5s default.
+vi.setConfig({ testTimeout: 30_000 });
 
 // The fake CLI: node + the fixture script, spawned through the driver's
 // argv template `binary` option (shell:false — argv is element-built).
@@ -175,8 +204,28 @@ function baseOptions(
     binary: ['node', FAKE_CLI],
     routingTable: conformanceRoutingTable(),
     sessionsDir: join(scratchDir, SESSIONS_DIR),
-    harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
+    harnessConfig: conformanceHarnessConfig(scratchDir),
     spawn: recordingSpawn(calls, extraEnv),
+  };
+}
+
+/**
+ * The harness config every fake-CLI run uses: workspaces inside scratchDir,
+ * and the conformance isolation write (`echo … > note.txt`) permitted via an
+ * anchored re: pattern (token patterns deny redirects by design) — the same
+ * config the ai-sdk and claude-agent instantiations use, because in harness
+ * mode the REAL harness (served over MCP) executes the tool.
+ */
+function conformanceHarnessConfig(
+  scratchDir: string,
+): NonNullable<SubprocessDriverOptions['harnessConfig']> {
+  return {
+    ...defaultHarnessConfig,
+    workspaceRoot: join(scratchDir, 'workspaces'),
+    tools: {
+      ...defaultHarnessConfig.tools,
+      run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['re:^echo .* > note\\.txt$'] },
+    },
   };
 }
 
@@ -248,6 +297,17 @@ function probeEnvOf(narration: readonly string[]): Record<string, string> {
   return JSON.parse(line.slice('CQ_ENV_PROBE:'.length)) as Record<string, string>;
 }
 
+/** The conformance route as buildArgs sees it (argv-shape tests). */
+const TEST_ROUTE = {
+  endpoint: 'conformance',
+  baseUrl: 'http://127.0.0.1:1/anthropic',
+  env: {
+    ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY',
+    ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY',
+  },
+  model: 'conformance-1',
+};
+
 describe('subprocess driver specifics (fake agent CLI)', () => {
   test('routeFor rejects prototype keys — constructor/toString are not providers (mirror of the claude-agent guard)', () => {
     expect(() =>
@@ -258,19 +318,11 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     ).toThrow(/unknown provider 'toString'/);
   });
 
-  test('buildArgs: the exact headless argv — undocumented flags removed (#19-8)', () => {
-    const route = {
-      endpoint: 'conformance',
-      baseUrl: 'http://127.0.0.1:1/anthropic',
-      env: {
-        ANTHROPIC_AUTH_TOKEN: 'CONFORMANCE_API_KEY',
-        ANTHROPIC_API_KEY: 'CONFORMANCE_API_KEY',
-      },
-      model: 'conformance-1',
-    };
+  test('buildArgs: the exact CLOSED-surface headless argv (harness default) — undocumented flags removed (#19-8, W1.4)', () => {
     const args = buildArgs({
-      route,
-      allowedToolNames: ['read', 'edit'],
+      route: TEST_ROUTE,
+      allowedToolNames: ['mcp__cq-harness__read', 'mcp__cq-harness__edit'],
+      mcpConfigPath: '/sessions/s-1.cq-harness-mcp.json',
       outputJsonSchema: '{"type":"object"}',
       resumeCliSessionId: 'cli-9',
     });
@@ -281,6 +333,91 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       '--verbose', // the real CLI refuses stream-json print mode without it (found live, T1.6)
       '--json-schema',
       '{"type":"object"}',
+      '--tools', // every builtin ABSENT (not merely denied)
+      '',
+      '--setting-sources', // no ambient settings
+      '',
+      '--strict-mcp-config', // no ambient MCP servers
+      '--mcp-config',
+      '/sessions/s-1.cq-harness-mcp.json',
+      '--allowedTools',
+      'mcp__cq-harness__read mcp__cq-harness__edit', // ONE element, SPACE-joined
+      '--model',
+      'conformance-1',
+      '--resume',
+      'cli-9',
+    ]);
+    // The allowlist is never comma-joined: a comma list silently pre-approves
+    // only its first entry (RS-1b b9/b10).
+    expect(args.some((arg) => arg.includes(','))).toBe(false);
+    // Without --json-schema the flag pair is simply absent.
+    const noSchema = buildArgs({
+      route: TEST_ROUTE,
+      allowedToolNames: ['mcp__cq-harness__read'],
+      mcpConfigPath: '/sessions/s-1.cq-harness-mcp.json',
+      outputJsonSchema: undefined,
+      resumeCliSessionId: undefined,
+    });
+    expect(noSchema).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--tools',
+      '',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--mcp-config',
+      '/sessions/s-1.cq-harness-mcp.json',
+      '--allowedTools',
+      'mcp__cq-harness__read',
+      '--model',
+      'conformance-1',
+    ]);
+    // Empty selection (ToolPolicy mode 'none'): NO --mcp-config, and
+    // --allowedTools ALWAYS present with an EMPTY value as ONE element.
+    const none = buildArgs({
+      route: TEST_ROUTE,
+      allowedToolNames: [],
+      outputJsonSchema: undefined,
+      resumeCliSessionId: undefined,
+    });
+    expect(none).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--tools',
+      '',
+      '--setting-sources',
+      '',
+      '--strict-mcp-config',
+      '--allowedTools',
+      '',
+      '--model',
+      'conformance-1',
+    ]);
+    expect(none).not.toContain('--mcp-config');
+    expect(none).not.toContain('--permission-prompts'); // undocumented — removed (issue #19)
+    expect(none).not.toContain('--bare'); // undocumented — removed (issue #19)
+  });
+
+  test('buildArgs STOCK surface: the legacy argv byte-exact — no closed-surface flags, raw harness names (D6)', () => {
+    const args = buildArgs({
+      route: TEST_ROUTE,
+      toolSurface: 'stock',
+      allowedToolNames: ['read', 'edit'],
+      outputJsonSchema: '{"type":"object"}',
+      resumeCliSessionId: 'cli-9',
+    });
+    expect(args).toEqual([
+      '-p',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--json-schema',
+      '{"type":"object"}',
       '--allowedTools',
       'read edit',
       '--model',
@@ -288,12 +425,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       '--resume',
       'cli-9',
     ]);
-    // ToolPolicy mode 'none' shape: --allowedTools ALWAYS present with an
-    // EMPTY value (nothing pre-approved; headless -p cannot prompt, so a
-    // tool outside the list is CLI-DENIED — the WorkerResult.denials source).
     const none = buildArgs({
-      route,
+      route: TEST_ROUTE,
+      toolSurface: 'stock',
       allowedToolNames: [],
+      // Ignored on the stock surface: the config only exists in harness mode.
+      mcpConfigPath: '/sessions/ignored.json',
       outputJsonSchema: undefined,
       resumeCliSessionId: undefined,
     });
@@ -307,8 +444,6 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       '--model',
       'conformance-1',
     ]);
-    expect(none).not.toContain('--permission-prompts'); // undocumented — removed (issue #19)
-    expect(none).not.toContain('--bare'); // undocumented — removed (issue #19)
   });
 
   test('THE REMAP TEST: unknown model on the default routing table throws BEFORE any spawn', async () => {
@@ -533,14 +668,20 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   });
 
-  test('deny-tool: the CLI tool_result denial maps to the frozen {tool, reason} shape', async () => {
+  test('deny-tool: the CLI permission denial maps to the frozen {tool, reason} shape under the HARNESS name', async () => {
     await withScratch(async (scratchDir) => {
       const driver = new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
       );
       const result = await driver.run(invocation({ prompt: 'denial run' }));
+      // The CLI's permission gate refused mcp__cq-harness__edit (frame +
+      // its own text); the denial speaks OUR vocabulary — the harness name.
       expect(result.denials).toEqual([
-        { tool: 'edit', reason: 'permission denied: edit is not allowed' },
+        {
+          tool: 'edit',
+          reason:
+            "Claude requested permissions to use mcp__cq-harness__edit, but you haven't granted it yet.",
+        },
       ]);
       // result.is_error:true → an error verdict even though the stream closed cleanly.
       expect(result.stopReason).toBe('error');
@@ -901,7 +1042,29 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"sandbox-level-unenforced"'));
       expect(marker).toBeDefined();
-      expect(marker).toContain('"level":"workspace-write"');
+      // Harness mode: the harness enforces the TOOL-level sandbox mapping on
+      // this lane, so the marker narrows to OS confinement.
+      expect(JSON.parse(marker as string)).toEqual({
+        cq: 'sandbox-level-unenforced',
+        level: 'workspace-write',
+        layer: 'os',
+      });
+
+      // Stock mode (null-hypothesis evals): nothing the harness enforces
+      // applies — the LEGACY marker, no layer.
+      const stockDriver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        toolSurface: 'stock',
+      });
+      const stockResult = await stockDriver.run(invocation({ prompt: 'stock sandbox marker run' }));
+      expect(stockResult.stopReason).toBe('complete');
+      const stockMarker = (await narrationOf(store, stockResult.sessionId as string)).find((line) =>
+        line.includes('"sandbox-level-unenforced"'),
+      );
+      expect(JSON.parse(stockMarker as string)).toEqual({
+        cq: 'sandbox-level-unenforced',
+        level: 'workspace-write',
+      });
 
       // level 'none' asks for nothing extra → no marker…
       const noneDriver = new SubprocessDriver(baseOptions(scratchDir, {}, []));
@@ -932,9 +1095,36 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // The binary template carries the fixture-only probe flag: the CLI
       // spawns a sleeping grandchild in ITS process group and records the
       // pid, then ignores SIGTERM (forcing the SIGKILL rung).
+      // Readiness-gated deadline: the governed abort fires only once the
+      // grandchild pid is on disk (the harness-mode CLI connects its MCP
+      // server before init, so a fixed wall clock would race node startup).
+      let deadline: (() => void) | undefined;
+      const deadlineHandle = Symbol('pid-file-gated deadline');
+      const firePidReady = async (): Promise<void> => {
+        for (let i = 0; i < 1_000; i++) {
+          try {
+            await stat(pidFile);
+            deadline?.();
+            return;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        }
+      };
+      const spawn = recordingSpawn(calls, { FAKE_AGENT_MODE: 'ignore-sigterm' });
       const driver = new SubprocessDriver({
-        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ignore-sigterm' }, calls),
+        ...baseOptions(scratchDir, {}, calls),
         binary: ['node', FAKE_CLI, '--spawn-grandchild', pidFile],
+        spawn: (options) => {
+          const child = spawn(options);
+          onTestFinished(() => {
+            child.kill('SIGKILL');
+          });
+          child.onStdoutLine((line) => {
+            if (line.includes('"subtype":"init"')) firePidReady().catch(() => undefined);
+          });
+          return child;
+        },
         termGraceMs: 200,
         killGraceMs: 200,
       });
@@ -942,6 +1132,21 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         () => driver.run(invocation({ prompt: 'group kill run' })),
         { wallClockMs: 1000 },
         { op: 'subprocess', jobKey: 'subprocess-group', attempt: 1 },
+        {
+          clock: {
+            now: realClock.now,
+            setTimeout: (fn, ms) => {
+              if (deadline === undefined) {
+                deadline = fn;
+                return deadlineHandle;
+              }
+              return realClock.setTimeout(fn, ms);
+            },
+            clearTimeout: (handle) => {
+              if (handle !== deadlineHandle) realClock.clearTimeout(handle);
+            },
+          },
+        },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
@@ -1197,13 +1402,18 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       // A probe worker: dumps its OWN process.env as a narration line (the
       // driver folds non-JSON lines into the session record) and then emits
       // the minimal stream-json run so the invocation completes.
+      // The probe is a CLI of its own (no MCP client), so it runs over the
+      // EMPTY harness surface (ToolPolicy mode 'none': no server, no tools)
+      // and reports exactly that init surface — the closed-surface assertion
+      // still runs and passes.
+      const EMPTY_SURFACE = { allow: [] as string[], mode: 'none' as const };
       const probePath = join(scratchDir, 'env-probe.mjs');
       await writeFile(
         probePath,
         [
           'const env = { ...process.env };',
           "process.stdout.write('CQ_ENV_PROBE:' + JSON.stringify(env) + '\\n');",
-          "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'env-probe', model: 'conformance-1' }) + '\\n');",
+          "process.stdout.write(JSON.stringify({ type: 'system', subtype: 'init', session_id: 'env-probe', model: 'conformance-1', tools: [], mcp_servers: [] }) + '\\n');",
           "process.stdout.write(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, session_id: 'env-probe', usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }, model: 'conformance-1' }) + '\\n');",
         ].join('\n'),
         'utf8',
@@ -1229,7 +1439,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       try {
         // NO spawn override: this is the production spawnManaged path.
         const denied = await new SubprocessDriver(probeOptions).run(
-          invocation({ prompt: 'env probe run' }),
+          invocation({ prompt: 'env probe run', toolPolicy: EMPTY_SURFACE }),
         );
         expect(denied.stopReason).toBe('complete');
         const deniedEnv = probeEnvOf(await narrationOf(store, denied.sessionId as string));
@@ -1252,7 +1462,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         const allowed = await new SubprocessDriver({
           ...probeOptions,
           envAllowlist: ['CQ_ENV_LEAK_MARKER'],
-        }).run(invocation({ prompt: 'allowlist probe run' }));
+        }).run(invocation({ prompt: 'allowlist probe run', toolPolicy: EMPTY_SURFACE }));
         expect(allowed.stopReason).toBe('complete');
         const allowedEnv = probeEnvOf(await narrationOf(store, allowed.sessionId as string));
         expect(allowedEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
@@ -1266,7 +1476,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           envAllowlist: mutableAllowlist,
         });
         mutableAllowlist.push('GH_TOKEN');
-        const frozen = await frozenDriver.run(invocation({ prompt: 'frozen allowlist probe run' }));
+        const frozen = await frozenDriver.run(
+          invocation({ prompt: 'frozen allowlist probe run', toolPolicy: EMPTY_SURFACE }),
+        );
         const frozenEnv = probeEnvOf(await narrationOf(store, frozen.sessionId as string));
         expect(frozenEnv['CQ_ENV_LEAK_MARKER']).toBe(marker);
         expect(frozenEnv['GH_TOKEN']).toBeUndefined(); // pushed AFTER construction — not honored
@@ -1290,5 +1502,598 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       /envAllowlist entries must be env var names matching/,
     );
     expect(() => new SubprocessDriver({ envAllowlist: ['CLAUDE_CONFIG_DIR'] })).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3. The CLOSED tool surface (W1.4): the real cq-harness MCP server behind the
+//    fake CLI's MCP client, the per-run config lifecycle, and the fail-closed
+//    init-surface / is_error classification.
+// ---------------------------------------------------------------------------
+
+/** The --mcp-config value of a recorded argv (undefined when absent). */
+function mcpConfigArgOf(args: readonly string[]): string | undefined {
+  const index = args.indexOf('--mcp-config');
+  return index === -1 ? undefined : args[index + 1];
+}
+
+/** The parsed narration markers with a given `cq` tag. */
+async function markersOf(
+  store: SessionStore,
+  sessionId: string,
+  cq: string,
+): Promise<Array<Record<string, unknown>>> {
+  return (await narrationOf(store, sessionId))
+    .filter((line) => line.startsWith('{') && line.includes(`"cq":"${cq}"`))
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+}
+
+/** The fixture's FAKE_AGENT_CONFIG_PROBE record. */
+interface ConfigProbe {
+  path: string | null;
+  atStart: { present: boolean; mode?: number; symlink?: boolean };
+  afterInit: { present: boolean };
+}
+
+async function readProbe(path: string): Promise<ConfigProbe> {
+  return JSON.parse(await readFile(path, 'utf8')) as ConfigProbe;
+}
+
+/** Poll until `pid` is gone (ESRCH); false if it outlives ~5s. */
+async function processGone(pid: number): Promise<boolean> {
+  for (let i = 0; i < 200; i++) {
+    try {
+      process.kill(pid, 0);
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** A hand-built observation for the exported stdout fold (harness mode). */
+type Observation = Parameters<typeof handleStdoutLine>[0];
+function harnessObservation(tools: string[]): Observation {
+  return {
+    cliSessionId: undefined,
+    servedModel: undefined,
+    transcript: [],
+    narration: [],
+    stderr: [],
+    assistantUsage: undefined,
+    result: undefined,
+    close: undefined,
+    toolUseNameById: new Map(),
+    toolUses: [],
+    toolResults: [],
+    deniedToolUseIds: new Set(),
+    denials: [],
+    expectedSurface: { harness: true, tools },
+    initSeen: false,
+    harnessConnected: false,
+    permissionDeniedIds: new Set(),
+    harnessFailure: undefined,
+  };
+}
+
+const line = (event: unknown): string => JSON.stringify(event);
+const initLine = (tools: string[]): string =>
+  line({
+    type: 'system',
+    subtype: 'init',
+    session_id: 'cli-1',
+    model: 'conformance-1',
+    tools,
+    mcp_servers: [{ name: 'cq-harness', status: 'connected', source: 'dynamic' }],
+  });
+const toolUseLine = (id: string, name: string): string =>
+  line({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id, name, input: { path: 'x' } }] },
+  });
+const toolResultLine = (id: string, content: unknown): string =>
+  line({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: id, is_error: true, content }] },
+  });
+
+describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
+  test('toolSurface validation: anything but harness/stock throws at construction', () => {
+    expect(() => new SubprocessDriver({ toolSurface: 'builtin' as unknown as 'harness' })).toThrow(
+      /toolSurface must be 'harness' or 'stock'/,
+    );
+    expect(() => new SubprocessDriver({ toolSurface: 'harness' })).not.toThrow();
+    expect(() => new SubprocessDriver({ toolSurface: 'stock' })).not.toThrow();
+  });
+
+  test('a real run: byte-exact closed argv; the 0600 config lives in sessionsDir, is deleted once init reports connected, and is gone after settle', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls: SpawnCall[] = [];
+      const probe = join(scratchDir, 'config-probe.json');
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probe }, calls),
+      );
+      const result = await driver.run(invocation({ prompt: 'closed surface run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.error).toBeUndefined();
+      const sessionId = result.sessionId as string;
+      const sessionsDir = join(scratchDir, SESSIONS_DIR);
+      const configPath = join(sessionsDir, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.args).toEqual([
+        FAKE_CLI,
+        '-p',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--tools',
+        '',
+        '--setting-sources',
+        '',
+        '--strict-mcp-config',
+        '--mcp-config',
+        configPath,
+        '--allowedTools',
+        'mcp__cq-harness__read mcp__cq-harness__edit mcp__cq-harness__run',
+        '--model',
+        'conformance-1',
+      ]);
+      // Beside the session records — never in the model-visible workspace.
+      const workspace = (await store.load(sessionId))?.workspace as string;
+      expect(dirname(configPath)).toBe(sessionsDir);
+      expect(configPath.startsWith(workspace)).toBe(false);
+      const recorded = await readProbe(probe);
+      expect(recorded.path).toBe(configPath);
+      // It existed as a REGULAR 0600 file when the CLI started…
+      expect(recorded.atStart).toEqual({ present: true, mode: 0o600, symlink: false });
+      // …was deleted as soon as init reported the harness connected, while
+      // the run was still live…
+      expect(recorded.afterInit).toEqual({ present: false });
+      // …and is gone after settle.
+      await expect(lstat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect((await readdir(workspace)).some((f) => f.endsWith(HARNESS_MCP_CONFIG_FILE))).toBe(
+        false,
+      );
+      expect((await readdir(sessionsDir)).some((f) => f.endsWith(HARNESS_MCP_CONFIG_FILE))).toBe(
+        false,
+      );
+    });
+  });
+
+  test('empty selection (mode none): no --mcp-config, --allowedTools "" as ONE element, no config file, init [] passes', async () => {
+    await withScratch(async (scratchDir) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, calls),
+      );
+      const result = await driver.run(
+        invocation({ prompt: 'empty surface run', toolPolicy: { allow: [], mode: 'none' } }),
+      );
+      expect(result.stopReason).toBe('complete');
+      expect(calls[0]?.args).toEqual([
+        FAKE_CLI,
+        '-p',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--tools',
+        '',
+        '--setting-sources',
+        '',
+        '--strict-mcp-config',
+        '--allowedTools',
+        '',
+        '--model',
+        'conformance-1',
+      ]);
+      expect(
+        (await readdir(join(scratchDir, SESSIONS_DIR))).some((f) =>
+          f.endsWith(HARNESS_MCP_CONFIG_FILE),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  test('a stale config file and a planted symlink at the config path are REPLACED, never followed', async () => {
+    await withScratch(async (scratchDir) => {
+      const seed = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, []),
+      ).run(invocation({ prompt: 'seed run' }));
+      const sessionId = seed.sessionId as string;
+      const configPath = join(scratchDir, SESSIONS_DIR, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
+
+      // (1) A stale regular file from a crashed earlier run.
+      await writeFile(configPath, 'stale — not even json', { mode: 0o644 });
+      const staleProbe = join(scratchDir, 'stale-probe.json');
+      const stale = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: staleProbe }, []),
+      ).run(invocation({ prompt: 'stale run', sessionRef: sessionId }));
+      expect(stale.stopReason).toBe('complete'); // the server connected off the FRESH config
+      expect((await readProbe(staleProbe)).atStart).toEqual({
+        present: true,
+        mode: 0o600,
+        symlink: false,
+      });
+      await expect(lstat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+      // (2) A planted symlink pointing at a victim file outside the store.
+      const victim = join(scratchDir, 'victim.json');
+      await writeFile(victim, 'victim-content', 'utf8');
+      await symlink(victim, configPath);
+      const linkProbe = join(scratchDir, 'link-probe.json');
+      const linked = await new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: linkProbe }, []),
+      ).run(invocation({ prompt: 'symlink run', sessionRef: sessionId }));
+      expect(linked.stopReason).toBe('complete');
+      // The CLI saw a regular 0600 file, not the link…
+      expect((await readProbe(linkProbe)).atStart).toEqual({
+        present: true,
+        mode: 0o600,
+        symlink: false,
+      });
+      // …the victim was never written through the link, nor deleted…
+      expect(await readFile(victim, 'utf8')).toBe('victim-content');
+      // …and the config path is gone after settle.
+      await expect(lstat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
+  test('init mismatch: an unstripped builtin in init.tools → error, harness prefix, surface-mismatch marker', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_INIT_EXTRA_TOOL: 'Bash' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'leaky builtin run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('init surface mismatch');
+      expect(result.error).toContain('Bash');
+      const [marker, ...rest] = await markersOf(
+        store,
+        result.sessionId as string,
+        'harness-surface-mismatch',
+      );
+      expect(rest).toEqual([]);
+      expect(marker).toMatchObject({ cq: 'harness-surface-mismatch', errorClass: 'harness' });
+      expect(JSON.stringify(marker?.['observed'])).toContain('Bash');
+    });
+  });
+
+  test('init mismatch: an extra connected MCP server → error with the harness prefix', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_INIT_EXTRA_SERVER: 'ambient-connector' },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'leaky server run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('ambient-connector');
+      const markers = await markersOf(
+        store,
+        result.sessionId as string,
+        'harness-surface-mismatch',
+      );
+      expect(markers).toHaveLength(1);
+      expect(markers[0]?.['errorClass']).toBe('harness');
+    });
+  });
+
+  test('the REAL server refusing its argv at startup (exit 78) → init reports failed → error/harness', async () => {
+    launchControl.extraArgs = ['stray-argument']; // bin.ts demands exactly one argument
+    onTestFinished(() => {
+      launchControl.extraArgs = [];
+    });
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'tool-then-reply', FAKE_AGENT_TOOL: 'read' },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'refused server run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.denials).toEqual([]); // no tool ever ran
+      const [marker] = await markersOf(
+        store,
+        result.sessionId as string,
+        'harness-surface-mismatch',
+      );
+      expect(marker?.['observed']).toEqual({
+        mcp_servers: [{ name: 'cq-harness', status: 'failed' }],
+        tools: [],
+      });
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(false);
+    });
+  });
+
+  test('no init event at all in harness mode → harness-surface-unverified error, never a model outcome', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_NO_INIT: '1' }, []),
+      );
+      const result = await driver.run(invocation({ prompt: 'silent init run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('never reported its init surface');
+      expect(
+        await markersOf(store, result.sessionId as string, 'harness-surface-unverified'),
+      ).toEqual([{ cq: 'harness-surface-unverified', errorClass: 'harness' }]);
+    });
+  });
+
+  test('the server dying mid-run → transport failure: error/harness, NOT a denial', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'read',
+            FAKE_AGENT_INPUT: JSON.stringify({ path: 'note.txt' }),
+            FAKE_AGENT_KILL_SERVER: '1',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'dead server run' }));
+      expect(result.stopReason).toBe('error');
+      expect(result.denials).toEqual([]);
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('transport failure');
+      expect(result.error).toContain('MCP error -32000: Connection closed');
+      expect(
+        await markersOf(store, result.sessionId as string, 'harness-transport-failure'),
+      ).toEqual([
+        {
+          cq: 'harness-transport-failure',
+          errorClass: 'harness',
+          tool: 'read',
+          text: 'MCP error -32000: Connection closed',
+        },
+      ]);
+    });
+  });
+
+  test('a REAL harness denial (path escape) is a denial under the harness name; the run completes', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'read',
+            FAKE_AGENT_INPUT: JSON.stringify({ path: '../../outside-secret.txt' }),
+            FAKE_AGENT_REPLY: 'noted the refusal',
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'escape run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.error).toBeUndefined();
+      expect(result.denials).toHaveLength(1);
+      expect(result.denials[0]?.tool).toBe('read');
+      expect(result.denials[0]?.reason.startsWith('path escape:')).toBe(true);
+      // The session record speaks harness names, never the qualified spelling.
+      const record = await store.load(result.sessionId as string);
+      const toolMessages = record?.messages.filter(
+        (m) => m.role === 'tool' && m.toolName !== 'cli-narration',
+      );
+      expect(toolMessages?.map((m) => m.toolName)).toEqual(['read']);
+      const folded = JSON.parse(toolMessages?.[0]?.content ?? '{}') as { ok: boolean };
+      expect(folded.ok).toBe(false);
+    });
+  });
+
+  test('a harness-served tool that SUCCEEDS lands as a role-tool message with the server text', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'run',
+            FAKE_AGENT_INPUT: JSON.stringify({ command: 'echo served-marker > note.txt' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(invocation({ prompt: 'served run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(result.denials).toEqual([]);
+      const record = await store.load(result.sessionId as string);
+      expect(await readFile(join(record?.workspace as string, 'note.txt'), 'utf8')).toBe(
+        'served-marker\n',
+      );
+      const message = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'run');
+      expect(JSON.parse(message?.content ?? '{}')).toMatchObject({
+        input: { command: 'echo served-marker > note.txt' },
+        ok: true,
+      });
+    });
+  });
+
+  test('stdout fold: a CLI permission denial (frame or CLI text) is a denial; unknown is_error text is a transport failure', () => {
+    const read = 'mcp__cq-harness__read';
+    const edit = 'mcp__cq-harness__edit';
+
+    // (a) The permission_denied FRAME names the tool_use: whatever the text,
+    // the errored result is a permission denial.
+    const framed = harnessObservation(['read', 'edit']);
+    handleStdoutLine(framed, initLine([read, edit]));
+    expect(framed.harnessConnected).toBe(true);
+    expect(framed.harnessFailure).toBeUndefined();
+    handleStdoutLine(framed, toolUseLine('t1', edit));
+    handleStdoutLine(
+      framed,
+      line({ type: 'system', subtype: 'permission_denied', tool_name: edit, tool_use_id: 't1' }),
+    );
+    handleStdoutLine(framed, toolResultLine('t1', 'denied by policy'));
+    expect(framed.denials).toEqual([{ tool: 'edit', reason: 'denied by policy' }]);
+    expect(framed.harnessFailure).toBeUndefined();
+
+    // (b) No frame, but the CLI's own permission text → a denial too.
+    const texted = harnessObservation(['read', 'edit']);
+    handleStdoutLine(texted, initLine([read, edit]));
+    handleStdoutLine(texted, toolUseLine('t2', edit));
+    const cliText = `Claude requested permissions to use ${edit}, but you haven't granted it yet.`;
+    handleStdoutLine(texted, toolResultLine('t2', cliText));
+    expect(texted.denials).toEqual([{ tool: 'edit', reason: cliText }]);
+    expect(texted.harnessFailure).toBeUndefined();
+
+    // (c) A stable harness denial prefix (text-block form) → a denial.
+    const harnessDenied = harnessObservation(['read']);
+    handleStdoutLine(harnessDenied, initLine([read]));
+    handleStdoutLine(harnessDenied, toolUseLine('t3', read));
+    handleStdoutLine(
+      harnessDenied,
+      toolResultLine('t3', [{ type: 'text', text: "file not found: 'x'" }]),
+    );
+    expect(harnessDenied.denials).toEqual([{ tool: 'read', reason: "file not found: 'x'" }]);
+    expect(harnessDenied.harnessFailure).toBeUndefined();
+
+    // (d) Anything else on a harness tool → transport failure, never a denial.
+    const broken = harnessObservation(['read']);
+    handleStdoutLine(broken, initLine([read]));
+    handleStdoutLine(broken, toolUseLine('t4', read));
+    handleStdoutLine(broken, toolResultLine('t4', 'MCP error -32001: Request timed out'));
+    expect(broken.denials).toEqual([]);
+    expect(broken.harnessFailure).toEqual({
+      cq: 'harness-transport-failure',
+      errorClass: 'harness',
+      tool: 'read',
+      text: 'MCP error -32001: Request timed out',
+    });
+
+    // (e) Only the FIRST init is asserted, and an extra builtin fails it.
+    const leaky = harnessObservation(['read']);
+    handleStdoutLine(leaky, initLine([read, 'Bash']));
+    handleStdoutLine(leaky, initLine([read]));
+    expect(leaky.harnessConnected).toBe(false);
+    expect(leaky.harnessFailure?.cq).toBe('harness-surface-mismatch');
+  });
+
+  test('governed abort in harness mode → aborted (not a harness error), and no server process survives', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const pidFile = join(scratchDir, 'server.pid');
+      let deadline: (() => void) | undefined;
+      const deadlineHandle = Symbol('init-gated deadline');
+      const spawn = recordingSpawn([], {
+        FAKE_AGENT_MODE: 'block-until-abort',
+        FAKE_AGENT_SERVER_PID_FILE: pidFile,
+      });
+      const driver = new SubprocessDriver({
+        ...baseOptions(scratchDir, {}, []),
+        spawn: (options) => {
+          const child = spawn(options);
+          onTestFinished(() => {
+            child.kill('SIGKILL');
+          });
+          child.onStdoutLine((l) => {
+            if (l.includes('"subtype":"init"')) queueMicrotask(() => deadline?.());
+          });
+          return child;
+        },
+        termGraceMs: 500,
+        killGraceMs: 500,
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation({ prompt: 'governed harness run' })),
+        { wallClockMs: 1000 },
+        { op: 'subprocess', jobKey: 'subprocess-harness-abort', attempt: 1 },
+        {
+          clock: {
+            now: realClock.now,
+            setTimeout: (fn, ms) => {
+              if (deadline === undefined) {
+                deadline = fn;
+                return deadlineHandle;
+              }
+              return realClock.setTimeout(fn, ms);
+            },
+            clearTimeout: (handle) => {
+              if (handle !== deadlineHandle) realClock.clearTimeout(handle);
+            },
+          },
+        },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.error).toBeUndefined();
+      const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((l) => l.includes('"errorClass":"harness"'))).toBe(false);
+      const pids = (await readFile(pidFile, 'utf8'))
+        .split('\n')
+        .filter((l) => l !== '')
+        .map(Number);
+      expect(pids).toHaveLength(1);
+      for (const pid of pids) expect(await processGone(pid)).toBe(true);
+      // The config is gone even though the run never completed.
+      expect(
+        (await readdir(join(scratchDir, SESSIONS_DIR))).some((f) =>
+          f.endsWith(HARNESS_MCP_CONFIG_FILE),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  test('STOCK surface run: the legacy argv and the legacy in-process tool path (raw names, no MCP)', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const calls: SpawnCall[] = [];
+      const driver = new SubprocessDriver({
+        ...baseOptions(
+          scratchDir,
+          {
+            FAKE_AGENT_MODE: 'tool-then-reply',
+            FAKE_AGENT_TOOL: 'read',
+            FAKE_AGENT_INPUT: JSON.stringify({ path: 'missing.txt' }),
+          },
+          calls,
+        ),
+        toolSurface: 'stock',
+      });
+      const result = await driver.run(invocation({ prompt: 'stock run' }));
+      expect(result.stopReason).toBe('complete');
+      expect(calls[0]?.args).toEqual([
+        FAKE_CLI,
+        '-p',
+        '--output-format',
+        'stream-json',
+        '--verbose',
+        '--allowedTools',
+        'read edit run',
+        '--model',
+        'conformance-1',
+      ]);
+      expect(mcpConfigArgOf(calls[0]?.args ?? [])).toBeUndefined();
+      expect(result.denials).toEqual([{ tool: 'read', reason: "file not found: 'missing.txt'" }]);
+      const record = await store.load(result.sessionId as string);
+      expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'read')).toBe(true);
+      // No init surface is asserted on the stock surface.
+      expect(
+        (await narrationOf(store, result.sessionId as string)).some((l) =>
+          l.includes('"errorClass":"harness"'),
+        ),
+      ).toBe(false);
+
+      // The legacy deny-tool shape still maps on the stock surface.
+      const denied = await new SubprocessDriver({
+        ...baseOptions(scratchDir, { FAKE_AGENT_MODE: 'deny-tool' }, []),
+        toolSurface: 'stock',
+      }).run(invocation({ prompt: 'stock denial run' }));
+      expect(denied.denials).toEqual([
+        { tool: 'edit', reason: 'permission denied: edit is not allowed' },
+      ]);
+      expect(denied.stopReason).toBe('error');
+    });
   });
 });

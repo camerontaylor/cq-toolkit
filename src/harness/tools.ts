@@ -86,24 +86,29 @@
 // Invalid regexes and empty/whitespace-only patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
-// `run` executes through the SHELL (node:child_process exec, cwd =
-// workspace) so pipelines work; the allowlist is the gate over the whole
-// command string. Config timeoutMs maps onto exec's own timeout (child
-// killed by signal → exitCode null + killed flag); captured output is
-// head-truncated to maxOutputChars with `truncated: true`. read/edit have no
+// `run` executes through the SHELL (node:child_process spawn with
+// `shell: true`, cwd = workspace, stdin closed) so pipelines work; the
+// allowlist is the gate over the whole command string. Each command runs in
+// its OWN PROCESS GROUP (POSIX `detached`), so a timeout, an abort
+// (`execute(input, { signal })`) or a harness shutdown kills the whole group
+// with SIGKILL — `npm test → node` grandchildren included, which `exec`
+// (killing only `/bin/sh`) could not reach. A kill reports exitCode null +
+// the killed flag. Captured output is retained up to a byte bound per
+// stream and head-truncated to maxOutputChars with `truncated: true` — a
+// noisy command is truncated, never denied. read/edit have no
 // wall-clock of their own: local fs ops need no timer, and wall-clock POLICY
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 
-const execAsync = promisify(exec);
+/** POSIX platforms get per-command process groups (`detached` + group kill). */
+const POSIX = process.platform !== 'win32';
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
@@ -151,6 +156,15 @@ export type ToolkitToolResult =
   | { ok: false; denial: ToolDenial };
 
 /**
+ * Per-call execution options (additive). `signal` cancels an in-flight
+ * call: `run` kills the command's whole process group; read/edit are
+ * local fs ops that finish on their own and ignore it.
+ */
+export interface ToolExecuteOptions {
+  signal?: AbortSignal | undefined;
+}
+
+/**
  * One harness tool, SELF-CONTAINED plain data: name, description, input
  * schema (zod), and an executor bound to the workspace the tools were built
  * for. `execute` accepts `unknown` (adapters may pass unparsed payloads) and
@@ -161,19 +175,19 @@ export type ToolkitTool =
       name: 'read';
       description: string;
       inputSchema: typeof ReadToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     }
   | {
       name: 'edit';
       description: string;
       inputSchema: typeof EditToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     }
   | {
       name: 'run';
       description: string;
       inputSchema: typeof RunToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     };
 
 // ---------------------------------------------------------------------------
@@ -284,6 +298,108 @@ function commandVerdict(patterns: readonly CommandPattern[], command: string): C
     return { allowed: true, via: 'tokens' };
   }
   return { allowed: false, metacharacters: sawMetacharMatch };
+}
+
+// ---------------------------------------------------------------------------
+// runShellCommand — one `run` command in its own process group
+// ---------------------------------------------------------------------------
+
+/** How one shell command ended: a normal exit, a kill, or a failed spawn. */
+type ShellOutcome =
+  | { kind: 'exit'; code: number; stdout: string; stderr: string }
+  | { kind: 'killed'; stdout: string; stderr: string }
+  | { kind: 'spawn-error'; error: unknown };
+
+/** Inputs to one shell command execution — plain data plus the cancellation signal. */
+interface ShellCommandOptions {
+  cwd: string;
+  /** Per-stream retention bound in bytes; omitted = unbounded (the uncapped config choice). */
+  maxBytes?: number;
+  /** Per-command wall clock; on expiry the whole process group is killed. */
+  timeoutMs?: number;
+  /** Cancellation: abort kills the whole process group. */
+  signal?: AbortSignal;
+}
+
+/**
+ * Run `command` through the platform shell (`/bin/sh -c` on POSIX, as
+ * `exec` did), cwd = workspace, stdin closed. On POSIX the shell LEADS ITS
+ * OWN PROCESS GROUP, so a timeout or an abort signals `-pid` and reaches
+ * every descendant; Windows has no groups in v1 and kills the direct child
+ * only (the same limitation the subprocess lane records). The kill is
+ * SIGKILL: the decision to stop has already been made (timeout, cancel, or
+ * harness shutdown), and a command that traps SIGTERM must not outlive it.
+ * Never rejects — a spawn failure is data.
+ */
+function runShellCommand(command: string, opts: ShellCommandOptions): Promise<ShellOutcome> {
+  return new Promise<ShellOutcome>((settle) => {
+    if (opts.signal?.aborted === true) {
+      settle({ kind: 'killed', stdout: '', stderr: '' });
+      return;
+    }
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(command, {
+        cwd: opts.cwd,
+        shell: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        ...(POSIX ? { detached: true } : {}),
+      });
+    } catch (err) {
+      settle({ kind: 'spawn-error', error: err });
+      return;
+    }
+    const collect = (): { chunks: Buffer[]; bytes: number } => ({ chunks: [], bytes: 0 });
+    const out = collect();
+    const err = collect();
+    const retain = (sink: { chunks: Buffer[]; bytes: number }, chunk: Buffer): void => {
+      if (opts.maxBytes !== undefined && sink.bytes >= opts.maxBytes) return; // keep draining, stop retaining
+      const room = opts.maxBytes === undefined ? chunk.length : opts.maxBytes - sink.bytes;
+      const kept = chunk.length <= room ? chunk : chunk.subarray(0, room);
+      sink.chunks.push(kept);
+      sink.bytes += kept.length;
+    };
+    child.stdout?.on('data', (chunk: Buffer) => retain(out, chunk));
+    child.stderr?.on('data', (chunk: Buffer) => retain(err, chunk));
+
+    let killedByUs = false;
+    const killGroup = (): void => {
+      killedByUs = true;
+      if (POSIX && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+          return;
+        } catch {
+          // group already gone — fall through to the direct kill
+        }
+      }
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        // already gone
+      }
+    };
+    const timer = opts.timeoutMs === undefined ? undefined : setTimeout(killGroup, opts.timeoutMs);
+    opts.signal?.addEventListener('abort', killGroup, { once: true });
+
+    let spawnError: unknown;
+    child.on('error', (e: unknown) => {
+      spawnError ??= e;
+    });
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      if (timer !== undefined) clearTimeout(timer);
+      opts.signal?.removeEventListener('abort', killGroup);
+      const stdout = Buffer.concat(out.chunks).toString('utf8');
+      const stderr = Buffer.concat(err.chunks).toString('utf8');
+      if (spawnError !== undefined && child.pid === undefined) {
+        settle({ kind: 'spawn-error', error: spawnError });
+      } else if (killedByUs || signal !== null || code === null) {
+        settle({ kind: 'killed', stdout, stderr });
+      } else {
+        settle({ kind: 'exit', code, stdout, stderr });
+      }
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -554,7 +670,7 @@ export function buildTools(
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: RunToolInputSchema,
-      execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
+      execute: async (rawInput: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult> => {
         if (sandbox === 'read-only') return deny('run', 'sandbox: read-only');
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
@@ -568,52 +684,30 @@ export function buildTools(
               : `command not allowed by harness config allowlist: '${command}'`,
           );
         }
-        try {
-          const { stdout, stderr } = await execAsync(command, {
-            cwd: workspaceAbs,
-            // maxBuffer is BYTES; the output cap is CHARS. Size the buffer
-            // comfortably above the cap so capOutput does the truncating
-            // (4 bytes/char covers UTF-8's worst case, +64KiB slack for the
-            // exit/stdout wrapper): at exec's 1 MiB default a noisy command
-            // rejects with a string-code error BEFORE the cap truncates —
-            // a 'run failed' denial instead of a truncated result (issue #18).
-            ...(runCfg.maxOutputChars !== undefined
-              ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
-              : {}),
-            ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
-          });
-          const capped = capOutput(formatOutcome(0, false, stdout, stderr), runCfg.maxOutputChars);
-          return { ok: true, exitCode: 0, killed: false, ...capped };
-        } catch (err) {
-          // promisify(exec) rejects on nonzero exit / signal kill with the
-          // captured streams attached; a spawn failure (e.g. no shell) has a
-          // STRING code. Nonzero exits are REAL tool results (the model must
-          // see them), not denials — only spawn-level failures deny.
-          const e = err as Error & {
-            code?: string | number | null;
-            killed?: boolean;
-            signal?: string | null;
-            stdout?: string;
-            stderr?: string;
-          };
-          const stdout = e.stdout ?? '';
-          const stderr = e.stderr ?? '';
-          if (typeof e.code === 'number') {
-            const capped = capOutput(
-              formatOutcome(e.code, false, stdout, stderr),
-              runCfg.maxOutputChars,
-            );
-            return { ok: true, exitCode: e.code, killed: false, ...capped };
-          }
-          if (e.killed === true) {
-            const capped = capOutput(
-              formatOutcome(null, true, stdout, stderr),
-              runCfg.maxOutputChars,
-            );
-            return { ok: true, exitCode: null, killed: true, ...capped };
-          }
-          return deny('run', `run failed: ${messageOf(err)}`);
+        const outcome = await runShellCommand(command, {
+          cwd: workspaceAbs,
+          // Retention is BYTES; the output cap is CHARS. Retain comfortably
+          // above the cap so capOutput does the truncating (4 bytes/char
+          // covers UTF-8's worst case, +64KiB slack for the exit/stdout
+          // wrapper) — a noisy command is truncated, never denied (issue #18).
+          ...(runCfg.maxOutputChars !== undefined
+            ? { maxBytes: runCfg.maxOutputChars * 4 + 65_536 }
+            : {}),
+          ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
+          ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        });
+        // Nonzero exits and kills are REAL tool results (the model must see
+        // them), not denials — only spawn-level failures deny.
+        if (outcome.kind === 'spawn-error') {
+          return deny('run', `run failed: ${messageOf(outcome.error)}`);
         }
+        const killed = outcome.kind === 'killed';
+        const exitCode = killed ? null : outcome.code;
+        const capped = capOutput(
+          formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
+          runCfg.maxOutputChars,
+        );
+        return { ok: true, exitCode, killed, ...capped };
       },
     });
   }
