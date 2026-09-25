@@ -113,6 +113,15 @@ function bodyLines(b: string): string[] {
   return b.split('\n').filter((l) => l !== '');
 }
 
+/** Remove ambient repository selectors so the real fixture uses only cwd. */
+function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  // Keep this fixture independent of ambient git state; a shared helper can
+  // replace this local scrub when the template seam lands.
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (key.startsWith('GIT_')) delete env[key];
+  return env;
+}
+
 /**
  * Build one real staged diff containing all five baseline cases. The
  * section keys are stable fixture names so the single `git diff --cached`
@@ -120,9 +129,11 @@ function bodyLines(b: string): string[] {
  */
 async function realGitDiffCases(): Promise<Record<string, string>> {
   const ws = await mkdtemp(join(tmpdir(), 'cq-gitdiff-'));
+  const env = scrubbedGitEnv();
   const run = (args: string[]): void => {
     const r = spawnSync('git', args, {
       cwd: ws,
+      env,
       encoding: 'utf8',
       timeout: 10_000,
       killSignal: 'SIGKILL',
@@ -176,6 +187,7 @@ async function realGitDiffCases(): Promise<Record<string, string>> {
       ['-c', 'diff.renames=false', '-c', 'diff.noprefix=false', 'diff', '--cached'],
       {
         cwd: ws,
+        env,
         encoding: 'utf8',
         timeout: 10_000,
         killSignal: 'SIGKILL',

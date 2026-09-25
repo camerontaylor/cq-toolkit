@@ -112,11 +112,10 @@ afterEach(() => {
 });
 
 // Real compiler/Oxlint calls have a bounded 30s child deadline below; the
-// suite-level budget is explicit so a loaded host cannot fail the test before
-// the structurally bounded child process reports its result. TS7's
-// configuration-error classification remains covered by the self-host gate;
-// an isolated failing-config spawn measured 3.27s on this host, above the
-// 2s budget for adding another real process here.
+// suite-level budget is explicit because most tests perform two real
+// compiler+Oxlint process spawns under host-load swings; the reused TS2307
+// plus configuration-failure case performs three bounded real gates. A loaded
+// host must not fail before the structurally bounded child process reports.
 describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () => {
   it('finds no src/driver import of src/kernel — static or dynamic (the seam rule)', () => {
     expect(kernelImports(DRIVER_SRC)).toEqual([]);
@@ -174,6 +173,18 @@ describe('real pinned compiler and lint conformance', { timeout: 30_000 }, () =>
     const missing = gate(root);
     expect(missing.status).toBe(1);
     expect(missing.stderr).toContain('TS2307');
+
+    // Keep the real TS configuration-error classifier live: a valid self-host
+    // gate cannot exercise this branch, and the residual regex must be proved
+    // against actual TypeScript diagnostics rather than hand-typed text.
+    writeFileSync(
+      join(root, 'tsconfig.json'),
+      '{"compilerOptions":{"notAnOption":true},"include":["src"]}',
+    );
+    const configFailure = gate(root);
+    expect(configFailure.status).toBe(1);
+    expect(configFailure.stderr).toContain('compiler configuration or project-loading failure:');
+    expect(configFailure.stderr).toMatch(/TS5023|TS5083/);
   });
   it('reproduces the integrated checker omission that requires the compiler fallback', () => {
     const root = fixture();
