@@ -571,10 +571,17 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
       threads.push(...nodes.map(toSnapshotThread));
     });
     // Counted from the NODES; the filtered totalCount lies (module doc).
+    // The connection is filtered to force-push events, so any node that is
+    // not one is a malformed payload: counting around it could reuse a
+    // settled tuple after an uncounted force-push — fail closed instead.
     advance(timelinePaging, pull['timelineItems'], page, (nodes) => {
-      forcePushEpoch += nodes.filter(
-        (node) => asString(asRecord(node)['__typename']) === 'HeadRefForcePushedEvent',
-      ).length;
+      for (const node of nodes) {
+        if (asString(asRecord(node)['__typename']) === 'HeadRefForcePushedEvent') {
+          forcePushEpoch += 1;
+        } else {
+          truncated = true;
+        }
+      }
     });
   }
   const pull = first ?? {};
@@ -611,8 +618,11 @@ const isTrusted = (
 ): boolean => {
   if (review.authorLogin === null || review.authorLogin === '') return false;
   if (review.authorType === 'Other') return false;
+  // An unknown PR author means the self-review exclusion cannot be
+  // established: trust nobody (acceptance then fails closed).
+  if (authorLogin === null || authorLogin === '') return false;
   const name = bareName(review.authorLogin);
-  if (authorLogin !== null && authorLogin !== '' && bareName(authorLogin) === name) return false;
+  if (bareName(authorLogin) === name) return false;
   for (const excluded of policy.excludedLogins) {
     if (bareName(excluded) === name) return false;
   }

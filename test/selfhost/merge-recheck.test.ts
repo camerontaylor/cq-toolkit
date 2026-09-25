@@ -78,7 +78,10 @@ interface ThreadSpec {
 interface PrSpec {
   state: string;
   isDraft: boolean;
-  author: string;
+  /** The PR author's login; null → a null author (deleted account / partial payload). */
+  author: string | null;
+  /** Extra timeline nodes appended to the first page (malformed-payload probes). */
+  extraTimelineNodes: unknown[];
   head: string;
   base: string;
   baseName: string;
@@ -103,6 +106,7 @@ const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
   state: 'OPEN',
   isDraft: false,
   author: 'alice',
+  extraTimelineNodes: [],
   head: SHA_B,
   base: BASE,
   baseName: BASE_NAME,
@@ -160,7 +164,7 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
         pullRequest: {
           state: spec.state,
           isDraft: spec.isDraft,
-          author: { login: spec.author, __typename: 'User' },
+          author: spec.author === null ? null : { login: spec.author, __typename: 'User' },
           headRefOid:
             laterPage && spec.headOnLaterPages !== null ? spec.headOnLaterPages : spec.head,
           baseRefOid:
@@ -220,10 +224,13 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
               hasNextPage: timelineMore,
               endCursor: timelineMore ? String(timelineFrom + PAGE) : null,
             },
-            nodes: Array.from(
-              { length: Math.max(0, Math.min(PAGE, spec.forcePushes - timelineFrom)) },
-              () => ({ __typename: 'HeadRefForcePushedEvent' }),
-            ),
+            nodes: [
+              ...Array.from(
+                { length: Math.max(0, Math.min(PAGE, spec.forcePushes - timelineFrom)) },
+                () => ({ __typename: 'HeadRefForcePushedEvent' }),
+              ),
+              ...(timelineFrom === 0 ? spec.extraTimelineNodes : []),
+            ],
           },
         },
       },
@@ -551,6 +558,22 @@ describe('fetchPrSnapshot', () => {
     expect(snap.forcePushEpoch).toBe(1);
     // Paged: 130 events over two timeline pages all count.
     expect((await snapshotOf(prSpec({ forcePushes: 130 }))).forcePushEpoch).toBe(130);
+  });
+
+  test('a malformed timeline node fails closed (an uncounted force-push must not reuse a settled tuple)', async () => {
+    for (const junk of [{}, { __typename: 'IssueComment' }, null, 'x']) {
+      const snap = await snapshotOf(prSpec({ forcePushes: 1, extraTimelineNodes: [junk] }));
+      expect(snap.truncated).toBe(true);
+    }
+  });
+
+  test('an unknown PR author trusts nobody: acceptance fails closed', async () => {
+    const snap = await snapshotOf(prSpec({ author: null, reviews: [review()] }));
+    expect(snap.authorLogin).toBeNull();
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      accepted: false,
+      reason: 'no_head_bound_acceptance',
+    });
   });
 
   test('truncated on hasNextPage or a missing connection; malformed oids → null', async () => {
