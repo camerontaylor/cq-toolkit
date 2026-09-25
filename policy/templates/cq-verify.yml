@@ -99,7 +99,7 @@ jobs:
               # The subject is head_sha; the PR (and its base) comes from
               # the commit→PR API, never from pull_requests[] (ADR-0004 D-C.2).
               base="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
-                --jq "[.[] | select(.state == \"open\" and .head.sha == \"${subject}\" and .head.repo.id == ${REPO_ID}) | .base.ref] | map(select(. == \"merge-queue\" or . == \"main\")) | first // empty")"
+                --jq "[.[] | select(.state == \"open\" and .head.sha == \"${subject}\" and .head.repo.id == ${REPO_ID}) | .base.ref] | map(select(. == \"merge-queue\" or . == \"main\")) | if index(\"merge-queue\") then \"merge-queue\" elif index(\"main\") then \"main\" else empty end")"
               [ -n "$base" ] || { echo "refusing: no open same-repo PR into merge-queue/main has head ${subject}"; exit 1; }
               kind='pr'
               ;;
