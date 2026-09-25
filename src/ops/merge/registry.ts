@@ -129,6 +129,7 @@ const PrCandidateObject = z
     reviews: z.array(ReviewSummarySchema),
     issueComments: z.array(RestCommentSchema),
     lastCommitAt: z.string().nullable(),
+    headRefOid: z.string().nullable().optional(),
   })
   .strict();
 

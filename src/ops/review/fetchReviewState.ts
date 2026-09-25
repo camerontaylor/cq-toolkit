@@ -43,6 +43,8 @@ export interface FetchReviewStateInput {
   repo: string;
   /** Pull request number. */
   pr: number;
+  /** Paths changed by the claimed commits; carried to path-anchor classification. */
+  claimedPaths?: readonly string[];
 }
 
 /**
@@ -113,6 +115,8 @@ export interface FetchedReviewState extends TruncationFlag {
   restReviewComments: RestComment[];
   /** Flat REST issue comments (the PR's general conversation). */
   restIssueComments: RestComment[];
+  /** Paths claimed by the PR's changed files, when the caller supplies them. */
+  claimedPaths?: readonly string[] | undefined;
 }
 
 /**
@@ -144,7 +148,15 @@ const PR_STATE_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $thre
       }
       reviews(first: 100, after: $reviewsAfter) {
         pageInfo { hasNextPage endCursor }
-        nodes { id author { login } state body submittedAt }
+        nodes {
+          id
+          author { login __typename }
+          authorAssociation
+          commit { oid }
+          state
+          body
+          submittedAt
+        }
       }
     }
   }
@@ -177,7 +189,9 @@ interface GraphqlPullRequest {
     pageInfo: { hasNextPage: boolean; endCursor: string | null };
     nodes: {
       id: string;
-      author: { login: string } | null;
+      author: { login: string; __typename?: string | null } | null;
+      authorAssociation?: string | null;
+      commit?: { oid?: string | null } | null;
       state: string | null;
       body: string;
       submittedAt: string | null;
@@ -265,13 +279,18 @@ const toReviewThread = (node: {
 /** GraphQL review node → ReviewSummary; unknown verdict states → null. */
 const toReviewSummary = (node: {
   id: string;
-  author: { login: string } | null;
+  author: { login: string; __typename?: string | null } | null;
+  authorAssociation?: string | null;
+  commit?: { oid?: string | null } | null;
   state: string | null;
   body: string;
   submittedAt: string | null;
 }): ReviewSummary => ({
   id: node.id,
   authorLogin: node.author?.login ?? null,
+  authorType: node.author?.__typename ?? null,
+  authorAssociation: node.authorAssociation ?? null,
+  commitOid: node.commit?.oid ?? null,
   state: isKnownReviewState(node.state) ? node.state : null,
   body: node.body,
   submittedAt: node.submittedAt ?? null,
@@ -560,6 +579,7 @@ export async function fetchReviewState(
     reviews,
     restReviewComments,
     restIssueComments,
+    ...(input.claimedPaths === undefined ? {} : { claimedPaths: input.claimedPaths }),
     truncated: truncatedBecause.length > 0,
     truncatedBecause,
   };

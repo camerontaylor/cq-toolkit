@@ -96,6 +96,14 @@ export interface ClassifyConfig {
    * frozen).
    */
   skipApprovalReviews: boolean;
+  /** Reviewer logins/actor types trusted to produce actionable feedback. Undefined preserves the legacy SDK surface; resolved config supplies a conservative empty set. */
+  trustedAuthors?: readonly string[] | undefined;
+  /** Login of the automation identity. Skip markers are honoured only from this identity when supplied. */
+  automationLogin?: string | null | undefined;
+  /** Additional logins excluded from the trust set. */
+  excludedLogins?: readonly string[] | undefined;
+  /** Paths claimed by the commits under review; a missing list disables the anchor check. */
+  claimedPaths?: readonly string[] | undefined;
 }
 
 /**

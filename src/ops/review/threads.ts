@@ -67,6 +67,12 @@ export interface ReviewSummary {
   state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED' | null;
   /** The review's markdown body (may be empty for bare verdicts). */
   body: string;
+  /** The head commit the review was submitted against, when GitHub supplied it. */
+  commitOid?: string | null | undefined;
+  /** The actor type returned by GitHub (User, Bot, Organization, …). */
+  authorType?: string | null | undefined;
+  /** The reviewer's association with the repository, when supplied. */
+  authorAssociation?: string | null | undefined;
   /** ISO 8601 submission timestamp, or null when not resolvable. */
   submittedAt: string | null;
 }

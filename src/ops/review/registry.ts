@@ -144,6 +144,9 @@ const ReviewSummarySchema: z.ZodType<ReviewSummary> = z
     authorLogin: z.string().nullable(),
     state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']).nullable(),
     body: z.string(),
+    commitOid: z.string().nullable().optional(),
+    authorType: z.string().nullable().optional(),
+    authorAssociation: z.string().nullable().optional(),
     submittedAt: z.string().nullable(),
   })
   .strict();
@@ -166,6 +169,7 @@ const FetchedReviewStateSchema: z.ZodType<FetchedReviewState> = z
     reviews: z.array(ReviewSummarySchema),
     restReviewComments: z.array(RestCommentSchema),
     restIssueComments: z.array(RestCommentSchema),
+    claimedPaths: z.array(z.string()).optional(),
     truncated: z.boolean(),
     truncatedBecause: z.array(z.string().min(1)),
   })
@@ -286,6 +290,10 @@ const ClassifyThreadsConfigDataSchema = z
     skipResponderAuthoredThreads: z.boolean(),
     skipDismissedReviews: z.boolean(),
     skipApprovalReviews: z.boolean(),
+    trustedAuthors: z.array(z.string()).optional(),
+    automationLogin: z.string().nullable().optional(),
+    excludedLogins: z.array(z.string()).optional(),
+    claimedPaths: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -304,6 +312,7 @@ export const FetchReviewStateOpInputSchema = z
     owner: z.string().min(1),
     repo: z.string().min(1),
     pr: z.number().int().positive(),
+    claimedPaths: z.array(z.string()).optional(),
     caps: z
       .object({
         reviewThreadPages: z.number().int().min(0).exactOptional(),
