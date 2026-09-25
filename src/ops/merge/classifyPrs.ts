@@ -196,6 +196,13 @@ const isTrustedReviewer = (review: ReviewSummary, ctx: ReviewContext): boolean =
 const isAutomation = (review: ReviewSummary, config: ClassifyPrConfig): boolean =>
   config.automationLogin !== undefined && review.authorLogin === config.automationLogin;
 
+const isTrustedLogin = (login: string | null, config: ClassifyPrConfig): boolean => {
+  if (config.trustedBots === undefined && config.trustedAssociations === undefined) return true;
+  if (login === null || login === config.automationLogin) return false;
+  if (config.excludedLogins?.includes(login)) return false;
+  return (config.trustedBots ?? []).includes(login);
+};
+
 /** Fold the complete review stream, retaining the latest submitted opinion per actor. */
 const latestReviewPerActor = (reviews: readonly ReviewSummary[]): ReviewSummary[] => {
   const latest = new Map<string | null, ReviewSummary>();
@@ -425,6 +432,7 @@ export function classifyPr(
         // CHANGES_REQUESTED "LGTM" body is a retracted note or an
         // objection, not an all-clear).
         stateCounts(review.state, config) &&
+        isReviewableEvidence(review, ctx) &&
         isAllClearAfter(
           review.body,
           review.authorLogin,
@@ -439,6 +447,7 @@ export function classifyPr(
         // Only TOP-LEVEL conversation comments: a reply rides on someone
         // else's thread, it is not the commenter's own verdict on the PR.
         comment.inReplyToId === null &&
+        isTrustedLogin(comment.authorLogin, config) &&
         isAllClearAfter(
           comment.body,
           comment.authorLogin,

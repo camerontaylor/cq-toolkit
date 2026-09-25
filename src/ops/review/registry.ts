@@ -529,7 +529,12 @@ export const registry: OpRegistryEntry[] = [
         ([m, gh]) =>
           awaitOp((input: FetchReviewStateOpInput) =>
             m.fetchReviewState(
-              { owner: input.owner, repo: input.repo, pr: input.pr },
+              {
+                owner: input.owner,
+                repo: input.repo,
+                pr: input.pr,
+                ...(input.claimedPaths === undefined ? {} : { claimedPaths: input.claimedPaths }),
+              },
               input.caps,
               gh.makeGhRunner(),
             ),
@@ -562,6 +567,10 @@ export const registry: OpRegistryEntry[] = [
                     skipResponderAuthoredThreads: input.config.skipResponderAuthoredThreads,
                     skipDismissedReviews: input.config.skipDismissedReviews,
                     skipApprovalReviews: input.config.skipApprovalReviews,
+                    trustedAuthors: input.config.trustedAuthors,
+                    automationLogin: input.config.automationLogin,
+                    excludedLogins: input.config.excludedLogins,
+                    claimedPaths: input.config.claimedPaths,
                   };
             // An undefined config triggers the library's shipped default.
             return m.classifyThreads(input.state, input.nowMs, config);

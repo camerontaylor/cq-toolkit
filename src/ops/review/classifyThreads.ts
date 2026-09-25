@@ -332,12 +332,13 @@ const botSkipThreadRow: RowFn<ReviewThread> = (thread, ctx) =>
 const trustThreadRow: RowFn<ReviewThread> = (thread, ctx) => {
   if (!isTrusted(thread.authorLogin, null, ctx.config))
     return threadItem(thread, 'blocked', 'untrusted_reviewer');
-  if (
-    thread.path !== null &&
-    ctx.config.claimedPaths !== undefined &&
-    !ctx.config.claimedPaths.includes(thread.path)
-  ) {
-    return threadItem(thread, 'blocked', 'path_anchor_mismatch');
+  if (ctx.config.claimedPaths !== undefined) {
+    if (thread.path === null || thread.line === null) {
+      return threadItem(thread, 'blocked', 'path_anchor_missing');
+    }
+    if (!ctx.config.claimedPaths.includes(thread.path)) {
+      return threadItem(thread, 'blocked', 'path_anchor_mismatch');
+    }
   }
   return null;
 };
