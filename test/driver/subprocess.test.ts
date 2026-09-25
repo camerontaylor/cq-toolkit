@@ -52,6 +52,7 @@ import {
   spawnManaged,
   terminateActiveChildrenOnExit,
 } from '../../src/driver/subprocess/process.js';
+import type { ProcessClose } from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
@@ -1017,7 +1018,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           usage: { input_tokens: 10, output_tokens: 5 },
           structured_output: { answer: 'must be voided on harness failure' },
         });
-        let oversizedObserved = false;
+        let childClose: Promise<ProcessClose> | undefined;
         const driver = new SubprocessDriver({
           ...baseOptions(scratchDir, {}, []),
           toolSurface,
@@ -1031,16 +1032,15 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
               ],
               maxRetainedBytes: 1024,
             });
-            void child.close.then((closed) => {
-              oversizedObserved = closed.oversizedLine === true;
-            });
+            childClose = child.close;
             return child;
           },
         });
         const result = await driver.run(
           invocation({ toolPolicy: { allow: [], mode: 'none' }, budget: { maxTokens: 1 } }),
         );
-        expect(oversizedObserved).toBe(true);
+        if (childClose === undefined) throw new Error('expected the driver to spawn a child');
+        expect((await childClose).oversizedLine).toBe(true);
         expect(result.stopReason).toBe('error');
         expect(result.usage.input).toBe(10);
         if (toolSurface === 'harness') {
