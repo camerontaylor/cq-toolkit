@@ -142,6 +142,19 @@ policy decision; U4 does not edit CI.
 `plans.smoke.test.ts` also has its own redundant build path; that is a
 follow-up outside PR-4's files.
 
+### Transport-fake follow-ups
+
+- `fakeManagedSpawn` does not model the production `maxRetainedBytes` /
+  `droppedBytes` tail cap. The cap contract is already directly covered by
+  real `spawnManaged` tests at `test/driver/subprocess.test.ts:1038-1142`; a
+  future fake-cap test is only needed if a moved script begins exercising
+  output retention.
+- The fake currently represents subprocess input as a synthetic JSON frame
+  rather than literal prompt bytes plus EOF. The moved conformance scripts
+  do not inspect prompt data or wait for `endStdin()`, so current assertions
+  do not depend on that fidelity. A future wait-for-EOF conformance case is
+  the candidate if byte/EOF behavior becomes part of the fake contract.
+
 This list is a guard, not a claim that every transitive process launch is
 found. The limitation is stated above so a future helper cannot make the
 inventory look stronger than it is.
