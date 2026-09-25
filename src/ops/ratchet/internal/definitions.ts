@@ -20,8 +20,8 @@
 // widen or narrow the set in ways a reviewer would not read off the text.
 import { posix } from 'node:path';
 import { z } from 'zod';
-import type { Direction } from './format.js';
-import { assertRepoRelPath, gitReadBlob, gitRevParse } from './git.js';
+import type { Direction } from '../format.js';
+import { assertRepoRelPath, gitReadBlob, gitRevParse } from '../git.js';
 
 /** Repo-relative path of the manifest (read at the trust ref). */
 export const RATCHETS_MANIFEST_PATH = 'baselines/ratchets.json';

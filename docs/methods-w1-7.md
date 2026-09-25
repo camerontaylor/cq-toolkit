@@ -61,7 +61,7 @@ that holds the write token, and bypasses merge-queue.
 
 1. Coverage one-decimal: `format.ts`, `sources.ts`, `scripts/ratchet-lib.mjs` + tests.
 2. Guard pairing + hardened ref-mode diff: `monotonicGuard.ts`, `registry.ts` (guard entry) + tests.
-3. Definitions + git plumbing: `baselines/ratchets.json`, `definitions.ts`, `git.ts` + tests.
+3. Definitions + git plumbing: `baselines/ratchets.json`, `internal/definitions.ts`, `git.ts` + tests.
 4. Verifier + recompute ops: `verifyRatchet.ts`, `recomputeTypecheck.ts`, registry entries + tests.
 5. Workflows, templates, `scripts/ratchet-propose.mjs`, workflow tests, generated docs.
 

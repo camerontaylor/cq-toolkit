@@ -38,7 +38,7 @@ import {
   loadTrustedManifest,
   tsconfigGraphPaths,
   type RatchetDefinition,
-} from './definitions.js';
+} from './internal/definitions.js';
 import {
   baselineRelPath,
   loosens,

@@ -1,4 +1,4 @@
-// W1.7 slice 3 — tests for src/ops/ratchet/definitions.ts.
+// W1.7 slice 3 — tests for src/ops/ratchet/internal/definitions.ts.
 //
 // Pinned:
 //   - the committed baselines/ratchets.json parses, and each ratchet's
@@ -21,7 +21,7 @@ import {
   loadTrustedManifest,
   parseRatchetManifest,
   tsconfigGraphPaths,
-} from '../../../src/ops/ratchet/definitions.js';
+} from '../../../src/ops/ratchet/internal/definitions.js';
 import { baselineRelPath, parseBaseline } from '../../../src/ops/ratchet/format.js';
 
 const ROOT = join(import.meta.dirname, '..', '..', '..');

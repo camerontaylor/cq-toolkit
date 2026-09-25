@@ -333,7 +333,7 @@ describe('verifyRatchet: the guard judges the same range', SLOW, () => {
 
   test('a baseline tightening passes the guard', async () => {
     const head = prBranch('pr-tighten', 'merge-queue', () =>
-      baseline('coverage', 'coverage', 'higher-is-better', 90, 'pct'),
+      baseline('coverage', 'coverage', 'higher-is-better', 95, 'pct'),
     );
     expect((await verify(head)).guard.ok).toBe(true);
   });
