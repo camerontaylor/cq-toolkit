@@ -221,6 +221,7 @@
 // 0 would be a fabricated fact. The derived figure is api-equivalent
 // (modeled — list price for the tokens consumed), never presented as billed
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { readFile, rm, writeFile } from 'node:fs/promises';
@@ -283,10 +284,12 @@ export const NARRATION_TOOL = 'cli-narration';
 
 /**
  * The file-name SUFFIX of the per-run MCP config (W1.4, Annex A.4):
- * `<sessionsDir>/<sessionId>.cq-harness-mcp.json`, created exclusively
- * (O_EXCL) with mode 0600 — never in the model-visible workspace (tamper
- * vector #26) — and deleted as soon as `system/init` reports the harness
- * connected, with a second delete at settle as the backstop.
+ * `<sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json` — UNIQUE PER
+ * RUN, so two concurrent runs on one session can never read, replace or
+ * delete each other's binding — created exclusively (O_EXCL) with mode
+ * 0600, never in the model-visible workspace (tamper vector #26), and
+ * deleted as soon as `system/init` reports the harness connected, with a
+ * second delete at settle as the backstop.
  */
 export const HARNESS_MCP_CONFIG_FILE = '.cq-harness-mcp.json';
 
@@ -934,18 +937,18 @@ export function allowedToolNames(
 /**
  * Write the per-run MCP config (Annex A.4) EXCLUSIVELY (flag 'wx' =
  * O_CREAT|O_EXCL — never follows or reuses a pre-planted file) with mode
- * 0600, beside the session records. A stale file from a crashed earlier run
- * on the same session is removed first (unlink removes a planted symlink
- * itself, never its target), then the exclusive create is retried once.
- * The server is launched as `process.execPath` + the module-relative bin
- * (never PATH/npx/plan data); the manifest is its one argv element.
+ * 0600, beside the session records, under a per-run random name. An
+ * existing file at that name is never adopted or replaced: EEXIST throws
+ * (pre-dispatch). The server is launched as `process.execPath` + the
+ * module-relative bin (never PATH/npx/plan data); the manifest is its one
+ * argv element.
  */
 async function writeMcpConfig(
   sessionsDir: string,
   sessionId: string,
   manifest: HarnessManifest,
 ): Promise<string> {
-  const path = join(sessionsDir, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
+  const path = join(sessionsDir, `${sessionId}.${randomUUID()}${HARNESS_MCP_CONFIG_FILE}`);
   const launch = harnessServerLaunch();
   const config = {
     mcpServers: {
@@ -957,13 +960,7 @@ async function writeMcpConfig(
     },
   };
   const body = `${JSON.stringify(config)}\n`;
-  try {
-    await writeFile(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  } catch (err) {
-    if ((err as { code?: unknown }).code !== 'EEXIST') throw err;
-    await rm(path, { force: true });
-    await writeFile(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
-  }
+  await writeFile(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
   return path;
 }
 

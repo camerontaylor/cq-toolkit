@@ -21,6 +21,7 @@
 //    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
 //   'edit failed: …' | 'run failed: …'
+//   'cancelled: …' (surface.ts: a queued call cancelled before it ran)
 //
 // ENFORCEMENT ORDER per call: sandbox gate → input schema → workspace
 // containment (lexical, then symlink realpath re-check) → config allowlist →
@@ -106,6 +107,13 @@ import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
+
+/**
+ * Per-stream retention bound for `run` when the config sets no output cap:
+ * "uncapped" means no truncation of the result text up to this bound, never
+ * unbounded memory (the old `exec` path capped at its 1 MiB maxBuffer).
+ */
+const UNCAPPED_RETENTION_BYTES = 1_048_576;
 
 /** POSIX platforms get per-command process groups (`detached` + group kill). */
 const POSIX = process.platform !== 'win32';
@@ -306,15 +314,15 @@ function commandVerdict(patterns: readonly CommandPattern[], command: string): C
 
 /** How one shell command ended: a normal exit, a kill, or a failed spawn. */
 type ShellOutcome =
-  | { kind: 'exit'; code: number; stdout: string; stderr: string }
-  | { kind: 'killed'; stdout: string; stderr: string }
+  | { kind: 'exit'; code: number; stdout: string; stderr: string; overflowed: boolean }
+  | { kind: 'killed'; stdout: string; stderr: string; overflowed: boolean }
   | { kind: 'spawn-error'; error: unknown };
 
 /** Inputs to one shell command execution — plain data plus the cancellation signal. */
 interface ShellCommandOptions {
   cwd: string;
-  /** Per-stream retention bound in bytes; omitted = unbounded (the uncapped config choice). */
-  maxBytes?: number;
+  /** Per-stream retention bound in bytes. */
+  maxBytes: number;
   /** Per-command wall clock; on expiry the whole process group is killed. */
   timeoutMs?: number;
   /** Cancellation: abort kills the whole process group. */
@@ -334,7 +342,7 @@ interface ShellCommandOptions {
 function runShellCommand(command: string, opts: ShellCommandOptions): Promise<ShellOutcome> {
   return new Promise<ShellOutcome>((settle) => {
     if (opts.signal?.aborted === true) {
-      settle({ kind: 'killed', stdout: '', stderr: '' });
+      settle({ kind: 'killed', stdout: '', stderr: '', overflowed: false });
       return;
     }
     let child: ReturnType<typeof spawn>;
@@ -352,9 +360,11 @@ function runShellCommand(command: string, opts: ShellCommandOptions): Promise<Sh
     const collect = (): { chunks: Buffer[]; bytes: number } => ({ chunks: [], bytes: 0 });
     const out = collect();
     const err = collect();
+    let overflowed = false;
     const retain = (sink: { chunks: Buffer[]; bytes: number }, chunk: Buffer): void => {
-      if (opts.maxBytes !== undefined && sink.bytes >= opts.maxBytes) return; // keep draining, stop retaining
-      const room = opts.maxBytes === undefined ? chunk.length : opts.maxBytes - sink.bytes;
+      const room = opts.maxBytes - sink.bytes;
+      if (chunk.length > room) overflowed = true; // keep draining, stop retaining
+      if (room <= 0) return;
       const kept = chunk.length <= room ? chunk : chunk.subarray(0, room);
       sink.chunks.push(kept);
       sink.bytes += kept.length;
@@ -394,9 +404,9 @@ function runShellCommand(command: string, opts: ShellCommandOptions): Promise<Sh
       if (spawnError !== undefined && child.pid === undefined) {
         settle({ kind: 'spawn-error', error: spawnError });
       } else if (killedByUs || signal !== null || code === null) {
-        settle({ kind: 'killed', stdout, stderr });
+        settle({ kind: 'killed', stdout, stderr, overflowed });
       } else {
-        settle({ kind: 'exit', code, stdout, stderr });
+        settle({ kind: 'exit', code, stdout, stderr, overflowed });
       }
     });
   });
@@ -690,9 +700,10 @@ export function buildTools(
           // above the cap so capOutput does the truncating (4 bytes/char
           // covers UTF-8's worst case, +64KiB slack for the exit/stdout
           // wrapper) — a noisy command is truncated, never denied (issue #18).
-          ...(runCfg.maxOutputChars !== undefined
-            ? { maxBytes: runCfg.maxOutputChars * 4 + 65_536 }
-            : {}),
+          maxBytes:
+            runCfg.maxOutputChars !== undefined
+              ? runCfg.maxOutputChars * 4 + 65_536
+              : UNCAPPED_RETENTION_BYTES,
           ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
           ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
         });
@@ -707,7 +718,13 @@ export function buildTools(
           formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
           runCfg.maxOutputChars,
         );
-        return { ok: true, exitCode, killed, ...capped };
+        return {
+          ok: true,
+          exitCode,
+          killed,
+          output: capped.output,
+          truncated: capped.truncated || outcome.overflowed,
+        };
       },
     });
   }

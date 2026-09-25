@@ -143,6 +143,7 @@ export function serveStdio(
     input.off('data', onData);
     input.off('end', onEnd);
     input.off('error', onEnd);
+    output.off('error', onEnd);
     finish(why);
   };
 
@@ -159,6 +160,11 @@ export function serveStdio(
     const rawArgs = params?.['arguments'];
     if (rawArgs !== undefined && asRecord(rawArgs) === undefined) {
       fail(id, JSONRPC_ERRORS.invalidParams, 'tools/call: params.arguments must be an object');
+      return;
+    }
+    if (inflight.has(id)) {
+      // A reused in-flight id would orphan the first call's abort handle.
+      fail(id, JSONRPC_ERRORS.invalidRequest, 'invalid request: id already in flight');
       return;
     }
     const controller = new AbortController();
@@ -286,6 +292,9 @@ export function serveStdio(
   input.on('data', onData);
   input.on('end', onEnd);
   input.on('error', onEnd);
+  // A dead peer surfaces as EPIPE on output: treat it as EOF so in-flight
+  // calls are aborted (their process groups killed) instead of crashing.
+  output.on('error', onEnd);
 
   return {
     done,

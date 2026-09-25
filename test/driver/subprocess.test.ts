@@ -1619,8 +1619,13 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
       expect(result.error).toBeUndefined();
       const sessionId = result.sessionId as string;
       const sessionsDir = join(scratchDir, SESSIONS_DIR);
-      const configPath = join(sessionsDir, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
       expect(calls).toHaveLength(1);
+      const configArg = calls[0]?.args.indexOf('--mcp-config') ?? -1;
+      const configPath = calls[0]?.args[configArg + 1] as string;
+      // Unique per run: <sessionId>.<uuid>.cq-harness-mcp.json.
+      expect(configPath.slice(sessionsDir.length + 1)).toMatch(
+        new RegExp(`^${sessionId}\\.[0-9a-f-]{36}\\.cq-harness-mcp\\.json$`),
+      );
       expect(calls[0]?.args).toEqual([
         FAKE_CLI,
         '-p',
@@ -1695,47 +1700,74 @@ describe('subprocess driver: the closed harness tool surface (W1.4)', () => {
     });
   });
 
-  test('a stale config file and a planted symlink at the config path are REPLACED, never followed', async () => {
+  test("per-run config names: concurrent runs on ONE session never share, replace or delete each other's binding; files at other names are never touched", async () => {
     await withScratch(async (scratchDir) => {
       const seed = await new SubprocessDriver(
         baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok' }, []),
       ).run(invocation({ prompt: 'seed run' }));
       const sessionId = seed.sessionId as string;
-      const configPath = join(scratchDir, SESSIONS_DIR, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
-
-      // (1) A stale regular file from a crashed earlier run.
-      await writeFile(configPath, 'stale — not even json', { mode: 0o644 });
-      const staleProbe = join(scratchDir, 'stale-probe.json');
-      const stale = await new SubprocessDriver(
-        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: staleProbe }, []),
-      ).run(invocation({ prompt: 'stale run', sessionRef: sessionId }));
-      expect(stale.stopReason).toBe('complete'); // the server connected off the FRESH config
-      expect((await readProbe(staleProbe)).atStart).toEqual({
-        present: true,
-        mode: 0o600,
-        symlink: false,
-      });
-      await expect(lstat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
-
-      // (2) A planted symlink pointing at a victim file outside the store.
+      const sessionsDir = join(scratchDir, SESSIONS_DIR);
+      // A file and a planted symlink at the legacy fixed name are inert:
+      // never followed, never written, never deleted.
+      const legacyPath = join(sessionsDir, `${sessionId}${HARNESS_MCP_CONFIG_FILE}`);
+      await writeFile(legacyPath, 'foreign — not ours', { mode: 0o644 });
       const victim = join(scratchDir, 'victim.json');
       await writeFile(victim, 'victim-content', 'utf8');
-      await symlink(victim, configPath);
-      const linkProbe = join(scratchDir, 'link-probe.json');
-      const linked = await new SubprocessDriver(
-        baseOptions(scratchDir, { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: linkProbe }, []),
-      ).run(invocation({ prompt: 'symlink run', sessionRef: sessionId }));
-      expect(linked.stopReason).toBe('complete');
-      // The CLI saw a regular 0600 file, not the link…
-      expect((await readProbe(linkProbe)).atStart).toEqual({
+      const linkPath = join(sessionsDir, `${sessionId}.planted${HARNESS_MCP_CONFIG_FILE}`);
+      await symlink(victim, linkPath);
+      // Two runs on the SAME session at once, with different sandbox levels.
+      const callsA: SpawnCall[] = [];
+      const callsB: SpawnCall[] = [];
+      const probeA = join(scratchDir, 'probe-a.json');
+      const probeB = join(scratchDir, 'probe-b.json');
+      const [a, b] = await Promise.all([
+        new SubprocessDriver(
+          baseOptions(
+            scratchDir,
+            { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probeA },
+            callsA,
+          ),
+        ).run(
+          invocation({
+            prompt: 'run A',
+            sessionRef: sessionId,
+            sandboxPolicy: { level: 'read-only' },
+          }),
+        ),
+        new SubprocessDriver(
+          baseOptions(
+            scratchDir,
+            { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_CONFIG_PROBE: probeB },
+            callsB,
+          ),
+        ).run(invocation({ prompt: 'run B', sessionRef: sessionId })),
+      ]);
+      expect(a.stopReason).toBe('complete');
+      expect(b.stopReason).toBe('complete');
+      const pathOf = (calls: SpawnCall[]): string => {
+        const args = calls[0]?.args ?? [];
+        return args[args.indexOf('--mcp-config') + 1] as string;
+      };
+      const pathA = pathOf(callsA);
+      const pathB = pathOf(callsB);
+      expect(pathA).not.toBe(pathB);
+      // Each CLI saw its OWN regular 0600 file at start.
+      expect((await readProbe(probeA)).atStart).toEqual({
         present: true,
         mode: 0o600,
         symlink: false,
       });
-      // …the victim was never written through the link, nor deleted…
+      expect((await readProbe(probeB)).atStart).toEqual({
+        present: true,
+        mode: 0o600,
+        symlink: false,
+      });
+      // Both per-run files are gone; the foreign files are untouched.
+      await expect(lstat(pathA)).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(lstat(pathB)).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await readFile(legacyPath, 'utf8')).toBe('foreign — not ours');
+      expect((await lstat(linkPath)).isSymbolicLink()).toBe(true);
       expect(await readFile(victim, 'utf8')).toBe('victim-content');
-      // …and the config path is gone after settle.
-      await expect(lstat(configPath)).rejects.toMatchObject({ code: 'ENOENT' });
     });
   });
 

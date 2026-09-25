@@ -20,6 +20,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
   symlinkSync,
@@ -316,7 +317,7 @@ describe('createHarnessSurface', () => {
     expect(read.outcome).toMatchObject({ ok: true, output: 'done\n' });
   });
 
-  test('an aborted signal reaches the tool (run reports a kill)', async () => {
+  test('an already-aborted signal: the call never executes (cancelled denial)', async () => {
     const surface = createHarnessSurface(manifest(scratch()));
     const controller = new AbortController();
     controller.abort();
@@ -325,7 +326,10 @@ describe('createHarnessSurface', () => {
       { command: 'echo x' },
       { signal: controller.signal },
     );
-    expect(outcome).toMatchObject({ ok: true, killed: true, exitCode: null });
+    expect(outcome).toEqual({
+      ok: false,
+      denial: { tool: 'run', reason: 'cancelled: the call was cancelled before it ran' },
+    });
   });
 });
 
@@ -545,4 +549,29 @@ describe('compareInitSurface', () => {
     const verdict = compareInitSurface({ harness: false, tools: [] }, { mcp_servers: [], tools });
     expect(verdict).toMatchObject({ ok: false, observed: { tools } });
   });
+});
+
+describe('queued cancellation (improvement pass)', () => {
+  test('a call cancelled while queued never executes: an edit behind a running run does not write', async () => {
+    const workspace = scratch();
+    await writeFile(join(workspace, 'note.txt'), 'before\n');
+    const surface = createHarnessSurface(manifest(workspace));
+    const cancel = new AbortController();
+    const running = surface.call('run', { command: 'sleep 1' });
+    const queued = surface.call(
+      'edit',
+      { path: 'note.txt', oldText: 'before', newText: 'after' },
+      { signal: cancel.signal },
+    );
+    cancel.abort();
+    await running;
+    const { result, outcome } = await queued;
+    expect(outcome).toEqual({
+      ok: false,
+      denial: { tool: 'edit', reason: 'cancelled: the call was cancelled before it ran' },
+    });
+    expect(result.isError).toBe(true);
+    expect(isHarnessDenial('cancelled: the call was cancelled before it ran')).toBe(true);
+    expect(readFileSync(join(workspace, 'note.txt'), 'utf8')).toBe('before\n');
+  }, 20_000);
 });

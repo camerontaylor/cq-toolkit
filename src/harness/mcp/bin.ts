@@ -56,6 +56,13 @@ function main(argv: readonly string[]): void {
   };
   process.once('SIGTERM', onSignal(143));
   process.once('SIGINT', onSignal(130));
+  // Backstop: an unexpected throw must still abort in-flight calls (killing
+  // their detached process groups) before the process dies.
+  process.once('uncaughtException', (err) => {
+    process.stderr.write(`cq-harness-mcp: fatal — ${oneLine(err)}\n`);
+    server.shutdown();
+    process.exit(70);
+  });
   server.done.then(
     (end) => {
       if (end === 'oversized-line') exitAfterFlush(EXIT_PROTOCOL);

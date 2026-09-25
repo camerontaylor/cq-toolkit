@@ -269,7 +269,18 @@ export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
         return Promise.reject(new Error(`harness surface: '${name}' is not a served tool`));
       }
       const run = queue.then(async (): Promise<HarnessCallOutcome> => {
-        const outcome = await tool.execute(args, opts);
+        // A call cancelled while it waited in the queue never executes (an
+        // `edit` must not write after its cancellation or a governed abort).
+        const outcome: ToolkitToolResult =
+          opts?.signal?.aborted === true
+            ? {
+                ok: false,
+                denial: {
+                  tool: tool.name,
+                  reason: 'cancelled: the call was cancelled before it ran',
+                },
+              }
+            : await tool.execute(args, opts);
         return { result: toCallToolResult(outcome), outcome };
       });
       // Serialize: the next call waits for this one to settle either way.
@@ -299,6 +310,7 @@ export const HARNESS_DENIAL_PREFIXES: readonly string[] = Object.freeze([
   'edit refused: ',
   'edit failed: ',
   'run failed: ',
+  'cancelled: ',
 ]);
 
 /** True only for text that starts with a stable harness denial prefix. */

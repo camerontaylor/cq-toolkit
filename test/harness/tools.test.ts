@@ -466,3 +466,23 @@ describe('run: results, output retention and spawn failure (W1.4)', () => {
     });
   });
 });
+
+describe('run output retention without a cap (improvement pass)', () => {
+  test('an uncapped config still bounds memory: past 1 MiB per stream the output is truncated', async () => {
+    await withScratch(async (scratchDir) => {
+      const config = {
+        ...defaultHarnessConfig,
+        tools: {
+          ...defaultHarnessConfig.tools,
+          run: { enabled: true, commandPatterns: ['head'], timeoutMs: 20_000 },
+        },
+      };
+      const run = buildTools(config, scratchDir).find((t) => t.name === 'run');
+      const result = await run?.execute({ command: 'head -c 3000000 /dev/zero' });
+      expect(result?.ok).toBe(true);
+      if (result?.ok !== true) return;
+      expect(result.truncated).toBe(true);
+      expect(result.output.length).toBeLessThan(1_200_000);
+    });
+  }, 30_000);
+});
