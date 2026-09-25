@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
 import { hackDetector } from '../../../src/ops/gates/hackDetector.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
+import { DEFAULT_PROTECTED_STAGE_PATTERNS } from '../../../src/ops/sweep/unit.js';
 
 interface CorpusEntry {
   id: string;
@@ -33,7 +34,16 @@ describe('RS-10 tamper corpus contract', () => {
       expect(entry.baseOwned).toMatch(/^(review|needs-human)$/);
       const fixtureUrl = new URL(`../../fixtures/tamper-corpus/${entry.path}`, import.meta.url);
       expect(() => readFileSync(fixtureUrl, 'utf8')).not.toThrow();
-      const result = await hackDetector({ diff: readFileSync(fixtureUrl, 'utf8') });
+      const diff = readFileSync(fixtureUrl, 'utf8');
+      const targetPath = diff.match(/^\+\+\+ b\/(.+)$/m)?.[1];
+      if (entry.class !== 'git-plumbing') {
+        expect(targetPath, entry.id).toBeDefined();
+        expect(
+          DEFAULT_PROTECTED_STAGE_PATTERNS.some((pattern) => pattern.test(targetPath!)),
+          entry.id,
+        ).toBe(true);
+      }
+      const result = await hackDetector({ diff });
       expect(result.status).toBe('ok');
       if (
         ['static', 'suppression', 'removed'].includes(entry.class) &&

@@ -189,13 +189,13 @@ export const DEFAULT_UNIT_GIT_TIMEOUT_MS = 600_000;
  * evidence behind a test-shaped or generated file.
  */
 export const DEFAULT_PROTECTED_STAGE_PATTERNS: readonly RegExp[] = Object.freeze([
-  /\.test\.[tj]sx?$/i,
-  /\.spec\.[tj]sx?$/i,
+  /\.test\.[cm]?[tj]sx?$/i,
+  /\.spec\.[cm]?[tj]sx?$/i,
   /(^|\/)__tests__\//i,
   /\.snap$/i,
   /(^|\/)__snapshots__\//i,
   /(^|\/)\.gitattributes$/i,
-  /(^|\/)vitest\.config(?:\.[^/]+)?$/i,
+  /(^|\/)(?:vitest|vite)\.config(?:\.[^/]+)?$/i,
   /(^|\/)jest\.config(?:\.[^/]+)?$/i,
   /(^|\/)tsconfig(?:\.[^/]+)?\.json$/i,
   /(^|\/)eslint\.config\.[^/]+$/i,

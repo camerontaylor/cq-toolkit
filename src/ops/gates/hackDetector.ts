@@ -430,7 +430,7 @@ function reportTestFileRemoval(
 
 /** Every heuristic, against one ADDED line's content only. */
 const PROTECTED_CONFIG_RE =
-  /(^|\/)(?:\.gitattributes|(?:[^/]+\/)*__snapshots__\/|[^/]+\.snap$|vitest\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
+  /(^|\/)(?:\.gitattributes|(?:[^/]+\/)*__snapshots__\/|[^/]+\.snap$|(?:vitest|vite)\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
 
 function isProtectedConfigPath(path: string | null): boolean {
   return path !== null && (path === '.gitattributes' || PROTECTED_CONFIG_RE.test(path));
