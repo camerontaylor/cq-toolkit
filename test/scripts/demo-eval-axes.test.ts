@@ -1,12 +1,10 @@
 // Slice D + F — tests for the #30 selective credential gate in the
 // demo-eval-axes workflow. Two describes:
-//   1. MODULE-LEVEL (no skipIf): direct unit tests over the extracted pure
-//      module scripts/lib/eval-axes-select.mjs — these run EVERYWHERE,
-//      including CI (no dist, no network, no keys needed).
-//   2. SPAWN E2E (skipIf dist missing): proves the real script wiring
-//      end-to-end where dist exists (e.g. after a local build); CI covers
-//      the module-level describe above and SKIPS these — the script imports
-//      ../dist/index.js at module top and CI runs tests before build.
+//   1. MODULE-LEVEL: direct unit tests over the extracted pure module
+//      scripts/lib/eval-axes-select.mjs — these run everywhere, including CI.
+//   2. SPAWN E2E: proves the real script wiring end-to-end. Vitest's
+//      globalSetup builds ../dist/index.js before collection, so these cases
+//      run everywhere too.
 //
 // Every case is spend-free: each refusal happens BEFORE any dispatch. The
 // e2e cases' dummy key (ZAI_API_KEY='x') is never used — the credential
@@ -14,8 +12,7 @@
 // ever reached.
 import { spawnSync } from 'node:child_process';
 import type { SpawnSyncReturns } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
@@ -49,6 +46,11 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
     cwd: ROOT,
     encoding: 'utf8',
     env: envFor(keys),
+    // This is a bounded refusal before dispatch, not a provider call. A
+    // shorter structural deadline prevents a wedged child from consuming
+    // Vitest's default five-second lifecycle budget.
+    timeout: 4_000,
+    killSignal: 'SIGKILL',
   });
 }
 
@@ -72,6 +74,7 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
 
   it('selectCells throws the usage message on a missing value and on a no-match', () => {
     expect(() => selectCells(CELLS, ['node', 'x', '--only'])).toThrow('--only requires a value');
+    expect(() => selectCells(CELLS, ['node', 'x', '--only'])).toThrow('valid cells:');
     expect(() => selectCells(CELLS, ['node', 'x', '--only', 'bogus'])).toThrow(
       "no cell matches 'bogus'",
     );
@@ -110,35 +113,24 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
   });
 });
 
-describe.skipIf(!existsSync(join(ROOT, 'dist', 'index.js')))(
-  'demo-eval-axes: the #30 selective credential gate (spawn e2e)',
-  () => {
-    // CI covers the module-level describe above and SKIPS these: the script
-    // imports ../dist/index.js at module top and CI runs tests before build.
+describe('demo-eval-axes: the #30 selective credential gate (spawn e2e)', () => {
+  // The global setup builds ../dist/index.js before collection, making this
+  // real spawn wiring mandatory in local runs and CI alike.
 
-    it('usage guard: --only without a value exits 1 listing the valid cells', () => {
-      const res = runDemo(['--only']);
-      expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-      expect(res.stderr).toContain('valid cells:');
-    });
-
-    it('#30 discriminator: a zai-only selection demands only ZAI_API_KEY, never DEEPSEEK_API_KEY', () => {
-      // No keys in env at all: the OLD unconditional gate listed BOTH key vars
-      // here; the selective gate must name ZAI_API_KEY only (the glm cells
-      // never contact DeepSeek).
-      const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
-      expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-      expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
-      expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
-    });
-
-    it('a selected deepseek cell still demands DEEPSEEK_API_KEY (refusal precedes any dispatch)', () => {
-      // ZAI_API_KEY='x' is never used: the credential gate refuses before
-      // makeDriver — the selected deepseek cells are never constructed, no
-      // network is touched, no paid call is made.
-      const res = runDemo(['--only', 'deepseek-flash'], { ZAI_API_KEY: 'x' });
-      expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
-      expect(res.stderr).toContain('DEEPSEEK_API_KEY');
-    });
-  },
-);
+  // One spawned refusal is the wiring proof (U3): the gate's decision logic
+  // — usage-arg handling and per-provider key demands — is asserted at
+  // module level above; this case proves the real spawned script actually
+  // runs that gate before any dispatch.
+  it('#30 discriminator: a zai-only refusal proves the spawned credential wiring', () => {
+    // No keys in env at all: the OLD unconditional gate listed BOTH key vars
+    // here; the selective gate must name ZAI_API_KEY only (the glm cells
+    // never contact DeepSeek).
+    const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
+    expect(
+      res.status,
+      `${res.stdout}${res.stderr}${res.signal ? `signal=${res.signal}` : ''}`,
+    ).toBe(1);
+    expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
+    expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
+  });
+});

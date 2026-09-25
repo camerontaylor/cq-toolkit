@@ -45,6 +45,7 @@
 //      structured rawOutput folds at the protocol boundary (#49), an
 //      oversized frame fails the connection (#42), relative PATH entries
 //      resolve absolute (#46), and win32 PATHEXT candidates (#40).
+import type { ChildProcess } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
@@ -62,6 +63,8 @@ import type { ExecutableProbe } from '../../src/driver/acp/binaries.js';
 import type { AcpDriverOptions } from '../../src/driver/acp/index.js';
 import { argvForShimSpawn, spawnAcpProcess } from '../../src/driver/acp/process.js';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
+import { fakeAcpSpawn, runFakeTool } from '../helpers/transport-fakes.js';
+import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { mapWireUsage } from '../../src/driver/acp/protocol.js';
@@ -75,33 +78,6 @@ import type { Driver, OpInvocation } from '../../src/driver/types.js';
 // driver's argv template `command` option (shell:false — argv is
 // element-built; the resolved binary rides the spawn seam's command).
 const FAKE_ACP_SERVER = fileURLToPath(new URL('../fixtures/fake-acp-server.mjs', import.meta.url));
-
-// ---------------------------------------------------------------------------
-// Directive → FAKE_ACP_* env (the conformance script contract, scripted
-// into the fixture). The spawn seam injects these per driver instance —
-// process.env is never mutated per-run.
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_ACP_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_ACP_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_ACP_MODE: 'tool-then-reply',
-        FAKE_ACP_TOOL: directive.tool,
-        FAKE_ACP_INPUT: JSON.stringify(directive.input),
-        FAKE_ACP_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: directive.text };
-    case undefined:
-    default:
-      return { FAKE_ACP_MODE: 'ok' };
-  }
-}
 
 /** One recorded spawn call: the exact argv + env the driver handed over. */
 interface SpawnCall {
@@ -141,11 +117,268 @@ function driverOptions(
   };
 }
 
+/** Calls `onInFlight` once the child observably holds the prompt the driver dispatched. */
+type PromptInFlight = (child: ChildProcess, onInFlight: () => void) => void;
+
+/**
+ * A governed deadline that lands MID-PROMPT by construction: a manual clock
+ * whose first rung (the signal) fires only once `inFlight` observes the
+ * prompt on the real child. A wall-clock deadline races the handshake — on
+ * a loaded host it fired before the prompt (the pre-prompt-abort branch,
+ * no session/cancel), so a mid-prompt assertion measured the host, not the
+ * driver. Later rungs never fire: a driver that cannot settle hangs into
+ * the test timeout, the regression signal these tests document.
+ */
+function midPromptDeadline(
+  options: AcpDriverOptions,
+  inFlight: PromptInFlight,
+): { options: AcpDriverOptions; clock: Clock } {
+  let fireSignal: (() => void) | undefined;
+  const clock: Clock = {
+    now: () => 0,
+    setTimeout: (fn) => {
+      fireSignal ??= fn; // only rung 1 is flushable — the later rungs must never fire
+      return { rung: 'signal' };
+    },
+    clearTimeout: () => undefined,
+  };
+  const inner = options.spawn ?? spawnAcpProcess;
+  const spawn: AcpSpawnFn = (opts) => {
+    const child = inner(opts);
+    // setImmediate, not a synchronous fire: this seam attaches its taps
+    // BEFORE the driver's own stdout listener (AcpWire, constructed with no
+    // await after the spawn), so it sees each chunk first. Deferring past
+    // the current I/O callback lets the driver fold the chunk that proves
+    // the prompt is in flight before the abort lands — a deadline firing
+    // on an idle mid-prompt wait, not inside the driver's frame handling.
+    inFlight(child, () => setImmediate(() => fireSignal?.()));
+    return child;
+  };
+  return { options: { ...options, spawn }, clock };
+}
+
+/** The fixture HOLDS the prompt: it emits usage_update only from its session/prompt flows. */
+const fixtureHoldsPrompt: PromptInFlight = (child, onInFlight) => {
+  let seen = '';
+  const tap = (chunk: string): void => {
+    seen += chunk;
+    if (!seen.includes('"usage_update"')) return;
+    child.stdout?.off('data', tap);
+    onInFlight();
+  };
+  child.stdout?.on('data', tap);
+};
+
+/** The stalled-write test's prompt size: large enough to wedge behind any OS pipe buffer. */
+const WEDGED_PROMPT_CHARS = 1024 * 1024;
+
+/**
+ * Backlog that only the wedged prompt can produce. The handshake frames
+ * (initialize, session establishment, the mode pin) total a few KiB, so
+ * even all of them queued at once stay far below this; the pipe buffer
+ * (16–64 KiB) is irrelevant because writableLength counts a chunk in full
+ * until its write callback, and the unread prompt's callback never fires.
+ */
+const WEDGED_PROMPT_BACKLOG = WEDGED_PROMPT_CHARS / 2;
+
+/**
+ * The prompt write is WEDGED: the stalled-stdin fixture never reads the
+ * prompt, so the driver's stdin holds a prompt-scale backlog that never
+ * drains. A state predicate polled until true or the child exits — never
+ * a deadline.
+ */
+const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
+  const poll = (): void => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    if ((child.stdin?.writableLength ?? 0) > WEDGED_PROMPT_BACKLOG) onInFlight();
+    else setTimeout(poll, 10);
+  };
+  poll();
+};
+
+function fakeAcpScript(
+  opts: { cwd: string; env: Record<string, string> },
+  directive: ModelDirective | undefined,
+): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
+  const sessionId = 'fake-acp-transport';
+  const model = opts.env['FAKE_ACP_MODEL'] ?? 'conformance-1';
+  let promptId: number | string | undefined;
+  let pendingPermission:
+    | { id: number; promptId: number | string; tool: string; input: unknown }
+    | undefined;
+  const update = (peer: JsonLinePeer, value: Record<string, unknown>): void => {
+    peer.send({ jsonrpc: '2.0', method: 'session/update', params: { sessionId, update: value } });
+  };
+  const respond = (
+    peer: JsonLinePeer,
+    id: number | string,
+    result: Record<string, unknown>,
+  ): void => {
+    peer.send({ jsonrpc: '2.0', id, result });
+  };
+  return (frame, peer) => {
+    if (
+      frame['id'] !== undefined &&
+      (frame['result'] !== undefined || frame['error'] !== undefined)
+    ) {
+      if (pendingPermission?.id === frame['id']) {
+        const pending = pendingPermission;
+        pendingPermission = undefined;
+        const result = frame['result'] as
+          | { outcome?: { outcome?: string; optionId?: string } }
+          | undefined;
+        if (result?.outcome?.outcome !== 'selected' || result.outcome.optionId !== 'allow_once') {
+          respond(peer, pending.promptId, {
+            stopReason: 'end_turn',
+            usage: { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 3 },
+          });
+          peer.finish();
+          return;
+        }
+        void runFakeTool(opts.cwd, pending.tool, pending.input)
+          .then((outcome) => {
+            update(peer, {
+              sessionUpdate: 'tool_call',
+              toolCallId: 'fake-transport-tool',
+              title: `${pending.tool}: conformance`,
+              kind: pending.tool,
+              status: 'in_progress',
+              content: [],
+              locations: [],
+              rawInput: pending.input,
+            });
+            update(peer, {
+              sessionUpdate: 'tool_call_update',
+              toolCallId: 'fake-transport-tool',
+              status: outcome.ok ? 'completed' : 'failed',
+              content: [{ type: 'text', text: outcome.text }],
+              ...(outcome.ok ? {} : { rawOutput: outcome.text }),
+            });
+            update(peer, {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: directive?.kind === 'tool-then-reply' ? directive.reply : 'done',
+              },
+            });
+            respond(peer, pending.promptId, {
+              stopReason: 'end_turn',
+              usage: {
+                inputTokens: 10,
+                outputTokens: 5,
+                cachedReadTokens: 2,
+                cachedWriteTokens: 3,
+              },
+            });
+            peer.finish();
+          })
+          .catch((error: unknown) => {
+            peer.stderr(`fake tool error: ${String(error)}`);
+            peer.finish(1);
+          });
+      }
+      return;
+    }
+    switch (frame['method']) {
+      case 'initialize':
+        respond(peer, frame['id'] as number, {
+          protocolVersion: 1,
+          agentCapabilities: { loadSession: true },
+        });
+        return;
+      case 'session/new':
+        respond(peer, frame['id'] as number, {
+          sessionId,
+          modes: { currentModeId: 'yolo', availableModes: [{ id: 'build', name: 'Build' }] },
+          configOptions: [],
+        });
+        return;
+      case 'session/load':
+        respond(peer, frame['id'] as number, {
+          sessionId:
+            (frame['params'] as { sessionId?: string } | undefined)?.sessionId ?? sessionId,
+          modes: { currentModeId: 'build' },
+        });
+        return;
+      case 'session/set_config_option':
+        update(peer, {
+          sessionUpdate: 'config_option_update',
+          configOptions: [
+            { id: 'model', category: 'model', type: 'select', currentValue: model, options: [] },
+          ],
+        });
+        respond(peer, frame['id'] as number, { modes: { currentModeId: 'build' } });
+        return;
+      case 'session/prompt':
+        promptId = frame['id'] as number;
+        if (directive?.kind === 'block-until-abort') return;
+        if (directive?.kind === 'fail') {
+          peer.stderr('simulated hard failure');
+          peer.finish(1);
+          return;
+        }
+        if (directive?.kind === 'tool-then-reply') {
+          const requestId = 100;
+          pendingPermission = {
+            id: requestId,
+            promptId,
+            tool: directive.tool,
+            input: directive.input,
+          };
+          peer.send({
+            jsonrpc: '2.0',
+            id: requestId,
+            method: 'session/request_permission',
+            params: {
+              sessionId,
+              toolCall: {
+                toolCallId: 'fake-transport-tool',
+                title: `${directive.tool}: conformance`,
+                content: [],
+                locations: [],
+                rawInput: directive.input,
+              },
+              options: [
+                { optionId: 'allow_once', name: 'Allow once', kind: 'allow_once' },
+                { optionId: 'reject_once', name: 'Reject once', kind: 'reject_once' },
+              ],
+            },
+          });
+          return;
+        }
+        update(peer, {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: directive?.kind === 'reply' ? directive.text : 'ok' },
+        });
+        respond(peer, promptId, {
+          stopReason: 'end_turn',
+          usage: { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 3 },
+        });
+        peer.finish();
+        return;
+      case 'session/cancel':
+        if (promptId !== undefined) {
+          respond(peer, promptId, { stopReason: 'cancelled', usage: null });
+          promptId = undefined;
+        }
+        return;
+      default:
+        if (frame['id'] !== undefined) {
+          peer.send({
+            jsonrpc: '2.0',
+            id: frame['id'],
+            error: { code: -32601, message: 'fake transport method not found' },
+          });
+        }
+    }
+  };
+}
+
 /** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
-  const calls: SpawnCall[] = [];
   return new AcpDriver({
-    ...driverOptions(spec.scratchDir, directiveEnv(spec.directive), calls),
+    ...driverOptions(spec.scratchDir, {}, []),
+    spawn: fakeAcpSpawn((opts) => fakeAcpScript(opts, spec.directive)),
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance
     // suite can assert a derived costUSD; everything else stays unpriced.
@@ -902,7 +1135,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       const narration = await narrationOf(store, result.sessionId as string);
       expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(false);
     });
-  });
+    // Real OS pipe/flush contract: the split frame crosses process stdout
+    // writes, so this is intentionally given a structural process budget.
+  }, 15_000);
 
   test('an oversized frame fails the CONNECTION (#42): error verdict naming the frame — never silent truncation', async () => {
     await withScratch(async (scratchDir, store) => {
@@ -1013,7 +1248,9 @@ describe('acp driver specifics (fake ACP server)', () => {
       ).toBe(true);
       expect((await readFile(join(workspace, ACP_SESSION_FILE), 'utf8')).trim()).toBe(acpId);
     });
-  });
+    // Real initialize → session/new → session/load and sidecar filesystem
+    // contract; keep enough budget for the child process and two runs.
+  }, 15_000);
 
   test('resume gate rung 2: unstable_resumeSession when only sessionCapabilities.resume is advertised — the recorded handle resumes (strategy §6)', async () => {
     await withScratch(async (scratchDir, store) => {
@@ -1229,25 +1466,28 @@ describe('acp driver specifics (fake ACP server)', () => {
   test('cancel maps to aborted: the governed signal settles via session/cancel + the cancelled response (§2.3)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];
-      const driver = new AcpDriver({
-        ...driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
-        termGraceMs: 500,
-        killGraceMs: 500,
-      });
-      // wallClockMs lands MID-PROMPT (after the handshake): the governed
-      // signal fires → session/cancel → the cancelled prompt response
-      // (usage null) settles the run.
+      const { options, clock } = midPromptDeadline(
+        driverOptions(scratchDir, { FAKE_ACP_MODE: 'block-until-abort' }, calls),
+        fixtureHoldsPrompt,
+      );
+      const driver = new AcpDriver({ ...options, termGraceMs: 500, killGraceMs: 500 });
+      // The deadline lands MID-PROMPT (the fixture holds the prompt): the
+      // governed signal fires → session/cancel → the cancelled prompt
+      // response (usage null) settles the run.
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'cancel run' })),
-        { wallClockMs: 1000 },
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-cancel', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // usage: null — unmeasured
       expect(outcome.value.costUSD).toBeUndefined(); // never a cost on an unmeasured verdict
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
     });
   }, 20_000);
@@ -1260,25 +1500,28 @@ describe('acp driver specifics (fake ACP server)', () => {
       // child → the pending prompt rejects on the wire's exit path → the
       // run settles 'aborted'. Without the mid-prompt kill rung (Codex P1)
       // THIS test hangs into its timeout.
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const { options, clock } = midPromptDeadline(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_IGNORE_CANCEL: '1' },
           [],
         ),
-        termGraceMs: 300,
-        killGraceMs: 300,
-      });
+        fixtureHoldsPrompt,
+      );
+      const driver = new AcpDriver({ ...options, termGraceMs: 300, killGraceMs: 300 });
       const outcome = await runLadder(
         () => driver.run(invocation({ prompt: 'ignore-cancel run' })),
-        { wallClockMs: 1000 },
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-ignore-cancel', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       // The courtesy write landed BEFORE the ladder fired (the settled-write
       // ordering), then the kill settled the run.
       expect(narration.some((line) => line.includes('"cancel-sent"'))).toBe(true);
@@ -1356,26 +1599,33 @@ describe('acp driver specifics (fake ACP server)', () => {
       // (THIS test times out on that regression). The fixed driver races
       // the write against cancelWriteGraceMs and runs the ladder
       // regardless of which wins.
-      const driver = new AcpDriver({
-        ...driverOptions(
+      const { options, clock } = midPromptDeadline(
+        driverOptions(
           scratchDir,
           { FAKE_ACP_MODE: 'block-until-abort', FAKE_ACP_STOP_READ_BEFORE_PROMPT: '1' },
           [],
         ),
+        promptWriteWedged,
+      );
+      const driver = new AcpDriver({
+        ...options,
         termGraceMs: 300,
         killGraceMs: 300,
         cancelWriteGraceMs: 100,
       });
       const outcome = await runLadder(
-        () => driver.run(invocation({ prompt: 'x'.repeat(1024 * 1024) })),
-        { wallClockMs: 1000 },
+        () => driver.run(invocation({ prompt: 'x'.repeat(WEDGED_PROMPT_CHARS) })),
+        { wallClockMs: 60_000 }, // nominal — the manual clock owns when it fires
         { op: 'acp', jobKey: 'acp-stalled-cancel-write', attempt: 1 },
+        { clock },
       );
       expect(outcome.outcome).toBe('completed');
       if (outcome.outcome !== 'completed') return;
+      expect(outcome.markers.some((marker) => marker.rung === 'signal')).toBe(true); // the deadline really fired
       expect(outcome.value.stopReason).toBe('aborted');
       expect(outcome.value.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // unmeasured — the turn never settled protocol-side
       const narration = await narrationOf(store, outcome.value.sessionId as string);
+      expect(narration.some((line) => line.includes('"pre-prompt-abort"'))).toBe(false); // the abort landed mid-prompt
       // The grace won the race: the record says the vendor never consumed
       // the cancel before the SIGTERM — and the kill happened anyway.
       expect(narration.some((line) => line.includes('"cancel-write-stalled"'))).toBe(true);

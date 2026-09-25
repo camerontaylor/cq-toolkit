@@ -112,29 +112,36 @@ function bodyLines(b: string): string[] {
   return b.split('\n').filter((l) => l !== '');
 }
 
-function gitAvailable(): boolean {
-  return spawnSync('git', ['--version']).status === 0;
-}
-
 /**
- * Feed the guard LITERAL git output: a real temp repo, `before` committed
- * (its absence = added-file lifecycle), `after` staged (its absence =
- * deleted-file lifecycle), and `git diff --cached` returned verbatim.
- * Identity configs ride on the commit as -c flags — one spawn per git
- * verb keeps the sandboxed-spawn overhead well inside the test timeout.
+ * Build one real staged diff containing all five baseline cases. The
+ * section keys are stable fixture names so the single `git diff --cached`
+ * can be split without committing any canned output.
  */
-async function realGitDiff(before: string | null, after: string | null): Promise<string> {
+async function realGitDiffCases(): Promise<Record<string, string>> {
   const ws = await mkdtemp(join(tmpdir(), 'cq-gitdiff-'));
+  const run = (args: string[]): void => {
+    const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8' });
+    if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${String(r.stderr)}`);
+  };
+  const cases: Record<string, { before: string | null; after: string | null }> = {
+    tighten: { before: body('lower-is-better', 3), after: body('lower-is-better', 2) },
+    loosen: { before: body('lower-is-better', 2), after: body('lower-is-better', 3) },
+    'clock-only': {
+      before: body('lower-is-better', 2),
+      after: body('lower-is-better', 2, { capturedAt: '2026-09-15T01:00:00.000Z' }),
+    },
+    added: { before: null, after: body('lower-is-better', 3) },
+    deleted: { before: body('lower-is-better', 3), after: null },
+  };
   try {
-    const run = (args: string[]): void => {
-      const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8' });
-      if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${String(r.stderr)}`);
-    };
     run(['init', '-q']);
     await mkdir(join(ws, 'baselines'), { recursive: true });
     await writeFile(join(ws, 'README.md'), 'seed commit\n', 'utf8');
-    const abs = join(ws, REL);
-    if (before !== null) await writeFile(abs, before, 'utf8');
+    for (const [name, fixture] of Object.entries(cases)) {
+      if (fixture.before !== null) {
+        await writeFile(join(ws, 'baselines', `${name}.json`), fixture.before, 'utf8');
+      }
+    }
     run(['add', '-A']);
     run([
       '-c',
@@ -148,12 +155,27 @@ async function realGitDiff(before: string | null, after: string | null): Promise
       '-m',
       'base',
     ]);
-    if (after === null) await rm(abs, { force: true });
-    else await writeFile(abs, after, 'utf8');
+    for (const [name, fixture] of Object.entries(cases)) {
+      const path = join(ws, 'baselines', `${name}.json`);
+      if (fixture.after === null) await rm(path, { force: true });
+      else await writeFile(path, fixture.after, 'utf8');
+    }
     run(['add', '-A']);
-    const d = spawnSync('git', ['diff', '--cached'], { cwd: ws, encoding: 'utf8' });
-    if (d.status !== 0 || typeof d.stdout !== 'string') throw new Error('git diff failed');
-    return d.stdout;
+    const diff = spawnSync(
+      'git',
+      ['-c', 'diff.renames=false', '-c', 'diff.noprefix=false', 'diff', '--cached'],
+      {
+        cwd: ws,
+        encoding: 'utf8',
+      },
+    );
+    if (diff.status !== 0 || typeof diff.stdout !== 'string') throw new Error('git diff failed');
+    const sections: Record<string, string> = {};
+    for (const section of diff.stdout.split(/(?=^diff --git )/m)) {
+      const match = /^diff --git \S+\/baselines\/(.+?)\.json /.exec(section);
+      if (match?.[1] !== undefined) sections[match[1]] = section;
+    }
+    return sections;
   } finally {
     await rm(ws, { recursive: true, force: true });
   }
@@ -1029,71 +1051,86 @@ describe('checkDiffMonotonicity', () => {
   });
 });
 
-const gitDescribe = gitAvailable() ? describe : describe.skip;
-gitDescribe('real git diff fixtures (literal git output from a temp repo)', () => {
-  test('a real tighten diff passes', { timeout: 20_000 }, async () => {
-    const diff = await realGitDiff(body('lower-is-better', 3), body('lower-is-better', 2));
-    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
-  });
-
-  test('a real loosen diff fails naming path + metric + values', { timeout: 20_000 }, async () => {
-    const diff = await realGitDiff(body('lower-is-better', 2), body('lower-is-better', 3));
-    expect(checkDiffMonotonicity(diff)).toEqual({
-      ok: false,
-      violations: [
-        { path: REL, target: TARGET, metric: METRIC, oldValue: 2, newValue: 3, why: 'loosened' },
-      ],
-      filesChecked: 1,
-    });
-  });
-
-  test('a noprefix DELETED baseline is attributed via the header fallback (floor-halved pair) and skipped', () => {
-    // RED before the round-3 fix: the identical `X X` header pair is always
-    // ODD-length, so the old %2===0 gate was dead code and the b-side path
-    // was never recovered — the section fail-closed on its minus lines.
-    // Now the path is recovered and the header-only `deleted file mode`
-    // lifecycle metadata skips the section.
-    const diff = [
-      `diff --git ${REL} ${REL}`,
-      'deleted file mode 100644',
-      'index 1111111..0000000',
-      `--- ${REL}`,
-      '+++ /dev/null',
-      '@@ -1,7 +0,0 @@',
-      ...bodyLines(body('lower-is-better', 3)).map((l) => `-${l}`),
-    ].join('\n');
-    expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
-  });
-
+describe('real git diff fixtures (literal git output from one temp repo)', () => {
   test(
-    'a real added-baseline diff is skipped via its metadata markers',
+    'all five real baseline cases stay live in one staged diff',
     { timeout: 20_000 },
     async () => {
-      const diff = await realGitDiff(null, body('lower-is-better', 3));
-      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
-    },
-  );
+      const sections = await realGitDiffCases();
+      expect(Object.keys(sections).sort()).toEqual([
+        'added',
+        'clock-only',
+        'deleted',
+        'loosen',
+        'tighten',
+      ]);
 
-  test(
-    'a real deleted-baseline diff is skipped via its metadata markers',
-    { timeout: 20_000 },
-    async () => {
-      const diff = await realGitDiff(body('lower-is-better', 3), null);
-      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
-    },
-  );
+      expect(checkDiffMonotonicity(sections.tighten ?? '')).toEqual({
+        ok: true,
+        violations: [],
+        filesChecked: 1,
+      });
+      expect(checkDiffMonotonicity(sections.loosen ?? '')).toEqual({
+        ok: false,
+        violations: [
+          {
+            path: 'baselines/loosen.json',
+            target: TARGET,
+            metric: METRIC,
+            oldValue: 2,
+            newValue: 3,
+            why: 'loosened',
+          },
+        ],
+        filesChecked: 1,
+      });
+      expect(checkDiffMonotonicity(sections['clock-only'] ?? '')).toEqual({
+        ok: true,
+        violations: [],
+        filesChecked: 1,
+      });
+      expect(checkDiffMonotonicity(sections.added ?? '')).toEqual({
+        ok: true,
+        violations: [],
+        filesChecked: 1,
+      });
+      expect(checkDiffMonotonicity(sections.deleted ?? '')).toEqual({
+        ok: true,
+        violations: [],
+        filesChecked: 1,
+      });
 
-  test(
-    'a real clock-only re-capture diff is skipped silently (value unmoved in context)',
-    { timeout: 20_000 },
-    async () => {
-      const diff = await realGitDiff(
-        body('lower-is-better', 2),
-        body('lower-is-better', 2, { capturedAt: '2026-09-15T01:00:00.000Z' }),
-      );
-      expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
+      // The whole literal diff is also judged once, proving the five real
+      // sections coexist rather than being independent hand-built strings.
+      expect(checkDiffMonotonicity(Object.values(sections).join(''))).toEqual({
+        ok: false,
+        violations: [
+          {
+            path: 'baselines/loosen.json',
+            target: TARGET,
+            metric: METRIC,
+            oldValue: 2,
+            newValue: 3,
+            why: 'loosened',
+          },
+        ],
+        filesChecked: 5,
+      });
     },
   );
+});
+
+test('a noprefix DELETED baseline is attributed via the header fallback and skipped', () => {
+  const diff = [
+    `diff --git ${REL} ${REL}`,
+    'deleted file mode 100644',
+    'index 1111111..0000000',
+    `--- ${REL}`,
+    '+++ /dev/null',
+    '@@ -1,7 +0,0 @@',
+    ...bodyLines(body('lower-is-better', 3)).map((l) => `-${l}`),
+  ].join('\n');
+  expect(checkDiffMonotonicity(diff)).toEqual({ ok: true, violations: [], filesChecked: 1 });
 });
 
 describe('formatViolations', () => {

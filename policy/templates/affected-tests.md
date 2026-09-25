@@ -1,8 +1,9 @@
 # The affected-tests pattern
 
 Pattern: available for instantiation from phase 1; this repo currently runs
-the full suite everywhere (the suite is seconds-sized, so selection buys
-nothing yet).
+the full suite everywhere as the merge-queue safety net. The measured suite
+is minutes-sized on the recorded host, so affected-test selection is useful
+as an advisory developer optimization.
 
 ## The idea
 
