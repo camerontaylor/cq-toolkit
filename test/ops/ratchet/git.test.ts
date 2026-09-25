@@ -203,6 +203,30 @@ describe('extractTreeAttributeFree', { timeout: 30_000 }, () => {
     expect(readdirSync(dest)).toContain('src');
   });
 
+  test('refuses a file or symlink as the extraction destination', async () => {
+    const file = join(tmp, 'extract-file');
+    writeFileSync(file, 'leave me alone');
+    await expect(extractTreeAttributeFree(repo, first, file)).rejects.toThrow(/not a directory/);
+    expect(readFileSync(file, 'utf8')).toBe('leave me alone');
+
+    const link = join(tmp, 'extract-link');
+    symlinkSync(file, link);
+    await expect(extractTreeAttributeFree(repo, first, link)).rejects.toThrow(/not a directory/);
+    expect(readFileSync(file, 'utf8')).toBe('leave me alone');
+  });
+
+  test('an empty commit extracts zero files without spawning cat-file', async () => {
+    const emptyRepo = join(tmp, 'empty-repo');
+    initRepo(emptyRepo);
+    git(emptyRepo, ['commit', '--allow-empty', '-q', '-m', 'empty']);
+    const dest = join(tmp, 'extract-empty-tree');
+    expect(await extractTreeAttributeFree(emptyRepo, 'HEAD', dest)).toEqual({
+      files: 0,
+      skipped: [],
+    });
+    expect(readdirSync(dest)).toEqual([]);
+  });
+
   test('refuses tracked node_modules at any depth before extracting files', async () => {
     const dependencyRepo = join(tmp, 'tracked-dependency-repo');
     initRepo(dependencyRepo);
@@ -322,5 +346,117 @@ describe('reads', { timeout: 30_000 }, () => {
     expect(await gitDiffText(repo, first, second, [':(glob)src/**'])).toBe('');
     const all = await gitDiffText(repo, first, second, []);
     expect(all).toContain('b/src/new.ts');
+  });
+
+  test.each(['', 'src/a\0b.ts'])('gitDiffText refuses an invalid pathspec %j', async (spec) => {
+    await expect(gitDiffText(repo, first, second, [spec])).rejects.toThrow(
+      /refusing empty or NUL-bearing pathspec/,
+    );
+  });
+});
+
+describe('malformed Git plumbing fails closed', { timeout: 30_000 }, () => {
+  let shimDir: string;
+
+  beforeAll(() => {
+    shimDir = join(tmp, 'fake-git');
+    mkdirSync(shimDir);
+    const shim = join(shimDir, 'git');
+    writeFileSync(
+      shim,
+      [
+        '#!/usr/bin/env node',
+        "const oid = '" + missingOid + "';",
+        'const args = process.argv.slice(2);',
+        'const scenario = process.env.CQ_FAKE_GIT_CASE;',
+        'const tab = String.fromCharCode(9);',
+        'const nl = String.fromCharCode(10);',
+        'const nul = String.fromCharCode(0);',
+        "if (args.includes('rev-parse')) { process.stdout.write(oid + nl); process.exit(0); }",
+        "if (args.includes('ls-tree')) {",
+        "  let out = Buffer.from('100644 blob ' + oid + tab + 'x.ts' + nul);",
+        "  if (scenario === 'ls-no-tab') out = Buffer.from('100644 blob ' + oid + nul);",
+        "  if (scenario === 'ls-bad-utf8') out = Buffer.concat([Buffer.from('100644 blob ' + oid + tab), Buffer.from([255, 0])]);",
+        "  if (scenario === 'ls-bad-meta') out = Buffer.from('100644 blob' + tab + 'x.ts' + nul);",
+        "  if (scenario === 'ls-bad-oid') out = Buffer.from('100644 blob not-an-oid' + tab + 'x.ts' + nul);",
+        "  if (scenario === 'ls-no-terminator') out = Buffer.from('100644 blob ' + oid + tab + 'x.ts');",
+        "  if (scenario === 'ls-empty-record') out = Buffer.from(nul + '100644 blob ' + oid + tab + 'x.ts' + nul);",
+        "  if (scenario === 'ls-tree-entry') out = Buffer.from('040000 tree ' + oid + tab + 'x' + nul);",
+        "  if (scenario === 'empty-tree') out = Buffer.alloc(0);",
+        '  process.stdout.write(out); process.exit(0);',
+        '}',
+        "if (args.includes('cat-file') && args.includes('--batch')) {",
+        "  process.stdin.on('end', () => {",
+        "    let out = oid + ' blob 1' + nl + 'x' + nl;",
+        "    if (scenario === 'batch-bad-header') out = 'garbage' + nl;",
+        "    if (scenario === 'batch-no-newline') out = 'garbage';",
+        "    if (scenario === 'batch-short-body') out = oid + ' blob 3' + nl + 'x' + nl;",
+        "    if (scenario === 'batch-trailing') out += 'extra';",
+        "    if (scenario === 'batch-exit-error') { process.stderr.write('deliberate failure'); process.exit(2); }",
+        '    process.stdout.write(out);',
+        '  });',
+        '  process.stdin.resume();',
+        "} else { process.stderr.write('unexpected git invocation'); process.exit(2); }",
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    chmodSync(shim, 0o755);
+  });
+
+  async function withFakeGit(scenario: string, call: () => Promise<unknown>): Promise<void> {
+    const savedPath = process.env['PATH'];
+    process.env['PATH'] = shimDir + ':' + (savedPath ?? '');
+    process.env['CQ_FAKE_GIT_CASE'] = scenario;
+    try {
+      await call();
+    } finally {
+      process.env['PATH'] = savedPath;
+      delete process.env['CQ_FAKE_GIT_CASE'];
+    }
+  }
+
+  test.each([
+    ['ls-no-tab', /malformed ls-tree record/],
+    ['ls-bad-utf8', /non-UTF-8 path/],
+    ['ls-bad-meta', /malformed ls-tree record/],
+    ['ls-bad-oid', /malformed ls-tree oid/],
+  ])('rejects %s', async (scenario, error) => {
+    await withFakeGit(scenario, async () => {
+      await expect(gitReadBlob(repo, first, 'x.ts')).rejects.toThrow(error);
+    });
+  });
+
+  test.each(['ls-no-terminator', 'ls-empty-record'])('accepts %s', async (scenario) => {
+    await withFakeGit(scenario, async () => {
+      const dest = join(tmp, scenario);
+      expect(await extractTreeAttributeFree(repo, first, dest)).toEqual({
+        files: 1,
+        skipped: [],
+      });
+      expect(readFileSync(join(dest, 'x.ts'), 'utf8')).toBe('x');
+    });
+  });
+
+  test('rejects a tree entry where a regular blob is required', async () => {
+    await withFakeGit('ls-tree-entry', async () => {
+      await expect(
+        extractTreeAttributeFree(repo, first, join(tmp, 'ls-tree-entry')),
+      ).rejects.toThrow(/unexpected tree entry/);
+    });
+  });
+
+  test.each([
+    ['batch-no-newline', /truncated cat-file --batch header/],
+    ['batch-bad-header', /unexpected cat-file --batch header/],
+    ['batch-short-body', /truncated cat-file --batch body/],
+    ['batch-trailing', /trailing cat-file --batch output/],
+    ['batch-exit-error', /cat-file --batch failed: deliberate failure/],
+  ])('rejects %s', async (scenario, error) => {
+    await withFakeGit(scenario, async () => {
+      await expect(extractTreeAttributeFree(repo, first, join(tmp, scenario))).rejects.toThrow(
+        error,
+      );
+    });
   });
 });

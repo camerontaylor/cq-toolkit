@@ -185,6 +185,23 @@ describe('makeMetricSource', () => {
     expect(none.cwds).toEqual(['/ws']);
   });
 
+  test('command passes an explicit timeout to the injected runner', async () => {
+    let timeoutMs: number | undefined;
+    const run: RunCheck = async (command) => {
+      timeoutMs = command.timeoutMs;
+      return { stdout: 'ok', stderr: '', exitCode: 0 };
+    };
+    const source = makeMetricSource(run, {
+      kind: 'command',
+      command: 'x',
+      args: [],
+      timeoutMs: 321,
+      parse: 'text',
+    });
+    await expect(source('/ws')).resolves.toBe('ok');
+    expect(timeoutMs).toBe(321);
+  });
+
   test('command with a null exit (timeout/signal/spawn fault) is null for every parse mode', async () => {
     for (const parse of ['text', 'json', 'coverage-json'] as const) {
       const source = makeMetricSource(runnerOf({ stdout: 'partial', stderr: '', exitCode: null }), {
@@ -315,5 +332,35 @@ describe('makeMetricSource', () => {
       parse: 'coverage-json',
     });
     await expect(weird(ws)).resolves.toBe('not an object');
+  });
+
+  test('file coverage-json preserves malformed nested shapes for adapter rejection', async () => {
+    const ws = await makeTmpDir();
+    for (const [name, parsed] of [
+      ['no-total.json', { total: null }],
+      ['no-lines.json', { total: { lines: null } }],
+    ] as const) {
+      await writeFile(join(ws, name), JSON.stringify(parsed), 'utf8');
+      const source = makeMetricSource(runnerOf({ stdout: '', stderr: '', exitCode: 0 }), {
+        kind: 'file',
+        path: name,
+        parse: 'coverage-json',
+      });
+      const reading = await source(ws);
+      expect(reading).toEqual(parsed);
+      expect(coverage.extract(reading)).toBeNull();
+    }
+  });
+
+  test('file accepts an absolute text path outside the workspace', async () => {
+    const location = await makeTmpDir();
+    const path = join(location, 'metric.txt');
+    await writeFile(path, 'measured', 'utf8');
+    const source = makeMetricSource(runnerOf({ stdout: '', stderr: '', exitCode: 0 }), {
+      kind: 'file',
+      path,
+      parse: 'text',
+    });
+    await expect(source('/different-workspace')).resolves.toBe('measured');
   });
 });
