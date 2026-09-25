@@ -174,14 +174,16 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(resolveJob).toContain('.github/workflows/cq-measure.yml');
       expect(resolveJob).toContain('head_repository.id');
       expect(resolveJob).toContain('/commits/${subject}/pulls');
-      // Dispatch is honoured only on the default ref (D-A.1).
+      // Dispatch is honoured only on the default ref (D-A.1). Whitespace is
+      // tolerant: no line in the workflow exceeds 80 columns, so this
+      // expression is folded across continuation lines.
       expect(resolveJob).toMatch(
-        /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/,
+        /github\.ref ==\s*format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/,
       );
       // A head with open PRs into both branches must be judged against the
       // merge-queue target, regardless of API array order.
-      expect(resolveJob).toContain(
-        'if index(\\"merge-queue\\") then \\"merge-queue\\" elif index(\\"main\\") then \\"main\\" else empty end',
+      expect(resolveJob).toMatch(
+        /if index\(\\"merge-queue\\"\) then \\"merge-queue\\"\s*elif index\(\\"main\\"\) then \\"main\\"\s*else empty end/,
       );
       const fetch = jobs.get('fetch') ?? '';
       expect(fetch).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
@@ -202,13 +204,31 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(compute).toContain('recompute emitted malformed JSON');
       const judge = jobs.get('judge') ?? '';
       expect(judge).toContain('ratchet.verifyRatchet');
-      expect(judge).toContain('persist-credentials: true');
       expect(judge).toContain('name: "cq/ratchet"');
       expect(judge).toContain('external_id: $ext');
       // A verifier crash or malformed output still produces a failing check.
       expect(judge).toContain('verifier emitted no valid JSON result');
       expect(judge).toMatch(/if ! jq -e -s[\s\S]*verdict\.json/);
       expect(judge).not.toMatch(/ratchet\.recomputeTypecheck|tsc/);
+      // F5: judge holds `checks: write` and nothing else, never checks out
+      // with a persisted credential, and never unpacks a HEAD-AUTHORED
+      // artifact — the measurement arrives as validated numbers.
+      expect(judge).toMatch(/^ {4}permissions:\n {6}checks: write$/m);
+      expect(judge).not.toMatch(/actions\/checkout@|persist-credentials/);
+      // No cross-run download of the head-authored measurement in judge…
+      expect(judge).not.toMatch(/run-id:|name: cq-measure/);
+      // …it consumes the bundle, and the numbers the measurement job vetted.
+      expect(judge).toContain('name: cq-verify-source');
+      expect(judge).toContain('${{ needs.measurement.outputs.json }}');
+      // Its one token use is posting the verdict itself.
+      expect(judge).toMatch(/GH_TOKEN: \$\{\{ github\.token \}\}/);
+      // …and the job that DOES unpack the artifact has no write scope.
+      const measurement = jobs.get('measurement') ?? '';
+      expect(measurement).toMatch(/^ {4}permissions:\n {6}actions: read$/m);
+      expect(measurement).toContain('actions/download-artifact@');
+      expect(measurement).toContain('name: cq-measure');
+      expect(measurement).toMatch(/run-id: \$\{\{ needs\.resolve\.outputs\.run_id \}\}/);
+      expect(measurement).not.toMatch(/checks: write|contents: write|secrets\./);
       expect(body).not.toMatch(/secrets\./);
     },
   );
@@ -218,12 +238,24 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
     { timeout: 30_000 },
     (_label, text) => {
       const resolveJob = jobBlocks(code(text)).get('resolve') ?? '';
-      const line = resolveJob.split('\n').find((candidate) => candidate.includes('--jq "'));
-      const filter = /--jq "(.*)"\)/
-        .exec(line ?? '')?.[1]
-        ?.replaceAll('\\"', '"')
-        .replaceAll('${subject}', '0123456789abcdef0123456789abcdef01234567')
-        .replaceAll('${REPO_ID}', '42');
+      // The jq filter is reflowed across shell continuation lines (no line
+      // in the workflow exceeds 80 columns). It runs from the `--jq "`
+      // opening quote to the `")"` that closes the argument, the `$(` and
+      // the outer quote; the continuation lines are rejoined into the
+      // one-line program the shell actually passes to jq.
+      const at = resolveJob.indexOf('--jq "');
+      const close = resolveJob.indexOf('")"', at);
+      const filter =
+        at === -1 || close === -1
+          ? undefined
+          : resolveJob
+              .slice(at + '--jq "'.length, close)
+              .split('\n')
+              .map((line) => line.trim())
+              .join(' ')
+              .replaceAll('\\"', '"')
+              .replaceAll('${subject}', '0123456789abcdef0123456789abcdef01234567')
+              .replaceAll('${REPO_ID}', '42');
       expect(filter).toBeDefined();
       const pull = (base: string) => ({
         state: 'open',

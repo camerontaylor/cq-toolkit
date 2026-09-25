@@ -78,7 +78,9 @@ export const MeasurementSchema = z
     schemaVersion: z.literal(1),
     metrics: z
       .record(z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/), z.number().finite())
-      .refine((m) => Object.keys(m).length <= 16, { message: 'too many metrics' }),
+      .refine((m) => Object.keys(m).length <= 16, {
+        message: 'too many metrics',
+      }),
   })
   .strict();
 
@@ -146,7 +148,9 @@ async function readMeasurement(
     const stat = await lstat(path);
     if (stat.isFile() === false) return { reason: 'measurement artifact is not a regular file' };
     if (stat.size > MEASUREMENT_MAX_BYTES) {
-      return { reason: `measurement artifact exceeds ${MEASUREMENT_MAX_BYTES} bytes` };
+      return {
+        reason: `measurement artifact exceeds ${MEASUREMENT_MAX_BYTES} bytes`,
+      };
     }
     text = await readFile(path, 'utf8');
   } catch (err) {
@@ -177,17 +181,23 @@ function evidenceValue(
 ): number | { reason: string } {
   if (def.evidence === 'recompute') {
     if (def.metric !== 'typecheck-count') {
-      return { reason: `no trusted recompute exists for metric '${def.metric}'` };
+      return {
+        reason: `no trusted recompute exists for metric '${def.metric}'`,
+      };
     }
     const count = input.typecheckCount;
     if (count === undefined) return { reason: 'the trusted typecheck recompute produced no count' };
     if (!Number.isSafeInteger(count) || count < 0) {
-      return { reason: `the typecheck recompute count ${count} is not a non-negative integer` };
+      return {
+        reason: `the typecheck recompute count ${count} is not a non-negative integer`,
+      };
     }
     return count;
   }
   if (input.measureConclusion !== 'success') {
-    return { reason: `the measurement run concluded '${input.measureConclusion}'` };
+    return {
+      reason: `the measurement run concluded '${input.measureConclusion}'`,
+    };
   }
   if ('reason' in measured) return measured;
   const value = measured.metrics[def.metric];
@@ -268,12 +278,24 @@ async function judgeRatchet(
   });
   const trustRead = await readCanonicalBaseline(input.repo, trust, path, def, 'the trust ref');
   if ('reason' in trustRead) return fail(trustRead.reason);
-  const subjectRead = await readCanonicalBaseline(input.repo, input.subject, path, def, 'the subject');
+  const subjectRead = await readCanonicalBaseline(
+    input.repo,
+    input.subject,
+    path,
+    def,
+    'the subject',
+  );
   if ('reason' in subjectRead) return fail(subjectRead.reason);
   const trustValue = trustRead.value;
   const raw = evidenceValue(def, input, measured);
   if (typeof raw !== 'number') {
-    return { ...base, baseline: trustValue, value: null, verdict: 'fail', reason: raw.reason };
+    return {
+      ...base,
+      baseline: trustValue,
+      value: null,
+      verdict: 'fail',
+      reason: raw.reason,
+    };
   }
   // One decimal place on BOTH sides for coverage (the shared granularity
   // law); every other metric compares at full precision.

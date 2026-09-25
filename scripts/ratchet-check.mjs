@@ -137,7 +137,12 @@ if (covRun.error || covRun.status !== 0) {
     new Map([['summary', async () => covRun.summary]]),
   );
   const covOutcome = (
-    await checkCoverage({ ws: ROOT, target: 'coverage', metric: 'coverage', sourceId: 'summary' })
+    await checkCoverage({
+      ws: ROOT,
+      target: 'coverage',
+      metric: 'coverage',
+      sourceId: 'summary',
+    })
   ).value;
   if (covOutcome.verdict === 'pass') {
     console.error(
@@ -172,14 +177,7 @@ if (base !== null) {
   const { GIT_HARDEN, HARDENED_DIFF_FLAGS } = engine;
   const diff = spawnSync(
     'git',
-    [
-      ...GIT_HARDEN,
-      'diff',
-      ...HARDENED_DIFF_FLAGS,
-      `${base}...HEAD`,
-      '--',
-      'baselines/',
-    ],
+    [...GIT_HARDEN, 'diff', ...HARDENED_DIFF_FLAGS, `${base}...HEAD`, '--', 'baselines/'],
     {
       cwd: ROOT,
       encoding: 'utf8',

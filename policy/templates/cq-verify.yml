@@ -19,14 +19,22 @@
 #     id — fork runs are refused) and resolves the subject from `head_sha`,
 #     never `head_branch`; a PR subject's base comes from the commit→PR API.
 #   - `fetch` has read-only repository access and transfers the trust and
-#     subject git objects as a bundle without executing head code. This
-#     keeps private repositories usable without a token in `compute`.
+#     subject git objects — and the base ref, so the merge-base that starts
+#     the judged range travels with them — as a bundle, without executing
+#     head code. This keeps private repositories usable without a token in
+#     `compute`, `measurement` or `judge`.
 #   - `compute` recomputes typecheck-count with the TRUST-REF toolchain over
 #     the extracted head tree. It runs `tsc` over head content, so it holds
 #     NOTHING: `permissions: {}`, no secrets, no environment. Its only output
 #     is a number.
-#   - `judge` runs the trusted verifier over git objects + the artifact and
-#     posts the `cq/ratchet` check run. It runs no head code.
+#   - `measurement` downloads the HEAD-AUTHORED measurement artifact and
+#     re-validates it in a job that holds no write scope and no secrets;
+#     only a numbers-only JSON crosses to `judge`, which therefore never
+#     unpacks a single byte the head authored (F5).
+#   - `judge` runs the trusted verifier over git objects + those numbers and
+#     posts the `cq/ratchet` check run. It runs no head code, holds
+#     `checks: write` only, and checks the trust ref out of the bundle with
+#     no persisted credential.
 #
 # INTERIM IDENTITY (until W1.10): the verdict is posted with this job's
 # GITHUB_TOKEN (`checks: write`). ADR-0004 D-F: such a check run is not yet a
@@ -62,7 +70,8 @@ jobs:
     # dispatch on any other ref would run that ref's copy of this file.
     if: >-
       github.event_name == 'workflow_run' ||
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -84,7 +93,11 @@ jobs:
           RUN_ID: ${{ github.event.workflow_run.id || inputs.measure_run_id }}
         run: |
           set -euo pipefail
-          case "$RUN_ID" in ''|*[!0-9]*) echo "refusing: run id '$RUN_ID' is not numeric"; exit 1;; esac
+          case "$RUN_ID" in
+            ''|*[!0-9]*)
+              echo "refusing: run id '$RUN_ID' is not numeric"
+              exit 1;;
+          esac
           # Re-read the run from the API by id: the fields below are the
           # server's, not a payload a dispatcher could shape.
           run="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
@@ -94,20 +107,35 @@ jobs:
           subject="$(jq -r '.head_sha' <<<"$run")"
           branch="$(jq -r '.head_branch' <<<"$run")"
           conclusion="$(jq -r '.conclusion' <<<"$run")"
-          [ "$path" = ".github/workflows/cq-measure.yml" ] || { echo "refusing: run path '$path'"; exit 1; }
-          [ "$head_repo" = "$REPO_ID" ] || { echo "refusing: fork or foreign run (repo id $head_repo)"; exit 1; }
-          [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || { echo "refusing: head_sha '$subject'"; exit 1; }
+          [ "$path" = ".github/workflows/cq-measure.yml" ] || {
+            echo "refusing: run path '$path'"; exit 1; }
+          [ "$head_repo" = "$REPO_ID" ] || {
+            echo "refusing: fork or foreign run (repo id $head_repo)"
+            exit 1; }
+          [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "refusing: head_sha '$subject'"; exit 1; }
           case "$event" in
             pull_request)
               # The subject is head_sha; the PR (and its base) comes from
-              # the commit→PR API, never from pull_requests[] (ADR-0004 D-C.2).
+              # the commit→PR API, never from pull_requests[]
+              # (ADR-0004 D-C.2).
               base="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
-                --jq "[.[] | select(.state == \"open\" and .head.sha == \"${subject}\" and .head.repo.id == ${REPO_ID}) | .base.ref] | map(select(. == \"merge-queue\" or . == \"main\")) | if index(\"merge-queue\") then \"merge-queue\" elif index(\"main\") then \"main\" else empty end")"
-              [ -n "$base" ] || { echo "refusing: no open same-repo PR into merge-queue/main has head ${subject}"; exit 1; }
+                --jq "[.[] | select(.state == \"open\"
+                   and .head.sha == \"${subject}\"
+                   and .head.repo.id == ${REPO_ID}) | .base.ref]
+                 | map(select(. == \"merge-queue\" or . == \"main\"))
+                 | if index(\"merge-queue\") then \"merge-queue\"
+                   elif index(\"main\") then \"main\"
+                   else empty end")"
+              [ -n "$base" ] || {
+                echo "refusing: no open same-repo PR"
+                echo "into merge-queue/main has head ${subject}"
+                exit 1; }
               kind='pr'
               ;;
             push)
-              [ "$branch" = "merge-queue" ] || { echo "refusing: push run on '$branch'"; exit 1; }
+              [ "$branch" = "merge-queue" ] || {
+                echo "refusing: push run on '$branch'"; exit 1; }
               kind='push'
               base='main'
               ;;
@@ -130,27 +158,38 @@ jobs:
       contents: read
     steps:
       - name: Check out the trust ref (the default branch)
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        # v5.1.0, immutable commit pin (repo policy)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
           # The read-only checkout token is needed for the subject fetch.
           # This job never executes head code; the bundle has no git config.
           persist-credentials: true
-      - name: Bundle the trust and subject git objects without executing head code
+      - name: Bundle the trust, subject and base objects (no head code)
         env:
+          BASE: ${{ needs.resolve.outputs.base }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
           TRUST: ${{ github.sha }}
         run: |
           set -euo pipefail
-          git fetch --no-tags origin "$SUBJECT"
+          git fetch --no-tags origin "$SUBJECT" \
+            "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
           git update-ref refs/cq-transfer/trust "$TRUST"
           git update-ref refs/cq-transfer/subject "$SUBJECT"
+          # The merge-base that starts the judged range travels with the
+          # bundle, so the deciding jobs need no repository fetch and hold
+          # no credential.
+          git update-ref refs/cq-transfer/base \
+            "refs/remotes/origin/${BASE}"
           mkdir -p "${RUNNER_TEMP}/cq-source"
           git bundle create "${RUNNER_TEMP}/cq-source/source.bundle" \
-            refs/cq-transfer/trust refs/cq-transfer/subject
+            refs/cq-transfer/trust \
+            refs/cq-transfer/subject \
+            refs/cq-transfer/base
       - name: Upload the source bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1 (immutable commit pin; repo policy)
+        # v7.0.1, immutable commit pin (repo policy)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: cq-verify-source
           path: ${{ runner.temp }}/cq-source/source.bundle
@@ -169,7 +208,8 @@ jobs:
       typecheck_count: ${{ steps.count.outputs.typecheck_count }}
     steps:
       - name: Download the trust and subject git objects
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (immutable commit pin; repo policy)
+        # v8.0.1, immutable commit pin (repo policy)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: cq-verify-source
           path: ${{ runner.temp }}/cq-source
@@ -179,11 +219,13 @@ jobs:
         run: |
           set -euo pipefail
           git init trust
-          git -C trust fetch --no-tags "${RUNNER_TEMP}/cq-source/source.bundle" \
+          git -C trust fetch --no-tags \
+            "${RUNNER_TEMP}/cq-source/source.bundle" \
             'refs/cq-transfer/*:refs/cq-transfer/*'
           git -C trust checkout --detach "$TRUST"
       - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        # v5.0.0, immutable commit pin (repo policy)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: 24
           cache: ''
@@ -203,62 +245,147 @@ jobs:
             --subject="$SUBJECT" \
             --scratch="${RUNNER_TEMP}/cq-recompute")" || true
           if [ -z "$out" ]; then
-            out='{"status":"failed","error":"recompute produced no JSON output"}'
+            msg='recompute produced no JSON output'
+            out="{\"status\":\"failed\",\"error\":\"$msg\"}"
           fi
-          if ! printf '%s\n' "$out" | jq -c '{status, value: (.value | {count}), detail, error}'; then
+          if ! printf '%s\n' "$out" |
+            jq -c '{status, value: (.value | {count}), detail, error}'
+          then
             echo 'recompute emitted malformed JSON'
           fi
           count=''
           if printf '%s\n' "$out" | jq -e -s \
-            'length == 1 and .[0].status == "ok" and (.[0].value.count | type) == "number"' \
+            'length == 1 and .[0].status == "ok"
+             and (.[0].value.count | type) == "number"' \
             >/dev/null 2>&1; then
             count="$(printf '%s' "$out" | jq -r '.value.count')"
           fi
           echo "typecheck_count=${count}" >> "$GITHUB_OUTPUT"
 
-  judge:
-    name: judge
-    needs: [resolve, compute]
-    # A failed recompute still yields a (failing) verdict; only an
-    # unresolved subject yields none.
+  measurement:
+    name: measurement
+    needs: [resolve]
     if: ${{ !cancelled() && needs.resolve.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
+    # F5: this artifact is HEAD-AUTHORED bytes — cq-measure runs head code
+    # with ACTIONS_RUNTIME_TOKEN and can upload an arbitrary zip. It is
+    # unpacked and re-validated HERE, in a job with no write scope, no
+    # secrets and no environment; only a numbers-only JSON crosses to
+    # `judge`. `actions: read` is the single scope a cross-run download
+    # needs: read-only, and it cannot post a check run or write to the
+    # repository.
     permissions:
       actions: read
-      checks: write
-      contents: read
+    outputs:
+      json: ${{ steps.validate.outputs.json }}
     steps:
-      - name: Check out the trust ref (the default branch)
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 0
-          # This job fetches subject objects, then only runs trust-ref code.
-          persist-credentials: true
-      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
-        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
-        with:
-          node-version: 24
-          cache: ''
-      - name: Install and build the trusted toolkit
-        run: |
-          npm ci --ignore-scripts
-          npm run build
-      - name: Fetch the subject and its base (git objects only)
-        env:
-          SUBJECT: ${{ needs.resolve.outputs.subject }}
-          BASE: ${{ needs.resolve.outputs.base }}
-        run: git fetch --no-tags origin "$SUBJECT" "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
       - name: Download the measurement artifact (untrusted data)
         # A missing artifact is a failing verdict below, never a skip.
         continue-on-error: true
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (immutable commit pin; repo policy)
+        # v8.0.1, immutable commit pin (repo policy)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
           name: cq-measure
           run-id: ${{ needs.resolve.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/cq-measure
+      - name: Re-validate the measurement and emit only the numbers
+        id: validate
+        run: |
+          set -euo pipefail
+          # The SAME rules the verifier re-applies in TypeScript (a regular
+          # file, a size cap, a strict object/number schema) — defence in
+          # depth, and the reason only validated numbers leave this job.
+          json=''
+          f="${RUNNER_TEMP}/cq-measure/measurement.json"
+          size=0
+          if [ -f "$f" ] && [ ! -L "$f" ]; then
+            size="$(wc -c <"$f" | tr -d '[:space:]')"
+          fi
+          if [ -f "$f" ] && [ ! -L "$f" ] && [ "$size" -le 65536 ]; then
+            bad_key='test("^[a-z0-9][a-z0-9-]{0,63}$") | not'
+            if json="$(jq -ce "
+              if type != \"object\" then error(\"not an object\")
+              elif ((keys | sort) != [\"metrics\", \"schemaVersion\"])
+                then error(\"unexpected keys\")
+              elif .schemaVersion != 1 then error(\"bad schemaVersion\")
+              elif (.metrics | type) != \"object\"
+                then error(\"metrics is not an object\")
+              elif ((.metrics | length) > 16) then error(\"too many metrics\")
+              elif ([.metrics | keys[] | select($bad_key)] | length) > 0
+                then error(\"bad metric id\")
+              elif ([.metrics[] | select(type != \"number\")] | length) > 0
+                then error(\"a metric is not a number\")
+              else . end" "$f" 2>/dev/null)"; then
+              :
+            else
+              json=''
+            fi
+          fi
+          if [ -z "$json" ]; then
+            echo 'measurement absent/invalid — verdict fails closed' >&2
+          fi
+          # One physical line by construction (jq -c, numbers only), so the
+          # value is a single well-formed GITHUB_OUTPUT line.
+          echo "json=${json}" >> "$GITHUB_OUTPUT"
+
+  judge:
+    name: judge
+    needs: [resolve, compute, measurement]
+    # A failed recompute still yields a (failing) verdict; only an
+    # unresolved subject yields none.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # F5: `checks: write` is the verdict's own scope and nothing else — no
+    # repository read, no artifact read. The trust ref, the subject objects
+    # and the base all arrive in the `cq-verify-source` bundle, so this job
+    # holds no credential at all (ADR-0004 D-G.3).
+    permissions:
+      checks: write
+    steps:
+      - name: Download the trust, subject and base git objects
+        # v8.0.1, immutable commit pin (repo policy)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: cq-verify-source
+          path: ${{ runner.temp }}/cq-source
+      - name: Check out the trust ref from the bundle (no credential)
+        env:
+          BASE: ${{ needs.resolve.outputs.base }}
+          TRUST: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          bundle="${RUNNER_TEMP}/cq-source/source.bundle"
+          git init -q trust
+          git -C trust fetch --no-tags "$bundle" \
+            'refs/cq-transfer/*:refs/cq-transfer/*'
+          # The base ref carries the name the verifier's merge-base wants.
+          git -C trust update-ref "refs/remotes/origin/${BASE}" \
+            refs/cq-transfer/base
+          git -C trust checkout --detach "$TRUST"
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
+        # v5.0.0, immutable commit pin (repo policy)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+          cache: ''
+      - name: Install and build the trusted toolkit
+        working-directory: trust
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Restore the validated measurement (numbers only, no head bytes)
+        env:
+          MEASUREMENT_JSON: ${{ needs.measurement.outputs.json }}
+        run: |
+          set -euo pipefail
+          dest="${RUNNER_TEMP}/cq-measure"
+          mkdir -p "$dest"
+          if [ -n "$MEASUREMENT_JSON" ]; then
+            printf '%s\n' "$MEASUREMENT_JSON" > "${dest}/measurement.json"
+          fi
       - name: 'Verify (CLI: ratchet.verifyRatchet)'
         id: verify
         env:
@@ -270,8 +397,9 @@ jobs:
           TYPECHECK_COUNT: ${{ needs.compute.outputs.typecheck_count }}
         run: |
           set -euo pipefail
+          verdict="${RUNNER_TEMP}/verdict.json"
           args=(
-            --repo=.
+            --repo=trust
             --trustRef="$TRUST"
             --subject="$SUBJECT"
             --subjectKind="$KIND"
@@ -282,9 +410,11 @@ jobs:
           if [[ "$TYPECHECK_COUNT" =~ ^[0-9]+$ ]]; then
             args+=(--typecheckCount="$TYPECHECK_COUNT")
           fi
-          node dist/cli.js ratchet.verifyRatchet "${args[@]}" > "${RUNNER_TEMP}/verdict.json" || true
+          node trust/dist/cli.js ratchet.verifyRatchet "${args[@]}" \
+            > "$verdict" || true
           if ! jq -e -s \
-            'length == 1 and (.[0] | type) == "object" and (.[0].status | type) == "string"
+            'length == 1 and (.[0] | type) == "object"
+             and (.[0].status | type) == "string"
              and (.[0].value == null or (.[0].value | type) == "object")
              and (.[0].error == null or (.[0].error | type) == "string")
              and (.[0].detail == null or (.[0].detail | type) == "string")
@@ -294,7 +424,8 @@ jobs:
                 and (.[0].value.reasons | type) == "array"
                 and all(.[0].value.reasons[]; type == "string")))' \
             "${RUNNER_TEMP}/verdict.json" >/dev/null 2>&1; then
-            printf '%s\n' '{"status":"failed","error":"verifier emitted no valid JSON result"}' \
+            msg='verifier emitted no valid JSON result'
+            printf '%s\n' "{\"status\":\"failed\",\"error\":\"$msg\"}" \
               > "${RUNNER_TEMP}/verdict.json"
           fi
           cat "${RUNNER_TEMP}/verdict.json"
@@ -317,15 +448,21 @@ jobs:
                 head_sha: $sha,
                 external_id: $ext,
                 status: "completed",
-                conclusion: (if $r.status == "ok" and $verdict == "pass" then "success" else "failure" end),
+                conclusion: (if $r.status == "ok" and $verdict == "pass"
+                  then "success" else "failure" end),
                 output: {
-                  title: ("ratchet: " + (if $r.status == "ok" then $verdict else "verifier " + ($r.status // "crashed") end)),
+                  title: ("ratchet: " + (if $r.status == "ok"
+                    then $verdict
+                    else "verifier " + ($r.status // "crashed") end)),
                   summary: ((if $r.status == "ok" then
                     (($r.value.reasons // []) | map("- " + .) | join("\n"))
                   else
-                    (($r.error // $r.detail // "verifier returned no error detail") | tostring)
+                    (($r.error // $r.detail
+                      // "verifier returned no error detail") | tostring)
                   end) + "\n\ntrust ref `" + $ext + "`")
                 }
               }' > "${RUNNER_TEMP}/check-run.json"
-          gh api -X POST "repos/${REPO}/check-runs" --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
-          jq -e '.conclusion == "success"' "${RUNNER_TEMP}/check-run.json" >/dev/null
+          gh api -X POST "repos/${REPO}/check-runs" \
+            --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
+          jq -e '.conclusion == "success"' \
+            "${RUNNER_TEMP}/check-run.json" >/dev/null

@@ -51,9 +51,11 @@ describe('worker gate / ratchet definition-set sync (F1, F2)', () => {
     expect(Object.keys(REPRESENTATIVES).sort()).toEqual([...MANIFEST.definitionSet].sort());
   });
 
-  test.each(Object.entries(REPRESENTATIVES).flatMap(([source, paths]) =>
-    paths.map((path) => [source, path] as const),
-  ))('%s protects %s', (_source, path) => {
+  test.each(
+    Object.entries(REPRESENTATIVES).flatMap(([source, paths]) =>
+      paths.map((path) => [source, path] as const),
+    ),
+  )('%s protects %s', (_source, path) => {
     expect(isProtectedStagePath(path)).toBe(true);
   });
 

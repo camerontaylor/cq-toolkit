@@ -151,12 +151,22 @@ describe('isDefinitionPath', () => {
     ['.node-version', true],
     ['.cq/tool/bin', true],
     ['baselines/ratchets.json', true],
+    // F1: the whole ratchet-evidence tree is a definition, not just the
+    // manifest — a worker baseline edit redefines what the ratchet measures.
+    ['baselines/coverage--coverage--a8ceec8f7024.json', true],
+    ['baselines/nested/cov.json', true],
+    // F2: the protected-path list and the required-check list are themselves
+    // definitions (ADR-0004 D-C.4), so weakening either is needs-human.
+    ['src/ops/gates/protectedPaths.ts', true],
+    ['scripts/denylist-scan', true],
     ['src/x.ts', false],
     ['test/x.test.ts', false],
-    ['baselines/coverage--coverage--a8ceec8f7024.json', false],
     ['docs/package.json.md', false],
     ['src/mytsconfig.json', false],
-    ['.github/CODEOWNERS', false],
+    // F6: `.github/**`, not just `.github/workflows/` — a local composite
+    // action called from cq-measure was head-editable without needs-human.
+    ['.github/CODEOWNERS', true],
+    ['.github/actions/setup/action.yml', true],
   ])('%s → %s', (path, expected) => {
     expect(isDefinitionPath(manifest, path)).toBe(expected);
   });
