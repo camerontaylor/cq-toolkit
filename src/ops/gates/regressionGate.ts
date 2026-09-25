@@ -87,6 +87,20 @@ export const regressionGate: Op<RegressionGateInput, RegressionReport> = async (
 };
 
 function testTotalsRegression(base: FailureSet, final: FailureSet): string | null {
+  const observedFields = [
+    'numTotalTests',
+    'numPassedTests',
+    'numPassed',
+    'numSkippedTests',
+    'numPendingTests',
+    'numTodoTests',
+  ] as const;
+  const uncomputed = observedFields.find(
+    (field) => base[field] !== undefined && final[field] === undefined,
+  );
+  if (uncomputed !== undefined) {
+    return `${uncomputed} was observed in the baseline but is uncomputed in the final run — missing totals evidence cannot certify no regression`;
+  }
   if (
     base.numTotalTests !== undefined &&
     final.numTotalTests !== undefined &&
@@ -94,15 +108,13 @@ function testTotalsRegression(base: FailureSet, final: FailureSet): string | nul
   ) {
     return `test count dropped from ${base.numTotalTests} to ${final.numTotalTests} — a worker may not remove tests to make a run pass`;
   }
-  const skipped = (set: FailureSet): number | undefined => {
-    const pending = set.numSkippedTests ?? set.numPendingTests;
-    const todo = set.numTodoTests;
-    if (pending === undefined && todo === undefined) return undefined;
-    return (pending ?? 0) + (todo ?? 0);
+  const skipped = (set: FailureSet): number => {
+    const pending = set.numSkippedTests ?? set.numPendingTests ?? 0;
+    return pending + (set.numTodoTests ?? 0);
   };
   const baseSkipped = skipped(base);
   const finalSkipped = skipped(final);
-  if (baseSkipped !== undefined && finalSkipped !== undefined && finalSkipped > baseSkipped) {
+  if (finalSkipped > baseSkipped) {
     return `test skip/todo count rose from ${baseSkipped} to ${finalSkipped} — a worker may not make failing tests disappear`;
   }
   return null;

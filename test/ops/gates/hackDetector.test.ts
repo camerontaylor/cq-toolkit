@@ -42,7 +42,7 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
         kind: 'deleted-test-file',
         file: 'src/legacy/printer.test.ts',
         line: null,
-        pattern: '\\.test\\.[tj]sx?$',
+        pattern: '\\.(?:test|spec)\\.[cm]?[jt]sx?$',
         snippet: '--- a/src/legacy/printer.test.ts',
         message:
           'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
@@ -56,7 +56,7 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
         kind: 'deleted-test-file',
         file: 'src/legacy/printer.test.ts',
         line: null,
-        pattern: '\\.test\\.[tj]sx?$',
+        pattern: '\\.(?:test|spec)\\.[cm]?[jt]sx?$',
         snippet: 'rename from src/legacy/printer.test.ts',
         message:
           'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
@@ -70,7 +70,7 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
         kind: 'deleted-test-file',
         file: 'src/legacy/printer.test.ts',
         line: null,
-        pattern: '\\.test\\.[tj]sx?$',
+        pattern: '\\.(?:test|spec)\\.[cm]?[jt]sx?$',
         snippet: 'rename from src/legacy/printer.test.ts',
         message:
           'removed from the test run (deleted or renamed out of test patterns): src/legacy/printer.test.ts',
@@ -179,10 +179,10 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
 
   test('two tautologies on ONE added line yield two findings (matchAll, no cross-consumption)', async () => {
     const diff = [
-      'diff --git a/src/pair.ts b/src/pair.ts',
+      'diff --git a/test/pair.test.ts b/test/pair.test.ts',
       'index 1111111..2222222 100644',
-      '--- a/src/pair.ts',
-      '+++ b/src/pair.ts',
+      '--- a/test/pair.test.ts',
+      '+++ b/test/pair.test.ts',
       '@@ -1,1 +1,2 @@',
       ' const a = 1;',
       '+it("both fake", () => { expect(1).toBe(1); expect(2).toBe(2); });',
@@ -193,10 +193,10 @@ describe('hackDetector: fixture round-trips (exact findings)', () => {
 
   test('a tautology and a suppression sharing one line yield BOTH findings independently', async () => {
     const diff = [
-      'diff --git a/src/mix.ts b/src/mix.ts',
+      'diff --git a/test/mix.test.ts b/test/mix.test.ts',
       'index 3333333..4444444 100644',
-      '--- a/src/mix.ts',
-      '+++ b/src/mix.ts',
+      '--- a/test/mix.test.ts',
+      '+++ b/test/mix.test.ts',
       '@@ -1,1 +1,2 @@',
       ' const a = 1;',
       '+expect(1).toBe(1); // @ts-ignore',
@@ -321,7 +321,7 @@ describe('hackDetector: suppression config', () => {
         kind: 'deleted-test-file',
         file: 'src/with space/printer.test.ts',
         line: null,
-        pattern: '\\.test\\.[tj]sx?$',
+        pattern: '\\.(?:test|spec)\\.[cm]?[jt]sx?$',
         snippet: '--- "a/src/with space/printer.test.ts"',
         message:
           'removed from the test run (deleted or renamed out of test patterns): src/with space/printer.test.ts',
@@ -514,17 +514,17 @@ describe('hackDetector: diff parsing and line-number tracking', () => {
 
   test('a NEW file (--- /dev/null) scans its added lines under the b/ path', async () => {
     const diff = [
-      'diff --git a/src/fresh.ts b/src/fresh.ts',
+      'diff --git a/test/fresh.test.ts b/test/fresh.test.ts',
       'new file mode 100644',
       'index 0000000..9999999',
       '--- /dev/null',
-      '+++ b/src/fresh.ts',
+      '+++ b/test/fresh.test.ts',
       '@@ -0,0 +1,1 @@',
       '+export const x = test.skip("later");',
     ].join('\n');
     const findings = await findingsOf(diff);
     expect(findings.map((f) => [f.kind, f.file, f.line])).toEqual([
-      ['new-skip-only', 'src/fresh.ts', 1],
+      ['new-skip-only', 'test/fresh.test.ts', 1],
     ]);
   });
 
@@ -596,12 +596,12 @@ describe('hackDetector: tamper toggles', () => {
     expect(result).toEqual({ status: 'ok', value: [] });
   });
 
-  test('invalid testFilePatterns never compile when the knob is off: no throw, no failed', async () => {
+  test('invalid testFilePatterns remain an honest config failure (removed-test cannot be disabled)', async () => {
     const result = await hackDetector({
       diff: fixture('deleted-test.diff'),
-      tamper: { detectDeletedTests: false, detectRemovedTests: false, testFilePatterns: ['('] },
+      tamper: { testFilePatterns: ['('] },
     });
-    expect(result).toEqual({ status: 'ok', value: [] });
+    expect(result.status).toBe('failed');
   });
 
   test('garbage skipOnlyPattern never compiles when the knob is off (lazy-compile symmetry)', async () => {

@@ -173,6 +173,8 @@ export interface RunSweepOpts {
   push?: boolean;
   /** Optional staged-path allowlist overlay (the test-fix scope pin). */
   stagePathAllowlist?: { patterns: string[] };
+  /** Propose-only overlay used by the test-fix contract. */
+  proposeOnly?: boolean;
   /**
    * The explicit run-state dir every unit job carries (review-debt #174's
    * trust vouch). Default `<repoRoot>/cq-run-state`. `null` OMITS the field
@@ -225,6 +227,7 @@ export async function runSweepPlan(opts: RunSweepOpts): Promise<SweepRunOutcome>
     ...(opts.stagePathAllowlist !== undefined
       ? { stagePathAllowlist: opts.stagePathAllowlist }
       : {}),
+    ...(opts.proposeOnly !== undefined ? { proposeOnly: opts.proposeOnly } : {}),
   });
   const assembleTemplate = fullPlan.jobs.find((job) => job.id === SWEEP_PLAN_JOB_IDS.assemble);
   const trackerBranchTemplate = fullPlan.jobs.find(

@@ -1,7 +1,7 @@
-diff --git a/test/attack.test.ts b/test/attack.test.ts
-index 111..222 100644
---- a/test/attack.test.ts
-+++ b/test/attack.test.ts
-@@ -1,1 +1,2 @@
- context();
-++testPathIgnorePatterns: ['**/*.test.ts']
+diff --git a/jest.config.js b/jest.config.js
+index 1111111..2222222 100644
+--- a/jest.config.js
++++ b/jest.config.js
+@@ -1,1 +1,1 @@
+-module.exports = {};
++testPathIgnorePatterns: ['**/*.test.ts']

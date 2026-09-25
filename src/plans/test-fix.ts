@@ -30,14 +30,6 @@ export const TEST_FIX_FIXER = 'test-fix';
 export type TestFixPlanConfig = Omit<SweepPlanConfig, 'fixers'> & { fixers?: string[] };
 
 /**
- * Test-fix has no automatic commit surface for test files. Test edits are
- * evidence for a human, not a worker result; the unit gate routes any staged
- * test/config/snapshot path to needs-human. The empty list is intentional and
- * is not an opt-out: DEFAULT_PROTECTED_STAGE_PATTERNS in sweep.unit is the
- * default-deny guard that runs before an allowlist is considered.
- */
-export const TEST_FIX_STAGE_PATH_ALLOWLIST: { patterns: string[] } = { patterns: [] };
-
 /**
  * Author the EXPANDED test-fix plan (phase B) — buildSweepPlan under the
  * test-fix id with `fixers` pinned to the one test-only label AND the
@@ -69,7 +61,9 @@ export function buildTestFixPlan(
       `buildTestFixPlan: the phase-A report's unit job(s) ${JSON.stringify(foreignJobs)} embed inputs outside the test-only set ['${TEST_FIX_FIXER}'] — the report must come from a planner run of THIS plan's config`,
     );
   }
-  return buildSweepPlan({ ...config, fixers: [TEST_FIX_FIXER] }, report, TEST_FIX_PLAN_ID);
+  return buildSweepPlan({ ...config, fixers: [TEST_FIX_FIXER] }, report, TEST_FIX_PLAN_ID, {
+    proposeOnly: true,
+  });
 }
 
 /**

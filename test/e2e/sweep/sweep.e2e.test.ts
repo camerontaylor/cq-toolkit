@@ -166,6 +166,7 @@ function optsFor(
   extra?: {
     push?: boolean;
     stagePathAllowlist?: { patterns: string[] };
+    proposeOnly?: boolean;
     runStateDir?: string | null;
     concurrency?: number;
   },
@@ -221,7 +222,7 @@ function unitRow(
   run: RunReport,
   pkg: string,
   fixer: string = 'fix',
-): { status: string; report?: SweepUnitReport; error?: string } {
+): { status: string; report?: SweepUnitReport; error?: string; reason?: string } {
   // The planner's own job-id fold (sanitizedIdPart): runs of characters
   // outside [A-Za-z0-9._-] become ONE '-' — '@scope/gamma' lands as
   // '-scope-gamma', so the id carries a double dash.
@@ -235,6 +236,7 @@ function unitRow(
   return {
     status: row.result.status,
     ...(row.result.status === 'failed' ? { error: row.result.error } : {}),
+    ...(row.result.status === 'needs-human' ? { reason: row.result.reason } : {}),
   };
 }
 
@@ -827,7 +829,7 @@ describe('sweep e2e: driver self-commit vs the strand-retry trust pin (#174)', (
 
 describe('sweep e2e: test-fix stage-path allowlist', () => {
   test(
-    'a test-fix worker editing production code: failed naming the path; the legitimate test fix commits and pushes',
+    'a test-fix worker is propose-only: staged test and production edits route to human review',
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-scope');
@@ -841,22 +843,23 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
             { edit: ALPHA_FIX }, // the legitimate test fix
             { write: { file: 'packages/beta/index.js', text: "export const beta = 'prod';\n" } }, // production code
           ),
-          { stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] } },
+          {
+            stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] },
+            proposeOnly: true,
+          },
         ),
       );
 
-      // Alpha: the test-only edit is IN scope — fixed, committed, pushed.
+      // Test-fix is propose-only: even the test edit is staged but never
+      // committed, and the production edit is likewise human-routed.
       const alpha = unitRow(outcome.run, 'alpha', 'test-fix');
-      expect(alpha.status).toBe('ok');
-      expect(alpha.report?.committed).toBe(true);
-      expect(alpha.report?.pushed).toBe(true);
+      expect(alpha.status).toBe('needs-human');
+      expect(alpha.reason).toMatch(/propose-only|protected path/);
 
-      // Beta: the production-code file is OUT of scope — the unit failed
-      // naming the path, and nothing was committed or pushed.
       const beta = unitRow(outcome.run, 'beta', 'test-fix');
-      expect(beta.status).toBe('failed');
-      expect(beta.error).toMatch(/outside the allowlist/);
-      expect(beta.error).toContain('packages/beta/index.js');
+      expect(beta.status).toBe('needs-human');
+      expect(beta.reason).toMatch(/propose-only|protected path/);
+      expect(beta.reason).toContain('packages/beta/index.js');
       expect(
         await makeSubprocessWorktreeEffects(scene.repo).isStrictClean(
           resolve(scene.repo, 'worktrees', 'test-fix', 'beta'),
@@ -868,7 +871,7 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
       );
       expect(betaCommits.trim()).toBe('0');
       const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads).toContain('cq/e2e-scope/test-fix/alpha');
+      expect(originHeads).not.toContain('cq/e2e-scope/test-fix/alpha');
       expect(originHeads).not.toContain('cq/e2e-scope/test-fix/beta');
       // No PR exists: the fleet never assembled.
       expect(scene.gh.created).toHaveLength(0);

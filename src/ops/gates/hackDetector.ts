@@ -34,6 +34,12 @@
 //     backtracking at scan time; the boundary is same-principal config,
 //     and callers own that trust.
 import type { Op } from '../../kernel/types.js';
+import {
+  isProtectedConfigPath,
+  isProtectedTestPath,
+  PROTECTED_TEST_FILE_PATTERN_SOURCES,
+  PROTECTED_TEST_ROOT_PATTERN_SOURCES,
+} from './protectedPaths.js';
 
 /**
  * One configurable suppression signature. `pattern` is a regex SOURCE
@@ -99,9 +105,8 @@ export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Objec
  * i.e. deleted) matches none.
  */
 export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
-  '\\.test\\.[tj]sx?$',
-  '\\.spec\\.[tj]sx?$',
-  '__tests__/',
+  ...PROTECTED_TEST_ROOT_PATTERN_SOURCES,
+  ...PROTECTED_TEST_FILE_PATTERN_SOURCES,
 ]);
 
 /**
@@ -110,7 +115,7 @@ export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
  * Frozen: the marker taxonomy is a shipped default, not call-site knowledge.
  */
 export const DEFAULT_SKIP_ONLY_PATTERN =
-  '\\b(?:x(?:it|test|describe)|f(?:it|test|describe))\\b|\\b(?:describe|it|test)\\s*\\.\\s*(?:skip|only|todo|skipIf|runIf|fails|concurrent(?:\\.skip)?)\\b|\\b(?:skip|todo|only|concurrent)\\s*:\\s*(?:true|false|[A-Za-z_$])';
+  '\\b(?:x(?:it|test|describe)|f(?:it|test|describe))\\s*\\(|\\b(?:describe|it|test)\\s*\\.\\s*(?:skip|only|todo|skipIf|runIf|fails|concurrent(?:\\.skip)?)\\b|\\b(?:x?(?:it|test)|f(?:it|test)|describe)\\s*\\([^,\\n]*,\\s*\\{[^}\\n]*\\b(?:skip|todo|only|fails)\\s*:\\s*(?:true|false|["\'][^"\']*["\']|[A-Za-z_$])';
 
 /**
  * Tamper-heuristic tuning. Every field is optional with a shipped default;
@@ -130,8 +135,6 @@ export interface TamperConfig {
   skipOnlyPattern?: string;
   /** Flag tautological `expect(X).toBe(X)` assertions (default true). */
   detectTautologies?: boolean;
-  /** Flag a net deletion of it/test declarations in a test file (default true). */
-  detectRemovedTests?: boolean;
 }
 
 /** JSON-serializable input of the `gates.hackDetector` op. Plain data. */
@@ -183,7 +186,6 @@ interface CompiledConfig {
   skipOnly: RegExp | null;
   skipOnlySource: string;
   detectTautologies: boolean;
-  detectRemovedTests: boolean;
 }
 
 /** Hunk header: `@@ -old[,[count]] +new[,[count]] @@` — captures the new start. */
@@ -232,18 +234,14 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
       })),
       // Compiled only when the knob is on — mirroring the skipOnly
       // conditional, unused patterns never get a chance to be invalid.
-      testFilePatterns:
-        detectDeletedTests || (tamper.detectRemovedTests ?? true)
-          ? (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
-              source,
-              regex: new RegExp(source, 'i'),
-            }))
-          : [],
+      testFilePatterns: (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
+        source,
+        regex: new RegExp(source, 'i'),
+      })),
       detectDeletedTests,
       skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
       detectTautologies: tamper.detectTautologies ?? true,
-      detectRemovedTests: tamper.detectRemovedTests ?? true,
     };
   } catch (err) {
     if (err instanceof SyntaxError) {
@@ -283,7 +281,6 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let removedFailingTestDeclarations = 0;
   const flushRemovedTest = (): void => {
     if (
-      config.detectRemovedTests &&
       sectionPath !== null &&
       newPath !== '/dev/null' &&
       (removedTestDeclarations > addedTestDeclarations || removedFailingTestDeclarations > 0) &&
@@ -339,10 +336,10 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       if (line.startsWith('+++ ')) {
         newPath = headerPathOf(line.slice(4));
         sectionPath = newPath === '/dev/null' ? oldPath : newPath;
-        if (sectionPath !== null && isProtectedConfigPath(sectionPath)) {
+        if (sectionPath !== null && isProtectedConfigPathInDiff(sectionPath)) {
           reportProtectedConfig(findings, sectionPath);
         }
-        if (oldPath !== null && oldPath !== sectionPath && isProtectedConfigPath(oldPath)) {
+        if (oldPath !== null && oldPath !== sectionPath && isProtectedConfigPathInDiff(oldPath)) {
           reportProtectedConfig(findings, oldPath);
         }
         if (renameTo === null) {
@@ -426,16 +423,13 @@ function reportTestFileRemoval(
 }
 
 /** Every heuristic, against one ADDED line's content only. */
-const PROTECTED_CONFIG_RE =
-  /(^|\/)(?:\.gitattributes|(?:[^/]+\/)*__snapshots__\/|[^/]+\.snap$|(?:vitest|vite)\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
-
 function reportProtectedRename(
   findings: TamperFinding[],
   oldPath: string | null,
   newPath: string | null,
 ): void {
-  if (isProtectedConfigPath(oldPath)) reportProtectedConfig(findings, oldPath!);
-  if (isProtectedConfigPath(newPath)) reportProtectedConfig(findings, newPath!);
+  if (isProtectedConfigPathInDiff(oldPath)) reportProtectedConfig(findings, oldPath!);
+  if (isProtectedConfigPathInDiff(newPath)) reportProtectedConfig(findings, newPath!);
 }
 
 function reportProtectedConfig(findings: TamperFinding[], path: string): void {
@@ -449,8 +443,8 @@ function reportProtectedConfig(findings: TamperFinding[], path: string): void {
   });
 }
 
-function isProtectedConfigPath(path: string | null): boolean {
-  return path !== null && (path === '.gitattributes' || PROTECTED_CONFIG_RE.test(path));
+function isProtectedConfigPathInDiff(path: string | null): boolean {
+  return path !== null && isProtectedConfigPath(path);
 }
 
 function isExecutableTestDeclaration(content: string): boolean {
@@ -490,7 +484,7 @@ function scanAddedLine(
         : `added suppression "${suppression.name}"`,
     });
   }
-  if (config.skipOnly?.test(content)) {
+  if (newPath !== null && isProtectedTestPath(newPath) && config.skipOnly?.test(content)) {
     findings.push({
       kind: 'new-skip-only',
       file,
@@ -500,7 +494,7 @@ function scanAddedLine(
       message: 'added line marks a test as skipped or focused',
     });
   }
-  if (config.detectTautologies) {
+  if (config.detectTautologies && newPath !== null && isProtectedTestPath(newPath)) {
     for (const tautology of content.matchAll(TAUTOLOGY_RE)) {
       const [, left, right] = tautology;
       if (left === undefined || right === undefined) {

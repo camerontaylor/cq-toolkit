@@ -1,3 +1,7 @@
-diff --git a/fixture.bin b/fixture.bin
-index 111..222 100644
-Binary files a/fixture.bin and b/fixture.bin differ
+diff --git a/.gitattributes b/.gitattributes
+index 1111111..2222222 100644
+--- a/.gitattributes
++++ b/.gitattributes
+@@ -1,1 +1,1 @@
+-*.txt text
++*.ts -diff

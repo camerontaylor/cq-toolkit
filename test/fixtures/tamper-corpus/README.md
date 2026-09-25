@@ -1,7 +1,9 @@
 # RS-10 tamper corpus
 
-The manifest is the consuming-test contract. `default-deny` rejects worker commits that touch
-protected evidence; `base-owned` records the human verification verdict. The five git-plumbing
-fixtures are neutralised by the exact text-only diff argv; the remaining entries exercise static
-idioms, removed declarations, configuration, or totals. Fixtures are minimal unified diffs and are
-not themselves run by the package test command.
+The manifest is paired with executable verdicts in `test/ops/gates/tamper-corpus.test.ts`.
+Every fixture's paths run through the production staged-path classifier, test
+static attacks run through `hackDetector`, and totals rows run through
+`regressionGate`. The ten Git-plumbing rows exercise text-only/rename plumbing;
+a separate real-git test combines hostile binary, `-diff`, textconv, external
+diff, no-prefix, and mnemonic-prefix settings. Fixtures are minimal valid
+unified diffs and are not independently executed by the package test command.
