@@ -124,7 +124,6 @@ jobs:
       contents: write
     # The stage-2 switch gives automation ONE ≤20-minute run per slot; the
     # next slot re-enters with the persisted journal.
-    timeout-minutes: 20
     steps:
       - name: Check out main (trusted code only)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
