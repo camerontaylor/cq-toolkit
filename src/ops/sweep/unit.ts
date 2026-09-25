@@ -910,8 +910,9 @@ async function withBaseOwnedFinalTree(
       ),
     };
   }
-  await mkdir(bindings.worktreesDir, { recursive: true });
-  const tempDir = await mkdtemp(join(bindings.worktreesDir, '.cq-sweep-final-'));
+  const worktreesRoot = resolve(bindings.repoRoot, bindings.worktreesDir);
+  await mkdir(worktreesRoot, { recursive: true });
+  const tempDir = await mkdtemp(join(worktreesRoot, '.cq-sweep-final-'));
   const cleanPath = join(tempDir, 'checkout');
   try {
     const added = await bindings.git([

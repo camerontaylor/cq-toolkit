@@ -17,6 +17,7 @@ import type { CommitGateInput } from './commitGate.js';
 import type { FingerprintConfig } from './fingerprint.js';
 import type { HackDetectorInput } from './hackDetector.js';
 import type { RegressionGateInput } from './regressionGate.js';
+// Shared protected-path taxonomy helper: './protectedPaths.js'.
 
 /**
  * Registry-time mirror of {@link CheckRunnerInput}: the full input, and
