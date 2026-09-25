@@ -254,7 +254,11 @@ jobs:
                 conclusion: (if $r.status == "ok" and $verdict == "pass" then "success" else "failure" end),
                 output: {
                   title: ("ratchet: " + (if $r.status == "ok" then $verdict else "verifier " + ($r.status // "crashed") end)),
-                  summary: ((($r.value.reasons // []) | map("- " + .) | join("\n")) + "\n\ntrust ref `" + $ext + "`")
+                  summary: ((if $r.status == "ok" then
+                    (($r.value.reasons // []) | map("- " + .) | join("\n"))
+                  else
+                    (($r.error // $r.detail // "verifier returned no error detail") | tostring)
+                  end) + "\n\ntrust ref `" + $ext + "`")
                 }
               }' > "${RUNNER_TEMP}/check-run.json"
           gh api -X POST "repos/${REPO}/check-runs" --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
