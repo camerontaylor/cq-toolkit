@@ -268,7 +268,37 @@ type CommandVerdict =
  * escape hatch the denial points at) can still allow outright, whatever the
  * pattern order; the metacharacter denial fires only when no pattern allowed.
  */
-function commandVerdict(patterns: readonly CommandPattern[], command: string): CommandVerdict {
+function unsafeGitDiff(command: string, workspace: string): boolean {
+  const tokens = command.trim().split(/\s+/);
+  if (tokens[0] !== 'git' || tokens[1] !== 'diff') return false;
+  if (
+    tokens.some(
+      (token) => token === '--no-index' || token === '--output' || token.startsWith('--output='),
+    )
+  )
+    return true;
+  const root = resolve(workspace);
+  for (const token of tokens.slice(2)) {
+    if (token === '--') continue;
+    if (token.startsWith('-')) continue;
+    if (
+      token.startsWith('/') ||
+      token === '..' ||
+      token.startsWith('../') ||
+      token.includes('/../')
+    )
+      return true;
+    if (resolve(root, token) !== root && !resolve(root, token).startsWith(root + sep)) return true;
+  }
+  return false;
+}
+
+function commandVerdict(
+  patterns: readonly CommandPattern[],
+  command: string,
+  workspace: string,
+): CommandVerdict {
+  if (unsafeGitDiff(command, workspace)) return { allowed: false, metacharacters: false };
   const cmdTokens = command.trim().split(/\s+/);
   let sawMetacharMatch = false;
   for (const pattern of patterns) {
@@ -559,7 +589,7 @@ export function buildTools(
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
-        const verdict = commandVerdict(patterns, command);
+        const verdict = commandVerdict(patterns, command, workspaceAbs);
         if (!verdict.allowed) {
           return deny(
             'run',

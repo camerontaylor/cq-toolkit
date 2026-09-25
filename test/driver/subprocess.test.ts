@@ -47,6 +47,7 @@ import {
   DEFAULT_MAX_RETAINED_BYTES,
   buildChildEnv,
   spawnManaged,
+  terminateActiveChildrenOnExit,
 } from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
@@ -1049,6 +1050,35 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
+  test('oversized lines fail loudly while retention stays bounded', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', `process.stdout.write('x'.repeat(256) + '\\n');`],
+        cwd: scratchDir,
+        maxRetainedBytes: 32,
+      });
+      const close = await child.close;
+      expect(close.oversizedLine).toBe(true);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(32);
+      expect(close.droppedBytes).toBeGreaterThan(0);
+    });
+  });
+
+  test('the exit hook terminates an active detached child', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', 'setInterval(() => {}, 1000)'],
+        cwd: scratchDir,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      terminateActiveChildrenOnExit();
+      const close = await child.close;
+      expect(close.signal).toBe('SIGTERM');
+    });
+  });
+
   test('astral characters past the cap: byte-exact trim, no lone surrogate at the head (review 9-1)', async () => {
     await withScratch(async (scratchDir) => {
       const cap = 64 * 1024;
@@ -1240,12 +1270,13 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         // …while terminal basics and the configured route env do. Derive the
         // expected values from the live env so an ambient CONFORMANCE_* var
         // cannot flip this test (r2).
-        const expectedKey = process.env.CONFORMANCE_API_KEY as string;
         const expectedBaseUrl = process.env.CONFORMANCE_BASE_URL ?? 'http://127.0.0.1:1/anthropic';
         expect(typeof deniedEnv['PATH']).toBe('string');
         expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe(expectedBaseUrl);
-        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe(expectedKey);
-        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe(expectedKey);
+        // Diagnostics are redacted before persistence, so the route key is
+        // observable as present but never recoverable from the session log.
+        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe('[redacted]');
+        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe('[redacted]');
 
         // The documented escape hatch is real end-to-end (r1): naming the
         // marker in envAllowlist copies ONLY that parent name back in.

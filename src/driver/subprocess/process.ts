@@ -51,6 +51,29 @@ const POSIX = process.platform !== 'win32';
  */
 export const DEFAULT_MAX_RETAINED_BYTES = 1_048_576; // 1 MiB
 
+const activeChildren = new Set<ChildProcessWithoutNullStreams>();
+
+/** Terminate every child still owned by this process during an exit hook. */
+export function terminateActiveChildrenOnExit(): void {
+  for (const child of activeChildren) {
+    if (POSIX && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    } else {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+process.once('exit', terminateActiveChildrenOnExit);
+
 // ---------------------------------------------------------------------------
 // spawnManaged — the managed child
 // ---------------------------------------------------------------------------
@@ -235,6 +258,8 @@ export interface ProcessClose {
   stderr: string;
   /** Total bytes dropped off the two streams' heads by the retention cap. */
   droppedBytes: number;
+  /** A complete or pending line exceeded the configured line bound. */
+  oversizedLine?: boolean;
 }
 
 /**
@@ -271,6 +296,7 @@ interface StreamCollector {
   readonly text: string;
   /** Bytes dropped off the HEAD once the retention cap was hit. */
   readonly droppedBytes: number;
+  readonly oversizedLine: boolean;
 }
 
 /**
@@ -290,6 +316,7 @@ function createCollector(
   const tailBuf = { text: '', bytes: 0 };
   const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
+  let oversizedLine = false;
   // Trim a buffer back under the cap, cutting whole CODE POINTS off the
   // head (a cut between the halves of an astral pair would leave a lone
   // surrogate — corruption at the head of retained evidence) and measuring
@@ -301,16 +328,19 @@ function createCollector(
   // tail's trim drops anyway — counting both would inflate.
   const trimToCap = (buf: { text: string; bytes: number }): void => {
     if (buf.bytes <= maxRetainedBytes) return;
-    let cut = 0;
-    let cutBytes = 0;
-    while (cut < buf.text.length && buf.bytes - cutBytes > maxRetainedBytes) {
-      const width = (buf.text.codePointAt(cut) ?? 0) > 0xffff ? 2 : 1;
-      cutBytes += Buffer.byteLength(buf.text.slice(cut, cut + width));
-      cut += width;
+    const chars = Array.from(buf.text);
+    let keepBytes = 0;
+    let firstKept = chars.length;
+    for (let index = chars.length - 1; index >= 0; index -= 1) {
+      const width = Buffer.byteLength(chars[index]!);
+      if (keepBytes + width > maxRetainedBytes) break;
+      keepBytes += width;
+      firstKept = index;
     }
+    const cutBytes = buf.bytes - keepBytes;
     if (buf === tailBuf) droppedBytes += cutBytes;
-    buf.text = buf.text.slice(cut);
-    buf.bytes -= cutBytes;
+    buf.text = chars.slice(firstKept).join('');
+    buf.bytes = keepBytes;
   };
   return {
     onChunk(chunk: string): void {
@@ -323,6 +353,7 @@ function createCollector(
       let index = restBuf.text.indexOf('\n');
       while (index !== -1) {
         const line = restBuf.text.slice(0, index);
+        if (Buffer.byteLength(line) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = restBuf.text.slice(index + 1);
         restBuf.bytes -= Buffer.byteLength(line) + 1; // + the consumed '\n'
         for (const listener of listeners) listener(line);
@@ -331,6 +362,7 @@ function createCollector(
       // Bound the PENDING line — a single unterminated line must not grow
       // `rest` unbounded; past the cap its head is dropped (its drops are a
       // subset of the tail's, see trimToCap) and flush emits the tail.
+      if (Buffer.byteLength(restBuf.text) > maxRetainedBytes) oversizedLine = true;
       trimToCap(restBuf);
       tailBuf.text += chunk;
       tailBuf.bytes += chunkBytes;
@@ -345,6 +377,7 @@ function createCollector(
         // is untouched (review thread: no double retention, no phantom
         // drops).
         const finalLine = restBuf.text;
+        if (Buffer.byteLength(finalLine) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = '';
         restBuf.bytes = 0;
         for (const listener of listeners) listener(finalLine);
@@ -355,6 +388,9 @@ function createCollector(
     },
     get droppedBytes(): number {
       return droppedBytes;
+    },
+    get oversizedLine(): boolean {
+      return oversizedLine;
     },
   };
 }
@@ -390,6 +426,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     env: buildChildEnv(process.env, opts.env, opts.envAllowlist),
   });
 
+  activeChildren.add(child);
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => stdout.onChunk(chunk));
   child.stderr.setEncoding('utf8');
@@ -407,6 +444,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
   });
   child.on('close', (code, signal) => {
     exited = true;
+    activeChildren.delete(child);
     stdout.flush();
     stderr.flush();
     settleClose({
@@ -416,6 +454,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       stdout: stdout.text,
       stderr: stderr.text,
       droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
+      ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
     });
   });
 

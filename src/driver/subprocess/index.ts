@@ -205,6 +205,7 @@ import type {
 } from '../types.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
+import { redactSensitiveText } from '../error-text.js';
 import { spawnManaged, terminateGracefully } from './process.js';
 import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from './process.js';
 
@@ -639,6 +640,7 @@ export class SubprocessDriver implements Driver {
       maxTokens: budget.maxTokens,
       usage,
       resultStatus: resultStatusOf(observation.result),
+      oversizedLine: observation.close?.oversizedLine === true,
     });
     // The error field is present ONLY on a driver-level failure verdict (the
     // frozen contract allows `error` only with stopReason 'error'): the cause
@@ -1043,7 +1045,10 @@ async function persistObservation(
   if (text !== '') {
     await store.appendMessage(record.sessionId, { role: 'assistant', content: text, at: nowIso() });
   }
-  const diagnostics = [...observation.narration, ...observation.stderr.map((l) => `[stderr] ${l}`)];
+  const diagnostics = [
+    ...observation.narration.map(redactSensitiveText),
+    ...observation.stderr.map((l) => `[stderr] ${redactSensitiveText(l)}`),
+  ];
   if (diagnostics.length > 0) {
     const message: SessionMessage = {
       role: 'tool',
@@ -1110,6 +1115,9 @@ function errorCauseOf(observation: RunObservation): string {
     return `subprocess driver: result event error — ${cause}`;
   }
   const close = observation.close;
+  if (close?.oversizedLine === true) {
+    return 'subprocess driver: child emitted an oversized stdout/stderr line';
+  }
   if (close?.spawnError !== undefined) {
     return `subprocess driver: spawn failed — ${describeError(close.spawnError)}`;
   }
@@ -1156,6 +1164,7 @@ export interface StopReasonInputs {
   maxTokens: number | undefined;
   usage: Usage;
   resultStatus: ResultStatus;
+  oversizedLine?: boolean;
 }
 
 /** THE mapping (checked in order): aborted → budget → error → complete. */
@@ -1163,6 +1172,6 @@ export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason
   if (inputs.aborted) return 'aborted';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
     return 'budget';
-  if (inputs.resultStatus !== 'success') return 'error';
+  if (inputs.oversizedLine === true || inputs.resultStatus !== 'success') return 'error';
   return 'complete';
 }

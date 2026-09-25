@@ -205,7 +205,8 @@ import { buildTools } from '../../harness/tools.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
-import { boundedErrorText, describeError } from '../error-text.js';
+import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
+import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
@@ -450,12 +451,11 @@ export class ClaudeAgentDriver implements Driver {
       // so the host environment rides along and the endpoint plan is laid
       // over it (base URL + both auth spellings, values from the host env
       // read AT RUN TIME — the one place a secret value is ever touched).
-      env: {
-        ...process.env,
+      env: buildChildEnv(process.env, {
         ANTHROPIC_BASE_URL: endpoint.baseUrl,
         ANTHROPIC_AUTH_TOKEN: keyValue,
         ANTHROPIC_API_KEY: keyValue,
-      },
+      }),
       systemPrompt: systemPreamble(this.harnessConfig.promptBudget.maxSystemPromptChars),
       ...(selected.length > 0
         ? {
@@ -1082,7 +1082,7 @@ async function persistObservation(
     const message: SessionMessage = {
       role: 'tool',
       toolName: NARRATION_TOOL,
-      content: JSON.stringify(observation.narration),
+      content: JSON.stringify(observation.narration.map(redactSensitiveText)),
       at: nowIso(),
     };
     await store.appendMessage(record.sessionId, message);

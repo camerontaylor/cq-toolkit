@@ -457,25 +457,19 @@ export function selectPermissionAnswer(
 }
 
 /**
- * The permission request's matched tool IDENTITY (strategy §2.1's matching
- * gap, narrowed by the probe): the vendor's title leads with the tool name
- * as `<toolName>: <summary>` (capped at 80 chars on the reference vendor),
- * and `kind` is ABSENT from the request's toolCall. v1 matches the
- * leading token of the title; an empty title falls back to `kind`; both
- * absent → 'unknown' (which an allowlist never contains — fail-closed).
+ * Match the governed tool identity, never vendor display text. The ACP
+ * `kind` is authoritative; the tool-call id is the fail-closed fallback for
+ * harnesses that omit kind. Titles are intentionally ignored: they are free
+ * text and a model can spoof them.
  */
 export function permissionToolIdentity(
-  title: string | undefined,
   kind: string | undefined,
+  toolCallId: string | undefined,
 ): string {
-  const trimmed = title?.trim() ?? '';
-  if (trimmed !== '') {
-    const separator = trimmed.indexOf(': ');
-    const lead = separator === -1 ? trimmed : trimmed.slice(0, separator);
-    return lead.trim() !== '' ? lead.trim() : 'unknown';
-  }
-  const trimmedKind = kind?.trim() ?? '';
-  return trimmedKind !== '' ? trimmedKind : 'unknown';
+  const normalizedKind = kind?.trim();
+  if (normalizedKind !== undefined && normalizedKind !== '') return normalizedKind;
+  const normalizedId = toolCallId?.trim();
+  return normalizedId !== undefined && normalizedId !== '' ? normalizedId : 'unknown';
 }
 
 // ---------------------------------------------------------------------------

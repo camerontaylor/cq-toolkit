@@ -220,6 +220,8 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
+import { redactSensitiveText } from '../error-text.js';
+import { buildChildEnv } from '../subprocess/process.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
@@ -783,20 +785,21 @@ export class AcpDriver implements Driver {
     // ever touched); modelEnv hands the REQUESTED model id to the harness.
     // Validated BEFORE the session exists: a missing envNames entry is a
     // PRE-DISPATCH throw and must never leave a dangling record.
-    const childEnv = { ...process.env } as Record<string, string>;
-    for (const name of this.envNames) {
+    const extraNames = [...this.envNames];
+    for (const name of extraNames) {
       const value = process.env[name];
       if (value === undefined || value === '') {
         throw new Error(`acp driver: envNames entry '${name}' is not set in the environment`);
       }
-      childEnv[name] = value;
     }
+    const childEnv = buildChildEnv(process.env, undefined, extraNames);
     if (this.modelEnv !== undefined) {
       childEnv[this.modelEnv] = modelSpec.model;
     }
 
     // --- I6 isolation: fresh record + fresh workspace, or a real resume.
-    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
+    const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
         ? await store.create(await tempWorkspace(this.workspaceRoot))
@@ -822,7 +825,7 @@ export class AcpDriver implements Driver {
 
     // --- Protocol-level resume handle: the ACP session id a prior run
     // recorded in the workspace sidecar (absent → workspace-only continuation).
-    const resumeAcpSessionId = await readAcpSessionId(workspace);
+    const resumeAcpSessionId = await readAcpSessionId(sessionsDir, record.sessionId);
 
     // --- The one spawn. From here on, run() NEVER throws past the seam.
     const observation = newObservation();
@@ -1004,7 +1007,7 @@ export class AcpDriver implements Driver {
         });
         return;
       }
-      const identity = permissionToolIdentity(request.toolCall.title, request.toolCall.kind);
+      const identity = permissionToolIdentity(request.toolCall.kind, request.toolCall.toolCallId);
       const decision = decidePermission(
         toolPolicy,
         sandboxPolicy.level,
@@ -1747,9 +1750,12 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
  * the session/load handle of THIS run. Missing/unreadable → undefined (an
  * honest workspace-only continuation, never a fabricated resume).
  */
-async function readAcpSessionId(workspace: string): Promise<string | undefined> {
+async function readAcpSessionId(
+  sessionsDir: string,
+  sessionId: string,
+): Promise<string | undefined> {
   try {
-    const raw = await readFile(join(workspace, ACP_SESSION_FILE), 'utf8');
+    const raw = await readFile(join(sessionsDir, `${sessionId}${ACP_SESSION_FILE}`), 'utf8');
     const trimmed = raw.trim();
     return trimmed === '' ? undefined : trimmed;
   } catch {
@@ -1898,7 +1904,7 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
         existing.output = update.contentText;
       }
       existing.status = update.status ?? existing.status;
-      existing.identity = permissionToolIdentity(existing.title, existing.kind);
+      existing.identity = permissionToolIdentity(existing.kind, id);
       observation.tools.set(id, existing);
       // THE LATCH (CodeRabbit P1 on this PR): the completed report IS the
       // bypass evidence — a later update for the same id (failed, pending)
@@ -1992,7 +1998,11 @@ async function persistObservation(
     // failed write costs a workspace-only continuation, never this run's
     // verdict.
     try {
-      await writeFile(join(record.workspace, ACP_SESSION_FILE), `${acpSessionId}\n`, 'utf8');
+      await writeFile(
+        join(store.sessionsDir, `${record.sessionId}${ACP_SESSION_FILE}`),
+        `${acpSessionId}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
     } catch {
       // deliberately swallowed — resume degrades honestly
     }
@@ -2017,8 +2027,8 @@ async function persistObservation(
     await store.appendMessage(record.sessionId, { role: 'assistant', content: text, at: nowIso() });
   }
   const diagnostics = [
-    ...observation.narration,
-    ...observation.stderr.map((line) => `[stderr] ${line}`),
+    ...observation.narration.map(redactSensitiveText),
+    ...observation.stderr.map((line) => `[stderr] ${redactSensitiveText(line)}`),
   ];
   if (diagnostics.length > 0) {
     const message: SessionMessage = {

@@ -391,6 +391,35 @@ function optionsOf(calls: MockQueryCall[], nth = 0): Record<string, unknown> {
 }
 
 describe('claude-agent driver specifics (mock sdk)', () => {
+  test('child env is scrubbed by default and passes through only named values', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-env-'));
+    const secretName = 'CQ_CLAUDE_AGENT_SECRET_CANARY';
+    const passthroughName = 'CQ_CLAUDE_AGENT_PASSTHROUGH_CANARY';
+    const oldSecret = process.env[secretName];
+    const oldPassthrough = process.env[passthroughName];
+    const oldConfigured = process.env.CQ_RUN_ENV_PASSTHROUGH;
+    process.env[secretName] = 'must-not-reach-sdk';
+    process.env[passthroughName] = 'named-passthrough';
+    process.env.CQ_RUN_ENV_PASSTHROUGH = passthroughName;
+    try {
+      const { driver, calls } = driverWithCalls(scratchDir, {
+        directive: { kind: 'reply', text: 'ok' },
+      });
+      await driver.run(invocation({ prompt: 'env canary' }));
+      const env = optionsOf(calls)['env'] as Record<string, string>;
+      expect(env[secretName]).toBeUndefined();
+      expect(env[passthroughName]).toBe('named-passthrough');
+    } finally {
+      if (oldSecret === undefined) delete process.env[secretName];
+      else process.env[secretName] = oldSecret;
+      if (oldPassthrough === undefined) delete process.env[passthroughName];
+      else process.env[passthroughName] = oldPassthrough;
+      if (oldConfigured === undefined) delete process.env.CQ_RUN_ENV_PASSTHROUGH;
+      else process.env.CQ_RUN_ENV_PASSTHROUGH = oldConfigured;
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('peer ABSENT: a throwing loader throws pre-dispatch — before any session store mkdir', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
     try {
