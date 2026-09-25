@@ -34,6 +34,7 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /(?:^|\/)\.gitattributes$/i,
   /(?:^|\/)(?:tsconfig(?:\.[^/]+)?\.json|package\.json|biome\.jsonc?)$/i,
   /^\.github(?:\/|$)/i,
+  /^\.husky(?:\/|$)/i,
   /(?:^|\/)vitest\.(?:workspace|projects)\.(?:[cm]?[jt]sx?|json)$/i,
   /(?:^|\/)(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|bun\.lockb?|poetry\.lock|uv\.lock|pdm\.lock|Pipfile\.lock|Gemfile\.lock|Cargo\.lock|composer\.lock|mix\.lock|go\.sum)$/i,
 ]);

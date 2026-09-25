@@ -103,9 +103,13 @@ describe('RS-10 tamper corpus contract', () => {
     }
   });
 
-  test.each(['vitest.workspace.ts', 'vitest.workspace.json', 'vitest.projects.ts'])(
-    'protects Vitest workspace/project config: %s',
-    (path) => expect(isProtectedStagePath(path)).toBe(true),
+  test.each([
+    '.husky/pre-commit',
+    'vitest.workspace.ts',
+    'vitest.workspace.json',
+    'vitest.projects.ts',
+  ])('protects Vitest workspace/project config: %s', (path) =>
+    expect(isProtectedStagePath(path)).toBe(true),
   );
 
   test(
