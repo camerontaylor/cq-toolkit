@@ -74,6 +74,7 @@ describe('eval-axes-select module: --only selection and the credential gate (pur
 
   it('selectCells throws the usage message on a missing value and on a no-match', () => {
     expect(() => selectCells(CELLS, ['node', 'x', '--only'])).toThrow('--only requires a value');
+    expect(() => selectCells(CELLS, ['node', 'x', '--only'])).toThrow('valid cells:');
     expect(() => selectCells(CELLS, ['node', 'x', '--only', 'bogus'])).toThrow(
       "no cell matches 'bogus'",
     );
@@ -125,7 +126,10 @@ describe('demo-eval-axes: the #30 selective credential gate (spawn e2e)', () => 
     // here; the selective gate must name ZAI_API_KEY only (the glm cells
     // never contact DeepSeek).
     const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
-    expect(res.status, `${res.stdout}${res.stderr}`).toBe(1);
+    expect(
+      res.status,
+      `${res.stdout}${res.stderr}${res.signal ? `signal=${res.signal}` : ''}`,
+    ).toBe(1);
     expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
     expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
   });

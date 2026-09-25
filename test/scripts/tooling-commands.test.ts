@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { installFakeBin } from '../helpers/fake-bin.js';
+import { installFakeBin, readFakeBinLog } from '../helpers/fake-bin.js';
 import { copyRatchetEngine } from '../helpers/ratchet-fixture.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -197,52 +197,43 @@ describe('owned-file command contract', { timeout: 60_000 }, () => {
     const root = fixture(false);
     const file = join(root, 'src/owned space.ts');
     writeFileSync(file, 'export {};');
-    const staticLog = join(root, 'static.calls.jsonl');
+    const log = join(root, 'calls.jsonl');
     const oxlint = installFakeBin(root, 'oxlint', {
-      logFile: join(root, 'oxlint.calls.jsonl'),
+      logFile: log,
       exitCodeEnv: 'OXLINT_EXIT',
     });
     const oxfmt = installFakeBin(root, 'oxfmt', {
-      logFile: join(root, 'oxfmt.calls.jsonl'),
+      logFile: log,
       exitCodeEnv: 'OXFMT_EXIT',
     });
     writeFileSync(
       join(root, 'scripts/ratchet-typecheck.mjs'),
-      `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(staticLog)}, '["static"]\\n'); process.exit(17);`,
+      `import { appendFileSync } from 'node:fs'; appendFileSync(${JSON.stringify(log)}, '["static"]\\n'); process.exit(17);`,
     );
     const result = command(root, 'fix', ['src/owned space.ts'], {
       ...process.env,
       OXLINT_EXIT: '1',
     });
     expect(result.status).toBe(17);
-    const oxlintArgv = oxlint.calls()[0] ?? [];
-    const oxfmtArgv = oxfmt.calls()[0] ?? [];
-    const canonicalFile = realpathSync(file);
-    expect([
-      ['oxlint', ...oxlintArgv],
-      ['oxfmt', ...oxfmtArgv],
-    ]).toEqual([
+    expect(oxlint.calls()).toHaveLength(1);
+    expect(oxfmt.calls()).toHaveLength(1);
+    expect(readFakeBinLog(log)).toEqual([
       [
         'oxlint',
         '--config',
-        realpathSync(join(root, '.oxlintrc.json')),
+        join(root, '.oxlintrc.json'),
         '--disable-nested-config',
         '--fix',
-        canonicalFile,
+        file,
       ],
-      ['oxfmt', canonicalFile],
+      ['oxfmt', file],
+      ['static'],
     ]);
-    expect(
-      readFileSync(staticLog, 'utf8')
-        .trim()
-        .split('\n')
-        .map((line): unknown => JSON.parse(line)),
-    ).toEqual([['static']]);
-    rmSync(staticLog);
+    rmSync(log);
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXFMT_EXIT: '8' }).status,
     ).toBe(1);
-    expect(existsSync(staticLog)).toBe(false);
+    expect(readFakeBinLog(log).map((call) => call[0])).toEqual(['oxlint', 'oxfmt']);
     writeFileSync(join(root, 'scripts/ratchet-typecheck.mjs'), 'process.exit(0);');
     expect(
       command(root, 'fix', ['src/owned space.ts'], { ...process.env, OXLINT_EXIT: '1' }).status,

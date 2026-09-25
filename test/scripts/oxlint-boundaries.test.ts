@@ -27,9 +27,15 @@ function lint(root: string, files: string[]) {
     timeout: 20_000,
   });
 }
-function diagnosticsOf(result: ReturnType<typeof lint>): Array<{ filename: string; code: string }> {
+function diagnosticsOf(
+  result: ReturnType<typeof lint>,
+): Array<{ filename: string; code: string; labels?: Array<{ span?: { line?: number } }> }> {
   const parsed = JSON.parse(result.stdout) as {
-    diagnostics: Array<{ filename: string; code: string }>;
+    diagnostics: Array<{
+      filename: string;
+      code: string;
+      labels?: Array<{ span?: { line?: number } }>;
+    }>;
   };
   return parsed.diagnostics;
 }
@@ -84,9 +90,15 @@ describe('production Oxlint configuration and architecture plugin', () => {
         ).toBe(true);
       }
     }
-    expect(
-      diagnostics.filter((entry) => entry.filename === 'src/cli/main.ts').length,
-    ).toBeGreaterThanOrEqual(4);
+    const cliBoundaryDiagnostics = diagnostics.filter(
+      (entry) =>
+        entry.filename === 'src/cli/main.ts' &&
+        entry.code.includes('no-cli-beyond-registry-kernel'),
+    );
+    expect(new Set(cliBoundaryDiagnostics.map((entry) => entry.labels?.[0]?.span?.line))).toEqual(
+      new Set([1, 2, 3, 4]),
+    );
+    expect(cliBoundaryDiagnostics).toHaveLength(4);
   });
 
   it.each(['missing-plugin', 'invalid-config'])('fails closed for %s', (failure) => {

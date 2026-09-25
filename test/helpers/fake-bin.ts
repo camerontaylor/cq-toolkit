@@ -21,8 +21,14 @@ export interface FakeBin {
   path: string;
   /** Absolute JSONL log path. */
   logFile: string;
-  /** Parsed argv arrays, oldest call first. */
+  /** Parsed argv arrays for this binary, oldest call first. */
   calls(): string[][];
+}
+
+/** Read one shared fake-bin JSONL log, preserving cross-binary call order. */
+export function readFakeBinLog(logFile: string): string[][] {
+  const raw = readFileSync(logFile, 'utf8').trim();
+  return raw === '' ? [] : raw.split('\n').map((line) => JSON.parse(line) as string[]);
 }
 
 /**
@@ -36,8 +42,8 @@ export function installFakeBin(root: string, name: string, options: FakeBinOptio
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(
     path,
-    `import { appendFileSync, writeFileSync } from 'node:fs';
-appendFileSync(${JSON.stringify(logFile)}, JSON.stringify(process.argv.slice(2)) + '\\n');
+    `import { appendFileSync } from 'node:fs';
+appendFileSync(${JSON.stringify(logFile)}, JSON.stringify([${JSON.stringify(name)}, ...process.argv.slice(2)]) + '\\n');
 process.stdout.write(${JSON.stringify(options.stdout ?? '')});
 process.stderr.write(${JSON.stringify(options.stderr ?? '')});
 process.exitCode = ${
@@ -51,9 +57,9 @@ process.exitCode = ${
   return {
     path,
     logFile,
-    calls: () => {
-      const raw = readFileSync(logFile, 'utf8').trim();
-      return raw === '' ? [] : raw.split('\n').map((line) => JSON.parse(line) as string[]);
-    },
+    calls: () =>
+      readFakeBinLog(logFile)
+        .filter((call) => call[0] === name)
+        .map((call) => call.slice(1)),
   };
 }
