@@ -26,7 +26,7 @@
 // EXIT: 0 on stdin EOF; 65 (EX_DATAERR) on a protocol break (oversized
 // line); signal termination on SIGTERM/SIGINT/SIGHUP. Every path aborts in-flight calls first,
 // which kills their `run` process groups.
-import { installProcessSignalCleanup } from '../../kernel/process-signals.js';
+import { installProcessSignalCleanup } from '../../kernel/governor.js';
 import { serveStdio } from './server.js';
 import { checkStartup, EXIT_CONFIG, EXIT_PROTOCOL, oneLine, scrubEnvironment } from './startup.js';
 

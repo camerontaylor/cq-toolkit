@@ -69,7 +69,7 @@
 // (op crash, journal failure, registry defect) is caught per subcommand,
 // narrated, and returned as 1 with stdout left EMPTY — no result ever
 // existed.
-export { installProcessSignalCleanup } from '../kernel/process-signals.js';
+export { installProcessSignalCleanup } from '../kernel/governor.js';
 import { get, list } from '../registry/index.js';
 import { getPlan } from '../registry/plans.js';
 import { OpResultSchema } from '../kernel/schema.js';
