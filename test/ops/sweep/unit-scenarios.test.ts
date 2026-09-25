@@ -73,6 +73,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     listWorktrees: async () => worktreeState.map((entry) => ({ ...entry })),
     listBranches: async () => [],
     listRemoteBranches: async () => [],
+    revParse: async () => 'fake-head',
     remoteGetUrl: async () => null,
     pathExists: async () => false,
     trackedFilesUnder: async () => [],

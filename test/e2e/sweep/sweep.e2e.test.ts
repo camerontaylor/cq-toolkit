@@ -636,12 +636,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(existsSync(resolve(scene.repo, 'worktrees', 'fix', 'alpha', '.cq'))).toBe(false);
       expect(
         existsSync(
-          join(
-            join(scene.repo, 'cq-run-state'),
-            SWEEP_RUN_STATE_BASELINE_DIR,
-            'fix',
-            'alpha.json',
-          ),
+          join(join(scene.repo, 'cq-run-state'), SWEEP_RUN_STATE_BASELINE_DIR, 'fix', 'alpha.json'),
         ),
       ).toBe(true);
 
@@ -991,7 +986,6 @@ describe('sweep e2e: stranded commit retry', () => {
       expect(second.output).toContain('0 failing unit(s) of 1');
     },
   );
-  );
 
   test(
     'strand-retry REFUSES with no caller-vouched runStateDir: an ahead-of-base branch is never pushed (no-vouch, #174)',
@@ -1004,7 +998,9 @@ describe('sweep e2e: stranded commit retry', () => {
       );
       const alpha = unitRow(second.run, 'alpha');
       expect(alpha.status).toBe('failed');
-      expect(alpha.error).toMatch(/stranded pushes require an explicit caller-supplied runStateDir/);
+      expect(alpha.error).toMatch(
+        /stranded pushes require an explicit caller-supplied runStateDir/,
+      );
       expect(alpha.error).toMatch(/needs-human evidence/);
       const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
       expect(originHeads).not.toContain('cq/e2e-novouch/fix/alpha');
@@ -1167,7 +1163,7 @@ describe('sweep e2e: rescue lane and prep mode', () => {
         expect(
           existsSync(
             join(
-              sweepRunStateDir(scene.repo, 'worktrees', 'cq/e2e-prep'),
+              join(scene.repo, 'cq-run-state'),
               SWEEP_RUN_STATE_BASELINE_DIR,
               'fix',
               `${pkg}.json`,
