@@ -49,35 +49,76 @@
 //                               set (zod→JSON Schema via z.toJSONSchema;
 //                               the OpInvocation seam cannot carry a schema,
 //                               so per-op registries stay a later lane)
-//   --allowedTools <names>      ALWAYS present: the harness tool surface
-//                               (buildTools names) ∩ the frozen ToolPolicy —
-//                               'allowlist' (default) → policy.allow ∩
-//                               harness, 'unrestricted' → all harness names,
-//                               'none' → an EMPTY value (nothing
-//                               pre-approved). Headless -p mode CANNOT
-//                               PROMPT: a tool outside --allowedTools is
-//                               DENIED by the CLI (never prompted, never
-//                               hung) — those denials are the CLI-side
-//                               source of WorkerResult.denials. NO
-//                               UNDOCUMENTED FLAGS (issue #19):
-//                               `--permission-prompts none` and `--bare`
-//                               were removed — the real CLI rejects them at
-//                               parse.
+//   --tools ""                  harness mode (default): every CLI builtin
+//                               is REMOVED from the surface (absent, not
+//                               denied — RS-1/RS-1b b1/b5)
+//   --setting-sources ""        harness mode: no ambient HOME/project
+//                               settings (canary allow rules stay inert)
+//   --strict-mcp-config         harness mode: no ambient MCP servers
+//   --mcp-config <file>         harness mode, non-empty selection only: the
+//                               per-run config launching `cq-harness-mcp`
+//                               (`<sessionsDir>/<sessionId>.<run-uuid>.cq-
+//                               harness-mcp.json` — unique per run; O_EXCL +
+//                               0600, an existing file is a hard error;
+//                               deleted once init reports the server
+//                               connected, again at settle)
+//   --allowedTools <names>      ALWAYS present, ONE argv element,
+//                               SPACE-joined (comma-joining silently
+//                               pre-approves only the first entry — RS-1b
+//                               b9/b10): harness mode → the QUALIFIED
+//                               spellings `mcp__cq-harness__<name>` of the
+//                               selected surface (harness ∩ ToolPolicy:
+//                               'allowlist' → allow ∩ harness,
+//                               'unrestricted' → all, 'none' → empty).
+//                               MCP tools are never auto-approved, so this
+//                               list is load-bearing (RS-1b b6); name
+//                               matching is byte-exact (b3). Headless -p
+//                               mode CANNOT PROMPT: a call outside the list
+//                               is DENIED (never prompted, never hung). NO
+//                               UNDOCUMENTED FLAGS (issue #19).
 //   --model <route.model>       the routed, allowlist-verified model id
 //   --resume <cli-session-id>   only on sessionRef resume, when the record
 //                               carries a CLI session marker (below)
 //
-// TRUST STATEMENT (issue #28's subprocess half): sandboxPolicy governs the
-// tool-NAME surface only — the harness sandbox/path/output restrictions are
-// NOT enforced by this driver. The CLI is an independent process with its
-// own permission model: run/sandbox confinement is the host CLI's business
-// (--allowedTools controls WHICH tools may run, never where or how). When
-// sandboxPolicy.level is not 'none' AND a tool surface was actually
-// exposed, the run records a `sandbox-level-unenforced` narration marker so
-// the unenforced request is observable per run (a mode-'none' run exposes
-// NOTHING pre-approved — headless-denied — so there is nothing unenforced
-// to observe, and the shared conformance contract pins such records to zero
-// tool-role messages).
+// CLOSED TOOL SURFACE (W1.4 — RS-12 design, ADR-0002 Annex A.4). The
+// harness executors now run on this lane too: the CLI's only tools are the
+// harness's, served over stdio by `cq-harness-mcp` (src/harness/mcp/) —
+// the SAME shared core (src/harness/surface.ts) claude-agent serves
+// in-process. The driver authors the manifest (workspace realpath, sandbox,
+// selection, harness config, env names); the server re-validates it,
+// scrubs its env to the default child-env allowlist + envAllowlist names
+// (route credentials never reach `run` children's env), and enforces
+// containment, allowlists and the read-only mapping. Fail-closed on three
+// fronts, each settling stopReason 'error' with a `HARNESS_ERROR_PREFIX`
+// cause and an `errorClass: 'harness'` narration marker (ADR-0002 §2.2's
+// enum field lands with the W3.3 types bump):
+//   - the FIRST system/init must report exactly the expected surface —
+//     `cq-harness`/connected (or no server) and exactly the qualified
+//     selected tools, plus `StructuredOutput` under --json-schema (pinned
+//     by the live leg) — else the ladder terminates the run
+//     ('harness-surface-mismatch'); a run whose result arrives with no init
+//     at all is 'harness-surface-unverified';
+//   - an is_error result on a harness tool is a DENIAL only when its text
+//     carries a stable harness denial prefix, or the CLI reported a
+//     permission denial for it; anything else (a dead server's
+//     'Connection closed', an MCP timeout, …) is a transport failure that
+//     terminates the run ('harness-transport-failure').
+// Tool names are mapped back to harness names in records and denials.
+//
+// STOCK MODE (plan D6 — null-hypothesis evals only): `toolSurface:
+// 'stock'` keeps the legacy argv (no --tools/--setting-sources/MCP flags;
+// harness NAMES in --allowedTools, which the CLI does not know — inert,
+// RS-1 J2 C1) and none of the harness enforcement. An option of the
+// directly constructed driver only — never a factory or plan key.
+//
+// TRUST STATEMENT (issue #28's subprocess half). Harness mode: the harness
+// enforces the TOOL-level sandbox mapping (read-only denials, workspace
+// containment, allowlists); OS confinement stays unenforced, so a
+// requested level with a non-empty surface records `{cq:
+// 'sandbox-level-unenforced', level, layer: 'os'}`. `run` commands keep
+// HOST privileges (the harness trust boundary, tools.ts). Stock mode: the
+// CLI's own permission model governs; the legacy `sandbox-level-
+// unenforced` marker (no layer) records that nothing was enforced here.
 //
 // SESSIONS (I6, OUR vocabulary — src/harness/session.ts):
 //   - NO sessionRef → tempWorkspace() + SessionStore.create(): a fresh
@@ -102,8 +143,10 @@
 //     reachable by the model. Our vocabulary never becomes vendor
 //     vocabulary either way.
 //   - Persisted per run, post-settle: the user prompt, ONE role 'tool'
-//     message PER IN-POLICY CLI TOOL EXECUTION (toolName = the CLI tool
-//     name; content = { input, ok, output } in plain-JSON our-vocabulary),
+//     message PER IN-POLICY CLI TOOL EXECUTION (toolName = the harness name
+//     — `mcp__cq-harness__read` is recorded as `read`; stock mode: the CLI
+//     tool name; content = { input, ok, output } in plain-JSON
+//     our-vocabulary),
 //     the assistant transcript text (when any), and non-JSON stdout lines
 //     + stderr as narration (toolName 'cli-narration'). OUT-OF-POLICY tool
 //     activity is narration-only: the record reflects the governed tool
@@ -179,15 +222,28 @@
 // 0 would be a fabricated fact. The derived figure is api-equivalent
 // (modeled — list price for the tokens consumed), never presented as billed
 // (DD-9; docs/dd-9-api-equivalent-budget.md).
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { readFile, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
 import { currentJobContext } from '../../kernel/governor.js';
 import { defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
+import {
+  buildManifest,
+  compareInitSurface,
+  harnessToolName,
+  isHarnessDenial,
+  isQualifiedHarnessTool,
+  qualifiedToolName,
+  selectToolNames,
+} from '../../harness/surface.js';
+import type { ExpectedInitSurface, HarnessManifest } from '../../harness/surface.js';
+import { HARNESS_MCP_SERVER_NAME } from '../../harness/surface.js';
+import { harnessServerLaunch } from '../../harness/mcp/launch.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { stripMetaSchema } from '../json-schema.js';
@@ -226,6 +282,48 @@ export const CLI_SESSION_FILE = '.cq-cli-session';
 
 /** Session-message toolName under which non-JSON stdout narration is recorded. */
 export const NARRATION_TOOL = 'cli-narration';
+
+/**
+ * The file-name SUFFIX of the per-run MCP config (W1.4, Annex A.4):
+ * `<sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json` — UNIQUE PER
+ * RUN, so two concurrent runs on one session can never read, replace or
+ * delete each other's binding — created exclusively (O_EXCL) with mode
+ * 0600, never in the model-visible workspace (tamper vector #26), and
+ * deleted as soon as `system/init` reports the harness connected, with a
+ * second delete at settle as the backstop.
+ */
+export const HARNESS_MCP_CONFIG_FILE = '.cq-harness-mcp.json';
+
+/**
+ * CLI-internal tools the `claude` CLI adds to `init.tools` even under
+ * `--tools ""`, pinned by the W1.4 live leg (A.5a, CLI 2.1.280): with
+ * `--json-schema` the CLI injects exactly `StructuredOutput` (its native
+ * structured-output tool, auto-approved). Nothing is added without it.
+ */
+export const CLI_STRUCTURED_OUTPUT_TOOL = 'StructuredOutput';
+
+/**
+ * The stable leading text of every harness-classified error verdict
+ * (`WorkerResult.error`). ADR-0002 §2.2's `errorClass: 'harness'` lands with
+ * the seam-v2 types bump (W3.3); until then this prefix — and the
+ * `errorClass: 'harness'` field on the narration marker — is the
+ * machine-readable classification.
+ */
+export const HARNESS_ERROR_PREFIX = 'subprocess driver: harness failure';
+
+/**
+ * The tool surface the lane runs with:
+ *   - 'harness' (default) — the CLOSED surface (W1.4): every CLI builtin is
+ *     removed (`--tools ""`), ambient settings and MCP servers are ignored,
+ *     and the only tools are the harness's, served by `cq-harness-mcp` and
+ *     enforced by the shared core.
+ *   - 'stock' — the NULL-HYPOTHESIS EVAL mode only (plan D6): the CLI's own
+ *     builtin surface with the legacy argv, where `--allowedTools` carries
+ *     harness names the CLI does not know (inert — RS-1 J2 C1) and NOTHING
+ *     the harness enforces applies. An option of the DIRECTLY CONSTRUCTED
+ *     driver only (ADVISORY, ADR-0002 §2.5) — never a factory or plan key.
+ */
+export type SubprocessToolSurface = 'harness' | 'stock';
 
 /**
  * The spawn seam: `spawnManaged` by default; tests inject a fake (the
@@ -274,6 +372,12 @@ export interface SubprocessDriverOptions {
    * only, never values.
    */
   envAllowlist?: readonly string[];
+  /**
+   * The tool surface (see SubprocessToolSurface). Default 'harness' — the
+   * closed surface. 'stock' exists for null-hypothesis evals only and is
+   * reachable solely by constructing this class directly.
+   */
+  toolSurface?: SubprocessToolSurface;
   /** Spawn override hook for tests. Default: the real spawnManaged. */
   spawn?: SpawnFn;
 }
@@ -298,6 +402,7 @@ export class SubprocessDriver implements Driver {
     | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
     | undefined;
   private readonly envAllowlist: readonly string[] | undefined;
+  private readonly toolSurface: SubprocessToolSurface;
   private readonly spawnImpl: SpawnFn;
 
   constructor(options: SubprocessDriverOptions = {}) {
@@ -355,6 +460,16 @@ export class SubprocessDriver implements Driver {
     // weaken default-deny for every later spawn on a "stateless" instance.
     this.envAllowlist =
       options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
+    if (
+      options.toolSurface !== undefined &&
+      options.toolSurface !== 'harness' &&
+      options.toolSurface !== 'stock'
+    ) {
+      throw new Error(
+        `subprocess driver: toolSurface must be 'harness' or 'stock', got ${JSON.stringify(options.toolSurface)}`,
+      );
+    }
+    this.toolSurface = options.toolSurface ?? 'harness';
     this.spawnImpl = options.spawn ?? spawnManaged;
   }
 
@@ -386,25 +501,52 @@ export class SubprocessDriver implements Driver {
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
 
-    // --- Tool surface: harness names ∩ per-op ToolPolicy → --allowedTools.
-    const harnessNames = buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map(
-      (t) => t.name,
-    );
-    const allowed = allowedToolNames(harnessNames, toolPolicy);
+    // --- Tool surface. 'harness' (default): the SHARED CORE's one manifest
+    // constructor binds the workspace realpath, sandbox level, harness ∩
+    // ToolPolicy, harness config and env names; the manifest rides the
+    // server's argv inside a per-run MCP config (Annex A.4). 'stock': the
+    // legacy inert harness-name allowlist over the CLI's builtins (D6).
+    const stock = this.toolSurface === 'stock';
+    let manifest: HarnessManifest | undefined;
+    let allowed: string[];
+    if (stock) {
+      allowed = selectToolNames(
+        buildTools(this.harnessConfig, workspace, sandboxPolicy.level).map((t) => t.name),
+        toolPolicy,
+      );
+    } else {
+      manifest = await buildManifest({
+        workspace,
+        sandbox: sandboxPolicy.level,
+        toolPolicy,
+        harness: this.harnessConfig,
+        envNames: this.envAllowlist,
+      });
+      allowed = manifest?.tools ?? [];
+    }
 
-    // --- Trust statement (header): sandboxPolicy names the tool surface ---
-    // only; THIS driver does not enforce a sandbox level. When a level was
-    // requested AND a tool surface was actually exposed, record that the
-    // level went unenforced here (per-run, observable).
+    // --- Sandbox narration. Harness mode: the harness now enforces the
+    // TOOL-level sandbox mapping (read-only denials, containment) on this
+    // lane, so the marker narrows to OS confinement (`layer: 'os'`). Stock
+    // mode: nothing the harness enforces applies — the legacy marker.
     const sandboxUnenforced = sandboxPolicy.level !== 'none' && allowed.length > 0;
 
     // --- CLI-level resume: the CLI session id recorded in the SESSIONS ---
     // STORE sidecar by a prior run (absent → workspace-only continuation).
     const resumeCliSessionId = await readCliSessionId(sessionsDir, record.sessionId);
 
+    // --- The per-run MCP config (harness mode, non-empty selection):
+    // created exclusively, 0600, beside the session records.
+    const mcpConfigPath =
+      manifest === undefined
+        ? undefined
+        : await writeMcpConfig(sessionsDir, record.sessionId, manifest);
+
     const argv = buildArgs({
       route,
-      allowedToolNames: allowed,
+      toolSurface: this.toolSurface,
+      allowedToolNames: stock ? allowed : allowed.map(qualifiedToolName),
+      mcpConfigPath,
       outputJsonSchema: this.outputJsonSchema,
       resumeCliSessionId,
     });
@@ -415,6 +557,7 @@ export class SubprocessDriver implements Driver {
     const governed = currentJobContext();
     const signal = governed?.signal;
     if (signal?.aborted === true) {
+      await removeMcpConfig(mcpConfigPath);
       return {
         usage: zeroUsage(),
         sessionId: record.sessionId,
@@ -428,9 +571,23 @@ export class SubprocessDriver implements Driver {
     // argv → ERR_INVALID_ARG_TYPE, a hostile override) is an 'error'
     // VERDICT, not a rejection (issue #19).
     const observation = newObservation();
+    if (!stock) {
+      // Fail-closed init-surface assertion (Annex A.4): exactly the harness
+      // server (when configured) and exactly the selected tools, plus the
+      // pinned CLI-internal structured-output tool under --json-schema.
+      observation.expectedSurface = {
+        harness: manifest !== undefined,
+        tools: allowed,
+        internalTools: this.outputJsonSchema === undefined ? [] : [CLI_STRUCTURED_OUTPUT_TOOL],
+      };
+    }
     if (sandboxUnenforced) {
       observation.narration.push(
-        JSON.stringify({ cq: 'sandbox-level-unenforced', level: sandboxPolicy.level }),
+        JSON.stringify(
+          stock
+            ? { cq: 'sandbox-level-unenforced', level: sandboxPolicy.level }
+            : { cq: 'sandbox-level-unenforced', level: sandboxPolicy.level, layer: 'os' },
+        ),
       );
     }
     let child: ManagedChild;
@@ -463,6 +620,7 @@ export class SubprocessDriver implements Driver {
       } catch {
         // deliberately swallowed — the verdict still reaches the caller
       }
+      await removeMcpConfig(mcpConfigPath);
       return {
         usage: zeroUsage(),
         sessionId: record.sessionId,
@@ -478,8 +636,14 @@ export class SubprocessDriver implements Driver {
     const terminationDone = new Promise<void>((resolve) => {
       finishTermination = resolve;
     });
-    const onAbort = (): void => {
+    // One ladder, two deciders: the GOVERNED signal (→ 'aborted') and the
+    // fail-closed harness checks (→ 'error'/harness). The first decider wins;
+    // the ladder runs once.
+    let terminationCause: 'governed' | 'harness' | undefined;
+    const startTermination = (cause: 'governed' | 'harness'): void => {
+      if (terminationStarted) return;
       terminationStarted = true;
+      terminationCause = cause;
       void terminateGracefully(
         child,
         {
@@ -493,21 +657,33 @@ export class SubprocessDriver implements Driver {
         },
       ).then(
         (outcome) => {
-          aborted = true;
+          aborted = terminationCause === 'governed';
           observation.narration.push(JSON.stringify({ cq: 'termination', outcome }));
           finishTermination?.();
         },
         () => {
-          aborted = true; // ladder failure must not hang the governed run
+          aborted = terminationCause === 'governed'; // ladder failure must not hang the run
           finishTermination?.();
         },
       );
     };
+    const onAbort = (): void => startTermination('governed');
     if (signal !== undefined) {
       signal.addEventListener('abort', onAbort, { once: true });
     }
 
-    child.onStdoutLine((line) => handleStdoutLine(observation, line));
+    let earlyConfigDelete: Promise<void> | undefined;
+    child.onStdoutLine((line) => {
+      handleStdoutLine(observation, line);
+      if (observation.harnessConnected && earlyConfigDelete === undefined) {
+        // Shortest useful lifetime: the CLI has spawned the server and the
+        // manifest now lives in its memory (a reconnect respawns from that
+        // in-memory config, never the file — live leg A.5i) — delete the
+        // config at once; the settle-time delete below is the backstop.
+        earlyConfigDelete = removeMcpConfig(mcpConfigPath);
+      }
+      if (observation.harnessFailure !== undefined) startTermination('harness');
+    });
     child.onStderrLine((line) => observation.stderr.push(line));
 
     // Capture the settled close value WITHOUT adding an unbounded await: a
@@ -534,6 +710,26 @@ export class SubprocessDriver implements Driver {
     // against the ladder's final marker. Bounded: terminateGracefully
     // always settles (its SIGKILL rung force-resolves).
     if (terminationStarted) await terminationDone;
+
+    // Backstop delete of the per-run MCP config, whatever the verdict and
+    // whatever the sessionRetention (a failure is swallowed; rm is idempotent).
+    await earlyConfigDelete;
+    await removeMcpConfig(mcpConfigPath);
+
+    // Fail closed: a harness-mode run whose CLI never reported an init
+    // surface ran unverified — whatever it reports is not a model outcome.
+    if (
+      !aborted &&
+      observation.expectedSurface !== undefined &&
+      !observation.initSeen &&
+      observation.harnessFailure === undefined &&
+      observation.result !== undefined
+    ) {
+      observation.harnessFailure = { cq: 'harness-surface-unverified', errorClass: 'harness' };
+    }
+    if (observation.harnessFailure !== undefined) {
+      observation.narration.push(JSON.stringify(observation.harnessFailure));
+    }
 
     // Structured_output is the one vendor field that becomes seam data, so
     // when a schema was configured it must survive that schema before it can
@@ -632,10 +828,15 @@ export class SubprocessDriver implements Driver {
     const measured =
       observation.result !== undefined ? usageFromCli(observation.result.usage) : undefined;
     const usage = measured ?? observation.assistantUsage ?? zeroUsage();
+    // A harness failure voids the payload: output produced on an unverified
+    // or broken tool surface is not a model outcome.
     const structured =
-      observation.result === undefined ? undefined : observation.result.structured_output;
+      observation.result === undefined || observation.harnessFailure !== undefined
+        ? undefined
+        : observation.result.structured_output;
     const stopReason = stopReasonOf({
       aborted,
+      harnessFailure: observation.harnessFailure !== undefined,
       maxTokens: budget.maxTokens,
       usage,
       resultStatus: resultStatusOf(observation.result),
@@ -735,17 +936,63 @@ export function allowedToolNames(
   harnessToolNames: readonly string[],
   policy: ToolPolicy,
 ): string[] {
-  const mode = policy.mode ?? 'allowlist';
-  if (mode === 'none') return [];
-  if (mode === 'unrestricted') return [...harnessToolNames];
-  const allowed = new Set(policy.allow);
-  return harnessToolNames.filter((name) => allowed.has(name));
+  return selectToolNames(harnessToolNames, policy); // the shared core — one implementation
+}
+
+/**
+ * Write the per-run MCP config (Annex A.4) EXCLUSIVELY (flag 'wx' =
+ * O_CREAT|O_EXCL — never follows or reuses a pre-planted file) with mode
+ * 0600, beside the session records, under a per-run random name. An
+ * existing file at that name is never adopted or replaced: EEXIST throws
+ * (pre-dispatch). The server is launched as `process.execPath` + the
+ * module-relative bin (never PATH/npx/plan data); the manifest is its one
+ * argv element.
+ */
+async function writeMcpConfig(
+  sessionsDir: string,
+  sessionId: string,
+  manifest: HarnessManifest,
+): Promise<string> {
+  // ABSOLUTE: the CLI runs with cwd = the workspace, so a relative
+  // sessionsDir would resolve --mcp-config beneath the workspace.
+  const path = resolve(sessionsDir, `${sessionId}.${randomUUID()}${HARNESS_MCP_CONFIG_FILE}`);
+  const launch = harnessServerLaunch();
+  const config = {
+    mcpServers: {
+      [HARNESS_MCP_SERVER_NAME]: {
+        command: launch.command,
+        args: [...launch.args, JSON.stringify(manifest)],
+        env: {},
+      },
+    },
+  };
+  const body = `${JSON.stringify(config)}\n`;
+  await writeFile(path, body, { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  return path;
+}
+
+/** Delete the per-run MCP config; absent path or failure is swallowed (persistence posture). */
+async function removeMcpConfig(path: string | undefined): Promise<void> {
+  if (path === undefined) return;
+  try {
+    await rm(path, { force: true });
+  } catch {
+    // deliberately swallowed — the verdict outranks the cleanup
+  }
 }
 
 /** Inputs to the argv builder — plain data. */
 export interface ArgBuildInputs {
   route: Route;
+  /** The tool surface. Default 'harness' (the closed surface). */
+  toolSurface?: SubprocessToolSurface;
+  /**
+   * The --allowedTools names, verbatim: harness mode passes the QUALIFIED
+   * spellings (`mcp__cq-harness__<name>`); stock mode the legacy harness names.
+   */
   allowedToolNames: readonly string[];
+  /** The per-run MCP config path (harness mode, non-empty selection only). */
+  mcpConfigPath?: string | undefined;
   /** Serialized JSON Schema for --json-schema, when the schema option is set. */
   outputJsonSchema: string | undefined;
   /** CLI session id for --resume, when the record carries a marker. */
@@ -774,6 +1021,14 @@ export function buildArgs(inputs: ArgBuildInputs): string[] {
   if (inputs.outputJsonSchema !== undefined) {
     args.push('--json-schema', inputs.outputJsonSchema);
   }
+  if ((inputs.toolSurface ?? 'harness') === 'harness') {
+    // The CLOSED surface (RS-1 recipe + RS-1b MCP form, Annex A.4): no
+    // builtins (absent, not denied), no ambient settings, no ambient MCP.
+    args.push('--tools', '', '--setting-sources', '', '--strict-mcp-config');
+    if (inputs.mcpConfigPath !== undefined) args.push('--mcp-config', inputs.mcpConfigPath);
+  }
+  // ONE argv element, SPACE-joined: a comma-joined list silently
+  // pre-approves only its first entry (RS-1b b9/b10).
   args.push('--allowedTools', inputs.allowedToolNames.join(' '));
   args.push('--model', inputs.route.model);
   if (inputs.resumeCliSessionId !== undefined) {
@@ -817,7 +1072,31 @@ interface RunObservation {
   deniedToolUseIds: Set<string>;
   /** The frozen denials, in denial order. */
   denials: ToolDenial[];
+  /** Harness mode only: the init surface the CLI must report (fail-closed assertion). */
+  expectedSurface: ExpectedInitSurface | undefined;
+  /** True once the first system/init event was folded. */
+  initSeen: boolean;
+  /** True once init reported the harness server connected (the config file may go). */
+  harnessConnected: boolean;
+  /** tool_use ids the CLI reported as permission-denied (system/permission_denied). */
+  permissionDeniedIds: Set<string>;
+  /** The first harness failure (surface mismatch / transport failure) — terminates the run. */
+  harnessFailure: HarnessFailure | undefined;
 }
+
+/** A harness-classified failure marker (narration + error cause), `errorClass: 'harness'`. */
+type HarnessFailure =
+  | {
+      cq: 'harness-surface-mismatch';
+      errorClass: 'harness';
+      expected: unknown;
+      observed: unknown;
+    }
+  | { cq: 'harness-transport-failure'; errorClass: 'harness'; tool: string; text: string }
+  | { cq: 'harness-surface-unverified'; errorClass: 'harness' };
+
+/** The CLI's own permission-denial text (RS-1b b3/b6), the fallback when no frame was seen. */
+const CLI_PERMISSION_TEXT = /^Claude requested permissions to use /;
 
 function newObservation(): RunObservation {
   return {
@@ -834,6 +1113,11 @@ function newObservation(): RunObservation {
     toolResults: [],
     deniedToolUseIds: new Set(),
     denials: [],
+    expectedSurface: undefined,
+    initSeen: false,
+    harnessConnected: false,
+    permissionDeniedIds: new Set(),
+    harnessFailure: undefined,
   };
 }
 
@@ -926,7 +1210,17 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
       if (event['subtype'] === 'init') {
         observation.cliSessionId = asString(event['session_id']) ?? observation.cliSessionId;
         observation.servedModel = asString(event['model']) ?? observation.servedModel;
+        if (!observation.initSeen) {
+          observation.initSeen = true;
+          assertInitSurface(observation, event);
+        }
         return;
+      }
+      if (event['subtype'] === 'permission_denied') {
+        // The CLI's permission gate refused a call outside --allowedTools;
+        // the errored tool_result that follows is a permission denial.
+        const id = asString(event['tool_use_id']);
+        if (id !== undefined) observation.permissionDeniedIds.add(id);
       }
       observation.narration.push(line); // known type, unhandled subtype — evidence
       return;
@@ -975,7 +1269,29 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
         observation.toolResults.push({ toolUseId: id, ok: rec['is_error'] !== true, text });
         if (rec['is_error'] !== true || observation.deniedToolUseIds.has(id)) continue;
         observation.deniedToolUseIds.add(id);
-        const tool = observation.toolUseNameById.get(id) ?? 'unknown';
+        const rawName = observation.toolUseNameById.get(id) ?? 'unknown';
+        // Harness names in OUR vocabulary (the claude-agent lane's too).
+        const tool = harnessToolName(rawName);
+        if (
+          observation.expectedSurface !== undefined &&
+          isQualifiedHarnessTool(rawName) &&
+          !observation.permissionDeniedIds.has(id) &&
+          !CLI_PERMISSION_TEXT.test(text) &&
+          !isHarnessDenial(text)
+        ) {
+          // THREE-WAY is_error CLASSIFICATION (Annex A.4) — neither a harness
+          // denial (stable prefix) nor a CLI permission denial: a server
+          // crash, an MCP timeout, a -32602 … arriving as CLI-authored text.
+          // Never a denial: the run would otherwise finish as a model
+          // outcome with no working tools. Terminate → error/harness.
+          observation.harnessFailure ??= {
+            cq: 'harness-transport-failure',
+            errorClass: 'harness',
+            tool,
+            text: text.slice(0, 2_000),
+          };
+          continue;
+        }
         observation.denials.push({
           tool,
           reason: text === '' ? `tool use denied by the CLI (${tool})` : text,
@@ -992,6 +1308,34 @@ export function handleStdoutLine(observation: RunObservation, line: string): voi
     default:
       observation.narration.push(line);
   }
+}
+
+/**
+ * The fail-closed init-surface assertion (Annex A.4), on the FIRST
+ * system/init event of a harness-mode run: the `{name, status}` projection
+ * of `mcp_servers` and the `tools` set must match the expected surface
+ * exactly. A mismatch (a missing/failed harness, a leaked connector or
+ * stray `.mcp.json`, a builtin `--tools ""` no longer strips) records the
+ * harness failure that terminates the run; a match with a configured
+ * server marks it connected.
+ */
+function assertInitSurface(observation: RunObservation, event: Record<string, unknown>): void {
+  const expected = observation.expectedSurface;
+  if (expected === undefined) return; // stock mode — nothing asserted
+  const verdict = compareInitSurface(expected, {
+    mcp_servers: event['mcp_servers'],
+    tools: event['tools'],
+  });
+  if (verdict.ok) {
+    observation.harnessConnected = expected.harness;
+    return;
+  }
+  observation.harnessFailure ??= {
+    cq: 'harness-surface-mismatch',
+    errorClass: 'harness',
+    expected: verdict.expected,
+    observed: verdict.observed,
+  };
 }
 
 /**
@@ -1028,7 +1372,18 @@ async function persistObservation(
     }
   }
   for (const outcome of observation.toolResults) {
-    const name = observation.toolUseNameById.get(outcome.toolUseId);
+    const rawName = observation.toolUseNameById.get(outcome.toolUseId);
+    // Harness mode: only the QUALIFIED harness spellings are the governed
+    // surface, recorded under their harness names; stock mode: the legacy
+    // raw-name match.
+    const name =
+      rawName === undefined
+        ? undefined
+        : observation.expectedSurface === undefined
+          ? rawName
+          : isQualifiedHarnessTool(rawName)
+            ? harnessToolName(rawName)
+            : undefined;
     if (name === undefined || !allowedNames.has(name)) continue; // governed surface only
     const use = observation.toolUses.find((candidate) => candidate.id === outcome.toolUseId);
     const message: SessionMessage = {
@@ -1094,6 +1449,17 @@ export function resultStatusOf(result: ResultEvent | undefined): ResultStatus {
  * (`boundedErrorText`), so a 0-token failure is diagnosable from the journal.
  */
 function errorCauseOf(observation: RunObservation): string {
+  const failure = observation.harnessFailure;
+  if (failure !== undefined) {
+    switch (failure.cq) {
+      case 'harness-surface-mismatch':
+        return `${HARNESS_ERROR_PREFIX} — init surface mismatch: expected ${JSON.stringify(failure.expected)}, observed ${JSON.stringify(failure.observed)}`;
+      case 'harness-transport-failure':
+        return `${HARNESS_ERROR_PREFIX} — transport failure on '${failure.tool}': ${failure.text}`;
+      case 'harness-surface-unverified':
+        return `${HARNESS_ERROR_PREFIX} — the CLI never reported its init surface`;
+    }
+  }
   const result = observation.result;
   if (result !== undefined && resultStatusOf(result) === 'error') {
     const rawResult = asString(result['result']);
@@ -1153,14 +1519,17 @@ function costField(
 /** Inputs to the frozen stop-reason mapping (header table). */
 export interface StopReasonInputs {
   aborted: boolean;
+  /** A harness failure terminated or invalidated the run (always an 'error'). */
+  harnessFailure?: boolean;
   maxTokens: number | undefined;
   usage: Usage;
   resultStatus: ResultStatus;
 }
 
-/** THE mapping (checked in order): aborted → budget → error → complete. */
+/** THE mapping (checked in order): aborted → harness failure → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
+  if (inputs.harnessFailure === true) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
     return 'budget';
   if (inputs.resultStatus !== 'success') return 'error';
