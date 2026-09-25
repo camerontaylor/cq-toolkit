@@ -96,8 +96,9 @@ function testTotalsRegression(base: FailureSet, final: FailureSet): string | nul
   }
   const skipped = (set: FailureSet): number | undefined => {
     const pending = set.numSkippedTests ?? set.numPendingTests;
-    if (pending === undefined) return undefined;
-    return pending + (set.numTodoTests ?? 0);
+    const todo = set.numTodoTests;
+    if (pending === undefined && todo === undefined) return undefined;
+    return (pending ?? 0) + (todo ?? 0);
   };
   const baseSkipped = skipped(base);
   const finalSkipped = skipped(final);

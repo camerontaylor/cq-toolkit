@@ -232,12 +232,13 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
       })),
       // Compiled only when the knob is on — mirroring the skipOnly
       // conditional, unused patterns never get a chance to be invalid.
-      testFilePatterns: detectDeletedTests
-        ? (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
-            source,
-            regex: new RegExp(source, 'i'),
-          }))
-        : [],
+      testFilePatterns:
+        detectDeletedTests || (tamper.detectRemovedTests ?? true)
+          ? (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
+              source,
+              regex: new RegExp(source, 'i'),
+            }))
+          : [],
       detectDeletedTests,
       skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
@@ -279,12 +280,13 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let sectionPath: string | null = null;
   let addedTestDeclarations = 0;
   let removedTestDeclarations = 0;
+  let removedFailingTestDeclarations = 0;
   const flushRemovedTest = (): void => {
     if (
       config.detectRemovedTests &&
       sectionPath !== null &&
       newPath !== '/dev/null' &&
-      removedTestDeclarations > addedTestDeclarations &&
+      (removedTestDeclarations > addedTestDeclarations || removedFailingTestDeclarations > 0) &&
       isTestPath(sectionPath, config)
     ) {
       findings.push({
@@ -301,6 +303,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       flushRemovedTest();
       addedTestDeclarations = 0;
       removedTestDeclarations = 0;
+      removedFailingTestDeclarations = 0;
       sectionPath = null;
       oldPath = null;
       oldHeader = null;
@@ -374,7 +377,13 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       continue;
     }
     if (line.startsWith('-')) {
-      if (isTestDeclaration(line.slice(1))) removedTestDeclarations += 1;
+      const removed = line.slice(1);
+      if (isTestDeclaration(removed)) {
+        removedTestDeclarations += 1;
+        if (/\b(?:failing|fails|known failure)\b/i.test(removed)) {
+          removedFailingTestDeclarations += 1;
+        }
+      }
       continue; // removed line — a deleted suppression is a fix, never scanned
     }
     newLine++; // context line ('' or ' ') advances the new-file cursor
@@ -421,7 +430,7 @@ function reportTestFileRemoval(
 
 /** Every heuristic, against one ADDED line's content only. */
 const PROTECTED_CONFIG_RE =
-  /(^|\/)(?:\.gitattributes|vitest\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
+  /(^|\/)(?:\.gitattributes|(?:[^/]+\/)*__snapshots__\/|[^/]+\.snap$|vitest\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
 
 function isProtectedConfigPath(path: string | null): boolean {
   return path !== null && (path === '.gitattributes' || PROTECTED_CONFIG_RE.test(path));

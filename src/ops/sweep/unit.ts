@@ -1556,6 +1556,36 @@ async function verifyScannedTip(
     }
   }
   void parentRef;
+  const committedPaths = await bindings.git([
+    '-C',
+    worktreePath,
+    'diff',
+    'HEAD^',
+    'HEAD',
+    '--text',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--no-renames',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
+    '--name-status',
+    '-z',
+  ]);
+  if (committedPaths.code !== 0) {
+    return tagged(
+      'infra',
+      `sweep.unit ${unit.package}: git diff HEAD^..HEAD name-status failed — ${committedPaths.stderr.trim()}`,
+    );
+  }
+  const protectedPaths = stagedPathsOf(committedPaths.stdout).filter((path) =>
+    DEFAULT_PROTECTED_STAGE_PATTERNS.some((regex) => regex.test(path)),
+  );
+  if (protectedPaths.length > 0) {
+    return tagged(
+      'tamper',
+      `sweep.unit ${unit.package}: protected path(s) appeared in the committed diff — ${protectedPaths.join(', ')} — nothing pushed — needs-human evidence`,
+    );
+  }
   const committedDiff = await bindings.git([
     '-C',
     worktreePath,

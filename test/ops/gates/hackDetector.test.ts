@@ -599,7 +599,7 @@ describe('hackDetector: tamper toggles', () => {
   test('invalid testFilePatterns never compile when the knob is off: no throw, no failed', async () => {
     const result = await hackDetector({
       diff: fixture('deleted-test.diff'),
-      tamper: { detectDeletedTests: false, testFilePatterns: ['('] },
+      tamper: { detectDeletedTests: false, detectRemovedTests: false, testFilePatterns: ['('] },
     });
     expect(result).toEqual({ status: 'ok', value: [] });
   });
