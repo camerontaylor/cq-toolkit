@@ -23,6 +23,7 @@ import {
 } from '../../../src/ops/sweep/registry.js';
 import {
   bindingsFromDispatch,
+  classifyStagePaths,
   compileStagePathPatterns,
   DEFAULT_UNIT_PROMPT_TEMPLATE,
   makePushBranch,
@@ -167,6 +168,26 @@ describe('sweep.unit registry entry (jSKJF)', () => {
     );
     // The check-command args use the same literal substitution.
     expect(bindings.checkCommand(unit, '/wt').args).toEqual(['scripts/check.js', 'a$&b']);
+  });
+
+  test('the shared default-deny taxonomy protects whole evidence/config roots', () => {
+    for (const path of [
+      'packages/a/test/helpers/setup.ts',
+      'packages/a/__mocks__/fs.ts',
+      'vitest.setup.ts',
+      '.oxlintrc.json',
+      '.mocharc.json',
+      '.gitignore',
+      'package-lock.json',
+      '.github/workflows/ci.yml',
+    ]) {
+      expect(classifyStagePaths([path]).kind, path).toBe('protected');
+    }
+  });
+
+  test('propose-only routes every non-empty staged set to human review', () => {
+    expect(classifyStagePaths(['src/production.ts'], undefined, true).kind).toBe('propose-only');
+    expect(classifyStagePaths([], undefined, true).kind).toBe('clean');
   });
 
   test('the staged-path allowlist compiles CASE-SENSITIVELY (#175 item 3)', () => {

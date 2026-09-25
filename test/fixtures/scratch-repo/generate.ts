@@ -6,14 +6,17 @@
 // test/ops/sweep/worktreeFor.test.ts.
 //
 // THE SEED (the D4 acceptance shape):
-//   - packages/alpha — a FAILING suite (sum(1, 1) is 2, the suite expects 3)
-//     whose failure the fake fixer can flip to passing by one edit;
-//   - packages/beta — a PASSING suite a correct fixer must leave untouched.
-// Every package carries a `test/suite.test.js` plain-node script; the probe
+//   - packages/alpha — a FAILING production module (sum(1, 1) is 2, it
+//     expects 3) whose failure the fake fixer can flip to passing by one edit;
+//   - packages/beta — a PASSING production module a correct fixer must leave
+//     untouched.
+// Every package carries a `src/calculation.js` production module; the probe
 // check (`scripts/check.js <pkg>`) runs it and reports failures in the
 // tsc-lines wire format (`path(line,col): error TS0000: message`), exit 1 on
-// any failure, 0 on clean. Failure coordinates are FIXTURE-STABLE (4,9) —
-// the seeded throw's line is part of the deterministic fingerprint.
+// any failure, 0 on clean. Production source is deliberate: the default worker
+// gate protects test/config paths for human review, while these sweep cases
+// must exercise the later commit, regression, rescue, and strand lanes.
+// Failure coordinates are FIXTURE-STABLE (4,9).
 import { execFile } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,19 +26,19 @@ export const ALPHA_FAILURE_MESSAGE = 'expected 3, got 2';
 
 /** The one edit that fixes alpha's seeded failure (the fake fixer's contract). */
 export const ALPHA_FIX = {
-  file: 'packages/alpha/test/suite.test.js',
-  oldText: 'if (sum(1, 1) !== 3) {',
-  newText: 'if (sum(1, 1) !== 2) {',
+  file: 'packages/alpha/src/calculation.js',
+  oldText: 'const expected = 3;',
+  newText: 'const expected = 2;',
 } as const;
 
 /**
- * The one edit that BREAKS beta's passing suite (the dirty-tree scenario):
- * it shifts beta's expectation constant, so the broken suite's assertion AND
+ * The one edit that BREAKS beta's passing production module (the dirty-tree scenario):
+ * it shifts beta's expectation constant, so the broken module's assertion AND
  * its thrown message move together — the failure text stays internally
  * consistent with the assertion that produced it.
  */
 export const BETA_BREAK = {
-  file: 'packages/beta/test/suite.test.js',
+  file: 'packages/beta/src/calculation.js',
   oldText: 'const expected = 4;',
   newText: 'const expected = 5;',
 } as const;
@@ -54,26 +57,28 @@ export const SCRATCH_PACKAGES: Array<{ name: string; path: string }> = [
 
 /** Each package's known file-set (the planner's packageFiles input). */
 export const SCRATCH_PACKAGE_FILES: Record<string, string[]> = {
-  alpha: ['packages/alpha/test/suite.test.js'],
-  beta: ['packages/beta/test/suite.test.js'],
+  alpha: ['packages/alpha/src/calculation.js'],
+  beta: ['packages/beta/src/calculation.js'],
 };
 
-const ALPHA_SUITE = [
+const ALPHA_SOURCE = [
   "'use strict';",
-  '// alpha: seeded failure — sum(1, 1) is 2, the suite expects 3. The fake',
-  '// fixer flips the expectation to 2 and the suite passes.',
+  '// alpha: seeded failure — sum(1, 1) is 2, the module expects 3. The fake',
+  '// fixer flips the expectation to 2 and the production check passes.',
   'const sum = (a, b) => a + b;',
-  'if (sum(1, 1) !== 3) {',
-  "  throw new Error('expected 3, got ' + sum(1, 1));",
+  'const expected = 3;',
+  'if (sum(1, 1) !== expected) {',
+  "  throw new Error('expected ' + expected + ', got ' + sum(1, 1));",
   '}',
   '',
 ].join('\n');
 
-const BETA_SUITE = [
+/** Beta's seeded production source — the rename-side allowlist test moves it verbatim. */
+export const BETA_SOURCE = [
   "'use strict';",
-  '// beta: passing suite — a correct fixer leaves this file untouched. The',
-  '// expectation lives on its OWN line so the breaking edit shifts the',
-  '// assertion and its message together (consistent failure text).',
+  '// beta: passing production module — a correct fixer leaves this file',
+  '// untouched. The expectation lives on its OWN line so the breaking edit',
+  '// shifts the assertion and its message together (consistent failure text).',
   'const sum = (a, b) => a + b;',
   'const expected = 4;',
   'if (sum(2, 2) !== expected) {',
@@ -84,7 +89,7 @@ const BETA_SUITE = [
 
 /**
  * The probe check: `node scripts/check.js <pkg>` — runs that package's
- * suite, reports each failure as one tsc-lines diagnostic at the
+ * production module, reports each failure as one tsc-lines diagnostic at the
  * fixture-stable coordinates (4,9), exits 1 on any failure / 0 clean.
  */
 const CHECK_SCRIPT = [
@@ -92,13 +97,13 @@ const CHECK_SCRIPT = [
   '// Probe check for one scratch package (argv[2]): plain node, offline.',
   "const path = require('node:path');",
   'const pkg = process.argv[2];',
-  "const suite = path.join('packages', pkg, 'test', 'suite.test.js');",
+  "const source = path.join('packages', pkg, 'src', 'calculation.js');",
   'try {',
-  '  require(path.resolve(suite));',
+  '  require(path.resolve(source));',
   '  process.exit(0);',
   '} catch (err) {',
   "  const message = String(err && err.message ? err.message : err).split('\\n')[0];",
-  "  process.stdout.write(suite + '(4,9): error TS0000: ' + message + '\\n');",
+  "  process.stdout.write(source + '(4,9): error TS0000: ' + message + '\\n');",
   '  process.exit(1);',
   '}',
   '',
@@ -118,9 +123,6 @@ const GITIGNORE = 'worktrees/\n';
 
 const PKG_JSON = (name: string): string =>
   `${JSON.stringify({ name, version: '1.0.0', private: true }, null, 2)}\n`;
-
-/** Beta's seeded package.json content — the rename-side allowlist test renames it verbatim. */
-export const BETA_PACKAGE_JSON = PKG_JSON('beta');
 
 // Auto-maintenance suppression, VERBATIM from the worktreeFor test idiom:
 // a commit's detached background `gc --auto` inheriting these pipes hangs
@@ -172,11 +174,11 @@ export async function generateScratchRepo(root: string): Promise<void> {
   writeFileSync(join(root, '.gitignore'), GITIGNORE);
   writeFileSync(join(root, 'scripts', 'check.js'), CHECK_SCRIPT);
   for (const pkg of SCRATCH_PACKAGES) {
-    mkdirSync(join(root, pkg.path, 'test'), { recursive: true });
+    mkdirSync(join(root, pkg.path, 'src'), { recursive: true });
     writeFileSync(join(root, pkg.path, 'package.json'), PKG_JSON(pkg.name));
     writeFileSync(
-      join(root, pkg.path, 'test', 'suite.test.js'),
-      pkg.name === 'alpha' ? ALPHA_SUITE : BETA_SUITE,
+      join(root, pkg.path, 'src', 'calculation.js'),
+      pkg.name === 'alpha' ? ALPHA_SOURCE : BETA_SOURCE,
     );
   }
   await resilient(() => run(['init', '-q', '-b', 'main', root], root));

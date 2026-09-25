@@ -900,7 +900,19 @@ describe('makeSubprocessSweepPlannerDeps (captured fixtures)', () => {
 
   test('the changed-files argv terminates the rev list AFTER the base', () => {
     const args = changedFilesArgs('origin/main');
-    expect(args).toEqual(['diff', '--name-status', '-z', 'origin/main', '--']);
+    expect(args).toEqual([
+      'diff',
+      '--text',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--no-renames',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      '--name-status',
+      '-z',
+      'origin/main',
+      '--',
+    ]);
     // The base is a REVISION (before the terminator); the trailing `--`
     // ends the rev list with an empty pathspec — never `-- <base>`, which
     // would read the base as a PATH.

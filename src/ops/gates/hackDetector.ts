@@ -34,6 +34,12 @@
 //     backtracking at scan time; the boundary is same-principal config,
 //     and callers own that trust.
 import type { Op } from '../../kernel/types.js';
+import {
+  isProtectedConfigPath,
+  isProtectedTestPath,
+  PROTECTED_TEST_FILE_PATTERN_SOURCES,
+  PROTECTED_TEST_ROOT_PATTERN_SOURCES,
+} from './protectedPaths.js';
 
 /**
  * One configurable suppression signature. `pattern` is a regex SOURCE
@@ -83,6 +89,8 @@ export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Objec
     { name: 'oxlint-disable', pattern: '\\boxlint-disable\\b' },
     { name: '@ts-ignore', pattern: '@ts-ignore\\b' },
     { name: '@ts-expect-error', pattern: '@ts-expect-error\\b', requiresReason: true },
+    { name: '@ts-nocheck', pattern: '@ts-nocheck\\b' },
+    { name: 'biome-ignore', pattern: '\\bbiome-ignore\\b' },
     { name: 'istanbul ignore', pattern: '\\bistanbul\\s+ignore\\b' },
   ].map((pattern) => Object.freeze(pattern)),
 );
@@ -97,9 +105,8 @@ export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Objec
  * i.e. deleted) matches none.
  */
 export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
-  '\\.test\\.[tj]sx?$',
-  '\\.spec\\.[tj]sx?$',
-  '__tests__/',
+  ...PROTECTED_TEST_ROOT_PATTERN_SOURCES,
+  ...PROTECTED_TEST_FILE_PATTERN_SOURCES,
 ]);
 
 /**
@@ -107,7 +114,8 @@ export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
  * against every ADDED line (`describe.skip`, `it.only`, `test . skip`, …).
  * Frozen: the marker taxonomy is a shipped default, not call-site knowledge.
  */
-export const DEFAULT_SKIP_ONLY_PATTERN = '\\b(describe|it|test)\\s*\\.\\s*(skip|only)\\b';
+export const DEFAULT_SKIP_ONLY_PATTERN =
+  '\\b(?:x(?:it|test|describe)|f(?:it|test|describe))\\s*\\(|\\b(?:describe|it|test)\\s*\\.\\s*(?:skip|only|todo|skipIf|runIf|fails|concurrent(?:\\.skip)?)\\b|\\b(?:x?(?:it|test)|f(?:it|test)|describe)\\s*\\([^,\\n]*,\\s*\\{[^}\\n]*\\b(?:skip|todo|only|fails)\\s*:\\s*(?:true|false|["\'][^"\']*["\']|[A-Za-z_$])';
 
 /**
  * Tamper-heuristic tuning. Every field is optional with a shipped default;
@@ -139,11 +147,13 @@ export interface HackDetectorInput {
   tamper?: TamperConfig;
 }
 
-/** What a finding is about. Exactly four kinds. */
+/** What a finding is about. */
 export type TamperFindingKind =
   | 'suppression'
   | 'deleted-test-file'
   | 'new-skip-only'
+  | 'removed-test'
+  | 'protected-config'
   | 'tautological-assertion';
 
 /**
@@ -224,12 +234,10 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
       })),
       // Compiled only when the knob is on — mirroring the skipOnly
       // conditional, unused patterns never get a chance to be invalid.
-      testFilePatterns: detectDeletedTests
-        ? (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
-            source,
-            regex: new RegExp(source, 'i'),
-          }))
-        : [],
+      testFilePatterns: (tamper.testFilePatterns ?? DEFAULT_TEST_FILE_PATTERNS).map((source) => ({
+        source,
+        regex: new RegExp(source, 'i'),
+      })),
       detectDeletedTests,
       skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
@@ -267,8 +275,33 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let renameTo: string | null = null;
   let inHunk = false;
   let newLine = 0;
+  let sectionPath: string | null = null;
+  let addedTestDeclarations = 0;
+  let removedTestDeclarations = 0;
+  let removedFailingTestDeclarations = 0;
+  const flushRemovedTest = (): void => {
+    if (
+      sectionPath !== null &&
+      newPath !== '/dev/null' &&
+      (removedTestDeclarations > addedTestDeclarations || removedFailingTestDeclarations > 0) &&
+      isTestPath(sectionPath, config)
+    ) {
+      findings.push({
+        kind: 'removed-test',
+        file: sectionPath,
+        line: null,
+        snippet: `${removedTestDeclarations} removed test declaration(s), ${addedTestDeclarations} added`,
+        message: 'test declarations were removed without a matching addition',
+      });
+    }
+  };
   for (const line of diff.split(/\r?\n/)) {
     if (line.startsWith('diff --git ')) {
+      flushRemovedTest();
+      addedTestDeclarations = 0;
+      removedTestDeclarations = 0;
+      removedFailingTestDeclarations = 0;
+      sectionPath = null;
       oldPath = null;
       oldHeader = null;
       newPath = null;
@@ -292,6 +325,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
         // renameTo is already set — one evaluation per section, no
         // duplicate findings.
         reportTestFileRemoval(findings, config, renameFrom, renameFromHeader, renameTo);
+        reportProtectedRename(findings, renameFrom, renameTo);
         continue;
       }
       if (line.startsWith('--- ')) {
@@ -301,6 +335,13 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       }
       if (line.startsWith('+++ ')) {
         newPath = headerPathOf(line.slice(4));
+        sectionPath = newPath === '/dev/null' ? oldPath : newPath;
+        if (sectionPath !== null && isProtectedConfigPathInDiff(sectionPath)) {
+          reportProtectedConfig(findings, sectionPath);
+        }
+        if (oldPath !== null && oldPath !== sectionPath && isProtectedConfigPathInDiff(oldPath)) {
+          reportProtectedConfig(findings, oldPath);
+        }
         if (renameTo === null) {
           reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
         }
@@ -324,15 +365,24 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       continue; // "\ No newline at end of file" — metadata, not content
     }
     if (line.startsWith('+')) {
+      if (isExecutableTestDeclaration(line.slice(1))) addedTestDeclarations += 1;
       scanAddedLine(findings, config, newPath, newLine, line.slice(1));
       newLine++;
       continue;
     }
     if (line.startsWith('-')) {
+      const removed = line.slice(1);
+      if (isExecutableTestDeclaration(removed)) {
+        removedTestDeclarations += 1;
+        if (/\b(?:failing|fails|known failure)\b/i.test(removed)) {
+          removedFailingTestDeclarations += 1;
+        }
+      }
       continue; // removed line — a deleted suppression is a fix, never scanned
     }
     newLine++; // context line ('' or ' ') advances the new-file cursor
   }
+  flushRemovedTest();
   return findings;
 }
 
@@ -373,6 +423,39 @@ function reportTestFileRemoval(
 }
 
 /** Every heuristic, against one ADDED line's content only. */
+function reportProtectedRename(
+  findings: TamperFinding[],
+  oldPath: string | null,
+  newPath: string | null,
+): void {
+  if (isProtectedConfigPathInDiff(oldPath)) reportProtectedConfig(findings, oldPath!);
+  if (isProtectedConfigPathInDiff(newPath)) reportProtectedConfig(findings, newPath!);
+}
+
+function reportProtectedConfig(findings: TamperFinding[], path: string): void {
+  findings.push({
+    kind: 'protected-config',
+    file: path,
+    line: null,
+    snippet: 'protected runner/measurement configuration',
+    message:
+      'worker changes to runner, measurement, or repository configuration are never auto-committed',
+  });
+}
+
+function isProtectedConfigPathInDiff(path: string | null): boolean {
+  return path !== null && isProtectedConfigPath(path);
+}
+
+function isExecutableTestDeclaration(content: string): boolean {
+  const code = content.replace(/^\s*(?:\/\/|\/\*|\*).*?(?:\*\/)?$/, '');
+  return /\b(?:x?(?:it|test)|f(?:it|test))\s*\(/.test(code) || /\bdescribe\s*\(/.test(code);
+}
+
+function isTestPath(path: string, config: CompiledConfig): boolean {
+  return config.testFilePatterns.some((pattern) => pattern.regex.test(path));
+}
+
 function scanAddedLine(
   findings: TamperFinding[],
   config: CompiledConfig,
@@ -401,7 +484,7 @@ function scanAddedLine(
         : `added suppression "${suppression.name}"`,
     });
   }
-  if (config.skipOnly?.test(content)) {
+  if (newPath !== null && isProtectedTestPath(newPath) && config.skipOnly?.test(content)) {
     findings.push({
       kind: 'new-skip-only',
       file,
@@ -411,7 +494,7 @@ function scanAddedLine(
       message: 'added line marks a test as skipped or focused',
     });
   }
-  if (config.detectTautologies) {
+  if (config.detectTautologies && newPath !== null && isProtectedTestPath(newPath)) {
     for (const tautology of content.matchAll(TAUTOLOGY_RE)) {
       const [, left, right] = tautology;
       if (left === undefined || right === undefined) {

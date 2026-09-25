@@ -47,12 +47,7 @@ import {
   SweepUnitJobOverlay,
   type SweepPlanConfig,
 } from '../../src/plans/sweep.js';
-import {
-  buildTestFixPlan,
-  TEST_FIX_FIXER,
-  TEST_FIX_PLAN_ID,
-  TEST_FIX_STAGE_PATH_ALLOWLIST,
-} from '../../src/plans/test-fix.js';
+import { buildTestFixPlan, TEST_FIX_FIXER, TEST_FIX_PLAN_ID } from '../../src/plans/test-fix.js';
 import { getPlan } from '../../src/plans/registry.js';
 
 /** A two-unit planner report as planSweep would have produced it. */
@@ -102,11 +97,13 @@ describe('plans barrel surface (jZ59o)', () => {
     expect(() => PlanSweepInputSchema.parse(barrelPlannerInput(CONFIG))).not.toThrow();
     const testFixPlan = barrelBuildTestFixPlan(CONFIG, twoUnitReport(TEST_FIX_FIXER));
     expect(testFixPlan.id).toBe(TEST_FIX_PLAN_ID);
-    // The naming contract + the test-fix scope constant ride the barrel too.
+    // The naming contract rides the barrel too.
     expect(sweepUnitSegments('cq/x', { package: '@scope/pkg', fixer: 'fix' }).slug).toBe(
       'scope-pkg',
     );
-    expect(TEST_FIX_STAGE_PATH_ALLOWLIST.patterns.length).toBeGreaterThan(0);
+    for (const job of testFixPlan.jobs.filter((candidate) => candidate.op === 'sweep.unit')) {
+      expect((job as { input: { proposeOnly?: boolean } }).input.proposeOnly).toBe(true);
+    }
   });
 });
 
@@ -203,9 +200,9 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
     expect(plannerInput.fixers).toEqual([TEST_FIX_FIXER]);
     // Every unit job carries the test-only fixer (the plan's identity).
     for (const job of plan.jobs.slice(1, 3)) {
-      expect(SweepUnitDispatchInputSchema.parse((job as { input: unknown }).input).fixer).toBe(
-        TEST_FIX_FIXER,
-      );
+      const input = SweepUnitDispatchInputSchema.parse((job as { input: unknown }).input);
+      expect(input.fixer).toBe(TEST_FIX_FIXER);
+      expect(input.proposeOnly).toBe(true);
     }
     // A report from a DIFFERENTLY-configured phase A is plan corruption.
     expect(() => buildTestFixPlan(CONFIG, twoUnitReport('fix'))).toThrow(
