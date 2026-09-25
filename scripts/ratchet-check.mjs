@@ -11,13 +11,13 @@
 //       for the I5 status/evidence rules);
 //   (b) coverage — a real `npx vitest run --coverage`, the parsed
 //       coverage/coverage-summary.json fed to the coverage adapter
-//       (total.lines.pct NORMALIZED TO INTEGER PERCENT by
+//       (total.lines.pct NORMALIZED TO ONE DECIMAL PLACE by
 //       runCoverageRaw/normalizeCoverageSummary — 2-decimal float noise
 //       across runners is sub-granularity and must never be a verdict;
 //       higher-is-better).
 //
 // `--base <ref>` ADDITIONALLY runs the monotonic guard over the PR-shaped
-// diff: `git diff <ref>...HEAD` is normalized to the readings' integer-pct
+// diff: `git diff <ref>...HEAD` is normalized to the readings' one-decimal
 // basis (both diff sides, coverage-baseline sections only — see
 // engine.normalizeBaselineDiffValues, the ONE implementation shared with the
 // ratchet.monotonicGuard CLI op) and fed to
@@ -154,19 +154,45 @@ if (covRun.error || covRun.status !== 0) {
 
 // --base: the diff-mode guard. The diff text is preprocessed by
 // normalizeBaselineDiffValues (uniform comparison basis: fractional baseline
-// values on BOTH diff sides are rewritten to the same integer-pct the live
-// readings use — the re-basis hunk `93.46 → 93` then reads as the equal
-// no-op it is, while a true loosening `93 → 92` still fails) and the
+// values on BOTH diff sides are rewritten to the same one-decimal pct the
+// live readings use — the re-basis hunk `93.46 → 93.5` then reads as the
+// equal no-op it is, while a true loosening `93.4 → 93.3` still fails) and the
 // REWRITTEN text is what the engine judges; checkDiffMonotonicity itself is
 // untouched. The engine's input remains the guard's ONLY input — it still
 // judges baseline files alone (src/, workflows, everything else is ignored
 // by design, and passes through the normalization byte-identical).
 if (base !== null) {
-  const diff = spawnSync('git', ['diff', `${base}...HEAD`], {
-    cwd: ROOT,
-    encoding: 'utf8',
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  // The hardened, no-shell argv the trusted verifier uses (W1.7): no
+  // repo-configured external diff or textconv, no renames (a rename is a
+  // delete plus an add the guard pairs), fixed a/ b/ prefixes, no fsmonitor
+  // hook. A ref starting with `-` would be read as an option — refused.
+  if (base.startsWith('-')) fail(`refusing a --base that starts with '-': ${base}`);
+  const diff = spawnSync(
+    'git',
+    [
+      '--no-pager',
+      '--literal-pathspecs',
+      '-c',
+      'core.fsmonitor=false',
+      '-c',
+      'core.quotePath=true',
+      'diff',
+      '--text',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--no-renames',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      `${base}...HEAD`,
+      '--',
+      'baselines/',
+    ],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    },
+  );
   if (diff.error || diff.status !== 0) {
     fail(
       `cannot diff against '${base}': ${

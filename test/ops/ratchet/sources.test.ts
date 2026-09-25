@@ -7,7 +7,8 @@
 //   - `raw` returns the carried value verbatim.
 //   - `command` `text` returns the combined stdout+stderr on a CLEAN exit;
 //     `json`/`coverage-json` parse `stdout` alone (stderr noise never
-//     corrupts valid stdout JSON) and round coverage to integer percent.
+//     corrupts valid stdout JSON) and round coverage to ONE decimal
+//     (roundCoveragePct, half-up: 93.46 → 93.5, 93.45 → 93.5, 93.44 → 93.4).
 //     A null exit (signal/timeout/spawn fault) AND a non-zero exit are
 //     non-passing evidence for every non-tsc parse mode.
 //   - `command` tsc-text applies the evidence classification: a clean exit 0
@@ -97,12 +98,32 @@ describe('makeMetricSource', () => {
     await expect(bad('/ws')).resolves.toBeNull();
   });
 
-  test('command coverage-json parses stdout alone and rounds to integer percent', async () => {
+  test('command coverage-json parses stdout alone and rounds to one decimal', async () => {
     const source = makeMetricSource(
       runnerOf({ stdout: '{"total":{"lines":{"pct":93.46}}}', stderr: 'noise', exitCode: 0 }),
       { kind: 'command', command: 'x', args: [], parse: 'coverage-json' },
     );
-    await expect(source('/ws')).resolves.toEqual({ total: { lines: { pct: 93 } } });
+    await expect(source('/ws')).resolves.toEqual({ total: { lines: { pct: 93.5 } } });
+  });
+
+  test('command coverage-json rounds half-up at one decimal (93.45 → 93.5, 93.44 → 93.4, 1.05 → 1.1)', async () => {
+    for (const [pct, expected] of [
+      [93.45, 93.5],
+      [93.44, 93.4],
+      [1.05, 1.1],
+      [99.95, 100],
+      [94, 94],
+    ] as const) {
+      const source = makeMetricSource(
+        runnerOf({
+          stdout: JSON.stringify({ total: { lines: { pct } } }),
+          stderr: '',
+          exitCode: 0,
+        }),
+        { kind: 'command', command: 'x', args: [], parse: 'coverage-json' },
+      );
+      await expect(source('/ws')).resolves.toEqual({ total: { lines: { pct: expected } } });
+    }
   });
 
   test('command non-zero exit is null for text/json/coverage-json (legacy typecheckEvidence rule)', async () => {
@@ -258,7 +279,7 @@ describe('makeMetricSource', () => {
     await expect(unparsable(ws)).resolves.toBeNull();
   });
 
-  test('file coverage-json rounds total.lines.pct to integer percent (shared granularity law)', async () => {
+  test('file coverage-json rounds total.lines.pct to one decimal (shared granularity law)', async () => {
     const ws = await makeTmpDir();
     await writeFile(join(ws, 'coverage-summary.json'), '{"total":{"lines":{"pct":93.46}}}', 'utf8');
     const source = makeMetricSource(runnerOf({ stdout: '', stderr: '', exitCode: 0 }), {
@@ -266,7 +287,7 @@ describe('makeMetricSource', () => {
       path: 'coverage-summary.json',
       parse: 'coverage-json',
     });
-    await expect(source(ws)).resolves.toEqual({ total: { lines: { pct: 93 } } });
+    await expect(source(ws)).resolves.toEqual({ total: { lines: { pct: 93.5 } } });
     // A hostile/missing shape passes through untouched — the adapter rules it
     // unusable (I5), never a fabricated reading.
     await writeFile(join(ws, 'weird.json'), '"not an object"', 'utf8');

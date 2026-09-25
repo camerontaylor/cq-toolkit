@@ -150,7 +150,8 @@ export async function withGitAskpass(token, fn) {
 /**
  * Build (ensureDist) then import the BUILT engine. Returns the op factories,
  * the adapter registry, the format helpers (including the shared diff-side
- * coverage re-basis normalizer `normalizeBaselineDiffValues`), the diff
+ * coverage re-basis normalizer `normalizeBaselineDiffValues` and the
+ * coverage granularity law `roundCoveragePct` this file mirrors), the diff
  * monotonic guard, the baseline-proposal factory, and the first-party
  * adapters this lane's runners register (registration is the caller's job —
  * registerAdapter throws on a duplicate id, and the registry is per-process
@@ -181,6 +182,7 @@ export async function loadEngine() {
     renderBaseline: format.renderBaseline,
     tightens: format.tightens,
     normalizeBaselineDiffValues: format.normalizeBaselineDiffValues,
+    roundCoveragePct: format.roundCoveragePct,
     checkDiffMonotonicity: guard.checkDiffMonotonicity,
     formatViolations: guard.formatViolations,
     createProposeBaselineUpdate: propose.createProposeBaselineUpdate,
@@ -250,27 +252,43 @@ export function typecheckEvidence(typecheckCountAdapter, run) {
 }
 
 /**
- * Integer-percent normalization of a coverage summary — THE one shared
- * rounding point (ratchet-check, ratchet-propose, and the baseline capture
- * all read through runCoverageRaw, so all three apply it identically).
+ * LOCAL MIRROR of the engine's `roundCoveragePct`
+ * (src/ops/ratchet/format.ts — the source of truth): half-up to ONE decimal
+ * with a fixed absolute 1e-9 epsilon on the ×10 scale, so a decimal half
+ * that lands a hair below itself in binary still rounds up (1.05 → 1.1).
+ * Mirrored rather than imported because normalizeCoverageSummary is SYNC
+ * and runs inside runCoverageRaw, independent of the async loadEngine build;
+ * test/fixtures/ratchet-lib-selfhost.mjs asserts the two agree on a table
+ * of values, so they can never drift silently.
+ */
+function roundCoveragePct(pct) {
+  if (!Number.isFinite(pct)) return pct;
+  return Math.floor(pct * 10 + 0.5 + 1e-9) / 10;
+}
+
+/**
+ * One-decimal normalization of a coverage summary — the driver-side
+ * application of the shared granularity law (ratchet-check,
+ * ratchet-propose, and the baseline capture all read through
+ * runCoverageRaw, so all three apply it identically, and the engine's
+ * `coverage-json` source applies the same rounding).
  *
  * Rationale: the ratcheted quantity is total.lines.pct, and v8's 2-decimal
  * figure is NOT stable across environments — the same tree measured 93.46
  * locally and 93.38 in CI (provider/instrumentation noise), which failed a
  * 93.46 baseline as a spurious 0.08 "loosening". Granularity is the fix: the
- * reading is rounded to INTEGER percent (Math.round), in place, before any
- * adapter sees it. A ratchet step smaller than 1% is noise anyway — real
- * coverage work moves whole percentages — so 93.46 and 93.38 are both simply
- * 93, and cross-runner float noise can never turn into a ratchet verdict.
- * A hostile/missing shape is left untouched: the adapter rules it unusable
- * (I5), never a fabricated reading.
+ * reading is rounded half-up to ONE DECIMAL (roundCoveragePct above), in
+ * place, before any adapter sees it — the hundredths digit is noise, while
+ * the tenths digit keeps a small real coverage gain ratchetable (93.46 →
+ * 93.5, 93.44 → 93.4). A hostile/missing shape is left untouched: the
+ * adapter rules it unusable (I5), never a fabricated reading.
  */
 export function normalizeCoverageSummary(summary) {
   if (typeof summary !== 'object' || summary === null) return summary;
   try {
     const pct = summary?.total?.lines?.pct;
     if (typeof pct === 'number' && Number.isFinite(pct)) {
-      summary.total.lines.pct = Math.round(pct);
+      summary.total.lines.pct = roundCoveragePct(pct);
     }
   } catch {
     // Getter/hostile shape: leave as-is — the adapter's containment rules
@@ -314,7 +332,7 @@ export async function upsertProposalPr({ existing, edit, create }) {
  * Run the suite under the v8 coverage provider, then read the emitted
  * coverage/coverage-summary.json. Returns {status, stdout, stderr, error,
  * summary} where summary is the PARSED summary object, normalized to
- * INTEGER percent by normalizeCoverageSummary (the coverage adapter reads
+ * ONE-DECIMAL percent by normalizeCoverageSummary (the coverage adapter reads
  * total.lines.pct from it), or null when the file is absent or unparsable —
  * the engine rules a null reading non-passing evidence (I5). A stale summary
  * is removed BEFORE the run so a failed or crashed vitest can never leave
