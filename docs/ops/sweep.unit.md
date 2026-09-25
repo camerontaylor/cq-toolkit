@@ -249,6 +249,9 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minLength": 1,
       "type": "string"
     },
+    "proposeOnly": {
+      "type": "boolean"
+    },
     "push": {
       "type": "boolean"
     },
