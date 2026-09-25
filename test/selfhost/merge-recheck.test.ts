@@ -1,0 +1,754 @@
+// W1.2 slice B — tests for the merge-time recheck
+// (src/selfhost/merge-recheck.ts, the RS-3 decision).
+//
+// The forge is a fake GhFn: `api graphql` answers with a synthetic PR
+// payload built per test (mutable between calls, so a test can move the
+// head, add a review, or force-push mid-timeline), and the state-branch
+// git-data calls hit a tiny in-memory store (refs/commits/trees; 404 as
+// code 1 + 'gh: Not Found (HTTP 404)'; PATCH fast-forward only). Every argv
+// is recorded in order, interleaved with the inner mergePr's own entry, so
+// call ORDER is assertable.
+//
+// Pinned here: SHA-bound acceptance (an approval of an older commit never
+// counts — end-to-end the inner mergePr is never called), the immediate
+// re-fetch ordering, objection folding (old-sha CHANGES_REQUESTED blocks;
+// same-actor later APPROVED supersedes; COMMENTED does not), bot identity
+// folding and allowlisting, author/excluded exclusion, the client-side
+// force-push epoch, every structural refusal, CAS-failure refusal, never
+// throwing, observeOpenPrs isolation/pruning/single write, and the
+// non-retryable refusal stderr.
+import { createHash } from 'node:crypto';
+import { describe, expect, test } from 'vitest';
+import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
+import type { MergeEffects } from '../../src/ops/merge/effects.js';
+import {
+  CONSERVATIVE_TRUST_POLICY,
+  PR_SNAPSHOT_QUERY,
+  actorKey,
+  fetchPrSnapshot,
+  foldLatestOpinionated,
+  gateMergeEffects,
+  judgeAtHead,
+  observeOpenPrs,
+  recheckBeforeMerge,
+} from '../../src/selfhost/merge-recheck.js';
+import type { RecheckResult, TrustPolicy } from '../../src/selfhost/merge-recheck.js';
+import { readSettleState } from '../../src/selfhost/state-branch.js';
+
+const OWNER = 'octo';
+const REPO = 'widget';
+const PREFIX = `repos/${OWNER}/${REPO}/`;
+const SHA_A = 'a'.repeat(40);
+const SHA_B = 'b'.repeat(40);
+const BASE = 'c'.repeat(40);
+const T0 = Date.parse('2026-09-25T00:00:00.000Z');
+const SETTLE_MS = 30 * 60_000;
+const LATER = T0 + SETTLE_MS + 60_000;
+
+// ---------------------------------------------------------------------------
+// Synthetic PR payloads
+// ---------------------------------------------------------------------------
+
+interface ReviewSpec {
+  login: string | null;
+  typename?: string;
+  association?: string;
+  state: string;
+  submittedAt: string | null;
+  oid: string | null;
+}
+
+interface PrSpec {
+  state: string;
+  isDraft: boolean;
+  author: string;
+  head: string;
+  base: string;
+  reviews: ReviewSpec[];
+  forcePushes: number;
+  reviewsHasNext: boolean;
+  timelineTotalCount: number;
+  omitReviews: boolean;
+  errors: string[] | null;
+  missing: boolean;
+}
+
+const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
+  state: 'OPEN',
+  isDraft: false,
+  author: 'alice',
+  head: SHA_B,
+  base: BASE,
+  reviews: [],
+  forcePushes: 0,
+  reviewsHasNext: false,
+  timelineTotalCount: 0,
+  omitReviews: false,
+  errors: null,
+  missing: false,
+  ...over,
+});
+
+const review = (over: Partial<ReviewSpec> = {}): ReviewSpec => ({
+  login: 'carol',
+  typename: 'User',
+  association: 'COLLABORATOR',
+  state: 'APPROVED',
+  submittedAt: '2026-09-24T10:00:00Z',
+  oid: SHA_B,
+  ...over,
+});
+
+const payloadFor = (spec: PrSpec): unknown => {
+  if (spec.errors !== null) return { errors: spec.errors.map((message) => ({ message })) };
+  if (spec.missing) return { data: { repository: { pullRequest: null } } };
+  return {
+    data: {
+      repository: {
+        pullRequest: {
+          state: spec.state,
+          isDraft: spec.isDraft,
+          author: { login: spec.author, __typename: 'User' },
+          headRefOid: spec.head,
+          baseRefOid: spec.base,
+          ...(spec.omitReviews
+            ? {}
+            : {
+                reviews: {
+                  pageInfo: { hasNextPage: spec.reviewsHasNext },
+                  nodes: spec.reviews.map((r) => ({
+                    author: r.login === null ? null : { login: r.login, __typename: r.typename },
+                    authorAssociation: r.association,
+                    state: r.state,
+                    submittedAt: r.submittedAt,
+                    commit: r.oid === null ? null : { oid: r.oid },
+                  })),
+                },
+              }),
+          timelineItems: {
+            // The UNFILTERED count GitHub reports — never read.
+            totalCount: spec.timelineTotalCount,
+            pageInfo: { hasNextPage: false },
+            nodes: Array.from({ length: spec.forcePushes }, () => ({
+              __typename: 'HeadRefForcePushedEvent',
+            })),
+          },
+        },
+      },
+    },
+  };
+};
+
+// ---------------------------------------------------------------------------
+// The fake forge (graphql + in-memory state branch)
+// ---------------------------------------------------------------------------
+
+const okRes = (body: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(body), stderr: '' });
+const notFound = (): GhResult => ({ code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' });
+const unprocessable = (msg: string): GhResult => ({
+  code: 1,
+  stdout: '',
+  stderr: `gh: ${msg} (HTTP 422)`,
+});
+const sha1 = (text: string): string => createHash('sha1').update(text).digest('hex');
+
+const flagValue = (args: string[], name: string): string => {
+  const entry = args.find((a) => a.startsWith(`${name}=`));
+  return entry === undefined ? '' : entry.slice(name.length + 1);
+};
+
+interface Forge {
+  gh: GhFn;
+  /** Every event in order: 'graphql:<pr>', 'state:<METHOD> <path>', 'inner-merge:<pr>'. */
+  log: string[];
+  prs: Map<number, PrSpec>;
+  refs: Map<string, string>;
+  /** Fault injection: return a result to answer instead of routing. */
+  hook: ((args: string[]) => GhResult | undefined) | undefined;
+}
+
+const makeForge = (prs: Record<number, PrSpec>): Forge => {
+  const refs = new Map<string, string>();
+  const commits = new Map<string, { tree: string; parents: string[] }>();
+  const trees = new Map<string, Map<string, string>>();
+  let counter = 0;
+  const forge: Forge = {
+    log: [],
+    prs: new Map(Object.entries(prs).map(([k, v]) => [Number(k), v])),
+    refs,
+    hook: undefined,
+    gh: (args) => {
+      const hooked = forge.hook?.(args);
+      if (hooked !== undefined) return Promise.resolve(hooked);
+      return Promise.resolve(route(args));
+    },
+  };
+  const reaches = (commit: string, ancestor: string): boolean => {
+    const queue = [commit];
+    while (queue.length > 0) {
+      const c = queue.shift() ?? '';
+      if (c === ancestor) return true;
+      queue.push(...(commits.get(c)?.parents ?? []));
+    }
+    return false;
+  };
+  const route = (args: string[]): GhResult => {
+    if (args[0] !== 'api') return notFound();
+    if (args[1] === 'graphql') {
+      const pr = Number(flagValue(args, 'pr'));
+      forge.log.push(`graphql:${String(pr)}`);
+      const spec = forge.prs.get(pr);
+      return spec === undefined
+        ? okRes({ data: { repository: { pullRequest: null } } })
+        : okRes(payloadFor(spec));
+    }
+    let method = 'GET';
+    let path = '';
+    const fields: Array<[string, string]> = [];
+    for (let i = 1; i < args.length; i += 1) {
+      const arg = args[i] ?? '';
+      if (arg === '-X') method = args[(i += 1)] ?? '';
+      else if (arg === '-f' || arg === '-F') {
+        const kv = args[(i += 1)] ?? '';
+        const eq = kv.indexOf('=');
+        fields.push([kv.slice(0, eq), kv.slice(eq + 1)]);
+      } else path = arg;
+    }
+    const field = (name: string) => fields.find(([k]) => k === name)?.[1];
+    forge.log.push(`state:${method} ${path.split('?')[0] ?? ''}`);
+    if (!path.startsWith(PREFIX)) return notFound();
+    const rest = path.slice(PREFIX.length);
+    if (method === 'GET' && rest.startsWith('git/ref/heads/')) {
+      const sha = refs.get(`refs/heads/${rest.slice('git/ref/heads/'.length)}`);
+      return sha === undefined ? notFound() : okRes({ object: { sha, type: 'commit' } });
+    }
+    if (method === 'GET' && rest.startsWith('contents/')) {
+      const [filePath = '', query = ''] = rest.slice('contents/'.length).split('?');
+      const commit = commits.get(new URLSearchParams(query).get('ref') ?? '');
+      const content = commit === undefined ? undefined : trees.get(commit.tree)?.get(filePath);
+      if (content === undefined) return notFound();
+      return okRes({
+        type: 'file',
+        encoding: 'base64',
+        content: Buffer.from(content).toString('base64'),
+      });
+    }
+    if (method === 'POST' && rest === 'git/trees') {
+      const p = field('tree[][path]') ?? '';
+      const content = field('tree[][content]') ?? '';
+      const sha = sha1(`tree\0${p}\0${content}`);
+      trees.set(sha, new Map([[p, content]]));
+      return okRes({ sha });
+    }
+    if (method === 'POST' && rest === 'git/commits') {
+      const tree = field('tree') ?? '';
+      const parents = fields.filter(([k]) => k === 'parents[]').map(([, v]) => v);
+      counter += 1;
+      const sha = sha1(`commit\0${tree}\0${parents.join(',')}\0${String(counter)}`);
+      commits.set(sha, { tree, parents });
+      return okRes({ sha });
+    }
+    if (method === 'POST' && rest === 'git/refs') {
+      const ref = field('ref') ?? '';
+      if (refs.has(ref)) return unprocessable('Reference already exists');
+      refs.set(ref, field('sha') ?? '');
+      return okRes({});
+    }
+    if (method === 'PATCH' && rest.startsWith('git/refs/heads/')) {
+      const ref = `refs/heads/${rest.slice('git/refs/heads/'.length)}`;
+      const current = refs.get(ref);
+      const sha = field('sha') ?? '';
+      if (current === undefined) return unprocessable('Reference does not exist');
+      if (field('force') !== 'true' && !reaches(sha, current)) {
+        return unprocessable('Update is not a fast forward');
+      }
+      refs.set(ref, sha);
+      return okRes({});
+    }
+    return notFound();
+  };
+  return forge;
+};
+
+const forgeDeps = (forge: Forge) => ({ gh: forge.gh, owner: OWNER, repo: REPO });
+
+const recheckDeps = (
+  forge: Forge,
+  nowMs: number,
+  policy: TrustPolicy = CONSERVATIVE_TRUST_POLICY,
+) => ({
+  ...forgeDeps(forge),
+  nowMs: () => nowMs,
+  settleMs: SETTLE_MS,
+  policy,
+});
+
+/** Seed the durable first observation of every listed PR at T0. */
+const seedObservation = async (forge: Forge, prs: number[]): Promise<void> => {
+  const result = await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => T0 }, prs);
+  expect(result.write?.ok).toBe(true);
+};
+
+/** A MergeEffects fake whose mergePr logs into the forge's shared timeline. */
+const innerEffects = (forge: Forge) => {
+  const mergeCalls: Array<{ pr: number; opts: { method: 'merge'; matchHeadCommit?: string } }> = [];
+  const ok: GhResult = { code: 0, stdout: '', stderr: '' };
+  const effects: MergeEffects = {
+    validateRef: () => Promise.resolve({ ok: true, sha: SHA_B }),
+    fetchRef: () => Promise.resolve(ok),
+    readBaseRef: () => Promise.resolve({ ok: true, baseRefName: 'main' }),
+    worktreePrepare: (pr) => Promise.resolve({ path: `/tmp/pr-${String(pr)}` }),
+    worktreeRemove: () => Promise.resolve(),
+    mergePr: (pr, opts) => {
+      forge.log.push(`inner-merge:${String(pr)}`);
+      mergeCalls.push({ pr, opts });
+      return Promise.resolve(ok);
+    },
+    retargetBase: () => Promise.resolve(ok),
+    pushRef: () => Promise.resolve(ok),
+  };
+  return { effects, mergeCalls };
+};
+
+const gated = (forge: Forge, nowMs: number, policy: TrustPolicy = CONSERVATIVE_TRUST_POLICY) => {
+  const inner = innerEffects(forge);
+  const effects = gateMergeEffects(inner.effects, (pr, head) =>
+    recheckBeforeMerge(recheckDeps(forge, nowMs, policy), pr, head),
+  );
+  return { effects, mergeCalls: inner.mergeCalls };
+};
+
+const snapshotOf = async (spec: PrSpec) => fetchPrSnapshot(forgeDeps(makeForge({ 7: spec })), 7);
+
+// ---------------------------------------------------------------------------
+
+describe('fetchPrSnapshot', () => {
+  test('mirrors fetchReviewState argv; no GraphQL variable is named query', async () => {
+    const forge = makeForge({ 7: prSpec() });
+    const calls: string[][] = [];
+    await fetchPrSnapshot(
+      {
+        ...forgeDeps(forge),
+        gh: (args) => {
+          calls.push(args);
+          return forge.gh(args);
+        },
+      },
+      7,
+    );
+    expect(calls[0]).toEqual([
+      'api',
+      'graphql',
+      '-f',
+      `query=${PR_SNAPSHOT_QUERY}`,
+      '-f',
+      `owner=${OWNER}`,
+      '-f',
+      `name=${REPO}`,
+      '-F',
+      'pr=7',
+    ]);
+    expect(PR_SNAPSHOT_QUERY).not.toMatch(/\$query\b/);
+    expect(PR_SNAPSHOT_QUERY).not.toMatch(/totalCount/);
+  });
+
+  test('force-push epoch is counted from nodes, never the unfiltered totalCount', async () => {
+    const snap = await snapshotOf(prSpec({ forcePushes: 1, timelineTotalCount: 987_654 }));
+    expect(snap.forcePushEpoch).toBe(1);
+  });
+
+  test('truncated on hasNextPage or a missing connection; malformed oids → null', async () => {
+    expect((await snapshotOf(prSpec({ reviewsHasNext: true }))).truncated).toBe(true);
+    expect((await snapshotOf(prSpec({ omitReviews: true }))).truncated).toBe(true);
+    const bad = await snapshotOf(prSpec({ head: 'not-a-sha', base: SHA_A.slice(1) }));
+    expect(bad.headRefOid).toBeNull();
+    expect(bad.baseRefOid).toBeNull();
+  });
+
+  test('GraphQL errors, missing pullRequest, and a bad owner throw', async () => {
+    await expect(snapshotOf(prSpec({ errors: ['boom'] }))).rejects.toThrow(/boom/);
+    await expect(snapshotOf(prSpec({ missing: true }))).rejects.toThrow(/no pullRequest/);
+    await expect(
+      fetchPrSnapshot({ gh: makeForge({}).gh, owner: '..', repo: REPO }, 7),
+    ).rejects.toThrow(/charset/);
+  });
+});
+
+describe('actorKey + foldLatestOpinionated', () => {
+  test('both CodeRabbit identity forms are one actor; a human coderabbitai is distinct', () => {
+    expect(actorKey('coderabbitai', 'Bot')).toBe('bot:coderabbitai');
+    expect(actorKey('coderabbitai[bot]', 'User')).toBe('bot:coderabbitai');
+    expect(actorKey('CodeRabbitAI', 'User')).toBe('user:coderabbitai');
+    expect(actorKey(null, 'User')).toBe('unknown:');
+  });
+
+  test('COMMENTED and PENDING never supersede an opinion', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ state: 'CHANGES_REQUESTED', submittedAt: '2026-09-24T01:00:00Z' }),
+          review({ state: 'COMMENTED', submittedAt: '2026-09-24T02:00:00Z' }),
+          review({ state: 'PENDING', submittedAt: null }),
+        ],
+      }),
+    );
+    expect(foldLatestOpinionated(snap.reviews).get('user:carol')?.state).toBe('CHANGES_REQUESTED');
+  });
+});
+
+describe('judgeAtHead', () => {
+  test('an approval whose commit.oid ≠ headRefOid at merge time is not acceptance', async () => {
+    // SYNTHETIC TIMELINE: COLLABORATOR approves sha A; the author pushes sha
+    // B; the merge-time snapshot reports headRefOid B.
+    const forge = makeForge({ 7: prSpec({ head: SHA_A, reviews: [review({ oid: SHA_A })] }) });
+    const atA = await fetchPrSnapshot(forgeDeps(forge), 7);
+    expect(judgeAtHead(atA, SHA_A, CONSERVATIVE_TRUST_POLICY)).toEqual({
+      accepted: true,
+      by: ['user:carol'],
+    });
+    forge.prs.set(7, prSpec({ head: SHA_B, reviews: [review({ oid: SHA_A })] })); // the push
+    const atB = await fetchPrSnapshot(forgeDeps(forge), 7);
+    const verdict = judgeAtHead(atB, SHA_B, CONSERVATIVE_TRUST_POLICY);
+    expect(verdict).toMatchObject({ accepted: false, reason: 'no_head_bound_acceptance' });
+
+    // End to end: settled tuple at B, yet the stale approval can never merge.
+    await seedObservation(forge, [7]);
+    const { effects, mergeCalls } = gated(forge, LATER);
+    const result = await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B });
+    expect(result.code).toBe(1);
+    expect(result.stderr).toMatch(/refused pr 7: no_head_bound_acceptance/);
+    expect(mergeCalls).toEqual([]);
+  });
+
+  test('trusted CHANGES_REQUESTED on an OLD sha still blocks', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ login: 'dave', state: 'CHANGES_REQUESTED', oid: SHA_A }),
+          review({ login: 'carol', oid: SHA_B, submittedAt: '2026-09-24T11:00:00Z' }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      accepted: false,
+      reason: 'objection_outstanding',
+      detail: expect.stringContaining('user:dave') as unknown,
+    });
+  });
+
+  test("superseded by the same actor's later APPROVED at head → accepted", async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ state: 'CHANGES_REQUESTED', oid: SHA_A, submittedAt: '2026-09-24T09:00:00Z' }),
+          review({ state: 'APPROVED', oid: SHA_B, submittedAt: '2026-09-24T10:00:00Z' }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toEqual({
+      accepted: true,
+      by: ['user:carol'],
+    });
+  });
+
+  test('a later COMMENTED does not supersede CHANGES_REQUESTED', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({
+            login: 'dave',
+            state: 'CHANGES_REQUESTED',
+            oid: SHA_A,
+            submittedAt: '2026-09-24T09:00:00Z',
+          }),
+          review({
+            login: 'dave',
+            state: 'COMMENTED',
+            oid: SHA_B,
+            submittedAt: '2026-09-24T12:00:00Z',
+          }),
+          review({ login: 'carol', oid: SHA_B }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      reason: 'objection_outstanding',
+    });
+  });
+
+  test('CodeRabbit APPROVED at head: refused conservatively, accepted when allowlisted; one actor', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({
+            login: 'coderabbitai',
+            typename: 'Bot',
+            association: 'NONE',
+            submittedAt: '2026-09-24T09:00:00Z',
+          }),
+          review({ login: 'coderabbitai[bot]', typename: 'User', association: 'NONE' }),
+        ],
+      }),
+    );
+    expect(new Set(snap.reviews.map((r) => r.actorKey))).toEqual(new Set(['bot:coderabbitai']));
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      accepted: false,
+      reason: 'no_head_bound_acceptance',
+    });
+    const withBot: TrustPolicy = {
+      ...CONSERVATIVE_TRUST_POLICY,
+      trustedBots: new Set(['coderabbitai']),
+    };
+    expect(judgeAtHead(snap, SHA_B, withBot)).toEqual({ accepted: true, by: ['bot:coderabbitai'] });
+  });
+
+  test('PR author self-approval and excludedLogins actors never count', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        author: 'alice',
+        reviews: [
+          review({ login: 'alice', association: 'OWNER' }),
+          review({ login: 'cq-automation', association: 'MEMBER' }),
+        ],
+      }),
+    );
+    const policy: TrustPolicy = {
+      ...CONSERVATIVE_TRUST_POLICY,
+      excludedLogins: new Set(['cq-automation']),
+    };
+    expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({ reason: 'no_head_bound_acceptance' });
+  });
+
+  test('an untrusted association never counts; a pending review never counts', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ login: 'eve', association: 'CONTRIBUTOR' }),
+          review({ login: 'carol', state: 'PENDING', submittedAt: null }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      reason: 'no_head_bound_acceptance',
+    });
+  });
+});
+
+describe('recheckBeforeMerge + gateMergeEffects', () => {
+  test('approval at head B with settled state → inner mergePr called with the same opts', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    const { effects, mergeCalls } = gated(forge, LATER);
+    const opts = { method: 'merge' as const, matchHeadCommit: SHA_B };
+    const result = await effects.mergePr(7, opts);
+    expect(result.code).toBe(0);
+    expect(mergeCalls).toEqual([{ pr: 7, opts }]);
+    const direct = await recheckBeforeMerge(recheckDeps(forge, LATER + 1), 7, SHA_B);
+    expect(direct).toMatchObject({
+      ok: true,
+      acceptedBy: ['user:carol'],
+      tuple: { head: SHA_B, base: BASE, forcePushEpoch: 0 },
+      firstObservedAt: new Date(T0).toISOString(),
+    });
+  });
+
+  test('reviews are re-fetched immediately before merge; a late CHANGES_REQUESTED blocks', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    // "Classify": an earlier read sees a clean approval.
+    const early = await fetchPrSnapshot(forgeDeps(forge), 7);
+    expect(judgeAtHead(early, SHA_B, CONSERVATIVE_TRUST_POLICY).accepted).toBe(true);
+    // Between classify and merge a trusted reviewer objects.
+    forge.prs.set(
+      7,
+      prSpec({
+        reviews: [
+          review(),
+          review({
+            login: 'dave',
+            state: 'CHANGES_REQUESTED',
+            submittedAt: '2026-09-24T12:00:00Z',
+          }),
+        ],
+      }),
+    );
+    const { effects, mergeCalls } = gated(forge, LATER);
+    forge.log.length = 0;
+    forge.log.push('merge-requested');
+    const blocked = await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B });
+    expect(blocked.stderr).toMatch(/objection_outstanding/);
+    expect(mergeCalls).toEqual([]);
+    expect(forge.log[1]).toBe('graphql:7');
+
+    // Once dave approves at head, the fresh read lets the merge through —
+    // and the snapshot read sits between the request and the inner merge.
+    forge.prs.set(
+      7,
+      prSpec({
+        reviews: [
+          review(),
+          review({ login: 'dave', state: 'APPROVED', submittedAt: '2026-09-24T13:00:00Z' }),
+        ],
+      }),
+    );
+    forge.log.length = 0;
+    forge.log.push('merge-requested');
+    expect((await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B })).code).toBe(0);
+    const graphqlAt = forge.log.indexOf('graphql:7');
+    expect(graphqlAt).toBeGreaterThan(forge.log.indexOf('merge-requested'));
+    expect(graphqlAt).toBeLessThan(forge.log.indexOf('inner-merge:7'));
+  });
+
+  test('A → force-push → back to A: epoch bump invalidates the prior observation', async () => {
+    const forge = makeForge({ 7: prSpec({ head: SHA_A, reviews: [review({ oid: SHA_A })] }) });
+    await seedObservation(forge, [7]);
+    // Force-pushed away and back to A: same head, epoch 1.
+    forge.prs.set(7, prSpec({ head: SHA_A, forcePushes: 1, reviews: [review({ oid: SHA_A })] }));
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_A);
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toMatch(
+      /^settle: (tuple_changed|single_observation)$/,
+    );
+  });
+
+  test('settle pending when the second observation is too soon', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B);
+    expect(result).toEqual({ ok: false, reason: 'settle: settle_pending' });
+  });
+
+  test('refusals: head moved, unpinned, closed, draft, truncated reviews', async () => {
+    const cases: Array<[Partial<PrSpec>, string | undefined, RegExp]> = [
+      [{ head: SHA_A }, SHA_B, /^head moved/],
+      [{}, undefined, /^unpinned head/],
+      [{}, 'deadbeef', /^unpinned head/],
+      [{ state: 'CLOSED' }, SHA_B, /not open/],
+      [{ isDraft: true }, SHA_B, /draft/],
+      [{ reviewsHasNext: true }, SHA_B, /truncated/],
+      [{ base: 'zz' }, SHA_B, /base oid unavailable/],
+    ];
+    for (const [over, head, pattern] of cases) {
+      const forge = makeForge({ 7: prSpec({ reviews: [review()], ...over }) });
+      const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, head);
+      expect(result.ok).toBe(false);
+      expect((result as { reason: string }).reason).toMatch(pattern);
+    }
+  });
+
+  test('state-branch write CAS failure → refuse; nothing merges', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    forge.hook = (args) =>
+      args.includes('PATCH') ? unprocessable('Update is not a fast forward') : undefined;
+    const { effects, mergeCalls } = gated(forge, LATER);
+    const result = await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B });
+    expect(result.stderr).toMatch(/settle state not durable/);
+    expect(mergeCalls).toEqual([]);
+  });
+
+  test('state-branch read failure (non-404) → refuse', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    forge.hook = (args) =>
+      (args[1] ?? '').includes('git/ref/')
+        ? { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' }
+        : undefined;
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B);
+    expect(result).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/^settle state not durable: gh exit 1/) as unknown,
+    });
+  });
+
+  test('gh throw → refuse, never throws', async () => {
+    const throwing: GhFn = () => Promise.reject(new Error('spawn gh ENOENT\nstack…'));
+    const result = await recheckBeforeMerge(
+      {
+        gh: throwing,
+        owner: OWNER,
+        repo: REPO,
+        nowMs: () => LATER,
+        settleMs: SETTLE_MS,
+        policy: CONSERVATIVE_TRUST_POLICY,
+      },
+      7,
+      SHA_B,
+    );
+    expect(result).toEqual({ ok: false, reason: 'recheck fetch failed: spawn gh ENOENT' });
+    const badClock = await recheckBeforeMerge(
+      {
+        ...recheckDeps(makeForge({ 7: prSpec({ reviews: [review()] }) }), LATER),
+        nowMs: () => Number.NaN,
+      },
+      7,
+      SHA_B,
+    );
+    expect(badClock.ok).toBe(false);
+  });
+
+  test('refusal stderr does not match /base branch was modified/i', async () => {
+    const recheck = (): Promise<RecheckResult> =>
+      Promise.resolve({ ok: false, reason: 'forge said: Base branch was modified' });
+    const forge = makeForge({});
+    const inner = innerEffects(forge);
+    const result = await gateMergeEffects(inner.effects, recheck).mergePr(9, { method: 'merge' });
+    expect(result).toMatchObject({ code: 1, stdout: '' });
+    expect(result.stderr).toMatch(/^cq merge-time recheck refused pr 9: /);
+    expect(result.stderr).not.toMatch(/base branch was modified/i);
+    expect(inner.mergeCalls).toEqual([]);
+  });
+
+  test('every non-merge member delegates to the inner effects', async () => {
+    const forge = makeForge({});
+    const inner = innerEffects(forge);
+    const effects = gateMergeEffects(inner.effects, () => Promise.reject(new Error('never')));
+    expect(await effects.validateRef('x')).toEqual({ ok: true, sha: SHA_B });
+    expect(await effects.readBaseRef(1)).toEqual({ ok: true, baseRefName: 'main' });
+    expect(await effects.worktreePrepare(3, 'r')).toEqual({ path: '/tmp/pr-3' });
+    expect((await effects.fetchRef('r')).code).toBe(0);
+    expect((await effects.retargetBase(1, 'main')).code).toBe(0);
+    expect((await effects.pushRef('a:b', '/p')).code).toBe(0);
+    await expect(effects.worktreeRemove('/p')).resolves.toBeUndefined();
+  });
+});
+
+describe('observeOpenPrs', () => {
+  test('isolates a failing PR, prunes closed PRs, and writes once', async () => {
+    const forge = makeForge({ 1: prSpec(), 2: prSpec({ head: SHA_A }), 3: prSpec() });
+    await seedObservation(forge, [1, 2, 3]);
+    // PR 3 closed (dropped from the open list); PR 2's read now fails.
+    forge.hook = (args) =>
+      args[1] === 'graphql' && flagValue(args, 'pr') === '2'
+        ? { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' }
+        : undefined;
+    forge.prs.set(4, prSpec({ state: 'CLOSED' }));
+    forge.log.length = 0;
+    const result = await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => LATER }, [1, 2, 4]);
+    expect(result.observed).toEqual([1]);
+    expect(result.skipped).toEqual([
+      { pr: 2, reason: 'fetch failed: gh exit 1: gh: Server Error (HTTP 502)' },
+      { pr: 4, reason: 'not open' },
+    ]);
+    expect(result.write?.ok).toBe(true);
+    expect(forge.log.filter((entry) => entry.startsWith('state:PATCH'))).toHaveLength(1);
+    const { state } = await readSettleState(forgeDeps(forge));
+    expect(Object.keys(state.prs).sort()).toEqual(['1', '2']);
+    expect(state.prs['1']?.observations).toHaveLength(2);
+  });
+
+  test('a state-branch read failure is reported, never thrown; empty input writes nothing', async () => {
+    const forge = makeForge({ 1: prSpec() });
+    forge.hook = (args) =>
+      (args[1] ?? '').includes('git/ref/')
+        ? { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' }
+        : undefined;
+    const result = await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => T0 }, [1]);
+    expect(result.observed).toEqual([]);
+    expect(result.write).toMatchObject({ ok: false });
+    expect(await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => T0 }, [])).toEqual({
+      observed: [],
+      skipped: [],
+      write: null,
+    });
+  });
+});
