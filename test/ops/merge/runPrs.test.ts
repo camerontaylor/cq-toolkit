@@ -278,6 +278,32 @@ describe('runMergePrs', () => {
     expect(calls).toEqual([]);
   });
 
+  test('dispatch config applies trust policy: coderabbit approval yields no acceptable review', async () => {
+    const effects = new FakeMergeEffects();
+    const { resolve } = fakeResolve(acted(999));
+    const outcome = await runMergePrs(
+      {
+        ...baseInput([
+          eligible(44, {
+            reviews: [
+              {
+                ...approved(44),
+                authorLogin: 'coderabbitai[bot]',
+                authorAssociation: 'NONE',
+              },
+            ],
+          }),
+        ]),
+        config: { trustedBots: [], trustedAssociations: [], automationLogin: 'cq-automation[bot]' },
+      },
+      { effects, resolve },
+    );
+    expect(outcome).not.toBeNull();
+    // The composition surface reports the planner's stable not_eligible row;
+    // the underlying F1 classification is the no_acceptable_review reason.
+    expect(outcome.needsHuman).toEqual([{ pr: 44, reason: 'not_eligible' }]);
+  });
+
   test('no acted resolution: the pass-2 refresh seam is never invoked even when wired', async () => {
     const effects = new FakeMergeEffects();
     const { resolve, calls } = fakeResolve(acted(999));

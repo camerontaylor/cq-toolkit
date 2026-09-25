@@ -29,6 +29,9 @@
 //   7. The real run's RunOptions carry a durable journalDir (`merge-<stamp>`
 //      under the journal root) — asserted on the DIRECTORY the runner
 //      actually creates, the honest end-to-end observable.
+//   8. The W1.2 run-start settle observation rides the real-run result; a
+//      forge without a state branch fails its write without breaking the
+//      run (the recheck wiring itself: self-merge-prs-recheck.test.ts).
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -45,6 +48,7 @@ import {
   SELFHOST_DISABLES_CONFLICT_RESOLUTION,
 } from '../../src/selfhost/self-merge-prs.js';
 import { SelfhostDefaults } from '../../src/selfhost/config.js';
+import { defaultClassifyPrConfig } from '../../src/ops/merge/classify.config.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';
@@ -192,6 +196,28 @@ describe('buildRunInput (the pure input builder)', () => {
     );
   });
 
+  test('the resolved trust policy rides the strict JSON twin, not RegExp config', () => {
+    const input = buildRunInput(
+      [],
+      {
+        repoRoot: '/checkout',
+        journalRoot: '/j',
+        classifyConfig: {
+          ...defaultClassifyPrConfig,
+          trustedAssociations: [],
+          automationLogin: 'cq-automation[bot]',
+        },
+      },
+      1234,
+    );
+    expect(input.config).toEqual({
+      settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      trustedAssociations: [],
+      automationLogin: 'cq-automation[bot]',
+    });
+    expect(RunMergePrsInputSchema.parse(input).config).toEqual(input.config);
+  });
+
   test('disableConflictResolution omits modelSpec and marks the policy', () => {
     const input = buildRunInput(
       [],
@@ -209,6 +235,29 @@ describe('buildRunInput (the pure input builder)', () => {
 describe('runSelfMergePrs — real run', () => {
   test('pins the production conflict-disable policy constant', () => {
     expect(SELFHOST_DISABLES_CONFLICT_RESOLUTION).toBe(true);
+  });
+
+  test('the governed sweep preserves the trust policy and returns an outcome', async () => {
+    const seen: RunMergePrsInput[] = [];
+    const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });
+    const result = await runSelfMergePrs(
+      { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
+      {
+        ...baseCfg,
+        journalRoot: tmpJournalRoot(),
+        classifyConfig: {
+          ...defaultClassifyPrConfig,
+          trustedAssociations: [],
+          automationLogin: 'cq-automation[bot]',
+        },
+      },
+    );
+    expect(result).toMatchObject({ outcome: cannedOutcome });
+    expect(seen[0]?.config).toEqual({
+      settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      trustedAssociations: [],
+      automationLogin: 'cq-automation[bot]',
+    });
   });
 
   test('forwards the shipped conflict-disable policy into the parsed merge input', async () => {
@@ -256,6 +305,18 @@ describe('runSelfMergePrs — real run', () => {
     // `merge-<stamp>` dir the composition put in its RunOptions (stamp =
     // the once-read clock) under the journal root.
     expect(existsSync(join(journalRoot, 'merge-5000'))).toBe(true);
+    // The W1.2 run-start observation pass rides the result: this fake serves
+    // no snapshot shape (the PR is skipped) and no state branch (the write
+    // fails) — honest facts, never a broken run.
+    expect(result.settleObservation.observed).toEqual([]);
+    expect(result.settleObservation.skipped.map((row) => row.pr)).toEqual([7]);
+    expect(result.settleObservation.write?.ok).toBe(false);
+    // This fake does not route `gh api user`: the identity is unresolved
+    // (fail closed — every recheck would refuse), recorded, never thrown.
+    expect(result.automationIdentity).toMatchObject({
+      resolved: false,
+      reason: expect.stringContaining('unrouted gh invocation: api user') as unknown,
+    });
   });
 
   test('first-run journal root: a NON-EXISTENT nested journalRoot is created and the run succeeds (KyA)', async () => {

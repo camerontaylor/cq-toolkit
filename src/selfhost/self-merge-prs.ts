@@ -30,6 +30,38 @@
 // and logged at exit 0. Only a whole-run throw (bad args, a failed listing
 // fetch) exits 1. NO SECRETS: the payload carries PR numbers, verdicts,
 // branch-safe reasons, and report counts — never tokens or env.
+//
+// W1.2 — SHA-BOUND ACCEPTANCE AT MERGE TIME + DURABLE SETTLE. Reviews are
+// re-fetched IMMEDIATELY before every merge call: gateMergeEffects wraps the
+// executor's mergePr, so there is no classify→merge window. Acceptance comes
+// only from a trusted actor's CURRENT review whose commit.oid equals the
+// live headRefOid; unresolved external threads refuse; the base branch name
+// the executor's readBaseRef saw right before the call must still be the
+// live base, and a live base of SelfhostDefaults.protectedBranch refuses.
+// Settle comes from >= 2 durable observations of the identical (head, base,
+// force-push epoch) tuple >= settleMs apart, recorded on the `cq-state`
+// branch through the git-data API with the run's GH_TOKEN (the automation
+// identity; no worker holds it — conflict resolution is disabled in self-
+// host). Never the Actions cache: the journal root under .selfhost/journal
+// is cached and evictable, so the state branch is the persistence. Every
+// real run first observes all open candidates (at most one write, and only
+// when an anchor is new or a record is pruned), and the recheck adds its
+// own observation before judging (written only on ok or a new anchor).
+//
+// AUTOMATION IDENTITY. A real run first resolves the token's own login
+// (`gh api user`) and excludes it from trust — the automation can never
+// accept its own work. An integration (App) token cannot read /user
+// (HTTP 403 "Resource not accessible by integration" — only that exact
+// message; any other 403 fails closed); that is fine only while NO bot is
+// trusted (the App's own bot login is unknowable, so with any trustedBots
+// entry the run fails closed): App
+// bot identities are never trusted unless allowlisted, and the structural
+// automation bots are always excluded. Any OTHER failure fails closed —
+// every merge-time recheck refuses 'automation identity unresolved'. The
+// dry run skips resolution. A refusal surfaces as a
+// failed merge row ("cq merge-time recheck refused pr N: …") in needsHuman —
+// recorded limitation: executeMerges has no 'deferred' outcome, so a PR
+// that is merely not yet settled shows there until a later run merges it.
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -41,14 +73,27 @@ import {
 } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type { OpRegistryEntry, RunOptions, RunReport } from '../kernel/types.js';
+import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
 import type { PrClassification } from '../ops/merge/classifyPrs.js';
+import type { ClassifyPrConfig } from '../ops/merge/classify.config.js';
+import { realMergeEffects, type MergeEffects } from '../ops/merge/effects.js';
+import { makeRunMergePrsOp } from '../ops/merge/runPrs.js';
 import type { MergePrsCandidate, MergePrsOutcome, RunMergePrsInput } from '../ops/merge/runPrs.js';
-import { makeGhRunner, type GhFn } from '../ops/review/gh.js';
+import { GhError, ghJson, makeGhRunner, type GhFn } from '../ops/review/gh.js';
 import { list } from '../registry/index.js';
 import { makeMergePrsPlan } from '../plans/merge-prs.js';
 import { fetchMergeCandidates, type ExcludedCandidate } from './candidates.js';
 import { defaultJournalRoot, parseSelfhostArgs, SelfhostDefaults } from './config.js';
+import {
+  CONSERVATIVE_TRUST_POLICY,
+  gateMergeEffects,
+  observeOpenPrs,
+  recheckBeforeMerge,
+  type ObserveOpenPrsResult,
+  type RecheckResult,
+  type TrustPolicy,
+} from './merge-recheck.js';
 
 /** Production self-host policy: conflict resolution is always withheld. */
 export const SELFHOST_DISABLES_CONFLICT_RESOLUTION = true;
@@ -56,17 +101,34 @@ export const SELFHOST_DISABLES_CONFLICT_RESOLUTION = true;
 /** The merge plan's single job id (makeMergePrsPlan's shape, kept in sync). */
 const MERGE_PRS_PLAN_RUN_JOB_ID = 'merge-prs-run';
 
+/** The op the recheck gate rebinds (makeMergePrsPlan's single job's op). */
+const MERGE_RUN_PRS_OP = 'merge.runPrs';
+
 /** The entry's injected seams. Plain data; no ambient access behind them. */
 export interface SelfMergePrsDeps {
   /** The gh transport — the candidates fetch's listing + enrichment reads. */
   gh: GhFn;
   /**
    * The op registry view the governed run dispatches through. Default: the
-   * central registry view built exactly the way run-plan builds it. Only
-   * tests inject (their view binds a scripted merge.runPrs op).
+   * central registry view built exactly the way run-plan builds it, with
+   * merge.runPrs rebound through {@link recheckedRegistryView} (the W1.2
+   * merge-time recheck gate). An injected view is used VERBATIM — no gate
+   * is layered on: tests of scripted ops own their merge path. Only tests
+   * inject.
    */
   driverRegistryView?: OpRegistryView;
-  /** The injected clock; default Date.now (read once, at classify time). */
+  /**
+   * Test seam: the INNER merge effects under the recheck gate (the gate
+   * always wraps them). Default: realMergeEffects over cfg.repoRoot with the
+   * SelfhostDefaults protected branch. Ignored when driverRegistryView is
+   * injected.
+   */
+  mergeEffects?: MergeEffects;
+  /**
+   * The injected clock; default Date.now. Classification reads it ONCE per
+   * run; the observation pass and every merge-time recheck read it LIVE
+   * per call (settle is measured at the actual merge instant).
+   */
   nowMs?: () => number;
 }
 
@@ -86,6 +148,81 @@ export interface SelfMergePrsCfg {
   dryRun?: boolean;
   /** Disable model-dispatched conflict resolution; DIRTY rows become needs-human. */
   disableConflictResolution?: boolean;
+  /**
+   * The merge-time recheck's trust set (plan D3). Default
+   * CONSERVATIVE_TRUST_POLICY — the resolved D3 trust config from W1.1 /
+   * RS-15 Annex B (via trustPolicyFromConfig) replaces this default when it
+   * lands. The resolved automation login is always added to its exclusions.
+   */
+  trustPolicy?: TrustPolicy;
+  /** Resolved reviewer trust policy for the shipped merge classifier. */
+  classifyConfig?: ClassifyPrConfig;
+}
+
+/**
+ * The run-start resolution of the token's own login. The login is a
+ * structural fact (an account name, never a secret) and rides the payload.
+ */
+export interface AutomationIdentity {
+  /** True iff `gh api user` answered a login. */
+  resolved: boolean;
+  /** The resolved login. */
+  login?: string;
+  /** Why it is unresolved (one line, capped); absent when resolved. */
+  reason?: string;
+}
+
+/** Cap for the unresolved-identity reason (the recheck's REASON_MAX). */
+const IDENTITY_REASON_MAX = 500;
+
+/**
+ * Resolve the automation identity. `refusal` is null when the run may
+ * proceed (resolved, or an integration token under a policy that trusts NO
+ * bot — see the module doc) and the one-line refusal every recheck must
+ * answer otherwise. An integration token cannot name its own App bot, so
+ * with any `trustedBots` entry the App could be one of them and accept its
+ * own work: that case fails closed. Never throws.
+ */
+export async function resolveAutomationIdentity(
+  gh: GhFn,
+  policy: Pick<TrustPolicy, 'trustedBots'> = CONSERVATIVE_TRUST_POLICY,
+): Promise<{ identity: AutomationIdentity; refusal: string | null }> {
+  const cap = (text: string): string =>
+    (text.split('\n', 1)[0] ?? '').slice(0, IDENTITY_REASON_MAX);
+  try {
+    const user = await ghJson<unknown>(gh, ['api', 'user']);
+    const login =
+      typeof user === 'object' && user !== null && !Array.isArray(user)
+        ? (user as Record<string, unknown>)['login']
+        : undefined;
+    if (typeof login === 'string' && login.trim() !== '') {
+      return { identity: { resolved: true, login }, refusal: null };
+    }
+    const reason = 'gh api user returned no login';
+    return { identity: { resolved: false, reason }, refusal: reason };
+  } catch (error) {
+    const stderr = error instanceof GhError ? error.stderr : '';
+    if (/Resource not accessible by integration/.test(stderr)) {
+      const reason = cap(`integration token (no /user): ${stderr.trim()}`);
+      return {
+        identity: { resolved: false, reason },
+        // The App's own bot login is unknowable here; proceed only when no
+        // bot can grant acceptance at all.
+        refusal:
+          policy.trustedBots.size === 0
+            ? null
+            : cap(`integration token with trustedBots configured: ${reason}`),
+      };
+    }
+    const reason = cap(
+      error instanceof GhError
+        ? `gh exit ${String(error.code)}: ${stderr.trim() === '' ? error.message : stderr.trim()}`
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    );
+    return { identity: { resolved: false, reason }, refusal: reason };
+  }
 }
 
 /**
@@ -110,6 +247,10 @@ export type SelfMergePrsResult =
       excluded: ExcludedCandidate[];
       outcome: MergePrsOutcome | null;
       report: RunReport;
+      /** The run-start durable settle observation pass over the open candidates. */
+      settleObservation: ObserveOpenPrsResult;
+      /** The run-start automation-identity resolution (excluded from trust). */
+      automationIdentity: AutomationIdentity;
     };
 
 /**
@@ -120,7 +261,12 @@ export type SelfMergePrsResult =
  */
 export function buildRunInput(
   candidates: MergePrsCandidate[],
-  cfg: { repoRoot: string; journalRoot?: string; disableConflictResolution?: boolean },
+  cfg: {
+    repoRoot: string;
+    journalRoot?: string;
+    disableConflictResolution?: boolean;
+    classifyConfig?: ClassifyPrConfig;
+  },
   nowMs: number,
 ): RunMergePrsInput {
   return {
@@ -134,6 +280,30 @@ export function buildRunInput(
       : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
+    ...(cfg.classifyConfig === undefined
+      ? {}
+      : {
+          config: {
+            ...(cfg.classifyConfig.settleWindowMs === undefined
+              ? {}
+              : { settleWindowMs: cfg.classifyConfig.settleWindowMs }),
+            ...(cfg.classifyConfig.trustedBots === undefined
+              ? {}
+              : { trustedBots: cfg.classifyConfig.trustedBots }),
+            ...(cfg.classifyConfig.trustedAssociations === undefined
+              ? {}
+              : { trustedAssociations: cfg.classifyConfig.trustedAssociations }),
+            ...(cfg.classifyConfig.automationLogin === undefined
+              ? {}
+              : { automationLogin: cfg.classifyConfig.automationLogin }),
+            ...(cfg.classifyConfig.excludedLogins === undefined
+              ? {}
+              : { excludedLogins: cfg.classifyConfig.excludedLogins }),
+            ...(cfg.classifyConfig.acceptReviewStates === undefined
+              ? {}
+              : { acceptReviewStates: cfg.classifyConfig.acceptReviewStates }),
+          },
+        }),
   };
 }
 
@@ -153,15 +323,54 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
 };
 
 /**
- * Fetch this repository's merge candidates and, when not a dry run, execute
- * the governed merge-prs plan (module doc). The clock is read ONCE per run
- * (classify determinism: same fetch + same reading → same verdicts).
+ * The recheck-gated driver view: identical to `baseView` except
+ * `merge.runPrs`, whose entry keeps baseView's name and inputSchema but whose
+ * importer resolves the op built over `gateMergeEffects(innerEffects,
+ * recheck)` — every forge merge the op attempts is preceded by `recheck`.
+ * When baseView has no merge.runPrs entry the answer stays undefined (never
+ * fabricated).
+ */
+export function recheckedRegistryView(opts: {
+  baseView: OpRegistryView;
+  innerEffects: MergeEffects;
+  recheck: (
+    pr: number,
+    expectedHead: string | undefined,
+    expectedBase: string | undefined,
+  ) => Promise<RecheckResult>;
+}): OpRegistryView {
+  const { baseView, innerEffects, recheck } = opts;
+  return {
+    get: (name) => {
+      const entry = baseView.get(name);
+      if (name !== MERGE_RUN_PRS_OP || entry === undefined) return entry;
+      const gated = makeRunMergePrsOp({ effects: gateMergeEffects(innerEffects, recheck) });
+      return {
+        name: entry.name,
+        inputSchema: entry.inputSchema,
+        // Same bottom-instantiation variance adapter as centralRegistryView.
+        importer: async () => gated as unknown as Awaited<ReturnType<typeof entry.importer>>,
+      };
+    },
+  };
+}
+
+/**
+ * Fetch this repository's merge candidates and, when not a dry run, observe
+ * the open candidates durably and execute the governed merge-prs plan
+ * (module doc). The classify clock is read ONCE per run (classify
+ * determinism: same fetch + same reading → same verdicts); the observation
+ * pass and the merge-time rechecks read the live clock per call.
  */
 export async function runSelfMergePrs(
   deps: SelfMergePrsDeps,
   cfg: SelfMergePrsCfg,
 ): Promise<SelfMergePrsResult> {
-  const nowMs = (deps.nowMs ?? (() => Date.now()))();
+  // The LIVE clock: the observation pass and every recheck read it per call
+  // (settle is measured at the actual merge instant). The classify reading
+  // below is taken ONCE.
+  const clock = deps.nowMs ?? ((): number => Date.now());
+  const nowMs = clock();
   // The ONE clock reading rides into the fetch too: the closed-ancestor
   // sweep's freshness window is judged from the same instant the
   // classification will be (same fetch + same reading → same verdicts).
@@ -179,7 +388,7 @@ export async function runSelfMergePrs(
       candidateCount: fetched.candidates.length,
       classification: fetched.candidates.map((candidate) => ({
         pr: candidate.pr,
-        ...classifyPr(candidate, nowMs),
+        ...classifyPr(candidate, nowMs, cfg.classifyConfig),
       })),
     };
   }
@@ -193,6 +402,23 @@ export async function runSelfMergePrs(
   // never touching the journal.
   const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
   mkdirSync(journalRoot, { recursive: true });
+  // AUTOMATION IDENTITY (module doc): resolved once, before any merge can
+  // be attempted; an unresolved identity (other than an integration token)
+  // refuses every recheck rather than throwing the run.
+  const { identity: automationIdentity, refusal: identityRefusal } =
+    await resolveAutomationIdentity(deps.gh, cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY);
+  // RUN-START DURABLE OBSERVATION (W1.2): one snapshot per open candidate,
+  // at most ONE state-branch write, and only for a new/reset anchor or a
+  // pruned record (records of PRs outside this set are pruned — a PR
+  // excluded this run restarts its settle, which can only delay a merge).
+  // Never throws; a failed write does not stop the run — the
+  // recheck refuses any merge that lacks a durable observation anyway.
+  const settleObservation = await observeOpenPrs(
+    { gh: deps.gh, owner: cfg.owner, repo: cfg.repo, nowMs: clock },
+    fetched.candidates
+      .filter((candidate) => candidate.state === 'open')
+      .map((candidate) => candidate.pr),
+  );
   const input = buildRunInput(fetched.candidates, cfg, nowMs);
   // The governed composition — the recorded seam, not optional (I9),
   // mirroring src/cli/run-plan.ts: the caps ride BOTH the RunOptions (the
@@ -214,7 +440,53 @@ export async function runSelfMergePrs(
     governorConfig(runOptions, { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs }),
   );
   const plan = makeMergePrsPlan(input);
-  const view = deps.driverRegistryView ?? (await centralRegistryView());
+  // Production: the central registry with merge.runPrs gated by the
+  // merge-time recheck over the real (or seam-injected) inner effects. An
+  // injected driverRegistryView is used verbatim (its scripted op owns its
+  // merge path).
+  const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
+  const policy: TrustPolicy =
+    automationIdentity.login === undefined
+      ? basePolicy
+      : {
+          ...basePolicy,
+          excludedLogins: new Set([
+            ...basePolicy.excludedLogins,
+            automationIdentity.login.toLowerCase(),
+          ]),
+        };
+  const settleMs = defaultClassifyPrConfig.settleWindowMs; // the I2 settle constant
+  const view =
+    deps.driverRegistryView ??
+    recheckedRegistryView({
+      baseView: await centralRegistryView(),
+      innerEffects:
+        deps.mergeEffects ??
+        realMergeEffects({
+          repoRoot: cfg.repoRoot,
+          protectedBranch: SelfhostDefaults.protectedBranch,
+        }),
+      recheck: (pr, head, base) =>
+        identityRefusal !== null
+          ? Promise.resolve<RecheckResult>({
+              ok: false,
+              reason: `automation identity unresolved: ${identityRefusal}`,
+            })
+          : recheckBeforeMerge(
+              {
+                gh: deps.gh,
+                owner: cfg.owner,
+                repo: cfg.repo,
+                nowMs: clock,
+                settleMs,
+                policy,
+                protectedBranch: SelfhostDefaults.protectedBranch,
+              },
+              pr,
+              head,
+              base,
+            ),
+    });
   const report = withBudgetStop(
     await runPlan(plan, runOptions, governRegistry(view, governor)),
     plan,
@@ -225,7 +497,7 @@ export async function runSelfMergePrs(
     jobRow !== undefined && jobRow.result.status === 'ok'
       ? (jobRow.result.value as MergePrsOutcome)
       : null;
-  return { excluded: fetched.excluded, outcome, report };
+  return { excluded: fetched.excluded, outcome, report, settleObservation, automationIdentity };
 }
 
 /**
@@ -280,6 +552,20 @@ async function main(): Promise<void> {
           needsHuman: result.outcome?.needsHuman ?? [],
           diagnosis: result.outcome?.diagnosis ?? null,
           excluded: result.excluded,
+          // Structural facts only: PR numbers, one-line reasons, write ok,
+          // and the automation login (an account name, never a secret).
+          settleObservation: {
+            observed: result.settleObservation.observed,
+            skipped: result.settleObservation.skipped,
+            discarded: result.settleObservation.discarded,
+            write:
+              result.settleObservation.write === null
+                ? null
+                : result.settleObservation.write.ok
+                  ? { ok: true }
+                  : { ok: false, reason: result.settleObservation.write.reason },
+          },
+          automationIdentity: result.automationIdentity,
           report: {
             stoppedEarly: result.report.stoppedEarly,
             ...(result.report.earlyStopReason !== undefined

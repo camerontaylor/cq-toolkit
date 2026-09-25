@@ -21,10 +21,9 @@
 // from the type fails typecheck — the mirror cannot loosen silently.
 //
 // CONFIG IS THE DEFAULT BY DESIGN (merge.classifyPrs): ClassifyPrConfig
-// carries RegExp skip/all-clear patterns, which are not JSON, so a
-// JSON-dispatched classify runs the shipped defaultClassifyPrConfig. R3's
-// policy-as-data pass owns a string-pattern schema later; this entry does not
-// guess one.
+// carries RegExp skip/all-clear patterns, which are not JSON. JSON dispatch
+// therefore carries the resolved trust-policy fields explicitly and merges
+// them over the shipped defaults; pattern data remains code-owned.
 //
 // EFFECTS ARE BOUND PER DISPATCH (merge.executeMerges): the entry's importer
 // dynamically imports executeMerges AND realMergeEffects and binds the
@@ -34,6 +33,7 @@ import { z } from 'zod';
 import type { ModelSpec } from '../../driver/types.js';
 import type { Op, OpRegistryEntry } from '../../kernel/types.js';
 import type { PrCandidate, PrClassification } from './classifyPrs.js';
+import type { ClassifyPrConfig } from './classify.config.js';
 import type { ExecutionReport } from './executeMerges.js';
 import type { MergeFailureDiagnosis } from './diagnoseMergeFailure.js';
 import type {
@@ -68,6 +68,7 @@ const ModelSpecSchema: z.ZodType<ModelSpec> = z
 export const ThreadCommentSchema: z.ZodType<ThreadComment> = z
   .object({
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     body: z.string(),
     createdAt: z.string().nullable(),
   })
@@ -83,6 +84,7 @@ export const ReviewThreadSchema: z.ZodType<ReviewThread> = z
     isResolved: z.boolean(),
     isOutdated: z.boolean(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     createdAt: z.string().nullable(),
     body: z.string(),
     replies: z.array(ThreadCommentSchema),
@@ -95,6 +97,9 @@ export const ReviewSummarySchema: z.ZodType<ReviewSummary> = z
   .object({
     id: z.string(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
+    authorAssociation: z.string().nullable().optional(),
+    commitOid: z.string().nullable().optional(),
     state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']).nullable(),
     body: z.string(),
     submittedAt: z.string().nullable(),
@@ -107,6 +112,7 @@ export const RestCommentSchema: z.ZodType<RestComment> = z
     id: z.number().int(),
     nodeId: z.string().nullable(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     body: z.string(),
     createdAt: z.string().nullable(),
     inReplyToId: z.number().int().nullable(),
@@ -129,6 +135,7 @@ const PrCandidateObject = z
     reviews: z.array(ReviewSummarySchema),
     issueComments: z.array(RestCommentSchema),
     lastCommitAt: z.string().nullable(),
+    headRefOid: z.string().nullable().optional(),
   })
   .strict();
 
@@ -141,15 +148,32 @@ export const PrCandidateSchema: z.ZodType<PrCandidate> = PrCandidateObject;
 
 /** The JSON-dispatch input of the pure classifier: one candidate + the
  * caller's clock reading (classifyPr steals no time of its own). */
+const ClassifyPrConfigDataSchema = z
+  .object({
+    settleWindowMs: z.number().int().nonnegative().optional(),
+    trustedBots: z.array(z.string()).optional(),
+    trustedAssociations: z.array(z.string()).optional(),
+    automationLogin: z.string().nullable().optional(),
+    excludedLogins: z.array(z.string()).optional(),
+    acceptReviewStates: z
+      .array(z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']))
+      .optional(),
+  })
+  .strict();
+
+export type ClassifyPrConfigData = z.infer<typeof ClassifyPrConfigDataSchema>;
+
 export interface ClassifyPrsInput {
   candidate: PrCandidate;
   nowMs: number;
+  config?: ClassifyPrConfigData;
 }
 
 export const ClassifyPrsInputSchema: z.ZodType<ClassifyPrsInput> = z
   .object({
     candidate: PrCandidateSchema,
     nowMs: z.number(),
+    config: ClassifyPrConfigDataSchema.exactOptional(),
   })
   .strict();
 
@@ -401,6 +425,7 @@ export const RunMergePrsInputSchema: z.ZodType<RunMergePrsInput> = z
     conflictResolutionDisabled: z.boolean().exactOptional(),
     sessionsDir: z.string().min(1).exactOptional(),
     nowMs: z.number().exactOptional(),
+    config: ClassifyPrConfigDataSchema.exactOptional(),
   })
   .strict()
   .refine((input) => input.conflictResolutionDisabled !== true || input.modelSpec === undefined, {
@@ -420,14 +445,16 @@ export const registry: OpRegistryEntry[] = [
     importer: async () => {
       const { classifyPr } = await import('./classifyPrs.js');
       const { defaultClassifyPrConfig } = await import('./classify.config.js');
-      // The config is the DEFAULT, passed explicitly: ClassifyPrConfig's
-      // RegExp patterns are not JSON, so a JSON-dispatched classify runs
-      // the shipped table (R3 owns a string-pattern schema later).
-      const op: Op<ClassifyPrsInput, PrClassification> = (input) =>
-        Promise.resolve({
+      const op: Op<ClassifyPrsInput, PrClassification> = (input) => {
+        const config: ClassifyPrConfig =
+          input.config === undefined
+            ? defaultClassifyPrConfig
+            : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
+        return Promise.resolve({
           status: 'ok',
-          value: classifyPr(input.candidate, input.nowMs, defaultClassifyPrConfig),
+          value: classifyPr(input.candidate, input.nowMs, config),
         });
+      };
       return op as Op<unknown, unknown>;
     },
   },
