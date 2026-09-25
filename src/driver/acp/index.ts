@@ -58,9 +58,9 @@
 //                                        §2.2's honesty stands)
 //   mode 'unrestricted'                → ALLOW everything
 //   mode 'allowlist' (the default)     → the request's matched tool IDENTITY
-//                                        (the leading token of the title —
-//                                        the probe showed `<toolName>:
-//                                        <summary>`; `kind` falls back) ∈
+//                                        (authoritative kind, with execute
+//                                        mapped to run; a missing/blank kind
+//                                        denies explicitly) ∈
 //                                        policy.allow (case-insensitive) →
 //                                        ALLOW, else DENY ('tool policy: not
 //                                        allowlisted (kind …)')
@@ -1010,7 +1010,7 @@ export class AcpDriver implements Driver {
         });
         return;
       }
-      const identity = permissionToolIdentity(request.toolCall.kind, request.toolCall.toolCallId);
+      const identity = permissionToolIdentity(request.toolCall.kind);
       const decision = decidePermission(
         toolPolicy,
         sandboxPolicy.level,
@@ -1769,8 +1769,8 @@ async function readAcpSessionId(
 /**
  * THE PERMISSION DECISION (the frozen ToolPolicy + SandboxPolicy →
  * allow/deny for ONE request; the full mapping table is in the header).
- * `identity` is the matched tool identity (the title's leading token —
- * ./protocol.ts). The deny side carries the frozen denial record
+ * `identity` is the canonical kind-based tool identity (./protocol.ts).
+ * Missing kinds cannot authorize allowlisted tools. The deny side carries the denial record
  * synthesized AT the answer.
  */
 export function decidePermission(
@@ -1804,9 +1804,20 @@ export function decidePermission(
   if (policy.mode === 'unrestricted') {
     return { decision: 'allow', tool: identity };
   }
-  // mode 'allowlist' (the default reading when mode is omitted) — the
-  // matched identity against the allowlist, case-insensitively (vendor
-  // titles lead with capitalized tool names; our allowlists are lowercase).
+  // A vendor that omits kind cannot support this allowlist contract. Never
+  // infer authority from its display title or a coincidentally matching ID.
+  if (kind === undefined || kind.trim() === '') {
+    return {
+      decision: 'deny',
+      tool: identity,
+      denial: {
+        tool: identity,
+        reason: 'tool policy: missing ACP tool kind; cannot enforce allowlist',
+      },
+    };
+  }
+  // mode 'allowlist' (the default reading when mode is omitted): compare
+  // the canonical kind-based identity with the author's grant.
   const allowed = new Set([...policy.allow].map((name) => name.toLowerCase()));
   if (allowed.has(identity.toLowerCase())) {
     return { decision: 'allow', tool: identity };
@@ -1907,7 +1918,7 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
         existing.output = update.contentText;
       }
       existing.status = update.status ?? existing.status;
-      existing.identity = permissionToolIdentity(existing.kind, id);
+      existing.identity = permissionToolIdentity(existing.kind);
       observation.tools.set(id, existing);
       // THE LATCH (CodeRabbit P1 on this PR): the completed report IS the
       // bypass evidence — a later update for the same id (failed, pending)

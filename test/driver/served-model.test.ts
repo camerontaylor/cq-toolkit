@@ -56,6 +56,34 @@ describe('served-model assertion wrapper unit policy', () => {
     },
   );
 
+  test.each([
+    ['acp', 'ai-sdk/glm-5.3-flash', 'ai-sdk/glm-5.3-flash', 'complete'],
+    ['acp', 'vendor/model-a', 'vendor/model-a', 'complete'],
+    ['acp', 'vendor\\model-a', 'vendor\\model-a', 'complete'],
+    ['acp', 'ai-sdk/glm-5.3-flash', 'vendor/ai-sdk/glm-5.3-flash', 'complete'],
+    ['acp', 'ai-sdk/glm-5.3-flash', 'vendor\\ai-sdk/glm-5.3-flash', 'complete'],
+    ['acp', 'ai-sdk/model-a', 'different/model-a', 'error'],
+    ['acp', 'ai-sdk/model-a', 'vendor/ai-sdk/model-b', 'error'],
+    ['acp', 'model-a', 'vendor/extra/model-a', 'error'],
+    ['default', 'ai-sdk/model-a', 'ai-sdk/model-a', 'complete'],
+    ['default', 'ai-sdk/model-a', 'vendor/ai-sdk/model-a', 'error'],
+  ] as const)(
+    '%s compares requested %s with observed %s before optional prefix normalization',
+    async (lane, requested, observed, stopReason) => {
+      const raw = { ...result(observed), structuredOutput: { success: true } };
+      const verdict = await withServedModelAssertion(driverReturning(raw), lane).run(
+        invocation(requested),
+      );
+      expect(verdict.stopReason).toBe(stopReason);
+      if (stopReason === 'complete') {
+        expect(verdict).toBe(raw);
+      } else {
+        expect(verdict.error).toContain('served model assertion');
+        expect(verdict).not.toHaveProperty('structuredOutput');
+      }
+    },
+  );
+
   test('the shared wrapper unit policy rejects a mismatched served model', async () => {
     const wrapped = withServedModelAssertion(driverReturning(result('model-b')));
     const run = await wrapped.run(invocation());

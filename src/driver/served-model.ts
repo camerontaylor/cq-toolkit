@@ -48,7 +48,12 @@ export function assertServedModel(
       error: boundedErrorText('served model assertion: no served model was observed'),
     });
   }
-  if (normalizeModel(result.model, normalize) !== invocation.modelSpec.model) {
+  // A slash may be part of the requested model id, not a vendor prefix.
+  // Prefer exact identity; only then apply the lane's optional normalization.
+  if (
+    result.model !== invocation.modelSpec.model &&
+    normalizeModel(result.model, normalize) !== invocation.modelSpec.model
+  ) {
     return withoutStructuredOutput({
       ...result,
       stopReason: 'error',

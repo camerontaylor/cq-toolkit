@@ -231,6 +231,7 @@ const MODE = process.env.FAKE_ACP_MODE ?? 'ok';
 const REPLY = process.env.FAKE_ACP_REPLY;
 const TOOL = process.env.FAKE_ACP_TOOL ?? 'read';
 const TOOL_KIND = process.env.FAKE_ACP_TOOL_KIND;
+const TOOL_CALL_ID = process.env.FAKE_ACP_TOOL_CALL_ID;
 const OPTIONS_RAW = process.env.FAKE_ACP_OPTIONS;
 const SERVED_MODEL = process.env.FAKE_ACP_SERVED_MODEL;
 const REQUESTED_MODEL = process.env.FAKE_ACP_MODEL ?? 'fake-model';
@@ -684,7 +685,7 @@ async function resumeEchoFlow() {
 async function toolFlow({ alwaysFail }) {
   materializationUpdates();
   const input = toolInput();
-  const toolCallId = `call_${TOOL}_${process.pid}`;
+  const toolCallId = TOOL_CALL_ID ?? `call_${TOOL}_${process.pid}`;
   const title = `${TOOL}: ${toolSummary(input)}`;
   const options = offeredOptions();
 

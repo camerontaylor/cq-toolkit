@@ -440,6 +440,112 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test.each(['execute', ' EXECUTE '])(
+    'ACP kind %s authorizes toolkit run and persists its canonical identity',
+    async (kind) => {
+      await withScratch(async (scratchDir, store) => {
+        const driver = new AcpDriver(
+          driverOptions(
+            scratchDir,
+            {
+              FAKE_ACP_MODE: 'tool-then-reply',
+              FAKE_ACP_TOOL: 'run',
+              FAKE_ACP_TOOL_KIND: kind,
+              FAKE_ACP_INPUT: JSON.stringify({ command: 'echo canonical-run > allowed.txt' }),
+            },
+            [],
+          ),
+        );
+        const result = await driver.run(
+          invocation({
+            prompt: 'canonical run permission',
+            toolPolicy: { allow: ['run'], mode: 'allowlist' },
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(result.denials).toEqual([]);
+        const record = await store.load(result.sessionId as string);
+        expect(await readFile(join(record?.workspace as string, 'allowed.txt'), 'utf8')).toContain(
+          'canonical-run',
+        );
+        expect(record?.messages.some((m) => m.role === 'tool' && m.toolName === 'run')).toBe(true);
+      });
+    },
+  );
+
+  test.each([undefined, '', '  '])(
+    'missing ACP kind %s denies even when its call ID and title match grants',
+    async (kind) => {
+      await withScratch(async (scratchDir, store) => {
+        const driver = new AcpDriver(
+          driverOptions(
+            scratchDir,
+            {
+              FAKE_ACP_MODE: 'tool-then-reply',
+              FAKE_ACP_TOOL: 'run',
+              FAKE_ACP_TOOL_CALL_ID: 'run',
+              ...(kind === undefined ? {} : { FAKE_ACP_TOOL_KIND: kind }),
+              FAKE_ACP_INPUT: JSON.stringify({ command: 'echo escaped > forbidden.txt' }),
+            },
+            [],
+          ),
+        );
+        const result = await driver.run(
+          invocation({
+            prompt: 'missing kind cannot authorize',
+            // Omitted mode is also allowlist. Even 'unknown' cannot bless an absent kind.
+            toolPolicy: { allow: ['run', 'unknown'] },
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
+        expect(result.denials).toEqual([
+          {
+            tool: 'unknown',
+            reason: 'tool policy: missing ACP tool kind; cannot enforce allowlist',
+          },
+        ]);
+        const record = await store.load(result.sessionId as string);
+        await expect(
+          readFile(join(record?.workspace as string, 'forbidden.txt'), 'utf8'),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(record?.messages.some((m) => m.role === 'tool')).toBe(false);
+      });
+    },
+  );
+
+  test('ACP execute kind still denies when only read is allowlisted', async () => {
+    await withScratch(async (scratchDir, store) => {
+      const driver = new AcpDriver(
+        driverOptions(
+          scratchDir,
+          {
+            FAKE_ACP_MODE: 'tool-then-reply',
+            FAKE_ACP_TOOL: 'run',
+            FAKE_ACP_TOOL_KIND: 'execute',
+            FAKE_ACP_INPUT: JSON.stringify({ command: 'echo escaped > forbidden.txt' }),
+          },
+          [],
+        ),
+      );
+      const result = await driver.run(
+        invocation({
+          prompt: 'canonical identity still needs a grant',
+          toolPolicy: { allow: ['read'], mode: 'allowlist' },
+        }),
+      );
+      expect(result.denials).toEqual([
+        {
+          tool: 'run',
+          reason: 'tool policy: not allowlisted (kind execute)',
+        },
+      ]);
+      const record = await store.load(result.sessionId as string);
+      await expect(
+        readFile(join(record?.workspace as string, 'forbidden.txt'), 'utf8'),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
   test('answer table: reject selects reject_once — the denial is synthesized AT the answer', async () => {
     await withScratch(async (scratchDir, store) => {
       const driver = new AcpDriver(
@@ -461,10 +567,12 @@ describe('acp driver specifics (fake ACP server)', () => {
       );
       expect(result.stopReason).toBe('complete'); // the turn settles end_turn after a deny (probed)
       // `kind` is absent in this probe: the governed identity is the
-      // toolCallId, never the vendor title.
+      // unknown; neither the call ID nor the vendor title authorizes it.
       expect(result.denials).toHaveLength(1);
-      expect(result.denials[0]?.tool.startsWith('call_edit_')).toBe(true);
-      expect(result.denials[0]?.reason).toBe('tool policy: not allowlisted (kind unknown)');
+      expect(result.denials[0]?.tool).toBe('unknown');
+      expect(result.denials[0]?.reason).toBe(
+        'tool policy: missing ACP tool kind; cannot enforce allowlist',
+      );
       const record = await store.load(result.sessionId as string);
       expect(
         record?.messages.some(
@@ -639,8 +747,10 @@ describe('acp driver specifics (fake ACP server)', () => {
       // `kind` is ABSENT from the ask's toolCall on the recorded wire — the
       // denial reason says so honestly (the same shape as the reject test).
       expect(result.denials).toHaveLength(1);
-      expect(result.denials[0]?.tool.startsWith('call_run_')).toBe(true);
-      expect(result.denials[0]?.reason).toBe('tool policy: not allowlisted (kind unknown)');
+      expect(result.denials[0]?.tool).toBe('unknown');
+      expect(result.denials[0]?.reason).toBe(
+        'tool policy: missing ACP tool kind; cannot enforce allowlist',
+      );
       const narration = await narrationOf(store, result.sessionId as string);
       const marker = narration.find((line) => line.includes('"denied-tool-completed"'));
       expect(marker !== undefined && marker.includes('call_run_')).toBe(true);
@@ -718,7 +828,7 @@ describe('acp driver specifics (fake ACP server)', () => {
       // completed) and the turn settled the normal permission round-trip.
       expect(
         record?.messages.some(
-          (m) => m.role === 'tool' && m.toolName === 'execute' && m.content.includes('"ok":true'),
+          (m) => m.role === 'tool' && m.toolName === 'run' && m.content.includes('"ok":true'),
         ),
       ).toBe(true);
       expect(
@@ -1671,9 +1781,7 @@ describe('acp driver specifics (fake ACP server)', () => {
       const result = await driver.run(invocation({ prompt: 'content-block success run' }));
       expect(result.stopReason).toBe('complete');
       const record = await store.load(result.sessionId as string);
-      const toolMessage = record?.messages.find(
-        (m) => m.role === 'tool' && m.toolName === 'execute',
-      );
+      const toolMessage = record?.messages.find((m) => m.role === 'tool' && m.toolName === 'run');
       expect(toolMessage !== undefined).toBe(true); // the execution was persisted
       const folded = JSON.parse(toolMessage?.content as string) as {
         input: unknown;

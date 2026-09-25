@@ -519,6 +519,14 @@ Files:
 - `process.ts` — the I8 scan's exempt file for this lane: the shell-less
   spawn and the SIGTERM→SIGKILL settle-time termination ladder.
 
+ACP permission allowlists use the request's authoritative `kind`, mapping
+`execute` to the toolkit's `run` identity. Titles and call IDs never authorize
+a tool. Vendors that omit `kind` cannot satisfy an allowlist: requests are
+rejected with an explicit missing-kind denial, even if the title or call ID
+matches a grant. Such vendors need kind reporting to support allowlists;
+`unrestricted` retains its explicit allow-all behavior, while `none` and
+read-only sandbox policies still deny execution.
+
 ACP environment migration: the vendor process no longer inherits the full
 host environment. It receives the default child-env allowlist plus
 `envNames` and deployment `CQ_RUN_ENV_PASSTHROUGH` names (comma- or

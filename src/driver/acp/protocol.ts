@@ -457,19 +457,15 @@ export function selectPermissionAnswer(
 }
 
 /**
- * Match the governed tool identity, never vendor display text. The ACP
- * `kind` is authoritative; the tool-call id is the fail-closed fallback for
- * harnesses that omit kind. Titles are intentionally ignored: they are free
- * text and a model can spoof them.
+ * Map authoritative ACP kinds to toolkit tool identities (`execute` → `run`).
+ * Missing kinds stay unknown: neither free-text titles nor opaque call IDs
+ * establish an allowlist identity. The permission gate rejects missing kinds
+ * explicitly; call IDs remain available separately for correlation.
  */
-export function permissionToolIdentity(
-  kind: string | undefined,
-  toolCallId: string | undefined,
-): string {
-  const normalizedKind = kind?.trim();
-  if (normalizedKind !== undefined && normalizedKind !== '') return normalizedKind;
-  const normalizedId = toolCallId?.trim();
-  return normalizedId !== undefined && normalizedId !== '' ? normalizedId : 'unknown';
+export function permissionToolIdentity(kind: string | undefined): string {
+  const normalizedKind = kind?.trim().toLowerCase();
+  if (normalizedKind === undefined || normalizedKind === '') return 'unknown';
+  return normalizedKind === 'execute' ? 'run' : normalizedKind;
 }
 
 // ---------------------------------------------------------------------------
