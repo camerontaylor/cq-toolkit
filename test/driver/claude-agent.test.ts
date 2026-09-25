@@ -32,7 +32,7 @@
 //
 // This file MUST NOT import from '@anthropic-ai/claude-agent-sdk' (I10): the
 // mock returns plain objects the driver's structural types accept.
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -45,6 +45,7 @@ import {
   foldMessage,
   HARNESS_ERROR_PREFIX,
   resultStatusOf,
+  runHarnessTool,
   sandboxOption,
   stopReasonOf,
   usageFromAgent,
@@ -64,6 +65,7 @@ import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER } from './conformance.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
+import { buildManifest, createHarnessSurface } from '../../src/harness/surface.js';
 import { runLadder } from '../../src/kernel/governor.js';
 import type { OpInvocation } from '../../src/driver/types.js';
 
@@ -2148,4 +2150,54 @@ describe('claude-agent init-surface assertion (mock sdk)', () => {
     foldMessage(observation, { type: 'system', subtype: 'init', tools: ['Bash'], mcp_servers: [] });
     expect(observation.harnessFailure).toBeUndefined(); // a later init is not re-asserted
   });
+});
+
+describe('claude-agent harness calls are cancellable (W1.4 review cycle 1)', () => {
+  test.skipIf(process.platform === 'win32')(
+    'runHarnessTool forwards the signal: an abort kills a running `run` command group',
+    async () => {
+      const dir = await realpath(await mkdtemp(join(tmpdir(), 'cq-ca-cancel-')));
+      try {
+        const workspace = join(dir, 'ws');
+        await mkdir(workspace);
+        const manifest = await buildManifest({
+          workspace,
+          sandbox: 'none',
+          toolPolicy: { allow: ['run'], mode: 'allowlist' },
+          harness: {
+            ...defaultHarnessConfig,
+            tools: {
+              ...defaultHarnessConfig.tools,
+              run: { enabled: true, commandPatterns: ['sleep'], timeoutMs: 60_000 },
+            },
+          },
+        });
+        if (manifest === undefined) throw new Error('expected a manifest');
+        const surface = createHarnessSurface(manifest);
+        const store = new SessionStore(join(dir, 'sessions'));
+        const record = await store.create(workspace);
+        const denials: Array<{ tool: string; reason: string }> = [];
+        const cancel = new AbortController();
+        const started = Date.now();
+        const pending = runHarnessTool(
+          surface,
+          'run',
+          { command: 'sleep 30' },
+          store,
+          record,
+          denials,
+          cancel.signal,
+        );
+        setTimeout(() => cancel.abort(), 300);
+        const result = await pending;
+        expect(Date.now() - started).toBeLessThan(15_000);
+        expect(result.isError).toBeUndefined();
+        expect(result.content?.[0]?.text).toContain('killed by signal');
+        expect(denials).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 });

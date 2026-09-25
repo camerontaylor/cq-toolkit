@@ -483,7 +483,7 @@ export class ClaudeAgentDriver implements Driver {
         // and extra keys are stripped — the parity test's one scoped
         // transport difference (nothing executes either way).
         harnessTool.inputSchema.shape,
-        (args: unknown): Promise<SdkToolCallResult> =>
+        (args: unknown, extra: unknown): Promise<SdkToolCallResult> =>
           runHarnessTool(
             surface as HarnessSurface,
             harnessTool.name,
@@ -491,6 +491,10 @@ export class ClaudeAgentDriver implements Driver {
             store,
             record,
             observation.denials,
+            // Cancellation reaches the executor: the governed signal (I8 —
+            // forwarded, never decided here) and the SDK's per-call signal,
+            // whichever fires first; `run` then kills its process group.
+            callSignal(signal, extra),
           ),
       ),
     );
@@ -892,8 +896,9 @@ export async function runHarnessTool(
   store: SessionStore,
   record: SessionRecord,
   denials: ToolDenial[],
+  signal?: AbortSignal,
 ): Promise<SdkToolCallResult> {
-  const { result, outcome } = await surface.call(name, input);
+  const { result, outcome } = await surface.call(name, input, { signal });
   try {
     await store.appendMessage(record.sessionId, {
       role: 'tool',
@@ -910,6 +915,19 @@ export async function runHarnessTool(
   }
   if (!outcome.ok) denials.push(outcome.denial);
   return result;
+}
+
+/**
+ * The cancellation signal for one harness call: the governed signal and the
+ * SDK handler's per-call `extra.signal` (MCP RequestHandlerExtra), combined
+ * when both exist. Undefined when neither does (an ungoverned run).
+ */
+function callSignal(governed: AbortSignal | undefined, extra: unknown): AbortSignal | undefined {
+  const raw = asRecord(extra)?.['signal'];
+  const perCall = raw instanceof AbortSignal ? raw : undefined;
+  if (governed === undefined) return perCall;
+  if (perCall === undefined) return governed;
+  return AbortSignal.any([governed, perCall]);
 }
 
 /** Unmeasured usage: the honest zero (it means "not measured", never "nothing spent"). */
