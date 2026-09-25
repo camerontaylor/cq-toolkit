@@ -85,6 +85,18 @@ export interface ClassifyPrConfig {
    * list AS DATA (structure frozen) under the same anchoring rule.
    */
   skipPatterns: RegExp[];
+  /** Logins eligible to grant acceptance; undefined retains the legacy SDK surface. */
+  trustedBots?: readonly string[] | undefined;
+  /** Repository associations eligible to grant acceptance. */
+  trustedAssociations?: readonly string[] | undefined;
+  /** Automation identity; it is never trusted and alone may carry a skip marker. */
+  automationLogin?: string | null | undefined;
+  /** Additional logins removed from the trust set. */
+  excludedLogins?: readonly string[] | undefined;
+  /** Accepted opinionated states; the legacy blank SDK default is APPROVED and COMMENTED. */
+  acceptReviewStates?:
+    | readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED')[]
+    | undefined;
 }
 
 /**

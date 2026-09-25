@@ -173,7 +173,7 @@ interface PrFixture {
 
 const APPROVER = 'maintainer';
 
-/** fetchReviewState's GraphQL payload: one APPROVED non-author review after the last commit. */
+/** fetchReviewState's GraphQL payload: one head-bound APPROVED non-author review after the last commit. */
 const reviewStatePayload = (pr: number) => ({
   data: {
     repository: {
@@ -187,7 +187,11 @@ const reviewStatePayload = (pr: number) => ({
           nodes: [
             {
               id: `R_${String(pr)}`,
-              author: { login: APPROVER },
+              author: { login: APPROVER, __typename: 'User' },
+              authorAssociation: 'MEMBER',
+              // Classify (W1.1) binds reviews to the head too; the recheck's
+              // own snapshot decides what the merge instant sees.
+              commit: { oid: HEAD(pr) },
               state: 'APPROVED',
               body: '',
               submittedAt: iso(T0 - 30 * 60_000),
