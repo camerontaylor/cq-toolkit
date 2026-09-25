@@ -775,6 +775,7 @@ describe('harness parity — run child environment', () => {
       ];
       for (const name of secretNames) vi.stubEnv(name, `parity-fake-${name}`);
       vi.stubEnv(canaryName, canaryValue);
+      vi.stubEnv('CQ_SANDBOX', 'off'); // These env legs explicitly exercise host run policy.
       vi.stubEnv('CQ_RUN_ENV_PASSTHROUGH', mode === 'configured' ? canaryName : '');
       const envAllowlist = mode === 'explicit' ? [canaryName] : [];
       let client: Client | undefined;
@@ -819,7 +820,12 @@ describe('harness parity — run child environment', () => {
         expect(outputs[1]).toEqual(outputs[0]);
         expect(outputs[2]).toEqual(outputs[0]);
         for (const output of outputs) {
-          for (const name of [...secretNames, 'CONFORMANCE_API_KEY']) {
+          for (const name of [
+            ...secretNames,
+            'CONFORMANCE_API_KEY',
+            'CQ_SANDBOX',
+            'CQ_RUN_ENV_PASSTHROUGH',
+          ]) {
             expect(
               output.some((line) => line.startsWith(`${name}=`)),
               name,

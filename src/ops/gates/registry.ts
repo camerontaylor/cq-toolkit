@@ -17,6 +17,7 @@ import type { CommitGateInput } from './commitGate.js';
 import type { FingerprintConfig } from './fingerprint.js';
 import type { HackDetectorInput } from './hackDetector.js';
 import type { RegressionGateInput } from './regressionGate.js';
+// Shared protected-path taxonomy helper: './protectedPaths.js'.
 
 /**
  * Registry-time mirror of {@link CheckRunnerInput}: the full input, and
@@ -101,6 +102,12 @@ export const FailureSetSchema: z.ZodType<FailureSet> = z
     tool: z.string(),
     failures: z.array(CheckFailureSchema),
     exitCode: z.number().nullable(),
+    numTotalTests: z.number().int().nonnegative().exactOptional(),
+    numPassedTests: z.number().int().nonnegative().exactOptional(),
+    numPassed: z.number().int().nonnegative().exactOptional(),
+    numSkippedTests: z.number().int().nonnegative().exactOptional(),
+    numPendingTests: z.number().int().nonnegative().exactOptional(),
+    numTodoTests: z.number().int().nonnegative().exactOptional(),
   })
   .strict();
 

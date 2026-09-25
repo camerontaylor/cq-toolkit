@@ -53,6 +53,12 @@ describe('vitest-json adapter (real captured fixture)', () => {
         },
       ],
       exitCode: 1,
+      numTotalTests: 2,
+      numPassedTests: 1,
+      numPassed: 1,
+      numSkippedTests: 0,
+      numPendingTests: 0,
+      numTodoTests: 0,
     };
     expect(result).toEqual({ verdict: 'parsed', set: expected });
   });
@@ -192,6 +198,7 @@ describe('vitest-json adapter (real captured fixture)', () => {
           },
         ],
         exitCode: 1,
+        numTotalTests: 0,
       },
     });
   });

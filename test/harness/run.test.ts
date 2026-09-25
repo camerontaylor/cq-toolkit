@@ -10,6 +10,7 @@ import { defaultHarnessConfig } from '../../src/harness/config.js';
 import type { HarnessConfig } from '../../src/harness/config.js';
 import { runArgvCommand } from '../../src/harness/run.js';
 import { buildTools } from '../../src/harness/tools.js';
+import { harnessRunGate } from '../../src/sandbox/index.js';
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -75,9 +76,10 @@ async function terminated(pid: number): Promise<boolean> {
 }
 
 function run(workspace: string, harness = config(), envNames: readonly string[] = []) {
-  const tool = buildTools(harness, workspace, 'workspace-write', envNames).find(
-    (candidate) => candidate.name === 'run',
-  );
+  const tool = buildTools(harness, workspace, 'workspace-write', {
+    ...harnessRunGate(),
+    declaredEnvNames: envNames,
+  }).find((candidate) => candidate.name === 'run');
   if (tool === undefined) throw new Error('run fixture missing tool');
   return tool;
 }
@@ -208,6 +210,7 @@ describe('shared run core environment boundary', { timeout: 30_000 }, () => {
     '%s scrubs secrets and forwards explicitly allowed names',
     async (command) => {
       await withGitShim('env', async (workspace) => {
+        vi.stubEnv('CQ_SANDBOX', 'off'); // Explicit passthrough opts into the sandbox policy.
         vi.stubEnv('CQ_RUN_ENV_PASSTHROUGH', 'CQ_RUN_TEST_CONFIGURED');
         vi.stubEnv('CQ_RUN_TEST_SECRET', 'must-not-leak');
         vi.stubEnv('CQ_RUN_TEST_EXPLICIT', 'explicit-visible');
@@ -219,6 +222,8 @@ describe('shared run core environment boundary', { timeout: 30_000 }, () => {
         if (result.ok) {
           expect(result.output).not.toContain('CQ_RUN_TEST_SECRET=');
           expect(result.output).not.toContain('must-not-leak');
+          expect(result.output).not.toContain('CQ_SANDBOX=');
+          expect(result.output).not.toContain('CQ_RUN_ENV_PASSTHROUGH=');
           expect(result.output).toContain('CQ_RUN_TEST_EXPLICIT=explicit-visible');
           expect(result.output).toContain('CQ_RUN_TEST_CONFIGURED=configured-visible');
           expect(result.output).toContain('PATH=');

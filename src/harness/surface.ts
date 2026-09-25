@@ -45,6 +45,8 @@ import { stripMetaSchema } from '../driver/json-schema.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 import { buildTools } from './tools.js';
+import { harnessRunGate } from '../sandbox/index.js';
+import type { HarnessRunGate } from '../sandbox/index.js';
 import type { ToolkitTool, ToolkitToolName, ToolkitToolResult } from './tools.js';
 
 // ---------------------------------------------------------------------------
@@ -102,10 +104,11 @@ export function selectToolNames<N extends string>(
 export function selectHarnessSurface(
   harness: HarnessConfig,
   toolPolicy: ToolPolicy,
+  gate: HarnessRunGate = harnessRunGate(),
 ): ToolkitToolName[] {
   // buildTools touches no filesystem at build time; the workspace argument
   // only anchors the (lazy) executors, which are discarded here.
-  const names = buildTools(harness, resolve('.'), 'none').map((tool) => tool.name);
+  const names = buildTools(harness, resolve('.'), 'none', gate).map((tool) => tool.name);
   return selectToolNames(names, toolPolicy);
 }
 
@@ -163,7 +166,10 @@ export interface ManifestInputs {
  * pre-dispatch failures.
  */
 export async function buildManifest(inputs: ManifestInputs): Promise<HarnessManifest | undefined> {
-  const tools = selectHarnessSurface(inputs.harness, inputs.toolPolicy);
+  // The gate decides the surface the SAME way execution will: a withheld run
+  // tool is absent from both, so a manifest never names a tool the surface
+  // cannot serve.
+  const tools = selectHarnessSurface(inputs.harness, inputs.toolPolicy, harnessRunGate());
   if (tools.length === 0) return undefined;
   const workspace = await realpath(inputs.workspace);
   if (!(await stat(workspace)).isDirectory()) {
@@ -249,12 +255,11 @@ export function toCallToolResult(outcome: ToolkitToolResult): McpCallToolResult 
  */
 export function createHarnessSurface(input: HarnessManifest): HarnessSurface {
   const manifest = HarnessManifestSchema.parse(input);
-  const built = buildTools(
-    manifest.harness,
-    manifest.workspace,
-    manifest.sandbox,
-    manifest.envNames,
-  );
+  // The manifest's declared envNames ride the SHARED run gate (src/sandbox):
+  // they are still a default-deny allowlist, merged after the launcher scrub,
+  // and a policy knob name among them is refused there.
+  const gate: HarnessRunGate = { ...harnessRunGate(), declaredEnvNames: manifest.envNames };
+  const built = buildTools(manifest.harness, manifest.workspace, manifest.sandbox, gate);
   const byName = new Map(built.map((tool) => [tool.name, tool] as const));
   const missing = manifest.tools.filter((name) => !byName.has(name));
   if (missing.length > 0) {

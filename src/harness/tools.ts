@@ -7,6 +7,20 @@
 // own SDK tool format. Driver-agnostic by construction: NO vendor imports
 // in src/harness/**; the ai-sdk driver (slice 2) adapts these descriptors.
 //
+// THE SHARED RUN GATE (W1.11 / D14): every surface that builds these tools —
+// the ai-sdk driver, the subprocess driver's harness surface, the MCP harness
+// surface — reaches the same decision through `buildTools(..., gate)`. The
+// default gate is `harnessRunGate()` (src/sandbox), which withholds `run`
+// entirely whenever the environment expresses a CQ_SANDBOX policy and no
+// certified launcher backs it, so a driver choice cannot bypass the policy.
+// A withheld run tool is OMITTED, not denied: an unreachable tool never
+// reaches child_process.
+//
+// THE LAUNCHER ENV SCRUB: an allowed command's child gets a default-deny
+// environment (src/sandbox `buildSandboxLauncherEnv`): a small launcher
+// allowlist plus the names the gate's policy passed through, and never a
+// `CQ_*` knob — a model-directed child cannot reconfigure its own boundary.
+//
 // DENIAL FLOW — executors never throw. Every refusal (sandbox, bad input,
 // path escape (lexical or via symlink), allowlist miss, shell metacharacters
 // under a token pattern, missing file, missing target text, failed command
@@ -116,6 +130,8 @@ import type { SandboxLevel, ToolDenial } from '../driver/types.js';
 import { buildChildEnv } from '../driver/subprocess/process.js';
 import { runArgvCommand, runShellCommand } from './run.js';
 import type { RunCommandOptions, RunOutcome } from './run.js';
+import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
+import type { HarnessRunGate } from '../sandbox/index.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 
@@ -416,7 +432,7 @@ export function buildTools(
   config: HarnessConfig,
   workspace: string,
   sandbox: SandboxLevel = 'workspace-write',
-  envNames: readonly string[] = [],
+  gate: HarnessRunGate = harnessRunGate(),
 ): ToolkitTool[] {
   const cfg: HarnessConfig = HarnessConfigSchema.parse(config);
   const workspaceAbs = resolve(workspace);
@@ -636,7 +652,11 @@ export function buildTools(
   }
 
   // --- run --------------------------------------------------------------------
-  if (cfg.tools.run.enabled) {
+  if (cfg.tools.run.enabled && gate.enabled) {
+    // Validate the complete launcher environment before exposing an executor.
+    // A malformed or policy-bearing passthrough must fail during tool
+    // construction, never later inside a model-directed command.
+    buildSandboxLauncherEnv({}, gate);
     const runCfg = cfg.tools.run;
     const patterns = compileCommandPatterns(runCfg.commandPatterns); // loud on config corruption
     const formatOutcome = (
@@ -689,8 +709,13 @@ export function buildTools(
         let env: Record<string, string>;
         try {
           // Scrub at the shared core on every transport; never depend on an
-          // MCP launcher having already filtered the parent environment.
-          env = buildChildEnv(process.env, undefined, envNames);
+          // MCP launcher having already filtered the parent environment. The
+          // sandbox launcher scrub runs first, so its stricter defaults and
+          // policy-knob refusal also cover closed-form git execution.
+          env = buildChildEnv(buildSandboxLauncherEnv(process.env, gate), undefined, [
+            ...gate.envPassthrough,
+            ...(gate.declaredEnvNames ?? []),
+          ]);
         } catch (error) {
           return deny('run', `run failed: ${messageOf(error)}`);
         }
