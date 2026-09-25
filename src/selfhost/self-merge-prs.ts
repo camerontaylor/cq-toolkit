@@ -48,7 +48,8 @@
 // AUTOMATION IDENTITY. A real run first resolves the token's own login
 // (`gh api user`) and excludes it from trust — the automation can never
 // accept its own work. An integration (App) token cannot read /user
-// (HTTP 403 "Resource not accessible by integration"); that is fine: App
+// (HTTP 403 "Resource not accessible by integration" — only that exact
+// message; any other 403 fails closed); that is fine: App
 // bot identities are never trusted unless allowlisted, and the structural
 // automation bots are always excluded. Any OTHER failure fails closed —
 // every merge-time recheck refuses 'automation identity unresolved'. The
@@ -189,7 +190,7 @@ export async function resolveAutomationIdentity(
     return { identity: { resolved: false, reason }, refusal: reason };
   } catch (error) {
     const stderr = error instanceof GhError ? error.stderr : '';
-    if (/Resource not accessible by integration|HTTP 403/.test(stderr)) {
+    if (/Resource not accessible by integration/.test(stderr)) {
       return {
         identity: {
           resolved: false,

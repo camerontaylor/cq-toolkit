@@ -131,8 +131,11 @@ adopter owns it by hand.
   classify→merge window remains; `src/selfhost/state-branch.ts` owns the
   store. A refusal shows as a `cq merge-time recheck refused pr N: …`
   needs-human row, and a later run merges the PR once it qualifies.
-  `{{SELFHOST_TOKEN}}` needs Contents write to update `cq-state`; protect
-  that branch with a ruleset so only the automation identity can push it.
+  `{{SELFHOST_TOKEN}}` needs Contents write to update `cq-state`.
+  Restricting that branch to the automation identity is a MANUAL ruleset
+  step today — no automation enforces it until W1.10 — so any Contents-write
+  holder can back-date an anchor. That can only shorten settle; it can never
+  forge SHA-bound acceptance.
 
 ### Honest outcomes
 

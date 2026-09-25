@@ -525,6 +525,29 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     );
   });
 
+  test('a non-integration 403 fails closed like any other identity failure', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects();
+    const result = await runSelfMergePrs(
+      {
+        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7) }], [], {
+          code: 1,
+          stdout: '',
+          stderr: 'gh: Must have admin rights to Repository. (HTTP 403)',
+        }),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      cfg(tmpJournalRoot()),
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(result.automationIdentity).toMatchObject({ resolved: false });
+    expect(effects.merges).toEqual([]);
+    const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
+    expect(row?.reason).toContain('automation identity unresolved');
+  });
+
   test('a prior observation younger than settle → refused settle: settle_pending', async () => {
     const forge = new StateForge();
     forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS / 2));
