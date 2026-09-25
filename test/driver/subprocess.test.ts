@@ -1431,11 +1431,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         const preload = join(scratchDir, 'owned-child.mjs');
         const runWorker = join(scratchDir, 'run-worker.cjs');
         const runPidFile = join(scratchDir, 'run-pids.json');
+        const lateRunPidFile = join(scratchDir, 'late-run-pid.txt');
         const descendantCode =
           "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)";
         const workerCode = `
           const { spawn } = require('node:child_process');
-          process.on('SIGTERM', () => {});
+          process.on('SIGTERM', () => console.log('term'));
           const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], {stdio: ['ignore', 'pipe', 'inherit']});
           descendant.stdout.once('data', () => console.log(JSON.stringify([process.pid, descendant.pid])));
           setInterval(() => {}, 1000);
@@ -1449,6 +1450,7 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         );
         const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
         const runCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(runWorker)}`;
+        const lateRunCommand = `echo $$ > ${shellQuote(lateRunPidFile)}; exec sleep 60`;
         await writeFile(
           preload,
           `
@@ -1456,7 +1458,15 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           import { runShellCommand } from ${JSON.stringify(runUrl)};
           void runShellCommand(${JSON.stringify(runCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
           const child = spawnManaged({ command: process.execPath, args: ['-e', ${JSON.stringify(workerCode)}], cwd: ${JSON.stringify(scratchDir)} });
-          child.onStdoutLine(line => process.stdout.write(line + '\\n'));
+          let lateStarted = false;
+          child.onStdoutLine(line => {
+            if (line === 'term' && !lateStarted) {
+              lateStarted = true;
+              const late = spawnManaged({command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: ${JSON.stringify(scratchDir)}});
+              console.log(JSON.stringify({late: late.pid}));
+              void runShellCommand(${JSON.stringify(lateRunCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
+            } else process.stdout.write(line + '\\n');
+          });
         `,
         );
         const parent = spawn(
@@ -1505,8 +1515,21 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           parent.kill(signal);
           expect(await closed).toEqual({ code: null, signal });
           await vi.waitFor(() => expect(pids.some(alive)).toBe(false), { timeout: 3_000 });
+          const late = out.split('\n').find((line) => line.startsWith('{"late":'));
+          expect(late).toBeDefined(); // signal handling actually dispatched new work
+          const lateDriverPid = (JSON.parse(late!) as { late: number }).late;
+          const lateRunPid = Number(await readFile(lateRunPidFile, 'utf8'));
+          expect(lateRunPid).toBeGreaterThan(0);
+          await vi.waitFor(() => expect([lateDriverPid, lateRunPid].some(alive)).toBe(false), {
+            timeout: 3_000,
+          });
         } finally {
-          for (const groupLeader of [pids[0], runPids[0]]) {
+          // Recover late ownership even when a mutation failed an earlier assertion.
+          const late = out.split('\n').find((line) => line.startsWith('{"late":'));
+          const lateDriverPid =
+            late === undefined ? undefined : (JSON.parse(late) as { late: number }).late;
+          const lateRunPid = Number(await readFile(lateRunPidFile, 'utf8').catch(() => '0'));
+          for (const groupLeader of [pids[0], runPids[0], lateDriverPid, lateRunPid || undefined]) {
             if (groupLeader === undefined) continue;
             try {
               process.kill(-groupLeader, 'SIGKILL');

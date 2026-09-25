@@ -31,6 +31,9 @@ export function installProcessSignalCleanup(beforeSignal?: () => void): void {
         if (kill !== undefined) force.push(kill);
       }
       const finish = (): void => {
+        // Work may finish dispatching during the grace window. Sweep current
+        // ownership as well as the original groups (whose leaders may be gone).
+        for (const prepare of cleanups) prepare()?.();
         for (const kill of force) kill();
         for (const ownedSignal of signals) process.removeListener(ownedSignal, onSignal);
         process.kill(process.pid, signal);
