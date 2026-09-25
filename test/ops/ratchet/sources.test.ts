@@ -24,6 +24,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
 import type { CheckCommand, RawCheckOutput, RunCheck } from '../../../src/ops/gates/checkRunner.js';
+import { coverage } from '../../../src/ops/ratchet/adapters/coverage.js';
 import { makeMetricSource } from '../../../src/ops/ratchet/sources.js';
 
 const tmpDirs: string[] = [];
@@ -125,6 +126,23 @@ describe('makeMetricSource', () => {
       await expect(source('/ws')).resolves.toEqual({ total: { lines: { pct: expected } } });
     }
   });
+
+  test.each([-0.04, 100.04])(
+    'coverage-json preserves out-of-range %s so the adapter rejects it',
+    async (pct) => {
+      const source = makeMetricSource(
+        runnerOf({
+          stdout: JSON.stringify({ total: { lines: { pct } } }),
+          stderr: '',
+          exitCode: 0,
+        }),
+        { kind: 'command', command: 'x', args: [], parse: 'coverage-json' },
+      );
+      const raw = await source('/ws');
+      expect(raw).toEqual({ total: { lines: { pct } } });
+      expect(coverage.extract(raw)).toBeNull();
+    },
+  );
 
   test('command non-zero exit is null for text/json/coverage-json (legacy typecheckEvidence rule)', async () => {
     for (const parse of ['text', 'json', 'coverage-json'] as const) {

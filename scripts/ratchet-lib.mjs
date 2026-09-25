@@ -287,7 +287,9 @@ export function normalizeCoverageSummary(summary) {
   if (typeof summary !== 'object' || summary === null) return summary;
   try {
     const pct = summary?.total?.lines?.pct;
-    if (typeof pct === 'number' && Number.isFinite(pct)) {
+    // Preserve out-of-range evidence for the adapter to reject (I5):
+    // 100.04 → 100.0 or -0.04 → 0.0 would fabricate a valid reading.
+    if (typeof pct === 'number' && Number.isFinite(pct) && pct >= 0 && pct <= 100) {
       summary.total.lines.pct = roundCoveragePct(pct);
     }
   } catch {

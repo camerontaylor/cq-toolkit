@@ -77,7 +77,14 @@ function normalizeCoverage(parsed: unknown): unknown {
     const lines = (total as { lines?: unknown }).lines;
     if (typeof lines !== 'object' || lines === null) return parsed;
     const record = lines as { pct?: unknown };
-    if (typeof record.pct === 'number' && Number.isFinite(record.pct)) {
+    // Do not round an out-of-range reading INTO [0,100]: the adapter must
+    // still see and reject the original non-passing evidence (I5).
+    if (
+      typeof record.pct === 'number' &&
+      Number.isFinite(record.pct) &&
+      record.pct >= 0 &&
+      record.pct <= 100
+    ) {
       record.pct = roundCoveragePct(record.pct);
     }
   } catch {

@@ -134,6 +134,11 @@ await check('normalizeCoverageSummary rounds total.lines.pct to one decimal', ()
   equal(below.total.lines.pct, 93.4);
   const hostile = lib.normalizeCoverageSummary({ total: {} });
   equal(hostile.total.lines?.pct, undefined); // untouched shape -> adapter rules it unusable (I5)
+  for (const pct of [-0.04, 100.04]) {
+    const outOfRange = lib.normalizeCoverageSummary({ total: { lines: { pct } } });
+    equal(outOfRange.total.lines.pct, pct);
+    equal(engine.adapters.coverage.extract(outOfRange), null);
+  }
   equal(lib.normalizeCoverageSummary(null), null);
 });
 await check(
