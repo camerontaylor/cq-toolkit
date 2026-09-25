@@ -29,6 +29,9 @@
 //   7. The real run's RunOptions carry a durable journalDir (`merge-<stamp>`
 //      under the journal root) — asserted on the DIRECTORY the runner
 //      actually creates, the honest end-to-end observable.
+//   8. The W1.2 run-start settle observation rides the real-run result; a
+//      forge without a state branch fails its write without breaking the
+//      run (the recheck wiring itself: self-merge-prs-recheck.test.ts).
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -302,6 +305,18 @@ describe('runSelfMergePrs — real run', () => {
     // `merge-<stamp>` dir the composition put in its RunOptions (stamp =
     // the once-read clock) under the journal root.
     expect(existsSync(join(journalRoot, 'merge-5000'))).toBe(true);
+    // The W1.2 run-start observation pass rides the result: this fake serves
+    // no snapshot shape (the PR is skipped) and no state branch (the write
+    // fails) — honest facts, never a broken run.
+    expect(result.settleObservation.observed).toEqual([]);
+    expect(result.settleObservation.skipped.map((row) => row.pr)).toEqual([7]);
+    expect(result.settleObservation.write?.ok).toBe(false);
+    // This fake does not route `gh api user`: the identity is unresolved
+    // (fail closed — every recheck would refuse), recorded, never thrown.
+    expect(result.automationIdentity).toMatchObject({
+      resolved: false,
+      reason: expect.stringContaining('unrouted gh invocation: api user') as unknown,
+    });
   });
 
   test('first-run journal root: a NON-EXISTENT nested journalRoot is created and the run succeeds (KyA)', async () => {
