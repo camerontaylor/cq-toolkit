@@ -253,6 +253,8 @@ describe('makeSubprocessTrackerBranchEffects (real git)', () => {
       expect(second.created).toBe(false);
       expect(second.pushed).toBe(false);
       expect(second.headSha).toBe(first.headSha);
+      // The remote head is never rewound or replaced by the reuse.
+      expect(await gitOut(['ls-remote', '--heads', 'origin'], repo)).toBe(heads);
     },
   );
 

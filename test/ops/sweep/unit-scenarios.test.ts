@@ -1,14 +1,21 @@
 // In-process sweep.unit decision coverage. Plan-level rescue, assembly, prep,
-// and fleet claims remain in the real runSweepPlan contracts because those
-// decisions live in the e2e composition helper rather than production.
-import { mkdtemp, rm } from 'node:fs/promises';
+// and fleet decisions live in the production composition
+// (src/plans/sweep-run.ts) and are pinned in test/plans/sweep-run.test.ts;
+// the real-git/real-driver contracts stay in test/e2e/sweep/sweep.e2e.test.ts.
+import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import type { Driver, WorkerResult } from '../../../src/driver/types.js';
 import { DEFAULT_TEST_FILE_PATTERNS } from '../../../src/ops/gates/hackDetector.js';
 import type { RunCheck } from '../../../src/ops/gates/checkRunner.js';
-import { makeSweepUnitOp } from '../../../src/ops/sweep/unit.js';
+import {
+  makeSweepUnitOp,
+  readCommittedMarkers,
+  SWEEP_RUN_STATE_BASELINE_DIR,
+  SWEEP_RUN_STATE_SCANNED_DIR,
+} from '../../../src/ops/sweep/unit.js';
 import type { SweepUnitBindings } from '../../../src/ops/sweep/unit.js';
 import type { WorkUnit } from '../../../src/ops/sweep/planSweep.js';
 import type { WorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
@@ -276,6 +283,258 @@ describe('sweep unit in-process scenarios', () => {
         expect(result.error).toMatch(/outside the allowlist/);
         expect(result.error).toContain('packages/beta/test/suite.test.js');
       }
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Commit-trust decisions (review-debt #174), scoped branches, and prep mode —
+// over a git fake that models HEAD, its parent, the base tip, the
+// ahead-of-base count, and whether anything is staged.
+// ---------------------------------------------------------------------------
+
+interface ScriptedGit {
+  head: string;
+  parent: string;
+  base: string;
+  ahead: number;
+  /** true when `git diff --cached --quiet` reports staged changes. */
+  staged: boolean;
+}
+
+function scriptedGit(world: FakeWorld, state: ScriptedGit): GhFn {
+  return async (args) => {
+    world.gitCalls.push(args);
+    const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
+    if (args.includes('rev-parse')) {
+      const ref = args.at(-1);
+      if (ref === 'HEAD') return ok(`${state.head}\n`);
+      if (ref === 'HEAD^') return ok(`${state.parent}\n`);
+      return ok(`${state.base}\n`);
+    }
+    if (args.includes('rev-list')) return ok(`${String(state.ahead)}\n`);
+    if (args.includes('--quiet')) return { code: state.staged ? 1 : 0, stdout: '', stderr: '' };
+    if (args.includes('--name-status')) return ok(world.staged.nameStatus);
+    if (args.includes('commit')) {
+      state.parent = state.head;
+      state.head = `${state.head}-next`;
+      state.ahead += 1;
+      state.staged = false;
+      return ok();
+    }
+    if (args.includes('diff')) return ok('diff --git a/src/a.js b/src/a.js\n');
+    return ok();
+  };
+}
+
+const STRAND_BASE = 'b'.repeat(40);
+const STRANDED = 'c'.repeat(40);
+
+/** A tree whose fixer no-ops on top of ONE stranded ahead-of-base commit. */
+function strandedGit(world: FakeWorld): GhFn {
+  return scriptedGit(world, {
+    head: STRANDED,
+    parent: STRAND_BASE,
+    base: STRAND_BASE,
+    ahead: 1,
+    staged: false,
+  });
+}
+
+async function recordScanned(runStateDir: string, sha: string): Promise<void> {
+  await mkdir(join(runStateDir, SWEEP_RUN_STATE_SCANNED_DIR, 'fix'), { recursive: true });
+  await writeFile(
+    join(runStateDir, SWEEP_RUN_STATE_SCANNED_DIR, 'fix', 'alpha.json'),
+    `${JSON.stringify({ sha })}\n`,
+  );
+}
+
+describe('sweep unit in-process scenarios: commit trust, scoped branches, prep', () => {
+  test('a driver SELF-COMMIT moves HEAD: TAMPER needs-human, nothing staged, committed, or pushed (#174)', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    try {
+      const state: ScriptedGit = {
+        head: 'a'.repeat(40),
+        parent: STRAND_BASE,
+        base: STRAND_BASE,
+        ahead: 0,
+        staged: false,
+      };
+      const result = await runUnit(world, {
+        git: scriptedGit(world, state),
+        driver: {
+          run: async () => {
+            // The driver commits the fix itself: HEAD moves under the op.
+            state.parent = state.head;
+            state.head = 'd'.repeat(40);
+            state.ahead = 1;
+            return {
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+              stopReason: 'complete',
+            } satisfies WorkerResult;
+          },
+        },
+      });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toMatch(/^\[TAMPER\]/);
+        expect(result.error).toMatch(/worktree HEAD moved during the fixer run/);
+        expect(result.error).toMatch(/driver self-commit is not a supported mode/);
+        expect(result.error).toMatch(/needs-human evidence/);
+      }
+      expect(world.gitCalls.some((args) => args.includes('add'))).toBe(false);
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('strand-retry REFUSES without a caller-vouched runStateDir: the ahead-of-base branch is never pushed (#174)', async () => {
+    const world = await makeWorld([{ failing: false }, { failing: false }]);
+    try {
+      const result = await runUnit(world, { git: strandedGit(world) });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toMatch(/^\[TAMPER\]/);
+        expect(result.error).toMatch(
+          /stranded pushes require an explicit caller-supplied runStateDir/,
+        );
+        expect(result.error).toMatch(/needs-human evidence/);
+      }
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('strand-retry REFUSES a missing (stripped) scanned-commit record (#174)', async () => {
+    const world = await makeWorld([{ failing: false }, { failing: false }]);
+    try {
+      const result = await runUnit(world, {
+        git: strandedGit(world),
+        runStateDir: join(world.root, 'run-state'),
+      });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toMatch(/no scanned-commit record exists for this unit/);
+        expect(result.error).toMatch(/unscanned commit must not be pushed/);
+      }
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('strand-retry REFUSES a divergent tip: the recorded sha must still be HEAD (#174)', async () => {
+    const world = await makeWorld([{ failing: false }, { failing: false }]);
+    try {
+      const runStateDir = join(world.root, 'run-state');
+      await recordScanned(runStateDir, 'e'.repeat(40));
+      const result = await runUnit(world, { git: strandedGit(world), runStateDir });
+      expect(result.status).toBe('failed');
+      if (result.status === 'failed') {
+        expect(result.error).toMatch(/diverges from the recorded scanned sha/);
+      }
+      expect(world.pushCalls).toEqual([]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('strand-retry PUSHES the recorded scanned tip and writes the committed marker', async () => {
+    const world = await makeWorld([{ failing: false }, { failing: false }]);
+    try {
+      const runStateDir = join(world.root, 'run-state');
+      await recordScanned(runStateDir, STRANDED);
+      const result = await runUnit(world, { git: strandedGit(world), runStateDir });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value).toMatchObject({
+          committed: false,
+          pushed: true,
+          committedSha: STRANDED,
+        });
+      }
+      expect(world.pushCalls.map((push) => push.branch)).toEqual(['cq/unit/fix/alpha']);
+      expect(await readCommittedMarkers(world.root, 'worktrees', 'cq/unit', runStateDir)).toEqual([
+        { package: 'alpha', fixer: 'fix', branch: 'cq/unit/fix/alpha' },
+      ]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('a scoped package commits and pushes on its NORMALIZED branch, and its marker names the scoped package', async () => {
+    const world = await makeWorld([{ failing: true }, { failing: false }]);
+    try {
+      const runStateDir = join(world.root, 'run-state');
+      const scoped: WorkUnit = { package: '@scope/gamma', fixer: 'fix', files: [] };
+      const result = await makeSweepUnitOp(
+        bindingsOf(world, {
+          runStateDir,
+          git: scriptedGit(world, {
+            head: 'a'.repeat(40),
+            parent: STRAND_BASE,
+            base: STRAND_BASE,
+            ahead: 0,
+            staged: true,
+          }),
+        }),
+      )(scoped);
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value).toMatchObject({
+          committed: true,
+          pushed: true,
+          prBranch: 'cq/unit/fix/scope-gamma',
+        });
+      }
+      expect(world.worktreeState.map((entry) => entry.branch)).toEqual(['cq/unit/fix/scope-gamma']);
+      expect(world.pushCalls.map((push) => push.branch)).toEqual(['cq/unit/fix/scope-gamma']);
+      expect(await readCommittedMarkers(world.root, 'worktrees', 'cq/unit', runStateDir)).toEqual([
+        { package: '@scope/gamma', fixer: 'fix', branch: 'cq/unit/fix/scope-gamma' },
+      ]);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('prep mode probes only: baseline evidence and snapshot, zero fixer runs, zero commits, zero pushes', async () => {
+    const world = await makeWorld([{ failing: true, message: 'seeded failure' }]);
+    try {
+      const runStateDir = join(world.root, 'run-state');
+      let driverRuns = 0;
+      const result = await runUnit(world, {
+        mode: 'prep',
+        runStateDir,
+        driver: {
+          run: async () => {
+            driverRuns += 1;
+            throw new Error('prep must never run the fixer');
+          },
+        },
+      });
+      expect(result.status).toBe('ok');
+      if (result.status === 'ok') {
+        expect(result.value.mode).toBe('prep');
+        expect(result.value.baseline.verdict).toBe('failing');
+        expect(result.value.baseline.failureSet).toBeDefined();
+        expect(result.value.final).toBeUndefined();
+        expect(result.value.regression).toBeUndefined();
+        expect(result.value.committed).toBeUndefined();
+        expect(result.value.pushed).toBeUndefined();
+      }
+      expect(driverRuns).toBe(0);
+      expect(world.checks).toHaveLength(1); // the baseline probe only
+      expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+      expect(world.pushCalls).toEqual([]);
+      expect(existsSync(join(runStateDir, SWEEP_RUN_STATE_BASELINE_DIR, 'fix', 'alpha.json'))).toBe(
+        true,
+      );
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }
