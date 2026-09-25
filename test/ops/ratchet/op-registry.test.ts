@@ -12,7 +12,8 @@
 //      touching the network, or reading the filesystem at bind time: the
 //      CheckRunner/gh/git seams are bound per dispatch and are closure-only
 //      at construction (the inertness proof).
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { execFileSync } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -160,6 +161,84 @@ describe('ratchet family op registry entries', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  test('ratchet.monotonicGuard ref mode diffs the merge base with hardened Git reads', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'cq-op-registry-ref-'));
+    const git = (...args: string[]): string =>
+      execFileSync('git', args, {
+        cwd: repo,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          GIT_CONFIG_GLOBAL: '/dev/null',
+          GIT_CONFIG_SYSTEM: '/dev/null',
+          GIT_CONFIG_NOSYSTEM: '1',
+        },
+      }).trim();
+    try {
+      git('init', '-q', '-b', 'main');
+      git('config', 'user.email', 'test@example.test');
+      git('config', 'user.name', 'test');
+      git('config', 'commit.gpgsign', 'false');
+      await mkdir(join(repo, 'baselines'));
+      const rel = baselineRelPath('coverage', 'coverage');
+      const baseline = (value: number): string =>
+        renderBaseline({
+          schemaVersion: 1,
+          target: 'coverage',
+          metric: 'coverage',
+          direction: 'higher-is-better',
+          value,
+          unit: 'pct',
+          capturedAt: '2026-09-15T19:20:25.084Z',
+        });
+      await writeFile(join(repo, rel), baseline(93), 'utf8');
+      git('add', rel);
+      git('commit', '-q', '-m', 'baseline');
+      const base = git('rev-parse', 'HEAD');
+      await writeFile(join(repo, rel), baseline(94), 'utf8');
+      git('add', rel);
+      git('commit', '-q', '-m', 'tighten');
+
+      const op = await entryByName('ratchet.monotonicGuard').importer();
+      expect(await op({ repo, base, head: 'HEAD' })).toMatchObject({
+        status: 'ok',
+        value: { ok: true, violations: [], filesChecked: 1 },
+      });
+      expect(await op({ repo, base })).toMatchObject({
+        status: 'failed',
+        error: 'ratchet: ref mode needs repo, base and head',
+      });
+      expect(await op({ repo, base: '--output=bad', head: 'HEAD' })).toMatchObject({
+        status: 'failed',
+      });
+    } finally {
+      await rm(repo, { recursive: true, force: true });
+    }
+  });
+
+  test('trusted verifier importers preserve failed op results', async () => {
+    const verify = await entryByName('ratchet.verifyRatchet').importer();
+    expect(
+      await verify({
+        repo: '/not-a-git-repository',
+        trustRef: 'main',
+        subject: 'HEAD',
+        subjectKind: 'pr',
+        base: 'main',
+        measureConclusion: 'success',
+      }),
+    ).toMatchObject({ status: 'failed' });
+
+    const recompute = await entryByName('ratchet.recomputeTypecheck').importer();
+    expect(
+      await recompute({
+        repo: '/not-a-git-repository',
+        subject: '--unsafe',
+        scratch: '/not-created',
+      }),
+    ).toMatchObject({ status: 'failed' });
   });
 });
 

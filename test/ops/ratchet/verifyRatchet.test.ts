@@ -340,6 +340,83 @@ describe('verifyRatchet: the guard judges the same range', SLOW, () => {
 });
 
 describe('verifyRatchet: faults are failed, never a pass', SLOW, () => {
+  const coveragePath = baselineRelPath('coverage', 'coverage');
+
+  test.each([
+    [
+      'missing',
+      () => {
+        git(['rm', '-q', coveragePath]);
+      },
+      /missing at the trust ref/,
+    ],
+    [
+      'misnamed',
+      () => {
+        write(
+          coveragePath,
+          renderBaseline({
+            schemaVersion: 1,
+            target: 'another-target',
+            metric: 'coverage',
+            direction: 'higher-is-better',
+            value: 90,
+            unit: 'pct',
+            capturedAt: '2026-09-20T00:00:00.000Z',
+          }),
+        );
+      },
+      /names another ratchet/,
+    ],
+    [
+      'wrong-direction',
+      () => baseline('coverage', 'coverage', 'lower-is-better', 90, 'pct'),
+      /direction lower-is-better disagrees/,
+    ],
+    ['invalid-json', () => write(coveragePath, 'not JSON'), /not valid JSON/],
+  ])('a %s trust baseline fails the coverage ratchet', async (name, edit, reason) => {
+    const head = prBranch('pr-bad-trust-' + name, 'merge-queue', () =>
+      write('src/bad-trust-' + name + '.ts', 'export const example = 1;\n'),
+    );
+    const variant = prBranch('trust-' + name, trust, edit);
+    const verdict = await verify(head, { trustRef: variant });
+    expect(verdict.verdict).toBe('fail');
+    expect(verdict.results.find((r) => r.metric === 'coverage')).toMatchObject({
+      verdict: 'fail',
+      value: null,
+    });
+    expect(verdict.reasons.join('\n')).toMatch(reason);
+  });
+
+  test('unsupported recompute metrics and invalid recompute counts fail closed', async () => {
+    const head = prBranch('pr-recompute-evidence', 'merge-queue', () =>
+      write('src/recompute-evidence.ts', 'export const example = 1;\n'),
+    );
+    for (const count of [-1, 1.5]) {
+      const verdict = await verify(head, { typecheckCount: count });
+      expect(verdict.verdict).toBe('fail');
+      expect(verdict.reasons.join('\n')).toMatch(/not a non-negative integer/);
+    }
+
+    const variant = prBranch('trust-unsupported-recompute', trust, () => {
+      const manifest = structuredClone(MANIFEST);
+      manifest.ratchets.push({
+        target: 'custom',
+        metric: 'custom-count',
+        direction: 'lower-is-better',
+        unit: 'errors',
+        evidence: 'recompute',
+      });
+      write('baselines/ratchets.json', JSON.stringify(manifest));
+      baseline('custom', 'custom-count', 'lower-is-better', 0, 'errors');
+    });
+    const verdict = await verify(head, { trustRef: variant });
+    expect(verdict.verdict).toBe('fail');
+    expect(verdict.reasons.join('\n')).toMatch(
+      /no trusted recompute exists for metric 'custom-count'/,
+    );
+  });
+
   test('an unresolvable subject is `failed`', async () => {
     const result = await verifyRatchet({
       repo,
