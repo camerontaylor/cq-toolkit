@@ -512,6 +512,7 @@ describe('sweep + test-fix smoke: discovery and shape (ws-i item 2)', () => {
             pathExists: async () => false,
             trackedFilesUnder: async () => [],
             isStrictClean: async () => true,
+            revParse: async () => '0'.repeat(40),
             worktreeAdd: async () => undefined,
             worktreePrune: async () => undefined,
             rmDir: async () => undefined,

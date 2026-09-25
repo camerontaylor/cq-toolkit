@@ -161,10 +161,14 @@ async function realGitDiffCases(): Promise<Record<string, string>> {
       else await writeFile(path, fixture.after, 'utf8');
     }
     run(['add', '-A']);
-    const diff = spawnSync('git', ['-c', 'diff.renames=false', 'diff', '--cached'], {
-      cwd: ws,
-      encoding: 'utf8',
-    });
+    const diff = spawnSync(
+      'git',
+      ['-c', 'diff.renames=false', '-c', 'diff.noprefix=false', 'diff', '--cached'],
+      {
+        cwd: ws,
+        encoding: 'utf8',
+      },
+    );
     if (diff.status !== 0 || typeof diff.stdout !== 'string') throw new Error('git diff failed');
     const sections: Record<string, string> = {};
     for (const section of diff.stdout.split(/(?=^diff --git )/m)) {
