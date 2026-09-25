@@ -5,6 +5,15 @@
 // certification, never an invitation to run an unverified launcher.
 
 export type SandboxMode = 'off' | 'required';
+/**
+ * The requested egress posture of a sandboxed run child.
+ *
+ * ADVISORY IN v1: nothing enforces this value. There is no transport
+ * boundary — no proxy, netfilter, or loopback-only launcher — in front of a
+ * `run` child, so 'model-only' records the INTENDED posture for a future
+ * certified launcher; it is never a claim that egress is restricted today.
+ * `run` is instead fail-closed outright while no launcher exists.
+ */
 export type SandboxNetwork = 'model-only' | 'allow';
 export type SandboxBackend = 'landlock' | 'bwrap' | 'container' | 'seatbelt' | 'cc-native';
 export type SandboxPlatform = 'linux' | 'darwin' | 'other';
@@ -20,6 +29,7 @@ export interface SandboxOptIn {
 export interface SandboxConfig {
   mode: SandboxMode;
   backend: SandboxBackend | 'auto';
+  /** ADVISORY: the requested egress posture, not an enforced boundary (see SandboxNetwork). */
   network: SandboxNetwork;
   runTool: 'on' | 'off' | 'withheld';
   envPassthrough: readonly string[];

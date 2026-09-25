@@ -207,8 +207,10 @@ export {
   tempWorkspace,
 } from './harness/session.js';
 // W1.11 sandbox policy: conservative configuration resolution, certified
-// backend selection, and the mandatory launcher environment scrub.
+// backend selection, the mandatory launcher environment scrub, and the
+// shared run gate every harness surface applies.
 export type {
+  HarnessRunGate,
   ResolveSandboxOptions,
   SandboxBackend,
   SandboxConfig,
@@ -221,6 +223,7 @@ export {
   assertRunToolAvailable,
   buildSandboxLauncherEnv,
   certifiedAutoOrder,
+  harnessRunGate,
   resolveSandboxConfig,
   runToolAvailable,
 } from './sandbox/index.js';

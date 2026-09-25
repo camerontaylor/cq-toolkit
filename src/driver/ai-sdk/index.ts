@@ -174,7 +174,7 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { deepFreeze, defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
-import { resolveSandboxConfig } from '../../sandbox/index.js';
+import { harnessRunGate, resolveSandboxConfig } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
@@ -319,12 +319,17 @@ export class AiSdkDriver implements Driver {
     );
 
     // --- Tool surface: harness config surface ∩ per-op ToolPolicy. --------
+    // The gate is the SHARED buildTools seam decision (src/sandbox), so this
+    // driver adds no policy of its own: a CQ_SANDBOX policy that withholds
+    // `run` withholds it here exactly as it does on the subprocess and MCP
+    // harness surfaces. The constructor's own resolution only pins WHICH
+    // policy object the shared gate is built from.
     const denials: ToolDenial[] = [];
     const harnessTools = buildTools(
       this.harnessConfig,
       record.workspace,
       sandboxPolicy.level,
-      this.sandboxConfig.runTool === 'on',
+      harnessRunGate({ sandboxConfig: this.sandboxConfig }),
     );
     const selected = selectTools(harnessTools, toolPolicy);
     const toolSet: ToolSet = {};
