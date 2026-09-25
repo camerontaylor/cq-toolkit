@@ -328,6 +328,7 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
         // renameTo is already set — one evaluation per section, no
         // duplicate findings.
         reportTestFileRemoval(findings, config, renameFrom, renameFromHeader, renameTo);
+        reportProtectedRename(findings, renameFrom, renameTo);
         continue;
       }
       if (line.startsWith('--- ')) {
@@ -339,14 +340,10 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
         newPath = headerPathOf(line.slice(4));
         sectionPath = newPath === '/dev/null' ? oldPath : newPath;
         if (sectionPath !== null && isProtectedConfigPath(sectionPath)) {
-          findings.push({
-            kind: 'protected-config',
-            file: sectionPath,
-            line: null,
-            snippet: 'protected runner/measurement configuration',
-            message:
-              'worker changes to runner, measurement, or repository configuration are never auto-committed',
-          });
+          reportProtectedConfig(findings, sectionPath);
+        }
+        if (oldPath !== null && oldPath !== sectionPath && isProtectedConfigPath(oldPath)) {
+          reportProtectedConfig(findings, oldPath);
         }
         if (renameTo === null) {
           reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
@@ -371,14 +368,14 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       continue; // "\ No newline at end of file" — metadata, not content
     }
     if (line.startsWith('+')) {
-      if (isTestDeclaration(line.slice(1))) addedTestDeclarations += 1;
+      if (isExecutableTestDeclaration(line.slice(1))) addedTestDeclarations += 1;
       scanAddedLine(findings, config, newPath, newLine, line.slice(1));
       newLine++;
       continue;
     }
     if (line.startsWith('-')) {
       const removed = line.slice(1);
-      if (isTestDeclaration(removed)) {
+      if (isExecutableTestDeclaration(removed)) {
         removedTestDeclarations += 1;
         if (/\b(?:failing|fails|known failure)\b/i.test(removed)) {
           removedFailingTestDeclarations += 1;
@@ -432,12 +429,33 @@ function reportTestFileRemoval(
 const PROTECTED_CONFIG_RE =
   /(^|\/)(?:\.gitattributes|(?:[^/]+\/)*__snapshots__\/|[^/]+\.snap$|(?:vitest|vite)\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
 
+function reportProtectedRename(
+  findings: TamperFinding[],
+  oldPath: string | null,
+  newPath: string | null,
+): void {
+  if (isProtectedConfigPath(oldPath)) reportProtectedConfig(findings, oldPath!);
+  if (isProtectedConfigPath(newPath)) reportProtectedConfig(findings, newPath!);
+}
+
+function reportProtectedConfig(findings: TamperFinding[], path: string): void {
+  findings.push({
+    kind: 'protected-config',
+    file: path,
+    line: null,
+    snippet: 'protected runner/measurement configuration',
+    message:
+      'worker changes to runner, measurement, or repository configuration are never auto-committed',
+  });
+}
+
 function isProtectedConfigPath(path: string | null): boolean {
   return path !== null && (path === '.gitattributes' || PROTECTED_CONFIG_RE.test(path));
 }
 
-function isTestDeclaration(content: string): boolean {
-  return /\b(?:x?(?:it|test|describe)|f(?:it|test|describe))\s*\(/.test(content);
+function isExecutableTestDeclaration(content: string): boolean {
+  const code = content.replace(/^\s*(?:\/\/|\/\*|\*).*?(?:\*\/)?$/, '');
+  return /\b(?:x?(?:it|test)|f(?:it|test))\s*\(/.test(code) || /\bdescribe\s*\(/.test(code);
 }
 
 function isTestPath(path: string, config: CompiledConfig): boolean {
