@@ -145,6 +145,7 @@ export type {
   EditToolInput,
   ReadToolInput,
   RunToolInput,
+  ToolExecuteOptions,
   ToolkitTool,
   ToolkitToolName,
   ToolkitToolResult,
@@ -157,6 +158,37 @@ export {
   ReadToolInputSchema,
   RunToolInputSchema,
 } from './harness/tools.js';
+// The shared harness tool-surface core (W1.4, ADR-0002 Annex A.1) —
+// re-export only: naming, selection, the driver-authored manifest, the
+// bound serialized surface, the stable denial classifier and the
+// init-surface comparator both driver lanes (and third-party MCP hosts of
+// the `cq-harness-mcp` bin) share.
+export type {
+  ExpectedInitSurface,
+  HarnessCallOutcome,
+  HarnessManifest,
+  HarnessSurface,
+  HarnessSurfaceTool,
+  InitSurfaceVerdict,
+  ManifestInputs,
+  McpCallToolResult,
+  ServerStatus,
+} from './harness/surface.js';
+export {
+  buildManifest,
+  compareInitSurface,
+  createHarnessSurface,
+  HARNESS_DENIAL_PREFIXES,
+  HARNESS_MCP_SERVER_NAME,
+  HarnessManifestSchema,
+  harnessToolName,
+  isHarnessDenial,
+  isQualifiedHarnessTool,
+  qualifiedToolName,
+  selectHarnessSurface,
+  selectToolNames,
+  toCallToolResult,
+} from './harness/surface.js';
 export type {
   SessionHeaderLine,
   SessionLine,
@@ -195,11 +227,15 @@ export type {
   SpawnFn,
   StopReasonInputs,
   SubprocessDriverOptions,
+  SubprocessToolSurface,
 } from './driver/subprocess/index.js';
 export {
   allowedToolNames,
   buildArgs,
   CLI_SESSION_FILE,
+  CLI_STRUCTURED_OUTPUT_TOOL,
+  HARNESS_ERROR_PREFIX,
+  HARNESS_MCP_CONFIG_FILE,
   NARRATION_TOOL,
   resultStatusOf,
   stopReasonOf,

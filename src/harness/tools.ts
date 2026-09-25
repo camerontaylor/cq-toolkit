@@ -23,6 +23,7 @@
 //    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
 //   'edit failed: …' | 'run failed: …'
+//   'cancelled: …' (surface.ts: a queued call cancelled before it ran)
 //
 // ENFORCEMENT ORDER per call: sandbox gate → input schema → workspace
 // containment (lexical, then symlink realpath re-check) → config allowlist →
@@ -91,26 +92,35 @@
 // subcommand (never bare git or global options). Invalid patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
-// Literal git diff/log commands select constant argv and execute with
-// execFile, shell:false. Other `run` commands execute through the SHELL (exec, cwd =
-// workspace) so pipelines work; the allowlist is the gate over the whole
-// command string. Config timeoutMs maps onto exec's own timeout (child
-// killed by signal → exitCode null + killed flag); captured output is
-// head-truncated to maxOutputChars with `truncated: true`. read/edit have no
+// Closed-form git diff/log select constant argv and spawn with shell:false.
+// Other `run` commands use the platform shell so pipelines work; the
+// allowlist is the gate over the whole command string. Each command runs in
+// its OWN PROCESS GROUP (POSIX `detached`), so a timeout, an abort
+// (`execute(input, { signal })`) or a harness shutdown kills the whole group
+// with SIGKILL — `npm test → node` grandchildren included, which `exec`
+// (killing only `/bin/sh`) could not reach. A kill reports exitCode null +
+// the killed flag. Captured output is retained up to a byte bound per
+// stream and head-truncated to maxOutputChars with `truncated: true` — a
+// noisy command is truncated, never denied. read/edit have no
 // wall-clock of their own: local fs ops need no timer, and wall-clock POLICY
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
-import { exec, execFile } from 'node:child_process';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
-import { promisify } from 'node:util';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
+import { buildChildEnv } from '../driver/subprocess/process.js';
+import { runArgvCommand, runShellCommand } from './run.js';
+import type { RunCommandOptions, RunOutcome } from './run.js';
 import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 
-const execAsync = promisify(exec);
-const execFileAsync = promisify(execFile);
+/**
+ * Per-stream retention bound for `run` when the config sets no output cap:
+ * "uncapped" means no truncation of the result text up to this bound, never
+ * unbounded memory (the old `exec` path capped at its 1 MiB maxBuffer).
+ */
+const UNCAPPED_RETENTION_BYTES = 1_048_576;
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
@@ -158,6 +168,15 @@ export type ToolkitToolResult =
   | { ok: false; denial: ToolDenial };
 
 /**
+ * Per-call execution options (additive). `signal` cancels an in-flight
+ * call: `run` kills the command's whole process group; read/edit are
+ * local fs ops that finish on their own and ignore it.
+ */
+export interface ToolExecuteOptions {
+  signal?: AbortSignal | undefined;
+}
+
+/**
  * One harness tool, SELF-CONTAINED plain data: name, description, input
  * schema (zod), and an executor bound to the workspace the tools were built
  * for. `execute` accepts `unknown` (adapters may pass unparsed payloads) and
@@ -168,19 +187,19 @@ export type ToolkitTool =
       name: 'read';
       description: string;
       inputSchema: typeof ReadToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     }
   | {
       name: 'edit';
       description: string;
       inputSchema: typeof EditToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     }
   | {
       name: 'run';
       description: string;
       inputSchema: typeof RunToolInputSchema;
-      execute(input: unknown): Promise<ToolkitToolResult>;
+      execute(input: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult>;
     };
 
 // ---------------------------------------------------------------------------
@@ -383,6 +402,7 @@ export function buildTools(
   config: HarnessConfig,
   workspace: string,
   sandbox: SandboxLevel = 'workspace-write',
+  envNames: readonly string[] = [],
 ): ToolkitTool[] {
   const cfg: HarnessConfig = HarnessConfigSchema.parse(config);
   const workspaceAbs = resolve(workspace);
@@ -589,51 +609,25 @@ export function buildTools(
       if (stderr !== '') parts.push(`--- stderr ---\n${stderr}`);
       return parts.join('\n');
     };
-    const executionOptions = {
-      cwd: workspaceAbs,
-      // maxBuffer is bytes; the cap is characters. Leave UTF-8 and wrapper
-      // slack so capOutput truncates before exec rejects on buffer overflow.
-      ...(runCfg.maxOutputChars !== undefined
-        ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
-        : {}),
-      ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
-    };
-    const outcome = (
-      exitCode: number | null,
-      killed: boolean,
-      stdout: string,
-      stderr: string,
-    ): ToolkitToolResult => ({
-      ok: true,
-      exitCode,
-      killed,
-      ...capOutput(formatOutcome(exitCode, killed, stdout, stderr), runCfg.maxOutputChars),
-    });
-    const settle = (err: unknown): ToolkitToolResult => {
-      // Both exec and execFile reject on nonzero exit / signal kill with
-      // captured streams. String-code spawn failures (including ENOENT) deny.
-      const e = err as Error & {
-        code?: string | number | null;
-        killed?: boolean;
-        stdout?: string;
-        stderr?: string;
-      };
-      const stdout = e.stdout ?? '';
-      const stderr = e.stderr ?? '';
-      if (typeof e.code === 'number') return outcome(e.code, false, stdout, stderr);
-      if (e.killed === true) return outcome(null, true, stdout, stderr);
-      return deny('run', `run failed: ${messageOf(err)}`);
-    };
-    const runArgv = async (argv: readonly string[]): Promise<ToolkitToolResult> => {
-      try {
-        const { stdout, stderr } = await execFileAsync('git', argv, {
-          ...executionOptions,
-          shell: false,
-        });
-        return outcome(0, false, stdout, stderr);
-      } catch (err) {
-        return settle(err);
+    const settle = (outcome: RunOutcome): ToolkitToolResult => {
+      // Normal exits (including nonzero) and kills remain tool results.
+      // Only spawn-level failures are denials.
+      if (outcome.kind === 'spawn-error') {
+        return deny('run', `run failed: ${messageOf(outcome.error)}`);
       }
+      const killed = outcome.kind === 'killed';
+      const exitCode = killed ? null : outcome.code;
+      const capped = capOutput(
+        formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
+        runCfg.maxOutputChars,
+      );
+      return {
+        ok: true,
+        exitCode,
+        killed,
+        output: capped.output,
+        truncated: capped.truncated || outcome.overflowed,
+      };
     };
     tools.push({
       name: 'run',
@@ -646,11 +640,30 @@ export function buildTools(
         promptBudget.maxToolDescriptionChars,
       ),
       inputSchema: RunToolInputSchema,
-      execute: async (rawInput: unknown): Promise<ToolkitToolResult> => {
+      execute: async (rawInput: unknown, opts?: ToolExecuteOptions): Promise<ToolkitToolResult> => {
         if (sandbox === 'read-only') return deny('run', 'sandbox: read-only');
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
+        let env: Record<string, string>;
+        try {
+          // Scrub at the shared core on every transport; never depend on an
+          // MCP launcher having already filtered the parent environment.
+          env = buildChildEnv(process.env, undefined, envNames);
+        } catch (error) {
+          return deny('run', `run failed: ${messageOf(error)}`);
+        }
+        const executionOptions: RunCommandOptions = {
+          cwd: workspaceAbs,
+          env,
+          // Retain UTF-8 and wrapper slack above the configured character cap.
+          maxBytes:
+            runCfg.maxOutputChars !== undefined
+              ? runCfg.maxOutputChars * 4 + 65_536
+              : UNCAPPED_RETENTION_BYTES,
+          ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
+          ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        };
         const raw = command.trim().split(/\s+/);
         // An attached shell operator (git diff; …) must not bypass the lock
         // under a regex grant. Quoted/disguised verbs remain author-owned.
@@ -665,7 +678,7 @@ export function buildTools(
               `command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
             );
           }
-          return runArgv(argv);
+          return settle(await runArgvCommand('git', argv, executionOptions));
         }
         const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
@@ -676,12 +689,7 @@ export function buildTools(
               : `command not allowed by harness config allowlist: '${command}'`,
           );
         }
-        try {
-          const { stdout, stderr } = await execAsync(command, executionOptions);
-          return outcome(0, false, stdout, stderr);
-        } catch (err) {
-          return settle(err);
-        }
+        return settle(await runShellCommand(command, executionOptions));
       },
     });
   }

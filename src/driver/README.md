@@ -170,8 +170,10 @@ Files:
 - `index.ts` — `SubprocessDriver implements Driver` (constructor options:
   `binary?` default `'claude'`, `outputSchema?` → `--json-schema`,
   `routingTable?`, `termGraceMs?`/`killGraceMs?`, `sessionsDir?`,
-  `harnessConfig?`, `pricing?`, `envAllowlist?`, and a `spawn?` override
-  hook for tests). Before the CLI receives the JSON Schema, the driver
+  `harnessConfig?`, `pricing?`, `envAllowlist?`, `toolSurface?` (default
+  `'harness'`; `'stock'` is the D6 null-hypothesis mode, reachable only by
+  constructing the class directly), and a `spawn?` override hook for
+  tests). Before the CLI receives the JSON Schema, the driver
   removes `$schema` properties and absolute `http(s)://json-schema.org/`
   values under `$ref`, `$dynamicRef`, and `$recursiveRef` (`stripMetaSchema`).
 - `routing.ts` — env-based model routing as CONFIG (`RoutingTable`,
@@ -192,18 +194,20 @@ Files:
   markers; grace delays injectable for tests). The governor decides
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
 
-Child environment is DEFAULT-DENY (issue #183) for `spawnManaged` — the
-subprocess driver only; the sibling ACP/claude-agent drivers still inherit
-the parent env (a separate surface, not changed here). `spawnManaged`
-copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
+Child environment is DEFAULT-DENY (issue #183) for the subprocess CLI,
+the claude-agent SDK child, and every harness `run` child. They use the
+shared `buildChildEnv` policy; the ACP vendor process is a separate surface.
+The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
 terminal + locale basics, XDG dirs, network-egress/TLS config
 (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
-from the entry process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`,
-`AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, or `NODE_OPTIONS`/`NODE_PATH`.
-Per-Route endpoint/auth vars are composed explicitly into
-`SpawnOptions.env` and always win over the allowlist, so configured
-driver keys still reach the worker; a deployment extends the copied names
-with `SubprocessDriverOptions.envAllowlist` (names only, never values) —
+from the entry process env. By default it excludes `GH_TOKEN`, `*_API_KEY`,
+`*_SECRET`, `AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, and `NODE_OPTIONS`/`NODE_PATH`.
+Per-route endpoint/auth vars are composed explicitly into the agent CLI
+or SDK child's environment and always win over the allowlist, so configured
+driver keys still reach that worker. These credential overrides are not
+passed to harness `run` children. A deployment extends the copied names
+with `SubprocessDriverOptions.envAllowlist` or
+`ClaudeAgentDriverOptions.envAllowlist` (names only, never values) —
 e.g. for a corporate `SSH_AUTH_SOCK` or `NPM_CONFIG_*`. A marker secret in
 the entry process env therefore cannot reach a `spawnManaged` worker,
 where prompt-injected PR content could exfiltrate it. TWO CAVEATS (issue
@@ -214,30 +218,81 @@ there, so a worker with file-read tools can still reach
 `~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, … — that
 boundary is the `ToolPolicy`/sandbox surface, not this env allowlist.
 
-Argv surface (headless reference): `-p` (prompt rides stdin),
-`--output-format stream-json`, `--verbose` (the real CLI refuses stream-json
-print mode without it — found live, CLI 2.1.270, T1.6 slice 4),
-`--json-schema <schema>` when
-`outputSchema` is set, `--allowedTools <names>` (ALWAYS present — the
-harness tool surface ∩ the frozen ToolPolicy; an empty value is exactly
-mode `none`: headless `-p` mode cannot prompt, so a tool outside
-`--allowedTools` is denied by the CLI, and those CLI-side denials are the
-source of `WorkerResult.denials`), `--model <route.model>`, and
-`--resume <cli-session-id>` on sessionRef resume. No undocumented flags:
-`--permission-prompts none` and `--bare` were removed (issue #19) — the
-real CLI rejects them at argv parse.
+Both drivers carry their explicit `envAllowlist` through the harness
+manifest's `envNames`. The manifest also captures names from the deployment
+variable `CQ_RUN_ENV_PASSTHROUGH` (comma- or whitespace-separated names),
+so those opt-ins survive the stdio startup scrub. The shared core filters
+the environment at every `run` execution, including in-process SDK tools and direct `buildTools`
+calls; the stdio server's startup scrub is an additional boundary. Both
+closed-form git commands and shell commands receive the filtered env.
 
-TRUST STATEMENT (issue #28's subprocess half): `sandboxPolicy` governs the
-tool-NAME surface only — the harness sandbox/path/output restrictions are
-not enforced by this driver. The CLI is an independent process with its own
-permission model; run/sandbox confinement is the host CLI's business
-(`--allowedTools` controls which tools may run, never where or how). When
-`sandboxPolicy.level` is not `none` AND a tool surface was actually
-exposed, the run records a `sandbox-level-unenforced` narration marker so
-the unenforced request is observable per run (a mode-`none` run exposes
-nothing pre-approved — headless-denied — so there is nothing unenforced to
-observe, and the shared conformance contract pins such records to zero
-tool-role messages).
+Argv surface (headless reference, harness mode — the default): `-p` (prompt
+rides stdin), `--output-format stream-json`, `--verbose` (the real CLI
+refuses stream-json print mode without it — found live, CLI 2.1.270, T1.6
+slice 4), `--json-schema <schema>` when `outputSchema` is set, then the
+CLOSED SURFACE (W1.4): `--tools ""` (builtins absent, not denied),
+`--setting-sources ""` (no ambient settings), `--strict-mcp-config` (no
+ambient MCP servers), `--mcp-config <sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json`
+(unique per run, created `O_EXCL` 0600; a name collision is a hard error)
+when the selected surface is non-empty, and `--allowedTools` — ALWAYS
+present, ONE space-joined argv element (comma-joining silently pre-approves
+only the first entry) holding the qualified spellings
+`mcp__cq-harness__<name>` of harness ∩ the frozen ToolPolicy (empty = mode
+`none`). Then `--model <route.model>` and `--resume <cli-session-id>` on
+sessionRef resume. No undocumented flags: `--permission-prompts none` and
+`--bare` were removed (issue #19). Stock mode keeps the legacy argv
+(no closed-surface flags; harness names in `--allowedTools`, inert).
+
+Closed tool surface (W1.4 — RS-12 design, ADR-0002 Annex A):
+
+- The shared core `src/harness/surface.ts` (vendor-free) owns naming
+  (`cq-harness`, `mcp__cq-harness__<name>`), selection, the strict
+  driver-authored manifest (`buildManifest` — the only constructor:
+  workspace realpath, sandbox level, harness ∩ policy, harness config, env
+  names), the bound serialized surface (`createHarnessSurface`), the MCP
+  `CallToolResult` mapping, the stable harness denial prefixes
+  (`isHarnessDenial`) and the init-surface comparator. BOTH lanes serve it:
+  claude-agent in-process, subprocess over stdio; a two-level parity test
+  (`test/driver/harness-parity.test.ts`) pins identical CallToolResults and
+  identical `WorkerResult.denials`.
+- The stdio server `src/harness/mcp/` (bin `cq-harness-mcp`) is a
+  hand-rolled closed subset of JSON-RPC 2.0 (initialize / initialized /
+  cancelled / ping / tools/list / tools/call; version negotiation; 1 MiB
+  line cap) — ZERO runtime dependencies; `@modelcontextprotocol/sdk` is a
+  devDependency conformance client only. Toolkit dispatch launches it as
+  `process.execPath` + the module-relative `dist/harness/mcp/bin.js` —
+  never through PATH, npx or plan data. It re-validates the manifest at
+  startup (strict schema, realpath identity, surface equality), chdirs to
+  the workspace and scrubs its env to the default child-env allowlist plus
+  the lane's `envAllowlist` names, or exits 78 before `initialize`.
+- The driver asserts the FIRST `system/init` fail-closed (exactly
+  `cq-harness`/connected and exactly the qualified selected tools, plus the
+  CLI's `StructuredOutput` under `--json-schema`), classifies `is_error`
+  harness results three ways (harness denial by prefix / CLI permission
+  denial / anything else = transport failure), and settles every harness
+  failure as stopReason `error` with a `HARNESS_ERROR_PREFIX` cause and an
+  `errorClass: 'harness'` narration marker (the ADR-0002 §2.2 enum field
+  lands with the W3.3 types bump).
+- Named limitations: a same-uid `run` command can still read an
+  ancestor's environment (OS confinement, T1.8); a server killed without
+  SIGTERM orphans an in-flight command group until it exits on its own.
+
+The shared `run` tool accepts six closed-form `git diff` commands and
+three closed-form `git log` commands, each still requiring an allowlist
+grant. They select constant argv with `shell: false`; path and revision
+arguments are unavailable. Both transports use the same process lifecycle
+for these commands and ordinary shell commands: bounded output, timeout,
+cancellation, and POSIX process-group termination. See the exact forms and
+config pins in [the harness README](../harness/README.md).
+
+TRUST STATEMENT (issue #28's subprocess half): in harness mode the harness
+enforces the TOOL-level sandbox mapping on this lane (read-only denials,
+workspace containment, path/command allowlists); OS confinement stays
+unenforced, so a requested level with a non-empty surface records
+`{cq: 'sandbox-level-unenforced', level, layer: 'os'}`. `run` commands keep
+host privileges (the harness trust boundary). In stock mode the CLI's own
+permission model governs and the legacy marker (no `layer`) records that
+nothing was enforced by the harness.
 
 Event mapping (stream-json → seam): init `session_id` → CLI session id
 (persisted post-settle to the sessions-store sidecar
@@ -313,7 +368,10 @@ Files:
 - `index.ts` — `ClaudeAgentDriver implements Driver` (constructor options:
   `sdkLoader?`, `endpointTable?`, `outputSchema?` → the SDK's native
   `outputFormat: { type: 'json_schema' }`, `harnessConfig?`,
-  `sessionsDir?`, `pricing?`). Before the CLI receives the schema, the
+  `sessionsDir?`, `pricing?`, `envAllowlist?`). The env option contains
+  additional host variable names exposed to the SDK child and harness
+  `run` children through the manifest; invalid names are rejected at
+  construction. Before the CLI receives the schema, the
   driver removes `$schema` properties and absolute
   `http(s)://json-schema.org/` values under `$ref`, `$dynamicRef`, and
   `$recursiveRef` (`stripMetaSchema`).
@@ -358,8 +416,12 @@ and post-dispatch observation are alternative defences; this lane
 deliberately takes the second.
 
 Tool policy mapping (the governed surface, exact): built-in agent tools
-are disabled wholesale (`tools: []`) — the ONLY surface is the harness
-read/edit/run surface, registered as the SDK's in-process custom tools
+are disabled wholesale (`tools: []`), and `settingSources: []` +
+`strictMcpConfig: true` keep the account's claude.ai connectors off the
+surface under subscription auth (W1.4 live leg A.5j); the FIRST init frame
+is asserted fail-closed against the expected surface. The ONLY surface is
+the harness read/edit/run surface — the shared core's bound surface
+(`src/harness/surface.ts`), registered as the SDK's in-process custom tools
 (`createSdkMcpServer` + `tool(...)` under one server name, addressable as
 `mcp__<server>__<name>` in `allowedTools`). Mode `allowlist` (default) →
 harness ∩ `policy.allow`; `unrestricted` → the whole harness surface;

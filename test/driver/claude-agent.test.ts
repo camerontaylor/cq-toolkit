@@ -32,7 +32,7 @@
 //
 // This file MUST NOT import from '@anthropic-ai/claude-agent-sdk' (I10): the
 // mock returns plain objects the driver's structural types accept.
-import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
@@ -43,7 +43,9 @@ import {
   allowedToolNames,
   ClaudeAgentDriver,
   foldMessage,
+  HARNESS_ERROR_PREFIX,
   resultStatusOf,
+  runHarnessTool,
   sandboxOption,
   stopReasonOf,
   usageFromAgent,
@@ -63,6 +65,7 @@ import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER } from './conformance.js';
 import { defaultHarnessConfig } from '../../src/harness/config.js';
 import { SessionStore } from '../../src/harness/session.js';
+import { buildManifest, createHarnessSurface } from '../../src/harness/surface.js';
 import { runLadder } from '../../src/kernel/governor.js';
 import type { OpInvocation } from '../../src/driver/types.js';
 
@@ -117,6 +120,91 @@ function structuredOutputOf(
   }
 }
 
+/** One `{name, status}` MCP server entry of an init frame. */
+interface MockServerStatus {
+  name: string;
+  status: string;
+}
+
+/** The surface half of an SDK init frame. */
+interface MockInitSurface {
+  tools: string[];
+  mcp_servers: MockServerStatus[];
+}
+
+/**
+ * Stand-in for the SDK's default built-in preset (what `tools` omitted
+ * would expose). The driver always passes `tools: []`, so these only ever
+ * appear when that contract breaks.
+ */
+const MOCK_BUILTIN_PRESET = ['Bash', 'Read', 'Edit', 'Write'];
+
+/**
+ * The claude.ai connector surface subscription auth attaches when the
+ * worker's surface is NOT closed (live leg A.5j) — the mock's model of the
+ * leak `settingSources: []` + `strictMcpConfig: true` prevent.
+ */
+const MOCK_CONNECTOR_SERVER: MockServerStatus = { name: 'claude.ai Gmail', status: 'connected' };
+const MOCK_CONNECTOR_TOOLS = [
+  'mcp__claude_ai_Gmail__send_message',
+  'mcp__claude_ai_Gmail__search_threads',
+];
+
+/**
+ * The init surface the SDK would HONESTLY report for these query options —
+ * derived from what the driver actually registered, never hardcoded per
+ * test (the real 0.3.270 frame: `tools` lists every available tool, i.e.
+ * the built-ins `options.tools` enables, every tool of every registered
+ * MCP server as `mcp__<server>__<tool>`, and `StructuredOutput` when
+ * `outputFormat` is set; `mcp_servers` lists each registered server with
+ * its connection status). `allowedTools` is a permission list, not an
+ * availability list, so it does not shape the surface. With
+ * `subscriptionConnectors`, an UNCLOSED surface (settingSources not [] or
+ * strictMcpConfig not true) also carries the account's claude.ai connector.
+ */
+function honestInitSurface(
+  options: Record<string, unknown>,
+  opts: { subscriptionConnectors?: boolean } = {},
+): MockInitSurface {
+  const tools: string[] = Array.isArray(options['tools'])
+    ? [...(options['tools'] as string[])]
+    : [...MOCK_BUILTIN_PRESET];
+  const mcpServers: MockServerStatus[] = [];
+  const registered = (options['mcpServers'] ?? {}) as Record<string, { tools?: MockSdkTool[] }>;
+  for (const [serverName, config] of Object.entries(registered)) {
+    mcpServers.push({ name: serverName, status: 'connected' });
+    for (const registeredTool of config.tools ?? []) {
+      tools.push(`mcp__${serverName}__${registeredTool.name}`);
+    }
+  }
+  const closed =
+    Array.isArray(options['settingSources']) &&
+    (options['settingSources'] as unknown[]).length === 0 &&
+    options['strictMcpConfig'] === true;
+  if (opts.subscriptionConnectors === true && !closed) {
+    mcpServers.push(MOCK_CONNECTOR_SERVER);
+    tools.push(...MOCK_CONNECTOR_TOOLS);
+  }
+  if (options['outputFormat'] !== undefined) tools.push('StructuredOutput');
+  return { tools, mcp_servers: mcpServers };
+}
+
+/** An honest `system/init` frame for these options (plus any extra fields). */
+function initFrame(
+  options: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    type: 'system',
+    subtype: 'init',
+    model: options['model'],
+    cwd: options['cwd'],
+    permissionMode: options['permissionMode'],
+    ...honestInitSurface(options),
+    ...extra,
+  };
+}
+
 /** One scripted query: init → (tool phase) → assistant text → success result. */
 async function* runScriptedQuery(
   script: {
@@ -125,6 +213,10 @@ async function* runScriptedQuery(
     calls: MockQueryCall[];
     /** Overrides the mock's usage — the LYING-USAGE tests ride this (review round 3). */
     usage?: Record<string, unknown>;
+    /** Model subscription auth: connectors attach unless the surface is closed. */
+    subscriptionConnectors?: boolean;
+    /** Tamper with the honest init surface — a host that ignores the closing options. */
+    tamperInit?: (surface: MockInitSurface) => MockInitSurface;
   },
   prompt: string,
   options: Record<string, unknown>,
@@ -135,14 +227,19 @@ async function* runScriptedQuery(
   // that to prove the driver surfaces the SERVED id, never the requested).
   const model = script.servedModel ?? (options['model'] as string);
   const sessionId = `agent-cli-${script.calls.length}`;
+  const surface = honestInitSurface(options, {
+    ...(script.subscriptionConnectors === undefined
+      ? {}
+      : { subscriptionConnectors: script.subscriptionConnectors }),
+  });
   yield {
     type: 'system',
     subtype: 'init',
     session_id: sessionId,
     model,
     cwd: options['cwd'],
-    tools: [],
     permissionMode: options['permissionMode'],
+    ...(script.tamperInit === undefined ? surface : script.tamperInit(surface)),
   };
   const signal = (options['abortController'] as { signal?: AbortSignal } | undefined)?.signal;
   const directive = script.directive;
@@ -257,6 +354,8 @@ function mockSdkModule(script: {
   servedModel?: string;
   calls: MockQueryCall[];
   usage?: Record<string, unknown>;
+  subscriptionConnectors?: boolean;
+  tamperInit?: (surface: MockInitSurface) => MockInitSurface;
 }): Record<string, unknown> {
   return {
     ...mockAdapters,
@@ -371,7 +470,11 @@ function invocation(overrides: Partial<OpInvocation> = {}): OpInvocation {
 /** A recording driver + its captured query calls (options evidence). */
 function driverWithCalls(
   scratchDir: string,
-  opts: { directive?: ModelDirective; servedModel?: string } = {},
+  opts: {
+    directive?: ModelDirective;
+    servedModel?: string;
+    envAllowlist?: readonly string[];
+  } = {},
 ): { driver: ClaudeAgentDriver; calls: MockQueryCall[] } {
   const calls: MockQueryCall[] = [];
   const driver = new ClaudeAgentDriver({
@@ -379,6 +482,7 @@ function driverWithCalls(
     endpointTable: conformanceEndpointTable(),
     sessionsDir: join(scratchDir, SESSIONS_DIR),
     harnessConfig: conformanceHarnessConfig(scratchDir),
+    ...(opts.envAllowlist === undefined ? {} : { envAllowlist: opts.envAllowlist }),
   });
   return { driver, calls };
 }
@@ -391,34 +495,49 @@ function optionsOf(calls: MockQueryCall[], nth = 0): Record<string, unknown> {
 }
 
 describe('claude-agent driver specifics (mock sdk)', () => {
-  test('child env is scrubbed by default and passes through only named values', async () => {
-    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-env-'));
-    const secretName = 'CQ_CLAUDE_AGENT_SECRET_CANARY';
-    const passthroughName = 'CQ_CLAUDE_AGENT_PASSTHROUGH_CANARY';
-    const oldSecret = process.env[secretName];
-    const oldPassthrough = process.env[passthroughName];
-    const oldConfigured = process.env.CQ_RUN_ENV_PASSTHROUGH;
-    process.env[secretName] = 'must-not-reach-sdk';
-    process.env[passthroughName] = 'named-passthrough';
-    process.env.CQ_RUN_ENV_PASSTHROUGH = passthroughName;
-    try {
-      const { driver, calls } = driverWithCalls(scratchDir, {
-        directive: { kind: 'reply', text: 'ok' },
-      });
-      await driver.run(invocation({ prompt: 'env canary' }));
-      const env = optionsOf(calls)['env'] as Record<string, string>;
-      expect(env[secretName]).toBeUndefined();
-      expect(env[passthroughName]).toBe('named-passthrough');
-    } finally {
-      if (oldSecret === undefined) delete process.env[secretName];
-      else process.env[secretName] = oldSecret;
-      if (oldPassthrough === undefined) delete process.env[passthroughName];
-      else process.env[passthroughName] = oldPassthrough;
-      if (oldConfigured === undefined) delete process.env.CQ_RUN_ENV_PASSTHROUGH;
-      else process.env.CQ_RUN_ENV_PASSTHROUGH = oldConfigured;
-      await rm(scratchDir, { recursive: true, force: true });
-    }
-  });
+  test.each(['explicit', 'configured'])(
+    'child env is scrubbed and passes through only %s named values',
+    async (mode) => {
+      const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-env-'));
+      const secretName = 'CQ_CLAUDE_AGENT_SECRET_CANARY';
+      const passthroughName = 'CQ_CLAUDE_AGENT_PASSTHROUGH_CANARY';
+      const oldSecret = process.env[secretName];
+      const oldPassthrough = process.env[passthroughName];
+      const oldConfigured = process.env.CQ_RUN_ENV_PASSTHROUGH;
+      process.env[secretName] = 'must-not-reach-sdk';
+      process.env[passthroughName] = 'named-passthrough';
+      process.env.CQ_RUN_ENV_PASSTHROUGH = mode === 'configured' ? passthroughName : '';
+      const envAllowlist = mode === 'explicit' ? [passthroughName] : [];
+      try {
+        const { driver, calls } = driverWithCalls(scratchDir, {
+          directive: { kind: 'reply', text: 'ok' },
+          envAllowlist,
+        });
+        // Constructor snapshots the trusted declaration; caller mutation
+        // cannot widen an already-built driver's process or tool surface.
+        envAllowlist.push(secretName);
+        await driver.run(invocation({ prompt: 'env canary' }));
+        const env = optionsOf(calls)['env'] as Record<string, string>;
+        expect(env[secretName]).toBeUndefined();
+        expect(env[passthroughName]).toBe('named-passthrough');
+      } finally {
+        if (oldSecret === undefined) delete process.env[secretName];
+        else process.env[secretName] = oldSecret;
+        if (oldPassthrough === undefined) delete process.env[passthroughName];
+        else process.env[passthroughName] = oldPassthrough;
+        if (oldConfigured === undefined) delete process.env.CQ_RUN_ENV_PASSTHROUGH;
+        else process.env.CQ_RUN_ENV_PASSTHROUGH = oldConfigured;
+        await rm(scratchDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test.each(['BAD=VALUE', 'BAD NAME', '', 'BAD;NAME'])(
+    'rejects invalid envAllowlist name %j before dispatch',
+    (name) => {
+      expect(() => new ClaudeAgentDriver({ envAllowlist: [name] })).toThrow(/envAllowlist/);
+    },
+  );
 
   test('peer ABSENT: a throwing loader throws pre-dispatch — before any session store mkdir', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
@@ -772,6 +891,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
           }): AsyncGenerator<unknown, void> =>
             (async function* () {
               calls.push({ prompt: 'n/a', options });
+              yield initFrame(options, { session_id: 'agent-cli-err' });
               yield {
                 type: 'result',
                 subtype: 'error_during_execution',
@@ -803,8 +923,14 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: (): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
+              yield initFrame(options, { session_id: 'agent-cli-err' });
               yield {
                 type: 'result',
                 subtype: 'error_during_execution',
@@ -833,8 +959,14 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: (): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
+              yield initFrame(options, { session_id: 'agent-cli-err' });
               yield {
                 type: 'result',
                 subtype: 'error_during_execution',
@@ -865,8 +997,14 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       const driver = new ClaudeAgentDriver({
         sdkLoader: async () => ({
           ...mockAdapters,
-          query: (): AsyncGenerator<unknown, void> =>
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
             (async function* () {
+              yield initFrame(options, { session_id: 'agent-cli-err' });
               yield {
                 type: 'result',
                 subtype: 'error_during_execution',
@@ -977,12 +1115,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
                 });
                 await new Promise((resolve) => setTimeout(resolve, 10)); // a tick past the abort
               }
-              yield {
-                type: 'system',
-                subtype: 'init',
-                session_id: 'agent-cli-clean',
-                model: options['model'],
-              };
+              yield initFrame(options, { session_id: 'agent-cli-clean' });
               yield {
                 type: 'assistant',
                 session_id: 'agent-cli-clean',
@@ -1072,7 +1205,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
             (async function* () {
               const sessionId = 'agent-cli-userframe';
               const model = options['model'] as string;
-              yield { type: 'system', subtype: 'init', session_id: sessionId, model };
+              yield initFrame(options, { session_id: sessionId, model });
               const server = (
                 options['mcpServers'] as
                   | Record<
@@ -1181,7 +1314,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
             (async function* () {
               const sessionId = 'agent-cli-usertext';
               const model = options['model'] as string;
-              yield { type: 'system', subtype: 'init', session_id: sessionId, model };
+              yield initFrame(options, { session_id: sessionId, model });
               // The frame under test: a user frame whose MessageParam
               // content carries an ordinary TEXT block — the normal flow
               // never emits one.
@@ -1239,7 +1372,7 @@ describe('claude-agent driver specifics (mock sdk)', () => {
             (async function* () {
               const sessionId = 'agent-cli-userjunk';
               const model = options['model'] as string;
-              yield { type: 'system', subtype: 'init', session_id: sessionId, model };
+              yield initFrame(options, { session_id: sessionId, model });
               // Malformed: message is a string, not a record — nothing
               // shapeable to fold (subprocess lane: content undefined →
               // return). Dropped, not narrated, never a crash.
@@ -1485,6 +1618,9 @@ describe('claude-agent driver specifics (mock sdk)', () => {
       error: undefined as string | undefined,
       deniedToolUseIds: new Set<string>(),
       denials: [],
+      expectedSurface: undefined,
+      initSeen: false,
+      harnessFailure: undefined,
     };
     foldMessage(observation, 'not even an object');
     foldMessage(observation, { type: 'system', subtype: 'init', session_id: 's1', model: 'm-1' });
@@ -1518,4 +1654,603 @@ describe('claude-agent driver specifics (mock sdk)', () => {
     expect(observation.narration).toHaveLength(2); // the string + the unknown subtype
     expect(observation.result?.['subtype']).toBe('success');
   });
+});
+
+// ---------------------------------------------------------------------------
+// 3. The fail-closed init-surface assertion (W1.4, ADR-0002 Annex A.2)
+// ---------------------------------------------------------------------------
+
+/** The narration marker objects persisted for one run (parsed JSON lines). */
+async function narrationMarkers(
+  scratchDir: string,
+  sessionId: string | undefined,
+): Promise<Array<Record<string, unknown>>> {
+  const record = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(sessionId as string);
+  const narration = record?.messages.find(
+    (m) => m.role === 'tool' && m.toolName === 'agent-narration',
+  );
+  if (narration === undefined) return [];
+  return (JSON.parse(narration.content) as string[]).flatMap((line) => {
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      return typeof parsed === 'object' && parsed !== null
+        ? [parsed as Record<string, unknown>]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
+/** The session record's executed-tool messages (role 'tool', excluding narration). */
+async function executedToolMessages(
+  scratchDir: string,
+  sessionId: string | undefined,
+): Promise<string[]> {
+  const record = await new SessionStore(join(scratchDir, SESSIONS_DIR)).load(sessionId as string);
+  return (record?.messages ?? [])
+    .filter((m) => m.role === 'tool' && m.toolName !== 'agent-narration')
+    .map((m) => m.toolName ?? '');
+}
+
+describe('claude-agent init-surface assertion (mock sdk)', () => {
+  test('options close the surface: settingSources [] and strictMcpConfig true', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const { driver, calls } = driverWithCalls(scratchDir, {
+        directive: { kind: 'reply', text: 'ok' },
+      });
+      await driver.run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      await driver.run(invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }));
+      for (const nth of [0, 1]) {
+        expect(optionsOf(calls, nth)['settingSources']).toEqual([]);
+        expect(optionsOf(calls, nth)['strictMcpConfig']).toBe(true);
+      }
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('subscription connectors do NOT leak: the closing options keep the honest init surface exact → complete', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const calls: MockQueryCall[] = [];
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls,
+            subscriptionConnectors: true,
+          }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('complete');
+      expect(result.error).toBeUndefined();
+      // The mock's derivation is not vacuous: WITHOUT the closing options
+      // the same subscription posture would attach the connector.
+      const leaky = honestInitSurface(
+        { ...optionsOf(calls), settingSources: undefined, strictMcpConfig: undefined },
+        { subscriptionConnectors: true },
+      );
+      expect(leaky.tools).toContain('mcp__claude_ai_Gmail__send_message');
+      expect(honestInitSurface(optionsOf(calls), { subscriptionConnectors: true })).toEqual({
+        tools: ['mcp__cq-harness__read', 'mcp__cq-harness__edit', 'mcp__cq-harness__run'],
+        mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
+      });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('init MISMATCH (an extra claude.ai connector server + its tools) → error, harness prefix, narration marker; no later frame is consumed', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      let handlerCalled = false;
+      let framesAfterInit = 0;
+      let generatorClosed = false;
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              try {
+                const surface = honestInitSurface(options);
+                // A host that IGNORES the closing options: the account's
+                // connector rides the worker's surface anyway.
+                yield initFrame(options, {
+                  session_id: 'agent-cli-leak',
+                  tools: [...surface.tools, ...MOCK_CONNECTOR_TOOLS],
+                  mcp_servers: [...surface.mcp_servers, MOCK_CONNECTOR_SERVER],
+                });
+                framesAfterInit += 1;
+                const server = (options['mcpServers'] as Record<string, { tools?: MockSdkTool[] }>)[
+                  'cq-harness'
+                ];
+                const runTool = server?.tools?.find((t) => t.name === 'run');
+                yield {
+                  type: 'assistant',
+                  session_id: 'agent-cli-leak',
+                  message: {
+                    model: options['model'],
+                    content: [
+                      {
+                        type: 'tool_use',
+                        id: 'leak-1',
+                        name: 'mcp__cq-harness__run',
+                        input: { command: 'echo x > note.txt' },
+                      },
+                    ],
+                    usage: AGENT_USAGE,
+                  },
+                };
+                framesAfterInit += 1;
+                handlerCalled = true;
+                await runTool?.handler({ command: 'echo x > note.txt' }, undefined);
+                yield {
+                  type: 'result',
+                  subtype: 'success',
+                  is_error: false,
+                  session_id: 'agent-cli-leak',
+                  result: 'done',
+                  usage: AGENT_USAGE,
+                  permission_denials: [],
+                };
+              } finally {
+                generatorClosed = true;
+              }
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('init surface mismatch');
+      expect(result.error).toContain('mcp__claude_ai_Gmail__send_message');
+      // The loop broke on the init frame: the generator was returned
+      // (closed) and never resumed — the later tool call never executed.
+      expect(framesAfterInit).toBe(0);
+      expect(handlerCalled).toBe(false);
+      expect(generatorClosed).toBe(true);
+      expect(await executedToolMessages(scratchDir, result.sessionId)).toEqual([]);
+      const marker = (await narrationMarkers(scratchDir, result.sessionId)).find(
+        (m) => m['cq'] === 'harness-surface-mismatch',
+      );
+      expect(marker).toMatchObject({
+        cq: 'harness-surface-mismatch',
+        errorClass: 'harness',
+        expected: {
+          mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
+          tools: ['mcp__cq-harness__edit', 'mcp__cq-harness__read', 'mcp__cq-harness__run'],
+        },
+      });
+      const observed = marker?.['observed'] as { mcp_servers: unknown; tools: string[] };
+      expect(observed.mcp_servers).toContainEqual({ name: 'claude.ai Gmail', status: 'connected' });
+      expect(observed.tools).toContain('mcp__claude_ai_Gmail__send_message');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('the scripted mock with a tampered init: an extra server alone is a mismatch (tools exact)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const calls: MockQueryCall[] = [];
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: {
+              kind: 'tool-then-reply',
+              tool: 'run',
+              input: { command: 'echo x > note.txt' },
+              reply: 'unused',
+            },
+            calls,
+            tamperInit: (surface) => ({
+              ...surface,
+              mcp_servers: [...surface.mcp_servers, MOCK_CONNECTOR_SERVER],
+            }),
+          }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(await executedToolMessages(scratchDir, result.sessionId)).toEqual([]);
+      expect(result.denials).toEqual([]);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('MISSING harness server (status failed) → error with the harness prefix and marker', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls: [],
+            // A failed server contributes no tools and reports 'failed'.
+            tamperInit: (surface) => ({
+              tools: surface.tools.filter((t) => !t.startsWith('mcp__cq-harness__')),
+              mcp_servers: surface.mcp_servers.map((server) => ({ ...server, status: 'failed' })),
+            }),
+          }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(
+        invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }),
+      );
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      const marker = (await narrationMarkers(scratchDir, result.sessionId)).find(
+        (m) => m['cq'] === 'harness-surface-mismatch',
+      );
+      expect(marker).toMatchObject({
+        errorClass: 'harness',
+        expected: {
+          mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
+          tools: ['mcp__cq-harness__read'],
+        },
+        observed: { mcp_servers: [{ name: 'cq-harness', status: 'failed' }], tools: [] },
+      });
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a harness tool the init frame does not list (only a subset connected) → mismatch', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls: [],
+            tamperInit: (surface) => ({
+              ...surface,
+              tools: surface.tools.filter((t) => t !== 'mcp__cq-harness__run'),
+            }),
+          }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('MISSING init frame: a run with a result but no init → unverified harness error', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              yield {
+                type: 'assistant',
+                session_id: 'agent-cli-noinit',
+                message: {
+                  model: options['model'],
+                  content: [{ type: 'text', text: 'looks fine' }],
+                  usage: AGENT_USAGE,
+                },
+              };
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: false,
+                session_id: 'agent-cli-noinit',
+                result: 'looks fine',
+                usage: AGENT_USAGE,
+                permission_denials: [],
+                structured_output: { answer: 'ok' }, // schema-valid, but unverified
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+        outputSchema: z.object({ answer: z.string() }).strict(),
+      });
+      const result = await driver.run(invocation());
+      expect(result.stopReason).toBe('error');
+      expect(result.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(result.error).toContain('never reported its init surface');
+      const markers = await narrationMarkers(scratchDir, result.sessionId);
+      expect(markers).toContainEqual({ cq: 'harness-surface-unverified', errorClass: 'harness' });
+      // A real measurement still rides the error verdict (usage is honest)…
+      expect(result.usage).toEqual({ input: 120, output: 12, cacheRead: 15, cacheWrite: 5 });
+      // …but the payload produced on an unverified surface never does (review r1).
+      expect(result.structuredOutput).toBeUndefined();
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('outputFormat set → StructuredOutput is part of the expected surface (present: complete; absent: mismatch)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const schema = z.object({ answer: z.string() }).strict();
+      const base = {
+        endpointTable: conformanceEndpointTable(),
+        outputSchema: schema,
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      };
+      const calls: MockQueryCall[] = [];
+      const ok = await new ClaudeAgentDriver({
+        ...base,
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"ok"}' }, calls }),
+      }).run(invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }));
+      expect(ok.stopReason).toBe('complete');
+      expect(ok.structuredOutput).toEqual({ answer: 'ok' });
+      expect(honestInitSurface(optionsOf(calls)).tools).toEqual([
+        'mcp__cq-harness__read',
+        'StructuredOutput',
+      ]);
+
+      const missing = await new ClaudeAgentDriver({
+        ...base,
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: '{"answer":"ok"}' },
+            calls: [],
+            tamperInit: (surface) => ({
+              ...surface,
+              tools: surface.tools.filter((t) => t !== 'StructuredOutput'),
+            }),
+          }),
+      }).run(invocation({ toolPolicy: { allow: ['read'], mode: 'allowlist' } }));
+      expect(missing.stopReason).toBe('error');
+      expect(missing.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+      expect(missing.structuredOutput).toBeUndefined();
+
+      // And without outputFormat a StructuredOutput entry is an EXTRA tool.
+      const extra = await new ClaudeAgentDriver({
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls: [],
+            tamperInit: (surface) => ({
+              ...surface,
+              tools: [...surface.tools, 'StructuredOutput'],
+            }),
+          }),
+      }).run(invocation());
+      expect(extra.stopReason).toBe('error');
+      expect(extra.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('mode none expects NO servers and NO tools (or only StructuredOutput with outputFormat)', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      const calls: MockQueryCall[] = [];
+      const { driver } = driverWithCalls(scratchDir, { directive: { kind: 'reply', text: 'ok' } });
+      const none = await driver.run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      expect(none.stopReason).toBe('complete');
+
+      const structured = await new ClaudeAgentDriver({
+        endpointTable: conformanceEndpointTable(),
+        outputSchema: z.object({ answer: z.string() }),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+        sdkLoader: async () =>
+          mockSdkModule({ directive: { kind: 'reply', text: '{"answer":"x"}' }, calls }),
+      }).run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      expect(structured.stopReason).toBe('complete');
+      expect(honestInitSurface(optionsOf(calls))).toEqual({
+        tools: ['StructuredOutput'],
+        mcp_servers: [],
+      });
+
+      // Any server at all in mode none is a mismatch — even a connected harness.
+      const leaked = await new ClaudeAgentDriver({
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls: [],
+            tamperInit: () => ({
+              tools: ['mcp__cq-harness__read'],
+              mcp_servers: [{ name: 'cq-harness', status: 'connected' }],
+            }),
+          }),
+      }).run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      expect(leaked.stopReason).toBe('error');
+      expect(leaked.error?.startsWith(HARNESS_ERROR_PREFIX)).toBe(true);
+
+      // A leaked builtin (tools: [] no longer stripping) is a mismatch too.
+      const builtin = await new ClaudeAgentDriver({
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+        sdkLoader: async () =>
+          mockSdkModule({
+            directive: { kind: 'reply', text: 'ok' },
+            calls: [],
+            tamperInit: (surface) => ({ ...surface, tools: [...surface.tools, 'Bash'] }),
+          }),
+      }).run(invocation({ toolPolicy: { allow: [], mode: 'none' } }));
+      expect(builtin.stopReason).toBe('error');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('a governed abort still yields aborted — even when the SDK never sent an init frame', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'agtdrv-'));
+    try {
+      // Settles CLEANLY with a result but NO init frame, only after the
+      // governed signal fired: aborted outranks the unverified check.
+      const driver = new ClaudeAgentDriver({
+        sdkLoader: async () => ({
+          ...mockAdapters,
+          query: ({
+            options,
+          }: {
+            prompt: string;
+            options: Record<string, unknown>;
+          }): AsyncGenerator<unknown, void> =>
+            (async function* () {
+              const signal = (options['abortController'] as { signal?: AbortSignal } | undefined)
+                ?.signal;
+              if (signal !== undefined) {
+                await new Promise<void>((resolve) => {
+                  if (signal.aborted) resolve();
+                  else signal.addEventListener('abort', () => resolve(), { once: true });
+                });
+              }
+              yield {
+                type: 'result',
+                subtype: 'success',
+                is_error: false,
+                session_id: 'agent-cli-abort-noinit',
+                result: 'late',
+                usage: AGENT_USAGE,
+                permission_denials: [],
+              };
+            })(),
+        }),
+        endpointTable: conformanceEndpointTable(),
+        sessionsDir: join(scratchDir, SESSIONS_DIR),
+        harnessConfig: conformanceHarnessConfig(scratchDir),
+      });
+      const outcome = await runLadder(
+        () => driver.run(invocation()),
+        { wallClockMs: 20 },
+        { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
+      );
+      expect(outcome.outcome).toBe('completed');
+      if (outcome.outcome !== 'completed') return;
+      expect(outcome.value.stopReason).toBe('aborted');
+      expect(outcome.value.error).toBeUndefined();
+
+      // And the scripted block-until-abort path (honest init first) too.
+      const { driver: blocking } = driverWithCalls(scratchDir, {
+        directive: { kind: 'block-until-abort' },
+      });
+      const blocked = await runLadder(
+        () => blocking.run(invocation()),
+        { wallClockMs: 20 },
+        { op: 'claude-agent', jobKey: 'claude-agent', attempt: 1 },
+      );
+      expect(blocked.outcome).toBe('completed');
+      if (blocked.outcome !== 'completed') return;
+      expect(blocked.value.stopReason).toBe('aborted');
+    } finally {
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
+  test('foldMessage asserts only the FIRST init frame', () => {
+    const observation: Parameters<typeof foldMessage>[0] = {
+      agentSessionId: undefined,
+      servedModel: undefined,
+      transcript: [],
+      narration: [],
+      assistantUsage: undefined,
+      result: undefined,
+      error: undefined,
+      deniedToolUseIds: new Set<string>(),
+      denials: [],
+      expectedSurface: { harness: true, tools: ['read'], internalTools: [] },
+      initSeen: false,
+      harnessFailure: undefined,
+    };
+    foldMessage(observation, {
+      type: 'system',
+      subtype: 'init',
+      tools: ['mcp__cq-harness__read'],
+      mcp_servers: [{ name: 'cq-harness', status: 'connected', source: 'sdk' }],
+    });
+    expect(observation.initSeen).toBe(true);
+    expect(observation.harnessFailure).toBeUndefined(); // extra fields beyond {name,status} are ignored
+    foldMessage(observation, { type: 'system', subtype: 'init', tools: ['Bash'], mcp_servers: [] });
+    expect(observation.harnessFailure).toBeUndefined(); // a later init is not re-asserted
+  });
+});
+
+describe('claude-agent harness calls are cancellable (W1.4 review cycle 1)', () => {
+  test.skipIf(process.platform === 'win32')(
+    'runHarnessTool forwards the signal: an abort kills a running `run` command group',
+    async () => {
+      const dir = await realpath(await mkdtemp(join(tmpdir(), 'cq-ca-cancel-')));
+      try {
+        const workspace = join(dir, 'ws');
+        await mkdir(workspace);
+        const manifest = await buildManifest({
+          workspace,
+          sandbox: 'none',
+          toolPolicy: { allow: ['run'], mode: 'allowlist' },
+          harness: {
+            ...defaultHarnessConfig,
+            tools: {
+              ...defaultHarnessConfig.tools,
+              run: { enabled: true, commandPatterns: ['sleep'], timeoutMs: 60_000 },
+            },
+          },
+        });
+        if (manifest === undefined) throw new Error('expected a manifest');
+        const surface = createHarnessSurface(manifest);
+        const store = new SessionStore(join(dir, 'sessions'));
+        const record = await store.create(workspace);
+        const denials: Array<{ tool: string; reason: string }> = [];
+        const cancel = new AbortController();
+        const started = Date.now();
+        const pending = runHarnessTool(
+          surface,
+          'run',
+          { command: 'sleep 30' },
+          store,
+          record,
+          denials,
+          cancel.signal,
+        );
+        setTimeout(() => cancel.abort(), 300);
+        const result = await pending;
+        expect(Date.now() - started).toBeLessThan(15_000);
+        expect(result.isError).toBeUndefined();
+        expect(result.content?.[0]?.text).toContain('killed by signal');
+        expect(denials).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    30_000,
+  );
 });
