@@ -44,7 +44,7 @@ import {
   ALPHA_FIX,
   BETA_BREAK,
   BETA_BREAK_MESSAGE,
-  BETA_PACKAGE_JSON,
+  BETA_SOURCE,
   generateScratchRepo,
   SCRATCH_PACKAGE_FILES,
   SCRATCH_PACKAGES,
@@ -380,9 +380,9 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       expect(alphaReport?.committed).toBe(true);
       expect(alphaReport?.prBranch).toBe('cq/e2e-happy/fix/alpha');
 
-      // Alpha's fix landed in the worktree AND in a commit; beta's suite is
-      // untouched and its branch carries no commit.
-      expect(readInWorktree(scene.repo, 'alpha', 'packages/alpha/test/suite.test.js')).toContain(
+      // Alpha's production fix landed in the worktree AND in a commit; beta's
+      // module is untouched and its branch carries no commit.
+      expect(readInWorktree(scene.repo, 'alpha', 'packages/alpha/src/calculation.js')).toContain(
         ALPHA_FIX.newText,
       );
       const alphaCommits = await gitOut(
@@ -675,7 +675,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/REGRESSION/);
       expect(beta.error).toMatch(/novel failure/);
-      // The novel failure is exactly the broken suite's own consistent text.
+      // The novel failure is exactly the broken module's own consistent text.
       expect(beta.error).toContain(BETA_BREAK_MESSAGE);
       // The failures-only output names the failing unit on the failure side.
       expect(outcome.output).toContain('FAIL beta/fix:');
@@ -712,15 +712,15 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
 
 describe('sweep e2e: tamper guard on new files', () => {
   test(
-    'a fixer that ADDS a file with an it.skip hack: the staged scan flags it, the unit fails uncommitted',
+    'a fixer that ADDS a file with a suppression hack: the staged scan flags it, the unit fails uncommitted',
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-tamper');
       const HACKED = {
-        file: 'packages/beta/test/added.test.js',
-        text: "it.skip('gaming the run', () => {});\n",
+        file: 'packages/beta/src/added.js',
+        text: '// eslint-disable-next-line no-undef\nglobalThis.hacked = true;\n',
       };
-      // Alpha fixes normally; beta "fixes" by ADDING a skip-marked file.
+      // Alpha fixes normally; beta "fixes" by ADDING a suppressed file.
       const outcome: SweepRunOutcome = await runSweepPlan(
         optsFor(scene, prompts({ edit: ALPHA_FIX }, { write: HACKED })),
       );
@@ -732,8 +732,9 @@ describe('sweep e2e: tamper guard on new files', () => {
       const beta = unitRow(outcome.run, 'beta');
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/tamper findings/);
-      expect(beta.error).toMatch(/new-skip-only/);
-      expect(beta.error).toMatch(/added\.test\.js/);
+      expect(beta.error).toMatch(/suppression/);
+      expect(beta.error).toMatch(/eslint-disable/);
+      expect(beta.error).toMatch(/added\.js/);
 
       // The fix was withheld AFTER staging: the hack file sits staged but
       // uncommitted — the branch carries no commit, the tree is dirty.
@@ -752,7 +753,7 @@ describe('sweep e2e: tamper guard on new files', () => {
         ['-C', resolve(scene.repo, 'worktrees', 'fix', 'beta'), 'diff', '--cached', '--name-only'],
         scene.repo,
       );
-      expect(staged).toContain('packages/beta/test/added.test.js');
+      expect(staged).toContain('packages/beta/src/added.js');
       // No PR exists: the fleet never assembled.
       expect(scene.gh.created).toHaveLength(0);
     },
@@ -840,7 +841,7 @@ describe('sweep e2e: test-fix stage-path allowlist', () => {
         optsFor(
           { ...scene, config: { ...scene.config, fixers: ['test-fix'] } },
           prompts(
-            { edit: ALPHA_FIX }, // the legitimate test fix
+            { edit: ALPHA_FIX }, // a production edit under a propose-only worker
             { write: { file: 'packages/beta/index.js', text: "export const beta = 'prod';\n" } }, // production code
           ),
           {
@@ -889,20 +890,21 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-scoped');
-      // Seed ONE scoped package with alpha's failing-suite shape.
+      // Seed ONE scoped package with alpha's failing production-module shape.
       const pkgDir = join(scene.repo, 'packages', '@scope', 'gamma');
-      mkdirSync(join(pkgDir, 'test'), { recursive: true });
+      mkdirSync(join(pkgDir, 'src'), { recursive: true });
       writeFileSync(
         join(pkgDir, 'package.json'),
         `${JSON.stringify({ name: '@scope/gamma', version: '1.0.0', private: true }, null, 2)}\n`,
       );
       writeFileSync(
-        join(pkgDir, 'test', 'suite.test.js'),
+        join(pkgDir, 'src', 'calculation.js'),
         [
           "'use strict';",
           'const sum = (a, b) => a + b;',
-          'if (sum(1, 1) !== 3) {',
-          "  throw new Error('expected 3, got ' + sum(1, 1));",
+          'const expected = 3;',
+          'if (sum(1, 1) !== expected) {',
+          "  throw new Error('expected ' + expected + ', got ' + sum(1, 1));",
           '}',
           '',
         ].join('\n'),
@@ -911,14 +913,14 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
       await gitOut(['-C', scene.repo, 'commit', '-q', '-m', 'seed: @scope/gamma'], scene.repo);
 
       const GAMMA_FIX = {
-        file: 'packages/@scope/gamma/test/suite.test.js',
-        oldText: 'if (sum(1, 1) !== 3) {',
-        newText: 'if (sum(1, 1) !== 2) {',
+        file: 'packages/@scope/gamma/src/calculation.js',
+        oldText: 'const expected = 3;',
+        newText: 'const expected = 2;',
       };
       const config: SweepPlanConfig = {
         ...scene.config,
         packages: [{ name: '@scope/gamma', path: 'packages/@scope/gamma' }],
-        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/test/suite.test.js'] },
+        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/src/calculation.js'] },
       };
       const outcome = await runSweepPlan(
         optsFor({ ...scene, config }, (unit) =>
@@ -956,7 +958,7 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
   );
 
   test(
-    'a working-tree RENAME production → test shape: the allowlist flags the SOURCE path',
+    'a working-tree RENAME across an allowlist: the SOURCE path is flagged too',
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-rename');
@@ -966,23 +968,23 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
           prompts(
             { edit: ALPHA_FIX },
             {
-              // Same content at a test-shaped path + the original removed:
+              // Same content at the allowed destination + the original removed:
               // git stages this as a rename whose SOURCE is production code.
-              write: { file: 'packages/beta/test/manifest.test.js', text: BETA_PACKAGE_JSON },
-              delete: 'packages/beta/package.json',
+              write: { file: 'packages/beta/generated/calculation.js', text: BETA_SOURCE },
+              delete: 'packages/beta/src/calculation.js',
             },
           ),
-          { stagePathAllowlist: { patterns: [...DEFAULT_TEST_FILE_PATTERNS] } },
+          { stagePathAllowlist: { patterns: ['^packages/beta/generated/'] } },
         ),
       );
 
       // The unit failed naming the rename's SOURCE — the destination alone
-      // (test/manifest.test.js) matches the test-file patterns and would
-      // have slipped a --name-only allowlist.
+      // (generated/calculation.js) matches the allowlist and would have
+      // slipped a --name-only check.
       const beta = unitRow(outcome.run, 'beta', 'test-fix');
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/outside the allowlist/);
-      expect(beta.error).toContain('packages/beta/package.json');
+      expect(beta.error).toContain('packages/beta/src/calculation.js');
       expect(scene.gh.created).toHaveLength(0);
     },
   );
@@ -998,7 +1000,7 @@ describe('sweep e2e: assemble guard, stranded commits, concurrency', () => {
     { timeout: 120_000 },
     async () => {
       const scene = await scenario('cq/e2e-clean');
-      // Beta-only fleet: the suite passes, the fixer no-ops, nothing commits
+      // Beta-only fleet: the production module passes, the fixer no-ops, nothing commits
       // -> no markers -> the marker-filtered package list is EMPTY -> no
       // assemble dispatch (no empty tracker PR).
       const config: SweepPlanConfig = {
@@ -1150,12 +1152,12 @@ test(
   { timeout: 120_000 },
   async () => {
     const scene = await scenario('cq/e2e-uniscope');
-    // Alpha's worker crosses the package boundary: edits BETA's suite
-    // inside ALPHA's worktree. The enriched job carries the per-unit
+    // Alpha's worker crosses the package boundary: edits BETA's production
+    // module inside ALPHA's worktree. The enriched job carries the per-unit
     // default (^packages/alpha/ + the declared file), so the staged
     // cross-package content fails the unit naming the path.
     const CROSS = {
-      file: 'packages/beta/test/suite.test.js',
+      file: 'packages/beta/src/calculation.js',
       oldText: 'const expected = 4;',
       newText: 'const expected = 4; // touched by the alpha worker',
     };
@@ -1167,7 +1169,7 @@ test(
     const alpha = unitRow(outcome.run, 'alpha');
     expect(alpha.status).toBe('failed');
     expect(alpha.error).toMatch(/outside the allowlist/);
-    expect(alpha.error).toContain('packages/beta/test/suite.test.js');
+    expect(alpha.error).toContain('packages/beta/src/calculation.js');
     // The fleet gate: the failed unit withholds the assemble dispatch.
     expect(outcome.assembleRun).toBeUndefined();
     expect(scene.gh.created).toHaveLength(0);
@@ -1230,8 +1232,8 @@ describe('sweep e2e: rescue lane and prep mode', () => {
             { edit: ALPHA_FIX },
             {
               write: {
-                file: 'packages/beta/test/added.test.js',
-                text: "it.skip('gaming the run', () => {});\n",
+                file: 'packages/beta/src/added.js',
+                text: '// eslint-disable-next-line no-undef\nglobalThis.hacked = true;\n',
               },
             },
           ),
