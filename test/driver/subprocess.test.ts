@@ -1449,7 +1449,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         );
         const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
         const runCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(runWorker)}`;
-        const lateRunCommand = 'exec sleep 60';
+        // Ignoring TERM is inherited across exec by sleep. Redirect all its
+        // pipes so each short-lived leader really closes before the final sweep.
+        const lateRunCommand = "trap '' TERM; sleep 60 </dev/null >/dev/null 2>&1 & echo $!";
         await writeFile(
           preload,
           `
@@ -1472,9 +1474,13 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           child.onStdoutLine(line => {
             if (line === 'term' && !lateStarted) {
               lateStarted = true;
-              const late = spawnManaged({command: process.execPath, args: ['-e', 'setInterval(() => {}, 1000)'], cwd: ${JSON.stringify(scratchDir)}});
+              const late = spawnManaged({command: '/bin/sh', args: ['-c', ${JSON.stringify(lateRunCommand)}], cwd: ${JSON.stringify(scratchDir)}});
+              late.onStdoutLine(line => console.log(JSON.stringify({lateDescendant: Number(line)})));
+              void late.close.then(close => console.log(JSON.stringify({lateClosed: close.code})));
               console.log(JSON.stringify({late: late.pid}));
-              void runShellCommand(${JSON.stringify(lateRunCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
+              void runShellCommand(${JSON.stringify(lateRunCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000}).then(outcome => {
+                if (outcome.kind === 'exit') console.log(JSON.stringify({lateRunClosed: outcome.code, lateRunDescendant: Number(outcome.stdout)}));
+              });
             } else process.stdout.write(line + '\\n');
           });
         `,
@@ -1532,9 +1538,38 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           expect(lateRun).toBeDefined();
           const lateRunPid = (JSON.parse(lateRun!) as { lateRun: number }).lateRun;
           expect(lateRunPid).toBeGreaterThan(0);
-          await vi.waitFor(() => expect([lateDriverPid, lateRunPid].some(alive)).toBe(false), {
-            timeout: 3_000,
-          });
+          expect(out).toContain('{"lateClosed":0}');
+          const lateDescendant = out
+            .split('\n')
+            .find((line) => line.startsWith('{"lateDescendant":'));
+          expect(lateDescendant).toBeDefined();
+          const lateDescendantPid = (JSON.parse(lateDescendant!) as { lateDescendant: number })
+            .lateDescendant;
+          const lateRunClosed = out
+            .split('\n')
+            .find((line) => line.startsWith('{"lateRunClosed":'));
+          expect(lateRunClosed).toBeDefined();
+          const lateRunResult = JSON.parse(lateRunClosed!) as {
+            lateRunClosed: number;
+            lateRunDescendant: number;
+          };
+          expect(lateRunResult.lateRunClosed).toBe(0);
+          expect(lateDescendantPid).toBeGreaterThan(0);
+          expect(lateRunResult.lateRunDescendant).toBeGreaterThan(0);
+          await vi.waitFor(
+            () =>
+              expect(
+                [
+                  lateDriverPid,
+                  lateRunPid,
+                  lateDescendantPid,
+                  lateRunResult.lateRunDescendant,
+                ].some(alive),
+              ).toBe(false),
+            {
+              timeout: 3_000,
+            },
+          );
         } finally {
           // Recover late ownership even when a mutation failed an earlier assertion.
           const late = out.split('\n').find((line) => line.startsWith('{"late":'));

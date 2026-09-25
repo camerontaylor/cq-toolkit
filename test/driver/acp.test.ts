@@ -383,6 +383,41 @@ describe('acp driver specifics (fake ACP server)', () => {
     });
   });
 
+  test.each(['CONTROL unchanged grants', 'TREATMENT mutated grants'])(
+    'envNames constructor snapshot: %s retains grants while reading current values',
+    async (leg) => {
+      await withScratch(async (scratchDir) => {
+        const allowed = 'CQ_ACP_SNAPSHOT_ALLOWED';
+        const secret = 'CQ_ACP_SNAPSHOT_SECRET';
+        const saved = new Map(
+          [allowed, secret, 'CQ_RUN_ENV_PASSTHROUGH'].map((name) => [name, process.env[name]]),
+        );
+        try {
+          delete process.env.CQ_RUN_ENV_PASSTHROUGH;
+          process.env[allowed] = 'before-construction';
+          process.env[secret] = 'withheld-test-canary';
+          const grants = [allowed];
+          const calls: SpawnCall[] = [];
+          const driver = new AcpDriver({
+            ...driverOptions(scratchDir, {}, calls),
+            envNames: grants,
+          });
+          if (leg.startsWith('TREATMENT')) grants.splice(0, 1, secret);
+          process.env[allowed] = 'rotated-after-construction';
+          expect((await driver.run(invocation())).stopReason).toBe('complete');
+          expect(calls).toHaveLength(1);
+          expect(calls[0]?.env[allowed]).toBe('rotated-after-construction');
+          expect(calls[0]?.env[secret]).toBeUndefined();
+        } finally {
+          for (const [name, value] of saved) {
+            if (value === undefined) delete process.env[name];
+            else process.env[name] = value;
+          }
+        }
+      });
+    },
+  );
+
   test('answer table: allow selects allow_once (the vendor-string optionId echoed)', async () => {
     await withScratch(async (scratchDir, store) => {
       const calls: SpawnCall[] = [];

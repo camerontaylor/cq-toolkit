@@ -746,7 +746,7 @@ export class AcpDriver implements Driver {
     this.command = options.command;
     this.endpoint = options.endpoint ?? DEFAULT_ACP_ENDPOINT;
     this.endpointTable = options.endpointTable ?? defaultAcpEndpointTable();
-    this.envNames = options.envNames ?? [];
+    this.envNames = Object.freeze([...(options.envNames ?? [])]);
     this.modelEnv = options.modelEnv;
     this.outputSchema = options.outputSchema;
     this.workspaceRoot = options.workspaceRoot;

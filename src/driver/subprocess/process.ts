@@ -37,7 +37,10 @@
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
-import { registerProcessSignalCleanup } from '../../kernel/process-signals.js';
+import {
+  processSignalCleanupStarted,
+  registerProcessSignalCleanup,
+} from '../../kernel/process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
@@ -461,7 +464,9 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
   });
   child.on('close', (code, signal) => {
     exited = true;
-    activeChildren.delete(child);
+    // A late leader can exit during signal grace while its background children
+    // survive. Keep its process-group identity for the executable's final sweep.
+    if (!processSignalCleanupStarted()) activeChildren.delete(child);
     stdout.flush();
     stderr.flush();
     settleClose({
