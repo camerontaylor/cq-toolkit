@@ -70,6 +70,7 @@ import { deepFreeze, defaultHarnessConfig, HarnessConfigSchema } from '../../har
 import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
+import { withServedModelAssertion } from '../../driver/served-model.js';
 import type {
   Budget,
   Driver,
@@ -551,13 +552,14 @@ export function worktreeFixDriver(
   opts: WorktreeFixDriverOptions,
 ): Driver & { sessionsDir: string } {
   const sessionsDir = opts.sessionsDir ?? mkdtempSync(join(tmpdir(), 'cq-fix-worktree-'));
-  const inner = opts.makeInner
+  const rawInner = opts.makeInner
     ? opts.makeInner(sessionsDir)
     : new SubprocessDriver({
         harnessConfig: opts.harnessConfig,
         sessionsDir,
         outputSchema: FixReviewItemOutputSchema,
       });
+  const inner = withServedModelAssertion(rawInner, 'default');
   const driver: Driver = {
     run: async (invocation) => {
       const store = new SessionStore(sessionsDir);

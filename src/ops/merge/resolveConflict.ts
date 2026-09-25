@@ -98,6 +98,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
 import { AiSdkDriver } from '../../driver/ai-sdk/index.js';
+import { withServedModelAssertion } from '../../driver/served-model.js';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
@@ -427,7 +428,9 @@ const defaultDriver = (
     ...(sessionsDir !== undefined ? { sessionsDir } : {}),
     ...(harnessConfig !== undefined ? { harnessConfig } : {}),
   };
-  return modelSpec.provider === 'ai-sdk' ? new AiSdkDriver(common) : new SubprocessDriver(common);
+  return modelSpec.provider === 'ai-sdk'
+    ? withServedModelAssertion(new AiSdkDriver(common), 'default')
+    : withServedModelAssertion(new SubprocessDriver(common), 'default');
 };
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));

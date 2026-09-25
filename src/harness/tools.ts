@@ -271,15 +271,17 @@ type CommandVerdict =
 function unsafeGitDiff(command: string, workspace: string): boolean {
   const tokens = command.trim().split(/\s+/);
   if (tokens[0] !== 'git' || tokens[1] !== 'diff') return false;
-  // The command runs through a shell, so quoted arguments could hide a
-  // dangerous token or path from this deliberately conservative matcher.
-  if (/["'`]/.test(command)) return true;
+  // The command runs through a shell, so quoted/expanded arguments could
+  // hide a dangerous token from this deliberately conservative matcher.
+  if (/["'`]/.test(command) || SHELL_METACHARACTERS.test(command)) return true;
+  // Pin worker-invoked diffs to the safe option vocabulary. In particular,
+  // rejecting every unknown option makes shell expansion such as
+  // `--${FLAG}` unable to synthesize --output or --no-index.
   if (
-    tokens.some(
-      (token) => token === '--no-index' || token === '--output' || token.startsWith('--output='),
-    )
-  )
+    tokens.slice(2).some((token) => token.startsWith('-') && token !== '--' && token !== '--cached')
+  ) {
     return true;
+  }
   const root = resolve(workspace);
   for (const token of tokens.slice(2)) {
     if (token === '--') continue;
