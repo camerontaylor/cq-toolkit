@@ -18,12 +18,16 @@ describe('shipped self-host sandbox job boundary', () => {
         yaml.indexOf('  self-review-privileged:'),
       );
       const privileged = yaml.slice(yaml.indexOf('  self-review-privileged:'));
+      expect(worker).toContain('timeout-minutes: 5');
+      expect(worker).toContain('trusted-commit: ${{ steps.trusted-commit.outputs.commit }}');
       expect(worker).toContain('permissions:\n      contents: read');
       expect(worker).not.toContain('secrets.');
       expect(privileged).toContain('permissions:\n      contents: write');
       expect(privileged).toContain(`GH_TOKEN: \${{ secrets.${token} }}`);
       expect(privileged).toContain(`ZAI_API_KEY: \${{ secrets.${driverKey} }}`);
       expect(privileged).toContain('needs: self-review-worker');
+      expect(privileged).toContain('timeout-minutes: 15');
+      expect(privileged).toContain('ref: ${{ needs.self-review-worker.outputs.trusted-commit }}');
     },
   );
 });

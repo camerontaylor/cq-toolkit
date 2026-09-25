@@ -12,7 +12,7 @@ describe('CQ sandbox policy', () => {
     expect(config.mode).toBe('required');
     expect(config.runTool).toBe('withheld');
     expect(config.configHint).toMatch(/CQ_SANDBOX=off/);
-    expect(() => assertRunToolAvailable(config)).toThrow(/certified RS-13 backend/);
+    expect(() => assertRunToolAvailable(config)).toThrow(/certified backend launcher/);
   });
 
   it('resolves explicit per-call opt-ins over project env', () => {
@@ -71,7 +71,14 @@ describe('CQ sandbox policy', () => {
         platform: 'linux',
         certifiedBackends: ['landlock'],
       }),
-    ).toMatchObject({ runTool: 'on', selectedBackend: 'landlock' });
+    ).toMatchObject({ runTool: 'withheld', selectedBackend: 'landlock' });
+    expect(
+      resolveSandboxConfig({
+        env: { CQ_SANDBOX: 'required', CQ_SANDBOX_BACKEND: 'landlock' },
+        platform: 'linux',
+        certifiedBackends: ['landlock'],
+      }).configHint,
+    ).toMatch(/fail-closed until a certified backend launcher/);
     expect(() =>
       resolveSandboxConfig({
         env: { CQ_SANDBOX_BACKEND: 'landlock' },

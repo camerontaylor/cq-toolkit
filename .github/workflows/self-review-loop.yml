@@ -81,14 +81,21 @@ jobs:
   # authenticated loop and all GitHub effects.
   self-review-worker:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     permissions:
       contents: read
+    outputs:
+      trusted-commit: ${{ steps.trusted-commit.outputs.commit }}
     steps:
       - name: Check out main (trusted code only)
+        id: trusted-checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
           ref: main
           persist-credentials: false
+      - name: Record trusted commit
+        id: trusted-commit
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Set up Node 24
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
@@ -112,6 +119,7 @@ jobs:
   self-review-privileged:
     needs: self-review-worker
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
     # The stage-2 switch gives automation ONE ≤20-minute run per slot; the
@@ -126,7 +134,7 @@ jobs:
           # collaborator's branch as ref, and that branch's code must never
           # execute here. Branches are validated LOCALLY pre-merge; the
           # automation runs only merged main.
-          ref: main
+          ref: ${{ needs.self-review-worker.outputs.trusted-commit }}
           # npm runs repo code below, so the checkout token must not
           # survive checkout; gh rides GH_TOKEN, not the checkout
           # credential.

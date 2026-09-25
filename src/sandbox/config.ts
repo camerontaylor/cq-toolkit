@@ -140,16 +140,20 @@ export function resolveSandboxConfig(options: ResolveSandboxOptions = {}): Sandb
   const selected =
     backend === 'auto' ? autoOrder.find((candidate) => certified.has(candidate)) : backend;
   const noBackend = mode === 'required' && selected === undefined;
-  const configHint = noBackend
-    ? 'CQ_SANDBOX=required needs a certified RS-13 backend; set CQ_SANDBOX=off to use the host command allowlist with env scrub'
-    : undefined;
+  const requiredLauncherUnavailable = mode === 'required';
+  const configHint =
+    noBackend || requiredLauncherUnavailable
+      ? 'CQ_SANDBOX=required is fail-closed until a certified backend launcher is configured; set CQ_SANDBOX=off to use the host command allowlist with env scrub'
+      : undefined;
 
   return {
     mode,
     backend,
     network,
-    runTool:
-      requestedRunTool === 'off' ? 'off' : mode === 'required' && noBackend ? 'withheld' : 'on',
+    // Required mode remains withheld even when backend certification is known:
+    // the current harness has no certified launcher.  Exposing `run` here
+    // would silently turn the model-selected shell into a host shell.
+    runTool: requestedRunTool === 'off' ? 'off' : requiredLauncherUnavailable ? 'withheld' : 'on',
     envPassthrough,
     ...(selected !== undefined ? { selectedBackend: selected } : {}),
     ...(configHint !== undefined ? { configHint } : {}),
