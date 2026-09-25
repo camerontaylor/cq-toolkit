@@ -76,9 +76,9 @@ permissions:
   contents: read
 
 jobs:
-  # Worker/build lane: no repository write token is available to this job.
-  # It only prepares the trusted source; the privileged job below owns all
-  # GitHub effects and dispatches the model workers.
+  # Unprivileged preparation lane: no repository write token is available to
+  # this job. It builds trusted source; the privileged job below owns the
+  # authenticated loop and all GitHub effects.
   self-review-worker:
     runs-on: ubuntu-latest
     permissions:
@@ -98,9 +98,17 @@ jobs:
         run: npm ci
       - name: Build from source
         run: npm run build
+      - name: Upload trusted build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (immutable commit pin; repo policy)
+        with:
+          name: self-review-dist-${{ github.run_id }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 1
 
   # Privileged lane: only this job receives the self-host token and provider
-  # key. Keeping it separate prevents a worker from inheriting write access.
+  # key. The token is scoped to the loop step; checkout credentials never
+  # persist into the worker.
   self-review-privileged:
     needs: self-review-worker
     runs-on: ubuntu-latest
@@ -130,8 +138,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Build from source
-        run: npm run build
+      - name: Download trusted build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (immutable commit pin; repo policy)
+        with:
+          name: self-review-dist-${{ github.run_id }}
+          path: dist
       # DURABLE vs EPHEMERAL under .selfhost/journal: the per-PR dispatch
       # logs (dispatch-<pr>.ndjson) are replyAndResolve's actionId dedupe
       # memory — the one content that MUST survive across scheduled

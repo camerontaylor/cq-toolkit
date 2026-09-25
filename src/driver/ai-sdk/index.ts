@@ -174,6 +174,8 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { deepFreeze, defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
+import { resolveSandboxConfig } from '../../sandbox/index.js';
+import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
@@ -229,6 +231,12 @@ export interface AiSdkDriverOptions {
   outputSchema?: ZodType;
   /** Harness config (tool surface + prompt budget). Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
+  /**
+   * Resolved CQ_SANDBOX/CQ_RUN_TOOL policy. When omitted, resolve the
+   * conservative environment policy at construction time. A withheld or
+   * disabled run tool is omitted from the model surface.
+   */
+  sandboxConfig?: SandboxConfig;
   /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
   sessionsDir?: string;
   /**
@@ -250,6 +258,7 @@ export class AiSdkDriver implements Driver {
   private readonly providers: Readonly<Record<string, ProviderFactory>>;
   private readonly outputSchema: ZodType | undefined;
   private readonly harnessConfig: HarnessConfig;
+  private readonly sandboxConfig: SandboxConfig;
   private readonly sessionsDir: string | undefined;
   private readonly pricing: (modelSpec: ModelSpec) => PerMillionRates | undefined;
 
@@ -262,6 +271,9 @@ export class AiSdkDriver implements Driver {
     // the driver (a shared mutable default would leak one caller's change
     // into every later run).
     this.harnessConfig = deepFreeze(structuredClone(options.harnessConfig ?? defaultHarnessConfig));
+    this.sandboxConfig = deepFreeze(
+      structuredClone(options.sandboxConfig ?? resolveSandboxConfig()),
+    );
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
   }
@@ -308,7 +320,12 @@ export class AiSdkDriver implements Driver {
 
     // --- Tool surface: harness config surface ∩ per-op ToolPolicy. --------
     const denials: ToolDenial[] = [];
-    const harnessTools = buildTools(this.harnessConfig, record.workspace, sandboxPolicy.level);
+    const harnessTools = buildTools(
+      this.harnessConfig,
+      record.workspace,
+      sandboxPolicy.level,
+      this.sandboxConfig.runTool === 'on',
+    );
     const selected = selectTools(harnessTools, toolPolicy);
     const toolSet: ToolSet = {};
     for (const harnessTool of selected) {

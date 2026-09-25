@@ -464,6 +464,7 @@ export function buildTools(
   config: HarnessConfig,
   workspace: string,
   sandbox: SandboxLevel = 'workspace-write',
+  runEnabled = true,
 ): ToolkitTool[] {
   const cfg: HarnessConfig = HarnessConfigSchema.parse(config);
   const workspaceAbs = resolve(workspace);
@@ -683,7 +684,7 @@ export function buildTools(
   }
 
   // --- run --------------------------------------------------------------------
-  if (cfg.tools.run.enabled) {
+  if (cfg.tools.run.enabled && runEnabled) {
     const runCfg = cfg.tools.run;
     const patterns = compileCommandPatterns(runCfg.commandPatterns); // loud on config corruption
     const formatOutcome = (
