@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { DriverFactory, withServedModelAssertion } from '../../src/driver/served-model.js';
+import { withServedModelAssertion } from '../../src/driver/served-model.js';
 import type { Driver, OpInvocation, WorkerResult } from '../../src/driver/types.js';
 
 const invocation = (model = 'model-a'): OpInvocation => ({
@@ -49,14 +49,16 @@ describe('served-model assertion', () => {
     'construction path for the %s lane is wrapped',
     async (lane) => {
       const model = lane === 'acp' ? 'vendor/model-a' : 'model-a';
-      const run = await DriverFactory(driverReturning(result(model)), lane).run(invocation());
+      const run = await withServedModelAssertion(driverReturning(result(model)), lane).run(
+        invocation(),
+      );
       expect(run.stopReason).toBe('complete');
     },
   );
 
-  test('DriverFactory applies the wrapper rather than only exporting it', async () => {
-    const factoryDriver = DriverFactory(driverReturning(result('model-b')));
-    const run = await factoryDriver.run(invocation());
+  test('the shared construction wrapper rejects a mismatched served model', async () => {
+    const wrapped = withServedModelAssertion(driverReturning(result('model-b')));
+    const run = await wrapped.run(invocation());
     expect(run.stopReason).toBe('error');
   });
 });

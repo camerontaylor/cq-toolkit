@@ -84,6 +84,7 @@ const MODEL_SPEC = { model: 'resolver-model', provider: 'zai' };
 /** A WorkerResult for a 'complete' run carrying `structuredOutput` (and,
  * when scripted, the driver-reported session handle). */
 const completed = (structuredOutput: unknown, sessionId?: string): WorkerResult => ({
+  model: MODEL_SPEC.model,
   ...(sessionId !== undefined ? { sessionId } : {}),
   structuredOutput,
   usage: ZERO_USAGE,
@@ -642,7 +643,7 @@ describe('resolveConflict op', () => {
 
     const result = await op(baseInput());
     expect(result.status).toBe('failed');
-    expect(failedError(result)).toContain('decision contract');
+    expect(failedError(result)).toContain('no denials recorded');
   });
 
   test('stopReason aborted → indeterminate (partial work may exist)', async () => {

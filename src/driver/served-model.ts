@@ -35,22 +35,27 @@ export function assertServedModel(
   const requireObserved = policy.requireObserved ?? lane !== 'acp';
   const normalize = policy.normalizeVendorPrefix ?? lane === 'acp';
   if (result.stopReason !== 'complete') return result;
+  const withoutStructuredOutput = <T extends WorkerResult>(value: T): T => {
+    if (value.structuredOutput === undefined) return value;
+    const { structuredOutput: _discarded, ...rest } = value;
+    return rest as T;
+  };
   if (result.model === undefined) {
     if (!requireObserved) return result;
-    return {
+    return withoutStructuredOutput({
       ...result,
       stopReason: 'error',
       error: boundedErrorText('served model assertion: no served model was observed'),
-    };
+    });
   }
   if (normalizeModel(result.model, normalize) !== invocation.modelSpec.model) {
-    return {
+    return withoutStructuredOutput({
       ...result,
       stopReason: 'error',
       error: boundedErrorText(
         `served model assertion: requested '${invocation.modelSpec.model}' but observed '${result.model}'`,
       ),
-    };
+    });
   }
   return result;
 }
@@ -67,14 +72,3 @@ export function withServedModelAssertion(
     },
   };
 }
-
-/** Factory seam used by op wiring: the returned driver always passes through the wrapper. */
-export function DriverFactory(
-  driver: Driver,
-  lane: ServedModelLane = 'default',
-  policy: ServedModelPolicy = {},
-): Driver {
-  return withServedModelAssertion(driver, lane, policy);
-}
-
-export const createDriverFactory = DriverFactory;

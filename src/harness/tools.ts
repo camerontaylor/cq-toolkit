@@ -94,7 +94,7 @@
 // wall-clock of their own: local fs ops need no timer, and wall-clock POLICY
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
-import { exec } from 'node:child_process';
+import { exec, execFile } from 'node:child_process';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
@@ -104,6 +104,7 @@ import { HarnessConfigSchema } from './config.js';
 import type { HarnessConfig } from './config.js';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
@@ -268,51 +269,44 @@ type CommandVerdict =
  * escape hatch the denial points at) can still allow outright, whatever the
  * pattern order; the metacharacter denial fires only when no pattern allowed.
  */
-function unsafeGitDiff(command: string, workspace: string): boolean {
-  const tokens = command.trim().split(/\s+/);
-  if (tokens[0] !== 'git' || tokens[1] !== 'diff') return false;
-  // The command runs through a shell, so quoted/expanded arguments could
-  // hide a dangerous token from this deliberately conservative matcher.
-  if (/["'`$(){}\[\]*?]/.test(command) || SHELL_METACHARACTERS.test(command)) return true;
-  // Pin worker-invoked diffs to the safe option vocabulary. In particular,
-  // rejecting every unknown option makes shell expansion such as
-  // `--${FLAG}` unable to synthesize --output or --no-index.
-  if (
-    tokens
-      .slice(2)
-      .some(
-        (token) =>
-          token.startsWith('-') &&
-          token !== '--' &&
-          token !== '--cached' &&
-          token !== '--stat' &&
-          token !== '--name-only',
-      )
-  ) {
-    return true;
-  }
-  const root = resolve(workspace);
-  for (const token of tokens.slice(2)) {
-    if (token === '--') continue;
-    if (token.startsWith('-')) continue;
-    if (
-      token.startsWith('/') ||
-      token === '..' ||
-      token.startsWith('../') ||
-      token.includes('/../')
-    )
-      return true;
-    if (resolve(root, token) !== root && !resolve(root, token).startsWith(root + sep)) return true;
-  }
-  return false;
-}
-
-function commandVerdict(
-  patterns: readonly CommandPattern[],
+function closedGitForm(
   command: string,
   workspace: string,
-): CommandVerdict {
-  if (unsafeGitDiff(command, workspace)) return { allowed: false, metacharacters: false };
+): { file: 'git'; args: string[] } | undefined | null {
+  const tokens = command.trim().split(/\s+/);
+  if (tokens[0] !== 'git' || (tokens[1] !== 'diff' && tokens[1] !== 'log')) return undefined;
+  const root = resolve(workspace);
+  const safePath = (path: string): boolean => {
+    if (path === '' || path.startsWith('/') || path.includes('\0')) return false;
+    const resolved = resolve(root, path);
+    return resolved === root || resolved.startsWith(root + sep);
+  };
+  if (tokens[1] === 'log') {
+    const forms = [
+      ['--oneline', '-n', '20'],
+      ['-n', '1'],
+      ['-n', '1', '--stat'],
+    ];
+    const args = tokens.slice(2);
+    return forms.some((form) => form.length === args.length && form.every((v, i) => v === args[i]))
+      ? { file: 'git', args: ['log', ...args] }
+      : null;
+  }
+  const rest = tokens.slice(2);
+  if (rest.length === 0) return { file: 'git', args: ['diff'] };
+  if (rest.length === 1 && rest[0] === '--') return { file: 'git', args: ['diff', '--'] };
+  if (rest.length === 1 && rest[0] === '--cached')
+    return { file: 'git', args: ['diff', '--cached'] };
+  if (rest.length === 2 && rest[0] === '--cached' && rest[1] === '--')
+    return { file: 'git', args: ['diff', '--cached', '--'] };
+  if (rest.length === 2 && rest[0] === '--' && safePath(rest[1]!))
+    return { file: 'git', args: ['diff', '--', rest[1]!] };
+  if (rest.length === 3 && rest[0] === '--cached' && rest[1] === '--' && safePath(rest[2]!))
+    return { file: 'git', args: ['diff', '--cached', '--', rest[2]!] };
+  return null;
+}
+
+function commandVerdict(patterns: readonly CommandPattern[], command: string): CommandVerdict {
   const cmdTokens = command.trim().split(/\s+/);
   let sawMetacharMatch = false;
   for (const pattern of patterns) {
@@ -603,7 +597,11 @@ export function buildTools(
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
-        const verdict = commandVerdict(patterns, command, workspaceAbs);
+        const closedGit = closedGitForm(command, workspaceAbs);
+        if (closedGit === null) {
+          return deny('run', `command not allowed by harness config allowlist: '${command}'`);
+        }
+        const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
           return deny(
             'run',
@@ -613,19 +611,28 @@ export function buildTools(
           );
         }
         try {
-          const { stdout, stderr } = await execAsync(command, {
-            cwd: workspaceAbs,
-            // maxBuffer is BYTES; the output cap is CHARS. Size the buffer
-            // comfortably above the cap so capOutput does the truncating
-            // (4 bytes/char covers UTF-8's worst case, +64KiB slack for the
-            // exit/stdout wrapper): at exec's 1 MiB default a noisy command
-            // rejects with a string-code error BEFORE the cap truncates —
-            // a 'run failed' denial instead of a truncated result (issue #18).
-            ...(runCfg.maxOutputChars !== undefined
-              ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
-              : {}),
-            ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
-          });
+          const { stdout, stderr } =
+            closedGit === undefined
+              ? await execAsync(command, {
+                  cwd: workspaceAbs,
+                  // maxBuffer is BYTES; the output cap is CHARS. Size the buffer
+                  // comfortably above the cap so capOutput does the truncating
+                  // (4 bytes/char covers UTF-8's worst case, +64KiB slack for the
+                  // exit/stdout wrapper): at exec's 1 MiB default a noisy command
+                  // rejects with a string-code error BEFORE the cap truncates —
+                  // a 'run failed' denial instead of a truncated result (issue #18).
+                  ...(runCfg.maxOutputChars !== undefined
+                    ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
+                    : {}),
+                  ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
+                })
+              : await execFileAsync(closedGit.file, closedGit.args, {
+                  cwd: workspaceAbs,
+                  ...(runCfg.maxOutputChars !== undefined
+                    ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
+                    : {}),
+                  ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
+                });
           const capped = capOutput(formatOutcome(0, false, stdout, stderr), runCfg.maxOutputChars);
           return { ok: true, exitCode: 0, killed: false, ...capped };
         } catch (err) {
