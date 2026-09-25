@@ -61,14 +61,20 @@
 // pinned too: the recheck refuses a changed, unverified, or protected base.
 // Unresolved external review threads (classify row 5's count) refuse.
 //
+// I11 LAG. GraphQL reviews/reviewThreads lag REST: before judging, the
+// recheck cross-checks the REST reviews and review-comments collections
+// (fetchReviewState's traps, `reviews.lag`/`reviewThreads.lag`) and refuses
+// a snapshot missing a submitted REST review or REST thread root.
+//
 // FAIL-CLOSED: every ambiguity (truncated connection, malformed oid, GraphQL
 // error, transport failure, CAS loss) refuses. recheckBeforeMerge and
 // observeOpenPrs NEVER throw — a throw inside becomes a one-line, capped,
 // log-safe refusal reason (counts and actor keys; never review bodies).
-import { GhError, ghJson, ghNameOk } from '../ops/review/gh.js';
+import { GhError, ghJson, ghNameOk, slurpedComments } from '../ops/review/gh.js';
 import type { GhFn, GhResult } from '../ops/review/gh.js';
 import type { MergeEffects } from '../ops/merge/effects.js';
-import { countUnresolvedThreads } from '../ops/review/threads.js';
+import { attachRestReplies, countUnresolvedThreads } from '../ops/review/threads.js';
+import type { RestComment, ReviewThread } from '../ops/review/threads.js';
 import { observeWithChange, pruneToOpen, settleStatus } from './settle-state.js';
 import type { SettleTuple } from './settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
@@ -82,7 +88,9 @@ import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch
  * threadsAfter and timelineAfter, sent as `-f` strings ONLY when a real
  * cursor exists. `timelineItems.totalCount` is deliberately NOT selected —
  * on a filtered connection it reports the UNFILTERED count; the epoch is
- * counted from the nodes. A thread's ROOT author is its first comment's.
+ * counted from the nodes. A thread's ROOT author is its first comment's, and
+ * its ROOT `databaseId` (REST comment id) plus each review's node `id` are
+ * the join keys of the I11 REST lag cross-check (see checkReviewDataLag).
  */
 export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $reviewsAfter: String, $threadsAfter: String, $timelineAfter: String) {
   repository(owner: $owner, name: $name) {
@@ -95,11 +103,11 @@ export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: I
       baseRefName
       reviewThreads(first: 100, after: $threadsAfter) {
         pageInfo { hasNextPage endCursor }
-        nodes { isResolved comments(first: 1) { nodes { author { login } } } }
+        nodes { isResolved comments(first: 1) { nodes { databaseId author { login } } } }
       }
       reviews(first: 100, after: $reviewsAfter) {
         pageInfo { hasNextPage endCursor }
-        nodes { author { login __typename } authorAssociation state submittedAt commit { oid } }
+        nodes { id author { login __typename } authorAssociation state submittedAt commit { oid } }
       }
       timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $timelineAfter) {
         pageInfo { hasNextPage endCursor }
@@ -118,6 +126,8 @@ export const SNAPSHOT_PAGE_CAP = 10;
 
 /** One review, reduced to the facts the judgment reads (never the body). */
 export interface BoundReview {
+  /** The GraphQL review node id (REST `node_id`), or null when absent. */
+  nodeId: string | null;
   /** Normalized actor identity — see {@link actorKey}. */
   actorKey: string;
   /** The author login verbatim, or null (deleted account). */
@@ -140,6 +150,8 @@ export interface SnapshotThread {
   isResolved: boolean;
   /** The ROOT comment's author login, or null (deleted/absent — external). */
   rootAuthorLogin: string | null;
+  /** The ROOT comment's REST id (GraphQL `databaseId`), or null when absent. */
+  rootDatabaseId: number | null;
 }
 
 /** The PR as seen by one recheck read. */
@@ -425,6 +437,7 @@ const toBoundReview = (node: unknown): BoundReview => {
   const typename = asString(author['__typename']);
   const state = asString(record['state']);
   return {
+    nodeId: asString(record['id']) || null,
     actorKey: actorKey(login, typename),
     authorLogin: login,
     authorType: typename === 'Bot' || typename === 'User' ? typename : 'Other',
@@ -443,6 +456,9 @@ const toSnapshotThread = (node: unknown): SnapshotThread => {
   return {
     isResolved: record['isResolved'] === true,
     rootAuthorLogin: asString(asRecord(root['author'])['login']) || null,
+    rootDatabaseId: Number.isSafeInteger(root['databaseId'])
+      ? (root['databaseId'] as number)
+      : null,
   };
 };
 
@@ -600,6 +616,141 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
     truncated,
   };
 }
+
+// -- the I11 REST lag cross-check --------------------------------------------
+
+/**
+ * REST pages RETAINED per collection by the lag cross-check
+ * (fetchReviewState's restPages default; 100 entries a page). A collection
+ * with more pages is not cross-checkable and refuses (fail closed).
+ */
+export const REST_LAG_PAGE_CAP = 20;
+
+/** A snapshot thread in the shared vocabulary (only the rule-read fields are real). */
+const asReviewThread = (thread: SnapshotThread): ReviewThread => ({
+  id: '',
+  rootDatabaseId: thread.rootDatabaseId,
+  path: null,
+  line: null,
+  isResolved: thread.isResolved,
+  isOutdated: false,
+  authorLogin: thread.rootAuthorLogin,
+  createdAt: null,
+  body: '',
+  replies: [],
+});
+
+/**
+ * Read one REST collection of PR `pr` exactly as fetchReviewState does
+ * (`gh api <path>?per_page=100 --paginate --slurp`, normalized by gh.ts's
+ * shared slurpedComments guard) and return its flattened entries, or a
+ * log-safe refusal fragment: a failed read (transport, non-JSON, a
+ * non-array or mixed payload) or more than REST_LAG_PAGE_CAP pages.
+ */
+const readRestCollection = async (
+  deps: ForgeDeps,
+  pr: number,
+  collection: 'reviews' | 'comments',
+): Promise<{ entries: unknown[] } | { reason: string }> => {
+  const label = collection === 'reviews' ? 'restReviews' : 'restComments';
+  const path = `repos/${deps.owner}/${deps.repo}/pulls/${String(pr)}/${collection}?per_page=100`;
+  let pages: unknown[][];
+  try {
+    pages = slurpedComments(
+      await ghJson<unknown>(deps.gh, ['api', path, '--paginate', '--slurp']),
+      path,
+    );
+  } catch (error) {
+    return { reason: `${label} read failed: ${describeError(error)}` };
+  }
+  if (pages.length > REST_LAG_PAGE_CAP) {
+    return {
+      reason: `${label}.pageCap (${String(pages.length)} pages > ${String(REST_LAG_PAGE_CAP)})`,
+    };
+  }
+  return { entries: pages.flat() };
+};
+
+/** One REST review-comment entry → RestComment, or null when its ids are malformed. */
+const toRestComment = (entry: unknown): RestComment | null => {
+  const record = asRecord(entry);
+  const id = record['id'];
+  const parent = record['in_reply_to_id'];
+  if (!Number.isSafeInteger(id)) return null;
+  if (parent !== undefined && parent !== null && !Number.isSafeInteger(parent)) return null;
+  return {
+    id: id as number,
+    nodeId: asString(record['node_id']) || null,
+    authorLogin: null,
+    body: '',
+    createdAt: null,
+    inReplyToId: typeof parent === 'number' ? parent : null,
+  };
+};
+
+/**
+ * The I11 cross-check (policy/DOCTRINE.md: GraphQL reviews/reviewThreads lag
+ * REST — verify via REST), mirroring fetchReviewState's two lag traps over
+ * an UNTRUNCATED snapshot. Reads the REST reviews and review-comments
+ * collections of PR `pr` and returns null when both agree with the
+ * snapshot, else a one-line, log-safe `review data lag: …` reason (trap
+ * names and counts only):
+ *   - `reviews.lag`: a REST review whose `node_id` is absent from the
+ *     snapshot's review node ids. PENDING REST reviews are ignored (an
+ *     unsubmitted draft is no opinion), and a REST review with no `node_id`
+ *     cannot be cross-checked and is not evidence of lag (fetchReviewState's
+ *     rule);
+ *   - `reviewThreads.lag`: at THREAD granularity via the shared
+ *     attachRestReplies — a REST conversation whose chain ROOT id matches
+ *     no snapshot thread's root `databaseId` is a thread the snapshot has
+ *     not caught up to;
+ *   - a failed/capped/unparseable REST read, or a REST entry that is not an
+ *     object / has a malformed id, refuses too — an unverifiable snapshot is
+ *     never trusted. NEVER throws.
+ */
+const checkReviewDataLag = async (
+  deps: ForgeDeps,
+  pr: number,
+  snapshot: PrSnapshot,
+): Promise<string | null> => {
+  const restReviews = await readRestCollection(deps, pr, 'reviews');
+  if ('reason' in restReviews) return `review data lag: ${restReviews.reason}`;
+  const restComments = await readRestCollection(deps, pr, 'comments');
+  if ('reason' in restComments) return `review data lag: ${restComments.reason}`;
+  if (
+    restReviews.entries.some(
+      (entry) => typeof entry !== 'object' || entry === null || Array.isArray(entry),
+    )
+  ) {
+    return 'review data lag: restReviews unparseable (a non-object entry)';
+  }
+  const comments = restComments.entries.map(toRestComment);
+  const parsed = comments.filter((comment): comment is RestComment => comment !== null);
+  if (parsed.length !== comments.length) {
+    return `review data lag: restComments unparseable (${String(comments.length - parsed.length)} entry(ies) with a malformed id)`;
+  }
+  const traps: string[] = [];
+  const snapshotIds = new Set(snapshot.reviews.map((review) => review.nodeId));
+  const submitted = restReviews.entries
+    .map(asRecord)
+    .filter((entry) => asString(entry['state']) !== 'PENDING');
+  const missing = submitted.filter((entry) => {
+    const nodeId = entry['node_id'];
+    return typeof nodeId === 'string' && !snapshotIds.has(nodeId);
+  }).length;
+  if (missing > 0) {
+    traps.push(
+      `reviews.lag (${String(missing)} of ${String(submitted.length)} REST review(s) missing from ${String(snapshot.reviews.length)} snapshot review(s))`,
+    );
+  }
+  const { unmatchedRoots } = attachRestReplies(snapshot.threads.map(asReviewThread), parsed);
+  if (unmatchedRoots.length > 0) {
+    traps.push(
+      `reviewThreads.lag (${String(unmatchedRoots.length)} REST thread root(s) missing from ${String(snapshot.threads.length)} snapshot thread(s))`,
+    );
+  }
+  return traps.length === 0 ? null : `review data lag: ${traps.join('; ')}`;
+};
 
 // -- the judgment -------------------------------------------------------------
 
@@ -807,24 +958,20 @@ const recheckOrThrow = async (
     }
     return refuse(`${reason}${suffix}`);
   };
+  // (g0) The I11 REST cross-check, before reviews or threads are judged:
+  // GraphQL reviews/reviewThreads lag REST, so a snapshot missing a REST
+  // review or thread root is stale and refuses. Placed after the ledger
+  // read like every judgment refusal: the tuple is GraphQL-derived and
+  // independent of the lag, so a created/reset anchor is still written
+  // (best effort) and an unchanged tuple writes nothing.
+  const lag = await checkReviewDataLag(deps, pr, snapshot);
+  if (lag !== null) return refuseAfterObserving(lag);
   // (g) Unresolved external threads (the I2 thread rule, classify row 5's
   // exact count: root author ≠ PR author; a null root author is external),
   // judged before any review.
-  const unresolved = countUnresolvedThreads(
-    snapshot.threads.map((thread) => ({
-      id: '',
-      rootDatabaseId: null,
-      path: null,
-      line: null,
-      isResolved: thread.isResolved,
-      isOutdated: false,
-      authorLogin: thread.rootAuthorLogin,
-      createdAt: null,
-      body: '',
-      replies: [],
-    })),
-    { excludeAuthorLogin: snapshot.authorLogin },
-  );
+  const unresolved = countUnresolvedThreads(snapshot.threads.map(asReviewThread), {
+    excludeAuthorLogin: snapshot.authorLogin,
+  });
   if (unresolved > 0) {
     return refuseAfterObserving(`unresolved external threads: ${String(unresolved)}`);
   }
@@ -862,11 +1009,13 @@ const recheckOrThrow = async (
  * (e) refuse a moved head, a missing base oid/name, a live base that is
  * `deps.protectedBranch`, or a live base name ≠ `expectedBase` ('base
  * changed'); (f) read the state branch (a read failure refuses as not
- * durable) and observe the tuple in memory; (g) refuse unresolved external
- * review threads; (h) refuse without head-bound trusted acceptance or with
+ * durable) and observe the tuple in memory; (g0) the I11 REST cross-check:
+ * refuse `review data lag: …` when a submitted REST review or a REST thread
+ * root is missing from the snapshot, or a REST read fails/is capped (see
+ * checkReviewDataLag); (g) refuse unresolved external review threads; (h) refuse without head-bound trusted acceptance or with
  * an outstanding objection; (i) refuse unless settled per the observed
  * ledger; (j) WRITE the observation (compare-and-swap) and answer ok — a
- * failed write refuses as not durable. A refusal at (g)–(i) writes only
+ * failed write refuses as not durable. A refusal at (g0)–(i) writes only
  * when the observation created/reset the record (best effort); on an
  * unchanged tuple it writes nothing. Every refusal past (f) carries a
  * short `(state discarded: …)` suffix when the read discarded records; an
@@ -918,7 +1067,10 @@ export interface ObserveOpenPrsResult {
  * supplies the second), so an idle repo costs no state-branch push. An
  * empty `prs` attempts nothing (`write: null`).
  * The clock is read once, AFTER the fetches (stamps can only be late — an
- * anchor stamped late shortens the measured settle; fail closed). A read
+ * anchor stamped late shortens the measured settle; fail closed). No I11
+ * REST lag cross-check runs here: this pass only anchors the GraphQL-derived
+ * `(head, base, epoch)` tuple and never grants acceptance — the merge-time
+ * recheck cross-checks before it judges. A read
  * throw or refused write is reported in `write`; NEVER throws.
  */
 export async function observeOpenPrs(

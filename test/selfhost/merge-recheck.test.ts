@@ -24,6 +24,10 @@
 // or as a later review — revokes it), base oid/name consistency across
 // pages, the per-PR base pin (unverified / changed / protected), unresolved
 // external threads, and the state read's discarded reasons on the answer.
+// And the I11 REST lag cross-check: the fake serves REST reviews/comments
+// consistent with the snapshot (plus per-spec extras), so reviews lag,
+// reviewThreads lag, PENDING exclusion, read failure and the page cap are
+// all probed through recheckBeforeMerge.
 import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -31,6 +35,7 @@ import type { MergeEffects } from '../../src/ops/merge/effects.js';
 import {
   CONSERVATIVE_TRUST_POLICY,
   PR_SNAPSHOT_QUERY,
+  REST_LAG_PAGE_CAP,
   SNAPSHOT_PAGE_CAP,
   STRUCTURAL_EXCLUDED_LOGINS,
   actorKey,
@@ -61,6 +66,8 @@ const LATER = T0 + SETTLE_MS + 60_000;
 // ---------------------------------------------------------------------------
 
 interface ReviewSpec {
+  /** The review node id (GraphQL `id` = REST `node_id`); default `R_<index>`. */
+  id?: string;
   login: string | null;
   typename?: string | undefined;
   association?: string;
@@ -100,6 +107,10 @@ interface PrSpec {
   baseOnLaterPages: string | null;
   /** When set, pages after the first report this baseRefName (a mid-read retarget). */
   baseNameOnLaterPages: string | null;
+  /** Extra REST review entries (beyond the snapshot's) — reviews-lag probes. */
+  restExtraReviews: unknown[];
+  /** Extra REST review-comment entries (beyond the snapshot's) — thread-lag probes. */
+  restExtraComments: unknown[];
 }
 
 const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
@@ -122,6 +133,8 @@ const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
   headOnLaterPages: null,
   baseOnLaterPages: null,
   baseNameOnLaterPages: null,
+  restExtraReviews: [],
+  restExtraComments: [],
   ...over,
 });
 
@@ -134,6 +147,33 @@ const review = (over: Partial<ReviewSpec> = {}): ReviewSpec => ({
   oid: SHA_B,
   ...over,
 });
+
+/** A review's node id: its explicit `id`, else `R_<index>`. */
+const reviewNodeId = (r: ReviewSpec, index: number): string => r.id ?? `R_${String(index)}`;
+
+/** A thread root's REST id (GraphQL `databaseId`). */
+const rootDatabaseId = (index: number): number => 1000 + index;
+
+/**
+ * The REST collections CONSISTENT with the snapshot (plus the spec's
+ * extras): every review by node_id, and every thread's root comment plus
+ * one reply chained to it.
+ */
+const restReviewsFor = (spec: PrSpec): unknown[] => [
+  ...spec.reviews.map((r, i) => ({ node_id: reviewNodeId(r, i), state: r.state })),
+  ...spec.restExtraReviews,
+];
+const restCommentsFor = (spec: PrSpec): unknown[] => [
+  ...spec.threads.flatMap((t, i) =>
+    t.root === undefined
+      ? []
+      : [
+          { id: rootDatabaseId(i), in_reply_to_id: null },
+          { id: 5000 + i, in_reply_to_id: rootDatabaseId(i) },
+        ],
+  ),
+  ...spec.restExtraComments,
+];
 
 const flagValue = (args: string[], name: string): string => {
   const entry = args.find((a) => a.startsWith(`${name}=`));
@@ -181,13 +221,18 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
                     hasNextPage: threadsMore,
                     endCursor: threadsMore ? String(threadsFrom + PAGE) : null,
                   },
-                  nodes: spec.threads.slice(threadsFrom, threadsFrom + PAGE).map((t) => ({
+                  nodes: spec.threads.slice(threadsFrom, threadsFrom + PAGE).map((t, i) => ({
                     isResolved: t.isResolved,
                     comments: {
                       nodes:
                         t.root === undefined
                           ? []
-                          : [{ author: t.root === null ? null : { login: t.root } }],
+                          : [
+                              {
+                                databaseId: rootDatabaseId(threadsFrom + i),
+                                author: t.root === null ? null : { login: t.root },
+                              },
+                            ],
                     },
                   })),
                 },
@@ -202,7 +247,8 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
                         hasNextPage: reviewsMore,
                         endCursor: reviewsMore ? String(reviewsFrom + PAGE) : null,
                       },
-                  nodes: spec.reviews.slice(reviewsFrom, reviewsFrom + PAGE).map((r) => ({
+                  nodes: spec.reviews.slice(reviewsFrom, reviewsFrom + PAGE).map((r, i) => ({
+                    id: reviewNodeId(r, reviewsFrom + i),
                     author:
                       r.login === null
                         ? null
@@ -295,6 +341,16 @@ const makeForge = (prs: Record<number, PrSpec>): Forge => {
       return spec === undefined
         ? okRes({ data: { repository: { pullRequest: null } } })
         : okRes(payloadFor(spec, args));
+    }
+    // The I11 REST cross-check reads (`--paginate --slurp`: one outer array of pages).
+    const restRead = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/(reviews|comments)\?per_page=100$/.exec(
+      args[1] ?? '',
+    );
+    if (restRead !== null && args.includes('--paginate') && args.includes('--slurp')) {
+      forge.log.push(`rest:${restRead[2] ?? ''}:${restRead[1] ?? ''}`);
+      const spec = forge.prs.get(Number(restRead[1]));
+      if (spec === undefined) return notFound();
+      return okRes([restRead[2] === 'reviews' ? restReviewsFor(spec) : restCommentsFor(spec)]);
     }
     let method = 'GET';
     let path = '';
@@ -538,9 +594,9 @@ describe('fetchPrSnapshot', () => {
     expect(snap.truncated).toBe(false);
     expect(snap.threads).toHaveLength(143);
     expect(snap.threads.slice(-3)).toEqual([
-      { isResolved: false, rootAuthorLogin: 'dave' },
-      { isResolved: false, rootAuthorLogin: null },
-      { isResolved: false, rootAuthorLogin: null },
+      { isResolved: false, rootAuthorLogin: 'dave', rootDatabaseId: 1140 },
+      { isResolved: false, rootAuthorLogin: null, rootDatabaseId: null },
+      { isResolved: false, rootAuthorLogin: null, rootDatabaseId: 1142 },
     ]);
     // A missing reviewThreads connection is truncated.
     expect((await snapshotOf(prSpec({ omitThreads: true }))).truncated).toBe(true);
@@ -1306,6 +1362,152 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     expect((await effects.retargetBase(1, 'main')).code).toBe(0);
     expect((await effects.pushRef('a:b', '/p')).code).toBe(0);
     await expect(effects.worktreeRemove('/p')).resolves.toBeUndefined();
+  });
+});
+
+describe('recheckBeforeMerge — the I11 REST lag cross-check', () => {
+  /** A seeded, otherwise-mergeable PR 7 whose spec `over` shapes REST/threads. */
+  const settledForge = async (over: Partial<PrSpec> = {}): Promise<Forge> => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()], ...over }) });
+    await seedObservation(forge, [7]);
+    forge.log.length = 0;
+    return forge;
+  };
+  const writes = (forge: Forge): string[] =>
+    forge.log.filter((entry) => /^state:(POST|PATCH)/.test(entry));
+
+  test('consistent REST and GraphQL passes', async () => {
+    const forge = await settledForge({ threads: [{ isResolved: true, root: 'dave' }] });
+    const calls: string[][] = [];
+    const result = await recheckBeforeMerge(
+      {
+        ...recheckDeps(forge, LATER),
+        gh: (args) => {
+          calls.push(args);
+          return forge.gh(args);
+        },
+      },
+      7,
+      SHA_B,
+      BASE_NAME,
+    );
+    expect(result.ok).toBe(true);
+    // fetchReviewState's exact REST argv, both collections, after the snapshot.
+    for (const collection of ['reviews', 'comments']) {
+      expect(calls).toContainEqual([
+        'api',
+        `${PREFIX}pulls/7/${collection}?per_page=100`,
+        '--paginate',
+        '--slurp',
+      ]);
+    }
+    expect(forge.log.indexOf('rest:reviews:7')).toBeGreaterThan(forge.log.indexOf('graphql:7'));
+    expect(forge.log.indexOf('rest:comments:7')).toBeGreaterThan(forge.log.indexOf('graphql:7'));
+  });
+
+  test('a REST review missing from the GraphQL snapshot refuses (reviews lag)', async () => {
+    const forge = await settledForge({
+      restExtraReviews: [{ node_id: 'R_fresh', state: 'CHANGES_REQUESTED' }],
+    });
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+    expect(result).toEqual({
+      ok: false,
+      reason:
+        'review data lag: reviews.lag (1 of 2 REST review(s) missing from 1 snapshot review(s))',
+    });
+    // Unchanged tuple: the lag refusal writes nothing.
+    expect(writes(forge)).toEqual([]);
+  });
+
+  test('PENDING REST reviews are ignored; a node_id-less REST review is no lag evidence', async () => {
+    const forge = await settledForge({
+      restExtraReviews: [{ node_id: 'R_draft', state: 'PENDING' }, { state: 'COMMENTED' }],
+    });
+    expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME)).ok).toBe(
+      true,
+    );
+  });
+
+  test('a REST thread root missing from the GraphQL snapshot refuses (reviewThreads lag)', async () => {
+    const forge = await settledForge({
+      threads: [{ isResolved: true, root: 'dave' }],
+      // A fresh thread (root 9001) plus a reply to it: ONE unmatched root.
+      restExtraComments: [
+        { id: 9001, in_reply_to_id: null },
+        { id: 9002, in_reply_to_id: 9001 },
+      ],
+    });
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+    expect(result).toEqual({
+      ok: false,
+      reason:
+        'review data lag: reviewThreads.lag (1 REST thread root(s) missing from 1 snapshot thread(s))',
+    });
+  });
+
+  test('both traps firing are named together; the refusal precedes the thread and review judgments', async () => {
+    const forge = await settledForge({
+      threads: [{ isResolved: false, root: 'dave' }],
+      restExtraReviews: [{ node_id: 'R_fresh', state: 'APPROVED' }],
+      restExtraComments: [{ id: 9001 }],
+    });
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+    expect(result.ok).toBe(false);
+    expect((result as { reason: string }).reason).toBe(
+      'review data lag: reviews.lag (1 of 2 REST review(s) missing from 1 snapshot review(s)); reviewThreads.lag (1 REST thread root(s) missing from 1 snapshot thread(s))',
+    );
+  });
+
+  test('REST read failure refuses', async () => {
+    const forge = await settledForge();
+    forge.hook = (args) =>
+      (args[1] ?? '').endsWith('/reviews?per_page=100')
+        ? { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' }
+        : undefined;
+    expect(await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME)).toEqual({
+      ok: false,
+      reason: 'review data lag: restReviews read failed: gh exit 1: gh: Server Error (HTTP 502)',
+    });
+    // A MIXED (untrustworthy) comments payload refuses too.
+    forge.hook = (args) =>
+      (args[1] ?? '').endsWith('/comments?per_page=100') ? okRes([[], { id: 1 }]) : undefined;
+    const mixed = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+    expect((mixed as { reason: string }).reason).toMatch(
+      /^review data lag: restComments read failed: .*MIXED page payload/,
+    );
+    // A malformed comment id is unparseable, not silently skipped.
+    forge.hook = (args) =>
+      (args[1] ?? '').endsWith('/comments?per_page=100') ? okRes([[{ id: 'x' }]]) : undefined;
+    expect(await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME)).toEqual({
+      ok: false,
+      reason: 'review data lag: restComments unparseable (1 entry(ies) with a malformed id)',
+    });
+    expect(writes(forge)).toEqual([]);
+  });
+
+  test('a REST collection past the page cap refuses (restReviews.pageCap)', async () => {
+    const forge = await settledForge();
+    forge.hook = (args) =>
+      (args[1] ?? '').endsWith('/reviews?per_page=100')
+        ? okRes(Array.from({ length: REST_LAG_PAGE_CAP + 1 }, () => []))
+        : undefined;
+    expect(await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME)).toEqual({
+      ok: false,
+      reason: `review data lag: restReviews.pageCap (${String(REST_LAG_PAGE_CAP + 1)} pages > ${String(REST_LAG_PAGE_CAP)})`,
+    });
+  });
+
+  test('a lag refusal that creates a new anchor still writes it; observeOpenPrs reads no REST', async () => {
+    const forge = makeForge({
+      7: prSpec({ reviews: [review()], restExtraReviews: [{ node_id: 'R_fresh' }] }),
+    });
+    const result = await recheckBeforeMerge(recheckDeps(forge, T0), 7, SHA_B, BASE_NAME);
+    expect((result as { reason: string }).reason).toMatch(/^review data lag: reviews\.lag/);
+    const { state } = await readSettleState(forgeDeps(forge));
+    expect(state.prs['7']?.observations).toHaveLength(1);
+    forge.log.length = 0;
+    await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => LATER }, [7]);
+    expect(forge.log.filter((entry) => entry.startsWith('rest:'))).toEqual([]);
   });
 });
 

@@ -21,6 +21,7 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   - the data is truncated: past the page cap, a missing connection, or a
     head, base oid or base name that changed between pages;
   - the settle ledger cannot be read;
+  - the REST cross-check finds review data lag, or cannot run (below);
   - an unresolved external review thread remains (below);
   - a trusted reviewer's latest opinionated review is CHANGES_REQUESTED;
   - no trusted actor's current opinion accepts the live head;
@@ -31,6 +32,23 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   `(state discarded: <n> record(s); first: <reason>)` when the read
   discarded records; an ok answer carries them as `discarded`.
 
+- **REST lag cross-check (I11).** GraphQL `reviews` and `reviewThreads`
+  can lag REST, so after the ledger read and before threads or reviews are
+  judged, the recheck reads `repos/{o}/{r}/pulls/{n}/reviews` and
+  `.../pulls/{n}/comments` exactly as `fetchReviewState` does
+  (`?per_page=100 --paginate --slurp`, the shared `slurpedComments`
+  normalizer, a 20-page cap). It refuses `review data lag: …`, naming the
+  trap and counts, when a non-PENDING REST review's `node_id` is missing
+  from the snapshot's review ids (`reviews.lag`; a review with no
+  `node_id` is not evidence), or when a REST conversation's root comment
+  matches no snapshot thread's root `databaseId` (`reviewThreads.lag`,
+  thread granularity via the shared `attachRestReplies`). A failed,
+  capped (`restReviews.pageCap`/`restComments.pageCap`), mixed or
+  malformed REST read refuses too. The tuple is GraphQL-derived and not
+  affected by the lag, so this refusal follows the normal write rules: a
+  created or reset anchor is written (best effort) and an unchanged tuple
+  writes nothing. The run-start `observeOpenPrs` pass skips the check. It
+  only anchors the tuple and never grants acceptance.
 - **Base pin (I3).** The gate remembers, per PR, the `baseRefName` from the
   most recent successful `readBaseRef(pr)` it delegated. `executeMerges`
   calls it right before every merge attempt and every retry. A failed read
