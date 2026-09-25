@@ -28,11 +28,23 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         "draft": {
           "type": "boolean"
         },
+        "headRefOid": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "issueComments": {
           "items": {
             "additionalProperties": false,
             "properties": {
               "authorLogin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorType": {
                 "type": [
                   "string",
                   "null"
@@ -109,7 +121,19 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
           "items": {
             "additionalProperties": false,
             "properties": {
+              "authorAssociation": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "authorLogin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorType": {
                 "type": [
                   "string",
                   "null"
@@ -117,6 +141,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
               },
               "body": {
                 "type": "string"
+              },
+              "commitOid": {
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "id": {
                 "type": "string"
@@ -165,6 +195,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "null"
                 ]
               },
+              "authorType": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "body": {
                 "type": "string"
               },
@@ -206,6 +242,12 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "additionalProperties": false,
                   "properties": {
                     "authorLogin": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "authorType": {
                       "type": [
                         "string",
                         "null"
@@ -274,6 +316,53 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
         "issueComments",
         "lastCommitAt"
       ],
+      "type": "object"
+    },
+    "config": {
+      "additionalProperties": false,
+      "properties": {
+        "acceptReviewStates": {
+          "items": {
+            "enum": [
+              "APPROVED",
+              "CHANGES_REQUESTED",
+              "COMMENTED",
+              "DISMISSED"
+            ],
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "automationLogin": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "excludedLogins": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "settleWindowMs": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trustedAssociations": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "trustedBots": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
       "type": "object"
     },
     "nowMs": {
