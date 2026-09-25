@@ -7,8 +7,17 @@
 // WHY A STATE BRANCH: settle observations must outlive any one workflow
 // run. The Actions cache is EVICTABLE (an eviction would silently reset —
 // or, worse, a poisoned entry could fabricate — settle) and PR content is
-// author-controlled. A branch in the base repository is durable, audited
-// (every write is a commit), and writable only by our automation's token.
+// author-controlled. A branch in the base repository is durable and audited
+// (every write is a commit). It is NOT yet writable only by our automation:
+// that holds once W1.10's ruleset restricts `cq-state`; until then any
+// holder of Contents write can push it. A forged, back-dated anchor could
+// shorten settle, but can never forge SHA-bound acceptance (the recheck
+// reads reviews from the forge, never from this branch).
+//
+// EVERY WRITE IS A PUSH: each ref move runs the repo's unfiltered `push:`
+// workflows on this branch, so callers write only on material change (see
+// merge-recheck.ts).
+//
 // The branch IS the persistence: this module never touches the local
 // filesystem (the workflow's `.selfhost/journal`, which DOES live in the
 // Actions cache, plays no part in settle).

@@ -15,7 +15,12 @@
 //   5. The run-start observation pass writes every open candidate in ONE
 //      commit, and a second run over a FRESH, EMPTY journal root (simulated
 //      Actions-cache eviction) still sees it and merges once settled.
-//   6. The dry run makes NO state-branch calls.
+//   6. The dry run makes NO state-branch calls (and resolves no identity).
+//   7. The automation identity (`gh api user`) is excluded from trust; an
+//      integration token's 403 proceeds; any other failure refuses every
+//      merge 'automation identity unresolved'.
+//   8. A settled merge run writes only the pre-merge audit observation —
+//      the run-start pass over an already-anchored tuple writes nothing.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -218,11 +223,23 @@ const snapshotPayload = (fixture: PrFixture) => ({
   },
 });
 
-/** The fake gh: records every argv; routes state-branch, snapshot, and candidate reads. */
-const forgeGh = (forge: StateForge, fixtures: PrFixture[], calls: string[][]): GhFn => {
+/** The token's own login as `gh api user` reports it (a plain automation user). */
+const AUTOMATION_LOGIN = 'cq-runner';
+
+/**
+ * The fake gh: records every argv; routes the identity read, state-branch,
+ * snapshot, and candidate reads. `user` overrides the `gh api user` answer.
+ */
+const forgeGh = (
+  forge: StateForge,
+  fixtures: PrFixture[],
+  calls: string[][],
+  user: GhResult = json({ login: AUTOMATION_LOGIN }),
+): GhFn => {
   const byPr = new Map(fixtures.map((fixture) => [fixture.pr, fixture]));
   return async (args: string[]): Promise<GhResult> => {
     calls.push(args);
+    if (args.length === 2 && args[0] === 'api' && args[1] === 'user') return user;
     const served = forge.handle(args);
     if (served !== undefined) return served;
     const path = args[0] === 'api' && typeof args[1] === 'string' ? args[1] : '';
@@ -428,7 +445,84 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     expect(effects.merges).toEqual([{ pr: 7, matchHeadCommit: HEAD(7) }]);
     expect(result.outcome?.firstPass.merged).toEqual([7]);
     expect(result.settleObservation.observed).toEqual([7]);
-    expect(result.settleObservation.write?.ok).toBe(true);
+    // The tuple was already anchored: the run-start pass writes nothing,
+    // and the ONLY commit is the recheck's pre-merge audit observation.
+    expect(result.settleObservation.write).toBeNull();
+    expect(forge.written().map((commit) => commit.message)).toEqual(['settle: recheck pr #7']);
+    expect(result.automationIdentity).toEqual({ resolved: true, login: AUTOMATION_LOGIN });
+  });
+
+  test("the automation identity's own head-bound approval never counts", async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects();
+    const result = await runSelfMergePrs(
+      {
+        // The token IS the approver: its approval must be excluded.
+        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7) }], [], json({ login: APPROVER })),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      cfg(tmpJournalRoot()),
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(result.automationIdentity).toEqual({ resolved: true, login: APPROVER });
+    expect(effects.merges).toEqual([]);
+    const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
+    expect(row?.reason).toContain('no_head_bound_acceptance');
+  });
+
+  test('an integration token (403 on /user) proceeds; the merge goes through', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects();
+    const forbidden: GhResult = {
+      code: 1,
+      stdout: '',
+      stderr: 'gh: Resource not accessible by integration (HTTP 403)',
+    };
+    const result = await runSelfMergePrs(
+      {
+        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7) }], [], forbidden),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      cfg(tmpJournalRoot()),
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(result.automationIdentity).toMatchObject({
+      resolved: false,
+      reason: expect.stringContaining('integration token') as unknown,
+    });
+    expect(effects.merges).toEqual([{ pr: 7, matchHeadCommit: HEAD(7) }]);
+  });
+
+  test('any other identity failure fails closed: every merge refused, the run still completes', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects();
+    const result = await runSelfMergePrs(
+      {
+        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7) }], [], {
+          code: 1,
+          stdout: '',
+          stderr: 'gh: Bad credentials (HTTP 401)',
+        }),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      cfg(tmpJournalRoot()),
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(result.automationIdentity).toEqual({
+      resolved: false,
+      reason: 'gh exit 1: gh: Bad credentials (HTTP 401)',
+    });
+    expect(effects.merges).toEqual([]);
+    const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
+    expect(row?.reason).toContain(
+      'automation identity unresolved: gh exit 1: gh: Bad credentials (HTTP 401)',
+    );
   });
 
   test('a prior observation younger than settle → refused settle: settle_pending', async () => {
@@ -517,6 +611,7 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     expect(result.dryRun).toBe(true);
     expect(calls.length).toBeGreaterThan(0);
     expect(calls.filter(isStateBranchCall)).toEqual([]);
+    expect(calls.some((args) => args[0] === 'api' && args[1] === 'user')).toBe(false);
     expect(calls.some((args) => args.includes(`query=${PR_SNAPSHOT_QUERY}`))).toBe(false);
     expect(forge.tip).toBeNull();
   });

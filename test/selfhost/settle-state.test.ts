@@ -4,7 +4,8 @@
 // Pinned here:
 //   1. observe: the same tuple appends; a head change, a base change, and a
 //      force-push epoch bump with the SAME head SHA each REPLACE the record
-//      (every prior observation invalidated); the input is never mutated.
+//      (every prior observation invalidated); the input is never mutated;
+//      observeWithChange reports created / reset / appended.
 //   2. Compaction over MAX_OBSERVATIONS_PER_PR keeps the first observation
 //      (the settle anchor) plus the newest ones.
 //   3. settleStatus: every not-settled reason; the exactly-settleMs
@@ -20,6 +21,7 @@ import {
   SETTLE_STATE_VERSION,
   emptySettleState,
   observe,
+  observeWithChange,
   parseSettleState,
   pruneToOpen,
   sameTuple,
@@ -107,6 +109,18 @@ describe('observe', () => {
     const kept = s.prs['7']?.observations.map((o) => Date.parse(o.observedAt));
     expect(kept).toHaveLength(MAX_OBSERVATIONS_PER_PR);
     expect(kept).toEqual([times[0], ...times.slice(-(MAX_OBSERVATIONS_PER_PR - 1))]);
+  });
+
+  test('observeWithChange reports created, appended, and reset', () => {
+    const first = observeWithChange(emptySettleState(REPO), 7, tuple(), T0, 'x');
+    expect(first.changed).toBe('created');
+    const again = observeWithChange(first.state, 7, tuple(), T0 + MIN, 'x');
+    expect(again.changed).toBe('appended');
+    expect(again.state.prs['7']?.observations).toHaveLength(2);
+    const moved = observeWithChange(again.state, 7, tuple({ head: HEAD_B }), T0 + 2 * MIN, 'x');
+    expect(moved.changed).toBe('reset');
+    expect(moved.state.prs['7']?.observations).toHaveLength(1);
+    expect(observe(first.state, 7, tuple(), T0 + MIN, 'x')).toEqual(again.state);
   });
 
   test('caller bugs throw (bad pr, bad sha, empty by)', () => {

@@ -9,18 +9,42 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   the PR is re-fetched right before each merge call and there is no
   classify→merge window. `recheckBeforeMerge` reads the live
   `headRefOid`/`baseRefOid`, every review with its `commit.oid`, and the
-  `HeadRefForcePushedEvent` timeline. It refuses when:
+  `HeadRefForcePushedEvent` timeline. Reviews and timeline page with
+  independent cursors (`reviewsAfter`/`timelineAfter`, sent only when a
+  real cursor exists), capped at 10 pages each. It reads the clock after
+  the fetch, so a new anchor is never stamped before what it records. It
+  refuses when:
   - the head is unpinned or has moved;
-  - the data is truncated;
-  - no durable observation could be written;
+  - the data is truncated: past the page cap, a missing connection, or a
+    head that changed between pages;
+  - the settle ledger cannot be read;
   - a trusted reviewer's latest opinionated review is CHANGES_REQUESTED;
   - no trusted review is bound to the live head;
-  - the tuple has not settled.
+  - the tuple has not settled;
+  - the observation could not be written just before an ok answer.
 - **Fold.** The latest opinionated review per actor is folded over all
   reviews. `latestOpinionatedReviews(writersOnly:true)` and `reviewDecision`
   are never read. Both CodeRabbit identity forms (`coderabbitai`/Bot and
   `coderabbitai[bot]`/User) fold to one actor. Bots grant acceptance only
-  when allowlisted.
+  when allowlisted. Authors that are neither Bot nor User (null,
+  Organization) never count, and an acceptance needs a parseable
+  `submittedAt`.
+- **Trust config.** `trustPolicyFromConfig` maps the W1.1 config fields
+  structurally, without importing W1.1 types. It can only narrow the
+  blanks. Bot logins are normalized to the bare name.
+  `trustedAssociations` intersects {OWNER, MEMBER, COLLABORATOR}.
+  `acceptReviewStates` keeps only APPROVED/COMMENTED, and a blank list
+  means APPROVED. `automationLogin` is excluded. The structural bots
+  (`github-actions[bot]`, `cq-automation[bot]`, `cq-verdict[bot]`,
+  `cq-promoter[bot]`) are always excluded, and a `trustedBots` entry naming
+  an excluded identity is dropped. `CONSERVATIVE_TRUST_POLICY` is
+  `trustPolicyFromConfig({})`.
+- **Automation identity.** A real run resolves the token's login with
+  `gh api user` and excludes it from trust. An integration token's 403
+  ("Resource not accessible by integration") proceeds: App bots are never
+  trusted unless allowlisted. Any other failure makes every recheck refuse
+  with "automation identity unresolved". The status rides the result and
+  the payload as `automationIdentity`. Dry runs skip this.
 - **Settle.** Settle needs two observations of the identical
   `(head, base, force-push epoch)` tuple, at least `settleMs` apart. The
   epoch is the client-side count of force-push nodes, never `totalCount`.
@@ -29,6 +53,14 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   `cq-state` branch, written through the git-data API. The ref update is
   fast-forward only, which makes it a compare-and-swap. The Actions cache is
   never used, and dry runs never write.
+- **Minimal writes.** Writes scale with activity, not with cron fires. The
+  run-start pass writes only when a record is created or reset, or a
+  record is pruned. A same-tuple observation is not appended, because the
+  first observation anchors settle and the recheck supplies the second.
+  The recheck writes before answering ok (the audit record), or best
+  effort when a refusal created or reset the record. A refusal on an
+  unchanged tuple writes nothing. Ledger `discarded` reasons ride the
+  result and the payload.
 
 ## Credential (ADR-0004 D-D)
 
@@ -41,10 +73,20 @@ not delegated to a separate privileged job.
 ## Residuals
 
 - Until W1.10 adds branch rulesets, any holder of Contents write can push
-  `cq-state`. A forged observation could shorten settle, but it cannot forge
-  SHA-bound acceptance.
+  `cq-state`. A forged, back-dated observation could shorten settle, but it
+  cannot forge SHA-bound acceptance.
+- Pushes to `cq-state` trigger the unfiltered `push:` workflows (ci,
+  denylist, ratchet) on that branch. Writes are kept to material changes.
+  The doctrine-sanctioned fix is a job-level
+  `if: github.ref != 'refs/heads/cq-state'` in the required-check template
+  and in those workflows. It is deferred to the workflow/ruleset owner
+  (W1.10), because this lane does not edit workflows.
 - A refusal surfaces as a failed-merge needs-human row. `executeMerges` has
   no "deferred" outcome yet.
 - Including the base SHA in the tuple follows RS-3. Each merge into
-  `merge-queue` therefore restarts settle for its siblings, which is
-  conservative.
+  `merge-queue` therefore restarts settle for its siblings, so at most one
+  merge per base lands per settle window (10 min). That throughput cost is
+  accepted per RS-3.
+- W1.1's classify fold differs: it keys on the raw login and takes the
+  latest review in any state. The recheck is the binding, stricter gate.
+  Unify both into one shared module after W1.1 merges.

@@ -27,17 +27,29 @@
 // TRUST (plan D3, conservative blanks per RS-15 Annex B): users count only
 // with an association in {OWNER, MEMBER, COLLABORATOR}; bots never count
 // unless allowlisted (`authorAssociation` is NONE for bots, so the allowlist
-// is the ONLY bot trust path); the PR author and every excluded login (the
-// automation's own identity) NEVER count, whatever their association.
+// is the ONLY bot trust path); an author that is neither Bot nor User
+// (Organization, Mannequin, deleted) never counts; the PR author and every
+// excluded login (the automation's own identity, plus the STRUCTURAL
+// automation bots, which config can never re-admit) NEVER count, whatever
+// their association. trustPolicyFromConfig maps the D3 config shape onto
+// this policy and can only narrow the blanks.
 //
 // SETTLE. The durable two-observation rule on `(head, base, forcePushEpoch)`
 // lives in settle-state.ts. The force-push epoch is the number of
 // HeadRefForcePushedEvent NODES in the PR timeline, COUNTED CLIENT-SIDE —
 // the filtered connection's `totalCount` is the UNFILTERED timeline count
-// and is never read. The recheck's observation is WRITTEN to the state
-// branch before settle is judged: the state branch IS the persistence, so
-// an observation that is not durable does not exist, and no durable
-// observation means no merge.
+// and is never read. The state branch IS the persistence: an observation
+// that is not durable does not exist, and no durable observation means no
+// merge — an ok recheck WRITES its observation (the audit record of the
+// settled tuple) before it answers ok, and a failed write refuses.
+//
+// WRITES SCALE WITH ACTIVITY, NOT CRON FIRES. Every push to cq-state runs
+// the repo's unfiltered `push:` workflows on that branch, so a write happens
+// only when it carries something new: a created/reset record (a new
+// anchor), a pruned record, or the pre-merge audit observation. A pure
+// same-tuple append on an unchanged PR is never written — the first
+// observation anchors settle and the merge-time recheck supplies the
+// second, in memory, at the instant it judges.
 //
 // NO CLASSIFY→MERGE WINDOW. gateMergeEffects wraps the executor's effects so
 // the snapshot (reviews included) is re-fetched IMMEDIATELY before each
@@ -51,19 +63,22 @@
 import { GhError, ghJson, ghNameOk } from '../ops/review/gh.js';
 import type { GhFn, GhResult } from '../ops/review/gh.js';
 import type { MergeEffects } from '../ops/merge/effects.js';
-import { observe, pruneToOpen, settleStatus } from './settle-state.js';
-import type { SettleState, SettleTuple } from './settle-state.js';
+import { observeWithChange, pruneToOpen, settleStatus } from './settle-state.js';
+import type { SettleTuple } from './settle-state.js';
 import { readSettleState, writeSettleState } from './state-branch.js';
+import type { StateBranchSnapshot, StateBranchWriteResult } from './state-branch.js';
 
 /**
- * The ONE GraphQL document the recheck reads. Variable names are
- * load-bearing (the I11 collision rule, see fetchReviewState): the document
- * rides gh's `-f query=` slot, so no GraphQL variable may be named `query`.
+ * The ONE GraphQL document the recheck reads, paged by two independent
+ * cursors. Variable names are load-bearing (the I11 collision rule, see
+ * fetchReviewState): the document rides gh's `-f query=` slot, so no
+ * GraphQL variable may be named `query` — the cursors are reviewsAfter and
+ * timelineAfter, sent as `-f` strings ONLY when a real cursor exists.
  * `timelineItems.totalCount` is deliberately NOT selected — on a filtered
  * connection it reports the UNFILTERED count; the epoch is counted from
  * the nodes.
  */
-export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: Int!) {
+export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: Int!, $reviewsAfter: String, $timelineAfter: String) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $pr) {
       state
@@ -71,17 +86,24 @@ export const PR_SNAPSHOT_QUERY = `query ($owner: String!, $name: String!, $pr: I
       author { login __typename }
       headRefOid
       baseRefOid
-      reviews(first: 100) {
-        pageInfo { hasNextPage }
+      reviews(first: 100, after: $reviewsAfter) {
+        pageInfo { hasNextPage endCursor }
         nodes { author { login __typename } authorAssociation state submittedAt commit { oid } }
       }
-      timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100) {
-        pageInfo { hasNextPage }
+      timelineItems(itemTypes: [HEAD_REF_FORCE_PUSHED_EVENT], first: 100, after: $timelineAfter) {
+        pageInfo { hasNextPage endCursor }
         nodes { __typename }
       }
     }
   }
 }`;
+
+/**
+ * Page cap per connection (fetchReviewState's reviewPages default): 1,000
+ * reviews / force-push events. A connection with more pages is TRUNCATED
+ * and every consumer refuses (fail closed).
+ */
+export const SNAPSHOT_PAGE_CAP = 10;
 
 /** One review, reduced to the facts the judgment reads (never the body). */
 export interface BoundReview {
@@ -117,11 +139,12 @@ export interface PrSnapshot {
   baseRefOid: string | null;
   /** HeadRefForcePushedEvent nodes counted client-side. */
   forcePushEpoch: number;
-  /** Every review on the first (and, untruncated, only) page. */
+  /** Every review across the pages read (all of them, when untruncated). */
   reviews: BoundReview[];
   /**
-   * True when a connection had more pages OR was missing/malformed — the
-   * reviews and/or the epoch may be incomplete, so every consumer refuses.
+   * True when a connection had more pages than SNAPSHOT_PAGE_CAP, was
+   * missing/malformed, or the head moved between pages — the reviews
+   * and/or the epoch may be incomplete, so every consumer refuses.
    */
   truncated: boolean;
 }
@@ -139,16 +162,96 @@ export interface TrustPolicy {
 }
 
 /**
- * The conservative blanks (RS-15 Annex B): OWNER/MEMBER/COLLABORATOR users,
- * no bots, APPROVED only, no extra exclusions (the PR author is always
- * excluded regardless). Frozen — callers build their own policy object.
+ * Automation identities that NEVER count as reviewers, whatever the config
+ * says (RS-15 Annex B): the Actions token and the toolkit's own Apps. A
+ * trustedBots entry naming one of them is dropped.
  */
-export const CONSERVATIVE_TRUST_POLICY: TrustPolicy = Object.freeze({
-  trustedAssociations: new Set(['OWNER', 'MEMBER', 'COLLABORATOR']) as ReadonlySet<string>,
-  trustedBots: new Set<string>() as ReadonlySet<string>,
-  acceptStates: new Set(['APPROVED'] as const) as ReadonlySet<'APPROVED' | 'COMMENTED'>,
-  excludedLogins: new Set<string>() as ReadonlySet<string>,
-});
+export const STRUCTURAL_EXCLUDED_LOGINS: readonly string[] = Object.freeze([
+  'github-actions[bot]',
+  'cq-automation[bot]',
+  'cq-verdict[bot]',
+  'cq-promoter[bot]',
+]);
+
+/**
+ * Login → the bare lowercase name (a trailing `[bot]` stripped). Declared
+ * above CONSERVATIVE_TRUST_POLICY, which calls it at module load.
+ */
+const bareName = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
+
+/** The blank (and widest) trusted-association set; config may only narrow it. */
+const BLANK_ASSOCIATIONS: readonly string[] = ['OWNER', 'MEMBER', 'COLLABORATOR'];
+
+/**
+ * The D3 trust config, STRUCTURALLY (the W1.1 ClassifyPrConfig fields —
+ * deliberately not imported, so either lane lands first).
+ */
+interface TrustPolicyConfig {
+  /** Raw bot logins (e.g. 'coderabbitai[bot]') whose reviews count. */
+  trustedBots?: readonly string[];
+  /** Association narrowing; blank = {OWNER, MEMBER, COLLABORATOR}. */
+  trustedAssociations?: readonly string[];
+  /** The automation's own login — always excluded. */
+  automationLogin?: string | null;
+  /** Further logins that never count. */
+  excludedLogins?: readonly string[];
+  /** Review states that count as acceptance; blank = APPROVED only. */
+  acceptReviewStates?: readonly string[];
+}
+
+/**
+ * Map the D3 trust config onto a TrustPolicy — every mapping can only
+ * NARROW trust relative to the blanks:
+ *   - trustedBots: normalized to the bare lowercase name ('coderabbitai');
+ *     an entry naming an excluded identity (structural, automation, or
+ *     configured) is DROPPED;
+ *   - trustedAssociations: intersected with {OWNER, MEMBER, COLLABORATOR}
+ *     (case-insensitive); blank (absent or empty) → that set; a list with
+ *     no member of it trusts no user;
+ *   - acceptStates: APPROVED/COMMENTED only (every other state is not an
+ *     acceptance); blank → {APPROVED}; a list naming neither accepts none;
+ *   - excludedLogins: the configured ones plus automationLogin plus
+ *     STRUCTURAL_EXCLUDED_LOGINS, lowercased.
+ * Pure; empty/whitespace entries are ignored.
+ */
+export function trustPolicyFromConfig(cfg: TrustPolicyConfig): TrustPolicy {
+  const clean = (values: readonly string[] | undefined): string[] =>
+    (values ?? []).map((value) => value.trim()).filter((value) => value !== '');
+  const excluded = new Set(
+    [
+      ...STRUCTURAL_EXCLUDED_LOGINS,
+      ...clean(cfg.excludedLogins),
+      ...clean(cfg.automationLogin == null ? [] : [cfg.automationLogin]),
+    ].map((login) => login.toLowerCase()),
+  );
+  const excludedNames = new Set([...excluded].map(bareName));
+  const trustedBots = new Set(
+    clean(cfg.trustedBots)
+      .map(bareName)
+      .filter((name) => name !== '' && !excludedNames.has(name)),
+  );
+  const associations = clean(cfg.trustedAssociations).map((value) => value.toUpperCase());
+  const trustedAssociations = new Set(
+    associations.length === 0
+      ? BLANK_ASSOCIATIONS
+      : BLANK_ASSOCIATIONS.filter((value) => associations.includes(value)),
+  );
+  const states = clean(cfg.acceptReviewStates).map((value) => value.toUpperCase());
+  const acceptStates = new Set<'APPROVED' | 'COMMENTED'>(
+    states.length === 0
+      ? ['APPROVED']
+      : (['APPROVED', 'COMMENTED'] as const).filter((value) => states.includes(value)),
+  );
+  return { trustedAssociations, trustedBots, acceptStates, excludedLogins: excluded };
+}
+
+/**
+ * The conservative blanks (RS-15 Annex B) — trustPolicyFromConfig({}):
+ * OWNER/MEMBER/COLLABORATOR users, no bots, APPROVED only, the structural
+ * automation identities excluded (the PR author is always excluded
+ * regardless). Frozen — callers build their own policy object.
+ */
+export const CONSERVATIVE_TRUST_POLICY: TrustPolicy = Object.freeze(trustPolicyFromConfig({}));
 
 /** judgeAtHead's verdict. */
 export type HeadJudgment =
@@ -220,14 +323,23 @@ const REVIEW_STATES: readonly string[] = [
 
 const OPINIONATED: ReadonlySet<string> = new Set(['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED']);
 
-/** Login → the bare lowercase name (a trailing `[bot]` stripped). */
-const bareName = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
-
-/** A connection's `hasNextPage`, failing closed: anything but `false` → true. */
-const connectionTruncated = (connection: unknown): boolean => {
+/**
+ * One page of a connection, failing closed: missing/non-array nodes →
+ * malformed; `hasNextPage` anything but `false` means more (a non-boolean
+ * is treated as more); the cursor is kept only when it is a non-empty string.
+ */
+const readPage = (
+  connection: unknown,
+): { nodes: unknown[]; more: boolean; cursor: string | null } | null => {
   const record = asRecord(connection);
-  if (!Array.isArray(record['nodes'])) return true;
-  return asRecord(record['pageInfo'])['hasNextPage'] !== false;
+  const nodes = record['nodes'];
+  if (!Array.isArray(nodes)) return null;
+  const pageInfo = asRecord(record['pageInfo']);
+  return {
+    nodes,
+    more: pageInfo['hasNextPage'] !== false,
+    cursor: asString(pageInfo['endCursor']) || null,
+  };
 };
 
 // -- identity + folding -------------------------------------------------------
@@ -288,15 +400,27 @@ const toBoundReview = (node: unknown): BoundReview => {
   };
 };
 
+/** Per-connection pagination state inside fetchPrSnapshot. */
+interface PagedConnection {
+  /** The next `after` cursor; null = first page (the flag is omitted). */
+  cursor: string | null;
+  /** Stop advancing (read to the end, or truncated). */
+  done: boolean;
+}
+
 /**
  * Read one PR's merge-time snapshot: state, draft flag, author, head/base
- * oids, the first 100 reviews (commit-bound), and the force-push epoch —
- * ONE `gh api graphql` call, argv mirroring fetchReviewState (owner/name as
- * raw `-f` strings, pr coerced via `-F`). THROWS on invalid owner/repo, a
+ * oids, EVERY review (commit-bound), and the force-push epoch — a single
+ * `gh api graphql` request loop advancing two independent cursors
+ * (fetchReviewState's pattern: owner/name as raw `-f` strings, pr coerced
+ * via `-F`, `reviewsAfter`/`timelineAfter` sent as `-f` ONLY when a real
+ * cursor exists; a finished connection's re-served page is ignored). The
+ * PR-level fields come from the FIRST page. THROWS on invalid owner/repo, a
  * transport failure, a GraphQL `errors` array, or a missing pullRequest.
- * `truncated` is set on any `hasNextPage` other than `false` or a
- * missing/malformed connection (fail closed); oids are accepted only as
- * 40-hex (else null).
+ * `truncated` is set (fail closed) when a connection is missing/malformed,
+ * still has pages past SNAPSHOT_PAGE_CAP, reports more pages without a
+ * cursor, or a later page reports a different headRefOid (the PR moved
+ * mid-read); oids are accepted only as 40-hex (else null).
  */
 export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSnapshot> {
   const { gh, owner, repo } = deps;
@@ -308,8 +432,41 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
   if (!Number.isSafeInteger(pr) || pr <= 0) {
     throw new Error(`merge-recheck: pr must be a positive safe integer — got ${String(pr)}`);
   }
-  const payload = asRecord(
-    await ghJson<unknown>(gh, [
+  const reviews: BoundReview[] = [];
+  let forcePushEpoch = 0;
+  let truncated = false;
+  let first: Record<string, unknown> | null = null;
+  const reviewsPaging: PagedConnection = { cursor: null, done: false };
+  const timelinePaging: PagedConnection = { cursor: null, done: false };
+
+  /** Consume one page of a live connection and advance (or finish) it. */
+  const advance = (
+    paging: PagedConnection,
+    connection: unknown,
+    page: number,
+    take: (nodes: unknown[]) => void,
+  ): void => {
+    if (paging.done) return;
+    const read = readPage(connection);
+    if (read === null) {
+      truncated = true;
+      paging.done = true;
+      return;
+    }
+    take(read.nodes);
+    if (!read.more) {
+      paging.done = true;
+    } else if (page < SNAPSHOT_PAGE_CAP && read.cursor !== null) {
+      paging.cursor = read.cursor;
+    } else {
+      // Past the cap, or more pages with no cursor to reach them.
+      truncated = true;
+      paging.done = true;
+    }
+  };
+
+  for (let page = 1; !reviewsPaging.done || !timelinePaging.done; page += 1) {
+    const args = [
       'api',
       'graphql',
       '-f',
@@ -320,26 +477,42 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
       `name=${repo}`,
       '-F',
       `pr=${String(pr)}`,
-    ]),
-  );
-  const errors = payload['errors'];
-  if (Array.isArray(errors) && errors.length > 0) {
-    const messages = errors
-      .map((error) => asString(asRecord(error)['message']) || 'unnamed error')
-      .join('; ');
-    throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
+    ];
+    if (reviewsPaging.cursor !== null) args.push('-f', `reviewsAfter=${reviewsPaging.cursor}`);
+    if (timelinePaging.cursor !== null) args.push('-f', `timelineAfter=${timelinePaging.cursor}`);
+    const payload = asRecord(await ghJson<unknown>(gh, args));
+    const errors = payload['errors'];
+    if (Array.isArray(errors) && errors.length > 0) {
+      const messages = errors
+        .map((error) => asString(asRecord(error)['message']) || 'unnamed error')
+        .join('; ');
+      throw new Error(`gh api graphql returned GraphQL errors: ${messages}`);
+    }
+    const pullValue = asRecord(asRecord(payload['data'])['repository'])['pullRequest'];
+    if (typeof pullValue !== 'object' || pullValue === null || Array.isArray(pullValue)) {
+      throw new Error(
+        `gh api graphql returned no pullRequest payload for ${owner}/${repo}#${String(pr)}`,
+      );
+    }
+    const pull = asRecord(pullValue);
+    if (first === null) {
+      first = pull;
+    } else if (asOid(pull['headRefOid']) !== asOid(first['headRefOid'])) {
+      // The PR moved mid-read: the pages describe different code.
+      truncated = true;
+      break;
+    }
+    advance(reviewsPaging, pull['reviews'], page, (nodes) => {
+      reviews.push(...nodes.map(toBoundReview));
+    });
+    // Counted from the NODES; the filtered totalCount lies (module doc).
+    advance(timelinePaging, pull['timelineItems'], page, (nodes) => {
+      forcePushEpoch += nodes.filter(
+        (node) => asString(asRecord(node)['__typename']) === 'HeadRefForcePushedEvent',
+      ).length;
+    });
   }
-  const pullValue = asRecord(asRecord(payload['data'])['repository'])['pullRequest'];
-  if (typeof pullValue !== 'object' || pullValue === null || Array.isArray(pullValue)) {
-    throw new Error(
-      `gh api graphql returned no pullRequest payload for ${owner}/${repo}#${String(pr)}`,
-    );
-  }
-  const pull = asRecord(pullValue);
-  const reviewsConnection = asRecord(pull['reviews']);
-  const timeline = asRecord(pull['timelineItems']);
-  const reviewNodes = reviewsConnection['nodes'];
-  const timelineNodes = timeline['nodes'];
+  const pull = first ?? {};
   const author = asRecord(pull['author']);
   return {
     pr,
@@ -348,14 +521,9 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
     authorLogin: asString(author['login']) || null,
     headRefOid: asOid(pull['headRefOid']),
     baseRefOid: asOid(pull['baseRefOid']),
-    // Counted from the NODES; the filtered totalCount lies (module doc).
-    forcePushEpoch: Array.isArray(timelineNodes)
-      ? timelineNodes.filter(
-          (node) => asString(asRecord(node)['__typename']) === 'HeadRefForcePushedEvent',
-        ).length
-      : 0,
-    reviews: Array.isArray(reviewNodes) ? reviewNodes.map(toBoundReview) : [],
-    truncated: connectionTruncated(pull['reviews']) || connectionTruncated(pull['timelineItems']),
+    forcePushEpoch,
+    reviews,
+    truncated,
   };
 }
 
@@ -365,8 +533,9 @@ export async function fetchPrSnapshot(deps: ForgeDeps, pr: number): Promise<PrSn
  * Whether `review`'s actor is trusted under `policy` for a PR by
  * `authorLogin`. The author and excluded logins are compared by bare name
  * (either identity form) — deliberately over-broad, which can only refuse.
- * Users need `authorType` User AND a trusted association; bots need their
- * bare name allowlisted in `trustedBots`.
+ * An author that is neither Bot nor User (null, Organization, …) is never
+ * trusted. Users need `authorType` User AND a trusted association; bots
+ * need their bare name allowlisted in `trustedBots`.
  */
 const isTrusted = (
   review: BoundReview,
@@ -374,6 +543,7 @@ const isTrusted = (
   policy: TrustPolicy,
 ): boolean => {
   if (review.authorLogin === null || review.authorLogin === '') return false;
+  if (review.authorType === 'Other') return false;
   const name = bareName(review.authorLogin);
   if (authorLogin !== null && authorLogin !== '' && bareName(authorLogin) === name) return false;
   for (const excluded of policy.excludedLogins) {
@@ -392,7 +562,8 @@ const isTrusted = (
  * Judge acceptance AT `headSha` — pure. Trusted actors only (see the module
  * doc). An outstanding objection — a trusted actor whose latest opinionated
  * review is CHANGES_REQUESTED, on ANY sha — refuses `objection_outstanding`.
- * Otherwise accepted iff some trusted actor has a SUBMITTED review with
+ * Otherwise accepted iff some trusted actor has a SUBMITTED review (a
+ * parseable submittedAt, as foldLatestOpinionated requires) with
  * `commitOid === headSha` (case-insensitive) in `policy.acceptStates`; a
  * review of any other commit never counts. `detail` is log-safe (counts and
  * actor keys only).
@@ -422,7 +593,7 @@ export function judgeAtHead(
     if (
       SHA_RE.test(head) &&
       review.commitOid === head &&
-      review.submittedAt !== null &&
+      Number.isFinite(submittedMs(review)) &&
       review.state !== null &&
       (policy.acceptStates as ReadonlySet<string>).has(review.state)
     ) {
@@ -444,7 +615,7 @@ export function judgeAtHead(
 
 /** recheckBeforeMerge's injected seams. */
 export interface RecheckDeps extends ForgeDeps {
-  /** The injected clock — read ONCE per recheck. */
+  /** The injected clock — read ONCE per recheck, AFTER the snapshot fetch. */
   nowMs: () => number;
   /** Minimum spacing between the first and the recheck observation. */
   settleMs: number;
@@ -465,9 +636,6 @@ const recheckOrThrow = async (
     return refuse('unpinned head: the merge carries no 40-hex matchHeadCommit');
   }
   const expected = expectedHead.toLowerCase();
-  // ONE clock read, BEFORE the fetch: the recheck stamp can only understate
-  // the elapsed settle time (fail closed).
-  const nowMs = deps.nowMs();
   // (b) The immediate re-fetch.
   let snapshot: PrSnapshot;
   try {
@@ -475,6 +643,10 @@ const recheckOrThrow = async (
   } catch (error) {
     return refuse(`recheck fetch failed: ${describeError(error)}`);
   }
+  // ONE clock read, AFTER the fetch: the observation stamped below records
+  // what the fetch saw, so its stamp must never predate the fetch (a new
+  // anchor stamped early would lengthen the measured settle — fail open).
+  const nowMs = deps.nowMs();
   // (c)–(e) Structural gates.
   if (!snapshot.open) return refuse('pr is not open');
   if (snapshot.draft) return refuse('pr is a draft');
@@ -492,38 +664,65 @@ const recheckOrThrow = async (
     base: snapshot.baseRefOid,
     forcePushEpoch: snapshot.forcePushEpoch,
   };
-  // (f) Durable observation — no durable observation, no merge.
-  let written: SettleState;
+  // (f) The observation, computed IN MEMORY on the durable ledger — an
+  // unreadable ledger is no durable observation, so no merge.
+  let read: StateBranchSnapshot;
   try {
-    const read = await readSettleState(deps);
-    written = observe(read.state, pr, tuple, nowMs, RECHECK_BY);
-    const write = await writeSettleState(
-      deps,
-      { state: written, parentCommit: read.parentCommit },
-      `settle: recheck pr #${String(pr)}`,
-    );
-    if (!write.ok) return refuse(`settle state not durable: ${write.reason}`);
+    read = await readSettleState(deps);
   } catch (error) {
     return refuse(`settle state not durable: ${describeError(error)}`);
   }
+  const observed = observeWithChange(read.state, pr, tuple, nowMs, RECHECK_BY);
+  const persist = (): Promise<StateBranchWriteResult> =>
+    writeSettleState(
+      deps,
+      { state: observed.state, parentCommit: read.parentCommit },
+      `settle: recheck pr #${String(pr)}`,
+    );
+  // A refusal writes only a NEW anchor (created/reset record), best effort
+  // — the answer is a refusal either way, but a later run must be able to
+  // settle from it. A refusal on an unchanged tuple writes nothing.
+  const refuseAfterObserving = async (reason: string): Promise<RecheckResult> => {
+    if (observed.changed !== 'appended') {
+      try {
+        await persist();
+      } catch {
+        // Best effort: the refusal stands regardless.
+      }
+    }
+    return refuse(reason);
+  };
   // (g) Head-bound acceptance.
   const judgment = judgeAtHead(snapshot, expected, deps.policy);
-  if (!judgment.accepted) return refuse(`${judgment.reason}: ${judgment.detail}`);
-  // (h) Settle, judged on the WRITTEN state.
-  const settle = settleStatus(written.prs[String(pr)], tuple, nowMs, deps.settleMs);
-  if (!settle.settled) return refuse(`settle: ${settle.reason}`);
+  if (!judgment.accepted) {
+    return refuseAfterObserving(`${judgment.reason}: ${judgment.detail}`);
+  }
+  // (h) Settle, judged on the observed ledger.
+  const settle = settleStatus(observed.state.prs[String(pr)], tuple, nowMs, deps.settleMs);
+  if (!settle.settled) return refuseAfterObserving(`settle: ${settle.reason}`);
+  // (i) About to answer ok: the audit observation MUST be durable first.
+  let write: StateBranchWriteResult;
+  try {
+    write = await persist();
+  } catch (error) {
+    return refuse(`settle state not durable: ${describeError(error)}`);
+  }
+  if (!write.ok) return refuse(`settle state not durable: ${write.reason}`);
   return { ok: true, tuple, acceptedBy: judgment.by, firstObservedAt: settle.firstObservedAt };
 };
 
 /**
  * The merge-time recheck for PR `pr` pinned at `expectedHead`, in order:
- * (a) refuse an unpinned/non-40-hex head; (b) re-fetch the snapshot;
- * (c) refuse closed or draft; (d) refuse truncated; (e) refuse a moved head
- * or a missing base oid; (f) read the state branch, observe the tuple, and
- * WRITE it (compare-and-swap) — any read/write failure refuses as not
- * durable; (g) refuse without head-bound trusted acceptance or with an
- * outstanding objection; (h) refuse unless settled per the written ledger.
- * The clock is read ONCE. NEVER throws: every throw is a capped one-line
+ * (a) refuse an unpinned/non-40-hex head; (b) re-fetch the snapshot, then
+ * read the clock ONCE; (c) refuse closed or draft; (d) refuse truncated;
+ * (e) refuse a moved head or a missing base oid; (f) read the state branch
+ * (a read failure refuses as not durable) and observe the tuple in memory;
+ * (g) refuse without head-bound trusted acceptance or with an outstanding
+ * objection; (h) refuse unless settled per the observed ledger; (i) WRITE
+ * the observation (compare-and-swap) and answer ok — a failed write
+ * refuses as not durable. A refusal at (g)/(h) writes only when the
+ * observation created/reset the record (best effort); on an unchanged
+ * tuple it writes nothing. NEVER throws: every throw is a capped one-line
  * `ok: false` reason.
  */
 export async function recheckBeforeMerge(
@@ -542,11 +741,19 @@ export async function recheckBeforeMerge(
 
 /** observeOpenPrs's outcome. */
 export interface ObserveOpenPrsResult {
-  /** PRs whose tuple was observed into the written state. */
+  /**
+   * PRs whose live tuple the ledger now anchors — newly created/reset and
+   * already-anchored alike; empty when the ledger read or the write failed.
+   */
   observed: number[];
   /** PRs not observed, with the one-line why. */
   skipped: Array<{ pr: number; reason: string }>;
-  /** The ONE write's outcome; null when `prs` was empty (no write attempted). */
+  /** Why (parts of) the persisted ledger were discarded on read — the audit trail. */
+  discarded: string[];
+  /**
+   * The write's outcome; null when nothing material changed (no record
+   * created, reset, or pruned) or `prs` was empty — no write attempted.
+   */
   write: { ok: true; commit: string } | { ok: false; reason: string } | null;
 }
 
@@ -555,8 +762,12 @@ export interface ObserveOpenPrsResult {
  * isolation (a fetch failure, truncated snapshot, closed PR, or missing
  * head/base oid is SKIPPED with a reason — never fatal to its siblings),
  * then read the ledger ONCE, observe every good tuple, prune records of
- * PRs not in `prs` (the caller passes the full open set), and write ONCE.
- * An empty `prs` attempts nothing (`write: null`).
+ * PRs not in `prs` (the caller passes the full open set), and write at most
+ * ONCE — only when the ledger changed MATERIALLY: a record created or reset
+ * (a new anchor) or a record pruned. A same-tuple observation is NOT
+ * appended (the first observation anchors settle; the merge-time recheck
+ * supplies the second), so an idle repo costs no state-branch push. An
+ * empty `prs` attempts nothing (`write: null`).
  * The clock is read once, AFTER the fetches (stamps can only be late — an
  * anchor stamped late shortens the measured settle; fail closed). A read
  * throw or refused write is reported in `write`; NEVER throws.
@@ -567,7 +778,7 @@ export async function observeOpenPrs(
 ): Promise<ObserveOpenPrsResult> {
   // Nothing to observe: never prune the ledger from an empty list (an empty
   // input is more likely a failed listing than a truly empty repo).
-  if (prs.length === 0) return { observed: [], skipped: [], write: null };
+  if (prs.length === 0) return { observed: [], skipped: [], discarded: [], write: null };
   const skipped: Array<{ pr: number; reason: string }> = [];
   const tuples: Array<{ pr: number; tuple: SettleTuple }> = [];
   for (const pr of prs) {
@@ -592,29 +803,45 @@ export async function observeOpenPrs(
     }
   }
   const observed: number[] = [];
+  let discarded: string[] = [];
   try {
     const nowMs = deps.nowMs();
     const read = await readSettleState(deps);
+    discarded = read.discarded;
     let state = read.state;
+    let material = false;
     for (const { pr, tuple } of tuples) {
       try {
-        state = observe(state, pr, tuple, nowMs, OBSERVE_BY);
+        const next = observeWithChange(state, pr, tuple, nowMs, OBSERVE_BY);
+        // A same-tuple append is dropped: the anchor already stands.
+        if (next.changed !== 'appended') {
+          state = next.state;
+          material = true;
+        }
         observed.push(pr);
       } catch (error) {
         skipped.push({ pr, reason: `observe failed: ${describeError(error)}` });
       }
     }
-    state = pruneToOpen(state, new Set(prs));
+    const pruned = pruneToOpen(state, new Set(prs));
+    if (Object.keys(pruned.prs).length !== Object.keys(state.prs).length) material = true;
+    if (!material) return { observed, skipped, discarded, write: null };
     const write = await writeSettleState(
       deps,
-      { state, parentCommit: read.parentCommit },
-      `settle: observe ${String(observed.length)} open pr(s)`,
+      { state: pruned, parentCommit: read.parentCommit },
+      `settle: observe ${String(prs.length)} open pr(s)`,
     );
-    if (!write.ok)
-      return { observed: [], skipped, write: { ok: false, reason: oneLine(write.reason) } };
-    return { observed, skipped, write: { ok: true, commit: write.commit } };
+    if (!write.ok) {
+      return {
+        observed: [],
+        skipped,
+        discarded,
+        write: { ok: false, reason: oneLine(write.reason) },
+      };
+    }
+    return { observed, skipped, discarded, write: { ok: true, commit: write.commit } };
   } catch (error) {
-    return { observed: [], skipped, write: { ok: false, reason: describeError(error) } };
+    return { observed: [], skipped, discarded, write: { ok: false, reason: describeError(error) } };
   }
 }
 

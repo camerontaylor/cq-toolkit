@@ -327,7 +327,10 @@ describe('writeSettleState', () => {
     expect(store.refs.get(REF)).toBe(w2.commit);
     expect(store.commits.get(w2.commit)?.parents).toEqual([w1.commit]);
     const patch = calls.find((c) => c.includes('PATCH'));
-    expect(patch).toContain('force=false');
+    // The exact argv PAIR: `-F force=false` (a typed boolean), adjacent.
+    const forceAt = patch?.indexOf('force=false') ?? -1;
+    expect(forceAt).toBeGreaterThan(0);
+    expect(patch?.slice(forceAt - 1, forceAt + 1)).toEqual(['-F', 'force=false']);
     expect((await readSettleState(deps(gh))).state).toEqual(s2);
   });
 

@@ -41,8 +41,18 @@
 // identity; no worker holds it — conflict resolution is disabled in self-
 // host). Never the Actions cache: the journal root under .selfhost/journal
 // is cached and evictable, so the state branch is the persistence. Every
-// real run first observes all open candidates (one write), and the recheck
-// appends its own observation before judging. A refusal surfaces as a
+// real run first observes all open candidates (at most one write, and only
+// when an anchor is new or a record is pruned), and the recheck adds its
+// own observation before judging (written only on ok or a new anchor).
+//
+// AUTOMATION IDENTITY. A real run first resolves the token's own login
+// (`gh api user`) and excludes it from trust — the automation can never
+// accept its own work. An integration (App) token cannot read /user
+// (HTTP 403 "Resource not accessible by integration"); that is fine: App
+// bot identities are never trusted unless allowlisted, and the structural
+// automation bots are always excluded. Any OTHER failure fails closed —
+// every merge-time recheck refuses 'automation identity unresolved'. The
+// dry run skips resolution. A refusal surfaces as a
 // failed merge row ("cq merge-time recheck refused pr N: …") in needsHuman —
 // recorded limitation: executeMerges has no 'deferred' outcome, so a PR
 // that is merely not yet settled shows there until a later run merges it.
@@ -63,7 +73,7 @@ import type { PrClassification } from '../ops/merge/classifyPrs.js';
 import { realMergeEffects, type MergeEffects } from '../ops/merge/effects.js';
 import { makeRunMergePrsOp } from '../ops/merge/runPrs.js';
 import type { MergePrsCandidate, MergePrsOutcome, RunMergePrsInput } from '../ops/merge/runPrs.js';
-import { makeGhRunner, type GhFn } from '../ops/review/gh.js';
+import { GhError, ghJson, makeGhRunner, type GhFn } from '../ops/review/gh.js';
 import { list } from '../registry/index.js';
 import { makeMergePrsPlan } from '../plans/merge-prs.js';
 import { fetchMergeCandidates, type ExcludedCandidate } from './candidates.js';
@@ -134,9 +144,69 @@ export interface SelfMergePrsCfg {
   /**
    * The merge-time recheck's trust set (plan D3). Default
    * CONSERVATIVE_TRUST_POLICY — the resolved D3 trust config from W1.1 /
-   * RS-15 Annex B replaces this default when it lands.
+   * RS-15 Annex B (via trustPolicyFromConfig) replaces this default when it
+   * lands. The resolved automation login is always added to its exclusions.
    */
   trustPolicy?: TrustPolicy;
+}
+
+/**
+ * The run-start resolution of the token's own login. The login is a
+ * structural fact (an account name, never a secret) and rides the payload.
+ */
+export interface AutomationIdentity {
+  /** True iff `gh api user` answered a login. */
+  resolved: boolean;
+  /** The resolved login. */
+  login?: string;
+  /** Why it is unresolved (one line, capped); absent when resolved. */
+  reason?: string;
+}
+
+/** Cap for the unresolved-identity reason (the recheck's REASON_MAX). */
+const IDENTITY_REASON_MAX = 500;
+
+/**
+ * Resolve the automation identity. `refusal` is null when the run may
+ * proceed (resolved, or an integration token — see the module doc) and the
+ * one-line refusal every recheck must answer otherwise. Never throws.
+ */
+export async function resolveAutomationIdentity(
+  gh: GhFn,
+): Promise<{ identity: AutomationIdentity; refusal: string | null }> {
+  const cap = (text: string): string =>
+    (text.split('\n', 1)[0] ?? '').slice(0, IDENTITY_REASON_MAX);
+  try {
+    const user = await ghJson<unknown>(gh, ['api', 'user']);
+    const login =
+      typeof user === 'object' && user !== null && !Array.isArray(user)
+        ? (user as Record<string, unknown>)['login']
+        : undefined;
+    if (typeof login === 'string' && login.trim() !== '') {
+      return { identity: { resolved: true, login }, refusal: null };
+    }
+    const reason = 'gh api user returned no login';
+    return { identity: { resolved: false, reason }, refusal: reason };
+  } catch (error) {
+    const stderr = error instanceof GhError ? error.stderr : '';
+    if (/Resource not accessible by integration|HTTP 403/.test(stderr)) {
+      return {
+        identity: {
+          resolved: false,
+          reason: cap(`integration token (no /user): ${stderr.trim()}`),
+        },
+        refusal: null,
+      };
+    }
+    const reason = cap(
+      error instanceof GhError
+        ? `gh exit ${String(error.code)}: ${stderr.trim() === '' ? error.message : stderr.trim()}`
+        : error instanceof Error
+          ? error.message
+          : String(error),
+    );
+    return { identity: { resolved: false, reason }, refusal: reason };
+  }
 }
 
 /**
@@ -163,6 +233,8 @@ export type SelfMergePrsResult =
       report: RunReport;
       /** The run-start durable settle observation pass over the open candidates. */
       settleObservation: ObserveOpenPrsResult;
+      /** The run-start automation-identity resolution (excluded from trust). */
+      automationIdentity: AutomationIdentity;
     };
 
 /**
@@ -281,10 +353,16 @@ export async function runSelfMergePrs(
   // never touching the journal.
   const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
   mkdirSync(journalRoot, { recursive: true });
+  // AUTOMATION IDENTITY (module doc): resolved once, before any merge can
+  // be attempted; an unresolved identity (other than an integration token)
+  // refuses every recheck rather than throwing the run.
+  const { identity: automationIdentity, refusal: identityRefusal } =
+    await resolveAutomationIdentity(deps.gh);
   // RUN-START DURABLE OBSERVATION (W1.2): one snapshot per open candidate,
-  // ONE state-branch write (records of PRs outside this set are pruned —
-  // a PR excluded this run restarts its settle, which can only delay a
-  // merge). Never throws; a failed write does not stop the run — the
+  // at most ONE state-branch write, and only for a new/reset anchor or a
+  // pruned record (records of PRs outside this set are pruned — a PR
+  // excluded this run restarts its settle, which can only delay a merge).
+  // Never throws; a failed write does not stop the run — the
   // recheck refuses any merge that lacks a durable observation anyway.
   const settleObservation = await observeOpenPrs(
     { gh: deps.gh, owner: cfg.owner, repo: cfg.repo, nowMs: clock },
@@ -317,7 +395,17 @@ export async function runSelfMergePrs(
   // merge-time recheck over the real (or seam-injected) inner effects. An
   // injected driverRegistryView is used verbatim (its scripted op owns its
   // merge path).
-  const policy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
+  const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
+  const policy: TrustPolicy =
+    automationIdentity.login === undefined
+      ? basePolicy
+      : {
+          ...basePolicy,
+          excludedLogins: new Set([
+            ...basePolicy.excludedLogins,
+            automationIdentity.login.toLowerCase(),
+          ]),
+        };
   const settleMs = defaultClassifyPrConfig.settleWindowMs; // the I2 settle constant
   const view =
     deps.driverRegistryView ??
@@ -330,11 +418,16 @@ export async function runSelfMergePrs(
           protectedBranch: SelfhostDefaults.protectedBranch,
         }),
       recheck: (pr, head) =>
-        recheckBeforeMerge(
-          { gh: deps.gh, owner: cfg.owner, repo: cfg.repo, nowMs: clock, settleMs, policy },
-          pr,
-          head,
-        ),
+        identityRefusal !== null
+          ? Promise.resolve<RecheckResult>({
+              ok: false,
+              reason: `automation identity unresolved: ${identityRefusal}`,
+            })
+          : recheckBeforeMerge(
+              { gh: deps.gh, owner: cfg.owner, repo: cfg.repo, nowMs: clock, settleMs, policy },
+              pr,
+              head,
+            ),
     });
   const report = withBudgetStop(
     await runPlan(plan, runOptions, governRegistry(view, governor)),
@@ -346,7 +439,7 @@ export async function runSelfMergePrs(
     jobRow !== undefined && jobRow.result.status === 'ok'
       ? (jobRow.result.value as MergePrsOutcome)
       : null;
-  return { excluded: fetched.excluded, outcome, report, settleObservation };
+  return { excluded: fetched.excluded, outcome, report, settleObservation, automationIdentity };
 }
 
 /**
@@ -401,10 +494,12 @@ async function main(): Promise<void> {
           needsHuman: result.outcome?.needsHuman ?? [],
           diagnosis: result.outcome?.diagnosis ?? null,
           excluded: result.excluded,
-          // Structural facts only: PR numbers, one-line reasons, write ok.
+          // Structural facts only: PR numbers, one-line reasons, write ok,
+          // and the automation login (an account name, never a secret).
           settleObservation: {
             observed: result.settleObservation.observed,
             skipped: result.settleObservation.skipped,
+            discarded: result.settleObservation.discarded,
             write:
               result.settleObservation.write === null
                 ? null
@@ -412,6 +507,7 @@ async function main(): Promise<void> {
                   ? { ok: true }
                   : { ok: false, reason: result.settleObservation.write.reason },
           },
+          automationIdentity: result.automationIdentity,
           report: {
             stoppedEarly: result.report.stoppedEarly,
             ...(result.report.earlyStopReason !== undefined

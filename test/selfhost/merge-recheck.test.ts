@@ -14,9 +14,12 @@
 // re-fetch ordering, objection folding (old-sha CHANGES_REQUESTED blocks;
 // same-actor later APPROVED supersedes; COMMENTED does not), bot identity
 // folding and allowlisting, author/excluded exclusion, the client-side
-// force-push epoch, every structural refusal, CAS-failure refusal, never
-// throwing, observeOpenPrs isolation/pruning/single write, and the
-// non-retryable refusal stderr.
+// force-push epoch, cursor pagination (page cap and mid-read head moves
+// fail closed), trustPolicyFromConfig's narrowing, every structural
+// refusal, CAS-failure refusal, never throwing, write minimization
+// (observeOpenPrs and the recheck write only on material change; an ok
+// recheck writes BEFORE the inner merge), observeOpenPrs
+// isolation/pruning/single write, and the non-retryable refusal stderr.
 import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -24,6 +27,8 @@ import type { MergeEffects } from '../../src/ops/merge/effects.js';
 import {
   CONSERVATIVE_TRUST_POLICY,
   PR_SNAPSHOT_QUERY,
+  SNAPSHOT_PAGE_CAP,
+  STRUCTURAL_EXCLUDED_LOGINS,
   actorKey,
   fetchPrSnapshot,
   foldLatestOpinionated,
@@ -31,6 +36,7 @@ import {
   judgeAtHead,
   observeOpenPrs,
   recheckBeforeMerge,
+  trustPolicyFromConfig,
 } from '../../src/selfhost/merge-recheck.js';
 import type { RecheckResult, TrustPolicy } from '../../src/selfhost/merge-recheck.js';
 import { readSettleState } from '../../src/selfhost/state-branch.js';
@@ -51,7 +57,7 @@ const LATER = T0 + SETTLE_MS + 60_000;
 
 interface ReviewSpec {
   login: string | null;
-  typename?: string;
+  typename?: string | undefined;
   association?: string;
   state: string;
   submittedAt: string | null;
@@ -71,6 +77,8 @@ interface PrSpec {
   omitReviews: boolean;
   errors: string[] | null;
   missing: boolean;
+  /** When set, pages after the first report this headRefOid (a mid-read push). */
+  headOnLaterPages: string | null;
 }
 
 const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
@@ -86,6 +94,7 @@ const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
   omitReviews: false,
   errors: null,
   missing: false,
+  headOnLaterPages: null,
   ...over,
 });
 
@@ -99,9 +108,27 @@ const review = (over: Partial<ReviewSpec> = {}): ReviewSpec => ({
   ...over,
 });
 
-const payloadFor = (spec: PrSpec): unknown => {
+const flagValue = (args: string[], name: string): string => {
+  const entry = args.find((a) => a.startsWith(`${name}=`));
+  return entry === undefined ? '' : entry.slice(name.length + 1);
+};
+
+/** The fake's page size (the query's `first: 100`). */
+const PAGE = 100;
+
+/**
+ * One page of the snapshot payload. Cursors are decimal offsets; each
+ * connection pages independently off its own `-f <name>After=` flag.
+ * `reviewsHasNext` forces a hasNextPage with NO cursor (unreachable → truncated).
+ */
+const payloadFor = (spec: PrSpec, args: string[]): unknown => {
   if (spec.errors !== null) return { errors: spec.errors.map((message) => ({ message })) };
   if (spec.missing) return { data: { repository: { pullRequest: null } } };
+  const reviewsFrom = Number(flagValue(args, 'reviewsAfter') || '0');
+  const timelineFrom = Number(flagValue(args, 'timelineAfter') || '0');
+  const laterPage = reviewsFrom > 0 || timelineFrom > 0;
+  const reviewsMore = reviewsFrom + PAGE < spec.reviews.length;
+  const timelineMore = timelineFrom + PAGE < spec.forcePushes;
   return {
     data: {
       repository: {
@@ -109,15 +136,27 @@ const payloadFor = (spec: PrSpec): unknown => {
           state: spec.state,
           isDraft: spec.isDraft,
           author: { login: spec.author, __typename: 'User' },
-          headRefOid: spec.head,
+          headRefOid:
+            laterPage && spec.headOnLaterPages !== null ? spec.headOnLaterPages : spec.head,
           baseRefOid: spec.base,
           ...(spec.omitReviews
             ? {}
             : {
                 reviews: {
-                  pageInfo: { hasNextPage: spec.reviewsHasNext },
-                  nodes: spec.reviews.map((r) => ({
-                    author: r.login === null ? null : { login: r.login, __typename: r.typename },
+                  pageInfo: spec.reviewsHasNext
+                    ? { hasNextPage: true, endCursor: null }
+                    : {
+                        hasNextPage: reviewsMore,
+                        endCursor: reviewsMore ? String(reviewsFrom + PAGE) : null,
+                      },
+                  nodes: spec.reviews.slice(reviewsFrom, reviewsFrom + PAGE).map((r) => ({
+                    author:
+                      r.login === null
+                        ? null
+                        : {
+                            login: r.login,
+                            ...(r.typename === undefined ? {} : { __typename: r.typename }),
+                          },
                     authorAssociation: r.association,
                     state: r.state,
                     submittedAt: r.submittedAt,
@@ -128,10 +167,14 @@ const payloadFor = (spec: PrSpec): unknown => {
           timelineItems: {
             // The UNFILTERED count GitHub reports — never read.
             totalCount: spec.timelineTotalCount,
-            pageInfo: { hasNextPage: false },
-            nodes: Array.from({ length: spec.forcePushes }, () => ({
-              __typename: 'HeadRefForcePushedEvent',
-            })),
+            pageInfo: {
+              hasNextPage: timelineMore,
+              endCursor: timelineMore ? String(timelineFrom + PAGE) : null,
+            },
+            nodes: Array.from(
+              { length: Math.max(0, Math.min(PAGE, spec.forcePushes - timelineFrom)) },
+              () => ({ __typename: 'HeadRefForcePushedEvent' }),
+            ),
           },
         },
       },
@@ -151,11 +194,6 @@ const unprocessable = (msg: string): GhResult => ({
   stderr: `gh: ${msg} (HTTP 422)`,
 });
 const sha1 = (text: string): string => createHash('sha1').update(text).digest('hex');
-
-const flagValue = (args: string[], name: string): string => {
-  const entry = args.find((a) => a.startsWith(`${name}=`));
-  return entry === undefined ? '' : entry.slice(name.length + 1);
-};
 
 interface Forge {
   gh: GhFn;
@@ -200,7 +238,7 @@ const makeForge = (prs: Record<number, PrSpec>): Forge => {
       const spec = forge.prs.get(pr);
       return spec === undefined
         ? okRes({ data: { repository: { pullRequest: null } } })
-        : okRes(payloadFor(spec));
+        : okRes(payloadFor(spec, args));
     }
     let method = 'GET';
     let path = '';
@@ -349,12 +387,63 @@ describe('fetchPrSnapshot', () => {
       'pr=7',
     ]);
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/\$query\b/);
+    expect(PR_SNAPSHOT_QUERY).toMatch(/\$reviewsAfter: String, \$timelineAfter: String/);
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/totalCount/);
+    expect(calls).toHaveLength(1); // one page: no cursor flag ever sent
+  });
+
+  test('>100 reviews page across 2 requests; a trusted approval on page 2 is accepted', async () => {
+    const crowd = Array.from({ length: 140 }, (_, i) =>
+      review({ login: `drive-by-${String(i)}`, association: 'NONE', state: 'COMMENTED' }),
+    );
+    const forge = makeForge({ 7: prSpec({ reviews: [...crowd, review({ login: 'carol' })] }) });
+    const calls: string[][] = [];
+    const snap = await fetchPrSnapshot(
+      {
+        ...forgeDeps(forge),
+        gh: (args) => {
+          calls.push(args);
+          return forge.gh(args);
+        },
+      },
+      7,
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.slice(-2)).toEqual(['-f', 'reviewsAfter=100']);
+    expect(calls[1]?.some((arg) => arg.startsWith('timelineAfter='))).toBe(false);
+    expect(snap.truncated).toBe(false);
+    expect(snap.reviews).toHaveLength(141);
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toEqual({
+      accepted: true,
+      by: ['user:carol'],
+    });
+  });
+
+  test('more pages than the cap → truncated, and the recheck refuses', async () => {
+    const many = Array.from({ length: SNAPSHOT_PAGE_CAP * 100 + 1 }, () => review());
+    const forge = makeForge({ 7: prSpec({ reviews: many }) });
+    const snap = await fetchPrSnapshot(forgeDeps(forge), 7);
+    expect(snap.truncated).toBe(true);
+    expect(forge.log.filter((entry) => entry === 'graphql:7')).toHaveLength(SNAPSHOT_PAGE_CAP);
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B);
+    expect(result).toEqual({
+      ok: false,
+      reason: 'snapshot truncated: reviews or force-push timeline incomplete',
+    });
+  });
+
+  test('a head that moves between pages → truncated (the PR moved mid-read)', async () => {
+    const crowd = Array.from({ length: 150 }, () => review());
+    const snap = await snapshotOf(prSpec({ reviews: crowd, headOnLaterPages: SHA_A }));
+    expect(snap.truncated).toBe(true);
+    expect(snap.headRefOid).toBe(SHA_B); // head/base come from the first page
   });
 
   test('force-push epoch is counted from nodes, never the unfiltered totalCount', async () => {
     const snap = await snapshotOf(prSpec({ forcePushes: 1, timelineTotalCount: 987_654 }));
     expect(snap.forcePushEpoch).toBe(1);
+    // Paged: 130 events over two timeline pages all count.
+    expect((await snapshotOf(prSpec({ forcePushes: 130 }))).forcePushEpoch).toBe(130);
   });
 
   test('truncated on hasNextPage or a missing connection; malformed oids → null', async () => {
@@ -519,6 +608,34 @@ describe('judgeAtHead', () => {
     expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({ reason: 'no_head_bound_acceptance' });
   });
 
+  test('a null author or a non-User/Bot author type (Organization) is never trusted', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ login: null, association: 'OWNER' }),
+          review({ login: 'acme', typename: 'Organization', association: 'OWNER' }),
+          review({ login: 'coderabbitai', typename: 'Organization', association: 'NONE' }),
+          review({ login: 'ghost', typename: undefined, association: 'MEMBER' }),
+        ],
+      }),
+    );
+    const withBot = trustPolicyFromConfig({ trustedBots: ['coderabbitai[bot]'] });
+    for (const policy of [CONSERVATIVE_TRUST_POLICY, withBot]) {
+      expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({
+        accepted: false,
+        reason: 'no_head_bound_acceptance',
+        detail: expect.stringContaining('trusted=0') as unknown,
+      });
+    }
+  });
+
+  test('an acceptance needs a PARSEABLE submittedAt', async () => {
+    const snap = await snapshotOf(prSpec({ reviews: [review({ submittedAt: 'not-a-date' })] }));
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      reason: 'no_head_bound_acceptance',
+    });
+  });
+
   test('an untrusted association never counts; a pending review never counts', async () => {
     const snap = await snapshotOf(
       prSpec({
@@ -531,6 +648,75 @@ describe('judgeAtHead', () => {
     expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
       reason: 'no_head_bound_acceptance',
     });
+  });
+});
+
+describe('trustPolicyFromConfig', () => {
+  test('blank config = the conservative blanks plus the structural exclusions', () => {
+    const blank = trustPolicyFromConfig({});
+    expect([...blank.trustedAssociations]).toEqual(['OWNER', 'MEMBER', 'COLLABORATOR']);
+    expect([...blank.trustedBots]).toEqual([]);
+    expect([...blank.acceptStates]).toEqual(['APPROVED']);
+    expect([...blank.excludedLogins].sort()).toEqual([...STRUCTURAL_EXCLUDED_LOGINS].sort());
+    expect(CONSERVATIVE_TRUST_POLICY).toEqual(blank);
+    expect(Object.isFrozen(CONSERVATIVE_TRUST_POLICY)).toBe(true);
+  });
+
+  test('bot logins normalize to the bare name; excluded identities are dropped', () => {
+    const policy = trustPolicyFromConfig({
+      trustedBots: [
+        'coderabbitai[bot]',
+        ' CodeRabbitAI ',
+        'github-actions[bot]',
+        'cq-verdict',
+        'mybot[bot]',
+        '',
+      ],
+      automationLogin: 'mybot[bot]',
+    });
+    expect([...policy.trustedBots]).toEqual(['coderabbitai']);
+    expect(policy.excludedLogins.has('mybot[bot]')).toBe(true);
+  });
+
+  test('trustedAssociations may only narrow the blank set', () => {
+    expect([
+      ...trustPolicyFromConfig({ trustedAssociations: ['owner', 'CONTRIBUTOR', 'NONE'] })
+        .trustedAssociations,
+    ]).toEqual(['OWNER']);
+    expect(
+      trustPolicyFromConfig({ trustedAssociations: ['CONTRIBUTOR'] }).trustedAssociations.size,
+    ).toBe(0);
+    expect(trustPolicyFromConfig({ trustedAssociations: [] }).trustedAssociations.size).toBe(3);
+  });
+
+  test('acceptStates keeps only APPROVED/COMMENTED; blank → APPROVED', () => {
+    expect([
+      ...trustPolicyFromConfig({
+        acceptReviewStates: ['APPROVED', 'COMMENTED', 'CHANGES_REQUESTED', 'DISMISSED'],
+      }).acceptStates,
+    ]).toEqual(['APPROVED', 'COMMENTED']);
+    expect(trustPolicyFromConfig({ acceptReviewStates: ['DISMISSED'] }).acceptStates.size).toBe(0);
+    expect([...trustPolicyFromConfig({ acceptReviewStates: [] }).acceptStates]).toEqual([
+      'APPROVED',
+    ]);
+  });
+
+  test('configured and automation logins never count, in either identity form', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ login: 'robo', association: 'MEMBER' }),
+          review({ login: 'ops-person', association: 'OWNER' }),
+          review({ login: 'cq-automation', typename: 'Bot', association: 'NONE' }),
+        ],
+      }),
+    );
+    const policy = trustPolicyFromConfig({
+      automationLogin: 'robo',
+      excludedLogins: ['Ops-Person'],
+      trustedBots: ['cq-automation[bot]'],
+    });
+    expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({ reason: 'no_head_bound_acceptance' });
   });
 });
 
@@ -614,8 +800,61 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
   test('settle pending when the second observation is too soon', async () => {
     const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
     await seedObservation(forge, [7]);
+    forge.log.length = 0;
     const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B);
     expect(result).toEqual({ ok: false, reason: 'settle: settle_pending' });
+    // A refusal on an unchanged tuple writes nothing.
+    expect(forge.log.filter((entry) => /^state:(POST|PATCH)/.test(entry))).toEqual([]);
+  });
+
+  test('a refusal that creates a new anchor writes it (best effort) so a later run can settle', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    const result = await recheckBeforeMerge(recheckDeps(forge, T0), 7, SHA_B);
+    expect(result).toEqual({ ok: false, reason: 'settle: single_observation' });
+    const { state } = await readSettleState(forgeDeps(forge));
+    expect(state.prs['7']?.observations).toEqual([
+      { observedAt: new Date(T0).toISOString(), by: 'self-merge-prs:recheck' },
+    ]);
+    // The anchor it wrote settles a recheck past the window.
+    expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B)).ok).toBe(true);
+  });
+
+  test('an ok recheck writes its observation BEFORE the inner mergePr', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    forge.log.length = 0;
+    const { effects } = gated(forge, LATER);
+    expect((await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B })).code).toBe(0);
+    const patchAt = forge.log.findIndex((entry) => entry.startsWith('state:PATCH'));
+    expect(patchAt).toBeGreaterThan(forge.log.indexOf('graphql:7'));
+    expect(patchAt).toBeLessThan(forge.log.indexOf('inner-merge:7'));
+    const { state } = await readSettleState(forgeDeps(forge));
+    expect(state.prs['7']?.observations.map((o) => o.observedAt)).toEqual([
+      new Date(T0).toISOString(),
+      new Date(LATER).toISOString(),
+    ]);
+  });
+
+  test('the clock is read AFTER the snapshot fetch', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    const order: string[] = [];
+    const gh: GhFn = (args) => {
+      if (args[1] === 'graphql') order.push('fetch');
+      return forge.gh(args);
+    };
+    await recheckBeforeMerge(
+      {
+        ...recheckDeps(forge, T0),
+        gh,
+        nowMs: () => {
+          order.push('clock');
+          return T0;
+        },
+      },
+      7,
+      SHA_B,
+    );
+    expect(order).toEqual(['fetch', 'clock']);
   });
 
   test('refusals: head moved, unpinned, closed, draft, truncated reviews', async () => {
@@ -733,7 +972,42 @@ describe('observeOpenPrs', () => {
     expect(forge.log.filter((entry) => entry.startsWith('state:PATCH'))).toHaveLength(1);
     const { state } = await readSettleState(forgeDeps(forge));
     expect(Object.keys(state.prs).sort()).toEqual(['1', '2']);
-    expect(state.prs['1']?.observations).toHaveLength(2);
+    // PR 1's same-tuple observation is NOT appended (the prune alone made
+    // the write material); the T0 anchor stands.
+    expect(state.prs['1']?.observations).toEqual([
+      { observedAt: new Date(T0).toISOString(), by: 'self-merge-prs:observe' },
+    ]);
+  });
+
+  test('a pass with only same-tuple observations makes NO state-branch write', async () => {
+    const forge = makeForge({ 1: prSpec(), 2: prSpec({ head: SHA_A }) });
+    await seedObservation(forge, [1, 2]);
+    forge.log.length = 0;
+    const result = await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => LATER }, [1, 2]);
+    expect(result).toEqual({ observed: [1, 2], skipped: [], discarded: [], write: null });
+    expect(forge.log.filter((entry) => /^state:(POST|PATCH)/.test(entry))).toEqual([]);
+  });
+
+  test('a moved head resets its record and is written; discarded reasons surface', async () => {
+    const forge = makeForge({ 1: prSpec() });
+    await seedObservation(forge, [1]);
+    forge.prs.set(1, prSpec({ head: SHA_A }));
+    const result = await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => LATER }, [1]);
+    expect(result.write?.ok).toBe(true);
+    const { state } = await readSettleState(forgeDeps(forge));
+    expect(state.prs['1']?.tuple.head).toBe(SHA_A);
+    expect(state.prs['1']?.observations).toHaveLength(1);
+
+    // A foreign ledger is discarded on read; the reason rides the result.
+    const foreign = makeForge({ 1: prSpec() });
+    foreign.hook = (args) =>
+      (args[1] ?? '').includes('git/ref/')
+        ? okRes({ object: { sha: 'e'.repeat(40) } })
+        : (args[1] ?? '').includes('contents/')
+          ? okRes({ encoding: 'base64', content: Buffer.from('{"version":9}').toString('base64') })
+          : undefined;
+    const discardedRun = await observeOpenPrs({ ...forgeDeps(foreign), nowMs: () => T0 }, [1]);
+    expect(discardedRun.discarded).toEqual(['settle state version 9 is not 1']);
   });
 
   test('a state-branch read failure is reported, never thrown; empty input writes nothing', async () => {
@@ -748,6 +1022,7 @@ describe('observeOpenPrs', () => {
     expect(await observeOpenPrs({ ...forgeDeps(forge), nowMs: () => T0 }, [])).toEqual({
       observed: [],
       skipped: [],
+      discarded: [],
       write: null,
     });
   });

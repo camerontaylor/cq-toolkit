@@ -223,23 +223,29 @@ export function parseSettleState(
   return { state, discarded };
 }
 
+/** How one observation changed the ledger (observeWithChange's report). */
+export type ObservationChange = 'created' | 'reset' | 'appended';
+
 /**
  * Record one observation of `tuple` for `pr` at `nowMs`, returning a NEW
- * state (the input is never mutated). Same tuple → the observation is
- * appended; different or absent → the record is REPLACED by the new tuple
- * with this single observation (every prior observation is invalidated).
- * Over MAX_OBSERVATIONS_PER_PR, the first observation (the settle anchor)
- * is kept plus the newest ones. THROWS on caller bugs: a non-positive PR
- * number, a malformed tuple, a non-finite clock, or an empty `by` —
- * persisting such a record would only be dropped on the next parse.
+ * state (the input is never mutated) plus how the PR's record changed:
+ * 'created' (no prior record), 'reset' (the prior record held a different
+ * tuple and is REPLACED — every prior observation is invalidated), or
+ * 'appended' (same tuple; the observation joins the record). Over
+ * MAX_OBSERVATIONS_PER_PR, the first observation (the settle anchor) is
+ * kept plus the newest ones. The change kind is what lets a caller skip
+ * durable writes that carry no new anchor (every state-branch push costs
+ * repo CI). THROWS on caller bugs: a non-positive PR number, a malformed
+ * tuple, a non-finite clock, or an empty `by` — persisting such a record
+ * would only be dropped on the next parse.
  */
-export function observe(
+export function observeWithChange(
   state: SettleState,
   pr: number,
   tuple: SettleTuple,
   nowMs: number,
   by: string,
-): SettleState {
+): { state: SettleState; changed: ObservationChange } {
   if (!Number.isSafeInteger(pr) || pr <= 0) {
     throw new RangeError(`settle-state observe: pr must be a positive integer — got ${String(pr)}`);
   }
@@ -255,6 +261,7 @@ export function observe(
   const prs: Record<string, SettleRecord> = {};
   for (const [k, record] of Object.entries(state.prs)) prs[k] = copyRecord(record);
   const prior = prs[key];
+  let changed: ObservationChange;
   if (prior !== undefined && sameTuple(prior.tuple, tuple)) {
     const observations = [...prior.observations, observation];
     const [first] = observations;
@@ -265,10 +272,26 @@ export function observe(
           ? [first, ...observations.slice(-(MAX_OBSERVATIONS_PER_PR - 1))]
           : observations,
     };
+    changed = 'appended';
   } else {
     prs[key] = { tuple: { ...tuple }, observations: [observation] };
+    changed = prior === undefined ? 'created' : 'reset';
   }
-  return { version: state.version, repo: state.repo, prs };
+  return { state: { version: state.version, repo: state.repo, prs }, changed };
+}
+
+/**
+ * observeWithChange without the change report: the NEW state only. Same
+ * rules, same throws.
+ */
+export function observe(
+  state: SettleState,
+  pr: number,
+  tuple: SettleTuple,
+  nowMs: number,
+  by: string,
+): SettleState {
+  return observeWithChange(state, pr, tuple, nowMs, by).state;
 }
 
 /**

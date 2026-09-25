@@ -265,6 +265,12 @@ describe('runSelfMergePrs — real run', () => {
     expect(result.settleObservation.observed).toEqual([]);
     expect(result.settleObservation.skipped.map((row) => row.pr)).toEqual([7]);
     expect(result.settleObservation.write?.ok).toBe(false);
+    // This fake does not route `gh api user`: the identity is unresolved
+    // (fail closed — every recheck would refuse), recorded, never thrown.
+    expect(result.automationIdentity).toMatchObject({
+      resolved: false,
+      reason: expect.stringContaining('unrouted gh invocation: api user') as unknown,
+    });
   });
 
   test('first-run journal root: a NON-EXISTENT nested journalRoot is created and the run succeeds (KyA)', async () => {
