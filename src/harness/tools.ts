@@ -15,6 +15,7 @@
 // WorkerResult.denials verbatim. Denial reasons are human-readable strings
 // with stable PREFIXES (the conformance suite asserts on these):
 //   'sandbox: …' | 'invalid input: …' | 'path escape: …'
+//   'path not allowed: … is inside a .git directory (toolkit invariant)'
 //   'path not allowed by harness config allowlist: …'
 //   'command not allowed by harness config allowlist: …'
 //   'command allowlist: shell metacharacters not permitted with token
@@ -517,6 +518,31 @@ export function buildTools(
 
   const relOf = (abs: string): string => relative(workspaceAbs, abs).split(sep).join('/');
 
+  /**
+   * TOOLKIT-OWNED INVARIANT (W1.4 composition review F1): read/edit never
+   * touch a `.git` path, whatever `pathPatterns` say (`**` + `*` match
+   * dot-segments). Editing `.git` steers git itself: repointing a linked
+   * worktree's `.git` gitfile redirects allowlisted `git add/commit` into
+   * another repository, and `.git/config` (`core.fsmonitor`,
+   * `diff.external`, hooks paths…) makes an allowlisted `git status/diff`
+   * run an arbitrary command, bypassing commandPatterns. Checked on the
+   * LEXICAL path and on the REALPATH (a symlink into `.git` is caught when
+   * it exists), relative to the workspace root, case-insensitively (macOS
+   * and Windows filesystems resolve `.GIT` to `.git`), with Windows'
+   * trailing-dot/space aliases (`.git.`) folded in.
+   */
+  const touchesGit = async (abs: string, effective: string): Promise<boolean> => {
+    const hasGitSegment = (rel: string): boolean =>
+      rel.split(/[\\/]/).some((segment) => /^\.git[. ]*$/i.test(segment));
+    if (hasGitSegment(relative(workspaceAbs, abs))) return true;
+    const root = await workspaceRealRoot();
+    return (
+      root !== undefined && isInside(effective, root) && hasGitSegment(relative(root, effective))
+    );
+  };
+  const gitDenial = (tool: ToolkitToolName, abs: string): ToolkitToolResult =>
+    deny(tool, `path not allowed: '${relOf(abs)}' is inside a .git directory (toolkit invariant)`);
+
   const pathAllowed = (patterns: readonly string[], abs: string): boolean =>
     compilePathPatterns(patterns).some((re) => re.test(relOf(abs)));
 
@@ -577,6 +603,7 @@ export function buildTools(
             `path escape: '${parsed.data.path}' escapes the workspace through a symlink`,
           );
         }
+        if (await touchesGit(abs, effective)) return gitDenial('read', abs);
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('read', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
@@ -620,6 +647,7 @@ export function buildTools(
         if (effective === undefined) {
           return deny('edit', `path escape: '${path}' escapes the workspace through a symlink`);
         }
+        if (await touchesGit(abs, effective)) return gitDenial('edit', abs);
         if (!(await pathAllowedEverywhere(fileCfg.pathPatterns, abs, effective))) {
           return deny('edit', `path not allowed by harness config allowlist: '${relOf(abs)}'`);
         }
