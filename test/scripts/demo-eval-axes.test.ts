@@ -46,10 +46,10 @@ function runDemo(args: string[], keys: Record<string, string> = {}): SpawnSyncRe
     cwd: ROOT,
     encoding: 'utf8',
     env: envFor(keys),
-    // This is a bounded refusal before dispatch, not a provider call. A
-    // shorter structural deadline prevents a wedged child from consuming
-    // Vitest's default five-second lifecycle budget.
-    timeout: 4_000,
+    // Bounded spawn lifecycle: node startup + built-dist import + pre-dispatch
+    // refusal under host load; this catches a WEDGED child, not normal startup,
+    // and is not an assertion deadline.
+    timeout: 10_000,
     killSignal: 'SIGKILL',
   });
 }
@@ -121,16 +121,21 @@ describe('demo-eval-axes: the #30 selective credential gate (spawn e2e)', () => 
   // — usage-arg handling and per-provider key demands — is asserted at
   // module level above; this case proves the real spawned script actually
   // runs that gate before any dispatch.
-  it('#30 discriminator: a zai-only refusal proves the spawned credential wiring', () => {
-    // No keys in env at all: the OLD unconditional gate listed BOTH key vars
-    // here; the selective gate must name ZAI_API_KEY only (the glm cells
-    // never contact DeepSeek).
-    const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
-    expect(
-      res.status,
-      `${res.stdout}${res.stderr}${res.signal ? `signal=${res.signal}` : ''}`,
-    ).toBe(1);
-    expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
-    expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
-  });
+  it(
+    '#30 discriminator: a zai-only refusal proves the spawned credential wiring',
+    { timeout: 15_000 },
+    () => {
+      // The child has a 10s structural bound; this outer budget covers it plus teardown.
+      // No keys in env at all: the OLD unconditional gate listed BOTH key vars
+      // here; the selective gate must name ZAI_API_KEY only (the glm cells
+      // never contact DeepSeek).
+      const res = runDemo(['--only', 'ai-sdk/glm-5.3-flash']);
+      expect(
+        res.status,
+        `${res.stdout}${res.stderr}${res.signal ? `signal=${res.signal}` : ''}`,
+      ).toBe(1);
+      expect(res.stderr).toContain('missing key env var(s) for the selected cells: ZAI_API_KEY');
+      expect(res.stderr).not.toContain('DEEPSEEK_API_KEY');
+    },
+  );
 });
