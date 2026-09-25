@@ -17,18 +17,30 @@ conformance cases are now in-process; the real fixture contracts remain in
 the driver-specific tests. These are pre-rebase measurements, not the final
 stacked measurement.
 
-| Area                                                  |                 Baseline |       U4 current measurement | Interpretation                                                                                                         |
-| ----------------------------------------------------- | -----------------------: | ---------------------------: | ---------------------------------------------------------------------------------------------------------------------- |
-| Full suite                                            |                   1,344s | not re-measured in this unit | The U4 change is scoped to the driver transport boundary; the full-suite target belongs to the stacked PR measurement. |
-| **PLACEHOLDER — full run 1 (wall / per-file / load)** |                        — |                            — | **Orchestrator to supply the recorded stacked measurement.**                                                           |
-| **PLACEHOLDER — full run 2 (wall / per-file / load)** |                        — |                            — | **Orchestrator to supply the recorded stacked measurement.**                                                           |
-| **PLACEHOLDER — full run 3 (wall / per-file / load)** |                        — |                            — | **Orchestrator to supply the recorded stacked measurement.**                                                           |
-| `test/e2e/sweep`                                      |                     918s |            not changed by U4 | PR-2's process-count work owns this area.                                                                              |
-| `test/driver/acp.test.ts`                             |          105s, 1 failure |                        44.2s | Conformance protocol decisions use the in-process ACP adapter; retained real OS/wire contracts remain.                 |
-| `test/driver/subprocess.test.ts`                      | not separately baselined |                        20.1s | Conformance stream-json decisions use the in-process managed-child adapter.                                            |
-| `test/driver/ai-sdk.test.ts`                          | not separately baselined |                        0.39s | No U4 transport change.                                                                                                |
-| `test/driver/claude-agent.test.ts`                    | not separately baselined |                        0.51s | No U4 transport change.                                                                                                |
-| `test/driver/process-inventory.test.ts`               |                      new |                        0.08s | Cheap guard over the committed process-entry list.                                                                     |
+Final-tree framing: the loaded-host baseline was **1,344s / 2,612 tests**;
+the three consecutive final-tree runs are consistently **695–704s / 2,888
+tests**. The suite grew through upstream sweep/review feature tests merged
+from merge-queue, so the like-for-like reduction is larger than the totals
+suggest. The dominant residual is load-sensitive
+`test/e2e/sweep/sweep.e2e.test.ts` at roughly **190–480s**; its deviation
+from the ≤60s/file goal is documented alongside the rescue/assembly-policy
+rationale. The ≤180s full-suite goal was not met on this chronically loaded
+host; the per-file table is the actionable breakdown. All timing rows remain
+advisory rather than a new timeout or ratchet.
+
+| Area                                                      |                 Baseline |                                                                                      U4 current measurement | Interpretation                                                                                                         |
+| --------------------------------------------------------- | -----------------------: | ----------------------------------------------------------------------------------------------------------: | ---------------------------------------------------------------------------------------------------------------------- |
+| Full suite                                                |                   1,344s |                                                                                not re-measured in this unit | The U4 change is scoped to the driver transport boundary; the full-suite target belongs to the stacked PR measurement. |
+| **Final full run 1 (final tree)**                         |                        — |                                                  703.98s wall; exit 0; load 3.74/3.92/3.90 → 4.56/4.18/4.03 | Per-file breakdown was not included in the supplied run record; advisory only.                                         |
+| **Final full run 2 (final tree)**                         |                        — | 693.81s wall; 2,880 passed / 7 skipped / 1 todo (2,888 total); exit 0; load 2.97/3.39/3.67 → 4.40/3.50/3.34 | Green; per-file breakdown is recorded in the final gate evidence.                                                      |
+| **Final full run 3 (final tree)**                         |                        — | 695.41s wall; 2,880 passed / 7 skipped / 1 todo (2,888 total); exit 0; load 4.40/3.50/3.34 → 4.02/3.84/3.52 | Green; per-file breakdown is recorded in the final gate evidence.                                                      |
+| `test/e2e/sweep`                                          |                     918s |                                                                                           not changed by U4 | PR-2's process-count work owns this area.                                                                              |
+| **Dominant residual: `test/e2e/sweep/sweep.e2e.test.ts`** |                        — |                                                                                      approximately 190–480s | Load-sensitive; rescue/assembly policy explains the deviation from the ≤60s/file goal.                                 |
+| `test/driver/acp.test.ts`                                 |          105s, 1 failure |                                                                                                       44.2s | Conformance protocol decisions use the in-process ACP adapter; retained real OS/wire contracts remain.                 |
+| `test/driver/subprocess.test.ts`                          | not separately baselined |                                                                                                       20.1s | Conformance stream-json decisions use the in-process managed-child adapter.                                            |
+| `test/driver/ai-sdk.test.ts`                              | not separately baselined |                                                                                                       0.39s | No U4 transport change.                                                                                                |
+| `test/driver/claude-agent.test.ts`                        | not separately baselined |                                                                                                       0.51s | No U4 transport change.                                                                                                |
+| `test/driver/process-inventory.test.ts`                   |                      new |                                                                                                       0.08s | Cheap guard over the committed process-entry list.                                                                     |
 
 Per-file durations are advisory measurements only. Host load, filesystem
 caches, and other worktrees can dominate them; do not turn this table into a
