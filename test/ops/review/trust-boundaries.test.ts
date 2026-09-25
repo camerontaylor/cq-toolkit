@@ -127,6 +127,25 @@ describe('W1.1 reviewer trust and SHA binding', () => {
     expect(result.reason).toBe('merge_objection_outstanding');
   });
 
+  test('a trusted human objection is not suppressed by a bot-shaped skip body', () => {
+    const result = classifyPr(
+      candidate([
+        {
+          ...review('member', 'CHANGES_REQUESTED', HEAD),
+          body: 'CodeRabbit skipped this run',
+          authorAssociation: 'MEMBER',
+        },
+      ]),
+      NOW,
+      {
+        ...defaultClassifyPrConfig,
+        trustedAssociations: ['MEMBER'],
+        automationLogin: 'cq-automation[bot]',
+      },
+    );
+    expect(result.reason).toBe('merge_objection_outstanding');
+  });
+
   test('a later approval from the same actor withdraws the objection', () => {
     const result = classifyPr(
       candidate([

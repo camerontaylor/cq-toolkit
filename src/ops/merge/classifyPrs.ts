@@ -240,11 +240,12 @@ interface ReviewContext {
  * The shared SCREEN every review must pass before its verdict can mean
  * anything to the table: a non-author (a null reviewer login is not the
  * author — external, counts, mirroring countUnresolvedThreads' exact
- * comparison), a body that is not a bot skip/failure notice
- * (matchesSkipPattern), and the TEMPORAL QUALIFIER — submitted STRICTLY
- * AFTER the last commit (evidence covering an earlier commit never
- * qualifies; a null/unparseable submittedAt never qualifies — fail
- * toward awaiting). `lastCommitMs` is typed nullable only so the
+ * comparison), membership in the resolved trust policy when one is active,
+ * a head-SHA binding when headRefOid is supplied, an automation-only skip
+ * marker under resolved policy, and the TEMPORAL QUALIFIER — submitted
+ * STRICTLY AFTER the last commit (evidence covering an earlier commit never
+ * qualifies; a null/unparseable submittedAt never qualifies — fail toward
+ * awaiting). `lastCommitMs` is typed nullable only so the
  * predicate stays total: the table has already failed closed on an
  * unknown commit by row 4, before any evidence row can call.
  */
@@ -253,7 +254,7 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
   if (!isTrustedReviewer(review, ctx)) return false;
   if (
     matchesSkipPattern(review.body, ctx.config) &&
-    (ctx.config.automationLogin === undefined || review.authorLogin !== ctx.config.automationLogin)
+    (ctx.config.automationLogin === undefined || review.authorLogin === ctx.config.automationLogin)
   )
     return false;
   if (ctx.headRefOid !== undefined && review.commitOid !== ctx.headRefOid) return false;
@@ -274,8 +275,9 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
 
 /**
  * An ACCEPTABLE review for row 7: reviewable evidence whose verdict
- * carries acceptance (stateCounts). Under the legacy surface no identity is
- * special; under resolved policy only the configured trust set can count.
+ * carries acceptance (stateCounts), with the resolved trust policy and
+ * current-head SHA applied when configured. Under the legacy surface no
+ * identity is special.
  */
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
@@ -403,7 +405,11 @@ export function classifyPr(
     if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
     if (!policyActive) return true;
     if (!isTrustedReviewer(review, ctx)) return false;
-    if (matchesSkipPattern(review.body, config)) return false;
+    if (
+      matchesSkipPattern(review.body, config) &&
+      (config.automationLogin === undefined || review.authorLogin === config.automationLogin)
+    )
+      return false;
     if (candidate.headRefOid !== undefined) return review.commitOid === candidate.headRefOid;
     return true;
   });
@@ -421,11 +427,12 @@ export function classifyPr(
     };
   }
   // Row 7 — nobody has looked AT THIS CODE: no acceptable review of the
-  // last commit's exact head state exists (non-author, verdict
-  // APPROVED/COMMENTED, non-skip-notice, submitted STRICTLY AFTER the
-  // last commit). Quiet is not acceptance until someone qualified has
-  // spoken about the head state at least once — and no amount of settle
-  // time cures evidence that predates the commit.
+  // last commit's exact head state exists (trusted non-author under the
+  // resolved policy, current-head SHA when supplied, configured verdict
+  // state, and submitted STRICTLY AFTER the last commit). Quiet is not
+  // acceptance until someone qualified has spoken about the head state at
+  // least once — and no amount of settle time cures evidence that predates
+  // the commit.
   const hasAcceptableReview = foldedReviews.some((review) => isAcceptableReview(review, ctx));
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };

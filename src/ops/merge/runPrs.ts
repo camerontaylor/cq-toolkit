@@ -85,6 +85,7 @@ import type { Driver, ModelSpec } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { classifyPr } from './classifyPrs.js';
+import { defaultClassifyPrConfig } from './classify.config.js';
 import type { PrCandidate } from './classifyPrs.js';
 import type { ClassifyPrConfig } from './classify.config.js';
 import { executeMerges } from './executeMerges.js';
@@ -138,6 +139,17 @@ export interface MergePrsCandidate extends PrCandidate {
   state: 'open' | 'closed';
 }
 
+export type RunMergePrsConfig = {
+  settleWindowMs?: number | undefined;
+  trustedBots?: readonly string[] | undefined;
+  trustedAssociations?: readonly string[] | undefined;
+  automationLogin?: string | null | undefined;
+  excludedLogins?: readonly string[] | undefined;
+  acceptReviewStates?:
+    | readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED')[]
+    | undefined;
+};
+
 /** The composition's input: the fetched candidates plus the run's
  * configuration. Everything optional has a documented default. */
 export interface RunMergePrsInput {
@@ -179,6 +191,8 @@ export interface RunMergePrsInput {
   nowMs?: number;
   /** Resolved reviewer trust policy passed to classifyPr. */
   classifyConfig?: ClassifyPrConfig;
+  /** JSON-dispatch twin of the resolved reviewer trust policy. */
+  config?: RunMergePrsConfig;
 }
 
 /** The composition's output: both execution reports, every resolution the
@@ -288,7 +302,11 @@ export async function runMergePrs(
   // Stages 1–3: classify → plan → execute (pass 1). The planner's seven
   // fail-closed rules stand untouched; conflicting prs are withheld
   // 'not_eligible' by the planner — carried, never re-graded.
-  const planned1 = classifyStage(input.prs, nowMs, input.classifyConfig);
+  const classifyConfig =
+    input.config === undefined
+      ? input.classifyConfig
+      : ({ ...defaultClassifyPrConfig, ...input.config } as ClassifyPrConfig);
+  const planned1 = classifyStage(input.prs, nowMs, classifyConfig);
   const plan1 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned1 });
   const firstPass = await execute(plan1);
 
@@ -504,7 +522,7 @@ export async function runMergePrs(
         .filter((candidate) => mergedInPass1.has(candidate.pr))
         .map((candidate) => ({ ...candidate, state: 'closed' as const }));
       const pass2Set = [...keptOpen, ...anchorRows];
-      const planned2 = classifyStage(pass2Set, nowMs, input.classifyConfig);
+      const planned2 = classifyStage(pass2Set, nowMs, classifyConfig);
       const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
       const second = await execute(plan2);
       secondPass = second;

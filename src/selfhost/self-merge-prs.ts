@@ -142,7 +142,30 @@ export function buildRunInput(
       : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
-    ...(cfg.classifyConfig === undefined ? {} : { classifyConfig: cfg.classifyConfig }),
+    ...(cfg.classifyConfig === undefined
+      ? {}
+      : {
+          config: {
+            ...(cfg.classifyConfig.settleWindowMs === undefined
+              ? {}
+              : { settleWindowMs: cfg.classifyConfig.settleWindowMs }),
+            ...(cfg.classifyConfig.trustedBots === undefined
+              ? {}
+              : { trustedBots: cfg.classifyConfig.trustedBots }),
+            ...(cfg.classifyConfig.trustedAssociations === undefined
+              ? {}
+              : { trustedAssociations: cfg.classifyConfig.trustedAssociations }),
+            ...(cfg.classifyConfig.automationLogin === undefined
+              ? {}
+              : { automationLogin: cfg.classifyConfig.automationLogin }),
+            ...(cfg.classifyConfig.excludedLogins === undefined
+              ? {}
+              : { excludedLogins: cfg.classifyConfig.excludedLogins }),
+            ...(cfg.classifyConfig.acceptReviewStates === undefined
+              ? {}
+              : { acceptReviewStates: cfg.classifyConfig.acceptReviewStates }),
+          },
+        }),
   };
 }
 
