@@ -99,6 +99,7 @@ import { z } from 'zod';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
 import { AiSdkDriver } from '../../driver/ai-sdk/index.js';
 import { withServedModelAssertion } from '../../driver/served-model.js';
+import { boundedErrorText } from '../../driver/error-text.js';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
@@ -428,9 +429,7 @@ const defaultDriver = (
     ...(sessionsDir !== undefined ? { sessionsDir } : {}),
     ...(harnessConfig !== undefined ? { harnessConfig } : {}),
   };
-  return modelSpec.provider === 'ai-sdk'
-    ? withServedModelAssertion(new AiSdkDriver(common), 'default')
-    : withServedModelAssertion(new SubprocessDriver(common), 'default');
+  return modelSpec.provider === 'ai-sdk' ? new AiSdkDriver(common) : new SubprocessDriver(common);
 };
 
 const errorMessage = (err: unknown): string => (err instanceof Error ? err.message : String(err));
@@ -635,7 +634,7 @@ export function makeResolveConflictOp(
                 : 'no denials recorded (see the session record for narration)';
             return {
               status: 'failed',
-              error: `conflict agent failed: ${hint}${sessionSuffix(result)}`,
+              error: `conflict agent failed: ${hint}${result.error === undefined ? '' : `; ${boundedErrorText(result.error)}`}${sessionSuffix(result)}`,
             };
           }
 

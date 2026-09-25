@@ -1092,6 +1092,7 @@ describe('runMergePrs', () => {
         run: async (invocation: OpInvocation): Promise<WorkerResult> => {
           runs.push(invocation);
           return {
+            model: invocation.modelSpec.model,
             structuredOutput: { decision: 'acted', summary: 'config rode along' },
             usage: ZERO_USAGE,
             denials: [],

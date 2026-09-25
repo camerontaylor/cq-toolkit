@@ -71,6 +71,7 @@ import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
 import { withServedModelAssertion } from '../../driver/served-model.js';
+import { boundedErrorText } from '../../driver/error-text.js';
 import type {
   Budget,
   Driver,
@@ -477,8 +478,9 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
 
 /**
  * The fix-worker seam source. Two forms:
- *   - a plain {@link Driver} — the caller owns the seam entirely (tests,
- *     in-process callers that enforce the harness themselves);
+ *   - a plain {@link Driver} — the caller supplies the seam (tests,
+ *     in-process callers that enforce the harness themselves); the op
+ *     applies the served-model assertion;
  *   - `{ perHarness }` — the DISPATCHED form (the registry binds it): the
  *     driver is built FROM THE INPUT'S HARNESS, WORKTREE, AND ModelSpec per
  *     invocation. Needed because {@link toolPolicyFor} reduces the harness
@@ -586,13 +588,13 @@ export function makeFixReviewItem(deps: {
 }): Op<FixReviewItemInput, FixReviewItemResult> {
   // The perHarness form builds the driver from the invocation's OWN harness
   // AND worktree (the dispatched seam must run in the PR worktree — see
-  // worktreeFixDriver); the plain-Driver form is the caller's whole seam.
+  // worktreeFixDriver); the plain-Driver form receives its assertion here.
   const driverFor = (input: FixReviewItemInput): Driver => {
     const source = deps.driver;
     if ('perHarness' in source) {
       return source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree, input.driver);
     }
-    return source;
+    return withServedModelAssertion(source, 'default');
   };
   return async (input: FixReviewItemInput) => {
     const driver = driverFor(input);
@@ -654,7 +656,11 @@ export function makeFixReviewItem(deps: {
     }
     if (worker.stopReason === 'error') {
       const session = worker.sessionId === undefined ? '' : ` (session ${worker.sessionId})`;
-      return { status: 'failed', error: `fixReviewItem: driver reported an error stop${session}` };
+      const detail = worker.error === undefined ? '' : `: ${boundedErrorText(worker.error)}`;
+      return {
+        status: 'failed',
+        error: `fixReviewItem: driver reported an error stop${session}${detail}`,
+      };
     }
     const parsed = parseFixOutput(worker.structuredOutput);
     if (parsed === null) {

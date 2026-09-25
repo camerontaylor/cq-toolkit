@@ -24,7 +24,7 @@ const driverReturning = (value: WorkerResult): Driver => ({
   run: async () => value,
 });
 
-describe('served-model assertion', () => {
+describe('served-model assertion wrapper unit policy', () => {
   test('default lane is fail-closed when the served model is absent or mismatched', async () => {
     const absent = withServedModelAssertion(driverReturning(result(undefined)));
     const absentResult = await absent.run(invocation());
@@ -37,7 +37,7 @@ describe('served-model assertion', () => {
     expect(mismatchResult.error).toContain("requested 'model-a'");
   });
 
-  test('ACP may omit its observation but accepts one vendor-prefixed model', async () => {
+  test('ACP unit policy may omit its observation but accepts one vendor-prefixed model', async () => {
     const absent = withServedModelAssertion(driverReturning(result(undefined)), 'acp');
     expect((await absent.run(invocation())).stopReason).toBe('complete');
 
@@ -46,7 +46,7 @@ describe('served-model assertion', () => {
   });
 
   test.each(['default', 'acp'] as const)(
-    'construction path for the %s lane is wrapped',
+    '%s wrapper unit policy accepts its matching model',
     async (lane) => {
       const model = lane === 'acp' ? 'vendor/model-a' : 'model-a';
       const run = await withServedModelAssertion(driverReturning(result(model)), lane).run(
@@ -56,9 +56,21 @@ describe('served-model assertion', () => {
     },
   );
 
-  test('the shared construction wrapper rejects a mismatched served model', async () => {
+  test('the shared wrapper unit policy rejects a mismatched served model', async () => {
     const wrapped = withServedModelAssertion(driverReturning(result('model-b')));
     const run = await wrapped.run(invocation());
     expect(run.stopReason).toBe('error');
   });
+
+  test.each([undefined, 'model-b'])(
+    'rejected served model %s drops structuredOutput without mutating the driver result',
+    async (model) => {
+      const raw = { ...result(model), structuredOutput: { success: true } };
+      const verdict = await withServedModelAssertion(driverReturning(raw)).run(invocation());
+      expect(verdict.stopReason).toBe('error');
+      expect(verdict.error).toContain('served model assertion');
+      expect(verdict).not.toHaveProperty('structuredOutput');
+      expect(raw.structuredOutput).toEqual({ success: true });
+    },
+  );
 });

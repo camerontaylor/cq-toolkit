@@ -17,6 +17,8 @@
 //   'sandbox: …' | 'invalid input: …' | 'path escape: …'
 //   'path not allowed by harness config allowlist: …'
 //   'command not allowed by harness config allowlist: …'
+//   'command allowlist: git diff is closed-form — …'
+//   'command allowlist: git log is closed-form — …'
 //   'command allowlist: shell metacharacters not permitted with token
 //    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
@@ -71,7 +73,9 @@
 //     plain prefixes: a re: match allows OUTRIGHT (including commands with
 //     shell metacharacters), so a re: pattern MUST be authored anchored
 //     (e.g. 're:^npm test.*$') — an unanchored re: is author error
-//     (recorded finding; documentation-covered, not code-repaired).
+//     (recorded finding; documentation-covered, not code-repaired). Broad
+//     regexes can also authorize disguised git verbs (git "diff"): the
+//     closed-form lock covers literal diff/log prefixes, not shell aliases.
 //   - anything else    → whitespace-token PREFIX: the pattern's tokens must
 //     equal the command's leading tokens ('npm test' allows 'npm test' and
 //     'npm test -- --watch', not 'npm run test'). Token splitting is naive
@@ -83,10 +87,12 @@
 //     'npm test $(rm -rf ~)'); such a command denies with the distinct
 //     'command allowlist: shell metacharacters …' reason pointing at
 //     anchored re: patterns as the deliberate escape hatch.
-// Invalid regexes and empty/whitespace-only patterns throw at `buildTools`
+// Token patterns must contain plain shell words; git requires a literal
+// subcommand (never bare git or global options). Invalid patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
-// `run` executes through the SHELL (node:child_process exec, cwd =
+// Literal git diff/log commands select constant argv and execute with
+// execFile, shell:false. Other `run` commands execute through the SHELL (exec, cwd =
 // workspace) so pipelines work; the allowlist is the gate over the whole
 // command string. Config timeoutMs maps onto exec's own timeout (child
 // killed by signal → exitCode null + killed flag); captured output is
@@ -226,7 +232,7 @@ type CommandPattern = { kind: 'regex'; re: RegExp } | { kind: 'tokens'; tokens: 
 
 /**
  * Compile the run allowlist. THROWS on an invalid `re:` regex or an
- * empty/whitespace-only pattern — config corruption is loud (an empty
+ * empty, non-plain-word, or git-global token pattern — corruption is loud (an empty
  * pattern would otherwise silently allow every command).
  */
 export function compileCommandPatterns(patterns: readonly string[]): CommandPattern[] {
@@ -242,6 +248,12 @@ export function compileCommandPatterns(patterns: readonly string[]): CommandPatt
       throw new Error(
         `harness: empty run command pattern '${raw}' (empty patterns would allow every command)`,
       );
+    }
+    if (tokens.some((token) => !/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(token))) {
+      throw new Error(`harness: run token pattern must contain only plain shell words: '${raw}'`);
+    }
+    if (tokens[0] === 'git' && !/^[a-z][a-z0-9-]*$/.test(tokens[1] ?? '')) {
+      throw new Error(`harness: git token pattern requires a literal subcommand: '${raw}'`);
     }
     return { kind: 'tokens', tokens };
   });
@@ -259,6 +271,39 @@ type CommandVerdict =
   | { allowed: true; via: 'regex' | 'tokens' }
   | { allowed: false; metacharacters: boolean };
 
+// Each key selects harness-owned argv. No input token is ever forwarded to git.
+const GIT_HEADER = [
+  '--no-pager',
+  '--literal-pathspecs',
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.quotePath=true',
+];
+const GIT_DIFF = [
+  ...GIT_HEADER,
+  'diff',
+  '--no-ext-diff',
+  '--no-textconv',
+  '--no-color',
+  '--src-prefix=a/',
+  '--dst-prefix=b/',
+];
+const CLOSED_GIT_DIFF = new Map<string, readonly string[]>([
+  ['git diff', [...GIT_DIFF, '--']],
+  ['git diff --stat', [...GIT_DIFF, '--stat', '--']],
+  ['git diff --name-only', [...GIT_DIFF, '--name-only', '--']],
+  ['git diff --cached', [...GIT_DIFF, '--cached', '--']],
+  ['git diff --cached --stat', [...GIT_DIFF, '--cached', '--stat', '--']],
+  ['git diff --cached --name-only', [...GIT_DIFF, '--cached', '--name-only', '--']],
+]);
+const GIT_LOG = [...GIT_HEADER, 'log', '--no-ext-diff', '--no-textconv', '--no-color'];
+const CLOSED_GIT_LOG = new Map<string, readonly string[]>([
+  ['git log --oneline -n 20', [...GIT_LOG, '--oneline', '-n', '20', '--']],
+  ['git log -n 1', [...GIT_LOG, '-n', '1', '--']],
+  ['git log -n 1 --stat', [...GIT_LOG, '-n', '1', '--stat', '--']],
+]);
+
 /**
  * Match the compiled command allowlist: a re: match allows OUTRIGHT (the
  * author owns the full string); a token-prefix match allows only a command
@@ -269,43 +314,6 @@ type CommandVerdict =
  * escape hatch the denial points at) can still allow outright, whatever the
  * pattern order; the metacharacter denial fires only when no pattern allowed.
  */
-function closedGitForm(
-  command: string,
-  workspace: string,
-): { file: 'git'; args: string[] } | undefined | null {
-  const tokens = command.trim().split(/\s+/);
-  if (tokens[0] !== 'git' || (tokens[1] !== 'diff' && tokens[1] !== 'log')) return undefined;
-  const root = resolve(workspace);
-  const safePath = (path: string): boolean => {
-    if (path === '' || path.startsWith('/') || path.includes('\0')) return false;
-    const resolved = resolve(root, path);
-    return resolved === root || resolved.startsWith(root + sep);
-  };
-  if (tokens[1] === 'log') {
-    const forms = [
-      ['--oneline', '-n', '20'],
-      ['-n', '1'],
-      ['-n', '1', '--stat'],
-    ];
-    const args = tokens.slice(2);
-    return forms.some((form) => form.length === args.length && form.every((v, i) => v === args[i]))
-      ? { file: 'git', args: ['log', ...args] }
-      : null;
-  }
-  const rest = tokens.slice(2);
-  if (rest.length === 0) return { file: 'git', args: ['diff'] };
-  if (rest.length === 1 && rest[0] === '--') return { file: 'git', args: ['diff', '--'] };
-  if (rest.length === 1 && rest[0] === '--cached')
-    return { file: 'git', args: ['diff', '--cached'] };
-  if (rest.length === 2 && rest[0] === '--cached' && rest[1] === '--')
-    return { file: 'git', args: ['diff', '--cached', '--'] };
-  if (rest.length === 2 && rest[0] === '--' && safePath(rest[1]!))
-    return { file: 'git', args: ['diff', '--', rest[1]!] };
-  if (rest.length === 3 && rest[0] === '--cached' && rest[1] === '--' && safePath(rest[2]!))
-    return { file: 'git', args: ['diff', '--cached', '--', rest[2]!] };
-  return null;
-}
-
 function commandVerdict(patterns: readonly CommandPattern[], command: string): CommandVerdict {
   const cmdTokens = command.trim().split(/\s+/);
   let sawMetacharMatch = false;
@@ -581,6 +589,52 @@ export function buildTools(
       if (stderr !== '') parts.push(`--- stderr ---\n${stderr}`);
       return parts.join('\n');
     };
+    const executionOptions = {
+      cwd: workspaceAbs,
+      // maxBuffer is bytes; the cap is characters. Leave UTF-8 and wrapper
+      // slack so capOutput truncates before exec rejects on buffer overflow.
+      ...(runCfg.maxOutputChars !== undefined
+        ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
+        : {}),
+      ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
+    };
+    const outcome = (
+      exitCode: number | null,
+      killed: boolean,
+      stdout: string,
+      stderr: string,
+    ): ToolkitToolResult => ({
+      ok: true,
+      exitCode,
+      killed,
+      ...capOutput(formatOutcome(exitCode, killed, stdout, stderr), runCfg.maxOutputChars),
+    });
+    const settle = (err: unknown): ToolkitToolResult => {
+      // Both exec and execFile reject on nonzero exit / signal kill with
+      // captured streams. String-code spawn failures (including ENOENT) deny.
+      const e = err as Error & {
+        code?: string | number | null;
+        killed?: boolean;
+        stdout?: string;
+        stderr?: string;
+      };
+      const stdout = e.stdout ?? '';
+      const stderr = e.stderr ?? '';
+      if (typeof e.code === 'number') return outcome(e.code, false, stdout, stderr);
+      if (e.killed === true) return outcome(null, true, stdout, stderr);
+      return deny('run', `run failed: ${messageOf(err)}`);
+    };
+    const runArgv = async (argv: readonly string[]): Promise<ToolkitToolResult> => {
+      try {
+        const { stdout, stderr } = await execFileAsync('git', argv, {
+          ...executionOptions,
+          shell: false,
+        });
+        return outcome(0, false, stdout, stderr);
+      } catch (err) {
+        return settle(err);
+      }
+    };
     tools.push({
       name: 'run',
       description: capDescription(
@@ -597,9 +651,21 @@ export function buildTools(
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
-        const closedGit = closedGitForm(command, workspaceAbs);
-        if (closedGit === null) {
-          return deny('run', `command not allowed by harness config allowlist: '${command}'`);
+        const raw = command.trim().split(/\s+/);
+        // An attached shell operator (git diff; …) must not bypass the lock
+        // under a regex grant. Quoted/disguised verbs remain author-owned.
+        const verb = raw[1]?.split(/[;&|<>]/, 1)[0];
+        if (raw[0] === 'git' && (verb === 'diff' || verb === 'log')) {
+          const forms = verb === 'diff' ? CLOSED_GIT_DIFF : CLOSED_GIT_LOG;
+          const key = raw.join(' ');
+          const argv = forms.get(key);
+          if (argv === undefined || !commandVerdict(patterns, key).allowed) {
+            return deny(
+              'run',
+              `command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
+            );
+          }
+          return runArgv(argv);
         }
         const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
@@ -611,59 +677,10 @@ export function buildTools(
           );
         }
         try {
-          const { stdout, stderr } =
-            closedGit === undefined
-              ? await execAsync(command, {
-                  cwd: workspaceAbs,
-                  // maxBuffer is BYTES; the output cap is CHARS. Size the buffer
-                  // comfortably above the cap so capOutput does the truncating
-                  // (4 bytes/char covers UTF-8's worst case, +64KiB slack for the
-                  // exit/stdout wrapper): at exec's 1 MiB default a noisy command
-                  // rejects with a string-code error BEFORE the cap truncates —
-                  // a 'run failed' denial instead of a truncated result (issue #18).
-                  ...(runCfg.maxOutputChars !== undefined
-                    ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
-                    : {}),
-                  ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
-                })
-              : await execFileAsync(closedGit.file, closedGit.args, {
-                  cwd: workspaceAbs,
-                  ...(runCfg.maxOutputChars !== undefined
-                    ? { maxBuffer: runCfg.maxOutputChars * 4 + 65_536 }
-                    : {}),
-                  ...(runCfg.timeoutMs !== undefined ? { timeout: runCfg.timeoutMs } : {}),
-                });
-          const capped = capOutput(formatOutcome(0, false, stdout, stderr), runCfg.maxOutputChars);
-          return { ok: true, exitCode: 0, killed: false, ...capped };
+          const { stdout, stderr } = await execAsync(command, executionOptions);
+          return outcome(0, false, stdout, stderr);
         } catch (err) {
-          // promisify(exec) rejects on nonzero exit / signal kill with the
-          // captured streams attached; a spawn failure (e.g. no shell) has a
-          // STRING code. Nonzero exits are REAL tool results (the model must
-          // see them), not denials — only spawn-level failures deny.
-          const e = err as Error & {
-            code?: string | number | null;
-            killed?: boolean;
-            signal?: string | null;
-            stdout?: string;
-            stderr?: string;
-          };
-          const stdout = e.stdout ?? '';
-          const stderr = e.stderr ?? '';
-          if (typeof e.code === 'number') {
-            const capped = capOutput(
-              formatOutcome(e.code, false, stdout, stderr),
-              runCfg.maxOutputChars,
-            );
-            return { ok: true, exitCode: e.code, killed: false, ...capped };
-          }
-          if (e.killed === true) {
-            const capped = capOutput(
-              formatOutcome(null, true, stdout, stderr),
-              runCfg.maxOutputChars,
-            );
-            return { ok: true, exitCode: null, killed: true, ...capped };
-          }
-          return deny('run', `run failed: ${messageOf(err)}`);
+          return settle(err);
         }
       },
     });
