@@ -1431,7 +1431,6 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         const preload = join(scratchDir, 'owned-child.mjs');
         const runWorker = join(scratchDir, 'run-worker.cjs');
         const runPidFile = join(scratchDir, 'run-pids.json');
-        const lateRunPidFile = join(scratchDir, 'late-run-pid.txt');
         const descendantCode =
           "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)";
         const workerCode = `
@@ -1450,12 +1449,23 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         );
         const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
         const runCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(runWorker)}`;
-        const lateRunCommand = `echo $$ > ${shellQuote(lateRunPidFile)}; exec sleep 60`;
+        const lateRunCommand = 'exec sleep 60';
         await writeFile(
           preload,
           `
           import { spawnManaged, buildChildEnv } from ${JSON.stringify(processUrl)};
           import { runShellCommand } from ${JSON.stringify(runUrl)};
+          import childProcess from 'node:child_process';
+          import { syncBuiltinESMExports } from 'node:module';
+          // Observe the real OS pid at dispatch; the child may be killed before
+          // its first instruction during the parent's final cleanup sweep.
+          const realSpawn = childProcess.spawn;
+          childProcess.spawn = (file, ...args) => {
+            const spawned = realSpawn(file, ...args);
+            if (file === ${JSON.stringify(lateRunCommand)}) console.log(JSON.stringify({lateRun: spawned.pid}));
+            return spawned;
+          };
+          syncBuiltinESMExports();
           void runShellCommand(${JSON.stringify(runCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
           const child = spawnManaged({ command: process.execPath, args: ['-e', ${JSON.stringify(workerCode)}], cwd: ${JSON.stringify(scratchDir)} });
           let lateStarted = false;
@@ -1518,7 +1528,9 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           const late = out.split('\n').find((line) => line.startsWith('{"late":'));
           expect(late).toBeDefined(); // signal handling actually dispatched new work
           const lateDriverPid = (JSON.parse(late!) as { late: number }).late;
-          const lateRunPid = Number(await readFile(lateRunPidFile, 'utf8'));
+          const lateRun = out.split('\n').find((line) => line.startsWith('{"lateRun":'));
+          expect(lateRun).toBeDefined();
+          const lateRunPid = (JSON.parse(lateRun!) as { lateRun: number }).lateRun;
           expect(lateRunPid).toBeGreaterThan(0);
           await vi.waitFor(() => expect([lateDriverPid, lateRunPid].some(alive)).toBe(false), {
             timeout: 3_000,
@@ -1528,8 +1540,12 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
           const late = out.split('\n').find((line) => line.startsWith('{"late":'));
           const lateDriverPid =
             late === undefined ? undefined : (JSON.parse(late) as { late: number }).late;
-          const lateRunPid = Number(await readFile(lateRunPidFile, 'utf8').catch(() => '0'));
-          for (const groupLeader of [pids[0], runPids[0], lateDriverPid, lateRunPid || undefined]) {
+          const lateRun = out.split('\n').find((line) => line.startsWith('{"lateRun":'));
+          const lateRunPid =
+            lateRun === undefined
+              ? undefined
+              : (JSON.parse(lateRun) as { lateRun: number }).lateRun;
+          for (const groupLeader of [pids[0], runPids[0], lateDriverPid, lateRunPid]) {
             if (groupLeader === undefined) continue;
             try {
               process.kill(-groupLeader, 'SIGKILL');
