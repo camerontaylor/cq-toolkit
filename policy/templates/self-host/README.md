@@ -51,10 +51,10 @@ a failed listing) exits 1.
 Names only in the templates — values live in the adopting repo's Actions
 secrets.
 
-| token                     | secret holds                                                                                                                                                                                                                                                                                           |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path). Referenced by the workflows as `GH_TOKEN` (gh). |
-| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                    |
+| token                     | secret holds                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `{{SELFHOST_TOKEN}}`      | a fine-grained PAT scoped to the TARGET REPOSITORY ONLY, permissions limited to what the automation does — read PRs, post review replies + resolve threads, merge PRs (labels: Pull requests read/write; Contents write for the review-fix push path and the `cq-state` settle-state branch). Referenced by the workflows as `GH_TOKEN` (gh). |
+| `{{SELFHOST_DRIVER_KEY}}` | the model provider API key driving review-loop fix workers through the ai-sdk route. Self-host merge conflict resolution is disabled; DIRTY candidates are reported as needs-human.                                                                                                                                                           |
 
 Both are step-scoped in the workflows: they reach only the run step, never
 `npm ci`'s lifecycle scripts. A missing `{{SELFHOST_TOKEN}}` makes these
@@ -112,6 +112,27 @@ adopter owns it by hand.
   cross-run memory — a slot that could run unbounded would duplicate or
   starve the slots after it.
 - Enforcement: `timeout-minutes: 20` on the job in each workflow YAML.
+
+### SHA-bound acceptance and durable settle state (W1.2)
+
+- Rule: immediately before every merge call, `self-merge-prs` re-fetches the
+  PR (head, base, reviews, force-push timeline) and merges only when a
+  trusted review's `commit.oid` equals the live head SHA and the identical
+  `(head SHA, base SHA, force-push epoch)` tuple has two durable observations
+  at least the settle window apart. Observations live in
+  `.cq/settle-state.json` on the `cq-state` branch, written through the
+  GitHub git-data API with a fast-forward-only (compare-and-swap) ref update.
+- Why: commit timestamps are author-controlled and GitHub records no push
+  time, so settle is measured from the automation's own observations. The
+  Actions cache holding `.selfhost/journal` is evictable and writable by any
+  job with the Actions token, so it never holds settle state.
+- Enforcement: `gateMergeEffects` and `recheckBeforeMerge` in
+  `src/selfhost/merge-recheck.ts` wrap the merge effect itself, so no
+  classify→merge window remains; `src/selfhost/state-branch.ts` owns the
+  store. A refusal shows as a `cq merge-time recheck refused pr N: …`
+  needs-human row, and a later run merges the PR once it qualifies.
+  `{{SELFHOST_TOKEN}}` needs Contents write to update `cq-state`; protect
+  that branch with a ruleset so only the automation identity can push it.
 
 ### Honest outcomes
 
