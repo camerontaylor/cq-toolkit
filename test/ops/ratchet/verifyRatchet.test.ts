@@ -151,7 +151,7 @@ beforeAll(() => {
   write('baselines/ratchets.json', `${JSON.stringify(MANIFEST, null, 2)}\n`);
   baseline('typecheck', 'typecheck-count', 'lower-is-better', 0, 'errors');
   baseline('coverage', 'coverage', 'higher-is-better', 90, 'pct');
-  write('tsconfig.json', '{ "extends": "./config/base.json", "include": ["src"] }\n');
+  write('tsconfig.json', '{ "extends": "./config/base", "include": ["src"] }\n');
   write('config/base.json', '{ "compilerOptions": { "strict": true } }\n');
   write('src/a.ts', 'export const a = 1;\n');
   trust = commit('trust');
@@ -289,6 +289,7 @@ describe('verifyRatchet: definitions come from the trust ref (A5, D-C)', SLOW, (
     ['a workflow', '.github/workflows/cq-measure.yml', 'name: x\n'],
     ['the test config', 'vitest.config.ts', 'export default {};\n'],
     ['a tsconfig extends target (graph, not the static set)', 'config/base.json', '{}\n'],
+    ['an extensionless extends target added by the head', 'config/base', '{}\n'],
   ])('editing %s is needs-human (D11 records are dormant)', async (_label, rel, content) => {
     const head = prBranch(`pr-def-${rel.replace(/[^a-z]/g, '')}`, 'merge-queue', () =>
       write(rel, content),
@@ -373,6 +374,11 @@ describe('verifyRatchet: faults are failed, never a pass', SLOW, () => {
       () => baseline('coverage', 'coverage', 'lower-is-better', 90, 'pct'),
       /direction lower-is-better disagrees/,
     ],
+    [
+      'wrong-unit',
+      () => baseline('coverage', 'coverage', 'higher-is-better', 90, 'errors'),
+      /unit errors disagrees with the definition \(pct\)/,
+    ],
     ['invalid-json', () => write(coveragePath, 'not JSON'), /not valid JSON/],
   ])('a %s trust baseline fails the coverage ratchet', async (name, edit, reason) => {
     const head = prBranch('pr-bad-trust-' + name, 'merge-queue', () =>
@@ -427,6 +433,19 @@ describe('verifyRatchet: faults are failed, never a pass', SLOW, () => {
       measureConclusion: 'success',
     });
     expect(result.status).toBe('failed');
+  });
+
+  test('a push cannot be judged over a PR base', async () => {
+    const result = await verifyRatchet({
+      repo,
+      trustRef: trust,
+      subject: trust,
+      subjectKind: 'push',
+      base: 'merge-queue',
+      measureConclusion: 'success',
+    });
+    expect(result.status).toBe('failed');
+    if (result.status === 'failed') expect(result.error).toMatch(/invalid base/);
   });
 
   test('a trust ref without the manifest is `failed`', async () => {

@@ -233,6 +233,15 @@ async function judgeRatchet(
         reason: `${path} direction ${baseline.direction} disagrees with the definition (${def.direction})`,
       };
     }
+    if (baseline.unit !== def.unit) {
+      return {
+        ...base,
+        baseline: baseline.value,
+        value: null,
+        verdict: 'fail',
+        reason: `${path} unit ${baseline.unit ?? '(none)'} disagrees with the definition (${def.unit ?? '(none)'})`,
+      };
+    }
     baselineValue = baseline.value;
   } catch (err) {
     return {
@@ -266,6 +275,16 @@ async function judgeRatchet(
 
 /** The verifier op. See the module header for what is trusted and why. */
 export const verifyRatchet: Op<VerifyRatchetInput, VerifyRatchetOutcome> = async (input) => {
+  // The carrier resolves the PR base or merge-queue push before invoking this
+  // op. Bind that classification to the branch whose merge-base starts the
+  // judged range, so a mislabeled push cannot silently use the PR range.
+  const baseBranch = /^(?:refs\/remotes\/origin\/)?(main|merge-queue)$/.exec(input.base)?.[1];
+  if (baseBranch === undefined || (input.subjectKind === 'push' && baseBranch !== 'main')) {
+    return {
+      status: 'failed',
+      error: `ratchet verify: ${input.subjectKind} subject has invalid base '${input.base}'`,
+    };
+  }
   let trust: string;
   let subject: string;
   let rangeBase: string;

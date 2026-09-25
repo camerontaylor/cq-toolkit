@@ -1088,6 +1088,24 @@ const REL_MOVED_2 = 'baselines/typecheck--typecheck-count--ba9876543210.json';
 const REL_MOVED_3 = 'baselines/typecheck--typecheck-count--fedcba987654.json';
 
 describe('delete/add pairing (W1.7, ADR-0004 attack A5)', () => {
+  test('coverage normalization keeps the deleted side across +++ /dev/null', () => {
+    const moved = 'baselines/coverage--coverage--0123456789ab.json';
+    const diff = deletedSection(REL_COV, covBody(93.44)) + addedSection(moved, covBody(93.4));
+    expect(checkDiffMonotonicity(diff).ok).toBe(false);
+    const normalized = normalizeBaselineDiffValues(
+      diff,
+      /^baselines\/[^/]*--coverage--[^/]*\.json$/,
+    );
+    expect(normalized).toContain('-  "value": 93.4,');
+    expect(normalized).toContain('+  "value": 93.4,');
+    expect(normalized).not.toContain('93.44');
+    expect(checkDiffMonotonicity(normalized)).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 2,
+    });
+  });
+
   test('an unreplaced delete renders the definition-change one-liner', () => {
     const verdict = checkDiffMonotonicity(deletedSection(REL, body('lower-is-better', 3)));
     expect(verdict.ok).toBe(false);

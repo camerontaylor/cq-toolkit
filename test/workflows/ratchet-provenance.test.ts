@@ -6,9 +6,9 @@
 // Pinned here:
 //   1. Lockstep: each generated file is the provenance header plus its
 //      template, byte for byte.
-//   2. The head-defined legs (cq-measure, ratchet-propose-measure) hold no
-//      credential: top-level `permissions: {}`, no `secrets.*`, no
-//      `environment:`.
+//   2. The head-defined legs (cq-measure, ratchet-propose-measure) fetch with
+//      read-only access without executing head code, then run head code in
+//      separate credential-free jobs.
 //   3. The deciding legs (cq-verify, ratchet-propose) run from the default
 //      branch (`workflow_run`), check out only the trust ref, install with
 //      `--ignore-scripts`, restore no cache, and never run the test suite;
@@ -17,6 +17,7 @@
 //      measure leg's artifact, and holds its token behind `environment:`.
 //   5. The legacy ratchet.yml's target/metric pairs are exactly the trust
 //      manifest's (baselines/ratchets.json), and its guard runs in ref mode.
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -91,19 +92,30 @@ describe('ratchet workflows: template ↔ generated lockstep', () => {
   });
 });
 
-describe('head-defined legs hold no credential (ADR-0004 D-D.5)', () => {
+describe('head code runs only in credential-free measurement jobs (ADR-0004 D-D.5)', () => {
   it.each(['cq-measure.yml', 'ratchet-propose-measure.yml'].flatMap(bothCopies))(
-    '%s: permissions {}, no secrets, no environment',
+    '%s: read-only source fetch is separate from credential-free measurement',
     (_label, text) => {
       const body = code(text);
       expect(body).toMatch(/^permissions: \{\}$/m);
       expect(body).not.toMatch(/secrets\./);
       expect(body).not.toMatch(/^\s*environment:/m);
-      // No job re-grants a permission the top level withheld.
-      for (const [id, job] of jobBlocks(body)) {
-        expect(job, `${id}: job-level permissions`).not.toMatch(/^\s{4}permissions:/m);
-      }
-      expect(body).toMatch(/persist-credentials: false/);
+      const jobs = jobBlocks(body);
+      expect([...jobs.keys()]).toEqual(['fetch', 'measure']);
+      const fetch = jobs.get('fetch') ?? '';
+      expect(fetch).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
+      expect(fetch).toMatch(/fetch-depth: 0/);
+      expect(fetch).toMatch(/persist-credentials: false/);
+      expect(fetch).toContain('git bundle create');
+      expect(fetch).toContain('actions/upload-artifact@');
+      expect(fetch).not.toMatch(/npm ci|npm run|vitest|ratchet\.recomputeTypecheck/);
+      const measure = jobs.get('measure') ?? '';
+      expect(measure).toMatch(/^ {4}needs: fetch$/m);
+      expect(measure).not.toMatch(/^ {4}permissions:/m);
+      expect(measure).toContain('actions/download-artifact@');
+      expect(measure).toContain('git checkout --detach "$SUBJECT"');
+      expect(measure).not.toMatch(/actions\/checkout@|github\.token|GH_TOKEN/);
+      expect(measure).toMatch(/npm ci/);
     },
   );
 
@@ -125,7 +137,7 @@ describe('head-defined legs hold no credential (ADR-0004 D-D.5)', () => {
 describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)', () => {
   it.each(['cq-verify.yml', 'ratchet-propose.yml'].flatMap(bothCopies))(
     '%s: workflow_run carrier, trust-ref checkout only, --ignore-scripts, no cache, no tests',
-    (_label, text) => {
+    (label, text) => {
       const body = code(text);
       expect(onBlock(body)).toMatch(/^ {2}workflow_run:$/m);
       expect(onBlock(body)).not.toMatch(/pull_request/);
@@ -141,7 +153,13 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(body).toMatch(/cache: ''/);
       expect(body).not.toMatch(/cache: npm|actions\/cache/);
       expect(body).not.toMatch(/vitest|npm test|npm run test/);
-      expect(body).toMatch(/persist-credentials: false/);
+      if (label.includes('cq-verify')) {
+        // Fetch and judge retain a read-only token only while running trust
+        // code or handling git objects; neither checks out the head.
+        expect(body).toMatch(/persist-credentials: true/);
+      } else {
+        expect(body).toMatch(/persist-credentials: false/);
+      }
     },
   );
 
@@ -159,16 +177,97 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(resolveJob).toMatch(
         /github\.ref == format\('refs\/heads\/\{0\}', github\.event\.repository\.default_branch\)/,
       );
+      // A head with open PRs into both branches must be judged against the
+      // merge-queue target, regardless of API array order.
+      expect(resolveJob).toContain(
+        'if index(\\"merge-queue\\") then \\"merge-queue\\" elif index(\\"main\\") then \\"main\\" else empty end',
+      );
+      const fetch = jobs.get('fetch') ?? '';
+      expect(fetch).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
+      expect(fetch).toContain('git fetch --no-tags origin "$SUBJECT"');
+      expect(fetch).toContain('git bundle create');
+      expect(fetch).not.toMatch(
+        /npm ci|npm run|ratchet\.recomputeTypecheck|ratchet\.verifyRatchet/,
+      );
       const compute = jobs.get('compute') ?? '';
       expect(compute).toMatch(/^\s{4}permissions: \{\}$/m);
       expect(compute).toContain('ratchet.recomputeTypecheck');
+      expect(compute).toContain('actions/download-artifact@');
+      expect(compute).not.toMatch(/actions\/checkout@|git fetch --no-tags origin/);
       expect(compute).not.toMatch(/github\.token|GH_TOKEN|secrets\./);
+      // Failed recompute output is reported and its count stays empty.
+      expect(compute).toMatch(/--scratch="\$\{RUNNER_TEMP\}\/cq-recompute"\)" \|\| true/);
+      expect(compute).toContain("count=''");
+      expect(compute).toContain('recompute emitted malformed JSON');
       const judge = jobs.get('judge') ?? '';
       expect(judge).toContain('ratchet.verifyRatchet');
+      expect(judge).toContain('persist-credentials: true');
       expect(judge).toContain('name: "cq/ratchet"');
       expect(judge).toContain('external_id: $ext');
+      // A verifier crash or malformed output still produces a failing check.
+      expect(judge).toContain('verifier emitted no valid JSON result');
+      expect(judge).toMatch(/if ! jq -e -s[\s\S]*verdict\.json/);
       expect(judge).not.toMatch(/ratchet\.recomputeTypecheck|tsc/);
       expect(body).not.toMatch(/secrets\./);
+    },
+  );
+
+  it.each(bothCopies('cq-verify.yml'))(
+    '%s: actual jq resolver prefers merge-queue for dual-target PRs in either API order',
+    (_label, text) => {
+      const resolveJob = jobBlocks(code(text)).get('resolve') ?? '';
+      const line = resolveJob.split('\n').find((candidate) => candidate.includes('--jq "'));
+      const filter = /--jq "(.*)"\)/
+        .exec(line ?? '')?.[1]
+        ?.replaceAll('\\"', '"')
+        .replaceAll('${subject}', '0123456789abcdef0123456789abcdef01234567')
+        .replaceAll('${REPO_ID}', '42');
+      expect(filter).toBeDefined();
+      const pull = (base: string) => ({
+        state: 'open',
+        head: {
+          sha: '0123456789abcdef0123456789abcdef01234567',
+          repo: { id: 42 },
+        },
+        base: { ref: base },
+      });
+      for (const pulls of [
+        [pull('main'), pull('merge-queue')],
+        [pull('merge-queue'), pull('main')],
+      ]) {
+        const result = spawnSync('jq', ['-r', filter ?? ''], {
+          input: JSON.stringify(pulls),
+          encoding: 'utf8',
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout.trim()).toBe('merge-queue');
+      }
+    },
+  );
+
+  it.each(bothCopies('cq-verify.yml'))(
+    '%s: the actual jq verdict guard rejects empty, malformed, and malformed-shape output',
+    (_label, text) => {
+      const judge = jobBlocks(code(text)).get('judge') ?? '';
+      const guard =
+        /if ! jq -e -s \\\n\s+'([\s\S]*?)' \\\n\s+"\$\{RUNNER_TEMP\}\/verdict\.json"/.exec(
+          judge,
+        )?.[1];
+      expect(guard).toBeDefined();
+      const accepted = (result: string): boolean => {
+        const jq = spawnSync('jq', ['-e', '-s', guard ?? ''], {
+          input: result,
+          encoding: 'utf8',
+        });
+        return jq.status === 0;
+      };
+      expect(accepted('')).toBe(false);
+      expect(accepted('{"status":')).toBe(false);
+      expect(accepted('{"status":"ok","value":42}')).toBe(false);
+      expect(accepted('{"status":"failed","value":42}')).toBe(false);
+      expect(accepted('{"status":"ok","value":{"verdict":"pass","reasons":[42]}}')).toBe(false);
+      expect(accepted('{"status":"failed","error":"CLI failed"}')).toBe(true);
+      expect(accepted('{"status":"ok","value":{"verdict":"pass","reasons":[]}}')).toBe(true);
     },
   );
 

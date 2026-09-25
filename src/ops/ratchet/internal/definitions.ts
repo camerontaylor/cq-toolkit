@@ -222,7 +222,12 @@ function resolveRelative(fromFile: string, ref: string): string | null {
   return joined;
 }
 
-/** `extends` targets (string or array): TS appends `.json` when the reference lacks it. */
+/**
+ * `extends` targets (string or array): TS tries a relative reference as
+ * written before appending `.json`. Both paths are definitions, even when
+ * the first is absent at the trust ref: the head could add it and change
+ * which config tsc resolves.
+ */
 function extendsTargets(file: string, config: Record<string, unknown>): string[] {
   const raw = config['extends'];
   const refs = typeof raw === 'string' ? [raw] : Array.isArray(raw) ? raw : [];
@@ -231,8 +236,11 @@ function extendsTargets(file: string, config: Record<string, unknown>): string[]
     if (typeof ref !== 'string') continue;
     // TS resolves only `./`/`../` extends relatively; anything else is a package.
     if (!ref.startsWith('./') && !ref.startsWith('../')) continue;
-    const resolved = resolveRelative(file, ref.endsWith('.json') ? ref : `${ref}.json`);
-    if (resolved !== null) out.push(resolved);
+    const candidates = ref.endsWith('.json') ? [ref] : [ref, `${ref}.json`];
+    for (const candidate of candidates) {
+      const resolved = resolveRelative(file, candidate);
+      if (resolved !== null) out.push(resolved);
+    }
   }
   return out;
 }

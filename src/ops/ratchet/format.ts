@@ -308,10 +308,11 @@ export function normalizeBaselineDiffValues(
     }
     if (inHunk === false && (line.startsWith('+++ ') || line.startsWith('--- '))) {
       const path = diffHeaderPath(line);
-      // Assigned PER HEADER, never only-if-matches: a sibling file's header
-      // must RESET the flag, so a non-coverage section following a coverage
-      // one can never inherit its normalization.
-      isCoverageSection = path !== null && isCoveragePath(path);
+      // A /dev/null side has no path to classify; retain the real side's
+      // classification for a deletion (and let the following real side
+      // classify an addition). Every REAL header still resets the flag when
+      // a sibling file is not a coverage baseline.
+      if (path !== null) isCoverageSection = isCoveragePath(path);
       out.push(line);
       continue;
     }

@@ -233,6 +233,7 @@ describe('git-backed', { timeout: 30_000 }, () => {
 
   test('tsconfigGraphPaths follows extends + references, JSONC, cycle-safe', async () => {
     expect(await tsconfigGraphPaths(repo, trust)).toEqual([
+      'configs/base',
       'configs/base.json',
       'configs/strict.json',
       'packages/a/tsconfig.json',
