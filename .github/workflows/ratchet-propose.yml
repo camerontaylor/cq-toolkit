@@ -5,8 +5,10 @@
 # Carrier: `workflow_run` on `ratchet-propose-measure` for runs on main — the
 # DEFAULT BRANCH's copy of this file runs (ADR-0004 D-A.1), so no pull request
 # can edit what holds the automation token before promotion. The job:
-#   - verifies the triggering run (workflow path, event `push`, branch main,
-#     repository id, success) before touching the token;
+#   - re-reads the triggering run from the API by numeric id and verifies its
+#     workflow path, event, branch main, repository id, success, and head SHA;
+#     the measured SHA must equal this trust/default-branch SHA, so stale
+#     measurements cannot propose a baseline for newer code;
 #   - builds the toolkit from the trust ref with `npm ci --ignore-scripts`
 #     and runs NO tests and no head code (the measurement ran credential-free
 #     in the measure leg);
@@ -51,18 +53,35 @@ jobs:
       contents: read
     steps:
       - name: Verify the triggering measure run
+        id: run
         env:
-          RUN_PATH: ${{ github.event.workflow_run.path }}
-          RUN_EVENT: ${{ github.event.workflow_run.event }}
-          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
-          RUN_REPO_ID: ${{ github.event.workflow_run.head_repository.id }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           REPO_ID: ${{ github.repository_id }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          TRUST: ${{ github.sha }}
         run: |
           set -euo pipefail
-          [ "$RUN_PATH" = ".github/workflows/ratchet-propose-measure.yml" ] || { echo "refusing: run path '$RUN_PATH'"; exit 1; }
-          [ "$RUN_EVENT" = "push" ] || [ "$RUN_EVENT" = "workflow_dispatch" ] || { echo "refusing: event '$RUN_EVENT'"; exit 1; }
-          [ "$RUN_BRANCH" = "main" ] || { echo "refusing: branch '$RUN_BRANCH'"; exit 1; }
-          [ "$RUN_REPO_ID" = "$REPO_ID" ] || { echo "refusing: foreign run"; exit 1; }
+          case "$RUN_ID" in ''|*[!0-9]*) echo "refusing: run id '$RUN_ID' is not numeric"; exit 1;; esac
+          # The API response is authoritative; event payload fields are not.
+          run="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
+          path="$(jq -r '.path' <<<"$run")"
+          event="$(jq -r '.event' <<<"$run")"
+          branch="$(jq -r '.head_branch' <<<"$run")"
+          head_repo="$(jq -r '.head_repository.id' <<<"$run")"
+          conclusion="$(jq -r '.conclusion' <<<"$run")"
+          measured_sha="$(jq -r '.head_sha' <<<"$run")"
+          [ "$path" = ".github/workflows/ratchet-propose-measure.yml" ] || { echo "refusing: run path '$path'"; exit 1; }
+          [ "$event" = "push" ] || [ "$event" = "workflow_dispatch" ] || { echo "refusing: event '$event'"; exit 1; }
+          [ "$branch" = "main" ] || { echo "refusing: branch '$branch'"; exit 1; }
+          [ "$head_repo" = "$REPO_ID" ] || { echo "refusing: foreign run"; exit 1; }
+          [ "$conclusion" = "success" ] || { echo "refusing: conclusion '$conclusion'"; exit 1; }
+          [[ "$measured_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "refusing: head_sha '$measured_sha'"; exit 1; }
+          [ "$measured_sha" = "$TRUST" ] || { echo "refusing: stale measurement $measured_sha (trust ref $TRUST)"; exit 1; }
+          {
+            echo "run_id=${RUN_ID}"
+            echo "measured_sha=${measured_sha}"
+          } >> "$GITHUB_OUTPUT"
       - name: Check out the trust ref (the default branch)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
@@ -84,10 +103,11 @@ jobs:
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (immutable commit pin; repo policy)
         with:
           name: ratchet-propose-measure
-          run-id: ${{ github.event.workflow_run.id }}
+          run-id: ${{ steps.run.outputs.run_id }}
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/ratchet-propose
       - name: Propose baseline tightening against merge-queue
         run: node scripts/ratchet-propose.mjs --measurement="${RUNNER_TEMP}/ratchet-propose/measurement.json"
         env:
           CQ_AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN }}
+          CQ_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}

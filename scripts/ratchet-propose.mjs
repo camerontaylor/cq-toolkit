@@ -130,6 +130,14 @@ if (
   );
 }
 const measurementPath = argv[0].slice(MEASUREMENT_FLAG.length);
+// The workflow supplies this only after re-reading the successful measure
+// run from the API and binding its head_sha to the current trust ref. Keep
+// local invocations compatible, but never render an unvalidated env value
+// into a privileged proposal PR body.
+const measuredSha = process.env.CQ_MEASURED_SHA;
+if (measuredSha !== undefined && /^[0-9a-f]{40}$/.test(measuredSha) === false) {
+  fail('CQ_MEASURED_SHA must be a 40-character lowercase commit SHA');
+}
 
 if (process.env.GITHUB_TOKEN) {
   console.error(
@@ -455,6 +463,10 @@ const effects = {
   },
 
   async commitAndUpsertPr({ head, base, title, body, commitMessage, files }) {
+    const proposalBody =
+      measuredSha === undefined
+        ? body
+        : `${body.trimEnd()}\n\nMeasured commit: \`${measuredSha}\`.\n`;
     const existing = listOpenProposalPrs(head, base);
     await withGitAskpass(token, async (gitEnv) => {
       // Missing-ref probes are ALLOWED to fail: `rev-parse --verify --quiet`
@@ -553,7 +565,7 @@ const effects = {
     const upsert = await upsertProposalPr({
       existing: existing.length > 0 ? { number: existing[0].number, url: existing[0].url } : null,
       edit: async () => {
-        runGh(['pr', 'edit', String(existing[0].number), '--title', title, '--body', body]);
+        runGh(['pr', 'edit', String(existing[0].number), '--title', title, '--body', proposalBody]);
       },
       create: async () => {
         const out = runGh([
@@ -566,7 +578,7 @@ const effects = {
           '--title',
           title,
           '--body',
-          body,
+          proposalBody,
         ]);
         const url =
           out

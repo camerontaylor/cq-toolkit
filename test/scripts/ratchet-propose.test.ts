@@ -49,14 +49,17 @@ afterAll(() => {
 
 function baseEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of ['CQ_AUTOMATION_TOKEN', 'GITHUB_TOKEN', 'GH_TOKEN']) delete env[key];
+  for (const key of ['CQ_AUTOMATION_TOKEN', 'CQ_MEASURED_SHA', 'GITHUB_TOKEN', 'GH_TOKEN']) {
+    delete env[key];
+  }
   return env;
 }
 
-function runRecorded(args: string[], withToken = true) {
+function runRecorded(args: string[], withToken = true, extraEnv: NodeJS.ProcessEnv = {}) {
   rmSync(callLog, { force: true });
   const env = baseEnv();
   if (withToken) env.CQ_AUTOMATION_TOKEN = 'test-token-not-real';
+  Object.assign(env, extraEnv);
   env.PATH = `${fakeBin}:${process.env.PATH ?? ''}`;
   const res = spawnSync(process.execPath, [SCRIPT, ...args], {
     cwd: ROOT,
@@ -93,6 +96,15 @@ describe('ratchet-propose: gate and arguments', () => {
     const res = runRecorded(args);
     expect(res.status, res.stderr).toBe(1);
     expect(res.stderr).toContain('usage: ratchet-propose.mjs --measurement=<path>');
+    expect(res.calls).toBe('');
+  });
+
+  it('rejects an unsafe measured SHA before reading the artifact or invoking git/gh', () => {
+    const res = runRecorded(['--measurement=/unused'], true, {
+      CQ_MEASURED_SHA: 'abc`\nInjected PR body',
+    });
+    expect(res.status, res.stderr).toBe(1);
+    expect(res.stderr).toContain('CQ_MEASURED_SHA must be a 40-character lowercase commit SHA');
     expect(res.calls).toBe('');
   });
 });
@@ -272,7 +284,11 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     return { origin, repo, bin, ghLog, mqTip, filterMarker };
   }
 
-  function propose(ctx: ReturnType<typeof setup>, metrics: Record<string, number>) {
+  function propose(
+    ctx: ReturnType<typeof setup>,
+    metrics: Record<string, number>,
+    measuredSha?: string,
+  ) {
     const artifact = join(ctx.repo, '..', 'measurement.json');
     writeFileSync(artifact, JSON.stringify({ schemaVersion: 1, metrics }));
     return spawnSync(
@@ -287,6 +303,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
           ...baseEnv(),
           ...GIT_ENV,
           CQ_AUTOMATION_TOKEN: 'test-token-not-real',
+          ...(measuredSha === undefined ? {} : { CQ_MEASURED_SHA: measuredSha }),
           PATH: `${ctx.bin}:${process.env.PATH ?? ''}`,
         },
       },
@@ -298,7 +315,8 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     { timeout: 240_000 },
     () => {
       const ctx = setup('happy');
-      const res = propose(ctx, { coverage: 95.04 });
+      const measuredSha = git(ctx.repo, ['rev-parse', 'HEAD']);
+      const res = propose(ctx, { coverage: 95.04 }, measuredSha);
       expect(res.status, `${res.stdout}${res.stderr}`).toBe(0);
       expect(res.stdout.trim()).toBe('https://github.com/owner/repo/pull/7');
       expect(res.stderr).toContain("no 'typecheck-count' reading");
@@ -307,6 +325,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
       const gh = readFileSync(ctx.ghLog, 'utf8');
       expect(gh).toMatch(/^pr create --base merge-queue --head ratchet\/propose-/m);
       expect(gh).toMatch(/^pr list --head \S+ --base merge-queue /m);
+      expect(gh).toContain(`Measured commit: \`${measuredSha}\`.`);
 
       const heads = git(ctx.origin, ['for-each-ref', '--format=%(refname:short)', 'refs/heads/']);
       const head = heads.split('\n').find((h) => h.startsWith('ratchet/propose-'));

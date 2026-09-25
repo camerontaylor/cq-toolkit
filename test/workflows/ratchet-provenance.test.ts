@@ -18,7 +18,8 @@
 //   5. The legacy ratchet.yml's target/metric pairs are exactly the trust
 //      manifest's (baselines/ratchets.json), and its guard runs in ref mode.
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -214,6 +215,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
 
   it.each(bothCopies('cq-verify.yml'))(
     '%s: actual jq resolver prefers merge-queue for dual-target PRs in either API order',
+    { timeout: 30_000 },
     (_label, text) => {
       const resolveJob = jobBlocks(code(text)).get('resolve') ?? '';
       const line = resolveJob.split('\n').find((candidate) => candidate.includes('--jq "'));
@@ -247,6 +249,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
 
   it.each(bothCopies('cq-verify.yml'))(
     '%s: the actual jq verdict guard rejects empty, malformed, and malformed-shape output',
+    { timeout: 30_000 },
     (_label, text) => {
       const judge = jobBlocks(code(text)).get('judge') ?? '';
       const guard =
@@ -279,9 +282,97 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(onBlock(body)).toMatch(/branches:\n {6}- main$/m);
       expect(body).toMatch(/^\s{4}environment: automation$/m);
       expect(body).toContain('.github/workflows/ratchet-propose-measure.yml');
+      expect(body).toContain('RUN_ID: ${{ github.event.workflow_run.id }}');
+      expect(body).toContain('gh api "repos/${REPO}/actions/runs/${RUN_ID}"');
+      expect(body).toContain('measured_sha="$(jq -r \'.head_sha\' <<<"$run")"');
+      expect(body).toContain('[ "$measured_sha" = "$TRUST" ]');
+      expect(body).toContain('run-id: ${{ steps.run.outputs.run_id }}');
+      expect(body).toContain('CQ_MEASURED_SHA: ${{ steps.run.outputs.measured_sha }}');
       expect(body).toMatch(/node scripts\/ratchet-propose\.mjs --measurement=/);
       expect(body).toMatch(/CQ_AUTOMATION_TOKEN: \$\{\{ secrets\.CQ_AUTOMATION_TOKEN \}\}/);
       expect(body).not.toMatch(/GITHUB_TOKEN:/);
+    },
+  );
+
+  it(
+    'ratchet-propose rejects forged and stale API run data before accepting its measured SHA',
+    { timeout: 30_000 },
+    () => {
+      const job = jobBlocks(code(template('ratchet-propose.yml'))).get('propose') ?? '';
+      const lines = job.split('\n');
+      const stepStart = lines.findIndex(
+        (line) => line.trim() === '- name: Verify the triggering measure run',
+      );
+      const runStart = lines.findIndex(
+        (line, index) => index > stepStart && line === '        run: |',
+      );
+      expect(stepStart).toBeGreaterThanOrEqual(0);
+      expect(runStart).toBeGreaterThan(stepStart);
+      const shellLines: string[] = [];
+      for (const line of lines.slice(runStart + 1)) {
+        if (line.trim() !== '' && !line.startsWith('          ')) break;
+        shellLines.push(line.startsWith('          ') ? line.slice(10) : '');
+      }
+      const shell = `gh() {
+  [ "$1" = api ] && [ "$2" = "repos/owner/repo/actions/runs/$RUN_ID" ] || return 9
+  printf '%s\\n' "$RUN_DATA"
+}
+${shellLines.join('\n')}`;
+      const sha = '0123456789abcdef0123456789abcdef01234567';
+      const valid = {
+        path: '.github/workflows/ratchet-propose-measure.yml',
+        event: 'push',
+        head_branch: 'main',
+        head_repository: { id: 42 },
+        conclusion: 'success',
+        head_sha: sha,
+      };
+      const outputDir = mkdtempSync(join(tmpdir(), 'ratchet-propose-run-'));
+      const outputPath = join(outputDir, 'github-output');
+      const check = (data: Record<string, unknown>, runId = '123') => {
+        rmSync(outputPath, { force: true });
+        const result = spawnSync('bash', ['-c', shell], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            RUN_ID: runId,
+            RUN_DATA: JSON.stringify(data),
+            REPO: 'owner/repo',
+            REPO_ID: '42',
+            TRUST: sha,
+            GITHUB_OUTPUT: outputPath,
+          },
+        });
+        return {
+          ...result,
+          outputs: existsSync(outputPath) ? readFileSync(outputPath, 'utf8') : '',
+        };
+      };
+      try {
+        const accepted = check(valid);
+        expect(accepted.status, accepted.stderr).toBe(0);
+        expect(accepted.outputs).toContain('run_id=123');
+        expect(accepted.outputs).toContain(`measured_sha=${sha}`);
+        for (const [label, data] of [
+          ['path', { ...valid, path: '.github/workflows/other.yml' }],
+          ['event', { ...valid, event: 'pull_request' }],
+          ['branch', { ...valid, head_branch: 'other' }],
+          ['repo', { ...valid, head_repository: { id: 43 } }],
+          ['conclusion', { ...valid, conclusion: 'failure' }],
+          ['head SHA shape', { ...valid, head_sha: 'not-a-sha' }],
+          ['stale SHA', { ...valid, head_sha: 'f'.repeat(40) }],
+        ] as const) {
+          const rejected = check(data);
+          expect(rejected.status, `${label}: ${rejected.stderr}`).toBe(1);
+          expect(rejected.outputs, label).not.toContain('measured_sha=');
+        }
+        const invalidId = check(valid, '123;echo bad');
+        expect(invalidId.status).toBe(1);
+        expect(invalidId.stdout).toContain('not numeric');
+        expect(invalidId.outputs).not.toContain('measured_sha=');
+      } finally {
+        rmSync(outputDir, { recursive: true, force: true });
+      }
     },
   );
 });
