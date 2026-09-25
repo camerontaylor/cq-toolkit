@@ -1,0 +1,4 @@
+diff --git i/test/legacy.test.ts w/src/legacy.ts
+similarity index 100%
+rename from test/legacy.test.ts
+rename to src/legacy.ts

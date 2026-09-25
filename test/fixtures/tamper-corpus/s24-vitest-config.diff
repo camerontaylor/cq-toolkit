@@ -1,0 +1,7 @@
+diff --git a/test/attack.test.ts b/test/attack.test.ts
+index 111..222 100644
+--- a/test/attack.test.ts
++++ b/test/attack.test.ts
+@@ -1,1 +1,2 @@
+ context();
+++exclude: ['**/*.test.ts']

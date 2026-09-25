@@ -101,6 +101,12 @@ export const FailureSetSchema: z.ZodType<FailureSet> = z
     tool: z.string(),
     failures: z.array(CheckFailureSchema),
     exitCode: z.number().nullable(),
+    numTotalTests: z.number().int().nonnegative().exactOptional(),
+    numPassedTests: z.number().int().nonnegative().exactOptional(),
+    numPassed: z.number().int().nonnegative().exactOptional(),
+    numSkippedTests: z.number().int().nonnegative().exactOptional(),
+    numPendingTests: z.number().int().nonnegative().exactOptional(),
+    numTodoTests: z.number().int().nonnegative().exactOptional(),
   })
   .strict();
 

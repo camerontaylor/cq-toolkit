@@ -399,6 +399,8 @@ describe('hackDetector: suppression config', () => {
       'oxlint-disable',
       '@ts-ignore',
       '@ts-expect-error',
+      '@ts-nocheck',
+      'biome-ignore',
       'istanbul ignore',
     ]);
     expect(() => {

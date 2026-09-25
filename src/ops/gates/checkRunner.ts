@@ -74,6 +74,18 @@ export interface FailureSet {
   tool: string;
   failures: CheckFailure[];
   exitCode: number | null;
+  /** Total tests reported by the test runner, when its wire format exposes it. */
+  numTotalTests?: number;
+  /** Passing tests reported by the test runner, when its wire format exposes it. */
+  numPassedTests?: number;
+  /** Short alias used by some runner reporters. */
+  numPassed?: number;
+  /** Tests skipped or pending in the runner summary. */
+  numSkippedTests?: number;
+  /** Vitest's spelling for pending/skipped tests. */
+  numPendingTests?: number;
+  /** Tests explicitly marked TODO by the runner. */
+  numTodoTests?: number;
 }
 
 /**

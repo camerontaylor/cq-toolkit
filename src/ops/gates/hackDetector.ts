@@ -83,6 +83,8 @@ export const DEFAULT_SUPPRESSION_PATTERNS: readonly SuppressionPattern[] = Objec
     { name: 'oxlint-disable', pattern: '\\boxlint-disable\\b' },
     { name: '@ts-ignore', pattern: '@ts-ignore\\b' },
     { name: '@ts-expect-error', pattern: '@ts-expect-error\\b', requiresReason: true },
+    { name: '@ts-nocheck', pattern: '@ts-nocheck\\b' },
+    { name: 'biome-ignore', pattern: '\\bbiome-ignore\\b' },
     { name: 'istanbul ignore', pattern: '\\bistanbul\\s+ignore\\b' },
   ].map((pattern) => Object.freeze(pattern)),
 );
@@ -107,7 +109,8 @@ export const DEFAULT_TEST_FILE_PATTERNS: readonly string[] = Object.freeze([
  * against every ADDED line (`describe.skip`, `it.only`, `test . skip`, …).
  * Frozen: the marker taxonomy is a shipped default, not call-site knowledge.
  */
-export const DEFAULT_SKIP_ONLY_PATTERN = '\\b(describe|it|test)\\s*\\.\\s*(skip|only)\\b';
+export const DEFAULT_SKIP_ONLY_PATTERN =
+  '\\b(?:x(?:it|test|describe)|f(?:it|test|describe))\\b|\\b(?:describe|it|test)\\s*\\.\\s*(?:skip|only|todo|skipIf|runIf|fails|concurrent(?:\\.skip)?)\\b|\\b(?:skip|todo|only|concurrent)\\s*:\\s*(?:true|false|[A-Za-z_$])';
 
 /**
  * Tamper-heuristic tuning. Every field is optional with a shipped default;
@@ -127,6 +130,8 @@ export interface TamperConfig {
   skipOnlyPattern?: string;
   /** Flag tautological `expect(X).toBe(X)` assertions (default true). */
   detectTautologies?: boolean;
+  /** Flag a net deletion of it/test declarations in a test file (default true). */
+  detectRemovedTests?: boolean;
 }
 
 /** JSON-serializable input of the `gates.hackDetector` op. Plain data. */
@@ -139,11 +144,13 @@ export interface HackDetectorInput {
   tamper?: TamperConfig;
 }
 
-/** What a finding is about. Exactly four kinds. */
+/** What a finding is about. */
 export type TamperFindingKind =
   | 'suppression'
   | 'deleted-test-file'
   | 'new-skip-only'
+  | 'removed-test'
+  | 'protected-config'
   | 'tautological-assertion';
 
 /**
@@ -176,6 +183,7 @@ interface CompiledConfig {
   skipOnly: RegExp | null;
   skipOnlySource: string;
   detectTautologies: boolean;
+  detectRemovedTests: boolean;
 }
 
 /** Hunk header: `@@ -old[,[count]] +new[,[count]] @@` — captures the new start. */
@@ -234,6 +242,7 @@ export const hackDetector: Op<HackDetectorInput, TamperFinding[]> = async (input
       skipOnly: tamper.detectNewSkipOnly === false ? null : new RegExp(skipOnlySource, 'i'),
       skipOnlySource,
       detectTautologies: tamper.detectTautologies ?? true,
+      detectRemovedTests: tamper.detectRemovedTests ?? true,
     };
   } catch (err) {
     if (err instanceof SyntaxError) {
@@ -267,8 +276,32 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
   let renameTo: string | null = null;
   let inHunk = false;
   let newLine = 0;
+  let sectionPath: string | null = null;
+  let addedTestDeclarations = 0;
+  let removedTestDeclarations = 0;
+  const flushRemovedTest = (): void => {
+    if (
+      config.detectRemovedTests &&
+      sectionPath !== null &&
+      newPath !== '/dev/null' &&
+      removedTestDeclarations > addedTestDeclarations &&
+      isTestPath(sectionPath, config)
+    ) {
+      findings.push({
+        kind: 'removed-test',
+        file: sectionPath,
+        line: null,
+        snippet: `${removedTestDeclarations} removed test declaration(s), ${addedTestDeclarations} added`,
+        message: 'test declarations were removed without a matching addition',
+      });
+    }
+  };
   for (const line of diff.split(/\r?\n/)) {
     if (line.startsWith('diff --git ')) {
+      flushRemovedTest();
+      addedTestDeclarations = 0;
+      removedTestDeclarations = 0;
+      sectionPath = null;
       oldPath = null;
       oldHeader = null;
       newPath = null;
@@ -301,6 +334,17 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       }
       if (line.startsWith('+++ ')) {
         newPath = headerPathOf(line.slice(4));
+        sectionPath = newPath === '/dev/null' ? oldPath : newPath;
+        if (sectionPath !== null && isProtectedConfigPath(sectionPath)) {
+          findings.push({
+            kind: 'protected-config',
+            file: sectionPath,
+            line: null,
+            snippet: 'protected runner/measurement configuration',
+            message:
+              'worker changes to runner, measurement, or repository configuration are never auto-committed',
+          });
+        }
         if (renameTo === null) {
           reportTestFileRemoval(findings, config, oldPath, oldHeader, newPath);
         }
@@ -324,15 +368,18 @@ function scanDiff(diff: string, config: CompiledConfig): TamperFinding[] {
       continue; // "\ No newline at end of file" — metadata, not content
     }
     if (line.startsWith('+')) {
+      if (isTestDeclaration(line.slice(1))) addedTestDeclarations += 1;
       scanAddedLine(findings, config, newPath, newLine, line.slice(1));
       newLine++;
       continue;
     }
     if (line.startsWith('-')) {
+      if (isTestDeclaration(line.slice(1))) removedTestDeclarations += 1;
       continue; // removed line — a deleted suppression is a fix, never scanned
     }
     newLine++; // context line ('' or ' ') advances the new-file cursor
   }
+  flushRemovedTest();
   return findings;
 }
 
@@ -373,6 +420,21 @@ function reportTestFileRemoval(
 }
 
 /** Every heuristic, against one ADDED line's content only. */
+const PROTECTED_CONFIG_RE =
+  /(^|\/)(?:\.gitattributes|vitest\.config(?:\.[^/]+)?|jest\.config(?:\.[^/]+)?|tsconfig(?:\.[^/]+)?\.json|\.eslintrc(?:\.[^/]+)?|eslint\.config\.[^/]+|oxlint(?:\.[^/]+)?\.json|biome\.jsonc?|package\.json)$/i;
+
+function isProtectedConfigPath(path: string | null): boolean {
+  return path !== null && (path === '.gitattributes' || PROTECTED_CONFIG_RE.test(path));
+}
+
+function isTestDeclaration(content: string): boolean {
+  return /\b(?:x?(?:it|test|describe)|f(?:it|test|describe))\s*\(/.test(content);
+}
+
+function isTestPath(path: string, config: CompiledConfig): boolean {
+  return config.testFilePatterns.some((pattern) => pattern.regex.test(path));
+}
+
 function scanAddedLine(
   findings: TamperFinding[],
   config: CompiledConfig,

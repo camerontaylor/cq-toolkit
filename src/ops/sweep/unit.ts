@@ -181,6 +181,29 @@ export const SWEEP_RUN_STATE_SCANNED_DIR = 'scanned';
 /** The worktreeFor family's default git wall clock (600s), for the unit op's adapter. */
 export const DEFAULT_UNIT_GIT_TIMEOUT_MS = 600_000;
 
+/**
+ * Paths a worker may never commit in a sweep/test-fix stage. These are
+ * evidence for a human, not fixes: changing them can redefine what runs or
+ * how it is measured. Test patterns include the shared test-file taxonomy;
+ * snapshots and config are explicit because a package can otherwise hide
+ * evidence behind a test-shaped or generated file.
+ */
+export const DEFAULT_PROTECTED_STAGE_PATTERNS: readonly RegExp[] = Object.freeze([
+  /\.test\.[tj]sx?$/i,
+  /\.spec\.[tj]sx?$/i,
+  /(^|\/)__tests__\//i,
+  /\.snap$/i,
+  /(^|\/)__snapshots__\//i,
+  /(^|\/)\.gitattributes$/i,
+  /(^|\/)vitest\.config(?:\.[^/]+)?$/i,
+  /(^|\/)jest\.config(?:\.[^/]+)?$/i,
+  /(^|\/)tsconfig(?:\.[^/]+)?\.json$/i,
+  /(^|\/)eslint\.config\.[^/]+$/i,
+  /(^|\/)\.eslintrc(?:\.[^/]+)?$/i,
+  /(^|\/)biome\.jsonc?$/i,
+  /(^|\/)package\.json$/i,
+]);
+
 // ---------------------------------------------------------------------------
 // The SDK binding surface
 // ---------------------------------------------------------------------------
@@ -271,9 +294,8 @@ export interface SweepUnitBindings {
    * The staged-path allowlist: regex SOURCES (hackDetector's pattern
    * precedent, compiled with `new RegExp`, `g`/`y` stripped) every staged
    * path must match. AFTER staging, any staged path matching none of the
-   * patterns fails the unit naming the offenders — a scoped worker (test-fix:
-   * the test-file patterns) can never commit outside its scope. Absent = no
-   * scope restriction.
+   * patterns fails the unit naming the offenders. The protected-path guard
+   * runs even when this optional scope is absent.
    */
   stagePathAllowlist?: { patterns: string[] };
 }
@@ -591,7 +613,19 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     if (staged !== null) return { status: 'failed', error: tagged('infra', staged) };
     const scope = await enforceStagePathAllowlist(bindings, unit, worktree);
     if (scope !== null) return { status: 'failed', error: tagged('scope', scope) };
-    const diff = await bindings.git(['-C', worktree.path, 'diff', '--cached', '--']);
+    const diff = await bindings.git([
+      '-C',
+      worktree.path,
+      'diff',
+      '--cached',
+      '--text',
+      '--no-ext-diff',
+      '--no-textconv',
+      '--no-renames',
+      '--src-prefix=a/',
+      '--dst-prefix=b/',
+      '--',
+    ]);
     if (diff.code !== 0) {
       return {
         status: 'failed',
@@ -951,10 +985,9 @@ async function enforceStagePathAllowlist(
   worktree: SweepWorkspace,
 ): Promise<string | null> {
   const allowlist = bindings.stagePathAllowlist;
-  if (allowlist === undefined || allowlist.patterns.length === 0) return null;
   let compiled: RegExp[];
   try {
-    compiled = compileStagePathPatterns(allowlist.patterns);
+    compiled = allowlist?.patterns.length ? compileStagePathPatterns(allowlist.patterns) : [];
   } catch (err) {
     return `sweep.unit ${unit.package}: invalid stage-path allowlist pattern — ${messageOf(err)}`;
   }
@@ -963,15 +996,27 @@ async function enforceStagePathAllowlist(
     worktree.path,
     'diff',
     '--cached',
+    '--text',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--no-renames',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
     '--name-status',
     '-z',
   ]);
   if (listed.code !== 0) {
     return `sweep.unit ${unit.package}: git diff --cached --name-status failed — ${listed.stderr.trim()}`;
   }
-  const offenders = stagedPathsOf(listed.stdout).filter(
-    (path) => !compiled.some((regex) => regex.test(path)),
+  const staged = stagedPathsOf(listed.stdout);
+  const protectedPaths = staged.filter((path) =>
+    DEFAULT_PROTECTED_STAGE_PATTERNS.some((regex) => regex.test(path)),
   );
+  if (protectedPaths.length > 0) {
+    return `sweep.unit ${unit.package}: protected path(s) changed by a worker — ${protectedPaths.join(', ')} — tests, runner/measurement config, snapshots, .gitattributes, and package scripts require needs-human review`;
+  }
+  if (allowlist === undefined || allowlist.patterns.length === 0) return null;
+  const offenders = staged.filter((path) => !compiled.some((regex) => regex.test(path)));
   if (offenders.length > 0) {
     return (
       `sweep.unit ${unit.package}: staged path(s) outside the allowlist [${allowlist.patterns.join(', ')}] — ` +
@@ -1012,7 +1057,19 @@ async function commitStaged(
   unit: WorkUnit,
   worktree: SweepWorkspace,
 ): Promise<{ committed: boolean; fault: string | null }> {
-  const empty = await bindings.git(['-C', worktree.path, 'diff', '--cached', '--quiet']);
+  const empty = await bindings.git([
+    '-C',
+    worktree.path,
+    'diff',
+    '--cached',
+    '--text',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--no-renames',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
+    '--quiet',
+  ]);
   if (empty.code !== 0 && empty.code !== 1) {
     return {
       committed: false,
@@ -1499,7 +1556,20 @@ async function verifyScannedTip(
     }
   }
   void parentRef;
-  const committedDiff = await bindings.git(['-C', worktreePath, 'diff', 'HEAD^', 'HEAD', '--']);
+  const committedDiff = await bindings.git([
+    '-C',
+    worktreePath,
+    'diff',
+    'HEAD^',
+    'HEAD',
+    '--text',
+    '--no-ext-diff',
+    '--no-textconv',
+    '--no-renames',
+    '--src-prefix=a/',
+    '--dst-prefix=b/',
+    '--',
+  ]);
   if (committedDiff.code !== 0) {
     return tagged(
       'infra',

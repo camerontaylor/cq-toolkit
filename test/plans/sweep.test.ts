@@ -106,7 +106,7 @@ describe('plans barrel surface (jZ59o)', () => {
     expect(sweepUnitSegments('cq/x', { package: '@scope/pkg', fixer: 'fix' }).slug).toBe(
       'scope-pkg',
     );
-    expect(TEST_FIX_STAGE_PATH_ALLOWLIST.patterns.length).toBeGreaterThan(0);
+    expect(TEST_FIX_STAGE_PATH_ALLOWLIST.patterns).toEqual([]);
   });
 });
 

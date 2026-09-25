@@ -1,0 +1,4 @@
+diff --git a/old.test.ts b/new.ts
+similarity index 100%
+rename from old.test.ts
+rename to new.ts
