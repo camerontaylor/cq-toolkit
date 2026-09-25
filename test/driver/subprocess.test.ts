@@ -99,35 +99,6 @@ function conformanceRoutingTable(): RoutingTable {
   });
 }
 
-// ---------------------------------------------------------------------------
-// Directive → FAKE_AGENT_* env (the conformance script contract, scripted
-// into the fixture). The spawn override injects these per driver instance —
-// process.env is never mutated per-run (vitest runs tests sequentially
-// within a file and `fileParallelism: false` serializes files; per-driver
-// env keeps runs isolated).
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_AGENT_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_AGENT_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_AGENT_MODE: 'tool-then-reply',
-        FAKE_AGENT_TOOL: directive.tool,
-        FAKE_AGENT_INPUT: JSON.stringify(directive.input),
-        FAKE_AGENT_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_REPLY: directive.text };
-    case undefined:
-    default:
-      return { FAKE_AGENT_MODE: 'ok' };
-  }
-}
-
 /** The --allowedTools value of a built argv (the fixture's permission gate). */
 function allowedToolsArg(args: readonly string[]): string {
   const index = args.indexOf('--allowedTools');
@@ -182,7 +153,8 @@ function baseOptions(
   };
 }
 
-/** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
+let fakeManagedSessionCounter = 0;
+
 function fakeManagedScript(
   opts: { cwd: string; args: readonly string[] },
   directive: ModelDirective | undefined,
@@ -195,7 +167,7 @@ function fakeManagedScript(
   const allowed = new Set(
     allowedIndex === -1 ? [] : (opts.args[allowedIndex + 1] ?? '').split(' ').filter(Boolean),
   );
-  const sessionId = `fake-cli-${Math.random().toString(36).slice(2)}`;
+  const sessionId = `fake-cli-${fakeManagedSessionCounter++}`;
   const usage = {
     input_tokens: 10,
     output_tokens: 5,
@@ -271,9 +243,10 @@ function fakeManagedScript(
   };
 }
 
+/** Fresh mock-backed SubprocessDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
   return new SubprocessDriver({
-    ...baseOptions(spec.scratchDir, directiveEnv(spec.directive), []),
+    ...baseOptions(spec.scratchDir, {}, []),
     spawn: fakeManagedSpawn((opts) =>
       fakeManagedScript(opts, spec.directive, spec.outputSchema !== undefined),
     ),

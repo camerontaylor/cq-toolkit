@@ -79,33 +79,6 @@ import type { Driver, OpInvocation } from '../../src/driver/types.js';
 // element-built; the resolved binary rides the spawn seam's command).
 const FAKE_ACP_SERVER = fileURLToPath(new URL('../fixtures/fake-acp-server.mjs', import.meta.url));
 
-// ---------------------------------------------------------------------------
-// Directive → FAKE_ACP_* env (the conformance script contract, scripted
-// into the fixture). The spawn seam injects these per driver instance —
-// process.env is never mutated per-run.
-// ---------------------------------------------------------------------------
-
-function directiveEnv(directive: ModelDirective | undefined): Record<string, string> {
-  switch (directive?.kind) {
-    case 'block-until-abort':
-      return { FAKE_ACP_MODE: 'block-until-abort' };
-    case 'fail':
-      return { FAKE_ACP_MODE: 'fail' };
-    case 'tool-then-reply':
-      return {
-        FAKE_ACP_MODE: 'tool-then-reply',
-        FAKE_ACP_TOOL: directive.tool,
-        FAKE_ACP_INPUT: JSON.stringify(directive.input),
-        FAKE_ACP_REPLY: directive.reply,
-      };
-    case 'reply':
-      return { FAKE_ACP_MODE: 'ok', FAKE_ACP_REPLY: directive.text };
-    case undefined:
-    default:
-      return { FAKE_ACP_MODE: 'ok' };
-  }
-}
-
 /** One recorded spawn call: the exact argv + env the driver handed over. */
 interface SpawnCall {
   command: string;
@@ -223,7 +196,6 @@ const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
   poll();
 };
 
-/** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function fakeAcpScript(
   opts: { cwd: string; env: Record<string, string> },
   directive: ModelDirective | undefined,
@@ -402,9 +374,10 @@ function fakeAcpScript(
   };
 }
 
+/** Fresh AcpDriver honoring the ConformanceSpec contract. */
 function makeDriver(spec: ConformanceSpec): Driver {
   return new AcpDriver({
-    ...driverOptions(spec.scratchDir, directiveEnv(spec.directive), []),
+    ...driverOptions(spec.scratchDir, {}, []),
     spawn: fakeAcpSpawn((opts) => fakeAcpScript(opts, spec.directive)),
     ...(spec.outputSchema !== undefined ? { outputSchema: spec.outputSchema } : {}),
     // The priced handle flows through the price lookup so the conformance

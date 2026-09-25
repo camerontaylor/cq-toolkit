@@ -1,5 +1,6 @@
 import { readFile, readdir } from 'node:fs/promises';
-import { join, relative } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, test } from 'vitest';
 
 /**
@@ -8,8 +9,7 @@ import { describe, expect, test } from 'vitest';
  * list, not a complete dynamic process detector.
  */
 const PROCESS_ENTRY_POINTS = [
-  /from ['"]node:child_process['"]/,
-  /from ['"]child_process['"]/,
+  /^import(?!\s+type\b)[^;]*from ['"](node:)?child_process['"]/m,
   /\bspawnAcpProcess\s*\(/,
   /\bspawnManaged\s*\(/,
   /\bmakeSubprocessWorktreeEffects\s*\(/,
@@ -18,33 +18,10 @@ const PROCESS_ENTRY_POINTS = [
   /\brunSweepPlan\s*\(/,
 ] as const;
 
-/** Process-backed test files. Keep this list synchronized deliberately. */
-const COMMITTED_PROCESS_TEST_FILES = [
-  'test/cli/i1.test.ts',
-  'test/driver/acp.test.ts',
-  'test/driver/subprocess.test.ts',
-  'test/e2e/analyze/analyze.e2e.test.ts',
-  'test/e2e/merge/live.test.ts',
-  'test/e2e/sweep/sweep.e2e.test.ts',
-  'test/helpers/git-template.test.ts',
-  'test/ops/ratchet/captureBaseline.test.ts',
-  'test/ops/ratchet/monotonicGuard.test.ts',
-  'test/ops/review/registry.test.ts',
-  'test/ops/sweep/cleanup.test.ts',
-  'test/ops/sweep/ledger-suppression.test.ts',
-  'test/ops/sweep/unit-registry.test.ts',
-  'test/ops/sweep/worktreeFor.test.ts',
-  'test/scripts/demo-eval-axes.test.ts',
-  'test/scripts/knip.test.ts',
-  'test/scripts/oxlint-boundaries.test.ts',
-  'test/scripts/ratchet-baseline.test.ts',
-  'test/scripts/static-conformance.test.ts',
-  'test/scripts/tooling-commands.test.ts',
-  'test/workflows/merge-queue-gate.test.ts',
-] as const;
+const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 async function processBackedTestFiles(): Promise<string[]> {
-  const root = join(process.cwd(), 'test');
+  const root = join(REPOSITORY_ROOT, 'test');
   const entries = await readdir(root, { recursive: true });
   const files: string[] = [];
   for (const entry of entries) {
@@ -52,14 +29,24 @@ async function processBackedTestFiles(): Promise<string[]> {
     const path = join(root, entry);
     const source = await readFile(path, 'utf8');
     if (PROCESS_ENTRY_POINTS.some((pattern) => pattern.test(source))) {
-      files.push(relative(process.cwd(), path).replaceAll('\\', '/'));
+      files.push(relative(REPOSITORY_ROOT, path).replaceAll('\\', '/'));
     }
   }
   return files.sort();
 }
 
+async function documentedProcessTestFiles(): Promise<string[]> {
+  const docs = await readFile(join(REPOSITORY_ROOT, 'docs/test-performance-notes.md'), 'utf8');
+  const section = docs.split('## Process-entry inventory')[1]?.split(/^## /m)[0] ?? '';
+  const files = [...section.matchAll(/^- `([^`]+\.test\.ts)`$/gm)].flatMap((match) =>
+    match[1] === undefined ? [] : [match[1]],
+  );
+  if (files.length === 0) throw new Error('Process-entry inventory section is empty');
+  return files.sort();
+}
+
 describe('real-process inventory', () => {
-  test('the committed process-backed test list matches the known entry points', async () => {
-    expect(await processBackedTestFiles()).toEqual([...COMMITTED_PROCESS_TEST_FILES].sort());
+  test('the documented process-backed test list matches the known entry points', async () => {
+    expect(await processBackedTestFiles()).toEqual(await documentedProcessTestFiles());
   });
 });

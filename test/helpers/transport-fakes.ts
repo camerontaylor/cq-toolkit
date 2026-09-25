@@ -120,6 +120,8 @@ function createLinePeer(
               script(JSON.parse(line) as JsonLineFrame, peer);
             } catch (error: unknown) {
               stderr.write(`fake transport script error: ${String(error)}\n`);
+              peer.finish(1);
+              break;
             }
           }
           newline = input.indexOf('\n');
@@ -152,6 +154,8 @@ export function fakeAcpSpawn(scriptFactory: (opts: AcpSpawnOptions) => JsonLineS
     child.stdin = parts.stdin;
     child.stdout = parts.stdout;
     child.stderr = parts.stderr;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     child.exitCode = null;
     child.signalCode = null;
     child.pid = 4242;
