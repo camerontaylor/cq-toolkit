@@ -316,6 +316,7 @@ export const HARNESS_DENIAL_PREFIXES: readonly string[] = Object.freeze([
   'sandbox: ',
   'invalid input: ',
   'path escape: ',
+  'path not allowed: ',
   'path not allowed by harness config allowlist: ',
   'command not allowed by harness config allowlist: ',
   'command allowlist: ',
