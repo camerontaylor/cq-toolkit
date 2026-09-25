@@ -237,6 +237,33 @@ describe('lifetime', () => {
 });
 
 describe('env scrub', () => {
+  test('CQ_RUN_ENV_PASSTHROUGH reaches an actual permitted run child without widening knobs', async () => {
+    const workspace = scratch();
+    const server = startBin(
+      [JSON.stringify(manifestFor(workspace, ['env']))],
+      baseEnv({
+        CQ_RUN_ENV_PASSTHROUGH: 'FOO',
+        FOO: 'kept',
+        ANTHROPIC_API_KEY: 'secret',
+        CQ_SANDBOX: 'off',
+      }),
+    );
+    server.send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'run', arguments: { command: 'env' } },
+    });
+    const text = textOf(await server.response(1));
+    expect(text).toContain('FOO=kept');
+    expect(text).not.toContain('ANTHROPIC_API_KEY');
+    expect(text).not.toContain('secret');
+    expect(text).not.toContain('CQ_SANDBOX=');
+    expect(text).not.toContain('CQ_RUN_ENV_PASSTHROUGH=');
+    server.child.stdin.end();
+    expect((await server.exited).code).toBe(0);
+  }, 20_000);
+
   test('a provider credential never reaches a run child; PATH and envNames do', async () => {
     const workspace = scratch();
     const server = startBin(

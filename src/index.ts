@@ -206,6 +206,27 @@ export {
   SessionStore,
   tempWorkspace,
 } from './harness/session.js';
+// W1.11 sandbox policy: conservative configuration resolution, certified
+// backend selection, the mandatory launcher environment scrub, and the
+// shared run gate every harness surface applies.
+export type {
+  HarnessRunGate,
+  ResolveSandboxOptions,
+  SandboxBackend,
+  SandboxConfig,
+  SandboxMode,
+  SandboxNetwork,
+  SandboxOptIn,
+  SandboxPlatform,
+} from './sandbox/index.js';
+export {
+  assertRunToolAvailable,
+  buildSandboxLauncherEnv,
+  certifiedAutoOrder,
+  harnessRunGate,
+  resolveSandboxConfig,
+  runToolAvailable,
+} from './sandbox/index.js';
 // First-party driver + price map (T1.4) — re-export only, no logic: the
 // in-process ai-sdk driver on the frozen seam, and the models.dev-derived
 // price map behind the derived-only costUSD rule.

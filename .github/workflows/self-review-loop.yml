@@ -1,20 +1,11 @@
 # instantiated from policy/templates/self-host/self-review-loop.yml — edit the template, not this file
+# PROVENANCE: this is the repository-owned instantiated self-host review-loop
+# workflow. Its trusted build and privileged loop are intentionally split;
+# the template is the adoptable source of record.
 #
-# The self-hosting review-loop automation (ws-k stage 2, item 7): the
-# toolkit's OWN review loop, built from source, runs against THIS
-# repository's own open PRs — fetch → classify → respond → resolve through
-# the shipped runReviewLoop with the frozen SelfhostDefaults, over every
-# open, same-repo, non-draft PR (one ≤20-min scheduled run per slot; the
-# journal under .selfhost/ persists the dedupe memory across runs via the
-# actions/cache restore/save pair below — the dispatch logs are the durable
-# content).
-# PROVENANCE: a repo-owned instantiated surface of policy/templates/self-host/
-# — the template is the adoptable copy; edit the template, not this file.
-#
-# SINGLE IDENTITY (I2, the recorded deviation): the loop replies and
-# resolves review threads AS THE REPO OWNER'S ACCOUNT (the GH_TOKEN user) —
-# there is no second identity reviewing automation's work yet. Every PR the
-# loop processes is soak evidence recorded in SELF-HOSTING.md (repo root).
+# The self-hosting review-loop automation runs the toolkit's own scheduled
+# review loop over this repository's open PRs. Secret-bearing effects are
+# isolated to the main-only privileged job below.
 name: self-review-loop
 
 on:
@@ -24,7 +15,9 @@ on:
     # peak-hour window (14:00–18:00 SGT), where quota consumption
     # multiplies (~3×). 01:00 UTC is deliberately EXCLUDED: 09:00 SGT is
     # the hard stop — no operation is initiated at or after it (the second
-    # cron's last fire is 00:45 UTC = 08:45 SGT).
+    # cron's last fire is 00:45 UTC = 08:45 SGT). HAND-REPLACED for an
+    # adopter: substitute YOUR provider's off-peak window, keeping the
+    # two-cron shape (a main window plus its final partial hour).
     - cron: '*/15 15-23 * * *'
     - cron: '0,15,30,45 0 * * *'
   workflow_dispatch:
@@ -61,11 +54,55 @@ permissions:
   contents: read
 
 jobs:
-  self-review-loop:
+  # Unprivileged preparation lane: no repository write token is available to
+  # this job. It builds trusted source; the privileged job below owns the
+  # authenticated loop and all GitHub effects.
+  self-review-worker:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      trusted-commit: ${{ steps.trusted-commit.outputs.commit }}
+    steps:
+      - name: Check out main (trusted code only)
+        id: trusted-checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Record trusted commit
+        id: trusted-commit
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Set up Node 24
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Build from source
+        run: npm run build
+      - name: Upload trusted build
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2 (immutable commit pin; repo policy)
+        with:
+          name: self-review-dist-${{ github.run_id }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 1
+
+  # Privileged lane: only this job receives the self-host token and provider
+  # key. The token is scoped to the loop step; checkout credentials never
+  # persist into the worker.
+  self-review-privileged:
+    if: github.ref == 'refs/heads/main'
+    needs: self-review-worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
     # The stage-2 switch gives automation ONE ≤20-minute run per slot; the
     # next slot re-enters with the persisted journal.
-    timeout-minutes: 20
     steps:
       - name: Check out main (trusted code only)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -73,10 +110,9 @@ jobs:
           # PINNED TO MAIN: schedule/dispatch always run main's trusted code
           # under GH_TOKEN — workflow_dispatch accepts any write-
           # collaborator's branch as ref, and that branch's code must never
-          # execute here. Branches are validated LOCALLY pre-merge (two
-          # CodeRabbit cycles + the gates); the automation runs only merged
-          # main.
-          ref: main
+          # execute here. Branches are validated LOCALLY pre-merge; the
+          # automation runs only merged main.
+          ref: ${{ needs.self-review-worker.outputs.trusted-commit }}
           # npm runs repo code below, so the checkout token must not
           # survive checkout; gh rides GH_TOKEN, not the checkout
           # credential.
@@ -88,8 +124,11 @@ jobs:
           cache: npm
       - name: Install dependencies
         run: npm ci
-      - name: Build from source
-        run: npm run build
+      - name: Download trusted build
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0 (immutable commit pin; repo policy)
+        with:
+          name: self-review-dist-${{ github.run_id }}
+          path: dist
       # DURABLE vs EPHEMERAL under .selfhost/journal: the per-PR dispatch
       # logs (dispatch-<pr>.ndjson) are replyAndResolve's actionId dedupe
       # memory — the one content that MUST survive across scheduled
@@ -115,16 +154,13 @@ jobs:
             self-review-loop-state-
       - name: Review loop over this repo's open PRs (dist/selfhost/self-review-loop.js)
         env:
-          # Step-scoped on purpose (the live-review.yml round-3
-          # discipline): the token must never reach npm ci's lifecycle
-          # scripts — it reaches ONLY this step.
+          # Step-scoped on purpose: the token must never reach npm ci's
+          # lifecycle scripts — it reaches ONLY this step.
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           # The fix workers' driver (ai-sdk, served model id): without it
           # the loop's dispatches cannot run — asserted below, before any
-          # effect.
-          # The driver's routing table reads ZAI_API_KEY (src/driver/subprocess/routing.ts:92,
-          # src/driver/ai-sdk/index.ts:484) — the Actions SECRET is named Z_AI_API_KEY;
-          # env-indirection maps secret name -> driver env name.
+          # effect. The env NAME is fixed (`ZAI_API_KEY`, what the drivers
+          # read); only the SECRET name is the adopter's placeholder.
           ZAI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.
@@ -142,7 +178,7 @@ jobs:
           # (bad args, a failed listing) exits 1. pipefail below turns that
           # throw into a red step despite tee.
           set -euo pipefail
-          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after 01:00 UTC (09:00 SGT, the owner hard stop) — exiting 0 records the honest no-op, not a failure. Runs BEFORE the secret asserts: a delayed fire with rotated/absent secrets is a scheduling fact (honest no-op), not a credential failure.
+          # Window-end fail-closed guard: a delayed fire must not initiate operations at/after the window's end hour — exiting 0 records the honest no-op, not a failure. (This repo's window ends 01:00 UTC; substitute YOURS.) Runs BEFORE the secret asserts: a delayed fire with rotated/absent secrets is a scheduling fact (honest no-op), not a credential failure.
           HM=$(date -u +%H%M)
           if [ "$((10#$HM))" -ge 100 ] && [ "$((10#$HM))" -lt 1500 ]; then
             echo 'outside the scheduled automation window (owner hard stop 09:00 SGT); refusing to initiate operations' >&2
@@ -153,9 +189,9 @@ jobs:
           # never use this workflow and therefore never inherit this skip.
           test -n "$GH_TOKEN" || { echo 'GH_TOKEN not set — skipping optional self-host automation' >&2; exit 0; }
           test -n "$ZAI_API_KEY" || { echo 'ZAI_API_KEY not set — fix workers cannot dispatch; refusing to start' >&2; exit 1; }
-          # Review-fix pushes currently reach plain unauthenticated `git push` (the checkout drops its credential) — point git at gh's credential helper.
+          # Review-fix pushes reach plain `git push` (the checkout drops its credential) — point git at gh's credential helper so the pushes authenticate.
           gh auth setup-git
-          # Worker-created commits currently fail (no identity on hosted runners; the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
+          # Worker-created commits fail without an identity on hosted runners (the fixer allowlist excludes `git config`) — set the automation identity before any worker runs.
           git config --global user.name 'cq-automation'
           git config --global user.email 'cq-automation@users.noreply.github.com'
           LOGIN=$(gh api user -q .login)
