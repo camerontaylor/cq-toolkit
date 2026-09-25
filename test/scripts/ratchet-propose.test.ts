@@ -236,12 +236,23 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
     git(repo, ['checkout', '-b', 'merge-queue']);
     writeFileSync(join(repo, COVERAGE_BASELINE), baseline(90));
     writeFileSync(join(repo, 'baselines', 'ratchets.json'), '{"not":"a baseline"}\n');
+    // The tip can select a Git filter through its attributes. Configure the
+    // filter only after committing the tip, then prove the privileged
+    // proposer neither checks that tree out nor filters its proposal blob.
+    writeFileSync(join(repo, '.gitattributes'), 'baselines/*.json filter=evil\n');
     git(repo, ['add', '-A']);
     git(repo, ['commit', '-m', 'merge-queue']);
     git(repo, ['push', 'origin', 'merge-queue']);
     const mqTip = git(repo, ['rev-parse', 'HEAD']);
     git(repo, ['checkout', 'main']);
     git(repo, ['branch', '-D', 'merge-queue']);
+    const filterMarker = join(dir, 'filter-ran');
+    const filter = join(dir, 'filter.sh');
+    writeFileSync(filter, `#!/bin/sh\nprintf 'ran\\n' >> '${filterMarker}'\ncat\n`);
+    chmodSync(filter, 0o755);
+    git(repo, ['config', 'filter.evil.clean', filter]);
+    git(repo, ['config', 'filter.evil.smudge', filter]);
+    git(repo, ['config', 'filter.evil.required', 'true']);
     const gh = join(bin, 'gh');
     writeFileSync(
       gh,
@@ -258,7 +269,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
       ].join('\n'),
     );
     chmodSync(gh, 0o755);
-    return { origin, repo, bin, ghLog, mqTip };
+    return { origin, repo, bin, ghLog, mqTip, filterMarker };
   }
 
   function propose(ctx: ReturnType<typeof setup>, metrics: Record<string, number>) {
@@ -308,6 +319,7 @@ describe('ratchet-propose: happy path against a local merge-queue origin', () =>
       // The temp worktree is gone and ROOT never left main.
       expect(git(ctx.repo, ['worktree', 'list']).split('\n')).toHaveLength(1);
       expect(git(ctx.repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main');
+      expect(existsSync(ctx.filterMarker)).toBe(false);
     },
   );
 

@@ -34,11 +34,14 @@
 // baselines — not the checkout's (the checkout is main, the trust ref for
 // the code that runs here). Proposals previously targeted main and so
 // bypassed the merge-queue checks (ADR-0004 D-B). The tip is fetched, pinned
-// to a SHA, and materialized as a temporary detached git worktree; the op
-// reads baselines from that worktree (ws) and the effects branch, commit and
-// push inside it. The worktree is removed in a finally, and the ROOT
-// checkout is never switched (the dirty-tree guard on ROOT stays as a
-// belt-and-braces refusal for local runs).
+// to a SHA. A temporary worktree is created with --no-checkout: read-tree
+// loads its index, while only canonical baseline blobs are materialized as
+// data for the op. Proposal bytes enter the index through hash-object
+// --no-filters + update-index, then write-tree/commit-tree/update-ref commit
+// the index without a worktree scan. No head tree is checked out, and no
+// head attribute can run a Git filter in the
+// credential-bearing job. The worktree is removed in a finally, and ROOT
+// is never switched (the dirty-tree guard on ROOT remains for local runs).
 //
 // ONE BRAIN: the driver only collects readings and enumerates committed
 // baselines; every decision the op owns — grouping, the tighten gate,
@@ -87,10 +90,21 @@ import {
 const BASE = 'merge-queue';
 const MAX_BUFFER = 64 * 1024 * 1024;
 /**
- * Hardened git prefix for EVERY git call: no pager, no fsmonitor daemon, and
- * no hooks — this job runs nothing from the repo beyond the prebuilt dist/.
+ * Hardened git prefix for EVERY git call. The subject cannot reinterpret
+ * paths, start a pager/fsmonitor/hook/signer, or reshape quoted output.
  */
-const GIT_HARDEN = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null'];
+const GIT_HARDEN = [
+  '--no-pager',
+  '--literal-pathspecs',
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.quotePath=true',
+  '-c',
+  'core.hooksPath=/dev/null',
+  '-c',
+  'commit.gpgsign=false',
+];
 const MEASUREMENT_FLAG = '--measurement=';
 
 // ---- TOKEN DOCTRINE gate (FIRST: the workflow carries no job-level if; ----
@@ -128,6 +142,33 @@ if (process.env.GITHUB_TOKEN) {
 // explicitly from the local const) and the gh subprocess env (GH_TOKEN) —
 // so scrub it from the process env NOW: no other child may inherit it.
 delete process.env.CQ_AUTOMATION_TOKEN;
+
+/** Keep the askpass variables supplied by withGitAskpass, but refuse Git redirections. */
+function safeGitEnv(source = process.env) {
+  const env = { ...source };
+  for (const key of [
+    'GIT_DIR',
+    'GIT_WORK_TREE',
+    'GIT_INDEX_FILE',
+    'GIT_COMMON_DIR',
+    'GIT_OBJECT_DIRECTORY',
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    'GIT_NAMESPACE',
+    'GIT_REPLACE_REF_BASE',
+    'GIT_EXTERNAL_DIFF',
+    'GIT_PAGER',
+    'GIT_CONFIG',
+    'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT',
+  ]) {
+    delete env[key];
+  }
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_OPTIONAL_LOCKS = '0';
+  env.GIT_NO_REPLACE_OBJECTS = '1';
+  env.GIT_TERMINAL_PROMPT = '0';
+  return env;
+}
 
 // ---- the measurement artifact: UNTRUSTED DATA, validated before any git/gh ----
 /**
@@ -196,6 +237,7 @@ const measured = readMeasurement(measurementPath);
 const status = spawnSync('git', [...GIT_HARDEN, 'status', '--porcelain'], {
   cwd: ROOT,
   encoding: 'utf8',
+  env: safeGitEnv(),
 });
 if (status.error || status.status !== 0) {
   fail(
@@ -236,7 +278,7 @@ function runGit(args, { cwd = ROOT, allowFail = false, env = process.env } = {})
     cwd,
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
-    env,
+    env: safeGitEnv(env),
   });
   if (!allowFail && (res.error || res.status !== 0)) {
     throw new Error(
@@ -296,6 +338,7 @@ if (/^[0-9a-f]{40,64}$/.test(baseSha ?? '') === false) {
 
 // ---- committed baselines AT THE MERGE-QUEUE TIP, parsed by the engine ----
 const committed = [];
+const baselineBlobs = [];
 const tree = runGit(['ls-tree', '-z', baseSha, '--', 'baselines/']).stdout;
 for (const entry of tree
   .split('\0')
@@ -314,15 +357,25 @@ for (const entry of tree
     continue;
   }
   let parsed;
+  let content;
   try {
-    parsed = engine.parseBaseline(runGit(['cat-file', 'blob', `${baseSha}:${path}`]).stdout);
+    content = runGit(['cat-file', 'blob', `${baseSha}:${path}`]).stdout;
+    parsed = engine.parseBaseline(content);
   } catch (err) {
     // A corrupt baseline yields no improvement (the ratchet CHECK is the
     // enforcement point; this script only proposes tightenings).
     console.error(`ratchet-propose: note — ${path} is corrupt; skipped — ${err.message}`);
     continue;
   }
+  // Only the canonical direct-child path is used by the proposal op. A
+  // mismatched path cannot supply another ratchet's baseline, and cannot
+  // become a filesystem path for materialization below.
+  if (path !== engine.baselineRelPath(parsed.target, parsed.metric)) {
+    console.error(`ratchet-propose: note — ${path} does not match its baseline identity; skipped`);
+    continue;
+  }
   committed.push(parsed);
+  baselineBlobs.push({ path, content });
 }
 
 // ---- improvements: only genuine TIGHTENs, judged by the engine's own comparator ----
@@ -390,7 +443,7 @@ function listOpenProposalPrs(head, base) {
   });
 }
 
-// ---- the merge-queue workspace: a disposable detached worktree at baseSha ----
+// ---- index-only merge-queue workspace: no head checkout or filters ----
 const wsParent = mkdtempSync(join(tmpdir(), 'ratchet-propose-mq-'));
 const ws = join(wsParent, 'ws');
 
@@ -413,39 +466,54 @@ const effects = {
         allowFail: true,
       }).stdout.trim();
       if (localHead !== '') {
-        runGit(['checkout', head], { cwd: ws }); // reuse: idempotent re-run keeps its history
+        // Reuse the local proposal branch without checking out its tree.
+        runGit(['read-tree', localHead], { cwd: ws });
       } else {
-        // Cut from the PINNED merge-queue tip the baselines were read at.
-        runGit(['checkout', '-b', head, baseSha], { cwd: ws });
+        // Cut from the PINNED merge-queue tip, changing only a ref.
+        runGit(['branch', head, baseSha], { cwd: ws });
       }
+      const parent = localHead === '' ? baseSha : localHead;
       for (const f of files) {
         mkdirSync(dirname(join(ws, f.path)), { recursive: true });
         // Full renderBaseline bytes from the op — written verbatim.
         writeFileSync(join(ws, f.path), f.content);
+        // git add would consult the head's .gitattributes from the index and
+        // could run a configured clean filter. Hash the bytes as-is instead.
+        const oid = runGit(['hash-object', '--no-filters', '-w', '--', f.path], {
+          cwd: ws,
+        }).stdout.trim();
+        if (/^[0-9a-f]{40,64}$/.test(oid) === false) {
+          throw new Error(`git hash-object returned no blob oid for ${f.path}`);
+        }
+        runGit(['update-index', '--add', '--cacheinfo', `100644,${oid},${f.path}`], {
+          cwd: ws,
+        });
       }
-      runGit(['add', '--', ...files.map((f) => f.path)], { cwd: ws });
-      const commit = runGit(
-        [
-          '-c',
-          'user.name=cq-toolkit ratchet',
-          '-c',
-          'user.email=ratchet@cq-toolkit.local',
-          'commit',
-          '-m',
-          commitMessage,
-        ],
-        { cwd: ws, allowFail: true },
-      );
-      // Idempotency: identical bytes on a re-run commit nothing — that is
-      // success, not failure.
-      if (
-        commit.status !== 0 &&
-        /nothing to commit/.test(`${commit.stdout}${commit.stderr}`) === false
-      ) {
-        throw new Error(
-          `git commit failed: exit ${commit.status}\n` +
-            redact(`${commit.stdout}${commit.stderr}`).trim(),
-        );
+      // write-tree and commit-tree consume only the index/git objects. A
+      // regular `git commit` may inspect the sparse worktree and consult
+      // head-controlled .gitattributes, so it is deliberately not used.
+      const treeOid = runGit(['write-tree'], { cwd: ws }).stdout.trim();
+      const parentTree = runGit(['rev-parse', `${parent}^{tree}`], { cwd: ws }).stdout.trim();
+      if (treeOid !== parentTree) {
+        const commitOid = runGit(
+          [
+            '-c',
+            'user.name=cq-toolkit ratchet',
+            '-c',
+            'user.email=ratchet@cq-toolkit.local',
+            'commit-tree',
+            treeOid,
+            '-p',
+            parent,
+            '-m',
+            commitMessage,
+          ],
+          { cwd: ws },
+        ).stdout.trim();
+        if (/^[0-9a-f]{40,64}$/.test(commitOid) === false) {
+          throw new Error('git commit-tree returned no commit oid');
+        }
+        runGit(['update-ref', `refs/heads/${head}`, commitOid, parent], { cwd: ws });
       }
       // Lease push: a TRUE lease against the remote head when it exists
       // (idempotent re-push), a plain create when it does not (first push —
@@ -527,10 +595,18 @@ const effects = {
   },
 };
 
-// ---- the op owns every remaining decision; ws = the merge-queue tip ----
+// ---- the op owns every remaining decision; ws has only baseline data ----
 let result;
 try {
-  runGit(['worktree', 'add', '--detach', ws, baseSha]);
+  runGit(['worktree', 'add', '--no-checkout', '--detach', ws, baseSha]);
+  // --no-checkout leaves the index empty. Populate it from the pinned tree
+  // without touching the filesystem, so a later commit retains every file
+  // outside the selected baseline updates.
+  runGit(['read-tree', baseSha], { cwd: ws });
+  for (const blob of baselineBlobs) {
+    mkdirSync(dirname(join(ws, blob.path)), { recursive: true });
+    writeFileSync(join(ws, blob.path), blob.content);
+  }
   const propose = engine.createProposeBaselineUpdate(effects);
   result = await propose({ ws, base: BASE, improvements });
 } catch (err) {

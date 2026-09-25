@@ -95,8 +95,14 @@ that holds the write token, and bypasses merge-queue.
    `rename`/`copy` header naming a baseline is refused, so a baseline cannot be renamed out of
    `baselines/` unjudged by a caller that forgets the flag.
 8. **Recompute skips symlinks and gitlinks** in the head tree, so a head symlink cannot point the
-   trusted `tsc` at runner paths. A symlinked source file therefore is not type-checked; that is
-   the fail-safe direction for a count that only a head could want lowered.
+   trusted `tsc` at runner paths. A symlinked source file is not type-checked; like source-level
+   suppression, this can lower the count and remains within ADR-0004 D-J's accepted residual.
+9. **The privileged proposer never checks out the merge-queue tip.** It reads canonical baseline
+   blobs with `cat-file`, materializes only those JSON files into a `--no-checkout` temporary
+   worktree, loads the tip into the index with `read-tree`, then writes proposal blobs with
+   `hash-object --no-filters` and commits the index with `write-tree`/`commit-tree`/`update-ref`.
+   A tip-controlled `.gitattributes` cannot invoke a configured clean or smudge filter in the
+   token-bearing job; the local-origin integration test pins this with a marker filter.
 
 ## Evidence
 
