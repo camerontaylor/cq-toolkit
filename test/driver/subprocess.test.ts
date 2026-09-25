@@ -22,6 +22,7 @@
 // 'conformance-priced' endpoint extension of the default table) so no test
 // needs a real provider key; the remap test alone uses the DEFAULT table to
 // pin the DeepSeek footgun to the shipped config.
+import { spawn } from 'node:child_process';
 import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
@@ -50,7 +51,9 @@ import {
   DEFAULT_MAX_RETAINED_BYTES,
   buildChildEnv,
   spawnManaged,
+  terminateActiveChildrenOnExit,
 } from '../../src/driver/subprocess/process.js';
+import type { ProcessClose } from '../../src/driver/subprocess/process.js';
 import { runDriverConformance } from './conformance.js';
 import type { ConformanceSpec, ModelDirective } from './conformance.js';
 import { SESSIONS_DIR, CONFORMANCE_PROVIDER, CONFORMANCE_MODEL } from './conformance.js';
@@ -986,6 +989,76 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     expect(() => new SubprocessDriver({ binary: ['node', FAKE_CLI] })).not.toThrow();
   });
 
+  test.each([
+    { aborted: true, harnessFailure: true, oversizedLine: true, expected: 'aborted' },
+    { aborted: false, harnessFailure: true, oversizedLine: true, expected: 'error' },
+    { aborted: false, harnessFailure: true, oversizedLine: false, expected: 'error' },
+    { aborted: false, harnessFailure: false, oversizedLine: true, expected: 'error' },
+    { aborted: false, harnessFailure: false, oversizedLine: false, expected: 'budget' },
+  ])('stop reason precedence over budget: %j', ({ expected, ...flags }) => {
+    expect(
+      stopReasonOf({
+        ...flags,
+        maxTokens: 1,
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+        resultStatus: 'success',
+      }),
+    ).toBe(expected);
+  });
+
+  test.each(['harness', 'stock'] as const)(
+    '%s: harness failure precedes oversized-line cause; both precede budget',
+    async (toolSurface) => {
+      await withScratch(async (scratchDir, store) => {
+        // No init + a success frame creates the unverified-surface failure
+        // only in harness mode. Both runs really exceed the line bound and
+        // token budget, so stock is the oversized-line control.
+        const frame = JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          usage: { input_tokens: 10, output_tokens: 5 },
+          structured_output: { answer: 'must be voided on harness failure' },
+        });
+        let childClose: Promise<ProcessClose> | undefined;
+        const driver = new SubprocessDriver({
+          ...baseOptions(scratchDir, {}, []),
+          toolSurface,
+          spawn: (options) => {
+            const child = spawnManaged({
+              ...options,
+              command: process.execPath,
+              args: [
+                '-e',
+                `process.stdin.resume(); process.stdout.write('x'.repeat(2048) + '\\n' + ${JSON.stringify(frame)} + '\\n');`,
+              ],
+              maxRetainedBytes: 1024,
+            });
+            childClose = child.close;
+            return child;
+          },
+        });
+        const result = await driver.run(
+          invocation({ toolPolicy: { allow: [], mode: 'none' }, budget: { maxTokens: 1 } }),
+        );
+        if (childClose === undefined) throw new Error('expected the driver to spawn a child');
+        expect((await childClose).oversizedLine).toBe(true);
+        expect(result.stopReason).toBe('error');
+        expect(result.usage.input).toBe(10);
+        if (toolSurface === 'harness') {
+          expect(result.error).toMatch(/^subprocess driver: harness failure/);
+          expect(result.error).toContain('never reported its init surface');
+          expect(result.error).not.toContain('oversized');
+          expect(result.structuredOutput).toBeUndefined();
+          expect(
+            await markersOf(store, result.sessionId as string, 'harness-surface-unverified'),
+          ).toEqual([{ cq: 'harness-surface-unverified', errorClass: 'harness' }]);
+        } else {
+          expect(result.error).toContain('oversized stdout/stderr line');
+        }
+      });
+    },
+  );
+
   test('a SYNCHRONOUS spawn failure is an error verdict, not a rejection (#19-5)', async () => {
     await withScratch(async (scratchDir, store) => {
       const throwingSpawn: SpawnFn = () => {
@@ -1254,6 +1327,275 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     });
   }, 20_000);
 
+  test('oversized lines fail loudly while retention stays bounded', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', `process.stdout.write('x'.repeat(256) + '\\n');`],
+        cwd: scratchDir,
+        maxRetainedBytes: 32,
+      });
+      const close = await child.close;
+      expect(close.oversizedLine).toBe(true);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(32);
+      expect(close.droppedBytes).toBeGreaterThan(0);
+    });
+  });
+
+  test('the exit hook terminates an active detached child', async () => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: ['-e', 'setInterval(() => {}, 1000)'],
+        cwd: scratchDir,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      terminateActiveChildrenOnExit();
+      const close = await child.close;
+      expect(close.signal).toBe('SIGTERM');
+    });
+  });
+
+  test.each([
+    [1, '🦄', ''],
+    [2, '🦄', ''],
+    [3, '🦄', ''],
+    [4, '🦄', '🦄'],
+    [5, '🦄🦄', '🦄'],
+    [3, 'x�', '�'],
+    [4, 'x�!', '�!'],
+  ])('UTF-8 retention cap %i preserves complete code points in %s', async (cap, text, expected) => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(text)}); process.stderr.write(${JSON.stringify(text)});`,
+        ],
+        cwd: scratchDir,
+        maxRetainedBytes: cap,
+      });
+      const out: string[] = [];
+      const err: string[] = [];
+      child.onStdoutLine((line) => out.push(line));
+      child.onStderrLine((line) => err.push(line));
+      const close = await child.close;
+      expect(close.stdout).toBe(expected);
+      expect(close.stderr).toBe(expected);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(cap);
+      expect(Buffer.byteLength(close.stderr)).toBeLessThanOrEqual(cap);
+      expect(close.droppedBytes).toBe(2 * (Buffer.byteLength(text) - Buffer.byteLength(expected)));
+      expect(out).toEqual(expected === '' ? [] : [expected]);
+      expect(err).toEqual(expected === '' ? [] : [expected]);
+    });
+  });
+
+  test('importing driver and runCli does not install signal handlers', async () => {
+    await withScratch(async (scratchDir) => {
+      const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+      const cliUrl = new URL('../../src/cli/main.ts', import.meta.url).href;
+      const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '--experimental-transform-types',
+          '--import',
+          loader,
+          '--input-type=module',
+          '-e',
+          `
+          const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+          const before = signals.map(s => process.listenerCount(s));
+          await import(${JSON.stringify(processUrl)});
+          await import(${JSON.stringify(cliUrl)});
+          console.log(JSON.stringify({before, after: signals.map(s => process.listenerCount(s))}));
+        `,
+        ],
+        cwd: scratchDir,
+      });
+      const close = await child.close;
+      expect(close.code, close.stderr).toBe(0);
+      const counts = JSON.parse(close.stdout) as { before: number[]; after: number[] };
+      expect(counts.after).toEqual(counts.before);
+    });
+  });
+
+  test.skipIf(process.platform === 'win32').each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)(
+    'CLI parent %s cleans detached workers and descendants from driver and in-process run',
+    async (signal) => {
+      await withScratch(async (scratchDir) => {
+        const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+        const bin = fileURLToPath(new URL('../../src/cli.ts', import.meta.url));
+        const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+        const runUrl = new URL('../../src/harness/run.ts', import.meta.url).href;
+        const preload = join(scratchDir, 'owned-child.mjs');
+        const runWorker = join(scratchDir, 'run-worker.cjs');
+        const runPidFile = join(scratchDir, 'run-pids.json');
+        const descendantCode =
+          "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)";
+        const workerCode = `
+          const { spawn } = require('node:child_process');
+          process.on('SIGTERM', () => console.log('term'));
+          const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], {stdio: ['ignore', 'pipe', 'inherit']});
+          descendant.stdout.once('data', () => console.log(JSON.stringify([process.pid, descendant.pid])));
+          setInterval(() => {}, 1000);
+        `;
+        await writeFile(
+          runWorker,
+          workerCode.replace(
+            'console.log(JSON.stringify([process.pid, descendant.pid]))',
+            `require('node:fs').writeFileSync(${JSON.stringify(runPidFile)}, JSON.stringify([process.pid, descendant.pid]))`,
+          ),
+        );
+        const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+        const runCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(runWorker)}`;
+        // Ignoring TERM is inherited across exec by sleep. Redirect all its
+        // pipes so each short-lived leader really closes before the final sweep.
+        const lateRunCommand = "trap '' TERM; sleep 60 </dev/null >/dev/null 2>&1 & echo $!";
+        await writeFile(
+          preload,
+          `
+          import { spawnManaged, buildChildEnv } from ${JSON.stringify(processUrl)};
+          import { runShellCommand } from ${JSON.stringify(runUrl)};
+          import childProcess from 'node:child_process';
+          import { syncBuiltinESMExports } from 'node:module';
+          // Observe the real OS pid at dispatch; the child may be killed before
+          // its first instruction during the parent's final cleanup sweep.
+          const realSpawn = childProcess.spawn;
+          childProcess.spawn = (file, ...args) => {
+            const spawned = realSpawn(file, ...args);
+            if (file === ${JSON.stringify(lateRunCommand)}) console.log(JSON.stringify({lateRun: spawned.pid}));
+            return spawned;
+          };
+          syncBuiltinESMExports();
+          void runShellCommand(${JSON.stringify(runCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
+          const child = spawnManaged({ command: process.execPath, args: ['-e', ${JSON.stringify(workerCode)}], cwd: ${JSON.stringify(scratchDir)} });
+          let lateStarted = false;
+          child.onStdoutLine(line => {
+            if (line === 'term' && !lateStarted) {
+              lateStarted = true;
+              const late = spawnManaged({command: '/bin/sh', args: ['-c', ${JSON.stringify(lateRunCommand)}], cwd: ${JSON.stringify(scratchDir)}});
+              late.onStdoutLine(line => console.log(JSON.stringify({lateDescendant: Number(line)})));
+              void late.close.then(close => console.log(JSON.stringify({lateClosed: close.code})));
+              console.log(JSON.stringify({late: late.pid}));
+              void runShellCommand(${JSON.stringify(lateRunCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000}).then(outcome => {
+                if (outcome.kind === 'exit') console.log(JSON.stringify({lateRunClosed: outcome.code, lateRunDescendant: Number(outcome.stdout)}));
+              });
+            } else process.stdout.write(line + '\\n');
+          });
+        `,
+        );
+        const parent = spawn(
+          process.execPath,
+          ['--experimental-transform-types', '--import', loader, '--import', preload, bin],
+          {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let out = '';
+        let err = '';
+        parent.stdout.on('data', (chunk: Buffer) => {
+          out += chunk.toString();
+        });
+        parent.stderr.on('data', (chunk: Buffer) => {
+          err += chunk.toString();
+        });
+        const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve) => {
+            parent.on('close', (code, endedSignal) => resolve({ code, signal: endedSignal }));
+          },
+        );
+        let pids: number[] = [];
+        let runPids: number[] = [];
+        const alive = (pid: number): boolean => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch (error) {
+            return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+          }
+        };
+        try {
+          await vi.waitFor(
+            async () => {
+              expect(err).toContain('missing subcommand'); // actual CLI installed its handlers
+              expect(out).toContain('\n'); // managed descendant installed its TERM trap
+              runPids = JSON.parse(await readFile(runPidFile, 'utf8')) as number[];
+              expect(runPids).toHaveLength(2); // run descendant installed its TERM trap
+            },
+            { timeout: 10_000 },
+          );
+          pids = [...(JSON.parse(out.trim()) as number[]), ...runPids];
+          expect(pids).toHaveLength(4);
+          expect(pids.every(alive)).toBe(true);
+          parent.kill(signal);
+          expect(await closed).toEqual({ code: null, signal });
+          await vi.waitFor(() => expect(pids.some(alive)).toBe(false), { timeout: 3_000 });
+          const late = out.split('\n').find((line) => line.startsWith('{"late":'));
+          expect(late).toBeDefined(); // signal handling actually dispatched new work
+          const lateDriverPid = (JSON.parse(late!) as { late: number }).late;
+          const lateRun = out.split('\n').find((line) => line.startsWith('{"lateRun":'));
+          expect(lateRun).toBeDefined();
+          const lateRunPid = (JSON.parse(lateRun!) as { lateRun: number }).lateRun;
+          expect(lateRunPid).toBeGreaterThan(0);
+          expect(out).toContain('{"lateClosed":0}');
+          const lateDescendant = out
+            .split('\n')
+            .find((line) => line.startsWith('{"lateDescendant":'));
+          expect(lateDescendant).toBeDefined();
+          const lateDescendantPid = (JSON.parse(lateDescendant!) as { lateDescendant: number })
+            .lateDescendant;
+          const lateRunClosed = out
+            .split('\n')
+            .find((line) => line.startsWith('{"lateRunClosed":'));
+          expect(lateRunClosed).toBeDefined();
+          const lateRunResult = JSON.parse(lateRunClosed!) as {
+            lateRunClosed: number;
+            lateRunDescendant: number;
+          };
+          expect(lateRunResult.lateRunClosed).toBe(0);
+          expect(lateDescendantPid).toBeGreaterThan(0);
+          expect(lateRunResult.lateRunDescendant).toBeGreaterThan(0);
+          await vi.waitFor(
+            () =>
+              expect(
+                [
+                  lateDriverPid,
+                  lateRunPid,
+                  lateDescendantPid,
+                  lateRunResult.lateRunDescendant,
+                ].some(alive),
+              ).toBe(false),
+            {
+              timeout: 3_000,
+            },
+          );
+        } finally {
+          // Recover late ownership even when a mutation failed an earlier assertion.
+          const late = out.split('\n').find((line) => line.startsWith('{"late":'));
+          const lateDriverPid =
+            late === undefined ? undefined : (JSON.parse(late) as { late: number }).late;
+          const lateRun = out.split('\n').find((line) => line.startsWith('{"lateRun":'));
+          const lateRunPid =
+            lateRun === undefined
+              ? undefined
+              : (JSON.parse(lateRun) as { lateRun: number }).lateRun;
+          for (const groupLeader of [pids[0], runPids[0], lateDriverPid, lateRunPid]) {
+            if (groupLeader === undefined) continue;
+            try {
+              process.kill(-groupLeader, 'SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+          parent.kill('SIGKILL');
+          await closed;
+        }
+      });
+    },
+    20_000,
+  );
+
   test('astral characters past the cap: byte-exact trim, no lone surrogate at the head (review 9-1)', async () => {
     await withScratch(async (scratchDir) => {
       const cap = 64 * 1024;
@@ -1450,12 +1792,13 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
         // …while terminal basics and the configured route env do. Derive the
         // expected values from the live env so an ambient CONFORMANCE_* var
         // cannot flip this test (r2).
-        const expectedKey = process.env.CONFORMANCE_API_KEY as string;
         const expectedBaseUrl = process.env.CONFORMANCE_BASE_URL ?? 'http://127.0.0.1:1/anthropic';
         expect(typeof deniedEnv['PATH']).toBe('string');
         expect(deniedEnv['ANTHROPIC_BASE_URL']).toBe(expectedBaseUrl);
-        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe(expectedKey);
-        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe(expectedKey);
+        // Diagnostics are redacted before persistence, so the route key is
+        // observable as present but never recoverable from the session log.
+        expect(deniedEnv['ANTHROPIC_API_KEY']).toBe('[redacted]');
+        expect(deniedEnv['ANTHROPIC_AUTH_TOKEN']).toBe('[redacted]');
 
         // The documented escape hatch is real end-to-end (r1): naming the
         // marker in envAllowlist copies ONLY that parent name back in.

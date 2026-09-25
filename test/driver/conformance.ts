@@ -76,7 +76,7 @@ import { runLadder } from '../../src/kernel/governor.js';
 /** Scripts the model's behavior for one driver instance — OUR vocabulary, not vendor shapes. */
 export type ModelDirective =
   | { kind: 'reply'; text: string }
-  | { kind: 'tool-then-reply'; tool: string; input: unknown; reply: string }
+  | { kind: 'tool-then-reply'; tool: string; input: unknown; reply: string; toolIdentity?: string }
   // The model BLOCKS until the governed signal fires, then rejects — the
   // script behind the I8 abort test (makeDriver wires the driver's abort
   // seam; the mock honors it).
@@ -243,6 +243,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'edit',
+            toolIdentity: 'edit',
             input: { path: 'x.txt', oldText: 'a', newText: 'b' },
             reply: 'noted the refusal',
           },
@@ -283,6 +284,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'read',
+            toolIdentity: 'read',
             input: { path: 'missing.txt' },
             reply: 'done anyway',
           },
@@ -309,6 +311,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'run',
+            toolIdentity: 'run',
             input: { command: 'echo conformance-marker > note.txt' },
             reply: 'wrote note.txt',
           },
@@ -327,6 +330,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'read',
+            toolIdentity: 'read',
             input: { path: 'note.txt' },
             reply: 'fresh workspace',
           },
@@ -360,6 +364,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'run',
+            toolIdentity: 'run',
             input: { command: 'echo conformance-marker > note.txt' },
             reply: 'wrote note.txt',
           },
@@ -376,6 +381,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'read',
+            toolIdentity: 'read',
             input: { path: 'note.txt' },
             reply: 'resumed and read the note',
           },
@@ -483,6 +489,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'run',
+            toolIdentity: 'run',
             input: { command: 'echo policy-marker > policy.txt' },
             reply: 'unused',
           },
@@ -509,6 +516,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'read',
+            toolIdentity: 'read',
             input: { path: 'absent.txt' },
             reply: 'done',
           },
@@ -529,6 +537,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'run',
+            toolIdentity: 'run',
             input: { command: 'echo allowlist-marker > out-of-policy.txt' },
             reply: 'unused',
           },
@@ -550,6 +559,7 @@ export function runDriverConformance(
           directive: {
             kind: 'tool-then-reply',
             tool: 'read',
+            toolIdentity: 'read',
             input: { path: '../../outside-secret.txt' },
             reply: 'noted',
           },

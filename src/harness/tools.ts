@@ -32,6 +32,8 @@
 //   'path not allowed: … is inside a .git directory (toolkit invariant)'
 //   'path not allowed by harness config allowlist: …'
 //   'command not allowed by harness config allowlist: …'
+//   'command allowlist: git diff is closed-form — …'
+//   'command allowlist: git log is closed-form — …'
 //   'command allowlist: shell metacharacters not permitted with token
 //    patterns — use re: with anchoring'
 //   'file not found: …' | 'read failed: …' | 'edit refused: …'
@@ -87,7 +89,11 @@
 //     plain prefixes: a re: match allows OUTRIGHT (including commands with
 //     shell metacharacters), so a re: pattern MUST be authored anchored
 //     (e.g. 're:^npm test.*$') — an unanchored re: is author error
-//     (recorded finding; documentation-covered, not code-repaired).
+//     (recorded finding; documentation-covered, not code-repaired). Broad
+//     regexes can also authorize disguised git verbs (git "diff"): the
+//     closed-form lock covers literal diff/log prefixes, not shell aliases.
+//     Leading literal diff/log words are locked even with attached shell
+//     operators or substitutions, including backticks and $(...).
 //   - anything else    → whitespace-token PREFIX: the pattern's tokens must
 //     equal the command's leading tokens ('npm test' allows 'npm test' and
 //     'npm test -- --watch', not 'npm run test'). Token splitting is naive
@@ -99,11 +105,13 @@
 //     'npm test $(rm -rf ~)'); such a command denies with the distinct
 //     'command allowlist: shell metacharacters …' reason pointing at
 //     anchored re: patterns as the deliberate escape hatch.
-// Invalid regexes and empty/whitespace-only patterns throw at `buildTools`
+// Token patterns must contain plain shell words; git requires a literal
+// subcommand (never bare git, global options, wrapped git or a path to git).
+// Invalid patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
-// `run` executes through the SHELL (node:child_process spawn with
-// `shell: true`, cwd = workspace, stdin closed) so pipelines work; the
+// Closed-form git diff/log select constant argv and spawn with shell:false.
+// Other `run` commands use the platform shell so pipelines work; the
 // allowlist is the gate over the whole command string. Each command runs in
 // its OWN PROCESS GROUP (POSIX `detached`), so a timeout, an abort
 // (`execute(input, { signal })`) or a harness shutdown kills the whole group
@@ -115,11 +123,13 @@
 // wall-clock of their own: local fs ops need no timer, and wall-clock POLICY
 // belongs to the driver/governor (I8) — hence FileToolConfig carries only an
 // output cap.
-import { spawn } from 'node:child_process';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import type { SandboxLevel, ToolDenial } from '../driver/types.js';
+import { buildChildEnv } from '../driver/subprocess/process.js';
+import { runArgvCommand, runShellCommand } from './run.js';
+import type { RunCommandOptions, RunOutcome } from './run.js';
 import { buildSandboxLauncherEnv, harnessRunGate } from '../sandbox/index.js';
 import type { HarnessRunGate } from '../sandbox/index.js';
 import { HarnessConfigSchema } from './config.js';
@@ -131,9 +141,6 @@ import type { HarnessConfig } from './config.js';
  * unbounded memory (the old `exec` path capped at its 1 MiB maxBuffer).
  */
 const UNCAPPED_RETENTION_BYTES = 1_048_576;
-
-/** POSIX platforms get per-command process groups (`detached` + group kill). */
-const POSIX = process.platform !== 'win32';
 
 // ---------------------------------------------------------------------------
 // Tool inputs — zod schemas, exported for driver adapters
@@ -264,7 +271,7 @@ type CommandPattern = { kind: 'regex'; re: RegExp } | { kind: 'tokens'; tokens: 
 
 /**
  * Compile the run allowlist. THROWS on an invalid `re:` regex or an
- * empty/whitespace-only pattern — config corruption is loud (an empty
+ * empty, non-plain-word, wrapped-git or git-global token pattern — corruption is loud (an empty
  * pattern would otherwise silently allow every command).
  */
 export function compileCommandPatterns(patterns: readonly string[]): CommandPattern[] {
@@ -281,6 +288,22 @@ export function compileCommandPatterns(patterns: readonly string[]): CommandPatt
         `harness: empty run command pattern '${raw}' (empty patterns would allow every command)`,
       );
     }
+    if (tokens.some((token) => !/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(token))) {
+      throw new Error(`harness: run token pattern must contain only plain shell words: '${raw}'`);
+    }
+    if (
+      tokens.some(
+        (token, index) =>
+          /(?:^|\/)git(?:\.(?:exe|cmd|bat|com))?$/i.test(token) && (index !== 0 || token !== 'git'),
+      )
+    ) {
+      throw new Error(
+        `harness: git token pattern must begin with literal git, without wrappers or paths; use an anchored re: grant for other spellings: '${raw}'`,
+      );
+    }
+    if (tokens[0] === 'git' && !/^[a-z][a-z0-9-]*$/.test(tokens[1] ?? '')) {
+      throw new Error(`harness: git token pattern requires a literal subcommand: '${raw}'`);
+    }
     return { kind: 'tokens', tokens };
   });
 }
@@ -296,6 +319,39 @@ const SHELL_METACHARACTERS = /[;&|$`()<>\n\r]/;
 type CommandVerdict =
   | { allowed: true; via: 'regex' | 'tokens' }
   | { allowed: false; metacharacters: boolean };
+
+// Each key selects harness-owned argv. No input token is ever forwarded to git.
+const GIT_HEADER = [
+  '--no-pager',
+  '--literal-pathspecs',
+  '-c',
+  'core.fsmonitor=false',
+  '-c',
+  'core.quotePath=true',
+];
+const GIT_DIFF = [
+  ...GIT_HEADER,
+  'diff',
+  '--no-ext-diff',
+  '--no-textconv',
+  '--no-color',
+  '--src-prefix=a/',
+  '--dst-prefix=b/',
+];
+const CLOSED_GIT_DIFF = new Map<string, readonly string[]>([
+  ['git diff', [...GIT_DIFF, '--']],
+  ['git diff --stat', [...GIT_DIFF, '--stat', '--']],
+  ['git diff --name-only', [...GIT_DIFF, '--name-only', '--']],
+  ['git diff --cached', [...GIT_DIFF, '--cached', '--']],
+  ['git diff --cached --stat', [...GIT_DIFF, '--cached', '--stat', '--']],
+  ['git diff --cached --name-only', [...GIT_DIFF, '--cached', '--name-only', '--']],
+]);
+const GIT_LOG = [...GIT_HEADER, 'log', '--no-ext-diff', '--no-textconv', '--no-color'];
+const CLOSED_GIT_LOG = new Map<string, readonly string[]>([
+  ['git log --oneline -n 20', [...GIT_LOG, '--oneline', '-n', '20', '--']],
+  ['git log -n 1', [...GIT_LOG, '-n', '1', '--']],
+  ['git log -n 1 --stat', [...GIT_LOG, '-n', '1', '--stat', '--']],
+]);
 
 /**
  * Match the compiled command allowlist: a re: match allows OUTRIGHT (the
@@ -323,118 +379,6 @@ function commandVerdict(patterns: readonly CommandPattern[], command: string): C
     return { allowed: true, via: 'tokens' };
   }
   return { allowed: false, metacharacters: sawMetacharMatch };
-}
-
-// ---------------------------------------------------------------------------
-// runShellCommand — one `run` command in its own process group
-// ---------------------------------------------------------------------------
-
-/** How one shell command ended: a normal exit, a kill, or a failed spawn. */
-type ShellOutcome =
-  | { kind: 'exit'; code: number; stdout: string; stderr: string; overflowed: boolean }
-  | { kind: 'killed'; stdout: string; stderr: string; overflowed: boolean }
-  | { kind: 'spawn-error'; error: unknown };
-
-/** Inputs to one shell command execution — plain data plus the cancellation signal. */
-interface ShellCommandOptions {
-  cwd: string;
-  /**
-   * The child's COMPLETE environment: a default-deny launcher allowlist plus
-   * the policy's explicit passthrough (src/sandbox). Required, not optional —
-   * absent would silently inherit the whole parent env.
-   */
-  env: Readonly<Record<string, string>>;
-  /** Per-stream retention bound in bytes. */
-  maxBytes: number;
-  /** Per-command wall clock; on expiry the whole process group is killed. */
-  timeoutMs?: number;
-  /** Cancellation: abort kills the whole process group. */
-  signal?: AbortSignal;
-}
-
-/**
- * Run `command` through the platform shell (`/bin/sh -c` on POSIX, as
- * `exec` did), cwd = workspace, stdin closed, and with the DEFAULT-DENY child
- * env the caller built (never the parent's full environment). On POSIX the shell LEADS ITS
- * OWN PROCESS GROUP, so a timeout or an abort signals `-pid` and reaches
- * every descendant; Windows has no groups in v1 and kills the direct child
- * only (the same limitation the subprocess lane records). The kill is
- * SIGKILL: the decision to stop has already been made (timeout, cancel, or
- * harness shutdown), and a command that traps SIGTERM must not outlive it.
- * Never rejects — a spawn failure is data.
- */
-function runShellCommand(command: string, opts: ShellCommandOptions): Promise<ShellOutcome> {
-  return new Promise<ShellOutcome>((settle) => {
-    if (opts.signal?.aborted === true) {
-      settle({ kind: 'killed', stdout: '', stderr: '', overflowed: false });
-      return;
-    }
-    let child: ReturnType<typeof spawn>;
-    try {
-      child = spawn(command, {
-        cwd: opts.cwd,
-        env: { ...opts.env },
-        shell: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        ...(POSIX ? { detached: true } : {}),
-      });
-    } catch (err) {
-      settle({ kind: 'spawn-error', error: err });
-      return;
-    }
-    const collect = (): { chunks: Buffer[]; bytes: number } => ({ chunks: [], bytes: 0 });
-    const out = collect();
-    const err = collect();
-    let overflowed = false;
-    const retain = (sink: { chunks: Buffer[]; bytes: number }, chunk: Buffer): void => {
-      const room = opts.maxBytes - sink.bytes;
-      if (chunk.length > room) overflowed = true; // keep draining, stop retaining
-      if (room <= 0) return;
-      const kept = chunk.length <= room ? chunk : chunk.subarray(0, room);
-      sink.chunks.push(kept);
-      sink.bytes += kept.length;
-    };
-    child.stdout?.on('data', (chunk: Buffer) => retain(out, chunk));
-    child.stderr?.on('data', (chunk: Buffer) => retain(err, chunk));
-
-    let killedByUs = false;
-    const killGroup = (): void => {
-      killedByUs = true;
-      if (POSIX && child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, 'SIGKILL');
-          return;
-        } catch {
-          // group already gone — fall through to the direct kill
-        }
-      }
-      try {
-        child.kill('SIGKILL');
-      } catch {
-        // already gone
-      }
-    };
-    const timer = opts.timeoutMs === undefined ? undefined : setTimeout(killGroup, opts.timeoutMs);
-    opts.signal?.addEventListener('abort', killGroup, { once: true });
-
-    let spawnError: unknown;
-    child.on('error', (e: unknown) => {
-      spawnError ??= e;
-    });
-    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
-      if (timer !== undefined) clearTimeout(timer);
-      opts.signal?.removeEventListener('abort', killGroup);
-      const stdout = Buffer.concat(out.chunks).toString('utf8');
-      const stderr = Buffer.concat(err.chunks).toString('utf8');
-      if (spawnError !== undefined && child.pid === undefined) {
-        settle({ kind: 'spawn-error', error: spawnError });
-      } else if (killedByUs || signal !== null || code === null) {
-        settle({ kind: 'killed', stdout, stderr, overflowed });
-      } else {
-        settle({ kind: 'exit', code, stdout, stderr, overflowed });
-      }
-    });
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +670,26 @@ export function buildTools(
       if (stderr !== '') parts.push(`--- stderr ---\n${stderr}`);
       return parts.join('\n');
     };
+    const settle = (outcome: RunOutcome): ToolkitToolResult => {
+      // Normal exits (including nonzero) and kills remain tool results.
+      // Only spawn-level failures are denials.
+      if (outcome.kind === 'spawn-error') {
+        return deny('run', `run failed: ${messageOf(outcome.error)}`);
+      }
+      const killed = outcome.kind === 'killed';
+      const exitCode = killed ? null : outcome.code;
+      const capped = capOutput(
+        formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
+        runCfg.maxOutputChars,
+      );
+      return {
+        ok: true,
+        exitCode,
+        killed,
+        output: capped.output,
+        truncated: capped.truncated || outcome.overflowed,
+      };
+    };
     tools.push({
       name: 'run',
       description: capDescription(
@@ -742,6 +706,46 @@ export function buildTools(
         const parsed = RunToolInputSchema.safeParse(rawInput);
         if (!parsed.success) return invalidInput('run', parsed.error);
         const command = parsed.data.command;
+        let env: Record<string, string>;
+        try {
+          // Scrub at the shared core on every transport; never depend on an
+          // MCP launcher having already filtered the parent environment. The
+          // sandbox launcher scrub runs first, so its stricter defaults and
+          // policy-knob refusal also cover closed-form git execution.
+          env = buildChildEnv(buildSandboxLauncherEnv(process.env, gate), undefined, [
+            ...gate.envPassthrough,
+            ...(gate.declaredEnvNames ?? []),
+          ]);
+        } catch (error) {
+          return deny('run', `run failed: ${messageOf(error)}`);
+        }
+        const executionOptions: RunCommandOptions = {
+          cwd: workspaceAbs,
+          env,
+          // Retain UTF-8 and wrapper slack above the configured character cap.
+          maxBytes:
+            runCfg.maxOutputChars !== undefined
+              ? runCfg.maxOutputChars * 4 + 65_536
+              : UNCAPPED_RETENTION_BYTES,
+          ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
+          ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
+        };
+        const raw = command.trim().split(/\s+/);
+        // An attached shell operator (git diff; …) must not bypass the lock
+        // under a regex grant. Quoted/disguised verbs remain author-owned.
+        const verb = raw[1]?.match(/^[a-z-]*/)?.[0];
+        if (raw[0] === 'git' && (verb === 'diff' || verb === 'log')) {
+          const forms = verb === 'diff' ? CLOSED_GIT_DIFF : CLOSED_GIT_LOG;
+          const key = raw.join(' ');
+          const argv = forms.get(key);
+          if (argv === undefined || !commandVerdict(patterns, key).allowed) {
+            return deny(
+              'run',
+              `command allowlist: git ${verb} is closed-form — use exactly one of: ${[...forms.keys()].join('; ')}`,
+            );
+          }
+          return settle(await runArgvCommand('git', argv, executionOptions));
+        }
         const verdict = commandVerdict(patterns, command);
         if (!verdict.allowed) {
           return deny(
@@ -751,40 +755,7 @@ export function buildTools(
               : `command not allowed by harness config allowlist: '${command}'`,
           );
         }
-        const outcome = await runShellCommand(command, {
-          cwd: workspaceAbs,
-          // Default-deny child env: the launcher allowlist plus only the
-          // names this gate's policy passed through (never a CQ_* knob).
-          env: buildSandboxLauncherEnv(process.env, gate),
-          // Retention is BYTES; the output cap is CHARS. Retain comfortably
-          // above the cap so capOutput does the truncating (4 bytes/char
-          // covers UTF-8's worst case, +64KiB slack for the exit/stdout
-          // wrapper) — a noisy command is truncated, never denied (issue #18).
-          maxBytes:
-            runCfg.maxOutputChars !== undefined
-              ? runCfg.maxOutputChars * 4 + 65_536
-              : UNCAPPED_RETENTION_BYTES,
-          ...(runCfg.timeoutMs !== undefined ? { timeoutMs: runCfg.timeoutMs } : {}),
-          ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
-        });
-        // Nonzero exits and kills are REAL tool results (the model must see
-        // them), not denials — only spawn-level failures deny.
-        if (outcome.kind === 'spawn-error') {
-          return deny('run', `run failed: ${messageOf(outcome.error)}`);
-        }
-        const killed = outcome.kind === 'killed';
-        const exitCode = killed ? null : outcome.code;
-        const capped = capOutput(
-          formatOutcome(exitCode, killed, outcome.stdout, outcome.stderr),
-          runCfg.maxOutputChars,
-        );
-        return {
-          ok: true,
-          exitCode,
-          killed,
-          output: capped.output,
-          truncated: capped.truncated || outcome.overflowed,
-        };
+        return settle(await runShellCommand(command, executionOptions));
       },
     });
   }

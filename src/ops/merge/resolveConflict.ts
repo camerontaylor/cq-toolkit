@@ -98,6 +98,8 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
 import { AiSdkDriver } from '../../driver/ai-sdk/index.js';
+import { withServedModelAssertion } from '../../driver/served-model.js';
+import { boundedErrorText } from '../../driver/error-text.js';
 import type { Driver, ModelSpec, Usage, WorkerResult } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { SessionStore } from '../../harness/session.js';
@@ -496,7 +498,10 @@ export function makeResolveConflictOp(
         const record = await new SessionStore(sessionsDir).create(workspace);
         return record.sessionId;
       });
-    const driver = deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec);
+    const driver = withServedModelAssertion(
+      deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec),
+      'default',
+    );
 
     // (b) Truth first: fetch the PR head ref. A nonzero exit means the
     // truth is unavailable — fail closed before any worktree exists.
@@ -629,7 +634,7 @@ export function makeResolveConflictOp(
                 : 'no denials recorded (see the session record for narration)';
             return {
               status: 'failed',
-              error: `conflict agent failed: ${hint}${sessionSuffix(result)}`,
+              error: `conflict agent failed: ${hint}${result.error === undefined ? '' : `; ${boundedErrorText(result.error)}`}${sessionSuffix(result)}`,
             };
           }
 

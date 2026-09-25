@@ -36,6 +36,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
+import { prepareProcessSignalCleanup } from './process-signals.js';
 import { candidateRunsForPlan, type RunLog } from './journal.js';
 import { attemptsFromJournal } from './rescue.js';
 import type { OpRegistryView } from './runner.js';
@@ -76,6 +77,42 @@ export const realClock: Clock = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
+
+/**
+ * Opt in at executable entrypoints, never at library import time. The signal
+ * has already decided termination; this bounded grace executes that decision.
+ * Managed MCP children get time to abort their own detached run groups before
+ * the final force-kill. Re-raising preserves the ordinary signal exit status.
+ */
+export function installProcessSignalCleanup(
+  beforeSignal?: () => void,
+  clock: Clock = realClock,
+): void {
+  const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
+  let stopping = false;
+  const onSignal = (signal: NodeJS.Signals): void => {
+    if (stopping) return;
+    stopping = true;
+    try {
+      beforeSignal?.();
+    } finally {
+      const force = prepareProcessSignalCleanup();
+      const finish = (): void => {
+        // Work may finish dispatching during the grace window. Sweep current
+        // ownership as well as the original groups (whose leaders may be gone).
+        for (const kill of prepareProcessSignalCleanup()) kill();
+        for (const kill of force) kill();
+        for (const ownedSignal of signals) process.removeListener(ownedSignal, onSignal);
+        process.kill(process.pid, signal);
+      };
+      // Match subprocess DEFAULT_TERM_GRACE_MS. Keep this timer referenced:
+      // descendants may survive after all direct children have exited.
+      if (force.length > 0) clock.setTimeout(finish, 2_000);
+      else finish();
+    }
+  };
+  for (const signal of signals) process.on(signal, onSignal);
+}
 
 // ---------------------------------------------------------------------------
 // The escalation ladder — three rungs, each observable
@@ -616,7 +653,11 @@ class SlotPool {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
 
-  constructor(private readonly limit: number) {}
+  private readonly limit: number;
+
+  constructor(limit: number) {
+    this.limit = limit;
+  }
 
   get held(): number {
     return this.active;

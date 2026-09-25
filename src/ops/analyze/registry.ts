@@ -420,10 +420,14 @@ export const registry: OpRegistryEntry[] = [
       Promise.all([
         import('./agenticRemediation.js'),
         import('../../driver/subprocess/index.js'),
+        import('../../driver/served-model.js'),
       ]).then(
-        ([m, d]) =>
+        ([m, d, s]) =>
           m.makeAgenticRemediation(
-            new d.SubprocessDriver({ outputSchema: m.AGENTIC_PROPOSAL_SCHEMA }),
+            s.withServedModelAssertion(
+              new d.SubprocessDriver({ outputSchema: m.AGENTIC_PROPOSAL_SCHEMA }),
+              'default',
+            ),
           ) as Op<unknown, unknown>,
       ),
   },

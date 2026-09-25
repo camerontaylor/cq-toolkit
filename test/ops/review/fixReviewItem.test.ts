@@ -89,6 +89,7 @@ const completeWorker = (
   usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
   denials: [],
   stopReason: 'complete',
+  model: 'test-model',
   ...extra,
 });
 
@@ -612,7 +613,10 @@ describe('worktreeFixDriver (round-2 finding 1, HIGH)', () => {
     const inner: Driver = {
       run: async (invocation) => {
         invocations.push(invocation);
-        return completeWorker({ changed: true, summary: 's', commits: ['a'] });
+        return completeWorker(
+          { changed: true, summary: 's', commits: ['a'] },
+          { model: invocation.modelSpec.model },
+        );
       },
     };
     const driver = worktreeFixDriver({
@@ -654,7 +658,10 @@ describe('worktreeFixDriver (round-2 finding 1, HIGH)', () => {
         return {
           run: async (invocation) => {
             invocations.push(invocation);
-            return completeWorker({ changed: false, summary: 'n/a', commits: [] });
+            return completeWorker(
+              { changed: false, summary: 'n/a', commits: [] },
+              { model: invocation.modelSpec.model },
+            );
           },
         };
       },

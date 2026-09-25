@@ -31,6 +31,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Budget, Driver, ModelSpec, SandboxPolicy, ToolPolicy } from '../../driver/types.js';
 import { SubprocessDriver } from '../../driver/subprocess/index.js';
+import { withServedModelAssertion } from '../../driver/served-model.js';
 import { defaultRoutingTable } from '../../driver/subprocess/routing.js';
 import type { RoutingTable } from '../../driver/subprocess/routing.js';
 import { SessionStore } from '../../harness/session.js';
@@ -1544,12 +1545,15 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
           branch: `${input.runPrefix}/${input.kind}/${input.slug}`,
         }
       : derived;
-  const driver = new SubprocessDriver({
-    binary:
-      typeof input.driver.binary === 'string' ? [input.driver.binary] : [...input.driver.binary],
-    routingTable: input.driver.routingTable ?? defaultRoutingTable(),
-    ...(input.driver.sessionsDir !== undefined ? { sessionsDir: input.driver.sessionsDir } : {}),
-  });
+  const driver = withServedModelAssertion(
+    new SubprocessDriver({
+      binary:
+        typeof input.driver.binary === 'string' ? [input.driver.binary] : [...input.driver.binary],
+      routingTable: input.driver.routingTable ?? defaultRoutingTable(),
+      ...(input.driver.sessionsDir !== undefined ? { sessionsDir: input.driver.sessionsDir } : {}),
+    }),
+    'default',
+  );
   return {
     repoRoot: input.repoRoot,
     worktreesDir: input.worktreesDir,

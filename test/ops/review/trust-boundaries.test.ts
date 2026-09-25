@@ -174,6 +174,38 @@ describe('W1.1 reviewer trust and SHA binding', () => {
     );
     expect(result.reason).toBe('no_acceptable_review');
   });
+
+  describe.each([
+    { context: 'default', config: defaultClassifyPrConfig },
+    {
+      context: 'trusted policy',
+      config: { ...defaultClassifyPrConfig, trustedAssociations: ['MEMBER'] },
+    },
+  ])('$context head-SHA acceptance', ({ config }) => {
+    test('null head and null review commit cannot supply acceptance', () => {
+      const result = classifyPr(
+        {
+          ...candidate([{ ...review('member', 'APPROVED', HEAD), commitOid: null }]),
+          headRefOid: null,
+        },
+        NOW,
+        config,
+      );
+      expect(result).toMatchObject({ verdict: 'awaiting', reason: 'no_acceptable_review' });
+    });
+
+    test('an omitted head preserves legacy acceptance without a review commit', () => {
+      const legacy = candidate([{ ...review('member', 'APPROVED', HEAD), commitOid: null }]);
+      delete legacy.headRefOid;
+      const result = classifyPr(legacy, NOW, config);
+      expect(result).toMatchObject({ verdict: 'eligible', reason: 'settle_window_elapsed' });
+    });
+
+    test('a known matching head still supplies acceptance', () => {
+      const result = classifyPr(candidate([review('member', 'APPROVED', HEAD)]), NOW, config);
+      expect(result).toMatchObject({ verdict: 'eligible', reason: 'settle_window_elapsed' });
+    });
+  });
 });
 
 describe('W1.3 path anchoring and untrusted input', () => {

@@ -37,6 +37,10 @@
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
+import {
+  processSignalCleanupStarted,
+  registerProcessSignalCleanup,
+} from '../../kernel/process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
@@ -50,6 +54,48 @@ const POSIX = process.platform !== 'win32';
  * and counts what it dropped (exposed as `ProcessClose.droppedBytes`).
  */
 export const DEFAULT_MAX_RETAINED_BYTES = 1_048_576; // 1 MiB
+
+const activeChildren = new Set<ChildProcessWithoutNullStreams>();
+
+/** Terminate every child still owned by this process during an exit hook. */
+export function terminateActiveChildrenOnExit(): void {
+  for (const child of activeChildren) {
+    if (POSIX && child.pid !== undefined) {
+      try {
+        process.kill(-child.pid, 'SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    } else {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* already gone */
+      }
+    }
+  }
+}
+
+process.once('exit', terminateActiveChildrenOnExit);
+
+// Registration alone does not install signal listeners in an embedding host.
+registerProcessSignalCleanup(() => {
+  const children = [...activeChildren];
+  if (children.length === 0) return undefined;
+  terminateActiveChildrenOnExit();
+  // Capture original groups: a leader may exit before a TERM-ignoring
+  // descendant, removing the leader from activeChildren during the grace.
+  return () => {
+    for (const child of children) {
+      try {
+        if (POSIX && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        // The original group is already gone.
+      }
+    }
+  };
+});
 
 // ---------------------------------------------------------------------------
 // spawnManaged — the managed child
@@ -235,6 +281,8 @@ export interface ProcessClose {
   stderr: string;
   /** Total bytes dropped off the two streams' heads by the retention cap. */
   droppedBytes: number;
+  /** A complete or pending line exceeded the configured line bound. */
+  oversizedLine?: boolean;
 }
 
 /**
@@ -271,6 +319,7 @@ interface StreamCollector {
   readonly text: string;
   /** Bytes dropped off the HEAD once the retention cap was hit. */
   readonly droppedBytes: number;
+  readonly oversizedLine: boolean;
 }
 
 /**
@@ -290,6 +339,7 @@ function createCollector(
   const tailBuf = { text: '', bytes: 0 };
   const restBuf = { text: '', bytes: 0 }; // the pending unterminated line
   let droppedBytes = 0;
+  let oversizedLine = false;
   // Trim a buffer back under the cap, cutting whole CODE POINTS off the
   // head (a cut between the halves of an astral pair would leave a lone
   // surrogate — corruption at the head of retained evidence) and measuring
@@ -301,16 +351,16 @@ function createCollector(
   // tail's trim drops anyway — counting both would inflate.
   const trimToCap = (buf: { text: string; bytes: number }): void => {
     if (buf.bytes <= maxRetainedBytes) return;
-    let cut = 0;
-    let cutBytes = 0;
-    while (cut < buf.text.length && buf.bytes - cutBytes > maxRetainedBytes) {
-      const width = (buf.text.codePointAt(cut) ?? 0) > 0xffff ? 2 : 1;
-      cutBytes += Buffer.byteLength(buf.text.slice(cut, cut + width));
-      cut += width;
-    }
-    if (buf === tailBuf) droppedBytes += cutBytes;
-    buf.text = buf.text.slice(cut);
-    buf.bytes -= cutBytes;
+    // Trim from the byte representation once per bounded buffer update. This
+    // avoids rebuilding an Array of code points on every chunk (the old
+    // repeated full-string scan was quadratic under noisy output).
+    const bytes = Buffer.from(buf.text, 'utf8');
+    let start = Math.max(0, bytes.length - maxRetainedBytes);
+    while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
+    const kept = bytes.subarray(start).toString('utf8');
+    if (buf === tailBuf) droppedBytes += buf.bytes - Buffer.byteLength(kept);
+    buf.text = kept;
+    buf.bytes = Buffer.byteLength(kept);
   };
   return {
     onChunk(chunk: string): void {
@@ -323,6 +373,7 @@ function createCollector(
       let index = restBuf.text.indexOf('\n');
       while (index !== -1) {
         const line = restBuf.text.slice(0, index);
+        if (Buffer.byteLength(line) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = restBuf.text.slice(index + 1);
         restBuf.bytes -= Buffer.byteLength(line) + 1; // + the consumed '\n'
         for (const listener of listeners) listener(line);
@@ -331,6 +382,7 @@ function createCollector(
       // Bound the PENDING line — a single unterminated line must not grow
       // `rest` unbounded; past the cap its head is dropped (its drops are a
       // subset of the tail's, see trimToCap) and flush emits the tail.
+      if (Buffer.byteLength(restBuf.text) > maxRetainedBytes) oversizedLine = true;
       trimToCap(restBuf);
       tailBuf.text += chunk;
       tailBuf.bytes += chunkBytes;
@@ -345,6 +397,7 @@ function createCollector(
         // is untouched (review thread: no double retention, no phantom
         // drops).
         const finalLine = restBuf.text;
+        if (Buffer.byteLength(finalLine) > maxRetainedBytes) oversizedLine = true;
         restBuf.text = '';
         restBuf.bytes = 0;
         for (const listener of listeners) listener(finalLine);
@@ -355,6 +408,9 @@ function createCollector(
     },
     get droppedBytes(): number {
       return droppedBytes;
+    },
+    get oversizedLine(): boolean {
+      return oversizedLine;
     },
   };
 }
@@ -390,6 +446,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
     env: buildChildEnv(process.env, opts.env, opts.envAllowlist),
   });
 
+  activeChildren.add(child);
   child.stdout.setEncoding('utf8');
   child.stdout.on('data', (chunk: string) => stdout.onChunk(chunk));
   child.stderr.setEncoding('utf8');
@@ -407,6 +464,9 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
   });
   child.on('close', (code, signal) => {
     exited = true;
+    // A late leader can exit during signal grace while its background children
+    // survive. Keep its process-group identity for the executable's final sweep.
+    if (!processSignalCleanupStarted()) activeChildren.delete(child);
     stdout.flush();
     stderr.flush();
     settleClose({
@@ -416,6 +476,7 @@ export function spawnManaged(opts: SpawnOptions): ManagedChild {
       stdout: stdout.text,
       stderr: stderr.text,
       droppedBytes: stdout.droppedBytes + stderr.droppedBytes,
+      ...(stdout.oversizedLine || stderr.oversizedLine ? { oversizedLine: true } : {}),
     });
   });
 

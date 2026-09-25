@@ -58,9 +58,9 @@
 //                                        §2.2's honesty stands)
 //   mode 'unrestricted'                → ALLOW everything
 //   mode 'allowlist' (the default)     → the request's matched tool IDENTITY
-//                                        (the leading token of the title —
-//                                        the probe showed `<toolName>:
-//                                        <summary>`; `kind` falls back) ∈
+//                                        (authoritative kind, with execute
+//                                        mapped to run; a missing/blank kind
+//                                        denies explicitly) ∈
 //                                        policy.allow (case-insensitive) →
 //                                        ALLOW, else DENY ('tool policy: not
 //                                        allowlisted (kind …)')
@@ -220,6 +220,8 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { computeCostUSD } from '../pricing/index.js';
+import { redactSensitiveText } from '../error-text.js';
+import { buildChildEnv } from '../subprocess/process.js';
 import type { PerMillionRates } from '../pricing/index.js';
 import type {
   Driver,
@@ -304,9 +306,11 @@ export interface AcpDriverOptions {
   /**
    * Host env var NAMES copied into the child env at run() time (the
    * routing discipline every lane shares: names in config, never values;
-   * a missing value throws pre-dispatch). Default: none — the harness
-   * inherits the driver's process env (the vendor reads its own
-   * credentials app-side, OQ-1).
+   * a missing or empty value throws pre-dispatch). Default: no extra
+   * names. The vendor process receives only the default child-env
+   * allowlist plus these names and deployment CQ_RUN_ENV_PASSTHROUGH
+   * names. Include vendor credential names here when the vendor reads
+   * authentication from env (OQ-1); ambient credentials are not inherited.
    */
   envNames?: readonly string[];
   /**
@@ -742,7 +746,7 @@ export class AcpDriver implements Driver {
     this.command = options.command;
     this.endpoint = options.endpoint ?? DEFAULT_ACP_ENDPOINT;
     this.endpointTable = options.endpointTable ?? defaultAcpEndpointTable();
-    this.envNames = options.envNames ?? [];
+    this.envNames = Object.freeze([...(options.envNames ?? [])]);
     this.modelEnv = options.modelEnv;
     this.outputSchema = options.outputSchema;
     this.workspaceRoot = options.workspaceRoot;
@@ -777,26 +781,28 @@ export class AcpDriver implements Driver {
       );
     }
 
-    // --- Child env: the host environment rides (the vendor reads its own
-    // credentials app-side, OQ-1); envNames adds explicitly configured
-    // NAMES (values read AT run time — the one place a secret value is
-    // ever touched); modelEnv hands the REQUESTED model id to the harness.
-    // Validated BEFORE the session exists: a missing envNames entry is a
-    // PRE-DISPATCH throw and must never leave a dangling record.
-    const childEnv = { ...process.env } as Record<string, string>;
-    for (const name of this.envNames) {
+    // --- Vendor-process env: default-deny via buildChildEnv's runtime
+    // allowlist plus explicit envNames and CQ_RUN_ENV_PASSTHROUGH names.
+    // Values are read AT run time; modelEnv explicitly overrides its
+    // variable with the REQUESTED model id. This is the ACP vendor process,
+    // not a command launched through the shared harness tool core.
+    // Validated BEFORE the session exists: a missing or empty envNames
+    // value is a PRE-DISPATCH throw and leaves no dangling record.
+    const extraNames = [...this.envNames];
+    for (const name of extraNames) {
       const value = process.env[name];
       if (value === undefined || value === '') {
         throw new Error(`acp driver: envNames entry '${name}' is not set in the environment`);
       }
-      childEnv[name] = value;
     }
+    const childEnv = buildChildEnv(process.env, undefined, extraNames);
     if (this.modelEnv !== undefined) {
       childEnv[this.modelEnv] = modelSpec.model;
     }
 
     // --- I6 isolation: fresh record + fresh workspace, or a real resume.
-    const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
+    const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
+    const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
         ? await store.create(await tempWorkspace(this.workspaceRoot))
@@ -822,7 +828,7 @@ export class AcpDriver implements Driver {
 
     // --- Protocol-level resume handle: the ACP session id a prior run
     // recorded in the workspace sidecar (absent → workspace-only continuation).
-    const resumeAcpSessionId = await readAcpSessionId(workspace);
+    const resumeAcpSessionId = await readAcpSessionId(sessionsDir, record.sessionId);
 
     // --- The one spawn. From here on, run() NEVER throws past the seam.
     const observation = newObservation();
@@ -1004,7 +1010,7 @@ export class AcpDriver implements Driver {
         });
         return;
       }
-      const identity = permissionToolIdentity(request.toolCall.title, request.toolCall.kind);
+      const identity = permissionToolIdentity(request.toolCall.kind);
       const decision = decidePermission(
         toolPolicy,
         sandboxPolicy.level,
@@ -1747,9 +1753,12 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
  * the session/load handle of THIS run. Missing/unreadable → undefined (an
  * honest workspace-only continuation, never a fabricated resume).
  */
-async function readAcpSessionId(workspace: string): Promise<string | undefined> {
+async function readAcpSessionId(
+  sessionsDir: string,
+  sessionId: string,
+): Promise<string | undefined> {
   try {
-    const raw = await readFile(join(workspace, ACP_SESSION_FILE), 'utf8');
+    const raw = await readFile(join(sessionsDir, `${sessionId}${ACP_SESSION_FILE}`), 'utf8');
     const trimmed = raw.trim();
     return trimmed === '' ? undefined : trimmed;
   } catch {
@@ -1760,8 +1769,8 @@ async function readAcpSessionId(workspace: string): Promise<string | undefined> 
 /**
  * THE PERMISSION DECISION (the frozen ToolPolicy + SandboxPolicy →
  * allow/deny for ONE request; the full mapping table is in the header).
- * `identity` is the matched tool identity (the title's leading token —
- * ./protocol.ts). The deny side carries the frozen denial record
+ * `identity` is the canonical kind-based tool identity (./protocol.ts).
+ * Missing kinds cannot authorize allowlisted tools. The deny side carries the denial record
  * synthesized AT the answer.
  */
 export function decidePermission(
@@ -1795,9 +1804,20 @@ export function decidePermission(
   if (policy.mode === 'unrestricted') {
     return { decision: 'allow', tool: identity };
   }
-  // mode 'allowlist' (the default reading when mode is omitted) — the
-  // matched identity against the allowlist, case-insensitively (vendor
-  // titles lead with capitalized tool names; our allowlists are lowercase).
+  // A vendor that omits kind cannot support this allowlist contract. Never
+  // infer authority from its display title or a coincidentally matching ID.
+  if (kind === undefined || kind.trim() === '') {
+    return {
+      decision: 'deny',
+      tool: identity,
+      denial: {
+        tool: identity,
+        reason: 'tool policy: missing ACP tool kind; cannot enforce allowlist',
+      },
+    };
+  }
+  // mode 'allowlist' (the default reading when mode is omitted): compare
+  // the canonical kind-based identity with the author's grant.
   const allowed = new Set([...policy.allow].map((name) => name.toLowerCase()));
   if (allowed.has(identity.toLowerCase())) {
     return { decision: 'allow', tool: identity };
@@ -1898,7 +1918,7 @@ function foldUpdate(observation: RunObservation, update: AcpUpdate): void {
         existing.output = update.contentText;
       }
       existing.status = update.status ?? existing.status;
-      existing.identity = permissionToolIdentity(existing.title, existing.kind);
+      existing.identity = permissionToolIdentity(existing.kind);
       observation.tools.set(id, existing);
       // THE LATCH (CodeRabbit P1 on this PR): the completed report IS the
       // bypass evidence — a later update for the same id (failed, pending)
@@ -1992,7 +2012,11 @@ async function persistObservation(
     // failed write costs a workspace-only continuation, never this run's
     // verdict.
     try {
-      await writeFile(join(record.workspace, ACP_SESSION_FILE), `${acpSessionId}\n`, 'utf8');
+      await writeFile(
+        join(store.sessionsDir, `${record.sessionId}${ACP_SESSION_FILE}`),
+        `${acpSessionId}\n`,
+        { encoding: 'utf8', mode: 0o600 },
+      );
     } catch {
       // deliberately swallowed — resume degrades honestly
     }
@@ -2017,8 +2041,8 @@ async function persistObservation(
     await store.appendMessage(record.sessionId, { role: 'assistant', content: text, at: nowIso() });
   }
   const diagnostics = [
-    ...observation.narration,
-    ...observation.stderr.map((line) => `[stderr] ${line}`),
+    ...observation.narration.map(redactSensitiveText),
+    ...observation.stderr.map((line) => `[stderr] ${redactSensitiveText(line)}`),
   ];
   if (diagnostics.length > 0) {
     const message: SessionMessage = {

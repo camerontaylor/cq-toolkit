@@ -44,7 +44,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { afterAll, beforeAll, describe, expect, test } from 'vitest';
+import { afterAll, beforeAll, describe, expect, test, vi } from 'vitest';
 import { ClaudeAgentDriver } from '../../src/driver/claude-agent/index.js';
 import { EndpointTableSchema } from '../../src/driver/claude-agent/routing.js';
 import { SubprocessDriver } from '../../src/driver/subprocess/index.js';
@@ -82,6 +82,14 @@ const HARNESS: HarnessConfig = {
     read: { ...defaultHarnessConfig.tools.read, pathPatterns: ['note.txt', 'src/**'] },
     edit: { ...defaultHarnessConfig.tools.edit, pathPatterns: ['note.txt', 'src/**'] },
     run: { ...defaultHarnessConfig.tools.run, commandPatterns: ['echo'] },
+  },
+};
+
+const ENV_HARNESS: HarnessConfig = {
+  ...HARNESS,
+  tools: {
+    ...HARNESS.tools,
+    run: { ...HARNESS.tools.run, commandPatterns: ['env'] },
   },
 };
 
@@ -197,11 +205,15 @@ function projectSdkResult(raw: Record<string, unknown>): McpCallToolResult {
 }
 
 /** Connect an SDK Client to a fresh stdio server bound to `manifest`. */
-async function stdioClient(manifest: HarnessManifest): Promise<Client> {
+async function stdioClient(
+  manifest: HarnessManifest,
+  env?: Record<string, string>,
+): Promise<Client> {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ['--import', LOADER, BIN, JSON.stringify(manifest)],
     stderr: 'pipe',
+    ...(env === undefined ? {} : { env }),
   });
   const client = new Client({ name: 'cq-parity', version: '0.0.0' });
   await client.connect(transport);
@@ -324,8 +336,9 @@ function scriptedSdk(
 /** A pre-seeded session so the driver binds OUR workspace (the sessionRef resume path). */
 async function seededSession(
   label: string,
+  workspaceOverride?: string,
 ): Promise<{ sessionsDir: string; sessionId: string; workspace: string }> {
-  const workspace = await seededWorkspace(label);
+  const workspace = workspaceOverride ?? (await seededWorkspace(label));
   workspaceCounter += 1;
   const sessionsDir = join(scratch, `sessions-${label}-${workspaceCounter}`);
   const record = await new SessionStore(sessionsDir).create(workspace);
@@ -347,19 +360,25 @@ const AGENT_ENDPOINTS = EndpointTableSchema.parse({
 async function claudeAgentPhase(
   sandbox: SandboxLevel,
   steps: ReadonlyArray<{ tool: string; input: unknown }>,
+  options: {
+    harnessConfig?: HarnessConfig;
+    envAllowlist?: readonly string[];
+    workspace?: string;
+  } = {},
 ): Promise<{
   results: unknown[];
   tools: CapturedTool[];
   verdict: WorkerResult;
   workspace: string;
 }> {
-  const session = await seededSession(`agent-${sandbox}`);
+  const session = await seededSession(`agent-${sandbox}`, options.workspace);
   const sink: { tools: CapturedTool[]; results: unknown[] } = { tools: [], results: [] };
   const driver = new ClaudeAgentDriver({
     sdkLoader: async () => scriptedSdk(steps, sink),
     endpointTable: AGENT_ENDPOINTS,
     sessionsDir: session.sessionsDir,
-    harnessConfig: HARNESS,
+    harnessConfig: options.harnessConfig ?? HARNESS,
+    ...(options.envAllowlist === undefined ? {} : { envAllowlist: options.envAllowlist }),
   });
   const verdict = await driver.run({
     prompt: 'parity run',
@@ -738,4 +757,87 @@ describe('harness parity — Level 2: WorkerResult.denials (claude-agent fold �
       'run',
     ]);
   }, 60_000);
+});
+
+describe('harness parity — run child environment', () => {
+  test.each(['default', 'explicit', 'configured'] as const)(
+    '%s allowlist: real env output matches core, stdio and claude-agent handlers',
+    async (mode) => {
+      const canaryName = 'CQ_PARITY_BENIGN_CANARY';
+      const canaryValue = 'parity-benign-value';
+      const secretNames = [
+        'GH_TOKEN',
+        'ANTHROPIC_API_KEY',
+        'ANTHROPIC_AUTH_TOKEN',
+        'OPENAI_API_KEY',
+        'ZAI_API_KEY',
+        'DEEPSEEK_API_KEY',
+      ];
+      for (const name of secretNames) vi.stubEnv(name, `parity-fake-${name}`);
+      vi.stubEnv(canaryName, canaryValue);
+      vi.stubEnv('CQ_SANDBOX', 'off'); // These env legs explicitly exercise host run policy.
+      vi.stubEnv('CQ_RUN_ENV_PASSTHROUGH', mode === 'configured' ? canaryName : '');
+      const envAllowlist = mode === 'explicit' ? [canaryName] : [];
+      let client: Client | undefined;
+      try {
+        const workspace = await seededWorkspace(`env-${mode}`);
+        const manifest = await buildManifest({
+          workspace,
+          sandbox: 'workspace-write',
+          toolPolicy: { mode: 'unrestricted', allow: [] },
+          harness: ENV_HARNESS,
+          envNames: envAllowlist,
+        });
+        if (manifest === undefined) throw new Error('run env manifest missing');
+        const core = await createHarnessSurface(manifest).call('run', { command: 'env' });
+        // The real MCP server starts with the same host values, including
+        // canary credentials; its startup and run executor must scrub them.
+        const parentEnv = Object.fromEntries(
+          Object.entries(process.env).filter(
+            (entry): entry is [string, string] => typeof entry[1] === 'string',
+          ),
+        );
+        client = await stdioClient(manifest, parentEnv);
+        const stdio = projectSdkResult(
+          await client.callTool({ name: 'run', arguments: { command: 'env' } }),
+        );
+        const agent = await claudeAgentPhase(
+          'workspace-write',
+          [{ tool: 'run', input: { command: 'env' } }],
+          { harnessConfig: ENV_HARNESS, envAllowlist, workspace },
+        );
+        expect(agent.verdict.stopReason, agent.verdict.error).toBe('complete');
+        expect(agent.results).toHaveLength(1);
+        const outputs = [core.result, stdio, agent.results[0] as McpCallToolResult].map(
+          (result) => {
+            expect(result.isError).toBeUndefined();
+            const text = result.content.map((block) => block.text).join('');
+            expect(text.startsWith('exit 0\n--- stdout ---\n')).toBe(true);
+            // env enumeration order is immaterial; compare the complete set.
+            return text.slice('exit 0\n--- stdout ---\n'.length).trim().split('\n').sort();
+          },
+        );
+        expect(outputs[1]).toEqual(outputs[0]);
+        expect(outputs[2]).toEqual(outputs[0]);
+        for (const output of outputs) {
+          for (const name of [
+            ...secretNames,
+            'CONFORMANCE_API_KEY',
+            'CQ_SANDBOX',
+            'CQ_RUN_ENV_PASSTHROUGH',
+          ]) {
+            expect(
+              output.some((line) => line.startsWith(`${name}=`)),
+              name,
+            ).toBe(false);
+          }
+          expect(output.includes(`${canaryName}=${canaryValue}`)).toBe(mode !== 'default');
+        }
+      } finally {
+        await client?.close();
+        vi.unstubAllEnvs();
+      }
+    },
+    60_000,
+  );
 });

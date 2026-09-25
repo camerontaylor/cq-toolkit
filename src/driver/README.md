@@ -194,18 +194,22 @@ Files:
   markers; grace delays injectable for tests). The governor decides
   WHEN (rung 1 signal via `currentJobContext()`); this file only obeys.
 
-Child environment is DEFAULT-DENY (issue #183) for `spawnManaged` — the
-subprocess driver only; the sibling ACP/claude-agent drivers still inherit
-the parent env (a separate surface, not changed here). `spawnManaged`
-copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
+Child environment is DEFAULT-DENY (issue #183) for the subprocess CLI,
+the claude-agent SDK child, the ACP vendor process, and every harness `run`
+child. All use the shared `buildChildEnv` policy. ACP configures its vendor
+process with `envNames`; its tools run in that vendor process, separately
+from the shared harness tool core.
+The policy copies ONLY `DEFAULT_CHILD_ENV_ALLOWLIST` (PATH/HOME/SHELL/USER/temp dirs,
 terminal + locale basics, XDG dirs, network-egress/TLS config
 (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_*`, proxy vars), Windows equivalents)
-from the entry process env — never `GH_TOKEN`, `*_API_KEY`, `*_SECRET`,
-`AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, or `NODE_OPTIONS`/`NODE_PATH`.
-Per-Route endpoint/auth vars are composed explicitly into
-`SpawnOptions.env` and always win over the allowlist, so configured
-driver keys still reach the worker; a deployment extends the copied names
-with `SubprocessDriverOptions.envAllowlist` (names only, never values) —
+from the entry process env. By default it excludes `GH_TOKEN`, `*_API_KEY`,
+`*_SECRET`, `AWS_*`, `NPM_TOKEN`, `SSH_AUTH_SOCK`, and `NODE_OPTIONS`/`NODE_PATH`.
+Per-route endpoint/auth vars are composed explicitly into the agent CLI
+or SDK child's environment and always win over the allowlist, so configured
+driver keys still reach that worker. These credential overrides are not
+passed to harness `run` children. A deployment extends the copied names
+with `SubprocessDriverOptions.envAllowlist` or
+`ClaudeAgentDriverOptions.envAllowlist` (names only, never values) —
 e.g. for a corporate `SSH_AUTH_SOCK` or `NPM_CONFIG_*`. A marker secret in
 the entry process env therefore cannot reach a `spawnManaged` worker,
 where prompt-injected PR content could exfiltrate it. TWO CAVEATS (issue
@@ -215,6 +219,14 @@ that); and `HOME` stays inherited because the CLI reads its own config
 there, so a worker with file-read tools can still reach
 `~/.aws/credentials`, `~/.config/gh/hosts.yml`, `~/.npmrc`, … — that
 boundary is the `ToolPolicy`/sandbox surface, not this env allowlist.
+
+Both drivers carry their explicit `envAllowlist` through the harness
+manifest's `envNames`. The manifest also captures names from the deployment
+variable `CQ_RUN_ENV_PASSTHROUGH` (comma- or whitespace-separated names),
+so those opt-ins survive the stdio startup scrub. The shared core filters
+the environment at every `run` execution, including in-process SDK tools and direct `buildTools`
+calls; the stdio server's startup scrub is an additional boundary. Both
+closed-form git commands and shell commands receive the filtered env.
 
 Argv surface (headless reference, harness mode — the default): `-p` (prompt
 rides stdin), `--output-format stream-json`, `--verbose` (the real CLI
@@ -266,6 +278,14 @@ Closed tool surface (W1.4 — RS-12 design, ADR-0002 Annex A):
 - Named limitations: a same-uid `run` command can still read an
   ancestor's environment (OS confinement, T1.8); a server killed without
   SIGTERM orphans an in-flight command group until it exits on its own.
+
+The shared `run` tool accepts six closed-form `git diff` commands and
+three closed-form `git log` commands, each still requiring an allowlist
+grant. They select constant argv with `shell: false`; path and revision
+arguments are unavailable. Both transports use the same process lifecycle
+for these commands and ordinary shell commands: bounded output, timeout,
+cancellation, and POSIX process-group termination. See the exact forms and
+config pins in [the harness README](../harness/README.md).
 
 TRUST STATEMENT (issue #28's subprocess half): in harness mode the harness
 enforces the TOOL-level sandbox mapping on this lane (read-only denials,
@@ -350,7 +370,10 @@ Files:
 - `index.ts` — `ClaudeAgentDriver implements Driver` (constructor options:
   `sdkLoader?`, `endpointTable?`, `outputSchema?` → the SDK's native
   `outputFormat: { type: 'json_schema' }`, `harnessConfig?`,
-  `sessionsDir?`, `pricing?`). Before the CLI receives the schema, the
+  `sessionsDir?`, `pricing?`, `envAllowlist?`). The env option contains
+  additional host variable names exposed to the SDK child and harness
+  `run` children through the manifest; invalid names are rejected at
+  construction. Before the CLI receives the schema, the
   driver removes `$schema` properties and absolute
   `http(s)://json-schema.org/` values under `$ref`, `$dynamicRef`, and
   `$recursiveRef` (`stripMetaSchema`).
@@ -495,6 +518,26 @@ Files:
   absent binary is a PRE-DISPATCH throw naming the binary + install hint.
 - `process.ts` — the I8 scan's exempt file for this lane: the shell-less
   spawn and the SIGTERM→SIGKILL settle-time termination ladder.
+
+ACP permission allowlists use the request's authoritative `kind`, mapping
+`execute` to the toolkit's `run` identity. Titles and call IDs never authorize
+a tool. Vendors that omit `kind` cannot satisfy an allowlist: requests are
+rejected with an explicit missing-kind denial, even if the title or call ID
+matches a grant. Such vendors need kind reporting to support allowlists;
+`unrestricted` retains its explicit allow-all behavior, while `none` and
+read-only sandbox policies still deny execution.
+
+ACP environment migration: the vendor process no longer inherits the full
+host environment. It receives the default child-env allowlist plus
+`envNames` and deployment `CQ_RUN_ENV_PASSTHROUGH` names (comma- or
+whitespace-separated). Operators using environment-based vendor
+authentication must include the credential variable names in `envNames`.
+Configure names only; values are read at `run()` time, and a missing or
+empty explicitly named value throws before dispatch or session creation.
+`modelEnv`, when configured, explicitly sets its variable to the requested
+model id. These options govern the ACP vendor process and its tools;
+they do not bind a shared harness manifest or configure harness `run`
+children.
 
 Lane specifics (all cited in the strategy doc): THE MODE PIN — sessions
 open in `yolo`, which never asks, so the driver pins

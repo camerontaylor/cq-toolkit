@@ -71,7 +71,8 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe('real pinned compiler and lint conformance', () => {
+// Each test spawns the real pinned TypeScript compiler and oxlint via the static gate.
+describe('real pinned compiler and lint conformance', { timeout: 60_000 }, () => {
   it('counts projected files, imported files, configs and inputs outside lint traversal', () => {
     const root = fixture();
     writeFileSync(

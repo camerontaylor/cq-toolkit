@@ -494,6 +494,7 @@ const completeWorker = (line: string, extra?: Partial<WorkerResult>): WorkerResu
   usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
   denials: [],
   stopReason: 'complete',
+  model: 'test-model',
   ...extra,
 });
 

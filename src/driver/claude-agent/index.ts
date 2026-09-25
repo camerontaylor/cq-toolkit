@@ -225,7 +225,8 @@ import {
 import type { ExpectedInitSurface, HarnessSurface } from '../../harness/surface.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
-import { boundedErrorText, describeError } from '../error-text.js';
+import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
+import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { computeCostUSD } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
@@ -349,6 +350,8 @@ export interface ClaudeAgentDriverOptions {
   harnessConfig?: HarnessConfig;
   /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
   sessionsDir?: string;
+  /** Additional host env names exposed to the SDK child and harness run commands. */
+  envAllowlist?: readonly string[];
   /**
    * Price-lookup override for the derived-only costUSD rule (default:
    * `computeCostUSD` over the vendored models.dev table via `priceOf`).
@@ -371,6 +374,7 @@ export class ClaudeAgentDriver implements Driver {
   private readonly outputJsonSchema: string | undefined;
   private readonly harnessConfig: HarnessConfig;
   private readonly sessionsDir: string | undefined;
+  private readonly envAllowlist: readonly string[] | undefined;
   private readonly pricingOverride:
     | ((modelSpec: ModelSpec) => PerMillionRates | undefined)
     | undefined;
@@ -378,6 +382,11 @@ export class ClaudeAgentDriver implements Driver {
   private sdkModule: Promise<AgentSdkModule> | undefined;
 
   constructor(options: ClaudeAgentDriverOptions = {}) {
+    if (options.envAllowlist?.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+      throw new Error('claude-agent driver: envAllowlist entries must be valid env var names');
+    }
+    this.envAllowlist =
+      options.envAllowlist === undefined ? undefined : Object.freeze([...options.envAllowlist]);
     this.sdkLoader = options.sdkLoader ?? defaultSdkLoader;
     this.endpointTable = options.endpointTable ?? defaultEndpointTable();
     // zod→JSON Schema at CONSTRUCTION: an unrepresentable schema is a loud
@@ -436,6 +445,7 @@ export class ClaudeAgentDriver implements Driver {
       sandbox: sandboxPolicy.level,
       toolPolicy,
       harness: this.harnessConfig,
+      envNames: this.envAllowlist,
     });
     const surface = manifest === undefined ? undefined : createHarnessSurface(manifest);
     const allowed = manifest?.tools ?? [];
@@ -518,16 +528,18 @@ export class ClaudeAgentDriver implements Driver {
       // API-key and subscription auth alike.
       settingSources: [],
       strictMcpConfig: true,
-      // Endpoint injection: the SDK's env REPLACES the child environment,
-      // so the host environment rides along and the endpoint plan is laid
-      // over it (base URL + both auth spellings, values from the host env
-      // read AT RUN TIME — the one place a secret value is ever touched).
-      env: {
-        ...process.env,
-        ANTHROPIC_BASE_URL: endpoint.baseUrl,
-        ANTHROPIC_AUTH_TOKEN: keyValue,
-        ANTHROPIC_API_KEY: keyValue,
-      },
+      // The SDK child receives only allowlisted host names plus its route
+      // credentials. Harness run children receive the manifest's allowlist
+      // without these SDK-only credential overrides.
+      env: buildChildEnv(
+        process.env,
+        {
+          ANTHROPIC_BASE_URL: endpoint.baseUrl,
+          ANTHROPIC_AUTH_TOKEN: keyValue,
+          ANTHROPIC_API_KEY: keyValue,
+        },
+        this.envAllowlist,
+      ),
       systemPrompt: systemPreamble(this.harnessConfig.promptBudget.maxSystemPromptChars),
       ...(surface !== undefined
         ? {
@@ -1215,7 +1227,7 @@ async function persistObservation(
     const message: SessionMessage = {
       role: 'tool',
       toolName: NARRATION_TOOL,
-      content: JSON.stringify(observation.narration),
+      content: JSON.stringify(observation.narration.map(redactSensitiveText)),
       at: nowIso(),
     };
     await store.appendMessage(record.sessionId, message);

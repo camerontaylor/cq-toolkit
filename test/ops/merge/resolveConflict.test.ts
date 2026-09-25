@@ -39,11 +39,11 @@
 //      F5 drill's live finding), and the JSON-line contract — and
 //      the op's DEFAULT loader reads that same file (the source-side half
 //      of the dist-shipping regression guard).
-import { readFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, test } from 'vitest';
+import { describe, expect, test, vi } from 'vitest';
 import { defaultHarnessConfig } from '../../../src/harness/config.js';
 import type {
   Driver,
@@ -73,6 +73,23 @@ import type {
   ResolveConflictInput,
 } from '../../../src/ops/merge/resolveConflict.js';
 
+// Source tests have no adjacent bin.js. Keep the real MCP server and
+// default SubprocessDriver, changing only the server's source launch path.
+vi.mock('../../../src/harness/mcp/launch.js', () => {
+  const fromHere = (relative: string): string =>
+    decodeURIComponent(new URL(relative, import.meta.url).pathname);
+  return {
+    harnessServerLaunch: () => ({
+      command: process.execPath,
+      args: [
+        '--import',
+        fromHere('../../helpers/ts-source-loader.mjs'),
+        fromHere('../../../src/harness/mcp/bin.ts'),
+      ],
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -84,6 +101,7 @@ const MODEL_SPEC = { model: 'resolver-model', provider: 'zai' };
 /** A WorkerResult for a 'complete' run carrying `structuredOutput` (and,
  * when scripted, the driver-reported session handle). */
 const completed = (structuredOutput: unknown, sessionId?: string): WorkerResult => ({
+  model: MODEL_SPEC.model,
   ...(sessionId !== undefined ? { sessionId } : {}),
   structuredOutput,
   usage: ZERO_USAGE,
@@ -274,6 +292,85 @@ const TEMPLATE = [
 ].join('\n');
 
 const fakeLoadPrompt = async (): Promise<string> => TEMPLATE;
+
+// S3 has one outer wrap around injected/default selection. The ai-sdk
+// default shares that exact construction point with subprocess; structural
+// coverage avoids a network-backed AiSdkDriver test.
+describe('S3 resolveConflict served-model construction', () => {
+  test.each(['CONTROL', 'TREATMENT'] as const)(
+    'S3 injected %s: matching model succeeds; missing model fails with assertion marker',
+    async (variant) => {
+      const verdict = completed({ decision: 'acted', summary: 'pushed' });
+      if (variant === 'TREATMENT') delete verdict.model;
+      const op = makeResolveConflictOp({
+        effects: new FakeMergeEffects(),
+        driver: new FakeDriver(verdict),
+        createSession: fakeCreateSession().createSession,
+        loadPrompt: fakeLoadPrompt,
+      });
+
+      const result = await op(baseInput());
+      if (variant === 'CONTROL') {
+        expect(result.status).toBe('ok');
+      } else {
+        expect(result.status).toBe('failed');
+        expect(failedError(result)).toContain('served model assertion');
+      }
+    },
+  );
+
+  test.each(['CONTROL', 'TREATMENT'] as const)(
+    'S3 subprocess default %s: matching model succeeds; remapped model fails with assertion marker',
+    async (variant) => {
+      const dir = await mkdtemp(join(tmpdir(), 'resolve-served-model-'));
+      try {
+        const bin = join(dir, 'bin');
+        await mkdir(bin);
+        const cli = join(bin, 'claude');
+        const fakeCli = fileURLToPath(
+          new URL('../../fixtures/fake-agent-cli.mjs', import.meta.url),
+        );
+        const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+        const reply = JSON.stringify({ decision: 'acted', summary: 'pushed' });
+        // The driver filters parent env. Set the fixture controls inside
+        // the executable shim so the real default construction stays intact.
+        await writeFile(
+          cli,
+          '#!/bin/sh\n' +
+            `exec env FAKE_AGENT_REPLY=${shellQuote(reply)} ` +
+            (variant === 'TREATMENT' ? 'FAKE_AGENT_SERVED_MODEL=remapped ' : '') +
+            `${shellQuote(process.execPath)} ${shellQuote(fakeCli)} "$@"\n`,
+        );
+        await chmod(cli, 0o755);
+        vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+        vi.stubEnv('ANTHROPIC_API_KEY', 'fixture-only-key');
+        const effects = new FakeMergeEffects();
+        effects.worktreePrepare = async () => ({ path: dir });
+        const op = makeResolveConflictOp({
+          effects,
+          sessionsDir: join(dir, 'sessions'),
+          loadPrompt: fakeLoadPrompt,
+        });
+        const result = await op({
+          ...baseInput(),
+          repoRoot: dir,
+          modelSpec: { provider: 'anthropic', model: 'claude-haiku-4-5' },
+        });
+        if (variant === 'CONTROL') {
+          expect(result.status).toBe('ok');
+        } else {
+          expect(result.status).toBe('failed');
+          expect(failedError(result)).toContain('served model assertion');
+        }
+      } finally {
+        vi.unstubAllEnvs();
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    // The real fake CLI and source-loaded MCP server each start a process.
+    30_000,
+  );
+});
 
 // ---------------------------------------------------------------------------
 // parseMergeConflictDecision
@@ -632,7 +729,7 @@ describe('resolveConflict op', () => {
   });
 
   test('silent output (no structuredOutput) fails closed too', async () => {
-    const driver = new FakeDriver(stopped('complete'));
+    const driver = new FakeDriver({ ...stopped('complete'), model: MODEL_SPEC.model });
     const op = makeResolveConflictOp({
       effects: new FakeMergeEffects(),
       driver,
@@ -823,6 +920,7 @@ describe('resolveConflict op', () => {
   test('the driver usage + cost are reported to the job context in ONE fold (#185)', async () => {
     const usage = { input: 12, output: 6, cacheRead: 0, cacheWrite: 0 };
     const driver = new FakeDriver({
+      model: MODEL_SPEC.model,
       structuredOutput: { decision: 'acted', summary: 'pushed' },
       usage,
       costUSD: 0.11,

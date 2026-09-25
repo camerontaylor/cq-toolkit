@@ -179,10 +179,12 @@
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
 //   1. governed signal fired (the ladder terminated the child) → 'aborted'
-//   2. real usage folded ≥ Budget.maxTokens → 'budget'
-//   3. result event present: subtype 'success' (and is_error ≠ true)
+//   2. harness surface/transport failure → 'error'
+//   3. oversized stdout/stderr line → 'error'
+//   4. real usage folded ≥ Budget.maxTokens → 'budget'
+//   5. result event present: subtype 'success' (and is_error ≠ true)
 //      → 'complete'; any other result status → 'error'
-//   4. no result event (spawn failure, nonzero exit, silent death) → 'error'
+//   6. no result event (spawn failure, nonzero exit, silent death) → 'error'
 // Once spawned, run() NEVER throws: every failure lands in an honest
 // 'error' verdict carrying the sessionId + denials gathered so far — and a
 // SYNCHRONOUS SPAWN FAILURE is a verdict too (issue #19): a spawnImpl that
@@ -261,6 +263,7 @@ import type {
 } from '../types.js';
 import { RoutingTableSchema, defaultRoutingTable, routeFor } from './routing.js';
 import type { Route, RoutingTable } from './routing.js';
+import { redactSensitiveText } from '../error-text.js';
 import { spawnManaged, terminateGracefully } from './process.js';
 import type { ManagedChild, ProcessClose, SpawnOptions, TerminationRungMarker } from './process.js';
 
@@ -840,6 +843,7 @@ export class SubprocessDriver implements Driver {
       maxTokens: budget.maxTokens,
       usage,
       resultStatus: resultStatusOf(observation.result),
+      oversizedLine: observation.close?.oversizedLine === true,
     });
     // The error field is present ONLY on a driver-level failure verdict (the
     // frozen contract allows `error` only with stopReason 'error'): the cause
@@ -1398,7 +1402,10 @@ async function persistObservation(
   if (text !== '') {
     await store.appendMessage(record.sessionId, { role: 'assistant', content: text, at: nowIso() });
   }
-  const diagnostics = [...observation.narration, ...observation.stderr.map((l) => `[stderr] ${l}`)];
+  const diagnostics = [
+    ...observation.narration.map(redactSensitiveText),
+    ...observation.stderr.map((l) => `[stderr] ${redactSensitiveText(l)}`),
+  ];
   if (diagnostics.length > 0) {
     const message: SessionMessage = {
       role: 'tool',
@@ -1442,9 +1449,10 @@ export function resultStatusOf(result: ResultEvent | undefined): ResultStatus {
 
 /**
  * The error CAUSE for an 'error' verdict (issue #208): what actually went
- * wrong, in precedence order — a failed result frame's own `result` string,
- * then its joined `errors` entries, then its subtype; else the child's spawn
- * error, else its exit code or terminating signal, else the narration tail.
+ * wrong, in precedence order — a harness failure; a failed result frame's
+ * own `result` string, joined `errors` entries, or subtype; the child's
+ * oversized-line failure, spawn error, exit code or terminating signal;
+ * finally the narration tail.
  * The caller appends the retained stderr tail and redacts/bounds the result
  * (`boundedErrorText`), so a 0-token failure is diagnosable from the journal.
  */
@@ -1476,6 +1484,9 @@ function errorCauseOf(observation: RunObservation): string {
     return `subprocess driver: result event error — ${cause}`;
   }
   const close = observation.close;
+  if (close?.oversizedLine === true) {
+    return 'subprocess driver: child emitted an oversized stdout/stderr line';
+  }
   if (close?.spawnError !== undefined) {
     return `subprocess driver: spawn failed — ${describeError(close.spawnError)}`;
   }
@@ -1524,12 +1535,14 @@ export interface StopReasonInputs {
   maxTokens: number | undefined;
   usage: Usage;
   resultStatus: ResultStatus;
+  oversizedLine?: boolean;
 }
 
-/** THE mapping (checked in order): aborted → harness failure → budget → error → complete. */
+/** THE mapping: aborted → harness failure → oversized line → budget → error → complete. */
 export function stopReasonOf(inputs: StopReasonInputs): WorkerResult['stopReason'] {
   if (inputs.aborted) return 'aborted';
   if (inputs.harnessFailure === true) return 'error';
+  if (inputs.oversizedLine === true) return 'error';
   if (inputs.maxTokens !== undefined && totalTokensOf(inputs.usage) >= inputs.maxTokens)
     return 'budget';
   if (inputs.resultStatus !== 'success') return 'error';
