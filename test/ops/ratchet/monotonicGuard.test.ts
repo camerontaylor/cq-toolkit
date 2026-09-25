@@ -120,8 +120,17 @@ function bodyLines(b: string): string[] {
 async function realGitDiffCases(): Promise<Record<string, string>> {
   const ws = await mkdtemp(join(tmpdir(), 'cq-gitdiff-'));
   const run = (args: string[]): void => {
-    const r = spawnSync('git', args, { cwd: ws, encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${String(r.stderr)}`);
+    const r = spawnSync('git', args, {
+      cwd: ws,
+      encoding: 'utf8',
+      timeout: 10_000,
+      killSignal: 'SIGKILL',
+    });
+    if (r.error !== undefined || r.status !== 0) {
+      throw new Error(
+        `git ${args.join(' ')} failed: ${r.error?.message ?? ''} ${String(r.stderr)}`,
+      );
+    }
   };
   const cases: Record<string, { before: string | null; after: string | null }> = {
     tighten: { before: body('lower-is-better', 3), after: body('lower-is-better', 2) },
@@ -167,9 +176,13 @@ async function realGitDiffCases(): Promise<Record<string, string>> {
       {
         cwd: ws,
         encoding: 'utf8',
+        timeout: 10_000,
+        killSignal: 'SIGKILL',
       },
     );
-    if (diff.status !== 0 || typeof diff.stdout !== 'string') throw new Error('git diff failed');
+    if (diff.error !== undefined || diff.status !== 0 || typeof diff.stdout !== 'string') {
+      throw new Error(`git diff failed: ${diff.error?.message ?? ''} ${String(diff.stderr)}`);
+    }
     const sections: Record<string, string> = {};
     for (const section of diff.stdout.split(/(?=^diff --git )/m)) {
       const match = /^diff --git \S+\/baselines\/(.+?)\.json /.exec(section);

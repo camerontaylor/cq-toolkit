@@ -21,6 +21,10 @@ export default function globalSetup(): void {
     encoding: 'utf8',
     maxBuffer: MAX_BUFFER,
     shell: process.platform === 'win32',
+    // Global setup runs before collection, so no test deadline exists yet.
+    // This generous bound catches a wedged/stalled build as evidence rather
+    // than hanging the entire run; I5 requires missing evidence to surface.
+    timeout: 600_000,
   });
   if (build.error !== undefined || build.status !== 0) {
     // tsc prints its diagnostics on stdout; npm's own failure lines go to stderr.
