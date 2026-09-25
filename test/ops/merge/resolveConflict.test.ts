@@ -73,6 +73,23 @@ import type {
   ResolveConflictInput,
 } from '../../../src/ops/merge/resolveConflict.js';
 
+// Source tests have no adjacent bin.js. Keep the real MCP server and
+// default SubprocessDriver, changing only the server's source launch path.
+vi.mock('../../../src/harness/mcp/launch.js', () => {
+  const fromHere = (relative: string): string =>
+    decodeURIComponent(new URL(relative, import.meta.url).pathname);
+  return {
+    harnessServerLaunch: () => ({
+      command: process.execPath,
+      args: [
+        '--import',
+        fromHere('../../helpers/ts-source-loader.mjs'),
+        fromHere('../../../src/harness/mcp/bin.ts'),
+      ],
+    }),
+  };
+});
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -350,6 +367,8 @@ describe('S3 resolveConflict served-model construction', () => {
         await rm(dir, { recursive: true, force: true });
       }
     },
+    // The real fake CLI and source-loaded MCP server each start a process.
+    30_000,
   );
 });
 
