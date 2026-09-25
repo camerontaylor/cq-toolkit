@@ -114,3 +114,38 @@ describe('S5 makeFixReviewItem plain Driver construction', () => {
     }
   });
 });
+
+describe('makeFixReviewItem caller-supplied perHarness construction', () => {
+  test.each([
+    { label: 'CONTROL observed model', model: 'requested-model' },
+    { label: 'TREATMENT missing model', model: undefined },
+    { label: 'TREATMENT mismatched model', model: 'different-model' },
+  ])('$label through raw factory', async ({ model }) => {
+    const input = inputFor('/tmp/cq-review-per-harness');
+    const run = vi.fn(async (invocation: OpInvocation): Promise<WorkerResult> => ({
+      ...success(invocation, false),
+      ...(model === undefined ? {} : { model }),
+    }));
+    // No worktree adapter or inner assertion: this exercises the exported
+    // caller-supplied factory boundary independently of the registry path.
+    const perHarness = vi.fn((): Driver => ({ run }));
+    const result = await makeFixReviewItem({ driver: { perHarness } })(input);
+    expect(perHarness).toHaveBeenCalledExactlyOnceWith(
+      defaultHarnessConfig,
+      input.worktree,
+      input.driver,
+    );
+    expect(run).toHaveBeenCalledOnce();
+    if (model === input.driver.model) {
+      expect(result.status).toBe('ok');
+      if (result.status !== 'ok') throw new Error(`unexpected ${result.status}`);
+      expect(result.value.summary).toBe('Already addressed.');
+    } else {
+      expect(result.status).toBe('failed');
+      if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
+      expect(result.error).toContain('served model assertion');
+      expect(result).not.toHaveProperty('value');
+      expect(JSON.stringify(result)).not.toContain('Already addressed.');
+    }
+  });
+});

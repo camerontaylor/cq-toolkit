@@ -493,7 +493,8 @@ const messageOf = (err: unknown): string => (err instanceof Error ? err.message 
  *     invocation's workspace. The ModelSpec rides the binding so the
  *     factory can select the DRIVER KIND from the provider handle (review-
  *     debt #186): 'ai-sdk' binds the in-process AiSdkDriver (no host CLI),
- *     any other handle binds the SubprocessDriver host-CLI lane.
+ *     any other handle binds the SubprocessDriver host-CLI lane. The op
+ *     also asserts the returned driver, including caller-supplied factories.
  */
 export type FixDriverSource =
   | Driver
@@ -588,11 +589,15 @@ export function makeFixReviewItem(deps: {
 }): Op<FixReviewItemInput, FixReviewItemResult> {
   // The perHarness form builds the driver from the invocation's OWN harness
   // AND worktree (the dispatched seam must run in the PR worktree — see
-  // worktreeFixDriver); the plain-Driver form receives its assertion here.
+  // worktreeFixDriver). Assert both forms here: caller-supplied factories
+  // need the same guarantee as plain drivers and the registry binding.
   const driverFor = (input: FixReviewItemInput): Driver => {
     const source = deps.driver;
     if ('perHarness' in source) {
-      return source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree, input.driver);
+      return withServedModelAssertion(
+        source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree, input.driver),
+        'default',
+      );
     }
     return withServedModelAssertion(source, 'default');
   };

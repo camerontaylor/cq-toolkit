@@ -37,6 +37,7 @@
 // SPAWN FAILURES ARE DATA, NOT THROWS: a missing binary (ENOENT) surfaces
 // on `close` as `spawnError` — the driver maps it to a stopReason 'error'
 // WorkerResult and NEVER throws past the frozen seam once spawned.
+import { registerProcessSignalCleanup } from '../../kernel/process-signals.js';
 import { spawn } from 'node:child_process';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 
@@ -73,6 +74,25 @@ export function terminateActiveChildrenOnExit(): void {
 }
 
 process.once('exit', terminateActiveChildrenOnExit);
+
+// Registration alone does not install signal listeners in an embedding host.
+registerProcessSignalCleanup(() => {
+  const children = [...activeChildren];
+  if (children.length === 0) return undefined;
+  terminateActiveChildrenOnExit();
+  // Capture original groups: a leader may exit before a TERM-ignoring
+  // descendant, removing the leader from activeChildren during the grace.
+  return () => {
+    for (const child of children) {
+      try {
+        if (POSIX && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+        else child.kill('SIGKILL');
+      } catch {
+        // The original group is already gone.
+      }
+    }
+  };
+});
 
 // ---------------------------------------------------------------------------
 // spawnManaged — the managed child
@@ -332,9 +352,9 @@ function createCollector(
     // avoids rebuilding an Array of code points on every chunk (the old
     // repeated full-string scan was quadratic under noisy output).
     const bytes = Buffer.from(buf.text, 'utf8');
-    const start = Math.max(0, bytes.length - maxRetainedBytes);
-    let kept = bytes.subarray(start).toString('utf8');
-    if (start > 0 && kept.charCodeAt(0) === 0xfffd) kept = kept.slice(1);
+    let start = Math.max(0, bytes.length - maxRetainedBytes);
+    while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
+    const kept = bytes.subarray(start).toString('utf8');
     if (buf === tailBuf) droppedBytes += buf.bytes - Buffer.byteLength(kept);
     buf.text = kept;
     buf.bytes = Buffer.byteLength(kept);

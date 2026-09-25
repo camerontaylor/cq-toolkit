@@ -22,6 +22,7 @@
 // 'conformance-priced' endpoint extension of the default table) so no test
 // needs a real provider key; the remap test alone uses the DEFAULT table to
 // pin the DeepSeek footgun to the shipped config.
+import { spawn } from 'node:child_process';
 import { lstat, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative } from 'node:path';
@@ -1354,6 +1355,172 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
       expect(close.signal).toBe('SIGTERM');
     });
   });
+
+  test.each([
+    [1, '🦄', ''],
+    [2, '🦄', ''],
+    [3, '🦄', ''],
+    [4, '🦄', '🦄'],
+    [5, '🦄🦄', '🦄'],
+    [3, 'x�', '�'],
+    [4, 'x�!', '�!'],
+  ])('UTF-8 retention cap %i preserves complete code points in %s', async (cap, text, expected) => {
+    await withScratch(async (scratchDir) => {
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '-e',
+          `process.stdout.write(${JSON.stringify(text)}); process.stderr.write(${JSON.stringify(text)});`,
+        ],
+        cwd: scratchDir,
+        maxRetainedBytes: cap,
+      });
+      const out: string[] = [];
+      const err: string[] = [];
+      child.onStdoutLine((line) => out.push(line));
+      child.onStderrLine((line) => err.push(line));
+      const close = await child.close;
+      expect(close.stdout).toBe(expected);
+      expect(close.stderr).toBe(expected);
+      expect(Buffer.byteLength(close.stdout)).toBeLessThanOrEqual(cap);
+      expect(Buffer.byteLength(close.stderr)).toBeLessThanOrEqual(cap);
+      expect(close.droppedBytes).toBe(2 * (Buffer.byteLength(text) - Buffer.byteLength(expected)));
+      expect(out).toEqual(expected === '' ? [] : [expected]);
+      expect(err).toEqual(expected === '' ? [] : [expected]);
+    });
+  });
+
+  test('importing driver and runCli does not install signal handlers', async () => {
+    await withScratch(async (scratchDir) => {
+      const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+      const cliUrl = new URL('../../src/cli/main.ts', import.meta.url).href;
+      const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+      const child = spawnManaged({
+        command: process.execPath,
+        args: [
+          '--experimental-transform-types',
+          '--import',
+          loader,
+          '--input-type=module',
+          '-e',
+          `
+          const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'];
+          const before = signals.map(s => process.listenerCount(s));
+          await import(${JSON.stringify(processUrl)});
+          await import(${JSON.stringify(cliUrl)});
+          console.log(JSON.stringify({before, after: signals.map(s => process.listenerCount(s))}));
+        `,
+        ],
+        cwd: scratchDir,
+      });
+      const close = await child.close;
+      expect(close.code, close.stderr).toBe(0);
+      const counts = JSON.parse(close.stdout) as { before: number[]; after: number[] };
+      expect(counts.after).toEqual(counts.before);
+    });
+  });
+
+  test.skipIf(process.platform === 'win32').each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)(
+    'CLI parent %s cleans detached workers and descendants from driver and in-process run',
+    async (signal) => {
+      await withScratch(async (scratchDir) => {
+        const loader = fileURLToPath(new URL('../helpers/ts-source-loader.mjs', import.meta.url));
+        const bin = fileURLToPath(new URL('../../src/cli.ts', import.meta.url));
+        const processUrl = new URL('../../src/driver/subprocess/process.ts', import.meta.url).href;
+        const runUrl = new URL('../../src/harness/run.ts', import.meta.url).href;
+        const preload = join(scratchDir, 'owned-child.mjs');
+        const runWorker = join(scratchDir, 'run-worker.cjs');
+        const runPidFile = join(scratchDir, 'run-pids.json');
+        const descendantCode =
+          "process.on('SIGTERM', () => {}); console.log('ready'); setInterval(() => {}, 1000)";
+        const workerCode = `
+          const { spawn } = require('node:child_process');
+          process.on('SIGTERM', () => {});
+          const descendant = spawn(process.execPath, ['-e', ${JSON.stringify(descendantCode)}], {stdio: ['ignore', 'pipe', 'inherit']});
+          descendant.stdout.once('data', () => console.log(JSON.stringify([process.pid, descendant.pid])));
+          setInterval(() => {}, 1000);
+        `;
+        await writeFile(
+          runWorker,
+          workerCode.replace(
+            'console.log(JSON.stringify([process.pid, descendant.pid]))',
+            `require('node:fs').writeFileSync(${JSON.stringify(runPidFile)}, JSON.stringify([process.pid, descendant.pid]))`,
+          ),
+        );
+        const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
+        const runCommand = `exec ${shellQuote(process.execPath)} ${shellQuote(runWorker)}`;
+        await writeFile(
+          preload,
+          `
+          import { spawnManaged, buildChildEnv } from ${JSON.stringify(processUrl)};
+          import { runShellCommand } from ${JSON.stringify(runUrl)};
+          void runShellCommand(${JSON.stringify(runCommand)}, {env: buildChildEnv(process.env), cwd: ${JSON.stringify(scratchDir)}, maxBytes: 1000});
+          const child = spawnManaged({ command: process.execPath, args: ['-e', ${JSON.stringify(workerCode)}], cwd: ${JSON.stringify(scratchDir)} });
+          child.onStdoutLine(line => process.stdout.write(line + '\\n'));
+        `,
+        );
+        const parent = spawn(
+          process.execPath,
+          ['--experimental-transform-types', '--import', loader, '--import', preload, bin],
+          {
+            stdio: ['ignore', 'pipe', 'pipe'],
+          },
+        );
+        let out = '';
+        let err = '';
+        parent.stdout.on('data', (chunk: Buffer) => {
+          out += chunk.toString();
+        });
+        parent.stderr.on('data', (chunk: Buffer) => {
+          err += chunk.toString();
+        });
+        const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve) => {
+            parent.on('close', (code, endedSignal) => resolve({ code, signal: endedSignal }));
+          },
+        );
+        let pids: number[] = [];
+        let runPids: number[] = [];
+        const alive = (pid: number): boolean => {
+          try {
+            process.kill(pid, 0);
+            return true;
+          } catch (error) {
+            return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+          }
+        };
+        try {
+          await vi.waitFor(
+            async () => {
+              expect(err).toContain('missing subcommand'); // actual CLI installed its handlers
+              expect(out).toContain('\n'); // managed descendant installed its TERM trap
+              runPids = JSON.parse(await readFile(runPidFile, 'utf8')) as number[];
+              expect(runPids).toHaveLength(2); // run descendant installed its TERM trap
+            },
+            { timeout: 10_000 },
+          );
+          pids = [...(JSON.parse(out.trim()) as number[]), ...runPids];
+          expect(pids).toHaveLength(4);
+          expect(pids.every(alive)).toBe(true);
+          parent.kill(signal);
+          expect(await closed).toEqual({ code: null, signal });
+          await vi.waitFor(() => expect(pids.some(alive)).toBe(false), { timeout: 3_000 });
+        } finally {
+          for (const groupLeader of [pids[0], runPids[0]]) {
+            if (groupLeader === undefined) continue;
+            try {
+              process.kill(-groupLeader, 'SIGKILL');
+            } catch {
+              /* already gone */
+            }
+          }
+          parent.kill('SIGKILL');
+          await closed;
+        }
+      });
+    },
+    20_000,
+  );
 
   test('astral characters past the cap: byte-exact trim, no lone surrogate at the head (review 9-1)', async () => {
     await withScratch(async (scratchDir) => {

@@ -78,8 +78,8 @@
 //     (recorded finding; documentation-covered, not code-repaired). Broad
 //     regexes can also authorize disguised git verbs (git "diff"): the
 //     closed-form lock covers literal diff/log prefixes, not shell aliases.
-//     Its attached-operator split covers ;&|<> only: backtick and $(
-//     attachments remain author-owned residuals under re: grants (design R-list).
+//     Leading literal diff/log words are locked even with attached shell
+//     operators or substitutions, including backticks and $(...).
 //   - anything else    → whitespace-token PREFIX: the pattern's tokens must
 //     equal the command's leading tokens ('npm test' allows 'npm test' and
 //     'npm test -- --watch', not 'npm run test'). Token splitting is naive
@@ -92,7 +92,8 @@
 //     'command allowlist: shell metacharacters …' reason pointing at
 //     anchored re: patterns as the deliberate escape hatch.
 // Token patterns must contain plain shell words; git requires a literal
-// subcommand (never bare git or global options). Invalid patterns throw at `buildTools`
+// subcommand (never bare git, global options, wrapped git or a path to git).
+// Invalid patterns throw at `buildTools`
 // time — config corruption is a loud error, never a silent allow-all.
 //
 // Closed-form git diff/log select constant argv and spawn with shell:false.
@@ -254,7 +255,7 @@ type CommandPattern = { kind: 'regex'; re: RegExp } | { kind: 'tokens'; tokens: 
 
 /**
  * Compile the run allowlist. THROWS on an invalid `re:` regex or an
- * empty, non-plain-word, or git-global token pattern — corruption is loud (an empty
+ * empty, non-plain-word, wrapped-git or git-global token pattern — corruption is loud (an empty
  * pattern would otherwise silently allow every command).
  */
 export function compileCommandPatterns(patterns: readonly string[]): CommandPattern[] {
@@ -273,6 +274,16 @@ export function compileCommandPatterns(patterns: readonly string[]): CommandPatt
     }
     if (tokens.some((token) => !/^[A-Za-z0-9_@%+=:,.\/-]+$/.test(token))) {
       throw new Error(`harness: run token pattern must contain only plain shell words: '${raw}'`);
+    }
+    if (
+      tokens.some(
+        (token, index) =>
+          /(?:^|\/)git(?:\.(?:exe|cmd|bat|com))?$/i.test(token) && (index !== 0 || token !== 'git'),
+      )
+    ) {
+      throw new Error(
+        `harness: git token pattern must begin with literal git, without wrappers or paths; use an anchored re: grant for other spellings: '${raw}'`,
+      );
     }
     if (tokens[0] === 'git' && !/^[a-z][a-z0-9-]*$/.test(tokens[1] ?? '')) {
       throw new Error(`harness: git token pattern requires a literal subcommand: '${raw}'`);
@@ -697,7 +708,7 @@ export function buildTools(
         const raw = command.trim().split(/\s+/);
         // An attached shell operator (git diff; …) must not bypass the lock
         // under a regex grant. Quoted/disguised verbs remain author-owned.
-        const verb = raw[1]?.split(/[;&|<>]/, 1)[0];
+        const verb = raw[1]?.match(/^[a-z-]*/)?.[0];
         if (raw[0] === 'git' && (verb === 'diff' || verb === 'log')) {
           const forms = verb === 'diff' ? CLOSED_GIT_DIFF : CLOSED_GIT_LOG;
           const key = raw.join(' ');

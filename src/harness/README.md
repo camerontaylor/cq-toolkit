@@ -33,12 +33,15 @@ There are no path-scoped or revision forms, alternate flag orderings,
 and `git log` commands outside the table are denied before the allowlist
 pattern loop, including under a matching `re:` grant. Each accepted key
 selects constant harness-owned argv; worker-supplied tokens never reach
-git's option parser or a shell.
+git's option parser or a shell. Attached shell operators and substitutions
+(including backticks and `$(...)`) after the literal diff/log word also deny.
 
 The argv disables the pager, external diff drivers, textconv, color, and
 fsmonitor; it pins literal pathspecs and quoted paths. Diff output also
 pins `a/` and `b/` prefixes. Token patterns must contain plain shell words,
-and a `git` token pattern must name a literal subcommand. Author-owned
+and a `git` token pattern must begin with literal `git` and name a literal
+subcommand. Wrapped or path-qualified git token patterns such as
+`env git diff` and `/usr/bin/git diff` are rejected during construction. Author-owned
 `re:` patterns remain a shell escape hatch: broad patterns can admit
 disguised git spellings such as `git "diff"`, so keep them narrow.
 

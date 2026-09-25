@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { registerProcessSignalCleanup } from '../kernel/process-signals.js';
 
 /** POSIX platforms get per-command process groups (`detached` + group kill). */
 const POSIX = process.platform !== 'win32';
@@ -105,6 +106,10 @@ function spawnAndCollect(
         // already gone
       }
     };
+    const unregisterSignalCleanup = registerProcessSignalCleanup(() => {
+      killGroup(); // in-process tool groups also belong to the executable
+      return undefined; // the existing abort path already uses SIGKILL
+    });
     const timer = opts.timeoutMs === undefined ? undefined : setTimeout(killGroup, opts.timeoutMs);
     opts.signal?.addEventListener('abort', killGroup, { once: true });
 
@@ -113,6 +118,7 @@ function spawnAndCollect(
       spawnError ??= e;
     });
     child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      unregisterSignalCleanup();
       if (timer !== undefined) clearTimeout(timer);
       opts.signal?.removeEventListener('abort', killGroup);
       const stdout = Buffer.concat(out.chunks).toString('utf8');

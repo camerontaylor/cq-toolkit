@@ -3,8 +3,8 @@
 // sources (`node --import test/helpers/ts-source-loader.mjs bin.ts …`), so
 // these pin what only a process can show:
 //   - exit statuses: startup refusal → 78 with exactly ONE stderr line and
-//     no stdout; stdin EOF → 0; an oversized line → 65; SIGTERM → 143 (or
-//     the signal) after killing the in-flight `run` process group — a forked
+//     no stdout; stdin EOF → 0; an oversized line → 65; SIGINT/TERM/HUP →
+//     the same signal after killing the in-flight `run` group — a forked
 //     GRANDCHILD dies with it;
 //   - the ENV SCRUB: a provider credential in the server's environment never
 //     reaches a `run` child, while PATH and a manifest envNames entry do;
@@ -198,9 +198,9 @@ describe('lifetime', () => {
     expect(server.stderr()).toContain('protocol break');
   }, 20_000);
 
-  test.skipIf(process.platform === 'win32')(
-    'SIGTERM exits and kills the in-flight run process group (grandchild included)',
-    async () => {
+  test.skipIf(process.platform === 'win32').each(['SIGINT', 'SIGTERM', 'SIGHUP'] as const)(
+    '%s exits and kills the in-flight run process group (grandchild included)',
+    async (parentSignal) => {
       const workspace = scratch();
       const server = startBin([JSON.stringify(manifestFor(workspace, ['re:^sh -c .*$']))]);
       server.send({ jsonrpc: '2.0', id: 1, method: 'ping' });
@@ -225,9 +225,15 @@ describe('lifetime', () => {
         return text.endsWith('\n') ? Number(text.trim()) : undefined;
       });
       expect(alive(pid)).toBe(true);
-      server.child.kill('SIGTERM');
-      const { code, signal } = await server.exited;
-      expect(code === 143 || signal === 'SIGTERM').toBe(true);
+      onTestFinished(() => {
+        try {
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          /* already gone */
+        }
+      });
+      server.child.kill(parentSignal);
+      expect(await server.exited).toEqual({ code: null, signal: parentSignal });
       await pollFor(async () => (alive(pid) ? undefined : true), 2_000);
       // The cancelled call is never answered.
       expect(server.stdout()).not.toContain('"id":2');

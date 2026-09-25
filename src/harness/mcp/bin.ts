@@ -24,8 +24,9 @@
 // harness error. A run never continues without its harness.
 //
 // EXIT: 0 on stdin EOF; 65 (EX_DATAERR) on a protocol break (oversized
-// line); 143/130 on SIGTERM/SIGINT. Every path aborts in-flight calls first,
+// line); signal termination on SIGTERM/SIGINT/SIGHUP. Every path aborts in-flight calls first,
 // which kills their `run` process groups.
+import { installProcessSignalCleanup } from '../../kernel/process-signals.js';
 import { serveStdio } from './server.js';
 import { checkStartup, EXIT_CONFIG, EXIT_PROTOCOL, oneLine, scrubEnvironment } from './startup.js';
 
@@ -55,12 +56,7 @@ function main(argv: readonly string[]): void {
   const server = serveStdio(startup.surface, process.stdin, process.stdout, {
     log: (line) => process.stderr.write(`${line}\n`),
   });
-  const onSignal = (code: number) => (): void => {
-    server.shutdown(); // aborts in-flight calls → their process groups are killed
-    exitAfterFlush(code);
-  };
-  process.once('SIGTERM', onSignal(143));
-  process.once('SIGINT', onSignal(130));
+  installProcessSignalCleanup(() => server.shutdown()); // aborts and kills in-flight run groups
   // Backstop: an unexpected throw must still abort in-flight calls (killing
   // their detached process groups) before the process dies.
   process.once('uncaughtException', (err) => {

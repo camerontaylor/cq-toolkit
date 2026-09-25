@@ -114,6 +114,15 @@ const configs = [
   { name: 'anchored regex', config: runConfig(['re:^git diff.*$', 're:^git log.*$']) },
 ];
 
+const attachedSubstitutions = [
+  { name: 'dollar-paren', suffix: (canary: string) => `$(touch ${canary})` },
+  { name: 'dollar-paren with space', suffix: (canary: string) => `$( touch ${canary})` },
+  { name: 'backtick', suffix: (canary: string) => `\`touch ${canary}\`` },
+];
+const substitutionRows = ['diff', 'log'].flatMap((verb) =>
+  attachedSubstitutions.map(({ name, suffix }) => ({ verb, name, suffix })),
+);
+
 describe.each(configs)('closed git forms: $name', { timeout: 30_000 }, ({ config }) => {
   let repo: Fixture;
   let run: ToolkitTool;
@@ -135,6 +144,23 @@ describe.each(configs)('closed git forms: $name', { timeout: 30_000 }, ({ config
     expect(JSON.stringify(result)).not.toContain(hostContents);
     expect(await readdir(repo.outside)).toEqual([]);
   });
+
+  test.each(substitutionRows)(
+    'attached substitution $verb $name denies without escaping',
+    async ({ verb, suffix }) => {
+      const result = await run.execute({
+        command: `git ${verb}${suffix(join(repo.outside, 'substitution'))}`,
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(
+          result.denial.reason.startsWith(verb === 'diff' ? closedDiffPrefix : closedLogPrefix),
+        ).toBe(true);
+      }
+      expect(await readdir(repo.outside)).toEqual([]);
+      expect(JSON.stringify(result)).not.toContain(hostContents);
+    },
+  );
 
   test.each(diffForms)('P %s returns the selected real diff', async (command) => {
     const result = await run.execute({ command });
@@ -200,12 +226,43 @@ describe('git form authorization and token-pattern lint', { timeout: 30_000 }, (
     'git --work-tree=x',
     'git di\\ff',
     '"git" diff',
+    'env git diff',
+    'env FOO=x git diff',
+    'command git log',
+    'nice git diff',
+    '/usr/bin/git diff',
+    './git diff',
+    '../git log',
+    'env /usr/local/bin/git diff',
+    'env FOO=x ./git diff',
+    'git status git',
+    'Git diff',
+    'env GIT diff',
+    '/usr/bin/Git log',
+    'git.exe diff',
+    'git.com diff',
+    '/tools/git.cmd diff',
+    'env C:/tools/GIT.BAT log',
     'echo "$HOME"',
     'echo a;b',
     'echo *',
     'echo {a,b}',
   ])('L buildTools rejects unsafe pattern %s', (pattern) => {
     expect(() => buildTools(runConfig([pattern]), tmpdir())).toThrow(/harness:/);
+  });
+
+  test.each([
+    'git diff',
+    'git log -n 1',
+    'git status',
+    'npm run test',
+    'env FOO=x npm test',
+    '/usr/bin/printf',
+    './git-helper',
+    'echo git.txt',
+    'echo legitimate',
+  ])('L control accepts plain pattern %s', (pattern) => {
+    expect(() => buildTools(runConfig([pattern]), tmpdir())).not.toThrow();
   });
 
   test.each(['git diff', 'git log -n 1'])(
@@ -252,6 +309,22 @@ describe('git form authorization and token-pattern lint', { timeout: 30_000 }, (
 });
 
 describe('constant argv and anti-vacuity controls', { timeout: 30_000 }, () => {
+  test.each(substitutionRows)(
+    'attached substitution $verb $name direct shell control creates the outside canary',
+    async ({ verb, suffix }) => {
+      const repo = await fixture();
+      try {
+        const canary = join(repo.outside, 'substitution-control');
+        await execFileAsync('/bin/sh', ['-c', `git ${verb}${suffix(canary)}`], {
+          cwd: repo.workspace,
+        });
+        expect(existsSync(canary)).toBe(true);
+      } finally {
+        await rm(repo.root, { recursive: true, force: true });
+      }
+    },
+  );
+
   test.each(configs)(
     'K $name pins external diff, textconv, fsmonitor and prefixes',
     async ({ config }) => {
