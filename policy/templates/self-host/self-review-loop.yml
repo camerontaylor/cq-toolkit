@@ -117,6 +117,7 @@ jobs:
   # key. The token is scoped to the loop step; checkout credentials never
   # persist into the worker.
   self-review-privileged:
+    if: github.ref == 'refs/heads/main'
     needs: self-review-worker
     runs-on: ubuntu-latest
     timeout-minutes: 15

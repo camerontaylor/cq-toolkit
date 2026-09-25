@@ -174,7 +174,7 @@ import { currentJobContext } from '../../kernel/governor.js';
 import { deepFreeze, defaultHarnessConfig } from '../../harness/config.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import { buildTools } from '../../harness/tools.js';
-import { harnessRunGate, resolveSandboxConfig } from '../../sandbox/index.js';
+import { harnessRunGate } from '../../sandbox/index.js';
 import type { SandboxConfig } from '../../sandbox/index.js';
 import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
@@ -232,9 +232,10 @@ export interface AiSdkDriverOptions {
   /** Harness config (tool surface + prompt budget). Default: defaultHarnessConfig. */
   harnessConfig?: HarnessConfig;
   /**
-   * Resolved CQ_SANDBOX/CQ_RUN_TOOL policy. When omitted, resolve the
-   * conservative environment policy at construction time. A withheld or
-   * disabled run tool is omitted from the model surface.
+   * Resolved CQ_SANDBOX/CQ_RUN_TOOL policy. When omitted, preserve the
+   * pre-W1.11 no-policy behavior; the shared gate only resolves a policy
+   * when the process environment expresses one. A withheld or disabled run
+   * tool is omitted from the model surface.
    */
   sandboxConfig?: SandboxConfig;
   /** Sessions directory for the backing SessionStore. Default: <os.tmpdir()/cq-harness>/sessions. */
@@ -258,7 +259,7 @@ export class AiSdkDriver implements Driver {
   private readonly providers: Readonly<Record<string, ProviderFactory>>;
   private readonly outputSchema: ZodType | undefined;
   private readonly harnessConfig: HarnessConfig;
-  private readonly sandboxConfig: SandboxConfig;
+  private readonly sandboxConfig: SandboxConfig | undefined;
   private readonly sessionsDir: string | undefined;
   private readonly pricing: (modelSpec: ModelSpec) => PerMillionRates | undefined;
 
@@ -271,9 +272,10 @@ export class AiSdkDriver implements Driver {
     // the driver (a shared mutable default would leak one caller's change
     // into every later run).
     this.harnessConfig = deepFreeze(structuredClone(options.harnessConfig ?? defaultHarnessConfig));
-    this.sandboxConfig = deepFreeze(
-      structuredClone(options.sandboxConfig ?? resolveSandboxConfig()),
-    );
+    this.sandboxConfig =
+      options.sandboxConfig === undefined
+        ? undefined
+        : deepFreeze(structuredClone(options.sandboxConfig));
     this.sessionsDir = options.sessionsDir;
     this.pricing = options.pricing ?? priceOf;
   }
@@ -322,14 +324,14 @@ export class AiSdkDriver implements Driver {
     // The gate is the SHARED buildTools seam decision (src/sandbox), so this
     // driver adds no policy of its own: a CQ_SANDBOX policy that withholds
     // `run` withholds it here exactly as it does on the subprocess and MCP
-    // harness surfaces. The constructor's own resolution only pins WHICH
-    // policy object the shared gate is built from.
+    // harness surfaces. With no explicit config, preserve the pre-W1.11
+    // no-policy behavior; an expressed environment is resolved by the gate.
     const denials: ToolDenial[] = [];
     const harnessTools = buildTools(
       this.harnessConfig,
       record.workspace,
       sandboxPolicy.level,
-      harnessRunGate({ sandboxConfig: this.sandboxConfig }),
+      harnessRunGate(this.sandboxConfig === undefined ? {} : { sandboxConfig: this.sandboxConfig }),
     );
     const selected = selectTools(harnessTools, toolPolicy);
     const toolSet: ToolSet = {};

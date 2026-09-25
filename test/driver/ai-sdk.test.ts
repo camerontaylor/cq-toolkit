@@ -317,6 +317,33 @@ describe('ai-sdk driver specifics (mock model)', () => {
     }
   });
 
+  test('preserves the pre-W1.11 run surface when no sandbox policy is expressed', async () => {
+    const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-sandbox-'));
+    const policyNames = [
+      'CQ_SANDBOX',
+      'CQ_SANDBOX_BACKEND',
+      'CQ_SANDBOX_NETWORK',
+      'CQ_RUN_TOOL',
+      'CQ_RUN_ENV_PASSTHROUGH',
+    ] as const;
+    const saved = policyNames.map((name) => [name, process.env[name]] as const);
+    try {
+      for (const name of policyNames) delete process.env[name];
+      const driver = new AiSdkDriver({
+        providers: { mock: (modelId) => modelFor(undefined, modelId) },
+        sessionsDir: join(scratchDir, 'sessions'),
+      });
+      await driver.run(invocation());
+      expect(lastGenerateTextArgs().tools).toHaveProperty('run');
+    } finally {
+      for (const [name, value] of saved) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+      await rm(scratchDir, { recursive: true, force: true });
+    }
+  });
+
   test('unknown provider throws BEFORE dispatch — no session record is created', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {

@@ -25,6 +25,7 @@ describe('shipped self-host sandbox job boundary', () => {
       expect(privileged).toContain('permissions:\n      contents: write');
       expect(privileged).toContain(`GH_TOKEN: \${{ secrets.${token} }}`);
       expect(privileged).toContain(`ZAI_API_KEY: \${{ secrets.${driverKey} }}`);
+      expect(privileged).toContain("if: github.ref == 'refs/heads/main'");
       expect(privileged).toContain('needs: self-review-worker');
       expect(privileged).toContain('timeout-minutes: 15');
       expect(privileged).toContain('ref: ${{ needs.self-review-worker.outputs.trusted-commit }}');
