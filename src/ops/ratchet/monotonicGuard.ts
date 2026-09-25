@@ -710,6 +710,21 @@ export function checkDiffMonotonicity(diff: string): DiffVerdict {
       }
       continue;
     }
+    // Rename/copy detection (W1.7): the pairing below needs BOTH sides of
+    // a moved baseline as a delete and an add, i.e. a `--no-renames` diff.
+    // A rename-detected section carries only the NEW path — a baseline
+    // renamed OUT of baselines/ would otherwise vanish unjudged, and a pure
+    // rename would ride the index-only skip. Any rename/copy header that
+    // names a baseline on either side fails closed.
+    const moved = headerRegion(section).find(
+      (line) =>
+        /^(?:rename|copy) (?:from|to) /.test(line) &&
+        BASELINE_PATH.test(line.replace(/^(?:rename|copy) (?:from|to) /, '')),
+    );
+    if (moved !== undefined) {
+      violations.push({ path, why: 'unparsable baseline diff' });
+      continue;
+    }
     if (BASELINE_PATH.test(path) === false) continue; // judged: baseline files only
     if (path === RATCHET_MANIFEST_PATH) continue; // definition manifest: the verifier's, not ours
     filesChecked += 1;
