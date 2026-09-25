@@ -222,7 +222,8 @@ refuses stream-json print mode without it — found live, CLI 2.1.270, T1.6
 slice 4), `--json-schema <schema>` when `outputSchema` is set, then the
 CLOSED SURFACE (W1.4): `--tools ""` (builtins absent, not denied),
 `--setting-sources ""` (no ambient settings), `--strict-mcp-config` (no
-ambient MCP servers), `--mcp-config <sessionsDir>/<sessionId>.cq-harness-mcp.json`
+ambient MCP servers), `--mcp-config <sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json`
+(unique per run, created `O_EXCL` 0600; a name collision is a hard error)
 when the selected surface is non-empty, and `--allowedTools` — ALWAYS
 present, ONE space-joined argv element (comma-joining silently pre-approves
 only the first entry) holding the qualified spellings

@@ -57,10 +57,11 @@
 //   --strict-mcp-config         harness mode: no ambient MCP servers
 //   --mcp-config <file>         harness mode, non-empty selection only: the
 //                               per-run config launching `cq-harness-mcp`
-//                               (`<sessionsDir>/<sessionId>.cq-harness-
-//                               mcp.json`, O_EXCL + 0600, deleted once init
-//                               reports the server connected, again at
-//                               settle)
+//                               (`<sessionsDir>/<sessionId>.<run-uuid>.cq-
+//                               harness-mcp.json` — unique per run; O_EXCL +
+//                               0600, an existing file is a hard error;
+//                               deleted once init reports the server
+//                               connected, again at settle)
 //   --allowedTools <names>      ALWAYS present, ONE argv element,
 //                               SPACE-joined (comma-joining silently
 //                               pre-approves only the first entry — RS-1b

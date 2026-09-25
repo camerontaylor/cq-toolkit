@@ -38,9 +38,13 @@ opt-in stock mode, and the live A10 conformance leg with the A.5a–k probes.
    that spawn the server from TypeScript sources use a test-only loader (`test/helpers/ts-source-loader.mjs`,
    Node type stripping plus `.js`→`.ts` resolution), wired in with `vi.mock` of `launch.ts`. Production code has
    no test knob. The live leg runs against the built `dist`, so the real launch path is exercised.
-6. **A stale MCP config left by a crashed earlier run on the same session is unlinked, then re-created
-   exclusively.** Unlink removes a planted symlink itself, never its target, and the retry uses `O_EXCL`. The
-   early delete runs when init reports the server connected. The settle-time delete always runs as a backstop.
+6. **The MCP config name is unique per run and collisions fail closed.** The file is
+   `<sessionsDir>/<sessionId>.<run-uuid>.cq-harness-mcp.json`, created with `O_EXCL` and mode 0600. An existing
+   file at that name is never adopted, replaced or followed: `EEXIST` throws before dispatch. Concurrent runs on
+   one session therefore cannot read, swap or delete each other's binding, and a file or symlink planted at any
+   other name is never touched. (This replaces an earlier unlink-and-retry design, which the improvement pass
+   showed could swap a live peer's binding.) The early delete runs when init reports the server connected, and
+   the settle-time delete always runs as a backstop.
 7. **A harness-mode run that returns a result with no init event** settles `harness-surface-unverified`, on both
    lanes (fail closed).
 
