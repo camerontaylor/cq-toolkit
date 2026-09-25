@@ -162,27 +162,20 @@ if (covRun.error || covRun.status !== 0) {
 // judges baseline files alone (src/, workflows, everything else is ignored
 // by design, and passes through the normalization byte-identical).
 if (base !== null) {
-  // The hardened, no-shell argv the trusted verifier uses (W1.7): no
-  // repo-configured external diff or textconv, no renames (a rename is a
-  // delete plus an add the guard pairs), fixed a/ b/ prefixes, no fsmonitor
-  // hook. A ref starting with `-` would be read as an option — refused.
+  // The verifier's OWN hardened git argv, reused from dist/ops/ratchet/git.js
+  // (F7) instead of an inline copy: the trusted diff pins `--no-color` and
+  // `--no-relative` (repository config that would otherwise ANSI-prefix or
+  // re-root every `diff --git` line, yielding zero parseable sections and a
+  // VACUOUS guard pass). One definition, no drift. A ref starting with `-`
+  // would be read as an option — refused.
   if (base.startsWith('-')) fail(`refusing a --base that starts with '-': ${base}`);
+  const { GIT_HARDEN, HARDENED_DIFF_FLAGS } = engine;
   const diff = spawnSync(
     'git',
     [
-      '--no-pager',
-      '--literal-pathspecs',
-      '-c',
-      'core.fsmonitor=false',
-      '-c',
-      'core.quotePath=true',
+      ...GIT_HARDEN,
       'diff',
-      '--text',
-      '--no-ext-diff',
-      '--no-textconv',
-      '--no-renames',
-      '--src-prefix=a/',
-      '--dst-prefix=b/',
+      ...HARDENED_DIFF_FLAGS,
       `${base}...HEAD`,
       '--',
       'baselines/',

@@ -7,7 +7,16 @@
 //     ratchet list and the definition set) and every baseline value are read
 //     with `git cat-file` AT `trustRef`, never from a working tree the head
 //     could have written (A5: a renamed target and a looser baseline in the
-//     head change nothing here — the trust ref's list is what is enumerated).
+//     head change nothing here — the trust ref's list is what is enumerated).//   - BASELINES are read as git objects at BOTH ends: the trust ref's
+//     canonical baseline is authoritative, and the SUBJECT's canonical
+//     baseline must also exist, parse with the same identity, and is compared
+//     as the STRICTER of the two (ADR-0004 D-B, W1.7 fix-forward F3/F4).
+//     Reading only the trust ref left a gap between a tightening that propose
+//     lands in merge-queue and its promotion: regressions inside the
+//     (main, queue] window passed, and after promotion `main`'s baseline
+//     exceeded its own code, so every later PR failed and repair needed a
+//     loosening the guard forbids. A subject can only ever raise its own bar,
+//     so taking the stricter side is never a bypass.
 //   - DEFINITION CHECK (D-C.3): the subject's changed paths, diffed against
 //     `merge-base(subject, base)` (a PR: its base branch, so already-queued
 //     siblings are not flagged; a push subject: `main`), are matched against
@@ -189,6 +198,50 @@ function evidenceValue(
   return value;
 }
 
+/**
+ * The canonical baseline for `def` at `rev`, with its identity checked against
+ * the definition. A value, or a reason — every fault (absent, unparsable, or
+ * naming another ratchet/direction/unit) is a reason, never a throw.
+ *
+ * `label` names the side in the message ("the trust ref" / "the subject"), so
+ * a failure says WHICH read failed.
+ */
+async function readCanonicalBaseline(
+  repo: string,
+  rev: string,
+  path: string,
+  def: RatchetDefinition,
+  label: string,
+): Promise<{ value: number } | { reason: string }> {
+  let text: string | null;
+  try {
+    text = await gitReadBlob(repo, rev, path);
+  } catch (err) {
+    return { reason: `${path} at ${label}: ${messageOf(err)}` };
+  }
+  if (text === null) return { reason: `${path} is missing at ${label}` };
+  let baseline: ReturnType<typeof parseBaseline>;
+  try {
+    baseline = parseBaseline(text);
+  } catch (err) {
+    return { reason: `${path} at ${label}: ${messageOf(err)}` };
+  }
+  if (baseline.target !== def.target || baseline.metric !== def.metric) {
+    return { reason: `${path} at ${label} names another ratchet` };
+  }
+  if (baseline.direction !== def.direction) {
+    return {
+      reason: `${path} direction ${baseline.direction} disagrees with the definition (${def.direction}) at ${label}`,
+    };
+  }
+  if (baseline.unit !== def.unit) {
+    return {
+      reason: `${path} unit ${baseline.unit ?? '(none)'} disagrees with the definition (${def.unit ?? '(none)'}) at ${label}`,
+    };
+  }
+  return { value: baseline.value };
+}
+
 /** Judge one trust-ref ratchet definition against its trust-ref baseline. */
 async function judgeRatchet(
   def: RatchetDefinition,
@@ -202,64 +255,37 @@ async function judgeRatchet(
     evidence: def.evidence,
   };
   const path = baselineRelPath(def.target, def.metric);
-  let baselineValue: number;
-  try {
-    const text = await gitReadBlob(input.repo, trust, path);
-    if (text === null) {
-      return {
-        ...base,
-        baseline: null,
-        value: null,
-        verdict: 'fail',
-        reason: `${path} is missing at the trust ref`,
-      };
-    }
-    const baseline = parseBaseline(text);
-    if (baseline.target !== def.target || baseline.metric !== def.metric) {
-      return {
-        ...base,
-        baseline: null,
-        value: null,
-        verdict: 'fail',
-        reason: `${path} names another ratchet`,
-      };
-    }
-    if (baseline.direction !== def.direction) {
-      return {
-        ...base,
-        baseline: baseline.value,
-        value: null,
-        verdict: 'fail',
-        reason: `${path} direction ${baseline.direction} disagrees with the definition (${def.direction})`,
-      };
-    }
-    if (baseline.unit !== def.unit) {
-      return {
-        ...base,
-        baseline: baseline.value,
-        value: null,
-        verdict: 'fail',
-        reason: `${path} unit ${baseline.unit ?? '(none)'} disagrees with the definition (${def.unit ?? '(none)'})`,
-      };
-    }
-    baselineValue = baseline.value;
-  } catch (err) {
-    return {
-      ...base,
-      baseline: null,
-      value: null,
-      verdict: 'fail',
-      reason: `${path}: ${messageOf(err)}`,
-    };
-  }
+  // Both sides of the comparison are read as git OBJECTS, never from a
+  // working tree. `trust` is where the definitions and their baselines are
+  // authoritative; the subject is read too (F3/F4) because a tightening lands
+  // in merge-queue while the trust ref still holds the older, looser value.
+  const fail = (reason: string): RatchetResult => ({
+    ...base,
+    baseline: null,
+    value: null,
+    verdict: 'fail',
+    reason,
+  });
+  const trustRead = await readCanonicalBaseline(input.repo, trust, path, def, 'the trust ref');
+  if ('reason' in trustRead) return fail(trustRead.reason);
+  const subjectRead = await readCanonicalBaseline(input.repo, input.subject, path, def, 'the subject');
+  if ('reason' in subjectRead) return fail(subjectRead.reason);
+  const trustValue = trustRead.value;
   const raw = evidenceValue(def, input, measured);
   if (typeof raw !== 'number') {
-    return { ...base, baseline: baselineValue, value: null, verdict: 'fail', reason: raw.reason };
+    return { ...base, baseline: trustValue, value: null, verdict: 'fail', reason: raw.reason };
   }
   // One decimal place on BOTH sides for coverage (the shared granularity
   // law); every other metric compares at full precision.
   const coverage = def.metric === COVERAGE_METRIC;
-  const baselineCmp = coverage ? roundCoveragePct(baselineValue) : baselineValue;
+  // F3: the effective baseline is the STRICTER of the trust ref's value and
+  // the subject's own canonical baseline, so a tightening that has landed in
+  // merge-queue but not yet been promoted is enforced immediately. This can
+  // never loosen the bar — `stricter` takes the more demanding side, and a
+  // subject can only ever raise its own.
+  const baselineCmp = [trustValue, subjectRead.value]
+    .map((v) => (coverage ? roundCoveragePct(v) : v))
+    .reduce((a, b) => (loosens(a, b, def.direction) ? a : b));
   const value = coverage ? roundCoveragePct(raw) : raw;
   if (loosens(baselineCmp, value, def.direction)) {
     return {

@@ -17,7 +17,7 @@
     }
   ],
   "definitionSet": [
-    "^\\.github/workflows/",
+    "^\\.github/",
     "(?:^|/)vitest\\.config\\.[^/]+$",
     "(?:^|/)vite\\.config\\.[^/]+$",
     "(?:^|/)vitest\\.workspace\\.[^/]+$",
@@ -30,6 +30,8 @@
     "(?:^|/)\\.node-version$",
     "(?:^|/)\\.gitattributes$",
     "^\\.cq/tool/",
-    "^baselines/ratchets\\.json$"
+    "^baselines/",
+    "^src/ops/gates/protectedPaths\\.ts$",
+    "^scripts/denylist-scan$"
   ]
 }

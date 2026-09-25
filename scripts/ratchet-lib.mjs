@@ -160,7 +160,7 @@ export async function withGitAskpass(token, fn) {
 export async function loadEngine() {
   ensureDist();
   const imp = (rel) => import(pathToFileURL(join(ROOT, 'dist', 'ops', 'ratchet', rel)).href);
-  const [check, capture, registry, format, guard, propose, tcAdapter, covAdapter] =
+  const [check, capture, registry, format, guard, propose, tcAdapter, covAdapter, git] =
     await Promise.all([
       imp('checkRatchet.js'),
       imp('captureBaseline.js'),
@@ -170,6 +170,7 @@ export async function loadEngine() {
       imp('proposeBaselineUpdate.js'),
       imp('adapters/typecheckCount.js'),
       imp('adapters/coverage.js'),
+      imp('git.js'),
     ]);
   return {
     createCheckRatchet: check.createCheckRatchet,
@@ -186,6 +187,13 @@ export async function loadEngine() {
     checkDiffMonotonicity: guard.checkDiffMonotonicity,
     formatViolations: guard.formatViolations,
     createProposeBaselineUpdate: propose.createProposeBaselineUpdate,
+    // The verifier's hardened git argv, reused (NOT re-spelled) by the
+    // runner scripts so a local guard diff can never drift from the trusted
+    // one — composition F7: an inline copy that omitted `--no-color` /
+    // `--no-relative` made `checkDiffMonotonicity` pass vacuously under
+    // `color.diff=always`.
+    GIT_HARDEN: git.GIT_HARDEN,
+    HARDENED_DIFF_FLAGS: git.HARDENED_DIFF_FLAGS,
     adapters: { typecheckCount: tcAdapter.typecheckCount, coverage: covAdapter.coverage },
   };
 }
