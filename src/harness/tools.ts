@@ -78,6 +78,8 @@
 //     (recorded finding; documentation-covered, not code-repaired). Broad
 //     regexes can also authorize disguised git verbs (git "diff"): the
 //     closed-form lock covers literal diff/log prefixes, not shell aliases.
+//     Its attached-operator split covers ;&|<> only: backtick and $(
+//     attachments remain author-owned residuals under re: grants (design R-list).
 //   - anything else    → whitespace-token PREFIX: the pattern's tokens must
 //     equal the command's leading tokens ('npm test' allows 'npm test' and
 //     'npm test -- --watch', not 'npm run test'). Token splitting is naive
