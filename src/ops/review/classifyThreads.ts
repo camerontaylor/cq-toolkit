@@ -215,11 +215,16 @@ const isTrusted = (
   authorType: string | null,
   config: ClassifyConfig,
 ): boolean => {
-  if (config.trustedAuthors === undefined) return true;
+  if (
+    config.trustedAuthors === undefined &&
+    config.automationLogin === undefined &&
+    config.excludedLogins === undefined
+  )
+    return true;
   if (authorLogin === null) return false;
   if (authorLogin === config.automationLogin || config.excludedLogins?.includes(authorLogin))
     return false;
-  return config.trustedAuthors.some(
+  return (config.trustedAuthors ?? []).some(
     (entry) => entry === authorLogin || entry === `${authorLogin}:${authorType ?? ''}`,
   );
 };

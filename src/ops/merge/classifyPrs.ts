@@ -34,14 +34,11 @@
 //
 // Definitional rules (the data lives in ./classify.config.js; the table
 // only applies it):
-//   - "No reviewer privileged": an ACCEPTABLE review is ANY review whose
-//     author ≠ the PR author (bots count, humans count — no identity is
-//     special), whose body is not a bot skip/failure notice (skipPatterns),
-//     and whose VERDICT is APPROVED or COMMENTED — a CHANGES_REQUESTED
-//     verdict is an objection, not acceptance (the cross-family reading
-//     agrees: classifyThreads treats it as actionable); DISMISSED is
-//     void; a null/unknown verdict never counts. Author self-reviews
-//     never count.
+//   - Under a resolved policy, an ACCEPTABLE review must be from the
+//     configured trust set (bots and associations may be allowlisted), must
+//     not be authored by the PR author or automation, and must bind to the
+//     current head SHA. A trusted non-author objection is actionable;
+//     untrusted input is never acceptance evidence.
 //   - THE TEMPORAL QUALIFIER (DOCTRINE §I2, canonical): an acceptable
 //     review is a review of the LAST COMMIT's exact head state — submitted
 //     STRICTLY AFTER the last commit. Evidence covering an earlier commit
@@ -54,7 +51,7 @@
 //     conversation comment) bypasses ONLY the settle wait — it can never
 //     stand in for the review-of-head requirement.
 //   - AN OUTSTANDING OBJECTION IS NOT SILENCE (row 6, deliberate
-//     strictness under NOTHING MERGES UNINVITED): a non-author
+//     strictness under NOTHING MERGES UNINVITED): a trusted non-author
 //     CHANGES_REQUESTED against the head state must be resolved or
 //     withdrawn before the quiet window can carry the PR — it blocks
 //     ahead of the all-clear and settle rows, no matter how long the
@@ -180,7 +177,12 @@ const matchesSkipPattern = (body: string, config: ClassifyPrConfig): boolean =>
   config.skipPatterns.some((pattern) => evalPattern(pattern, body));
 
 const isTrustedReviewer = (review: ReviewSummary, ctx: ReviewContext): boolean => {
-  if (ctx.config.trustedBots === undefined && ctx.config.trustedAssociations === undefined)
+  if (
+    ctx.config.trustedBots === undefined &&
+    ctx.config.trustedAssociations === undefined &&
+    ctx.config.automationLogin === undefined &&
+    ctx.config.excludedLogins === undefined
+  )
     return true;
   if (review.authorLogin === null || review.authorLogin === ctx.config.automationLogin)
     return false;
@@ -194,7 +196,13 @@ const isTrustedReviewer = (review: ReviewSummary, ctx: ReviewContext): boolean =
 };
 
 const isTrustedLogin = (login: string | null, config: ClassifyPrConfig): boolean => {
-  if (config.trustedBots === undefined && config.trustedAssociations === undefined) return true;
+  if (
+    config.trustedBots === undefined &&
+    config.trustedAssociations === undefined &&
+    config.automationLogin === undefined &&
+    config.excludedLogins === undefined
+  )
+    return true;
   if (login === null || login === config.automationLogin) return false;
   if (config.excludedLogins?.includes(login)) return false;
   return (config.trustedBots ?? []).includes(login);
@@ -243,13 +251,12 @@ interface ReviewContext {
 const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolean => {
   if (ctx.authorLogin !== null && review.authorLogin === ctx.authorLogin) return false;
   if (!isTrustedReviewer(review, ctx)) return false;
-  if (matchesSkipPattern(review.body, ctx.config)) return false;
   if (
-    ctx.headRefOid !== undefined &&
-    ctx.headRefOid !== null &&
-    review.commitOid !== ctx.headRefOid
+    matchesSkipPattern(review.body, ctx.config) &&
+    (ctx.config.automationLogin === undefined || review.authorLogin !== ctx.config.automationLogin)
   )
     return false;
+  if (ctx.headRefOid !== undefined && review.commitOid !== ctx.headRefOid) return false;
   const submittedMs = parseMs(review.submittedAt);
   return submittedMs !== null && ctx.lastCommitMs !== null && submittedMs > ctx.lastCommitMs;
 };
@@ -267,8 +274,8 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
 
 /**
  * An ACCEPTABLE review for row 7: reviewable evidence whose verdict
- * carries acceptance (stateCounts). No reviewer is privileged: bots and
- * humans count identically.
+ * carries acceptance (stateCounts). Under the legacy surface no identity is
+ * special; under resolved policy only the configured trust set can count.
  */
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
@@ -385,19 +392,22 @@ export function classifyPr(
     config,
     headRefOid: candidate.headRefOid,
   };
+  const policyActive =
+    config.trustedBots !== undefined ||
+    config.trustedAssociations !== undefined ||
+    config.automationLogin !== undefined ||
+    config.excludedLogins !== undefined;
   const foldInput = candidate.reviews.filter((review) => {
-    if (config.trustedBots === undefined && config.trustedAssociations === undefined) return true;
+    // COMMENTED/DISMISSED are transparent: they must not mask a standing
+    // verdict from the same actor.
+    if (review.state !== 'APPROVED' && review.state !== 'CHANGES_REQUESTED') return false;
+    if (!policyActive) return true;
     if (!isTrustedReviewer(review, ctx)) return false;
     if (matchesSkipPattern(review.body, config)) return false;
-    if (candidate.headRefOid !== undefined && candidate.headRefOid !== null) {
-      return review.commitOid === candidate.headRefOid;
-    }
+    if (candidate.headRefOid !== undefined) return review.commitOid === candidate.headRefOid;
     return true;
   });
-  const foldedReviews =
-    config.trustedBots !== undefined || config.trustedAssociations !== undefined
-      ? latestReviewPerActor(foldInput)
-      : candidate.reviews;
+  const foldedReviews = policyActive ? latestReviewPerActor(foldInput) : candidate.reviews;
   // Row 6 — an OUTSTANDING OBJECTION: a non-author reviewer's
   // CHANGES_REQUESTED against the last commit's head state, not yet
   // withdrawn (verdict moved off CHANGES_REQUESTED). An objection is not

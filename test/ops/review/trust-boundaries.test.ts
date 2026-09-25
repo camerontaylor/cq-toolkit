@@ -5,6 +5,10 @@ import { defaultClassifyConfig } from '../../../src/ops/review/classify.config.j
 import { defaultClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import type { FetchedReviewState } from '../../../src/ops/review/fetchReviewState.js';
 import type { PrCandidate } from '../../../src/ops/merge/classifyPrs.js';
+import {
+  registry as mergeRegistry,
+  ClassifyPrsInputSchema,
+} from '../../../src/ops/merge/registry.js';
 
 const NOW = Date.parse('2026-09-26T00:10:00Z');
 const HEAD = 'a'.repeat(40);
@@ -43,7 +47,7 @@ const state = (
 
 const review = (
   authorLogin: string,
-  stateName: 'APPROVED' | 'CHANGES_REQUESTED',
+  stateName: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED',
   commitOid: string,
 ) => ({
   id: authorLogin,
@@ -51,6 +55,7 @@ const review = (
   state: stateName,
   body: '',
   submittedAt: '2026-09-26T00:05:00Z',
+  authorAssociation: 'MEMBER',
   commitOid,
 });
 
@@ -89,11 +94,65 @@ describe('W1.1 reviewer trust and SHA binding', () => {
     expect(result.reason).toBe('settle_window_elapsed');
   });
 
+  test('the shipped merge registry rejects an untrusted bot approval', async () => {
+    const input = ClassifyPrsInputSchema.parse({
+      candidate: candidate([review('coderabbitai[bot]', 'APPROVED', HEAD)]),
+      nowMs: NOW,
+      config: { trustedAssociations: [], automationLogin: 'cq-automation[bot]' },
+    });
+    const entry = mergeRegistry.find((item) => item.name === 'merge.classifyPrs');
+    if (entry?.importer === undefined) throw new Error('merge.classifyPrs registry entry missing');
+    const operation = await entry.importer();
+    const result = await operation(input);
+    expect(result).toMatchObject({ status: 'ok', value: { reason: 'no_acceptable_review' } });
+  });
+
   test('a stale approval cannot grant acceptance', () => {
     const result = classifyPr(candidate([review('member', 'APPROVED', 'b'.repeat(40))]), NOW, {
       ...defaultClassifyPrConfig,
       trustedAssociations: ['MEMBER'],
     });
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a later COMMENTED review does not mask a standing objection', () => {
+    const result = classifyPr(
+      candidate([
+        { ...review('member', 'CHANGES_REQUESTED', HEAD), submittedAt: '2026-09-26T00:01:00Z' },
+        { ...review('member', 'COMMENTED', HEAD), submittedAt: '2026-09-26T00:09:00Z' },
+      ]),
+      NOW,
+      { ...defaultClassifyPrConfig, trustedAssociations: ['MEMBER'] },
+    );
+    expect(result.reason).toBe('merge_objection_outstanding');
+  });
+
+  test('a later approval from the same actor withdraws the objection', () => {
+    const result = classifyPr(
+      candidate([
+        { ...review('member', 'CHANGES_REQUESTED', HEAD), submittedAt: '2026-09-26T00:01:00Z' },
+        { ...review('member', 'APPROVED', HEAD), submittedAt: '2026-09-26T00:09:00Z' },
+      ]),
+      NOW,
+      { ...defaultClassifyPrConfig, trustedAssociations: ['MEMBER'] },
+    );
+    expect(result.reason).toBe('settle_window_elapsed');
+  });
+
+  test('an excluded login is rejected even without a trust allowlist', () => {
+    const result = classifyPr(candidate([review('outsider', 'APPROVED', HEAD)]), NOW, {
+      ...defaultClassifyPrConfig,
+      excludedLogins: ['outsider'],
+    });
+    expect(result.reason).toBe('no_acceptable_review');
+  });
+
+  test('a null head SHA fails closed when SHA evidence is explicitly present', () => {
+    const result = classifyPr(
+      { ...candidate([review('member', 'APPROVED', HEAD)]), headRefOid: null },
+      NOW,
+      { ...defaultClassifyPrConfig, trustedAssociations: ['MEMBER'] },
+    );
     expect(result.reason).toBe('no_acceptable_review');
   });
 });

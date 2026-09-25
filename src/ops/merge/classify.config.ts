@@ -93,7 +93,7 @@ export interface ClassifyPrConfig {
   automationLogin?: string | null | undefined;
   /** Additional logins removed from the trust set. */
   excludedLogins?: readonly string[] | undefined;
-  /** Accepted opinionated states, defaulting to APPROVED only. */
+  /** Accepted opinionated states; the legacy blank SDK default is APPROVED and COMMENTED. */
   acceptReviewStates?:
     | readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED')[]
     | undefined;

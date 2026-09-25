@@ -86,6 +86,7 @@ import type { HarnessConfig } from '../../harness/config.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { classifyPr } from './classifyPrs.js';
 import type { PrCandidate } from './classifyPrs.js';
+import type { ClassifyPrConfig } from './classify.config.js';
 import { executeMerges } from './executeMerges.js';
 import type { ExecutionReport } from './executeMerges.js';
 import { realMergeEffects } from './effects.js';
@@ -176,6 +177,8 @@ export interface RunMergePrsInput {
    * composition is the one place the ambient clock is allowed; tests
    * inject). */
   nowMs?: number;
+  /** Resolved reviewer trust policy passed to classifyPr. */
+  classifyConfig?: ClassifyPrConfig;
 }
 
 /** The composition's output: both execution reports, every resolution the
@@ -234,7 +237,11 @@ export interface RunMergePrsDeps {
 /** Stage 1: classify every OPEN candidate through F1's table (the default
  * config — R3 tunes via classify.config, not here); closed candidates
  * carry `classification: null` (stack structure only, per F2). */
-const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedPr[] =>
+const classifyStage = (
+  candidates: MergePrsCandidate[],
+  nowMs: number,
+  classifyConfig?: ClassifyPrConfig,
+): PlannedPr[] =>
   candidates.map((candidate) => ({
     pr: candidate.pr,
     headRefName: candidate.headRefName,
@@ -244,7 +251,8 @@ const classifyStage = (candidates: MergePrsCandidate[], nowMs: number): PlannedP
       : {}),
     state: candidate.state,
     authorLogin: candidate.authorLogin,
-    classification: candidate.state === 'open' ? classifyPr(candidate, nowMs) : null,
+    classification:
+      candidate.state === 'open' ? classifyPr(candidate, nowMs, classifyConfig) : null,
     truncated: candidate.truncated,
   }));
 
@@ -280,7 +288,7 @@ export async function runMergePrs(
   // Stages 1–3: classify → plan → execute (pass 1). The planner's seven
   // fail-closed rules stand untouched; conflicting prs are withheld
   // 'not_eligible' by the planner — carried, never re-graded.
-  const planned1 = classifyStage(input.prs, nowMs);
+  const planned1 = classifyStage(input.prs, nowMs, input.classifyConfig);
   const plan1 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned1 });
   const firstPass = await execute(plan1);
 
@@ -496,7 +504,7 @@ export async function runMergePrs(
         .filter((candidate) => mergedInPass1.has(candidate.pr))
         .map((candidate) => ({ ...candidate, state: 'closed' as const }));
       const pass2Set = [...keptOpen, ...anchorRows];
-      const planned2 = classifyStage(pass2Set, nowMs);
+      const planned2 = classifyStage(pass2Set, nowMs, input.classifyConfig);
       const plan2 = planMergeOrder({ baseBranch: input.baseBranch, prs: planned2 });
       const second = await execute(plan2);
       secondPass = second;
