@@ -612,7 +612,11 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     const staged = await stageUnitFiles(bindings, unit, worktree);
     if (staged !== null) return { status: 'failed', error: tagged('infra', staged) };
     const scope = await enforceStagePathAllowlist(bindings, unit, worktree);
-    if (scope !== null) return { status: 'failed', error: tagged('scope', scope) };
+    if (scope !== null) {
+      return scope.startsWith(`sweep.unit ${unit.package}: protected path(s)`)
+        ? { status: 'needs-human', reason: scope }
+        : { status: 'failed', error: tagged('scope', scope) };
+    }
     const diff = await bindings.git([
       '-C',
       worktree.path,
