@@ -43,6 +43,7 @@ import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type { OpRegistryEntry, RunOptions, RunReport } from '../kernel/types.js';
 import { classifyPr } from '../ops/merge/classifyPrs.js';
 import type { PrClassification } from '../ops/merge/classifyPrs.js';
+import type { ClassifyPrConfig } from '../ops/merge/classify.config.js';
 import type { MergePrsCandidate, MergePrsOutcome, RunMergePrsInput } from '../ops/merge/runPrs.js';
 import { makeGhRunner, type GhFn } from '../ops/review/gh.js';
 import { list } from '../registry/index.js';
@@ -86,6 +87,8 @@ export interface SelfMergePrsCfg {
   dryRun?: boolean;
   /** Disable model-dispatched conflict resolution; DIRTY rows become needs-human. */
   disableConflictResolution?: boolean;
+  /** Resolved reviewer trust policy for the shipped merge classifier. */
+  classifyConfig?: ClassifyPrConfig;
 }
 
 /**
@@ -120,7 +123,12 @@ export type SelfMergePrsResult =
  */
 export function buildRunInput(
   candidates: MergePrsCandidate[],
-  cfg: { repoRoot: string; journalRoot?: string; disableConflictResolution?: boolean },
+  cfg: {
+    repoRoot: string;
+    journalRoot?: string;
+    disableConflictResolution?: boolean;
+    classifyConfig?: ClassifyPrConfig;
+  },
   nowMs: number,
 ): RunMergePrsInput {
   return {
@@ -134,6 +142,30 @@ export function buildRunInput(
       : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
+    ...(cfg.classifyConfig === undefined
+      ? {}
+      : {
+          config: {
+            ...(cfg.classifyConfig.settleWindowMs === undefined
+              ? {}
+              : { settleWindowMs: cfg.classifyConfig.settleWindowMs }),
+            ...(cfg.classifyConfig.trustedBots === undefined
+              ? {}
+              : { trustedBots: cfg.classifyConfig.trustedBots }),
+            ...(cfg.classifyConfig.trustedAssociations === undefined
+              ? {}
+              : { trustedAssociations: cfg.classifyConfig.trustedAssociations }),
+            ...(cfg.classifyConfig.automationLogin === undefined
+              ? {}
+              : { automationLogin: cfg.classifyConfig.automationLogin }),
+            ...(cfg.classifyConfig.excludedLogins === undefined
+              ? {}
+              : { excludedLogins: cfg.classifyConfig.excludedLogins }),
+            ...(cfg.classifyConfig.acceptReviewStates === undefined
+              ? {}
+              : { acceptReviewStates: cfg.classifyConfig.acceptReviewStates }),
+          },
+        }),
   };
 }
 
@@ -179,7 +211,7 @@ export async function runSelfMergePrs(
       candidateCount: fetched.candidates.length,
       classification: fetched.candidates.map((candidate) => ({
         pr: candidate.pr,
-        ...classifyPr(candidate, nowMs),
+        ...classifyPr(candidate, nowMs, cfg.classifyConfig),
       })),
     };
   }

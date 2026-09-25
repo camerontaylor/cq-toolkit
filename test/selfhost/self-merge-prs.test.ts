@@ -45,6 +45,7 @@ import {
   SELFHOST_DISABLES_CONFLICT_RESOLUTION,
 } from '../../src/selfhost/self-merge-prs.js';
 import { SelfhostDefaults } from '../../src/selfhost/config.js';
+import { defaultClassifyPrConfig } from '../../src/ops/merge/classify.config.js';
 
 const OWNER = 'octo';
 const REPO = 'widget';
@@ -192,6 +193,28 @@ describe('buildRunInput (the pure input builder)', () => {
     );
   });
 
+  test('the resolved trust policy rides the strict JSON twin, not RegExp config', () => {
+    const input = buildRunInput(
+      [],
+      {
+        repoRoot: '/checkout',
+        journalRoot: '/j',
+        classifyConfig: {
+          ...defaultClassifyPrConfig,
+          trustedAssociations: [],
+          automationLogin: 'cq-automation[bot]',
+        },
+      },
+      1234,
+    );
+    expect(input.config).toEqual({
+      settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      trustedAssociations: [],
+      automationLogin: 'cq-automation[bot]',
+    });
+    expect(RunMergePrsInputSchema.parse(input).config).toEqual(input.config);
+  });
+
   test('disableConflictResolution omits modelSpec and marks the policy', () => {
     const input = buildRunInput(
       [],
@@ -209,6 +232,29 @@ describe('buildRunInput (the pure input builder)', () => {
 describe('runSelfMergePrs — real run', () => {
   test('pins the production conflict-disable policy constant', () => {
     expect(SELFHOST_DISABLES_CONFLICT_RESOLUTION).toBe(true);
+  });
+
+  test('the governed sweep preserves the trust policy and returns an outcome', async () => {
+    const seen: RunMergePrsInput[] = [];
+    const view = scriptedView(seen, { status: 'ok', value: cannedOutcome });
+    const result = await runSelfMergePrs(
+      { gh: fetchGh(), driverRegistryView: view, nowMs: () => 5_000 },
+      {
+        ...baseCfg,
+        journalRoot: tmpJournalRoot(),
+        classifyConfig: {
+          ...defaultClassifyPrConfig,
+          trustedAssociations: [],
+          automationLogin: 'cq-automation[bot]',
+        },
+      },
+    );
+    expect(result).toMatchObject({ outcome: cannedOutcome });
+    expect(seen[0]?.config).toEqual({
+      settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
+      trustedAssociations: [],
+      automationLogin: 'cq-automation[bot]',
+    });
   });
 
   test('forwards the shipped conflict-disable policy into the parsed merge input', async () => {

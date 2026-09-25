@@ -92,6 +92,7 @@ const awaitOp =
 const ThreadCommentSchema: z.ZodType<ThreadComment> = z
   .object({
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     // NO min(1): the mirror must accept what the family actually produces.
     body: z.string(),
     createdAt: z.string().nullable(),
@@ -104,6 +105,7 @@ const RestCommentSchema: z.ZodType<RestComment> = z
     id: z.number().int(),
     nodeId: z.string().nullable(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     body: z.string(),
     createdAt: z.string().nullable(),
     inReplyToId: z.number().int().nullable(),
@@ -126,6 +128,7 @@ const ReviewThreadSchema: z.ZodType<ReviewThread> = z
     isResolved: z.boolean(),
     isOutdated: z.boolean(),
     authorLogin: z.string().nullable(),
+    authorType: z.string().nullable().optional(),
     createdAt: z.string().nullable(),
     body: z.string(),
     replies: z.array(ThreadCommentSchema),
@@ -144,6 +147,9 @@ const ReviewSummarySchema: z.ZodType<ReviewSummary> = z
     authorLogin: z.string().nullable(),
     state: z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']).nullable(),
     body: z.string(),
+    commitOid: z.string().nullable().optional(),
+    authorType: z.string().nullable().optional(),
+    authorAssociation: z.string().nullable().optional(),
     submittedAt: z.string().nullable(),
   })
   .strict();
@@ -166,6 +172,7 @@ const FetchedReviewStateSchema: z.ZodType<FetchedReviewState> = z
     reviews: z.array(ReviewSummarySchema),
     restReviewComments: z.array(RestCommentSchema),
     restIssueComments: z.array(RestCommentSchema),
+    claimedPaths: z.array(z.string()).optional(),
     truncated: z.boolean(),
     truncatedBecause: z.array(z.string().min(1)),
   })
@@ -286,6 +293,10 @@ const ClassifyThreadsConfigDataSchema = z
     skipResponderAuthoredThreads: z.boolean(),
     skipDismissedReviews: z.boolean(),
     skipApprovalReviews: z.boolean(),
+    trustedAuthors: z.array(z.string()).optional(),
+    automationLogin: z.string().nullable().optional(),
+    excludedLogins: z.array(z.string()).optional(),
+    claimedPaths: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -304,6 +315,7 @@ export const FetchReviewStateOpInputSchema = z
     owner: z.string().min(1),
     repo: z.string().min(1),
     pr: z.number().int().positive(),
+    claimedPaths: z.array(z.string()).optional(),
     caps: z
       .object({
         reviewThreadPages: z.number().int().min(0).exactOptional(),
@@ -520,7 +532,12 @@ export const registry: OpRegistryEntry[] = [
         ([m, gh]) =>
           awaitOp((input: FetchReviewStateOpInput) =>
             m.fetchReviewState(
-              { owner: input.owner, repo: input.repo, pr: input.pr },
+              {
+                owner: input.owner,
+                repo: input.repo,
+                pr: input.pr,
+                ...(input.claimedPaths === undefined ? {} : { claimedPaths: input.claimedPaths }),
+              },
               input.caps,
               gh.makeGhRunner(),
             ),
@@ -553,6 +570,10 @@ export const registry: OpRegistryEntry[] = [
                     skipResponderAuthoredThreads: input.config.skipResponderAuthoredThreads,
                     skipDismissedReviews: input.config.skipDismissedReviews,
                     skipApprovalReviews: input.config.skipApprovalReviews,
+                    trustedAuthors: input.config.trustedAuthors,
+                    automationLogin: input.config.automationLogin,
+                    excludedLogins: input.config.excludedLogins,
+                    claimedPaths: input.config.claimedPaths,
                   };
             // An undefined config triggers the library's shipped default.
             return m.classifyThreads(input.state, input.nowMs, config);
