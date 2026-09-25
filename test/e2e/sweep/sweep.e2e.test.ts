@@ -1,33 +1,27 @@
-// D4 end-to-end — the shipped sweep plan on a scratch fixture repo (goal D4;
-// ws-d item 5; arm-a §4.2 loop steps 1–7; UC §1 rows 3–4). Pinned here:
+// D4 end-to-end — the shipped sweep composition on a scratch fixture repo
+// (goal D4; ws-d item 5; arm-a §4.2 loop steps 1–7), narrowed to the five
+// REAL-EFFECT contracts. Every composition decision (rescue budget and
+// attempts, the fleet gate, the marker filter, all-no-op, prep, the #174
+// vouch wiring, salvage tails) is pinned in-process in
+// test/plans/sweep-run.test.ts, and every unit-op decision (regression,
+// scope, self-commit, the strand-retry refusals, scoped branches, prep
+// evidence) in test/ops/sweep/unit-scenarios.test.ts. What stays here is
+// what only real git + the real subprocess driver can prove:
 //
-//   1. THE HAPPY PATH: probes → fix → gates → PRs with the REAL subprocess
-//      driver (the fake agent CLI fixture is its CLI leg) and REAL git
-//      (worktrees, check.js probes, diffs, commits) — the fake gh seam is
-//      the only injected forge. Tracker-first PR order, 3 PRs total, the
-//      journal shows every step, alpha's seeded failure is fixed and
-//      committed, and the failures-only DEFAULT output carries no
-//      per-package noise on a clean run.
-//   2. INTERRUPT → SALVAGE → RE-INVOKE: the fake agent faults on beta after
-//      alpha completed; salvage classifies alpha's clean-done tree `reuse`
-//      and beta's half-done tree `resume`; the re-invoke REUSES both trees
-//      and RE-PROBES their baselines (I7 — asserted by probe-call counting
-//      and the reuse's baseline-cache eviction), then assembles 3 PRs.
-//   3. DIRTY TREES ARE PRESERVED: the focused tamper run leaves beta's tree
-//      staged but uncommitted, and the REAL salvage (subprocess effects)
-//      classifies it `preserve`. The regression decision that withholds the
-//      commit is pinned in-process (test/ops/sweep/unit-scenarios.test.ts).
-//   4. EVIDENCE QUALITY: every journaled line parses through the frozen
-//      JournalEventSchema (openRunLog.read validates each line, not just a
-//      type-field sniff), and the salvage
-//      journal tail takes lastStep from the LAST job-finished event in
-//      journal order — jobs can finish out of plan order, and a multi-fixer
-//      fleet yields ONE salvage entry per unit tree.
-//   5. THE TAMPER GUARD, ON NEW FILES: the unit op stages BEFORE it scans,
-//      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
-//      scan and its unit fails uncommitted.
+//   1. THE HAPPY FLEET at concurrency 2: probes → fix → gates → commit →
+//      push → marker → tracker-first PRs, with dispatch OVERLAP observed in
+//      journal order (not merely both completing).
+//   2. INTERRUPT → SALVAGE → RE-INVOKE: a real driver fault, its real
+//      rescue re-dispatch, salvage over the real trees (reuse/resume), and
+//      the re-invoke's worktree reuse + fresh re-probe (I7).
+//   3. STRANDED PUSH → LATER PUBLISH: a push fault strands a verified local
+//      commit; the next run's strand-retry publishes it to the real origin.
+//   4. TAMPER ON AN ADDED FILE: the unit stages before it scans, so a NEW
+//      hacked file is flagged; the real salvage preserves the dirty tree.
+//   5. RENAME SOURCE SCOPE: git's `diff --cached --name-status -z` rename
+//      framing exposes the production SOURCE path to the allowlist.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -50,7 +44,7 @@ import {
   makeSweepUnitOp,
   type SweepUnitReport,
 } from '../../../src/ops/sweep/unit.js';
-import type { SweepUnitDispatchInput, SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
+import type { SweepUnitDriverConfig } from '../../../src/ops/sweep/unit.js';
 import { makeSubprocessWorktreeEffects } from '../../../src/ops/sweep/worktreeFor.js';
 import { makeSalvage, makeSubprocessSalvageEffects } from '../../../src/ops/sweep/salvage.js';
 import { subprocessRunCheck } from '../../../src/ops/gates/checkRunner.js';
@@ -65,10 +59,8 @@ import {
   makeFakeGh,
   runEventsAt,
   runSweepPlan,
-  salvageEntriesFor,
   salvageInterruptedRun,
   type RunSweepOpts,
-  type SweepRunOutcome,
 } from './run-sweep.js';
 
 // The fake endpoint's key: read by the driver at dispatch time from this
@@ -225,20 +217,6 @@ function focusedUnitBindings(scene: Scenario, driver: Driver) {
     prompt: () => 'focused real-git contract',
     git: makeGhRunner({ bin: 'git', timeoutMs: 30_000 }),
   };
-}
-
-/**
- * Strand alpha's verified fix: run 1 with NO origin (the commit lands, the
- * push fails), then restore the origin so a run-2 refusal branch can be
- * exercised (review-debt #174).
- */
-async function strandAlpha(scene: Scenario, runPrefix: string): Promise<void> {
-  await gitOut(['-C', scene.repo, 'remote', 'remove', 'origin'], scene.repo);
-  const first = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
-  const alpha = unitRow(first.run, 'alpha');
-  expect(alpha.status).toBe('failed');
-  expect(alpha.error).toContain(`git push of '${runPrefix}/fix/alpha' failed`);
-  await gitOut(['-C', scene.repo, 'remote', 'add', 'origin', scene.origin], scene.repo);
 }
 
 /** The unit job's report row (by package + fixer), unwrapped as SweepUnitReport. */
@@ -414,6 +392,8 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
       expect(alphaReport?.worktree.reused).toBe(false);
       expect(alphaReport?.tamperFindings).toEqual([]);
       expect(alphaReport?.committed).toBe(true);
+      expect(alphaReport?.committedSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(alphaReport?.pushed).toBe(true);
       expect(alphaReport?.prBranch).toBe('cq/e2e-happy/fix/alpha');
 
       // Alpha's fix landed in the worktree AND in a commit; beta's suite is
@@ -506,60 +486,6 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
 });
 
 // ---------------------------------------------------------------------------
-// 1b. Tracker branch create/push + re-invoke reuse (review-debt #173)
-// ---------------------------------------------------------------------------
-
-describe('sweep e2e: tracker branch create/push + re-invoke reuse (#173)', () => {
-  test(
-    'a pre-existing remote tracker branch is reused: the fleet still assembles and the remote head is never rewound',
-    { timeout: 120_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-tracker-reuse');
-      const trackerBranch = 'cq/e2e-tracker-reuse/tracker';
-      const baseSha = (await gitOut(['rev-parse', 'main'], scene.repo)).trim();
-      const tree = (await gitOut(['rev-parse', `${baseSha}^{tree}`], scene.repo)).trim();
-      const prior = (
-        await gitOut(
-          ['commit-tree', tree, '-p', baseSha, '-m', 'pre-existing tracker branch'],
-          scene.repo,
-        )
-      ).trim();
-      await gitOut(['update-ref', `refs/heads/${trackerBranch}`, prior], scene.repo);
-      await gitOut(
-        ['push', 'origin', `refs/heads/${trackerBranch}:refs/heads/${trackerBranch}`],
-        scene.repo,
-      );
-      const before = (
-        await gitOut(['ls-remote', '--heads', 'origin', `refs/heads/${trackerBranch}`], scene.repo)
-      ).trim();
-      expect(before).toContain(prior);
-
-      const outcome = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
-      expect(outcome.assembleRun).toBeDefined();
-      const assembled = assembleReport(outcome.assembleRun as RunReport);
-      expect(assembled.tracker).toMatchObject({ number: 1, created: true });
-      const trackerRow = outcome.assembleRun?.jobs.find(
-        (candidate) => candidate.jobId === 'sweep-tracker-branch',
-      );
-      expect(trackerRow?.result.status).toBe('ok');
-      if (trackerRow?.result.status === 'ok') {
-        expect(trackerRow.result.value).toMatchObject({
-          reusedRemote: true,
-          created: false,
-          pushed: false,
-          headSha: prior,
-        });
-      }
-      const after = (
-        await gitOut(['ls-remote', '--heads', 'origin', `refs/heads/${trackerBranch}`], scene.repo)
-      ).trim();
-      expect(after).toBe(before);
-      expect(after).toContain(prior);
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
 // 2. Interrupt → salvage → re-invoke (reuse + the I7 re-probe)
 // ---------------------------------------------------------------------------
 
@@ -586,7 +512,14 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       );
       const beta = unitRow(first.run, 'beta');
       expect(beta.status).toBe('failed');
-      expect(beta.error).toMatch(/fixer worker stopped with reason 'error'/);
+      // A real driver fault carries the RETRYABLE [INFRA] class, so the
+      // rescue lane re-dispatched it through the central registry — and the
+      // persisting fault failed the -r2 attempt too.
+      expect(beta.error).toMatch(
+        /^\[INFRA\] sweep\.unit beta: the fixer worker stopped with reason 'error'/,
+      );
+      expect(first.rescueRuns?.map((run) => run.jobs[0]?.jobId)).toEqual(['sweep-beta-fix-r2']);
+      expect(first.rescueRuns?.[0]?.jobs[0]?.result.status).toBe('failed');
       // The fleet gate: one failed unit withholds the assemble dispatch.
       expect(first.assembleRun).toBeUndefined();
       expect(scene.gh.created).toHaveLength(0); // no PR without its full fleet
@@ -715,7 +648,7 @@ describe('sweep e2e: tamper guard on new files', () => {
       )({ package: 'beta', fixer: 'fix', files: ['packages/beta/test/suite.test.js'] });
       expect(result.status).toBe('failed');
       if (result.status === 'failed') {
-        expect(result.error).toMatch(/tamper findings/);
+        expect(result.error).toMatch(/^\[TAMPER\] sweep\.unit beta: tamper findings/);
         expect(result.error).toMatch(/new-skip-only/);
         expect(result.error).toMatch(/added\.test\.js/);
       }
@@ -745,127 +678,10 @@ describe('sweep e2e: tamper guard on new files', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 3b. The strand-retry trust pin: a driver SELF-COMMIT is never pushed (#174)
+// 4. Rename-side scope (jVgCj)
 // ---------------------------------------------------------------------------
 
-describe('sweep e2e: driver self-commit vs the strand-retry trust pin (#174)', () => {
-  test(
-    'a driver that COMMITS the fix itself: the stage gates see nothing, and the strand-retry refuses to push the unscanned commit',
-    { timeout: 120_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-selfcommit');
-      const outcome: SweepRunOutcome = await runSweepPlan(
-        optsFor(
-          scene,
-          prompts(
-            { edit: ALPHA_FIX },
-            {
-              write: { file: 'packages/beta/src/self.ts', text: 'export const self = 1;\n' },
-              selfCommit: { message: 'beta driver self-commit' },
-            },
-          ),
-        ),
-      );
-
-      const alpha = unitRow(outcome.run, 'alpha');
-      expect(alpha.status).toBe('ok');
-      expect(alpha.report?.committed).toBe(true);
-      expect(alpha.report?.committedSha).toMatch(/^[0-9a-f]{40}$/);
-
-      const beta = unitRow(outcome.run, 'beta');
-      expect(beta.status).toBe('failed');
-      expect(beta.error).toMatch(/worktree HEAD moved during the fixer run/);
-      expect(beta.error).toMatch(/driver self-commit is not a supported mode/);
-      expect(beta.error).toMatch(/needs-human evidence/);
-
-      const localCommits = await gitOut(
-        ['rev-list', '--count', 'main..cq/e2e-selfcommit/fix/beta'],
-        scene.repo,
-      );
-      expect(localCommits.trim()).toBe('1');
-      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads).toContain('cq/e2e-selfcommit/fix/alpha');
-      expect(originHeads).not.toContain('cq/e2e-selfcommit/fix/beta');
-    },
-  );
-});
-
-// ---------------------------------------------------------------------------
-// 4. Scoped-package slugs (jTPa1) and rename-side scope (jVgCj)
-// ---------------------------------------------------------------------------
-
-describe('sweep e2e: scoped packages and rename-side scope', () => {
-  test(
-    '@scope/gamma derives the slug scope-gamma: the unit runs, commits, and pushes on the normalized branch',
-    { timeout: 120_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-scoped');
-      // Seed ONE scoped package with alpha's failing-suite shape.
-      const pkgDir = join(scene.repo, 'packages', '@scope', 'gamma');
-      mkdirSync(join(pkgDir, 'test'), { recursive: true });
-      writeFileSync(
-        join(pkgDir, 'package.json'),
-        `${JSON.stringify({ name: '@scope/gamma', version: '1.0.0', private: true }, null, 2)}\n`,
-      );
-      writeFileSync(
-        join(pkgDir, 'test', 'suite.test.js'),
-        [
-          "'use strict';",
-          'const sum = (a, b) => a + b;',
-          'if (sum(1, 1) !== 3) {',
-          "  throw new Error('expected 3, got ' + sum(1, 1));",
-          '}',
-          '',
-        ].join('\n'),
-      );
-      await gitOut(['-C', scene.repo, 'add', '-A'], scene.repo);
-      await gitOut(['-C', scene.repo, 'commit', '-q', '-m', 'seed: @scope/gamma'], scene.repo);
-
-      const GAMMA_FIX = {
-        file: 'packages/@scope/gamma/test/suite.test.js',
-        oldText: 'if (sum(1, 1) !== 3) {',
-        newText: 'if (sum(1, 1) !== 2) {',
-      };
-      const config: SweepPlanConfig = {
-        ...scene.config,
-        packages: [{ name: '@scope/gamma', path: 'packages/@scope/gamma' }],
-        packageFiles: { '@scope/gamma': ['packages/@scope/gamma/test/suite.test.js'] },
-      };
-      const outcome = await runSweepPlan(
-        optsFor({ ...scene, config }, (unit) =>
-          [
-            `You are the ${unit.fixer} fixer for package ${unit.package}.`,
-            'Apply exactly the edit in the instruction line, then report.',
-            `@SWEEP-AGENT ${JSON.stringify({ edit: GAMMA_FIX })}`,
-          ].join('\n'),
-        ),
-      );
-
-      // The scoped unit RAN (the old fold derived the undeliverable
-      // `-scope-gamma`, which SEGMENT_RE refuses): fixed, committed, pushed
-      // on the normalized branch.
-      const gamma = unitRow(outcome.run, '@scope/gamma');
-      expect(gamma.status).toBe('ok');
-      expect(gamma.report?.baseline.verdict).toBe('failing');
-      expect(gamma.report?.committed).toBe(true);
-      expect(gamma.report?.pushed).toBe(true);
-      expect(gamma.report?.prBranch).toBe('cq/e2e-scoped/fix/scope-gamma');
-      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads).toContain('cq/e2e-scoped/fix/scope-gamma');
-      // The marker-filtered assemble covers the scoped unit under its
-      // normalized branch.
-      expect(outcome.assembleRun).toBeDefined();
-      const assembled = assembleReport(outcome.assembleRun as RunReport);
-      expect(assembled.packages.map((row) => row.name)).toEqual(['@scope/gamma']);
-      expectTrackerFirstFleet(
-        scene,
-        'cq/e2e-scoped',
-        ['cq/e2e-scoped/fix/scope-gamma'],
-        assembled.packages,
-      );
-    },
-  );
-
+describe('sweep e2e: rename-side scope', () => {
   test(
     'a working-tree RENAME production → test shape: the allowlist flags the SOURCE path',
     { timeout: 120_000 },
@@ -917,28 +733,8 @@ describe('sweep e2e: scoped packages and rename-side scope', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Assemble-empty guard and stranded-commit retry
+// 5. Stranded-commit retry
 // ---------------------------------------------------------------------------
-
-describe('sweep e2e: assemble guard', () => {
-  test(
-    'an all-no-op fleet (nothing commits) dispatches NO assemble: zero gh calls',
-    { timeout: 120_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-clean');
-      const outcome = await runSweepPlan(optsFor(scene, prompts({}, {})));
-      const alpha = unitRow(outcome.run, 'alpha');
-      const beta = unitRow(outcome.run, 'beta');
-      expect(alpha.status).toBe('ok');
-      expect(alpha.report?.committed).toBe(false);
-      expect(beta.status).toBe('ok');
-      expect(beta.report?.committed).toBe(false);
-      expect(outcome.assembleRun).toBeUndefined();
-      expect(scene.gh.calls).toHaveLength(0);
-      expect(outcome.output).toContain('0 failing unit(s) of 2');
-    },
-  );
-});
 
 describe('sweep e2e: stranded commit retry', () => {
   test(
@@ -986,448 +782,4 @@ describe('sweep e2e: stranded commit retry', () => {
       expect(second.output).toContain('0 failing unit(s) of 1');
     },
   );
-
-  test(
-    'strand-retry REFUSES with no caller-vouched runStateDir: an ahead-of-base branch is never pushed (no-vouch, #174)',
-    { timeout: 600_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-novouch');
-      await strandAlpha(scene, 'cq/e2e-novouch');
-      const second = await runSweepPlan(
-        optsFor(scene, prompts({ edit: ALPHA_FIX }, {}), { runStateDir: null }),
-      );
-      const alpha = unitRow(second.run, 'alpha');
-      expect(alpha.status).toBe('failed');
-      expect(alpha.error).toMatch(
-        /stranded pushes require an explicit caller-supplied runStateDir/,
-      );
-      expect(alpha.error).toMatch(/needs-human evidence/);
-      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads).not.toContain('cq/e2e-novouch/fix/alpha');
-      expect(second.assembleRun).toBeUndefined();
-    },
-  );
-
-  test(
-    'strand-retry REFUSES a stripped scanned-commit record: a divergent tip is never pushed (#174)',
-    { timeout: 600_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-stripped');
-      await strandAlpha(scene, 'cq/e2e-stripped');
-      rmSync(join(scene.repo, 'cq-run-state', 'scanned', 'fix', 'alpha.json'));
-      const second = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
-      const alpha = unitRow(second.run, 'alpha');
-      expect(alpha.status).toBe('failed');
-      expect(alpha.error).toMatch(/no scanned-commit record exists for this unit/);
-      expect(alpha.error).toMatch(/unscanned commit must not be pushed/);
-      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads).not.toContain('cq/e2e-stripped/fix/alpha');
-    },
-  );
-
-  test(
-    'strand-retry REFUSES a divergent tip: the recorded sha must still be HEAD (#174)',
-    { timeout: 600_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-divergent');
-      await strandAlpha(scene, 'cq/e2e-divergent');
-      const worktree = resolve(scene.repo, 'worktrees', 'fix', 'alpha');
-      await gitOut(
-        ['-C', worktree, 'commit', '--allow-empty', '-m', 'unscanned tip move'],
-        scene.repo,
-      );
-      const second = await runSweepPlan(optsFor(scene, prompts({ edit: ALPHA_FIX }, {})));
-      const alpha = unitRow(second.run, 'alpha');
-      expect(alpha.status).toBe('failed');
-      expect(alpha.error).toMatch(/diverges from the recorded scanned sha/);
-      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads).not.toContain('cq/e2e-divergent/fix/alpha');
-    },
-  );
 });
-
-// ---------------------------------------------------------------------------
-// 6. Rescue lane (arm-a §4.2 step 5) and prep mode (UC §1 row 3)
-// ---------------------------------------------------------------------------
-
-describe('sweep e2e: rescue lane and prep mode', () => {
-  test(
-    'a transient fault is rescued: the -r2 re-dispatch runs, the unit lands ok, and the fleet assembles',
-    { timeout: 180_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-rescue');
-      // Attempt 1 faults (marker consumed); a re-dispatch proceeds to the fix.
-      const faultMarker = join(scene.root, 'alpha-faulted');
-      const outcome = await runSweepPlan(
-        optsFor(
-          { ...scene, config: { ...scene.config, rescue: { maxRedispatch: 1 } } },
-          prompts(
-            {
-              edit: ALPHA_FIX,
-              faultOnce: { marker: faultMarker, why: 'transient crash on alpha' },
-            },
-            {},
-          ),
-        ),
-      );
-      // Run 1: alpha FAILED (the transient fault); the RESCUE run re-dispatched
-      // sweep-alpha-fix-r2 and it landed OK.
-      const alpha = unitRow(outcome.run, 'alpha');
-      expect(alpha.status).toBe('failed');
-      expect(alpha.error).toMatch(
-        /\[INFRA\] sweep.unit alpha: the fixer worker stopped with reason 'error'/,
-      );
-      expect(outcome.rescueRuns).toHaveLength(1);
-      const rescueRow = outcome.rescueRuns?.[0]?.jobs[0];
-      expect(rescueRow?.jobId).toBe('sweep-alpha-fix-r2');
-      expect(rescueRow?.result.status).toBe('ok');
-      // The fleet assembles the rescued unit.
-      expect(outcome.assembleRun).toBeDefined();
-      const assembled = assembleReport(outcome.assembleRun as RunReport);
-      expect(assembled.packages.map((row) => row.name)).toEqual(['alpha']);
-    },
-  );
-
-  test(
-    'a TAMPER fault is never re-dispatched: no rescue run, straight to preserve',
-    { timeout: 120_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-tamper-rescue');
-      const config: SweepPlanConfig = { ...scene.config, rescue: { maxRedispatch: 1 } };
-      const outcome: SweepRunOutcome = await runSweepPlan(
-        optsFor(
-          { ...scene, config },
-          prompts(
-            { edit: ALPHA_FIX },
-            {
-              write: {
-                file: 'packages/beta/test/added.test.js',
-                text: "it.skip('gaming the run', () => {});\n",
-              },
-            },
-          ),
-        ),
-      );
-      // Beta's unit failed with a TAMPER verdict: NOT retryable — no rescue
-      // run exists for it.
-      const beta = unitRow(outcome.run, 'beta');
-      expect(beta.status).toBe('failed');
-      expect(beta.error).toMatch(/\[TAMPER\]/);
-      expect(outcome.rescueRuns).toBeUndefined();
-      // And the tree state routes it to preserve.
-      const salvaged = await salvageInterruptedRun({
-        journalDir: scene.journalDir,
-        planId: SWEEP_PLAN_ID,
-        config: scene.config,
-        planner: outcome.planner,
-        enrichedJobs: outcome.plan.jobs,
-        runIndex: 0,
-      });
-      expect(salvaged.rows.find((row) => row.path.endsWith('fix/beta'))?.class).toBe('preserve');
-      // Alpha succeeded, but beta's tamper still blocks the whole fleet gate.
-      expect(outcome.assembleRun).toBeUndefined();
-      expect(scene.gh.calls).toHaveLength(0);
-    },
-  );
-
-  test(
-    'prep mode runs probes only: baseline evidence for both packages, zero agents, zero commits, zero PRs',
-    { timeout: 120_000 },
-    async () => {
-      const scene = await scenario('cq/e2e-prep');
-      const config: SweepPlanConfig = { ...scene.config, mode: 'prep' };
-      const outcome = await runSweepPlan(
-        optsFor({ ...scene, config }, prompts({ edit: ALPHA_FIX }, {})),
-      );
-      // Both prep units landed ok with probe evidence only.
-      expect(outcome.run.counts).toMatchObject({ done: 3, failed: 0, blocked: 0 });
-      for (const pkg of ['alpha', 'beta']) {
-        const row = unitRow(outcome.run, pkg);
-        expect(row.status).toBe('ok');
-        expect(row.report?.mode).toBe('prep');
-        expect(row.report?.baseline.failureSet).toBeDefined();
-        expect(row.report?.final).toBeUndefined();
-        expect(row.report?.regression).toBeUndefined();
-        expect(row.report?.committed).toBeUndefined();
-        expect(row.report?.pushed).toBeUndefined();
-      }
-      // Zero agent invocations: the sessions dir was never created.
-      expect(existsSync(scene.sessionsDir)).toBe(false);
-      // Zero commits pushed and zero PRs: prep's product is the evidence.
-      const originHeads = await gitOut(['ls-remote', '--heads', 'origin'], scene.repo);
-      expect(originHeads.trim()).toBe('');
-      expect(scene.gh.calls).toHaveLength(0);
-      expect(outcome.assembleRun).toBeUndefined();
-      // The baseline snapshots exist for BOTH packages (run-state, namespaced).
-      for (const pkg of ['alpha', 'beta']) {
-        expect(
-          existsSync(
-            join(
-              join(scene.repo, 'cq-run-state'),
-              SWEEP_RUN_STATE_BASELINE_DIR,
-              'fix',
-              `${pkg}.json`,
-            ),
-          ),
-        ).toBe(true);
-      }
-    },
-  );
-});
-
-test(
-  'the default per-unit scope: an alpha worker editing beta fails naming the path (jZ59w)',
-  { timeout: 120_000 },
-  async () => {
-    const scene = await scenario('cq/e2e-uniscope');
-    const CROSS = {
-      file: 'packages/beta/test/suite.test.js',
-      oldText: 'const expected = 4;',
-      newText: 'const expected = 4; // touched by the alpha worker',
-    };
-    const outcome = await runSweepPlan(optsFor(scene, prompts({ edit: CROSS }, {})));
-    const alphaInput = outcome.plan.jobs.find((job) => job.id === 'sweep-alpha-fix')
-      ?.input as SweepUnitDispatchInput;
-    expect(alphaInput.stagePathAllowlist?.patterns).toContain('^packages/alpha/');
-    const alpha = unitRow(outcome.run, 'alpha');
-    expect(alpha.status).toBe('failed');
-    expect(alpha.error).toMatch(/outside the allowlist/);
-    expect(alpha.error).toContain('packages/beta/test/suite.test.js');
-    expect(outcome.assembleRun).toBeUndefined();
-    expect(scene.gh.created).toHaveLength(0);
-  },
-);
-
-// The journal-file shape sanity: one NDJSON file per dispatch (units + the
-// marker-filtered assemble), every line parseable.
-describe('sweep e2e: journal evidence shape', () => {
-  test('salvage journal tail: lastStep is the LAST journal-order finish, never the plan-order last job', () => {
-    const config = sceneLessConfig();
-    const planner = twoUnitPlanner();
-    const runId = 'sweep--tail--000000';
-    const at = (tick: number): string => new Date(1_700_000_000_000 + tick).toISOString();
-    const started = (jobId: string, tick: number): JournalEvent => ({
-      type: 'job-started',
-      runId,
-      at: at(tick),
-      jobId,
-      op: 'sweep.unit',
-      attempt: 1,
-    });
-    const finishedOk = (jobId: string, tick: number): JournalEvent => ({
-      type: 'job-finished',
-      runId,
-      at: at(tick),
-      jobId,
-      opId: 'sweep.unit',
-      inputsHash: 'h',
-      result: { status: 'ok', value: {} },
-    });
-    const finishedFailed = (jobId: string, tick: number): JournalEvent => ({
-      type: 'job-finished',
-      runId,
-      at: at(tick),
-      jobId,
-      opId: 'sweep.unit',
-      inputsHash: 'h',
-      result: { status: 'failed', error: 'boom' },
-    });
-
-    // OUT OF PLAN ORDER: beta (failed) finishes BEFORE alpha; alpha then
-    // re-finishes ok (a retry). The journal's last word per package:
-    const events: JournalEvent[] = [
-      { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
-      started('sweep-alpha-fix', 1),
-      started('sweep-beta-fix', 2),
-      finishedFailed('sweep-beta-fix', 3), // beta terminal FIRST ...
-      finishedFailed('sweep-alpha-fix', 4), // ... alpha's first attempt fails ...
-      finishedOk('sweep-alpha-fix', 5), // ... and its retry lands LAST
-    ];
-    const entries = salvageEntriesFor(config, planner, events);
-    const alpha = entries.find((entry) => entry.branch?.endsWith('fix/alpha'));
-    const beta = entries.find((entry) => entry.branch?.endsWith('fix/beta'));
-    // alpha: lastStep is ITS OWN last finish — the old plan-order fallback
-    // (`jobIds[jobIds.length - 1]`) would have named beta's job here.
-    expect(alpha?.journal?.lastStep).toBe('sweep-alpha-fix');
-    expect(alpha?.journal?.allTerminal).toBe(true); // the retry ended ok
-    // beta: failed terminal — pending work, never clean-done.
-    expect(beta?.journal?.lastStep).toBe('sweep-beta-fix');
-    expect(beta?.journal?.allTerminal).toBe(false);
-
-    // NO terminal event at all (interrupted before any finish): the entry
-    // carries NO lastStep — salvage's absent-evidence branch (I9).
-    const unfinished = salvageEntriesFor(config, planner, [
-      { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
-      started('sweep-alpha-fix', 1),
-      started('sweep-beta-fix', 2),
-    ]);
-    for (const entry of unfinished) {
-      expect(entry.journal?.lastStep).toBeUndefined();
-      expect(entry.journal?.allTerminal).toBe(false);
-    }
-  });
-
-  test('a slug-collision fleet salvages BOTH resolved trees via the enriched jobs (jTPa1/jVgCc-era pin)', () => {
-    const config = sceneLessConfig();
-    const units: Array<WorkUnit> = [
-      { package: '@a/b', fixer: 'fix', files: [] },
-      { package: 'a.b', fixer: 'fix', files: [] },
-    ];
-    const planner: SweepRunOutcome['planner'] = {
-      jobs: units.map((unit, index) => ({
-        id: `sweep-collide-${index}`,
-        op: 'sweep.unit',
-        input: unit,
-        dependsOn: [],
-      })),
-      units,
-      suppressed: [],
-      needsHuman: [],
-    };
-    // The ENRICHED expanded-plan jobs: the builder's resolved kind/slug
-    // (a-b, a-b-2). WITHOUT them the raw report derives 'a-b' for BOTH —
-    // the `-2` tree would be salvaged as the first tree, twice.
-    const enriched = planner.jobs.map((job, index) => ({
-      ...job,
-      input: {
-        ...(job.input as WorkUnit),
-        repoRoot: '/repo',
-        worktreesDir: 'worktrees',
-        runPrefix: 'cq/tail',
-        base: 'main',
-        kind: 'fix',
-        slug: index === 0 ? 'a-b' : 'a-b-2',
-      },
-    }));
-    const runId = 'sweep--collide--00000';
-    const at = (tick: number): string => new Date(1_700_000_000_000 + tick).toISOString();
-    const entries = salvageEntriesFor(
-      config,
-      planner,
-      [
-        { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
-        {
-          type: 'job-finished',
-          runId,
-          at: at(1),
-          jobId: 'sweep-collide-0',
-          opId: 'sweep.unit',
-          inputsHash: 'h',
-          result: { status: 'ok', value: {} },
-        },
-        {
-          type: 'job-finished',
-          runId,
-          at: at(2),
-          jobId: 'sweep-collide-1',
-          opId: 'sweep.unit',
-          inputsHash: 'h',
-          result: { status: 'failed', error: 'boom' },
-        },
-      ],
-      enriched,
-    );
-    expect(entries.map((entry) => entry.path)).toEqual([
-      '/repo/worktrees/fix/a-b',
-      '/repo/worktrees/fix/a-b-2',
-    ]);
-    expect(entries.find((entry) => entry.branch?.endsWith('a-b'))?.journal?.allTerminal).toBe(true);
-    expect(entries.find((entry) => entry.branch?.endsWith('a-b-2'))?.journal?.allTerminal).toBe(
-      false,
-    );
-  });
-
-  test('a multi-fixer fleet yields ONE salvage entry per UNIT tree (per kind/slug)', () => {
-    const config = sceneLessConfig();
-    // ONE package, TWO fixers — two trees (worktrees/fix/alpha and
-    // worktrees/test-fix/alpha), two jobs, two independent tails.
-    const units: Array<WorkUnit> = [
-      { package: 'alpha', fixer: 'fix', files: [] },
-      { package: 'alpha', fixer: 'test-fix', files: [] },
-    ];
-    const planner: SweepRunOutcome['planner'] = {
-      jobs: units.map((unit) => ({
-        id: `sweep-${unit.package}-${unit.fixer}`,
-        op: 'sweep.unit',
-        input: unit,
-        dependsOn: [],
-      })),
-      units,
-      suppressed: [],
-      needsHuman: [],
-    };
-    const runId = 'sweep--fan--000000';
-    const at = (tick: number): string => new Date(1_700_000_000_000 + tick).toISOString();
-    const entries = salvageEntriesFor(config, planner, [
-      { type: 'run-started', runId, at: at(0), planId: SWEEP_PLAN_ID },
-      {
-        type: 'job-finished',
-        runId,
-        at: at(1),
-        jobId: 'sweep-alpha-fix',
-        opId: 'sweep.unit',
-        inputsHash: 'h',
-        result: { status: 'failed', error: 'boom' },
-      },
-      {
-        type: 'job-finished',
-        runId,
-        at: at(2),
-        jobId: 'sweep-alpha-test-fix',
-        opId: 'sweep.unit',
-        inputsHash: 'h',
-        result: { status: 'ok', value: {} },
-      },
-    ]);
-    // Two entries, one per unit tree — the package-grouped derivation would
-    // have collapsed both fixers into one tree and dropped the other.
-    expect(entries).toHaveLength(2);
-    const fixEntry = entries.find((entry) => entry.branch?.endsWith('fix/alpha'));
-    const testFixEntry = entries.find((entry) => entry.branch?.endsWith('test-fix/alpha'));
-    expect(fixEntry?.path).toContain('worktrees/fix/alpha');
-    expect(testFixEntry?.path).toContain('worktrees/test-fix/alpha');
-    expect(fixEntry?.journal).toMatchObject({
-      lastStep: 'sweep-alpha-fix',
-      allTerminal: false,
-    });
-    expect(testFixEntry?.journal).toMatchObject({
-      lastStep: 'sweep-alpha-test-fix',
-      allTerminal: true,
-    });
-  });
-});
-
-/** Minimal config for the tail-derivation tests (only the naming fields are read). */
-function sceneLessConfig(): SweepPlanConfig {
-  return {
-    repoRoot: '/repo',
-    worktreesDir: 'worktrees',
-    runPrefix: 'cq/tail',
-    base: 'main',
-    packages: [
-      { name: 'alpha', path: 'packages/alpha' },
-      { name: 'beta', path: 'packages/beta' },
-    ],
-    selector: { mode: 'workspace-all' },
-    fixers: ['fix'],
-  };
-}
-
-/** The two-unit planner shape the expanded plan embeds (plan order: alpha, beta). */
-function twoUnitPlanner(): SweepRunOutcome['planner'] {
-  const units: Array<WorkUnit> = [
-    { package: 'alpha', fixer: 'fix', files: [] },
-    { package: 'beta', fixer: 'fix', files: [] },
-  ];
-  return {
-    jobs: units.map((unit) => ({
-      id: `sweep-${unit.package}-fix`,
-      op: 'sweep.unit',
-      input: unit,
-      dependsOn: [],
-    })),
-    units,
-    suppressed: [],
-    needsHuman: [],
-  };
-}
