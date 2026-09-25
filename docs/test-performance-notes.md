@@ -88,8 +88,9 @@ mid-prompt semantics. U4 does not rewrite or remove those tests.
 
 ## Process-entry inventory
 
-The committed list lives in `test/driver/process-inventory.test.ts` and is
-checked against the known entry-point scan. The current list is:
+The list below is the committed source of truth. `test/driver/process-inventory.test.ts`
+parses this section and checks it against the known entry-point scan. The
+current list is:
 
 - `test/cli/i1.test.ts`
 - `test/cli/plans.smoke.test.ts`
@@ -123,9 +124,11 @@ The current lane proposal is not a process-free split:
 
 - `test:unit` is not process-free: **21 of the 25** inventory files live in
   that lane, so its name and membership currently overstate isolation.
-- `acp.test.ts`'s e2e-lane placement remains justified: **57 of 58**
-  driver-specific tests still spawn the real fixture; only the shared
-  conformance suite moved to in-process transport fakes.
+- `acp.test.ts`'s e2e-lane placement remains justified: **at most 47 of 58**
+  driver-specific tests can spawn the real fixture — 7 never construct a
+  driver (2 win32 shim tests, pure usage-mapping, and 4 binary-resolution
+  tests), while 4 of the remaining tests assert zero pre-dispatch spawns.
+  Only the shared conformance suite moved to in-process transport fakes.
 
 Recorded proposals, for a later policy/template decision rather than this PR:
 

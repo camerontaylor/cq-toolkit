@@ -88,6 +88,7 @@ function createLinePeer(
   let closed = false;
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  let stdin: Writable;
   const peer: JsonLinePeer = {
     send(frame) {
       if (!closed) stdout.write(`${JSON.stringify(frame)}\n`);
@@ -100,10 +101,11 @@ function createLinePeer(
       closed = true;
       stdout.end();
       stderr.end();
+      stdin.destroy(new Error('fake transport child closed'));
       setImmediate(() => onClose(code, signal));
     },
   };
-  const stdin = new Writable({
+  stdin = new Writable({
     write(
       chunk: Buffer | string,
       _encoding: BufferEncoding,
@@ -130,6 +132,7 @@ function createLinePeer(
       callback();
     },
   });
+  stdin.on('error', () => undefined);
   return { stdin, stdout, stderr, finish: peer.finish };
 }
 

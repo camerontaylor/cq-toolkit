@@ -218,6 +218,18 @@ function fakeAcpScript(
 ): (frame: JsonLineFrame, peer: JsonLinePeer) => void {
   const sessionId = 'fake-acp-transport';
   const model = opts.env['FAKE_ACP_MODEL'] ?? 'conformance-1';
+  const toolKind = (tool: string): string => {
+    if (tool === 'read') return 'read';
+    if (tool === 'edit') return 'edit';
+    if (tool === 'run') return 'execute';
+    return 'other';
+  };
+  const toolSummary = (input: unknown): string => {
+    const value = input as { path?: unknown; command?: unknown };
+    if (typeof value.path === 'string') return value.path;
+    if (typeof value.command === 'string') return value.command;
+    return '(input)';
+  };
   let promptId: number | string | undefined;
   let pendingPermission:
     | { id: number; promptId: number | string; tool: string; input: unknown }
@@ -244,6 +256,32 @@ function fakeAcpScript(
           | { outcome?: { outcome?: string; optionId?: string } }
           | undefined;
         if (result?.outcome?.outcome !== 'selected' || result.outcome.optionId !== 'allow_once') {
+          const optionId = result?.outcome?.optionId ?? 'cancelled';
+          update(peer, {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'fake-transport-tool',
+            title: `${pending.tool}: ${toolSummary(pending.input)}`,
+            kind: toolKind(pending.tool),
+            status: 'in_progress',
+            content: [],
+            locations: [],
+            rawInput: pending.input,
+          });
+          const rejection = `rejected (${optionId})`;
+          update(peer, {
+            sessionUpdate: 'tool_call_update',
+            toolCallId: 'fake-transport-tool',
+            status: 'failed',
+            content: [{ type: 'text', text: rejection }],
+            rawOutput: rejection,
+          });
+          update(peer, {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: `${directive?.kind === 'tool-then-reply' ? directive.reply : 'done'} [permission:${optionId}]`,
+            },
+          });
           respond(peer, pending.promptId, {
             stopReason: 'end_turn',
             usage: { inputTokens: 10, outputTokens: 5, cachedReadTokens: 2, cachedWriteTokens: 3 },
@@ -256,8 +294,8 @@ function fakeAcpScript(
             update(peer, {
               sessionUpdate: 'tool_call',
               toolCallId: 'fake-transport-tool',
-              title: `${pending.tool}: conformance`,
-              kind: pending.tool,
+              title: `${pending.tool}: ${toolSummary(pending.input)}`,
+              kind: toolKind(pending.tool),
               status: 'in_progress',
               content: [],
               locations: [],
