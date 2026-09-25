@@ -8,22 +8,27 @@ the full suite took **1,344s**, `test/e2e/sweep` took **918s**, and
 ordering evidence, not a quiet-run SLA: other Paseo worktrees were active and
 the measured load was about 4.5.
 
-The current U4 driver run was measured on this worktree with the transport
-fakes enabled for the shared conformance suite and with the real contracts
-retained. The serial `test/driver/` run completed in **85.5s wall**; its
-per-file measured portions were 44.2s ACP, 20.1s subprocess, and under 0.6s
-for each remaining file. The fake-backed conformance cases are now in-process;
-the real fixture contracts remain in the driver-specific tests.
+The pre-rebase U4 driver run was measured at historical HEAD **`83b0a39`**
+with the transport fakes enabled for the shared conformance suite and with
+the real contracts retained. The serial `test/driver/` run completed in
+**85.5s wall**; its per-file measured portions were 44.2s ACP, 20.1s
+subprocess, and under 0.6s for each remaining file. The fake-backed
+conformance cases are now in-process; the real fixture contracts remain in
+the driver-specific tests. These are pre-rebase measurements, not the final
+stacked measurement.
 
-| Area                                    |                 Baseline |       U4 current measurement | Interpretation                                                                                                         |
-| --------------------------------------- | -----------------------: | ---------------------------: | ---------------------------------------------------------------------------------------------------------------------- |
-| Full suite                              |                   1,344s | not re-measured in this unit | The U4 change is scoped to the driver transport boundary; the full-suite target belongs to the stacked PR measurement. |
-| `test/e2e/sweep`                        |                     918s |            not changed by U4 | PR-2's process-count work owns this area.                                                                              |
-| `test/driver/acp.test.ts`               |          105s, 1 failure |                        44.2s | Conformance protocol decisions use the in-process ACP adapter; retained real OS/wire contracts remain.                 |
-| `test/driver/subprocess.test.ts`        | not separately baselined |                        20.1s | Conformance stream-json decisions use the in-process managed-child adapter.                                            |
-| `test/driver/ai-sdk.test.ts`            | not separately baselined |                        0.39s | No U4 transport change.                                                                                                |
-| `test/driver/claude-agent.test.ts`      | not separately baselined |                        0.51s | No U4 transport change.                                                                                                |
-| `test/driver/process-inventory.test.ts` |                      new |                        0.08s | Cheap guard over the committed process-entry list.                                                                     |
+| Area                                                  |                 Baseline |       U4 current measurement | Interpretation                                                                                                         |
+| ----------------------------------------------------- | -----------------------: | ---------------------------: | ---------------------------------------------------------------------------------------------------------------------- |
+| Full suite                                            |                   1,344s | not re-measured in this unit | The U4 change is scoped to the driver transport boundary; the full-suite target belongs to the stacked PR measurement. |
+| **PLACEHOLDER — full run 1 (wall / per-file / load)** |                        — |                            — | **Orchestrator to supply the recorded stacked measurement.**                                                           |
+| **PLACEHOLDER — full run 2 (wall / per-file / load)** |                        — |                            — | **Orchestrator to supply the recorded stacked measurement.**                                                           |
+| **PLACEHOLDER — full run 3 (wall / per-file / load)** |                        — |                            — | **Orchestrator to supply the recorded stacked measurement.**                                                           |
+| `test/e2e/sweep`                                      |                     918s |            not changed by U4 | PR-2's process-count work owns this area.                                                                              |
+| `test/driver/acp.test.ts`                             |          105s, 1 failure |                        44.2s | Conformance protocol decisions use the in-process ACP adapter; retained real OS/wire contracts remain.                 |
+| `test/driver/subprocess.test.ts`                      | not separately baselined |                        20.1s | Conformance stream-json decisions use the in-process managed-child adapter.                                            |
+| `test/driver/ai-sdk.test.ts`                          | not separately baselined |                        0.39s | No U4 transport change.                                                                                                |
+| `test/driver/claude-agent.test.ts`                    | not separately baselined |                        0.51s | No U4 transport change.                                                                                                |
+| `test/driver/process-inventory.test.ts`               |                      new |                        0.08s | Cheap guard over the committed process-entry list.                                                                     |
 
 Per-file durations are advisory measurements only. Host load, filesystem
 caches, and other worktrees can dominate them; do not turn this table into a
@@ -65,9 +70,9 @@ regex is complete.
 | Subprocess resume/argv/sidecar, SIGTERM→SIGKILL, and process-group grandchild kill                                                                                                                                   | **Kept real**                                             | These prove process startup, argv, filesystem sidecars, signals, and descendant cleanup.                                              |
 | Other driver-specific ACP/subprocess cases                                                                                                                                                                           | **Retained real until a case-specific boundary is named** | When in doubt, the real fixture is safer than silently replacing a process contract.                                                  |
 
-The three governed ACP cancel tests remain real exactly as required. The
-future PR-1 rebase's `midPromptDeadline` helper must preserve their
-mid-prompt semantics; U4 does not rewrite or remove those tests.
+The three governed ACP cancel tests remain real exactly as required; PR-1 is
+present in this base, and its `midPromptDeadline` helper must preserve their
+mid-prompt semantics. U4 does not rewrite or remove those tests.
 
 ## Process-entry inventory
 
@@ -75,17 +80,21 @@ The committed list lives in `test/driver/process-inventory.test.ts` and is
 checked against the known entry-point scan. The current list is:
 
 - `test/cli/i1.test.ts`
+- `test/cli/plans.smoke.test.ts`
 - `test/driver/acp.test.ts`
 - `test/driver/subprocess.test.ts`
 - `test/e2e/analyze/analyze.e2e.test.ts`
 - `test/e2e/merge/live.test.ts`
 - `test/e2e/sweep/sweep.e2e.test.ts`
 - `test/helpers/git-template.test.ts`
+- `test/ops/pr/ensureTrackerBranch.test.ts`
 - `test/ops/ratchet/captureBaseline.test.ts`
+- `test/ops/ratchet/effects.test.ts`
 - `test/ops/ratchet/monotonicGuard.test.ts`
 - `test/ops/review/registry.test.ts`
 - `test/ops/sweep/cleanup.test.ts`
 - `test/ops/sweep/ledger-suppression.test.ts`
+- `test/ops/sweep/planSweep.test.ts`
 - `test/ops/sweep/unit-registry.test.ts`
 - `test/ops/sweep/worktreeFor.test.ts`
 - `test/scripts/demo-eval-axes.test.ts`
@@ -95,6 +104,31 @@ checked against the known entry-point scan. The current list is:
 - `test/scripts/static-conformance.test.ts`
 - `test/scripts/tooling-commands.test.ts`
 - `test/workflows/merge-queue-gate.test.ts`
+
+## Lane-partition record (proposals only; no CI changes)
+
+The current lane proposal is not a process-free split:
+
+- `test:unit` is not process-free: **21 of the 25** inventory files live in
+  that lane, so its name and membership currently overstate isolation.
+- `acp.test.ts`'s e2e-lane placement remains justified: **57 of 58**
+  driver-specific tests still spawn the real fixture; only the shared
+  conformance suite moved to in-process transport fakes.
+
+Recorded proposals, for a later policy/template decision rather than this PR:
+
+1. Rename the lanes to `test:fast` and `test:process`, with membership derived
+   from this inventory list.
+2. Introduce a `test/process/` tree for process-backed tests.
+3. Split ACP into separate conformance/fake and real fixture files.
+
+These would be carried through `package.json` and `policy/templates/` as
+proposals. `.github/workflows/ci.yml` is not template-regenerable under
+`policy/templates/README.md`, so changing the CI step requires a separate
+policy decision; U4 does not edit CI.
+
+`plans.smoke.test.ts` also has its own redundant build path; that is a
+follow-up outside PR-4's files.
 
 This list is a guard, not a claim that every transitive process launch is
 found. The limitation is stated above so a future helper cannot make the
