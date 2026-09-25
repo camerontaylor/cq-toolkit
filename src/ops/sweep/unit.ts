@@ -678,7 +678,7 @@ export function makeSweepUnitOp(bindings: SweepUnitBindings): Op<WorkUnit, Sweep
     // #174: `git add -A` stages nothing after driver self-commits, so the
     // stage/scan gates never saw those bytes; without the record, 9b would
     // push them as "verified").
-    const commit = await commitStaged(bindings, unit, worktree);
+    const commit = await commitStaged(bindings, unit, worktree, finalProbe.treeSha);
     if (commit.fault !== null) return { status: 'failed', error: tagged('infra', commit.fault) };
     let committedSha: string | undefined;
     if (commit.committed) {
@@ -878,7 +878,7 @@ async function withBaseOwnedFinalTree(
   run: (
     clean: SweepWorkspace,
   ) => Promise<{ worktree?: SweepWorkspace; probe?: UnitProbe; fault?: string }>,
-): Promise<{ probe?: UnitProbe; fault: string | null }> {
+): Promise<{ probe?: UnitProbe; fault: string | null; treeSha?: string }> {
   const tree = await bindings.git(['-C', worktree.path, 'write-tree']);
   if (tree.code !== 0) {
     return {
@@ -910,7 +910,8 @@ async function withBaseOwnedFinalTree(
       ),
     };
   }
-  const tempDir = await mkdtemp(join(tmpdir(), 'cq-sweep-final-'));
+  await mkdir(bindings.worktreesDir, { recursive: true });
+  const tempDir = await mkdtemp(join(bindings.worktreesDir, '.cq-sweep-final-'));
   const cleanPath = join(tempDir, 'checkout');
   try {
     const added = await bindings.git([
@@ -932,15 +933,17 @@ async function withBaseOwnedFinalTree(
     }
     const result = await run({ ...worktree, path: cleanPath });
     if ('fault' in result && result.fault !== undefined) {
-      return { fault: result.fault };
+      return { fault: result.fault, treeSha: tree.stdout.trim() };
     }
     return {
       ...(result.probe !== undefined ? { probe: result.probe } : {}),
       fault: null,
+      treeSha: tree.stdout.trim(),
     };
   } catch (err) {
     return {
       fault: tagged('infra', `sweep.unit ${unit.package}: final probe crashed — ${messageOf(err)}`),
+      treeSha: tree.stdout.trim(),
     };
   } finally {
     await bindings.git(['-C', worktree.path, 'worktree', 'remove', '--force', cleanPath]);
@@ -1199,7 +1202,11 @@ async function commitStaged(
   bindings: SweepUnitBindings,
   unit: WorkUnit,
   worktree: SweepWorkspace,
+  expectedTreeSha?: string,
 ): Promise<{ committed: boolean; fault: string | null }> {
+  if (expectedTreeSha === undefined) {
+    return { committed: false, fault: 'sweep.unit: final probe did not return a tree sha' };
+  }
   const empty = await bindings.git([
     '-C',
     worktree.path,
@@ -1226,6 +1233,7 @@ async function commitStaged(
     '-C',
     worktree.path,
     'commit',
+    '--no-verify',
     '-m',
     `fix(${unit.package}): apply ${unit.fixer} sweep fix`,
   ]);
@@ -1233,6 +1241,13 @@ async function commitStaged(
     return {
       committed: false,
       fault: `sweep.unit ${unit.package}: git commit failed — ${committed.stderr.trim()}`,
+    };
+  }
+  const tree = await bindings.git(['-C', worktree.path, 'rev-parse', 'HEAD^{tree}']);
+  if (tree.code !== 0 || tree.stdout.trim() !== expectedTreeSha) {
+    return {
+      committed: false,
+      fault: `sweep.unit ${unit.package}: committed tree differs from the probed tree — expected ${expectedTreeSha}, got ${tree.stdout.trim() || tree.stderr.trim()}`,
     };
   }
   return { committed: true, fault: null };

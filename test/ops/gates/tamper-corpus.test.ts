@@ -9,6 +9,7 @@ import type { FailureSet } from '../../../src/ops/gates/checkRunner.js';
 import { hackDetector } from '../../../src/ops/gates/hackDetector.js';
 import { regressionGate } from '../../../src/ops/gates/regressionGate.js';
 import { classifyStagePaths } from '../../../src/ops/sweep/unit.js';
+import { isProtectedStagePath } from '../../../src/ops/gates/protectedPaths.js';
 
 const execFileAsync = promisify(execFile);
 const CLEANUP: string[] = [];
@@ -101,6 +102,11 @@ describe('RS-10 tamper corpus contract', () => {
       expect(computed, entry.id).toBe(entry.baseOwned);
     }
   });
+
+  test.each(['vitest.workspace.ts', 'vitest.workspace.json', 'vitest.projects.ts'])(
+    'protects Vitest workspace/project config: %s',
+    (path) => expect(isProtectedStagePath(path)).toBe(true),
+  );
 
   test(
     'every manifest path is referenced exactly once and every diff is structurally valid',
