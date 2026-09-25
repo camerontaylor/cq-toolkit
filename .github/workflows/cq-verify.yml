@@ -1,0 +1,261 @@
+# instantiated from policy/templates/cq-verify.yml — edit the template, not this file
+# cq-verify — the DEFAULT-BRANCH ratchet verifier (ADR-0004 D-B, D-C; W1.7).
+#
+# Carrier: `workflow_run` on `cq-measure` (plus `workflow_dispatch`, honoured
+# only on the default ref — ADR-0004 D-A.1). GitHub runs the DEFAULT BRANCH's
+# copy of this file for both, so a pull request cannot edit what judges it
+# (RS-4 T-2/T-8). Everything that decides comes from the trust ref
+# (`github.sha` here, the default-branch tip):
+#   - the verifier code: the toolkit built from the trust checkout with
+#     `npm ci --ignore-scripts` (never the head's dist/ or node_modules);
+#   - the ratchet definitions and definition set: `baselines/ratchets.json`
+#     read with `git cat-file` AT THE TRUST REF;
+#   - the baselines: read at the trust ref the same way.
+# The head is DATA: its git objects are fetched and read attribute-free
+# (`ls-tree` + `cat-file`, never `git archive` or a checkout), and its
+# measurement artifact is size-capped and schema-validated, never executed.
+#
+# Jobs (ADR-0004 D-B compute/sign split, critic r2 R2-4):
+#   - `resolve` verifies the triggering run (workflow path, event, repository
+#     id — fork runs are refused) and resolves the subject from `head_sha`,
+#     never `head_branch`; a PR subject's base comes from the commit→PR API.
+#   - `compute` recomputes typecheck-count with the TRUST-REF toolchain over
+#     the extracted head tree. It runs `tsc` over head content, so it holds
+#     NOTHING: `permissions: {}`, no secrets, no environment. Its only output
+#     is a number.
+#   - `judge` runs the trusted verifier over git objects + the artifact and
+#     posts the `cq/ratchet` check run. It runs no head code.
+#
+# INTERIM IDENTITY (until W1.10): the verdict is posted with this job's
+# GITHUB_TOKEN (`checks: write`). ADR-0004 D-F: such a check run is not yet a
+# trust anchor — any workflow can forge a GITHUB_TOKEN check run. W1.10 moves
+# the posting step to the verdict App in env `cq-verdict` and makes
+# `cq/ratchet` required with expected source = that App. Until then the
+# legacy `ratchet` check (ratchet.yml) stays the required one (expand/contract,
+# ADR-0004 D-H.2). `external_id` already binds `<trust-sha>:<subject-sha>`.
+name: cq-verify
+
+on:
+  workflow_run:
+    workflows:
+      - cq-measure
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      measure_run_id:
+        description: 'cq-measure run id to verify (its head_sha is the subject)'
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: cq-verify-${{ github.event.workflow_run.id || inputs.measure_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.event_name == 'workflow_run' ||
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: read
+    outputs:
+      run_id: ${{ steps.run.outputs.run_id }}
+      subject: ${{ steps.run.outputs.subject }}
+      kind: ${{ steps.run.outputs.kind }}
+      base: ${{ steps.run.outputs.base }}
+      conclusion: ${{ steps.run.outputs.conclusion }}
+    steps:
+      - name: Verify the triggering run and resolve the subject
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.measure_run_id }}
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in ''|*[!0-9]*) echo "refusing: run id '$RUN_ID' is not numeric"; exit 1;; esac
+          # Re-read the run from the API by id: the fields below are the
+          # server's, not a payload a dispatcher could shape.
+          run="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
+          path="$(jq -r '.path' <<<"$run")"
+          event="$(jq -r '.event' <<<"$run")"
+          head_repo="$(jq -r '.head_repository.id' <<<"$run")"
+          subject="$(jq -r '.head_sha' <<<"$run")"
+          branch="$(jq -r '.head_branch' <<<"$run")"
+          conclusion="$(jq -r '.conclusion' <<<"$run")"
+          [ "$path" = ".github/workflows/cq-measure.yml" ] || { echo "refusing: run path '$path'"; exit 1; }
+          [ "$head_repo" = "$REPO_ID" ] || { echo "refusing: fork or foreign run (repo id $head_repo)"; exit 1; }
+          [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || { echo "refusing: head_sha '$subject'"; exit 1; }
+          case "$event" in
+            pull_request)
+              # The subject is head_sha; the PR (and its base) comes from
+              # the commit→PR API, never from pull_requests[] (ADR-0004 D-C.2).
+              base="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
+                --jq "[.[] | select(.state == \"open\" and .head.sha == \"${subject}\" and .head.repo.id == ${REPO_ID}) | .base.ref] | map(select(. == \"merge-queue\" or . == \"main\")) | first // empty")"
+              [ -n "$base" ] || { echo "refusing: no open same-repo PR into merge-queue/main has head ${subject}"; exit 1; }
+              kind='pr'
+              ;;
+            push)
+              [ "$branch" = "merge-queue" ] || { echo "refusing: push run on '$branch'"; exit 1; }
+              kind='push'
+              base='main'
+              ;;
+            *) echo "refusing: event '$event'"; exit 1;;
+          esac
+          {
+            echo "run_id=${RUN_ID}"
+            echo "subject=${subject}"
+            echo "kind=${kind}"
+            echo "base=${base}"
+            echo "conclusion=${conclusion}"
+          } >> "$GITHUB_OUTPUT"
+
+  compute:
+    name: compute
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Runs the trust-ref tsc over HEAD CONTENT (a head tsconfig can point tsc
+    # at runner paths), so this job holds no credential at all (R2-4).
+    permissions: {}
+    outputs:
+      typecheck_count: ${{ steps.count.outputs.typecheck_count }}
+    steps:
+      - name: Check out the trust ref (the default branch)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          ref: ${{ github.sha }}
+          path: trust
+          persist-credentials: false
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: ''
+      - name: Install and build the trusted toolkit
+        working-directory: trust
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Fetch the subject's git objects (data only)
+        working-directory: trust
+        env:
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+        run: git fetch --no-tags --depth=1 origin "$SUBJECT"
+      - name: Recompute typecheck-count over the attribute-free head tree
+        id: count
+        env:
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+        run: |
+          set -euo pipefail
+          out="$(node trust/dist/cli.js ratchet.recomputeTypecheck \
+            --repo=trust \
+            --subject="$SUBJECT" \
+            --scratch="${RUNNER_TEMP}/cq-recompute")"
+          printf '%s\n' "$out" | jq -c '{status, value: (.value | {count}), detail, error}'
+          count="$(printf '%s' "$out" | jq -r 'if .status == "ok" and (.value.count | type) == "number" then .value.count else "" end')"
+          echo "typecheck_count=${count}" >> "$GITHUB_OUTPUT"
+
+  judge:
+    name: judge
+    needs: [resolve, compute]
+    # A failed recompute still yields a (failing) verdict; only an
+    # unresolved subject yields none.
+    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      checks: write
+      contents: read
+    steps:
+      - name: Check out the trust ref (the default branch)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
+        with:
+          node-version: 24
+          cache: ''
+      - name: Install and build the trusted toolkit
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Fetch the subject and its base (git objects only)
+        env:
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+          BASE: ${{ needs.resolve.outputs.base }}
+        run: git fetch --no-tags origin "$SUBJECT" "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+      - name: Download the measurement artifact (untrusted data)
+        # A missing artifact is a failing verdict below, never a skip.
+        continue-on-error: true
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (immutable commit pin; repo policy)
+        with:
+          name: cq-measure
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/cq-measure
+      - name: 'Verify (CLI: ratchet.verifyRatchet)'
+        id: verify
+        env:
+          TRUST: ${{ github.sha }}
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+          KIND: ${{ needs.resolve.outputs.kind }}
+          BASE: ${{ needs.resolve.outputs.base }}
+          CONCLUSION: ${{ needs.resolve.outputs.conclusion }}
+          TYPECHECK_COUNT: ${{ needs.compute.outputs.typecheck_count }}
+        run: |
+          set -euo pipefail
+          args=(
+            --repo=.
+            --trustRef="$TRUST"
+            --subject="$SUBJECT"
+            --subjectKind="$KIND"
+            --base="refs/remotes/origin/${BASE}"
+            --measureConclusion="$CONCLUSION"
+            --measurementPath="${RUNNER_TEMP}/cq-measure/measurement.json"
+          )
+          if [[ "$TYPECHECK_COUNT" =~ ^[0-9]+$ ]]; then
+            args+=(--typecheckCount="$TYPECHECK_COUNT")
+          fi
+          node dist/cli.js ratchet.verifyRatchet "${args[@]}" > "${RUNNER_TEMP}/verdict.json" || true
+          cat "${RUNNER_TEMP}/verdict.json"
+      - name: Post the cq/ratchet check run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRUST: ${{ github.sha }}
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+        run: |
+          set -euo pipefail
+          # Anything but an ok op result with verdict "pass" is a failure;
+          # needs-human is a failure whose summary names D11.
+          jq -n --slurpfile v "${RUNNER_TEMP}/verdict.json" \
+            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" '
+            ($v[0] // {}) as $r
+            | ($r.value.verdict // "fail") as $verdict
+            | {
+                name: "cq/ratchet",
+                head_sha: $sha,
+                external_id: $ext,
+                status: "completed",
+                conclusion: (if $r.status == "ok" and $verdict == "pass" then "success" else "failure" end),
+                output: {
+                  title: ("ratchet: " + (if $r.status == "ok" then $verdict else "verifier " + ($r.status // "crashed") end)),
+                  summary: ((($r.value.reasons // []) | map("- " + .) | join("\n")) + "\n\ntrust ref `" + $ext + "`")
+                }
+              }' > "${RUNNER_TEMP}/check-run.json"
+          gh api -X POST "repos/${REPO}/check-runs" --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
+          jq -e '.conclusion == "success"' "${RUNNER_TEMP}/check-run.json" >/dev/null

@@ -1,203 +1,256 @@
-// ratchet-propose — the ratchet-propose.yml workhorse (lane H, goal H4
-// slice 2). Post-merge, this driver measures the live ratchets and — for each
-// committed baseline the measurement TIGHTENS — proposes the corresponding
-// baseline change as exactly ONE pull request, by invoking the H3 op
-// createProposeBaselineUpdate with a REAL BaselinePrEffects implementation
-// over gh CLI + git.
+// ratchet-propose — the PRIVILEGED half of baseline-tightening proposals
+// (ADR-0004 D-B "ratchet-propose"; W1.7). For each committed baseline a
+// measurement TIGHTENS, it proposes the baseline change as exactly ONE pull
+// request by invoking the H3 op createProposeBaselineUpdate with a REAL
+// BaselinePrEffects implementation over gh CLI + git.
 //
-// ONE BRAIN: the driver only collects readings (exactly like ratchet-check)
-// and enumerates committed baselines; every decision the op owns — grouping,
-// the tighten gate, deterministic head branch, idempotent find-then-upsert,
-// I5 skips — stays in the op. The effects below are the impure seam the op's
-// docs reserve for H4: they shell out to gh/git and never judge metrics.
+// TWO-JOB SPLIT: measurement no longer happens here. The credential-free
+// `ratchet-propose-measure` workflow installs, runs the suite and recomputes
+// typecheck-count, then uploads a numbers-only artifact. The privileged
+// `ratchet-propose` workflow (`workflow_run`, environment `automation`)
+// builds the TRUSTED toolkit from the default branch (`npm ci
+// --ignore-scripts && npm run build`), downloads that artifact and runs
 //
-// TOKEN DOCTRINE (proposeBaselineUpdate.ts header — load-bearing): the
-// effects authenticate with CQ_AUTOMATION_TOKEN and NEVER with GITHUB_TOKEN.
-// GitHub suppresses workflow runs on PRs created with GITHUB_TOKEN, so a
-// GITHUB_TOKEN-authored proposal would never run the required I4 check (the
-// diff monotonicity guard) — an uncheckable ratchet bypass. When both vars
-// are present we warn and proceed with CQ_AUTOMATION_TOKEN only. The token
-// is never echoed (every subprocess result is redacted before printing) and
+//   node scripts/ratchet-propose.mjs --measurement=<path>
+//
+// This script runs no tests, no tsc and nothing from the repo beyond the
+// prebuilt dist/ engine. Usage: exactly one `--measurement=<path>`; anything
+// else fails. The token gate runs FIRST, so a tokenless invocation is a
+// green no-op (exit 0) whatever its arguments.
+//
+// ARTIFACT AS DATA: the measurement file is untrusted (the leg that wrote it
+// executed the repo's tests). It is opened without following symlinks, must
+// be a regular file of at most 64 KiB, and must match the strict schema in
+// ratchet-lib's parseProposeMeasurement — `{schemaVersion: 1, metrics:
+// {coverage?, typecheck-count?}}`, nothing else. Any violation fails the run
+// BEFORE any git or gh call; an unknown metric is refused, never ignored. A
+// metric absent from the artifact is noted and proposes nothing (I5). The
+// coverage reading is rounded with the engine's roundCoveragePct (one
+// decimal place) before any comparison. Worst case for a forged reading is a
+// too-tight proposal — a visible PR judged by the same checks as any other.
+//
+// TARGET merge-queue: the proposal PR is opened against `merge-queue`, cut
+// from the merge-queue tip and judged against THAT tip's committed
+// baselines — not the checkout's (the checkout is main, the trust ref for
+// the code that runs here). Proposals previously targeted main and so
+// bypassed the merge-queue checks (ADR-0004 D-B). The tip is fetched, pinned
+// to a SHA, and materialized as a temporary detached git worktree; the op
+// reads baselines from that worktree (ws) and the effects branch, commit and
+// push inside it. The worktree is removed in a finally, and the ROOT
+// checkout is never switched (the dirty-tree guard on ROOT stays as a
+// belt-and-braces refusal for local runs).
+//
+// ONE BRAIN: the driver only collects readings and enumerates committed
+// baselines; every decision the op owns — grouping, the tighten gate,
+// deterministic head branch, idempotent find-then-upsert, I5 skips — stays
+// in the op. The effects below are the impure seam: they shell out to
+// gh/git and never judge metrics.
+//
+// TOKEN DOCTRINE (proposeBaselineUpdate.ts header — load-bearing, unchanged):
+// the effects authenticate with CQ_AUTOMATION_TOKEN and NEVER with
+// GITHUB_TOKEN. GitHub suppresses workflow runs on PRs created with
+// GITHUB_TOKEN, so a GITHUB_TOKEN-authored proposal would never run its
+// required checks — an uncheckable ratchet bypass. When both vars are
+// present we warn and proceed with CQ_AUTOMATION_TOKEN only. The token is
+// never echoed (every subprocess result is redacted before printing) and
 // never lands on disk or in git state: git authenticates through a temp
 // GIT_ASKPASS script whose bytes contain no token (it echoes the token from
 // ITS environment) and which is removed in a finally — no authed URL ever
-// touches argv or .git/config. The effects also return the checkout to its
-// original branch in a finally, so a local run never strands the developer
-// on ratchet/propose-*.
+// touches argv or .git/config.
 import { spawnSync } from 'node:child_process';
-import { lstatSync, readFileSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  readSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+  PROPOSE_MEASUREMENT_MAX_BYTES,
   ROOT,
   fail,
   loadEngine,
   parseGhJson,
-  runCoverageRaw,
-  runTypecheckRaw,
-  typecheckEvidence,
+  parseProposeMeasurement,
   upsertProposalPr,
   withGitAskpass,
 } from './ratchet-lib.mjs';
 
 /** The proposal target branch (the op validates it as a git ref). */
-const BASE = 'main';
+const BASE = 'merge-queue';
 const MAX_BUFFER = 64 * 1024 * 1024;
+/**
+ * Hardened git prefix for EVERY git call: no pager, no fsmonitor daemon, and
+ * no hooks — this job runs nothing from the repo beyond the prebuilt dist/.
+ */
+const GIT_HARDEN = ['--no-pager', '-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null'];
+const MEASUREMENT_FLAG = '--measurement=';
 
-if (process.argv.length > 2) {
-  fail(`unknown arguments: ${process.argv.slice(2).join(' ')} — this script takes none`);
-}
-
-// ---- TOKEN DOCTRINE gate (the workflow carries no job-level if; THIS ----
-// script is the gate — a tokenless run is a green no-op).
+// ---- TOKEN DOCTRINE gate (FIRST: the workflow carries no job-level if; ----
+// THIS script is the gate — a tokenless run is a green no-op, whatever its
+// arguments, so a fork or a token-less environment never goes red).
 const token = process.env.CQ_AUTOMATION_TOKEN;
 if (!token || token === '') {
   console.error('ratchet-propose: CQ_AUTOMATION_TOKEN not set; skipping proposal');
   process.exit(0);
 }
+
+// ---- arguments: exactly one --measurement=<path> ----
+const argv = process.argv.slice(2);
+if (
+  argv.length !== 1 ||
+  argv[0].startsWith(MEASUREMENT_FLAG) === false ||
+  argv[0].length === MEASUREMENT_FLAG.length
+) {
+  fail(
+    `usage: ratchet-propose.mjs --measurement=<path> (got: ${
+      argv.length === 0 ? 'no arguments' : argv.join(' ')
+    })`,
+  );
+}
+const measurementPath = argv[0].slice(MEASUREMENT_FLAG.length);
+
 if (process.env.GITHUB_TOKEN) {
   console.error(
     'ratchet-propose: warning — GITHUB_TOKEN is also set. A PR authored with GITHUB_TOKEN ' +
-      'suppresses workflow runs, so its required I4 ratchet check would never run (I4 bypass). ' +
+      'suppresses workflow runs, so its required ratchet checks would never run (bypass). ' +
       'Proceeding with CQ_AUTOMATION_TOKEN only.',
   );
 }
 // The token's only legitimate consumers below are the git askpass env (set
 // explicitly from the local const) and the gh subprocess env (GH_TOKEN) —
-// so scrub it from the process env NOW: the build and coverage-suite
-// children this driver spawns (npm, vitest, tsc) must never inherit it.
+// so scrub it from the process env NOW: no other child may inherit it.
 delete process.env.CQ_AUTOMATION_TOKEN;
 
-// ---- worktree guard: the effects checkout/commit/push THIS checkout ----
-// A dirty tree would ride the branch switch into the proposal commit. CI
-// checkouts are clean; a local run with a token is refused here.
-const status = spawnSync('git', ['status', '--porcelain'], { cwd: ROOT, encoding: 'utf8' });
+// ---- the measurement artifact: UNTRUSTED DATA, validated before any git/gh ----
+/**
+ * lstat (a symlink is refused, never followed), then open with O_NOFOLLOW and
+ * re-check the OPENED file (closing the swap race), read at most cap+1 bytes,
+ * decode as strict UTF-8, and hand the text to the strict schema check.
+ */
+function readMeasurement(path) {
+  let st;
+  try {
+    st = lstatSync(path);
+  } catch (err) {
+    fail(`cannot read the measurement '${path}': ${err.message}`);
+  }
+  if (st.isFile() === false) {
+    fail(`measurement '${path}' is not a regular file (symlinks and special files are refused)`);
+  }
+  let fd;
+  try {
+    fd = openSync(path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+  } catch (err) {
+    fail(`cannot open the measurement '${path}': ${err.message}`);
+  }
+  let text;
+  let size;
+  try {
+    const opened = fstatSync(fd);
+    if (opened.isFile() === false) {
+      fail(`measurement '${path}' is not a regular file`);
+    }
+    if (opened.size > PROPOSE_MEASUREMENT_MAX_BYTES) {
+      fail(
+        `invalid measurement '${path}': ${opened.size} bytes — over the ` +
+          `${PROPOSE_MEASUREMENT_MAX_BYTES}-byte cap`,
+      );
+    }
+    const buf = Buffer.alloc(PROPOSE_MEASUREMENT_MAX_BYTES + 1);
+    let n = 0;
+    for (;;) {
+      const got = readSync(fd, buf, n, buf.length - n, null);
+      if (got === 0) break;
+      n += got;
+      if (n === buf.length) break; // grew past the cap mid-read — size check refuses it
+    }
+    size = n;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(buf.subarray(0, n));
+    } catch {
+      fail(`invalid measurement '${path}': not valid UTF-8`);
+    }
+  } finally {
+    closeSync(fd);
+  }
+  try {
+    return parseProposeMeasurement(text, size);
+  } catch (err) {
+    fail(`invalid measurement '${path}': ${err.message}`);
+  }
+}
+
+const measured = readMeasurement(measurementPath);
+
+// ---- worktree guard (ROOT is the trust-ref checkout; never switched) ----
+// The effects run in a temporary worktree, but a dirty ROOT still means a
+// local run over unreviewed state — refused, as before.
+const status = spawnSync('git', [...GIT_HARDEN, 'status', '--porcelain'], {
+  cwd: ROOT,
+  encoding: 'utf8',
+});
 if (status.error || status.status !== 0) {
   fail(
     `cannot inspect the worktree: ${status.error ? status.error.message : `exit ${status.status}`}`,
   );
 }
 if ((status.stdout ?? '').trim() !== '') {
-  fail(
-    'refusing to run on a dirty worktree — the proposal effects switch branches and commit in ' +
-      'this checkout; commit or stash first',
-  );
+  fail('refusing to run on a dirty worktree — commit or stash first');
 }
 
-// ---- engine (built fresh, adapters registered — same wiring as the check runners) ----
+// ---- engine: the PREBUILT trusted dist/ (no adapters needed: no measuring here) ----
 const engine = await loadEngine();
-engine.registerAdapter(engine.adapters.typecheckCount);
-engine.registerAdapter(engine.adapters.coverage);
 
-// ---- live readings, exactly like ratchet-check's two legs ----
-const tcRun = runTypecheckRaw();
-const { evidence: tcEvidence, rawText: tcRaw } = typecheckEvidence(
-  engine.adapters.typecheckCount,
-  tcRun,
-);
-const tcValue =
-  tcEvidence === null ? null : (engine.adapters.typecheckCount.extract(tcEvidence)?.value ?? null);
-if (tcValue === null) {
-  console.error(
-    `ratchet-propose: note — typecheck-count has no usable reading ` +
-      `(exit ${tcRun.status}); non-passing evidence, nothing proposed from it (I5). ` +
-      `Output tail:\n${tcRaw.slice(-1500).trim()}`,
-  );
-}
-
-const covRun = runCoverageRaw();
-const covValue =
-  covRun.error || covRun.status !== 0 || covRun.summary === null
-    ? null
-    : (engine.adapters.coverage.extract(covRun.summary)?.value ?? null);
-if (covValue === null) {
-  console.error(
-    `ratchet-propose: note — coverage has no usable reading ` +
-      `(${covRun.error ? covRun.error.message : `exit ${covRun.status}`}); ` +
-      'non-passing evidence, nothing proposed from it (I5). Output tail:\n' +
-      `${`${covRun.stdout}${covRun.stderr}`.slice(-1500).trim()}`,
-  );
-}
-
-// ---- committed baselines: parse each with the engine's own parser ----
-const baselinesDir = join(ROOT, 'baselines');
-const committed = [];
-for (const name of readdirSync(baselinesDir)
-  .filter((n) => n.endsWith('.json'))
-  .sort()) {
-  const abs = join(baselinesDir, name);
-  // lstat BEFORE read (mirror the engine's leaf discipline): a non-regular
-  // entry is refused as evidence, never followed.
-  let stat;
-  try {
-    stat = lstatSync(abs);
-  } catch {
-    continue; // raced away — nothing to propose from
-  }
-  if (stat.isFile() === false) {
-    console.error(`ratchet-propose: note — baselines/${name} is not a regular file; skipped`);
-    continue;
-  }
-  let parsed;
-  try {
-    parsed = engine.parseBaseline(readFileSync(abs, 'utf8'));
-  } catch (err) {
-    // A corrupt baseline yields no improvement (the ratchet CHECK is the
-    // enforcement point; this script only proposes tightenings).
-    console.error(`ratchet-propose: note — baselines/${name} is corrupt; skipped — ${err.message}`);
-    continue;
-  }
-  committed.push(parsed);
-}
-
-// ---- improvements: only genuine TIGHTENs, judged by the engine's own comparator ----
-const improvements = [];
-for (const b of committed) {
-  const live =
-    b.metric === 'typecheck-count' ? tcValue : b.metric === 'coverage' ? covValue : undefined;
-  if (live === undefined) {
+// ---- readings: ONLY from the artifact; coverage at one decimal place ----
+const live = {
+  coverage: measured.coverage === undefined ? null : engine.roundCoveragePct(measured.coverage),
+  'typecheck-count': measured['typecheck-count'] === undefined ? null : measured['typecheck-count'],
+};
+for (const [metric, value] of Object.entries(live)) {
+  if (value === null) {
     console.error(
-      `ratchet-propose: note — metric '${b.metric}' (${b.target}) has no live runner wired; skipped`,
-    );
-    continue;
-  }
-  if (live === null) {
-    continue; // note already emitted above
-  }
-  if (engine.tightens(b.value, live, b.direction)) {
-    improvements.push({ target: b.target, metric: b.metric, value: live });
-  } else {
-    console.error(
-      `ratchet-propose: ${b.target}/${b.metric} ${b.value} → ${live} is not a tightening ` +
-        `(${b.direction}) — nothing to propose`,
+      `ratchet-propose: note — the measurement carries no '${metric}' reading; ` +
+        'nothing proposed from it (I5)',
     );
   }
 }
 
-if (improvements.length === 0) {
-  console.error('ratchet-propose: no tightening to propose');
-  process.exit(0);
-}
-
-// ---- BaselinePrEffects over gh CLI + git ----
-// The token rides ONLY in subprocess envs: GH_TOKEN (winning over
-// GITHUB_TOKEN) for gh, and the askpass file's environment for git — never
-// in an echoed line (redact() scrubs any captured output), never in a log.
-const redact = (text) => (token ? String(text).split(token).join('[redacted]') : String(text));
+// ---- subprocess plumbing (token redacted from every captured line) ----
+const redact = (text) => String(text).split(token).join('[redacted]');
 const ghEnv = () => {
   const e = { ...process.env, GH_TOKEN: token };
   delete e.GITHUB_TOKEN; // doctrine: CQ_AUTOMATION_TOKEN only, no silent fallback
   return e;
 };
 
-function runGit(args, { allowFail = false, env = process.env } = {}) {
-  const res = spawnSync('git', args, { cwd: ROOT, encoding: 'utf8', maxBuffer: MAX_BUFFER, env });
+function runGit(args, { cwd = ROOT, allowFail = false, env = process.env } = {}) {
+  const res = spawnSync('git', [...GIT_HARDEN, ...args], {
+    cwd,
+    encoding: 'utf8',
+    maxBuffer: MAX_BUFFER,
+    env,
+  });
   if (!allowFail && (res.error || res.status !== 0)) {
     throw new Error(
-      `git ${args[0]} failed: ${res.error ? res.error.message : `exit ${res.status}`}\n` +
-        redact(`${res.stdout ?? ''}${res.stderr ?? ''}`).trim(),
+      `git ${args.find((a) => !a.startsWith('-') && !a.includes('=')) ?? args[0]} failed: ${
+        res.error ? res.error.message : `exit ${res.status}`
+      }\n` + redact(`${res.stdout ?? ''}${res.stderr ?? ''}`).trim(),
     );
   }
-  return { stdout: res.stdout ?? '', status: res.status, error: res.error };
+  return {
+    stdout: res.stdout ?? '',
+    stderr: res.stderr ?? '',
+    status: res.status,
+    error: res.error,
+  };
 }
 
 function runGh(args) {
@@ -214,6 +267,89 @@ function runGh(args) {
     );
   }
   return res.stdout ?? '';
+}
+
+// `-c credential.helper=` clears any inherited helper so the askpass path is
+// the only credential source (withGitAskpass: token in the child ENV only).
+const CRED = ['-c', 'credential.helper='];
+
+// ---- pin the merge-queue tip: the proposal's base AND its comparison point ----
+let baseSha;
+try {
+  baseSha = await withGitAskpass(token, async (gitEnv) => {
+    runGit([...CRED, 'fetch', 'origin', `+refs/heads/${BASE}:refs/remotes/origin/${BASE}`], {
+      env: gitEnv,
+    });
+    return runGit([
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/remotes/origin/${BASE}^{commit}`,
+    ]).stdout.trim();
+  });
+} catch (err) {
+  fail(`cannot fetch origin/${BASE}: ${err.message}`);
+}
+if (/^[0-9a-f]{40,64}$/.test(baseSha ?? '') === false) {
+  fail(`origin/${BASE} did not resolve to a commit`);
+}
+
+// ---- committed baselines AT THE MERGE-QUEUE TIP, parsed by the engine ----
+const committed = [];
+const tree = runGit(['ls-tree', '-z', baseSha, '--', 'baselines/']).stdout;
+for (const entry of tree
+  .split('\0')
+  .filter((e) => e !== '')
+  .sort()) {
+  const tab = entry.indexOf('\t');
+  const [mode, type] = entry.slice(0, tab).split(' ');
+  const path = entry.slice(tab + 1);
+  if (path.endsWith('.json') === false) continue;
+  // The definition manifest, not a baseline.
+  if (path === 'baselines/ratchets.json') continue;
+  // Mirror the engine's leaf discipline: only a regular blob is evidence
+  // (a symlink/submodule/subtree entry is refused, never followed).
+  if (type !== 'blob' || (mode !== '100644' && mode !== '100755')) {
+    console.error(`ratchet-propose: note — ${path} is not a regular file at ${BASE}; skipped`);
+    continue;
+  }
+  let parsed;
+  try {
+    parsed = engine.parseBaseline(runGit(['cat-file', 'blob', `${baseSha}:${path}`]).stdout);
+  } catch (err) {
+    // A corrupt baseline yields no improvement (the ratchet CHECK is the
+    // enforcement point; this script only proposes tightenings).
+    console.error(`ratchet-propose: note — ${path} is corrupt; skipped — ${err.message}`);
+    continue;
+  }
+  committed.push(parsed);
+}
+
+// ---- improvements: only genuine TIGHTENs, judged by the engine's own comparator ----
+const improvements = [];
+for (const b of committed) {
+  const value = Object.hasOwn(live, b.metric) ? live[b.metric] : undefined;
+  if (value === undefined) {
+    console.error(
+      `ratchet-propose: note — metric '${b.metric}' (${b.target}) has no measured reading wired; skipped`,
+    );
+    continue;
+  }
+  if (value === null) continue; // note already emitted above
+  const committedValue = b.metric === 'coverage' ? engine.roundCoveragePct(b.value) : b.value;
+  if (engine.tightens(committedValue, value, b.direction)) {
+    improvements.push({ target: b.target, metric: b.metric, value });
+  } else {
+    console.error(
+      `ratchet-propose: ${b.target}/${b.metric} ${b.value} → ${value} is not a tightening ` +
+        `(${b.direction}) against ${BASE} — nothing to propose`,
+    );
+  }
+}
+
+if (improvements.length === 0) {
+  console.error('ratchet-propose: no tightening to propose');
+  process.exit(0);
 }
 
 // `gh repo view --json nameWithOwner -q .nameWithOwner` prints a BARE
@@ -254,6 +390,11 @@ function listOpenProposalPrs(head, base) {
   });
 }
 
+// ---- the merge-queue workspace: a disposable detached worktree at baseSha ----
+const wsParent = mkdtempSync(join(tmpdir(), 'ratchet-propose-mq-'));
+const ws = join(wsParent, 'ws');
+
+/** BaselinePrEffects over gh CLI + git, operating inside `ws` (never ROOT). */
 const effects = {
   async findOpenPrByHead(head) {
     const list = listOpenProposalPrs(head, BASE);
@@ -262,38 +403,27 @@ const effects = {
 
   async commitAndUpsertPr({ head, base, title, body, commitMessage, files }) {
     const existing = listOpenProposalPrs(head, base);
-    // Remember where the checkout started: the effects switch branches, and
-    // the finally below returns it (a local propose must not strand the
-    // developer on ratchet/propose-*).
-    const originalBranch = runGit(['rev-parse', '--abbrev-ref', 'HEAD']).stdout.trim();
-    // Auth via GIT_ASKPASS (withGitAskpass): the token rides in the git child
-    // ENV only — never in a URL, argv, or .git/config; the temp askpass file
-    // is cleaned up in the helper's own finally, even on abnormal exit.
-    // `-c credential.helper=` clears any inherited helper so the askpass path
-    // is the only credential source.
     await withGitAskpass(token, async (gitEnv) => {
-      const cred = ['-c', 'credential.helper='];
-      runGit([...cred, 'fetch', 'origin', base], { env: gitEnv });
       // Missing-ref probes are ALLOWED to fail: `rev-parse --verify --quiet`
       // exits nonzero with empty stdout exactly when the ref does not exist —
-      // the fresh-checkout case for the local head, and the FIRST-push case
-      // for the remote-tracking ref. An absent ref is the create/plain-push
-      // path, never an error (PR-105 round-2 finding 3).
+      // the fresh case for the local head, and the FIRST-push case for the
+      // remote-tracking ref (PR-105 round-2 finding 3).
       const localHead = runGit(['rev-parse', '--verify', '--quiet', `refs/heads/${head}`], {
+        cwd: ws,
         allowFail: true,
-        env: gitEnv,
       }).stdout.trim();
       if (localHead !== '') {
-        runGit(['checkout', head]); // reuse: idempotent re-run keeps its history
+        runGit(['checkout', head], { cwd: ws }); // reuse: idempotent re-run keeps its history
       } else {
-        runGit(['checkout', '-b', head, `origin/${base}`]);
+        // Cut from the PINNED merge-queue tip the baselines were read at.
+        runGit(['checkout', '-b', head, baseSha], { cwd: ws });
       }
       for (const f of files) {
-        mkdirSync(dirname(join(ROOT, f.path)), { recursive: true });
+        mkdirSync(dirname(join(ws, f.path)), { recursive: true });
         // Full renderBaseline bytes from the op — written verbatim.
-        writeFileSync(join(ROOT, f.path), f.content);
+        writeFileSync(join(ws, f.path), f.content);
       }
-      runGit(['add', '--', ...files.map((f) => f.path)]);
+      runGit(['add', '--', ...files.map((f) => f.path)], { cwd: ws });
       const commit = runGit(
         [
           '-c',
@@ -304,7 +434,7 @@ const effects = {
           '-m',
           commitMessage,
         ],
-        { allowFail: true },
+        { cwd: ws, allowFail: true },
       );
       // Idempotency: identical bytes on a re-run commit nothing — that is
       // success, not failure.
@@ -320,39 +450,31 @@ const effects = {
       // Lease push: a TRUE lease against the remote head when it exists
       // (idempotent re-push), a plain create when it does not (first push —
       // the tracking ref probe below fails on exactly that).
-      runGit([...cred, 'fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], {
+      runGit([...CRED, 'fetch', 'origin', `+refs/heads/${head}:refs/remotes/origin/${head}`], {
+        cwd: ws,
         allowFail: true,
         env: gitEnv,
       });
       const expected = runGit(['rev-parse', '--verify', '--quiet', `refs/remotes/origin/${head}`], {
+        cwd: ws,
         allowFail: true,
-        env: gitEnv,
       }).stdout.trim();
       if (expected !== '') {
         runGit(
           [
-            ...cred,
+            ...CRED,
             'push',
             `--force-with-lease=refs/heads/${head}:${expected}`,
             'origin',
             `${head}:refs/heads/${head}`,
           ],
-          { env: gitEnv },
+          { cwd: ws, env: gitEnv },
         );
       } else {
-        runGit([...cred, 'push', 'origin', `${head}:refs/heads/${head}`], { env: gitEnv });
-      }
-    }).finally(() => {
-      // Return the checkout to where it started — unless this run never
-      // switched (already on the proposal head, or a detached CI checkout,
-      // which is nothing to restore).
-      if (originalBranch === '' || originalBranch === 'HEAD' || originalBranch === head) return;
-      const back = spawnSync('git', ['checkout', originalBranch], { cwd: ROOT, encoding: 'utf8' });
-      if (back.error || back.status !== 0) {
-        console.error(
-          `ratchet-propose: note — could not return to the original branch '${originalBranch}': ` +
-            `exit ${back.status ?? '?'} (the proposal itself succeeded)`,
-        );
+        runGit([...CRED, 'push', 'origin', `${head}:refs/heads/${head}`], {
+          cwd: ws,
+          env: gitEnv,
+        });
       }
     });
     // Edit-then-create with recovery (upsertProposalPr): a PR found open can
@@ -405,11 +527,25 @@ const effects = {
   },
 };
 
-// ---- the op owns every remaining decision ----
-const propose = engine.createProposeBaselineUpdate(effects);
-const result = await propose({ ws: ROOT, base: BASE, improvements });
+// ---- the op owns every remaining decision; ws = the merge-queue tip ----
+let result;
+try {
+  runGit(['worktree', 'add', '--detach', ws, baseSha]);
+  const propose = engine.createProposeBaselineUpdate(effects);
+  result = await propose({ ws, base: BASE, improvements });
+} catch (err) {
+  console.error(`ratchet-propose: ${redact(err?.message ?? err)}`);
+  result = null;
+} finally {
+  runGit(['worktree', 'remove', '--force', ws], { allowFail: true });
+  rmSync(wsParent, { recursive: true, force: true });
+  runGit(['worktree', 'prune'], { allowFail: true });
+}
+if (result === null) process.exit(1);
 if (result.status !== 'ok') {
-  console.error(`ratchet-propose: proposal ${result.status} — ${result.error ?? result.detail}`);
+  console.error(
+    `ratchet-propose: proposal ${result.status} — ${redact(result.error ?? result.detail)}`,
+  );
   process.exit(1);
 }
 const outcome = result.value;
@@ -424,6 +560,6 @@ for (const a of outcome.applied) {
   console.error(`ratchet-propose: applied ${a.path}: ${a.oldValue} → ${a.newValue}`);
 }
 console.error(
-  `ratchet-propose: proposal ${outcome.proposal} — ${outcome.prUrl} (head ${outcome.head})`,
+  `ratchet-propose: proposal ${outcome.proposal} — ${outcome.prUrl} (head ${outcome.head}, base ${BASE})`,
 );
 console.log(String(outcome.prUrl ?? ''));

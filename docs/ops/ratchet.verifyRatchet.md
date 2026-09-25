@@ -1,10 +1,10 @@
-# `ratchet.monotonicGuard`
+# `ratchet.verifyRatchet`
 
 Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-op-docs.mjs).
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `ratchet`
-- **CLI:** `cq ratchet.monotonicGuard [--<schema-key>=<value> ...] [--json]`; run `cq ratchet.monotonicGuard --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq ratchet.verifyRatchet [--<schema-key>=<value> ...] [--json]`; run `cq ratchet.verifyRatchet --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 
@@ -20,22 +20,47 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
       "minLength": 1,
       "type": "string"
     },
-    "diff": {
-      "type": "string"
-    },
-    "diffPath": {
+    "measureConclusion": {
       "minLength": 1,
       "type": "string"
     },
-    "head": {
+    "measurementPath": {
       "minLength": 1,
       "type": "string"
     },
     "repo": {
       "minLength": 1,
       "type": "string"
+    },
+    "subject": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "subjectKind": {
+      "enum": [
+        "pr",
+        "push"
+      ],
+      "type": "string"
+    },
+    "trustRef": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "typecheckCount": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "type": "integer"
     }
   },
+  "required": [
+    "repo",
+    "trustRef",
+    "subject",
+    "subjectKind",
+    "base",
+    "measureConclusion"
+  ],
   "type": "object"
 }
 ```

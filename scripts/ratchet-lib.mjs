@@ -361,3 +361,69 @@ export function runCoverageRaw() {
     summary,
   };
 }
+
+/** Byte cap on the ratchet-propose measurement artifact (numbers only — tiny). */
+export const PROPOSE_MEASUREMENT_MAX_BYTES = 64 * 1024;
+
+/** The metric keys a propose measurement may carry, each with its value law. */
+const PROPOSE_METRIC_CHECKS = {
+  coverage: (v) => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100,
+  'typecheck-count': (v) => Number.isSafeInteger(v) && v >= 0,
+};
+
+/**
+ * Validate the ratchet-propose measurement artifact as UNTRUSTED DATA (W1.7).
+ * The artifact is produced by the credential-free measure leg, which ran the
+ * suite; the privileged proposer consumes it only through this function.
+ * `size` is the byte length the caller observed (fstat/read); over
+ * PROPOSE_MEASUREMENT_MAX_BYTES is refused before parsing. The shape is
+ * strict — exactly `{schemaVersion: 1, metrics: {...}}`, metric keys limited
+ * to `coverage` (finite, [0,100]) and `typecheck-count` (non-negative safe
+ * integer). An UNKNOWN metric key is refused, never ignored: the proposer
+ * must not act on a shape it does not know. Returns a null-prototype
+ * `{ coverage?, 'typecheck-count'? }`; an absent metric is simply absent (the
+ * caller notes it and proposes nothing from it — I5). Throws an Error with a
+ * clear message on any violation.
+ */
+export function parseProposeMeasurement(text, size) {
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`measurement size is not a byte count: ${String(size)}`);
+  }
+  if (size > PROPOSE_MEASUREMENT_MAX_BYTES) {
+    throw new Error(
+      `measurement is ${size} bytes — over the ${PROPOSE_MEASUREMENT_MAX_BYTES}-byte cap`,
+    );
+  }
+  if (typeof text !== 'string') throw new Error('measurement text is not a string');
+  let doc;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    throw new Error(`measurement is not valid JSON — ${err?.message ?? err}`);
+  }
+  const isPlainObject = (v) => typeof v === 'object' && v !== null && Array.isArray(v) === false;
+  if (!isPlainObject(doc)) throw new Error('measurement must be a JSON object');
+  const topKeys = Object.keys(doc).sort();
+  if (topKeys.length !== 2 || topKeys[0] !== 'metrics' || topKeys[1] !== 'schemaVersion') {
+    throw new Error(
+      `measurement must have exactly the keys schemaVersion and metrics (got: ${JSON.stringify(topKeys)})`,
+    );
+  }
+  if (doc.schemaVersion !== 1) {
+    throw new Error(`unsupported measurement schemaVersion ${JSON.stringify(doc.schemaVersion)}`);
+  }
+  if (!isPlainObject(doc.metrics)) throw new Error('measurement.metrics must be a JSON object');
+  const out = Object.create(null);
+  for (const key of Object.keys(doc.metrics)) {
+    const check = Object.hasOwn(PROPOSE_METRIC_CHECKS, key) ? PROPOSE_METRIC_CHECKS[key] : null;
+    if (check === null) {
+      throw new Error(`measurement carries unknown metric ${JSON.stringify(key)} — refusing`);
+    }
+    const value = doc.metrics[key];
+    if (!check(value)) {
+      throw new Error(`measurement metric '${key}' has an invalid value ${JSON.stringify(value)}`);
+    }
+    out[key] = value;
+  }
+  return out;
+}

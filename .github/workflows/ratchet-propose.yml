@@ -1,62 +1,93 @@
 # instantiated from policy/templates/ratchet-propose.yml — edit the template, not this file
-# ratchet-propose — lane H slice 2 (goal H4), round-1 fix: post-merge
-# baseline-tightening proposals. After an improvement lands on main,
-# ratchet-propose.mjs measures the live ratchets, diffs them against the
-# committed baselines, and opens exactly ONE idempotent proposal PR per
-# improvement set — authored with CQ_AUTOMATION_TOKEN, never GITHUB_TOKEN (a
-# GITHUB_TOKEN-authored PR suppresses workflow runs, so its required I4 check
-# would never run — the script enforces the doctrine too; this job is the
-# outer belt).
+# ratchet-propose — the PRIVILEGED half of baseline-tightening proposals
+# (ADR-0004 D-B "ratchet-propose"; W1.7).
 #
-# NO job-level `if:` gate: the env context is not available at job-if
-# evaluation time (the env-intermediary pattern tried in slice 2 never
-# worked — PR-105 round-1 finding), and `secrets` cannot be read in `if:`
-# directly either. Instead the job ALWAYS runs and the SCRIPT is the gate:
-# without CQ_AUTOMATION_TOKEN it prints a skip message and exits 0 (belt —
-# this workflow; braces — the script's own token gate). A tokenless runner
-# therefore shows a green no-op, and a manual workflow_dispatch run behaves
-# the same.
+# Carrier: `workflow_run` on `ratchet-propose-measure` for runs on main — the
+# DEFAULT BRANCH's copy of this file runs (ADR-0004 D-A.1), so no pull request
+# can edit what holds the automation token before promotion. The job:
+#   - verifies the triggering run (workflow path, event `push`, branch main,
+#     repository id, success) before touching the token;
+#   - builds the toolkit from the trust ref with `npm ci --ignore-scripts`
+#     and runs NO tests and no head code (the measurement ran credential-free
+#     in the measure leg);
+#   - reads the measurement artifact as size-capped, schema-validated DATA;
+#   - opens exactly one idempotent proposal PR **against `merge-queue`**,
+#     branched from the merge-queue tip and compared against the merge-queue
+#     tip's committed baselines, so the proposal goes through the queue's
+#     checks like any PR (it previously targeted main and bypassed them).
 #
-# Invariant I4: no paths-ignore and no path filters anywhere; the absence of
-# an `if:` is the point — nothing here can silently skip.
+# TOKEN DOCTRINE (scripts/ratchet-propose.mjs): the PR is authored with
+# CQ_AUTOMATION_TOKEN, never GITHUB_TOKEN — a GITHUB_TOKEN-authored PR
+# suppresses its own workflow runs, so its checks would never run. The
+# token lives behind `environment: automation`; W1.10 moves it into that
+# environment (default-branch-only policy) and replaces it with the
+# automation App (ADR-0004 D-D.3). A tokenless run is a green no-op.
 name: ratchet-propose
 
 on:
-  push:
+  workflow_run:
+    workflows:
+      - ratchet-propose-measure
+    types:
+      - completed
     branches:
       - main
-  workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: ratchet-propose-${{ github.ref }}
-  cancel-in-progress: true
+  group: ratchet-propose
+  cancel-in-progress: false
 
 jobs:
   propose:
     name: propose
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
+    environment: automation
+    permissions:
+      actions: read
+      contents: read
     steps:
-      - name: Check out the repo (full history — the proposal branches from origin/main)
+      - name: Verify the triggering measure run
+        env:
+          RUN_PATH: ${{ github.event.workflow_run.path }}
+          RUN_EVENT: ${{ github.event.workflow_run.event }}
+          RUN_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          RUN_REPO_ID: ${{ github.event.workflow_run.head_repository.id }}
+          REPO_ID: ${{ github.repository_id }}
+        run: |
+          set -euo pipefail
+          [ "$RUN_PATH" = ".github/workflows/ratchet-propose-measure.yml" ] || { echo "refusing: run path '$RUN_PATH'"; exit 1; }
+          [ "$RUN_EVENT" = "push" ] || [ "$RUN_EVENT" = "workflow_dispatch" ] || { echo "refusing: event '$RUN_EVENT'"; exit 1; }
+          [ "$RUN_BRANCH" = "main" ] || { echo "refusing: branch '$RUN_BRANCH'"; exit 1; }
+          [ "$RUN_REPO_ID" = "$REPO_ID" ] || { echo "refusing: foreign run"; exit 1; }
+      - name: Check out the trust ref (the default branch)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
         with:
+          ref: ${{ github.sha }}
           fetch-depth: 0
-          # npm runs repo code below, so the checkout token must not
-          # survive checkout (persist-credentials: false). The proposal
-          # push authenticates with CQ_AUTOMATION_TOKEN via GIT_ASKPASS —
-          # never with this checkout's token.
+          # The proposal push authenticates with CQ_AUTOMATION_TOKEN via
+          # GIT_ASKPASS — never with this checkout's token.
           persist-credentials: false
-      - name: Set up Node 24
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing)
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0 (immutable commit pin; repo policy)
         with:
           node-version: 24
-          cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Propose baseline tightening
-        run: node scripts/ratchet-propose.mjs
+          cache: ''
+      - name: Install and build the trusted toolkit (no lifecycle scripts)
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Download the measurement artifact (untrusted data)
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (immutable commit pin; repo policy)
+        with:
+          name: ratchet-propose-measure
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/ratchet-propose
+      - name: Propose baseline tightening against merge-queue
+        run: node scripts/ratchet-propose.mjs --measurement="${RUNNER_TEMP}/ratchet-propose/measurement.json"
         env:
           CQ_AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN }}

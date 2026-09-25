@@ -1,7 +1,8 @@
 // T4.2 — the ratchet family OP registry (src/ops/ratchet/registry.ts).
 //
 // Pinned here:
-//   1. The family carries exactly the four H1–H3 ops (the metric adapters are
+//   1. The family carries exactly the four H1–H3 ops plus W1.7's trusted
+//      verifier pair (verifyRatchet, recomputeTypecheck) (the metric adapters are
 //      NOT ops and stay in metricRegistry.ts), each named `<family>.<module
 //      base>` so the central completeness heuristic covers the module and the
 //      CLI exposes one subcommand per op.
@@ -23,6 +24,8 @@ const ENTRY_NAMES = [
   'ratchet.checkRatchet',
   'ratchet.monotonicGuard',
   'ratchet.proposeBaselineUpdate',
+  'ratchet.recomputeTypecheck',
+  'ratchet.verifyRatchet',
 ];
 
 const entryByName = (name: string) => {
@@ -52,6 +55,15 @@ const minimalInputs: Record<string, () => Record<string, unknown>> = {
     source: commandSource(),
   }),
   'ratchet.monotonicGuard': () => ({ diff: '' }),
+  'ratchet.verifyRatchet': () => ({
+    repo: '/repo',
+    trustRef: 'main',
+    subject: 'HEAD',
+    subjectKind: 'pr',
+    base: 'origin/merge-queue',
+    measureConclusion: 'success',
+  }),
+  'ratchet.recomputeTypecheck': () => ({ repo: '/repo', subject: 'HEAD', scratch: '/tmp/x' }),
   'ratchet.proposeBaselineUpdate': () => ({
     ws: '/repo',
     base: 'main',
@@ -66,7 +78,7 @@ const minimalInput = (name: string): Record<string, unknown> => {
 };
 
 describe('ratchet family op registry entries', () => {
-  test('the family carries exactly the four ops, each `<family>.<module base>`', () => {
+  test('the family carries exactly its six ops, each `<family>.<module base>`', () => {
     expect(registry.map((entry) => entry.name).sort()).toEqual([...ENTRY_NAMES].sort());
   });
 
@@ -82,11 +94,14 @@ describe('ratchet family op registry entries', () => {
     expect(result.success).toBe(false);
   });
 
-  test('monotonicGuard requires exactly one of diff/diffPath', () => {
+  test('monotonicGuard requires exactly one of diff/diffPath/repo+base+head', () => {
     const schema = entryByName('ratchet.monotonicGuard').inputSchema;
     expect(schema.safeParse({}).success).toBe(false);
     expect(schema.safeParse({ diff: '', diffPath: '/tmp/x.diff' }).success).toBe(false);
     expect(schema.safeParse({ diffPath: '/tmp/x.diff' }).success).toBe(true);
+    expect(schema.safeParse({ repo: '.', base: 'origin/main', head: 'HEAD' }).success).toBe(true);
+    expect(schema.safeParse({ repo: '.', base: 'origin/main' }).success).toBe(false);
+    expect(schema.safeParse({ diff: '', repo: '.', base: 'a', head: 'b' }).success).toBe(false);
   });
 
   test.each(ENTRY_NAMES)(
@@ -98,11 +113,11 @@ describe('ratchet family op registry entries', () => {
   );
 
   test('ratchet.monotonicGuard normalizes the coverage re-basis before judging (review finding 1)', async () => {
-    // A hand-committed fractional coverage baseline re-based to the integer
-    // the live `coverage-json` reading uses must read as an equal no-op, not
+    // A hand-committed fractional coverage baseline re-based to the one
+    // decimal the live `coverage-json` reading uses must read as an equal no-op, not
     // a loosening — the op normalizes before the pure guard judges.
     const op = await entryByName('ratchet.monotonicGuard').importer();
-    const reBasis = await op({ diff: coverageDiff(93.46, 93) });
+    const reBasis = await op({ diff: coverageDiff(93.54, 93.5) });
     expect(reBasis).toMatchObject({
       status: 'ok',
       value: { ok: true, violations: [], filesChecked: 1 },
@@ -116,7 +131,7 @@ describe('ratchet family op registry entries', () => {
 
   test('ratchet.monotonicGuard normalizes any (target, coverage) pair, not one literal pair (finding N)', async () => {
     const op = await entryByName('ratchet.monotonicGuard').importer();
-    const verdict = await op({ diff: coverageDiff(93.46, 93, 'web') });
+    const verdict = await op({ diff: coverageDiff(93.54, 93.5, 'web') });
     expect(verdict).toMatchObject({
       status: 'ok',
       value: { ok: true, violations: [], filesChecked: 1 },
@@ -134,7 +149,7 @@ describe('ratchet family op registry entries', () => {
     const dir = await mkdtemp(join(tmpdir(), 'cq-op-registry-diff-'));
     try {
       const diffPath = join(dir, 'ratchet.diff');
-      await writeFile(diffPath, coverageDiff(93.46, 93), 'utf8');
+      await writeFile(diffPath, coverageDiff(93.54, 93.5), 'utf8');
       const ok = await op({ diffPath });
       expect(ok).toMatchObject({ status: 'ok', value: { ok: true, filesChecked: 1 } });
 
