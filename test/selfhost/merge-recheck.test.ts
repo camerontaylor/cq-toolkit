@@ -20,6 +20,10 @@
 // (observeOpenPrs and the recheck write only on material change; an ok
 // recheck writes BEFORE the inner merge), observeOpenPrs
 // isolation/pruning/single write, and the non-retryable refusal stderr.
+// Also: acceptance from each actor's CURRENT opinion (DISMISSED — in place
+// or as a later review — revokes it), base oid/name consistency across
+// pages, the per-PR base pin (unverified / changed / protected), unresolved
+// external threads, and the state read's discarded reasons on the answer.
 import { createHash } from 'node:crypto';
 import { describe, expect, test } from 'vitest';
 import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
@@ -47,6 +51,7 @@ const PREFIX = `repos/${OWNER}/${REPO}/`;
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
 const BASE = 'c'.repeat(40);
+const BASE_NAME = 'merge-queue';
 const T0 = Date.parse('2026-09-25T00:00:00.000Z');
 const SETTLE_MS = 30 * 60_000;
 const LATER = T0 + SETTLE_MS + 60_000;
@@ -64,13 +69,22 @@ interface ReviewSpec {
   oid: string | null;
 }
 
+interface ThreadSpec {
+  isResolved: unknown;
+  /** The root comment's author login; null → a null author; undefined → no comments. */
+  root: string | null | undefined;
+}
+
 interface PrSpec {
   state: string;
   isDraft: boolean;
   author: string;
   head: string;
   base: string;
+  baseName: string;
   reviews: ReviewSpec[];
+  threads: ThreadSpec[];
+  omitThreads: boolean;
   forcePushes: number;
   reviewsHasNext: boolean;
   timelineTotalCount: number;
@@ -79,6 +93,10 @@ interface PrSpec {
   missing: boolean;
   /** When set, pages after the first report this headRefOid (a mid-read push). */
   headOnLaterPages: string | null;
+  /** When set, pages after the first report this baseRefOid (a mid-read base move). */
+  baseOnLaterPages: string | null;
+  /** When set, pages after the first report this baseRefName (a mid-read retarget). */
+  baseNameOnLaterPages: string | null;
 }
 
 const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
@@ -87,7 +105,10 @@ const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
   author: 'alice',
   head: SHA_B,
   base: BASE,
+  baseName: BASE_NAME,
   reviews: [],
+  threads: [],
+  omitThreads: false,
   forcePushes: 0,
   reviewsHasNext: false,
   timelineTotalCount: 0,
@@ -95,6 +116,8 @@ const prSpec = (over: Partial<PrSpec> = {}): PrSpec => ({
   errors: null,
   missing: false,
   headOnLaterPages: null,
+  baseOnLaterPages: null,
+  baseNameOnLaterPages: null,
   ...over,
 });
 
@@ -126,8 +149,10 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
   if (spec.missing) return { data: { repository: { pullRequest: null } } };
   const reviewsFrom = Number(flagValue(args, 'reviewsAfter') || '0');
   const timelineFrom = Number(flagValue(args, 'timelineAfter') || '0');
-  const laterPage = reviewsFrom > 0 || timelineFrom > 0;
+  const threadsFrom = Number(flagValue(args, 'threadsAfter') || '0');
+  const laterPage = reviewsFrom > 0 || timelineFrom > 0 || threadsFrom > 0;
   const reviewsMore = reviewsFrom + PAGE < spec.reviews.length;
+  const threadsMore = threadsFrom + PAGE < spec.threads.length;
   const timelineMore = timelineFrom + PAGE < spec.forcePushes;
   return {
     data: {
@@ -138,7 +163,31 @@ const payloadFor = (spec: PrSpec, args: string[]): unknown => {
           author: { login: spec.author, __typename: 'User' },
           headRefOid:
             laterPage && spec.headOnLaterPages !== null ? spec.headOnLaterPages : spec.head,
-          baseRefOid: spec.base,
+          baseRefOid:
+            laterPage && spec.baseOnLaterPages !== null ? spec.baseOnLaterPages : spec.base,
+          baseRefName:
+            laterPage && spec.baseNameOnLaterPages !== null
+              ? spec.baseNameOnLaterPages
+              : spec.baseName,
+          ...(spec.omitThreads
+            ? {}
+            : {
+                reviewThreads: {
+                  pageInfo: {
+                    hasNextPage: threadsMore,
+                    endCursor: threadsMore ? String(threadsFrom + PAGE) : null,
+                  },
+                  nodes: spec.threads.slice(threadsFrom, threadsFrom + PAGE).map((t) => ({
+                    isResolved: t.isResolved,
+                    comments: {
+                      nodes:
+                        t.root === undefined
+                          ? []
+                          : [{ author: t.root === null ? null : { login: t.root } }],
+                    },
+                  })),
+                },
+              }),
           ...(spec.omitReviews
             ? {}
             : {
@@ -334,7 +383,7 @@ const innerEffects = (forge: Forge) => {
   const effects: MergeEffects = {
     validateRef: () => Promise.resolve({ ok: true, sha: SHA_B }),
     fetchRef: () => Promise.resolve(ok),
-    readBaseRef: () => Promise.resolve({ ok: true, baseRefName: 'main' }),
+    readBaseRef: () => Promise.resolve({ ok: true, baseRefName: BASE_NAME }),
     worktreePrepare: (pr) => Promise.resolve({ path: `/tmp/pr-${String(pr)}` }),
     worktreeRemove: () => Promise.resolve(),
     mergePr: (pr, opts) => {
@@ -350,10 +399,20 @@ const innerEffects = (forge: Forge) => {
 
 const gated = (forge: Forge, nowMs: number, policy: TrustPolicy = CONSERVATIVE_TRUST_POLICY) => {
   const inner = innerEffects(forge);
-  const effects = gateMergeEffects(inner.effects, (pr, head) =>
-    recheckBeforeMerge(recheckDeps(forge, nowMs, policy), pr, head),
+  const effects = gateMergeEffects(inner.effects, (pr, head, base) =>
+    recheckBeforeMerge(recheckDeps(forge, nowMs, policy), pr, head, base),
   );
   return { effects, mergeCalls: inner.mergeCalls };
+};
+
+/** executeMerges' order: readBaseRef right before every mergePr call. */
+const readAndMerge = async (
+  effects: MergeEffects,
+  pr: number,
+  opts: { method: 'merge'; matchHeadCommit?: string },
+): Promise<GhResult> => {
+  await effects.readBaseRef(pr);
+  return effects.mergePr(pr, opts);
 };
 
 const snapshotOf = async (spec: PrSpec) => fetchPrSnapshot(forgeDeps(makeForge({ 7: spec })), 7);
@@ -387,7 +446,10 @@ describe('fetchPrSnapshot', () => {
       'pr=7',
     ]);
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/\$query\b/);
-    expect(PR_SNAPSHOT_QUERY).toMatch(/\$reviewsAfter: String, \$timelineAfter: String/);
+    expect(PR_SNAPSHOT_QUERY).toMatch(
+      /\$reviewsAfter: String, \$threadsAfter: String, \$timelineAfter: String/,
+    );
+    expect(PR_SNAPSHOT_QUERY).toMatch(/baseRefName/);
     expect(PR_SNAPSHOT_QUERY).not.toMatch(/totalCount/);
     expect(calls).toHaveLength(1); // one page: no cursor flag ever sent
   });
@@ -425,11 +487,56 @@ describe('fetchPrSnapshot', () => {
     const snap = await fetchPrSnapshot(forgeDeps(forge), 7);
     expect(snap.truncated).toBe(true);
     expect(forge.log.filter((entry) => entry === 'graphql:7')).toHaveLength(SNAPSHOT_PAGE_CAP);
-    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B);
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
     expect(result).toEqual({
       ok: false,
-      reason: 'snapshot truncated: reviews or force-push timeline incomplete',
+      reason:
+        'snapshot truncated: reviews, review threads or force-push timeline incomplete, or the pr moved mid-read',
     });
+  });
+
+  test('a base oid or base name that changes between pages → truncated (fail closed)', async () => {
+    const crowd = Array.from({ length: 150 }, () => review());
+    const movedOid = await snapshotOf(prSpec({ reviews: crowd, baseOnLaterPages: SHA_A }));
+    expect(movedOid.truncated).toBe(true);
+    const retargeted = await snapshotOf(
+      prSpec({ reviews: crowd, baseNameOnLaterPages: 'release' }),
+    );
+    expect(retargeted.truncated).toBe(true);
+    expect(retargeted.baseRefName).toBe(BASE_NAME); // PR-level fields: first page
+    expect((await snapshotOf(prSpec({ reviews: crowd }))).truncated).toBe(false);
+  });
+
+  test('review threads page with their own cursor; resolution and root author fail closed', async () => {
+    const threads: ThreadSpec[] = [
+      ...Array.from({ length: 140 }, () => ({ isResolved: true, root: 'dave' })),
+      { isResolved: 'yes', root: 'dave' },
+      { isResolved: false, root: undefined },
+      { isResolved: false, root: null },
+    ];
+    const forge = makeForge({ 7: prSpec({ threads }) });
+    const calls: string[][] = [];
+    const snap = await fetchPrSnapshot(
+      {
+        ...forgeDeps(forge),
+        gh: (args) => {
+          calls.push(args);
+          return forge.gh(args);
+        },
+      },
+      7,
+    );
+    expect(calls).toHaveLength(2);
+    expect(calls[1]?.slice(-2)).toEqual(['-f', 'threadsAfter=100']);
+    expect(snap.truncated).toBe(false);
+    expect(snap.threads).toHaveLength(143);
+    expect(snap.threads.slice(-3)).toEqual([
+      { isResolved: false, rootAuthorLogin: 'dave' },
+      { isResolved: false, rootAuthorLogin: null },
+      { isResolved: false, rootAuthorLogin: null },
+    ]);
+    // A missing reviewThreads connection is truncated.
+    expect((await snapshotOf(prSpec({ omitThreads: true }))).truncated).toBe(true);
   });
 
   test('a head that moves between pages → truncated (the PR moved mid-read)', async () => {
@@ -503,7 +610,7 @@ describe('judgeAtHead', () => {
     // End to end: settled tuple at B, yet the stale approval can never merge.
     await seedObservation(forge, [7]);
     const { effects, mergeCalls } = gated(forge, LATER);
-    const result = await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B });
+    const result = await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B });
     expect(result.code).toBe(1);
     expect(result.stderr).toMatch(/refused pr 7: no_head_bound_acceptance/);
     expect(mergeCalls).toEqual([]);
@@ -629,6 +736,73 @@ describe('judgeAtHead', () => {
     }
   });
 
+  test('APPROVED at head then a later DISMISSED review by the same actor → not an acceptor', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ state: 'APPROVED', submittedAt: '2026-09-24T09:00:00Z' }),
+          review({ state: 'DISMISSED', submittedAt: '2026-09-24T10:00:00Z' }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
+      accepted: false,
+      reason: 'no_head_bound_acceptance',
+    });
+  });
+
+  test('an approval node GitHub rewrote to DISMISSED (state mutated in place) never counts', async () => {
+    const snap = await snapshotOf(prSpec({ reviews: [review({ state: 'DISMISSED' })] }));
+    const both = trustPolicyFromConfig({ acceptReviewStates: ['APPROVED', 'COMMENTED'] });
+    for (const policy of [CONSERVATIVE_TRUST_POLICY, both]) {
+      expect(judgeAtHead(snap, SHA_B, policy)).toMatchObject({
+        reason: 'no_head_bound_acceptance',
+      });
+    }
+  });
+
+  test('APPROVED at head then COMMENTED (not an accept state) → still an acceptor', async () => {
+    const snap = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ state: 'APPROVED', submittedAt: '2026-09-24T09:00:00Z' }),
+          review({ state: 'COMMENTED', oid: SHA_A, submittedAt: '2026-09-24T10:00:00Z' }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toEqual({
+      accepted: true,
+      by: ['user:carol'],
+    });
+  });
+
+  test('with COMMENTED accepted, the LATEST accept-state review decides (current opinion)', async () => {
+    const policy = trustPolicyFromConfig({ acceptReviewStates: ['APPROVED', 'COMMENTED'] });
+    // APPROVED of an old sha, then COMMENTED at head → the head comment counts.
+    const current = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ state: 'APPROVED', oid: SHA_A, submittedAt: '2026-09-24T09:00:00Z' }),
+          review({ state: 'COMMENTED', oid: SHA_B, submittedAt: '2026-09-24T10:00:00Z' }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(current, SHA_B, policy)).toEqual({ accepted: true, by: ['user:carol'] });
+    // COMMENTED at head, then APPROVED of an old sha → the actor's current
+    // opinion is bound to the old sha: no acceptance.
+    const stale = await snapshotOf(
+      prSpec({
+        reviews: [
+          review({ state: 'COMMENTED', oid: SHA_B, submittedAt: '2026-09-24T09:00:00Z' }),
+          review({ state: 'APPROVED', oid: SHA_A, submittedAt: '2026-09-24T10:00:00Z' }),
+        ],
+      }),
+    );
+    expect(judgeAtHead(stale, SHA_B, policy)).toMatchObject({
+      reason: 'no_head_bound_acceptance',
+    });
+  });
+
   test('an acceptance needs a PARSEABLE submittedAt', async () => {
     const snap = await snapshotOf(prSpec({ reviews: [review({ submittedAt: 'not-a-date' })] }));
     expect(judgeAtHead(snap, SHA_B, CONSERVATIVE_TRUST_POLICY)).toMatchObject({
@@ -726,10 +900,10 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     await seedObservation(forge, [7]);
     const { effects, mergeCalls } = gated(forge, LATER);
     const opts = { method: 'merge' as const, matchHeadCommit: SHA_B };
-    const result = await effects.mergePr(7, opts);
+    const result = await readAndMerge(effects, 7, opts);
     expect(result.code).toBe(0);
     expect(mergeCalls).toEqual([{ pr: 7, opts }]);
-    const direct = await recheckBeforeMerge(recheckDeps(forge, LATER + 1), 7, SHA_B);
+    const direct = await recheckBeforeMerge(recheckDeps(forge, LATER + 1), 7, SHA_B, BASE_NAME);
     expect(direct).toMatchObject({
       ok: true,
       acceptedBy: ['user:carol'],
@@ -761,7 +935,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     const { effects, mergeCalls } = gated(forge, LATER);
     forge.log.length = 0;
     forge.log.push('merge-requested');
-    const blocked = await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B });
+    const blocked = await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B });
     expect(blocked.stderr).toMatch(/objection_outstanding/);
     expect(mergeCalls).toEqual([]);
     expect(forge.log[1]).toBe('graphql:7');
@@ -779,7 +953,9 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     );
     forge.log.length = 0;
     forge.log.push('merge-requested');
-    expect((await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B })).code).toBe(0);
+    expect((await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B })).code).toBe(
+      0,
+    );
     const graphqlAt = forge.log.indexOf('graphql:7');
     expect(graphqlAt).toBeGreaterThan(forge.log.indexOf('merge-requested'));
     expect(graphqlAt).toBeLessThan(forge.log.indexOf('inner-merge:7'));
@@ -790,7 +966,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     await seedObservation(forge, [7]);
     // Force-pushed away and back to A: same head, epoch 1.
     forge.prs.set(7, prSpec({ head: SHA_A, forcePushes: 1, reviews: [review({ oid: SHA_A })] }));
-    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_A);
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_A, BASE_NAME);
     expect(result.ok).toBe(false);
     expect((result as { reason: string }).reason).toMatch(
       /^settle: (tuple_changed|single_observation)$/,
@@ -801,7 +977,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
     await seedObservation(forge, [7]);
     forge.log.length = 0;
-    const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B);
+    const result = await recheckBeforeMerge(recheckDeps(forge, T0 + 1000), 7, SHA_B, BASE_NAME);
     expect(result).toEqual({ ok: false, reason: 'settle: settle_pending' });
     // A refusal on an unchanged tuple writes nothing.
     expect(forge.log.filter((entry) => /^state:(POST|PATCH)/.test(entry))).toEqual([]);
@@ -809,14 +985,16 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
 
   test('a refusal that creates a new anchor writes it (best effort) so a later run can settle', async () => {
     const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
-    const result = await recheckBeforeMerge(recheckDeps(forge, T0), 7, SHA_B);
+    const result = await recheckBeforeMerge(recheckDeps(forge, T0), 7, SHA_B, BASE_NAME);
     expect(result).toEqual({ ok: false, reason: 'settle: single_observation' });
     const { state } = await readSettleState(forgeDeps(forge));
     expect(state.prs['7']?.observations).toEqual([
       { observedAt: new Date(T0).toISOString(), by: 'self-merge-prs:recheck' },
     ]);
     // The anchor it wrote settles a recheck past the window.
-    expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B)).ok).toBe(true);
+    expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME)).ok).toBe(
+      true,
+    );
   });
 
   test('an ok recheck writes its observation BEFORE the inner mergePr', async () => {
@@ -824,7 +1002,9 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     await seedObservation(forge, [7]);
     forge.log.length = 0;
     const { effects } = gated(forge, LATER);
-    expect((await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B })).code).toBe(0);
+    expect((await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B })).code).toBe(
+      0,
+    );
     const patchAt = forge.log.findIndex((entry) => entry.startsWith('state:PATCH'));
     expect(patchAt).toBeGreaterThan(forge.log.indexOf('graphql:7'));
     expect(patchAt).toBeLessThan(forge.log.indexOf('inner-merge:7'));
@@ -853,6 +1033,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
       },
       7,
       SHA_B,
+      BASE_NAME,
     );
     expect(order).toEqual(['fetch', 'clock']);
   });
@@ -869,7 +1050,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     ];
     for (const [over, head, pattern] of cases) {
       const forge = makeForge({ 7: prSpec({ reviews: [review()], ...over }) });
-      const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, head);
+      const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, head, BASE_NAME);
       expect(result.ok).toBe(false);
       expect((result as { reason: string }).reason).toMatch(pattern);
     }
@@ -881,7 +1062,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     forge.hook = (args) =>
       args.includes('PATCH') ? unprocessable('Update is not a fast forward') : undefined;
     const { effects, mergeCalls } = gated(forge, LATER);
-    const result = await effects.mergePr(7, { method: 'merge', matchHeadCommit: SHA_B });
+    const result = await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B });
     expect(result.stderr).toMatch(/settle state not durable/);
     expect(mergeCalls).toEqual([]);
   });
@@ -892,7 +1073,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
       (args[1] ?? '').includes('git/ref/')
         ? { code: 1, stdout: '', stderr: 'gh: Server Error (HTTP 502)' }
         : undefined;
-    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B);
+    const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
     expect(result).toMatchObject({
       ok: false,
       reason: expect.stringMatching(/^settle state not durable: gh exit 1/) as unknown,
@@ -912,6 +1093,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
       },
       7,
       SHA_B,
+      BASE_NAME,
     );
     expect(result).toEqual({ ok: false, reason: 'recheck fetch failed: spawn gh ENOENT' });
     const badClock = await recheckBeforeMerge(
@@ -921,8 +1103,161 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
       },
       7,
       SHA_B,
+      BASE_NAME,
     );
     expect(badClock.ok).toBe(false);
+  });
+
+  test('base pin: no successful readBaseRef → base unverified; a failed read forgets the pin; the pin is single-use', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    const inner = innerEffects(forge);
+    let readAnswer: { ok: boolean; baseRefName?: string } = { ok: true, baseRefName: BASE_NAME };
+    const effects = gateMergeEffects(
+      { ...inner.effects, readBaseRef: () => Promise.resolve(readAnswer) },
+      (pr, head, base) => recheckBeforeMerge(recheckDeps(forge, LATER), pr, head, base),
+    );
+    const opts = { method: 'merge' as const, matchHeadCommit: SHA_B };
+    // No read at all.
+    expect((await effects.mergePr(7, opts)).stderr).toMatch(/refused pr 7: base unverified/);
+    // A successful read, then a failed one: the older pin is forgotten.
+    await effects.readBaseRef(7);
+    readAnswer = { ok: false };
+    await effects.readBaseRef(7);
+    expect((await effects.mergePr(7, opts)).stderr).toMatch(/base unverified/);
+    // An ok read with an empty name pins nothing.
+    readAnswer = { ok: true, baseRefName: '' };
+    await effects.readBaseRef(7);
+    expect((await effects.mergePr(7, opts)).stderr).toMatch(/base unverified/);
+    expect(inner.mergeCalls).toEqual([]);
+    // A good read pins exactly one merge call.
+    readAnswer = { ok: true, baseRefName: BASE_NAME };
+    await effects.readBaseRef(7);
+    expect((await effects.mergePr(7, opts)).code).toBe(0);
+    expect((await effects.mergePr(7, opts)).stderr).toMatch(/base unverified/);
+    expect(inner.mergeCalls).toHaveLength(1);
+  });
+
+  test('base pin: the recheck receives the base readBaseRef saw, per PR', async () => {
+    const forge = makeForge({});
+    const inner = innerEffects(forge);
+    const seen: Array<[number, string | undefined]> = [];
+    const effects = gateMergeEffects(
+      {
+        ...inner.effects,
+        readBaseRef: (pr) => Promise.resolve({ ok: true, baseRefName: `base-${String(pr)}` }),
+      },
+      (pr, _head, base) => {
+        seen.push([pr, base]);
+        return Promise.resolve({ ok: false, reason: 'stub' });
+      },
+    );
+    await effects.readBaseRef(1);
+    await effects.readBaseRef(2);
+    await effects.mergePr(2, { method: 'merge', matchHeadCommit: SHA_B });
+    await effects.mergePr(1, { method: 'merge', matchHeadCommit: SHA_B });
+    expect(seen).toEqual([
+      [2, 'base-2'],
+      [1, 'base-1'],
+    ]);
+  });
+
+  test('a live base that differs from the pinned base → base changed; nothing merges', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()], baseName: 'release' }) });
+    await seedObservation(forge, [7]);
+    const { effects, mergeCalls } = gated(forge, LATER);
+    const result = await readAndMerge(effects, 7, { method: 'merge', matchHeadCommit: SHA_B });
+    expect(result.stderr).toMatch(
+      /refused pr 7: base changed: readBaseRef pinned merge-queue but the forge now reports release/,
+    );
+    expect(mergeCalls).toEqual([]);
+  });
+
+  test('a live base of the protected branch is refused outright, even when pinned', async () => {
+    const forge = makeForge({ 7: prSpec({ reviews: [review()], baseName: 'main' }) });
+    await seedObservation(forge, [7]);
+    const result = await recheckBeforeMerge(
+      { ...recheckDeps(forge, LATER), protectedBranch: 'main' },
+      7,
+      SHA_B,
+      'main',
+    );
+    expect(result).toEqual({
+      ok: false,
+      reason: 'base is the protected branch main: never merged into',
+    });
+    // Without a protected branch configured the same pin would pass the base gate.
+    expect((await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, 'main')).ok).toBe(true);
+  });
+
+  test('unresolved external threads refuse before reviews are judged', async () => {
+    const cases: Array<[ThreadSpec[], string | null]> = [
+      [[{ isResolved: false, root: 'dave' }], 'unresolved external threads: 1'],
+      [[{ isResolved: false, root: null }], 'unresolved external threads: 1'],
+      [
+        [
+          { isResolved: false, root: 'dave' },
+          { isResolved: 'maybe', root: 'erin' },
+        ],
+        'unresolved external threads: 2',
+      ],
+      // The PR author's own thread and resolved threads never block.
+      [
+        [
+          { isResolved: false, root: 'alice' },
+          { isResolved: true, root: 'dave' },
+        ],
+        null,
+      ],
+    ];
+    for (const [threads, reason] of cases) {
+      const forge = makeForge({ 7: prSpec({ reviews: [review()], threads }) });
+      await seedObservation(forge, [7]);
+      const result = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+      expect(result).toEqual(
+        reason === null ? expect.objectContaining({ ok: true }) : { ok: false, reason },
+      );
+    }
+    // With NO acceptance at all, the thread refusal still comes first.
+    const bare = makeForge({ 7: prSpec({ threads: [{ isResolved: false, root: 'dave' }] }) });
+    expect(await recheckBeforeMerge(recheckDeps(bare, LATER), 7, SHA_B, BASE_NAME)).toEqual({
+      ok: false,
+      reason: 'unresolved external threads: 1',
+    });
+  });
+
+  test('discarded ledger records surface on a refusal reason and on an ok result', async () => {
+    // Refusal: a foreign ledger is discarded wholesale → single observation.
+    const foreign = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    foreign.hook = (args) =>
+      (args[1] ?? '').includes('git/ref/')
+        ? okRes({ object: { sha: 'e'.repeat(40) } })
+        : (args[1] ?? '').includes('contents/')
+          ? okRes({ encoding: 'base64', content: Buffer.from('{"version":9}').toString('base64') })
+          : undefined;
+    expect(await recheckBeforeMerge(recheckDeps(foreign, LATER), 7, SHA_B, BASE_NAME)).toEqual({
+      ok: false,
+      reason:
+        'settle: single_observation (state discarded: 1 record(s); first: settle state version 9 is not 1)',
+    });
+
+    // Ok: a settled ledger that also carries one malformed record.
+    const forge = makeForge({ 7: prSpec({ reviews: [review()] }) });
+    await seedObservation(forge, [7]);
+    const tip = forge.refs.get('refs/heads/cq-state') ?? '';
+    const res = await forge.gh(['api', `${PREFIX}contents/.cq/settle-state.json?ref=${tip}`]);
+    const file = JSON.parse(res.stdout) as { content: string };
+    const ledger = JSON.parse(Buffer.from(file.content, 'base64').toString('utf8')) as {
+      prs: Record<string, unknown>;
+    };
+    ledger.prs['x'] = {};
+    const tampered = Buffer.from(JSON.stringify(ledger)).toString('base64');
+    forge.hook = (args) =>
+      (args[1] ?? '').includes('contents/')
+        ? okRes({ encoding: 'base64', content: tampered })
+        : undefined;
+    const ok = await recheckBeforeMerge(recheckDeps(forge, LATER), 7, SHA_B, BASE_NAME);
+    expect(ok).toMatchObject({ ok: true, discarded: ['pr key "x" is not a decimal PR number'] });
   });
 
   test('refusal stderr does not match /base branch was modified/i', async () => {
@@ -942,7 +1277,7 @@ describe('recheckBeforeMerge + gateMergeEffects', () => {
     const inner = innerEffects(forge);
     const effects = gateMergeEffects(inner.effects, () => Promise.reject(new Error('never')));
     expect(await effects.validateRef('x')).toEqual({ ok: true, sha: SHA_B });
-    expect(await effects.readBaseRef(1)).toEqual({ ok: true, baseRefName: 'main' });
+    expect(await effects.readBaseRef(1)).toEqual({ ok: true, baseRefName: BASE_NAME });
     expect(await effects.worktreePrepare(3, 'r')).toEqual({ path: '/tmp/pr-3' });
     expect((await effects.fetchRef('r')).code).toBe(0);
     expect((await effects.retargetBase(1, 'main')).code).toBe(0);

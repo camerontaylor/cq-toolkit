@@ -291,6 +291,30 @@ describe('readSettleState', () => {
     await expect(readSettleState(deps(flaky))).rejects.toBeInstanceOf(GhError);
   });
 
+  test('bare "Not Found" text without HTTP 404 is a transport failure, never an absent ledger', async () => {
+    const proxy: GhResult = {
+      code: 1,
+      stdout: '',
+      stderr: 'gh: proxy error: upstream Not Found (HTTP 502)',
+    };
+    const { gh } = makeForge(newStore(), () => proxy);
+    await expect(readSettleState(deps(gh))).rejects.toBeInstanceOf(GhError);
+
+    const store = newStore();
+    const { gh: writer } = makeForge(store);
+    await writeSettleState(
+      deps(writer),
+      { state: emptySettleState(FULL), parentCommit: null },
+      'x',
+    );
+    const { gh: flaky } = makeForge(store, (args) =>
+      (args[1] ?? '').includes('/contents/')
+        ? { code: 1, stdout: '', stderr: 'Not Found' }
+        : undefined,
+    );
+    await expect(readSettleState(deps(flaky))).rejects.toBeInstanceOf(GhError);
+  });
+
   test('an invalid owner/repo throws before any gh call', async () => {
     const { gh, calls } = makeForge(newStore());
     await expect(readSettleState({ gh, owner: '..', repo: REPO })).rejects.toThrow(/charset/);

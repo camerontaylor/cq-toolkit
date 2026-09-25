@@ -39,9 +39,10 @@
 // FAIL-CLOSED: a missing branch/file or an unparseable ledger reads as the
 // EMPTY ledger (settle resets — never granted); any OTHER transport
 // failure on read THROWS so the caller can refuse the merge with an honest
-// reason instead of pretending the forge answered "no observations". A
-// 404 from an inaccessible repository also reads as empty — harmless for
-// settle, and the subsequent write fails loudly.
+// reason instead of pretending the forge answered "no observations". Only
+// gh's status form (`HTTP 404`) is a 404 — bare "Not Found" text is a
+// transport failure. A 404 from an inaccessible repository also reads as
+// empty — harmless for settle, and the subsequent write fails loudly.
 import { GhError, ghJson, ghNameOk } from '../ops/review/gh.js';
 import type { GhFn } from '../ops/review/gh.js';
 import { emptySettleState, parseSettleState, serializeSettleState } from './settle-state.js';
@@ -109,9 +110,14 @@ const describe = (err: unknown): string => {
   return err instanceof Error ? err.message : String(err);
 };
 
-/** True for a gh failure that is the forge's 404 (resource absent). */
+/**
+ * True for a gh failure that is the forge's 404 (resource absent) — gh's
+ * status form `HTTP 404` ONLY. Bare "Not Found" text is NOT a 404: a proxy
+ * or gateway page can say it on any failure, and reading that as "no
+ * ledger" would silently reset settle, so it stays a transport failure.
+ */
 const isNotFound = (err: unknown): boolean =>
-  err instanceof GhError && (err.stderr.includes('Not Found') || err.stderr.includes('HTTP 404'));
+  err instanceof GhError && /\bHTTP 404\b/.test(err.stderr);
 
 /** True for a gh failure that is the forge's 422 (validation refusal). */
 const isUnprocessable = (err: unknown): boolean =>

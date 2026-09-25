@@ -21,6 +21,8 @@
 //      merge 'automation identity unresolved'.
 //   8. A settled merge run writes only the pre-merge audit observation —
 //      the run-start pass over an already-anchored tuple writes nothing.
+//   9. The recheck is wired with SelfhostDefaults.protectedBranch: a live
+//      base of 'main' refuses whatever readBaseRef pinned.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -165,6 +167,8 @@ interface PrFixture {
   pr: number;
   /** The commit the trusted approval is bound to (the snapshot's commit.oid). */
   approvedOid: string;
+  /** The snapshot's live baseRefName; default 'merge-queue' (what readBaseRef says). */
+  liveBaseName?: string;
 }
 
 const APPROVER = 'maintainer';
@@ -205,6 +209,8 @@ const snapshotPayload = (fixture: PrFixture) => ({
         author: { login: `pr-author-${String(fixture.pr)}`, __typename: 'User' },
         headRefOid: HEAD(fixture.pr),
         baseRefOid: BASE_SHA,
+        baseRefName: fixture.liveBaseName ?? 'merge-queue',
+        reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] },
         reviews: {
           pageInfo: { hasNextPage: false },
           nodes: [
@@ -590,6 +596,24 @@ describe('runSelfMergePrs — merge-time recheck through the real registry', () 
     const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
     expect(row?.reason).toContain('cq merge-time recheck refused pr 7');
     expect(row?.reason).toContain('settle: settle_pending');
+  });
+
+  test('a live base of the protected branch (main) is refused: protectedBranch is wired', async () => {
+    const forge = new StateForge();
+    forge.seed(seededState(7, T0 - REVIEW_ACCEPT_SETTLE_MS - 60_000));
+    const effects = new RecordingMergeEffects();
+    const result = await runSelfMergePrs(
+      {
+        gh: forgeGh(forge, [{ pr: 7, approvedOid: HEAD(7), liveBaseName: 'main' }], []),
+        mergeEffects: effects,
+        nowMs: () => T0,
+      },
+      cfg(tmpJournalRoot()),
+    );
+    if (result.dryRun === true) throw new Error('unreachable');
+    expect(effects.merges).toEqual([]);
+    const row = result.outcome?.needsHuman.find((entry) => entry.pr === 7);
+    expect(row?.reason).toContain('base is the protected branch main');
   });
 
   test('state branch round-trip survives a simulated Actions-cache eviction', async () => {

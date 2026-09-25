@@ -34,7 +34,10 @@
 // W1.2 — SHA-BOUND ACCEPTANCE AT MERGE TIME + DURABLE SETTLE. Reviews are
 // re-fetched IMMEDIATELY before every merge call: gateMergeEffects wraps the
 // executor's mergePr, so there is no classify→merge window. Acceptance comes
-// only from a trusted review whose commit.oid equals the live headRefOid.
+// only from a trusted actor's CURRENT review whose commit.oid equals the
+// live headRefOid; unresolved external threads refuse; the base branch name
+// the executor's readBaseRef saw right before the call must still be the
+// live base, and a live base of SelfhostDefaults.protectedBranch refuses.
 // Settle comes from >= 2 durable observations of the identical (head, base,
 // force-push epoch) tuple >= settleMs apart, recorded on the `cq-state`
 // branch through the git-data API with the run's GH_TOKEN (the automation
@@ -298,7 +301,11 @@ const centralRegistryView = async (): Promise<OpRegistryView> => {
 export function recheckedRegistryView(opts: {
   baseView: OpRegistryView;
   innerEffects: MergeEffects;
-  recheck: (pr: number, expectedHead: string | undefined) => Promise<RecheckResult>;
+  recheck: (
+    pr: number,
+    expectedHead: string | undefined,
+    expectedBase: string | undefined,
+  ) => Promise<RecheckResult>;
 }): OpRegistryView {
   const { baseView, innerEffects, recheck } = opts;
   return {
@@ -427,16 +434,25 @@ export async function runSelfMergePrs(
           repoRoot: cfg.repoRoot,
           protectedBranch: SelfhostDefaults.protectedBranch,
         }),
-      recheck: (pr, head) =>
+      recheck: (pr, head, base) =>
         identityRefusal !== null
           ? Promise.resolve<RecheckResult>({
               ok: false,
               reason: `automation identity unresolved: ${identityRefusal}`,
             })
           : recheckBeforeMerge(
-              { gh: deps.gh, owner: cfg.owner, repo: cfg.repo, nowMs: clock, settleMs, policy },
+              {
+                gh: deps.gh,
+                owner: cfg.owner,
+                repo: cfg.repo,
+                nowMs: clock,
+                settleMs,
+                policy,
+                protectedBranch: SelfhostDefaults.protectedBranch,
+              },
               pr,
               head,
+              base,
             ),
     });
   const report = withBudgetStop(

@@ -7,23 +7,48 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
 
 - **Merge-time recheck.** `gateMergeEffects` wraps the `mergePr` effect, so
   the PR is re-fetched right before each merge call and there is no
-  classify→merge window. `recheckBeforeMerge` reads the live
-  `headRefOid`/`baseRefOid`, every review with its `commit.oid`, and the
-  `HeadRefForcePushedEvent` timeline. Reviews and timeline page with
-  independent cursors (`reviewsAfter`/`timelineAfter`, sent only when a
-  real cursor exists), capped at 10 pages each. It reads the clock after
-  the fetch, so a new anchor is never stamped before what it records. It
+  classify→merge window for the head, base, reviews, or threads.
+  `recheckBeforeMerge` reads the live `headRefOid`/`baseRefOid`/
+  `baseRefName`, every review with its `commit.oid`, every review thread
+  (resolution and root author), and the `HeadRefForcePushedEvent`
+  timeline. Reviews, threads and timeline page with independent cursors
+  (`reviewsAfter`/`threadsAfter`/`timelineAfter`, sent only when a real
+  cursor exists), capped at 10 pages each. It reads the clock after the
+  fetch, so a new anchor is never stamped before what it records. It
   refuses when:
   - the head is unpinned or has moved;
+  - the base is unverified, changed, or the protected branch (below);
   - the data is truncated: past the page cap, a missing connection, or a
-    head that changed between pages;
+    head, base oid or base name that changed between pages;
   - the settle ledger cannot be read;
+  - an unresolved external review thread remains (below);
   - a trusted reviewer's latest opinionated review is CHANGES_REQUESTED;
-  - no trusted review is bound to the live head;
+  - no trusted actor's current opinion accepts the live head;
   - the tuple has not settled;
   - the observation could not be written just before an ok answer.
+
+  Refusals after the ledger read append
+  `(state discarded: <n> record(s); first: <reason>)` when the read
+  discarded records; an ok answer carries them as `discarded`.
+
+- **Base pin (I3).** The gate remembers, per PR, the `baseRefName` from the
+  most recent successful `readBaseRef(pr)` it delegated. `executeMerges`
+  calls it right before every merge attempt and every retry. A failed read
+  forgets the pin, and each `mergePr` consumes it. The recheck refuses
+  "base unverified" with no pin, "base changed" when the live
+  `baseRefName` differs from it, and refuses outright when the live base
+  is `SelfhostDefaults.protectedBranch` (`main`).
+- **Unresolved threads (I2).** Unresolved review threads whose root author
+  is external to the PR author are counted with `countUnresolvedThreads`,
+  the same rule as classify row 5. A null root author counts as external,
+  and a non-boolean `isResolved` counts as unresolved. Any such thread
+  refuses "unresolved external threads: <n>" before reviews are judged.
 - **Fold.** The latest opinionated review per actor is folded over all
-  reviews. `latestOpinionatedReviews(writersOnly:true)` and `reviewDecision`
+  reviews. Acceptance comes from each trusted actor's current opinion:
+  its latest review whose state is an accept state, CHANGES_REQUESTED, or
+  DISMISSED. The actor accepts only when that review is in an accept state
+  and bound to the live head. A dismissed approval never counts, whether
+  GitHub rewrote its state or a later DISMISSED review landed. `latestOpinionatedReviews(writersOnly:true)` and `reviewDecision`
   are never read. Both CodeRabbit identity forms (`coderabbitai`/Bot and
   `coderabbitai[bot]`/User) fold to one actor. Bots grant acceptance only
   when allowlisted. Authors that are neither Bot nor User (null,
@@ -41,8 +66,10 @@ Decision (`rs3-github-signals.md` §9) and ADR-0004 (reconciled).
   `trustPolicyFromConfig({})`.
 - **Automation identity.** A real run resolves the token's login with
   `gh api user` and excludes it from trust. An integration token's 403
-  ("Resource not accessible by integration") proceeds: App bots are never
-  trusted unless allowlisted. Any other failure makes every recheck refuse
+  ("Resource not accessible by integration") proceeds ONLY when no
+  `trustedBots` entry is configured, because the App's own bot login is
+  unknowable. Otherwise every recheck refuses with "automation identity
+  unresolved: integration token with trustedBots configured". Any other failure makes every recheck refuse
   with "automation identity unresolved". The status rides the result and
   the payload as `automationIdentity`. Dry runs skip this.
 - **Settle.** Settle needs two observations of the identical
