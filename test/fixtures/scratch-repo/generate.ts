@@ -112,13 +112,19 @@ const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=fals
 const GIT_CALL_TIMEOUT_MS = 6_000;
 const GIT_CALL_ATTEMPTS = 4;
 
+function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+  );
+}
+
 /** One bounded git call (the worktreeFor.test.ts real-git idiom). */
 function run(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'git',
       [...GIT_NO_AUTO_MAINTENANCE, ...args],
-      { cwd, timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
+      { cwd, env: scrubbedGitEnv(), timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(new Error(stderr.trim() || error.message));

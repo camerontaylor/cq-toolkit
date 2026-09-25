@@ -230,7 +230,7 @@ export interface SweepUnitBindings {
   adapter: AdapterName;
   /**
    * Optional worktree/git effects seam. The dispatch registry omits this and
-   * therefore keeps the shipped subprocess adapter; SDK callers can inject a
+   * therefore keeps the shipped subprocess adapter; SDK callers can inject
    * a fresh fake per op instance when they need to exercise unit orchestration
    * without spawning git.
    */

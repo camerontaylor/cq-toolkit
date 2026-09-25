@@ -19,6 +19,13 @@ const GIT_NO_AUTO_MAINTENANCE = ['-c', 'gc.auto=0', '-c', 'maintenance.auto=fals
 const GIT_CALL_TIMEOUT_MS = 6_000;
 const GIT_CALL_ATTEMPTS = 4;
 
+/** Git invocations must not inherit repository-selection state from the host. */
+function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+  );
+}
+
 export interface GitTemplate {
   /** Temporary root containing the seeded repository and bare origin. */
   root: string;
@@ -44,7 +51,7 @@ function git(args: string[], cwd: string): Promise<string> {
     execFile(
       'git',
       [...GIT_NO_AUTO_MAINTENANCE, ...args],
-      { cwd, timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
+      { cwd, env: scrubbedGitEnv(), timeout: GIT_CALL_TIMEOUT_MS, killSignal: 'SIGKILL' },
       (error, stdout, stderr) => {
         if (error !== null) {
           reject(new Error(stderr.trim() || error.message));
@@ -77,7 +84,22 @@ export async function createGitTemplate(seedRepo: SeedRepo): Promise<GitTemplate
     mkdirSync(repo, { recursive: true });
     await seedRepo(repo);
     await resilient(() => git(['init', '-q', '--bare', origin], root));
-    await resilient(() => git(['-C', repo, 'remote', 'add', 'origin', origin], repo));
+    await resilient(async () => {
+      let current: string | null;
+      try {
+        current = await git(['-C', repo, 'remote', 'get-url', 'origin'], repo);
+      } catch (err) {
+        if (err instanceof Error && /No such remote|not found/i.test(err.message)) current = null;
+        else throw err;
+      }
+      // Make the remote setup idempotent: a timed-out add may have applied
+      // before the process observed its failure, so a retry must not fail on
+      // "remote origin already exists".
+      if (current === null) await git(['-C', repo, 'remote', 'add', 'origin', origin], repo);
+      else if (current.trim() !== origin) {
+        await git(['-C', repo, 'remote', 'set-url', 'origin', origin], repo);
+      }
+    });
     return { root, repo, origin };
   } catch (err) {
     rmSync(root, { recursive: true, force: true });
@@ -143,6 +165,7 @@ function assertCleanClone(repo: string): void {
 function execFileSyncSafe(args: string[]): string {
   const result = spawnSync('git', args, {
     encoding: 'utf8',
+    env: scrubbedGitEnv(),
     timeout: GIT_CALL_TIMEOUT_MS,
   });
   if (result.error !== undefined || result.status !== 0) {

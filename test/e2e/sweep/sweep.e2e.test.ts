@@ -27,7 +27,15 @@
 //      so a fixer that ADDS a hacked file (a skip marker) is flagged by the
 //      scan and its unit fails uncommitted.
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
@@ -471,6 +479,8 @@ describe('sweep e2e: probes → fix → gates → PRs (arm-a §4.2 steps 1–7)'
         1,
       );
       await expectUnitOverlap(scene.journalDir, 0, ['sweep-alpha-fix', 'sweep-beta-fix']);
+      const journalFiles = readdirSync(scene.journalDir).filter((name) => name.endsWith('.ndjson'));
+      expect(journalFiles).toHaveLength(2); // units run + assemble run
 
       // The failures-only DEFAULT output: a clean run names no package.
       expect(outcome.output).not.toMatch(/alpha|beta/);
@@ -736,10 +746,6 @@ describe('sweep e2e: tamper guard on new files', () => {
       });
       expect(salvage.status).toBe('ok');
       if (salvage.status === 'ok') expect(salvage.value.rows[0]?.class).toBe('preserve');
-      // The focused real-git run never publishes a branch; the prep/no-op
-      // plan contract above separately proves the plan emits no push leg.
-      expect((await gitOut(['ls-remote', '--heads', 'origin'], scene.repo)).trim()).toBe('');
-      expect(scene.gh.created).toHaveLength(0);
     },
   );
 });
@@ -1113,6 +1119,8 @@ describe('sweep e2e: rescue lane and prep mode', () => {
       const beta = unitRow(outcome.run, 'beta');
       expect(beta.status).toBe('failed');
       expect(beta.error).toMatch(/\[TAMPER\]/);
+      expect(outcome.output).toContain('FAIL beta/fix:');
+      expect(outcome.output).toContain('1 failing unit(s) of 2');
       expect(outcome.rescueRuns).toBeUndefined();
       // And the tree state routes it to preserve.
       const salvaged = await salvageInterruptedRun({

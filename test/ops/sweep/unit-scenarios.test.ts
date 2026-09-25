@@ -34,6 +34,7 @@ interface FakeWorld {
   /** The `git diff --cached --name-status -z` output the allowlist parses. */
   staged: { nameStatus: string };
   worktreeState: Array<{ path: string; branch: string }>;
+  revParseByRef: Map<string, string>;
   dirty: { value: boolean };
 }
 
@@ -66,6 +67,10 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
   const checks: string[] = [];
   const pushCalls: Array<{ repoRoot: string; branch: string }> = [];
   const worktreeState: Array<{ path: string; branch: string }> = [];
+  const revParseByRef = new Map<string, string>([
+    [`${worktreePath}:HEAD`, 'head-sha'],
+    [`${worktreePath}:main`, 'base-sha'],
+  ]);
   const dirty = { value: false };
   const staged = { nameStatus: '' };
 
@@ -73,7 +78,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     listWorktrees: async () => worktreeState.map((entry) => ({ ...entry })),
     listBranches: async () => [],
     listRemoteBranches: async () => [],
-    revParse: async () => 'fake-head',
+    revParse: async (path, ref) => revParseByRef.get(`${path}:${ref}`) ?? `unresolved:${ref}`,
     remoteGetUrl: async () => null,
     pathExists: async () => false,
     trackedFilesUnder: async () => [],
@@ -132,6 +137,7 @@ async function makeWorld(checkOutputs: CheckOutput[]): Promise<FakeWorld> {
     worktreePath,
     staged,
     worktreeState,
+    revParseByRef,
     dirty,
   };
 }
@@ -191,6 +197,11 @@ describe('sweep unit in-process scenarios', () => {
         expect(result.error).toContain('novel failure');
       }
       expect(world.gitCalls.some((args) => args.includes('commit'))).toBe(false);
+      expect(
+        world.gitCalls.some((args) =>
+          args.some((arg) => ['reset', 'checkout', 'clean', 'stash', 'restore'].includes(arg)),
+        ),
+      ).toBe(false);
       expect(world.dirty.value).toBe(true);
       // Salvage reads the state the unit LEFT: the tree it created and its
       // cleanliness — never a stub that answers 'dirty' regardless.
@@ -209,6 +220,25 @@ describe('sweep unit in-process scenarios', () => {
       const later = await runUnit(world);
       expect(later.status).toBe('failed');
       if (later.status === 'failed') expect(later.error).toMatch(/dirty .*refusing reuse/);
+    } finally {
+      await rm(world.root, { recursive: true, force: true });
+    }
+  });
+
+  test('reuse reports ref-specific HEAD and base resolutions', async () => {
+    const world = await makeWorld([{ failing: false }, { failing: false }]);
+    try {
+      const first = await runUnit(world);
+      expect(first.status).toBe('ok');
+      const reused = await runUnit(world);
+      expect(reused.status).toBe('ok');
+      if (reused.status === 'ok') {
+        expect(reused.value.worktree).toMatchObject({
+          reused: true,
+          headSha: 'head-sha',
+          baseSha: 'base-sha',
+        });
+      }
     } finally {
       await rm(world.root, { recursive: true, force: true });
     }

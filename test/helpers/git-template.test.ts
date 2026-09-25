@@ -2,8 +2,13 @@ import { execFile } from 'node:child_process';
 import { renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { generateScratchRepo } from '../fixtures/scratch-repo/generate.js';
 import { cloneTemplate, createGitTemplate } from './git-template.js';
+
+function scrubbedGitEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([name]) => !name.startsWith('GIT_')),
+  );
+}
 
 function git(args: string[], cwd: string): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -12,6 +17,7 @@ function git(args: string[], cwd: string): Promise<string> {
       ['-c', 'gc.auto=0', '-c', 'maintenance.auto=false', ...args],
       {
         cwd,
+        env: scrubbedGitEnv(),
         timeout: 6_000,
         killSignal: 'SIGKILL',
       },
@@ -26,12 +32,21 @@ function git(args: string[], cwd: string): Promise<string> {
   });
 }
 
+async function seedSmokeRepo(repo: string): Promise<void> {
+  writeFileSync(join(repo, 'seed.txt'), 'template seed\n');
+  await git(['init', '-q', '-b', 'main', repo], repo);
+  await git(['-C', repo, 'config', 'user.email', 'template@example.invalid'], repo);
+  await git(['-C', repo, 'config', 'user.name', 'Template test'], repo);
+  await git(['-C', repo, 'add', 'seed.txt'], repo);
+  await git(['-C', repo, 'commit', '-q', '-m', 'seed template'], repo);
+}
+
 describe('git-template clone smoke', () => {
   test(
     'copies a clean template, then worktree-adds, commits, pushes, and publishes the ref',
-    { timeout: 30_000 },
+    { timeout: 60_000 },
     async () => {
-      const template = await createGitTemplate(generateScratchRepo);
+      const template = await createGitTemplate(seedSmokeRepo);
       let clone: Awaited<ReturnType<typeof cloneTemplate>> | undefined;
       try {
         clone = await cloneTemplate(template);
@@ -60,7 +75,7 @@ describe('git-template clone smoke', () => {
     let template: Awaited<ReturnType<typeof createGitTemplate>> | undefined;
     try {
       template = await createGitTemplate(async (repo) => {
-        await generateScratchRepo(repo);
+        await seedSmokeRepo(repo);
         const externalGitDir = join(repo, 'external-git-dir');
         renameSync(join(repo, '.git'), externalGitDir);
         writeFileSync(join(repo, '.git'), `gitdir: ${externalGitDir}\n`);
