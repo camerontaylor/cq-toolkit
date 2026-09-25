@@ -213,8 +213,12 @@ const WEDGED_PROMPT_BACKLOG = WEDGED_PROMPT_CHARS / 2;
  * a deadline.
  */
 const promptWriteWedged: PromptInFlight = (child, onInFlight) => {
+  let closed = false;
+  child.once('close', () => {
+    closed = true;
+  });
   const poll = (): void => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
+    if (closed || child.exitCode !== null || child.signalCode !== null) return;
     if ((child.stdin?.writableLength ?? 0) > WEDGED_PROMPT_BACKLOG) onInFlight();
     else setTimeout(poll, 10);
   };
