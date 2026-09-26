@@ -17,7 +17,7 @@
 //   4. The resolver, verdict guard and posting programs behave as documented
 //      when actually run (bash + jq, with `gh` stubbed).
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -639,6 +639,183 @@ ${script}`;
         };
         expect(lockFor({ EVENT: 'workflow_dispatch', PR_INPUT: '7' })).toBe('pr-7');
         expect(lockFor({ EVENT: 'schedule' })).toBe('sweep');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
+// W1.10 fresh-review fix — the post step's stale-verdict guard and the
+// sweep's "unchanged" dedupe, run for real (bash + jq, `gh` stubbed and its
+// argv recorded): a verdict is POSTed only when no newer-started same-app
+// row is on the head, and the sweep re-posts only a changed verdict.
+describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 10)', () => {
+  const SHA = '0123456789abcdef0123456789abcdef01234567';
+  const JUDGED = '2026-09-27T10:00:00Z';
+  const OLDER = '2026-09-27T09:59:00Z';
+  const NEWER = '2026-09-27T10:00:05Z';
+  const APP = '999';
+  const POST = `api -X POST repos/o/r/check-runs --input`;
+  type Row = {
+    id: number;
+    app: 'actions' | 'app';
+    started: string;
+    conclusion?: string;
+    ext?: string;
+  };
+  const row = (r: Row) => ({
+    id: r.id,
+    app:
+      r.app === 'actions'
+        ? { id: 15368, slug: 'github-actions' }
+        : { id: Number(APP), slug: 'cq-verdict' },
+    conclusion: r.conclusion ?? 'success',
+    external_id: r.ext ?? `trust:${SHA}`,
+    started_at: r.started,
+  });
+  const STUB = `gh() {
+  printf '%s\\n' "$*" >> "$ARGV_LOG"
+  [ "$1" = api ] || return 9
+  shift
+  if [ "$1" = -X ]; then echo https://example.invalid/run; return 0; fi
+  [ "$1" = --paginate ] && shift
+  local path="$1"
+  shift
+  case "$path" in
+    "repos/o/r/commits/${SHA}/check-runs?check_name=cq/acceptance&filter=all&per_page=100") ;;
+    *) return 9;;
+  esac
+  if [ "\${1:-}" = --jq ]; then jq -c "$2" <<<"$RUNS"; else printf '%s\\n' "$RUNS"; fi
+}
+`;
+
+  it.each(bothCopies('cq-accept.yml'))(
+    '%s: posts only a verdict no newer same-app row supersedes',
+    { timeout: 60_000 },
+    (_label, text) => {
+      const script = runScript(
+        jobBlocks(code(text)).get('judge') ?? '',
+        'Post the cq/acceptance check runs',
+      );
+      expect(script).not.toContain('${{');
+      const dir = mkdtempSync(join(tmpdir(), 'cq-accept-post-'));
+      try {
+        const work = join(dir, 'cq-accept');
+        mkdirSync(work);
+        writeFileSync(
+          join(work, '7.check-run.json'),
+          JSON.stringify({
+            name: 'cq/acceptance',
+            head_sha: SHA,
+            conclusion: 'success',
+            external_id: `trust:${SHA}`,
+            output: { title: 'pass', summary: 'ok' },
+          }),
+        );
+        writeFileSync(join(work, 'crashed'), '');
+        const argv = join(dir, 'argv');
+        const run = (opts: {
+          rows: Row[];
+          event?: string;
+          appId?: string;
+          judged?: string;
+        }): { status: number | null; posted: boolean; out: string } => {
+          writeFileSync(argv, '');
+          writeFileSync(join(work, '7.judged-at'), `${opts.judged ?? JUDGED}\n`);
+          const r = spawnSync('bash', ['-c', STUB + script], {
+            encoding: 'utf8',
+            env: {
+              PATH: process.env['PATH'] ?? '',
+              SHA,
+              ARGV_LOG: argv,
+              RUNNER_TEMP: dir,
+              GITHUB_STEP_SUMMARY: join(dir, 'summary'),
+              GH_TOKEN: 'x',
+              EVENT: opts.event ?? 'workflow_run',
+              REPO: 'o/r',
+              VERDICT_APP_ID: opts.appId ?? '',
+              TARGETS: JSON.stringify([{ pr: 7, subject: SHA }]),
+              RUNS: JSON.stringify({ check_runs: opts.rows.map(row) }),
+            },
+          });
+          const calls = readFileSync(argv, 'utf8').split('\n');
+          return {
+            status: r.status,
+            posted: calls.some((c) => c.startsWith(POST)),
+            out: r.stdout + r.stderr,
+          };
+        };
+        const expectRun = (
+          opts: Parameters<typeof run>[0],
+          posted: boolean,
+          why: string,
+        ): string => {
+          const r = run(opts);
+          expect(r.status, `${why}: ${r.out}`).toBe(0);
+          expect(r.posted, `${why}: ${r.out}`).toBe(posted);
+          return r.out;
+        };
+
+        // The stale guard, interim (github-actions) mode.
+        expect(expectRun({ rows: [] }, true, 'no prior row')).not.toMatch(/not posted/);
+        expect(
+          expectRun({ rows: [{ id: 3, app: 'actions', started: NEWER }] }, false, 'newer row'),
+        ).toMatch(/a newer verdict \(2026-09-27T10:00:05Z\) postdates this snapshot/);
+        expectRun({ rows: [{ id: 3, app: 'actions', started: OLDER }] }, true, 'older row');
+        expectRun({ rows: [{ id: 3, app: 'actions', started: JUDGED }] }, true, 'same second');
+
+        // Same-app selection: each mode ignores the other app's rows.
+        const actionsNewer: Row[] = [
+          { id: 3, app: 'app', started: OLDER },
+          { id: 5, app: 'actions', started: NEWER },
+        ];
+        const appNewer: Row[] = [
+          { id: 3, app: 'actions', started: OLDER },
+          { id: 5, app: 'app', started: NEWER },
+        ];
+        expectRun({ rows: actionsNewer, appId: APP }, true, 'App mode ignores actions');
+        expectRun({ rows: appNewer, appId: APP }, false, 'App mode, newer App row');
+        expectRun({ rows: appNewer }, true, 'interim mode ignores the App');
+        expectRun({ rows: actionsNewer }, false, 'interim mode, newer actions row');
+
+        // The sweep re-posts only a changed verdict.
+        expect(
+          expectRun(
+            { rows: [{ id: 3, app: 'actions', started: OLDER }], event: 'schedule' },
+            false,
+            'sweep, unchanged',
+          ),
+        ).toMatch(/#7: unchanged \(success\) — not re-posted/);
+        expectRun(
+          {
+            rows: [{ id: 3, app: 'actions', started: OLDER, conclusion: 'failure' }],
+            event: 'schedule',
+          },
+          true,
+          'sweep, conclusion changed',
+        );
+        expectRun(
+          {
+            rows: [{ id: 3, app: 'actions', started: OLDER, ext: `other:${SHA}` }],
+            event: 'schedule',
+          },
+          true,
+          'sweep, binding changed',
+        );
+        expectRun(
+          { rows: [{ id: 3, app: 'app', started: OLDER }], event: 'schedule' },
+          true,
+          'sweep, unchanged row from the other app only',
+        );
+
+        // A malformed judged-at refuses before any read or post.
+        for (const judged of ['', 'yesterday', '2026-09-27 10:00:00Z', `${JUDGED}x`]) {
+          const r = run({ rows: [], judged });
+          expect(r.status, `judged-at '${judged}'`).toBe(1);
+          expect(r.out).toContain('refusing: judged-at');
+          expect(r.posted).toBe(false);
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

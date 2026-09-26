@@ -33,7 +33,13 @@
 //      unadmitted path refuses.
 //   4. clean merges: each first-parent merge's tree equals `git merge-tree
 //      --write-tree` of its parents (no evil or conflict-resolving merge).
-//   5. acceptance (I2) recomputed per admitted PR at its merged head.
+//   5. I2's EVIDENCE rows recomputed per admitted PR at its merged head
+//      (head-bound trusted acceptance, no outstanding trusted objection, no
+//      unresolved external threads, the I11 lag cross-check). I2's SETTLE
+//      half (≥10 min since the head, or an all-clear postdating it) is NOT
+//      judged here: only the merger's recheck (self-merge-prs,
+//      merge-recheck.ts) enforces it, so a PR hand-merged into
+//      `merge-queue` skips settle (methods-w1-10 Residuals; C2 owns it).
 //   6. gates.policyDiff recomputed in-process over main..tip (push subject);
 //      fail/needs-human refuses — D11 records are dormant until the C3
 //      attestation, so a protected-path change promotes only by owner
@@ -721,7 +727,8 @@ async function gateBody(
   }
   report.push(`merges: ${String(closure.admitted.length)} first-parent merge(s) clean`);
 
-  // 5. Acceptance (I2) per admitted PR, at its merged head.
+  // 5. I2 evidence (not settle — see the header) per admitted PR, at its
+  //    merged head.
   const rejected: number[] = [];
   for (const a of closure.admitted) {
     const result = await deps.acceptance({
@@ -730,13 +737,15 @@ async function gateBody(
       base: QUEUE_BRANCH,
       state: 'merged',
     });
-    report.push(`acceptance PR #${String(a.pr)}: ${result.verdict}`);
+    report.push(
+      `acceptance PR #${String(a.pr)} (I2 evidence; settle not judged): ${result.verdict}`,
+    );
     for (const line of result.report) report.push(`  ${line}`);
     if (result.verdict !== 'pass') rejected.push(a.pr);
   }
   if (rejected.length > 0) {
     refuse(
-      `acceptance: PR(s) ${rejected.map((n) => `#${String(n)}`).join(', ')} lack I2 acceptance`,
+      `acceptance: PR(s) ${rejected.map((n) => `#${String(n)}`).join(', ')} lack I2 acceptance evidence`,
     );
   }
 

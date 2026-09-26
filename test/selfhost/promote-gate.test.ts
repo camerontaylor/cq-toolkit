@@ -805,7 +805,7 @@ describe('runGate', () => {
     });
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
-    expect(r.report.at(-1)).toMatch(/acceptance: PR\(s\) #7 lack I2 acceptance/);
+    expect(r.report.at(-1)).toMatch(/acceptance: PR\(s\) #7 lack I2 acceptance evidence/);
     expect(h.policyInputs).toEqual([]);
   });
 

@@ -35,7 +35,9 @@
 #     a RED CHECK RUN, not a red job: the job fails only when the verifier
 #     crashed or a post failed. The sweep skips a post when the newest
 #     `cq/acceptance` run on that head from the same app already carries the
-#     same conclusion and trust binding.
+#     same conclusion and trust binding. Every run skips a post when that
+#     newest run started after its own snapshot was read (a best-effort
+#     stale-verdict guard: the next event or sweep heals a miss).
 #
 # Identity (Decision 6): the check run is posted with a verdict-App token in
 # environment `cq-verdict` when `vars.CQ_VERDICT_APP_CLIENT_ID` is set, and
@@ -64,8 +66,8 @@ permissions: {}
 # the ordering that matters is the POSTS. `judge` holds a per-PR lock
 # instead (see there); a workflow-level group keyed on the triggering run
 # would never serialize two runs for the same PR. The sweep's lock is shared
-# only among sweeps, so the post step also refuses to land a verdict whose
-# snapshot predates the newest same-app verdict on that head.
+# only among sweeps, so the post step also skips (best-effort) a verdict
+# whose snapshot predates the newest same-app verdict on that head.
 
 jobs:
   resolve:
@@ -391,9 +393,14 @@ jobs:
                   else (.app_id | tostring) == $app end))
                 | max_by(.id) // {}')"
             # Runs for one head are not all serialized (the sweep and a
-            # per-PR run hold different locks), so a verdict judged from an
-            # older snapshot must never land on top of a newer one: skip
-            # when the newest row started after this snapshot was read.
+            # per-PR run hold different locks), so skip when the newest row
+            # started after this snapshot was read. BEST-EFFORT, not a
+            # guarantee: the read and the POST are separate calls, the
+            # compare is a strict `>` at one-second resolution, and the
+            # runner clock is compared with the server's started_at, so an
+            # older snapshot can occasionally still land last. The next
+            # event or the 15-minute sweep re-judges; the gate never reads
+            # this row (methods-w1-10 Residuals).
             if jq -e --arg t "$judged_at" \
                 '(.started_at // "") > $t' <<<"$newest" >/dev/null; then
               echo "#${pr}: a newer verdict ($(jq -r '.started_at' <<<"$newest")) postdates this snapshot (${judged_at}) — not posted"

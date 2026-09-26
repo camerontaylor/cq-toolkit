@@ -46,7 +46,7 @@
       "workflow": "live-merge.yml",
       "template": "live-merge.yml",
       "tokens": {
-        "DRILL_SECRET": "GH_TOKEN"
+        "DRILL_SECRET": "CQ_DRILL_MERGE_TOKEN"
       }
     },
     {

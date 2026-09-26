@@ -40,7 +40,13 @@
 #                       reads them by workflow path, never by check name),
 #                       e.g. ci.yml,denylist.yml
 #   GATE_TIMEOUT_MIN -> minutes the gate waits for verdicts and those runs
-#                       before refusing (default 20)
+#                       before refusing (default 20). CEILING: the wait
+#                       plus checkout, install and build must stay under
+#                       `decide`'s fixed `timeout-minutes: 40`, so keep it
+#                       <= 25 (test/workflows/template-render.test.ts
+#                       enforces this for the instance). Above that the
+#                       runner may kill `decide` mid-wait: still no
+#                       promotion (fails closed), but the report is lost.
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — values reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.

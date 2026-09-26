@@ -31,7 +31,10 @@
 #
 # Instantiate (each token below is written in double braces in the body):
 #   DRILL_SECRET -> NAME of the `drill` environment secret holding the drill
-#                   credential above, e.g. GH_TOKEN.
+#                   credential above, e.g. CQ_DRILL_MERGE_TOKEN. Its own name,
+#                   never `GH_TOKEN`: live-review reads a `drill` secret
+#                   `GH_TOKEN` that must be a fine-grained PAT scoped to its
+#                   scratch repos, and one secret cannot satisfy both scopes.
 name: live-merge
 
 on:

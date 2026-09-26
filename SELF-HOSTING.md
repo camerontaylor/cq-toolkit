@@ -139,10 +139,13 @@ Environments (each: custom branch policy, exactly `main`):
 | `cq-verdict` | `cq-policy` judge, `cq-verify` judge, `cq-accept` judge, `settings-drift`                                    | `CQ_VERDICT_APP_KEY` [`CQ_SETTINGS_TOKEN`]                                  |
 | `promote`    | `cq-gate` decide                                                                                             | `CQ_PROMOTER_APP_KEY` [`PROMOTE_TOKEN`]                                     |
 | `automation` | `self-merge-prs`, `self-review-loop` (privileged), `sync-merge-queue`, `init-merge-queue`, `ratchet-propose` | `CQ_AUTOMATION_APP_KEY`, `Z_AI_API_KEY` [`CQ_AUTOMATION_TOKEN`, `GH_TOKEN`] |
-| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `GH_TOKEN`, `Z_AI_API_KEY`, `DEEPSEEK_API_KEY`                              |
+| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `CQ_DRILL_MERGE_TOKEN`, `GH_TOKEN`, `Z_AI_API_KEY`, `DEEPSEEK_API_KEY`      |
 
 Only `drill` may have the owner as a required reviewer. The target state has
-no repository-level secrets.
+no repository-level secrets. The two `drill` GitHub tokens have different
+scopes: `CQ_DRILL_MERGE_TOKEN` (`live-merge`) is a classic token with `repo`
+plus `read:org`; `GH_TOKEN` (`live-review`) is a fine-grained PAT scoped to
+its scratch repositories.
 
 Repository variables: `CQ_VERDICT_APP_ID` and `CQ_VERDICT_APP_CLIENT_ID`
 (verdict App: the client id mints the posting token, the numeric id drives
@@ -182,8 +185,17 @@ Owner steps, in order (the RS-11 wizard outline):
    `automation` job cannot read a secret held in `promote`). Skip this and
    step 3 disarms sync (the behind/diverged sync PR fails with "sync not
    armed"), and init fails with no checkout credential.
-3. Move `PROMOTE_TOKEN` from the repository into `promote`. From here the
-   legacy gate fails closed and `cq-gate` carries every promotion.
+3. **Prerequisite: arm the trust set.** With the blank conservative default
+   (no bots, `APPROVED` only, human `OWNER`/`MEMBER`/`COLLABORATOR`) no PR in
+   this solo-identity repository reaches acceptance, because the owner
+   authors every PR. Set `CQ_MERGE_TRUSTED_BOTS` (the solo-maintainer
+   profile: `coderabbitai[bot]`) and `CQ_MERGE_ACCEPT_REVIEW_STATES` as
+   needed. Then confirm that a `cq-gate` run reported `would-promote` or
+   `promoted`, or at least that its per-PR `acceptance PR #<n>` lines
+   pass. Only then move `PROMOTE_TOKEN` from the repository into `promote`.
+   From there the legacy gate fails closed and `cq-gate` carries every
+   promotion. Skip the prerequisite and every promotion except break-glass
+   stops.
 4. Delete the remaining repository-level secrets; run `settings-drift` until
    the only drift left is the rulesets.
 5. **C2:** apply the rulesets from `github-settings.json` (R2 requires

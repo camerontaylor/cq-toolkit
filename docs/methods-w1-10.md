@@ -115,8 +115,11 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - there is no trusted acceptance bound to the head.
 
     These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The `judge` job is
-    serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the schedule), so an
-    older snapshot's post cannot land after a newer one's. Settle stays in the
+    serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the schedule). The
+    sweep and a per-PR run hold different locks, so before posting, each run skips when the
+    head's newest same-app `cq/acceptance` row started after its snapshot was read. That guard
+    is best-effort, so an older snapshot's post can still occasionally land after a newer
+    one's (see Residuals). Settle stays in the
     merger's recheck, because the ledger write needs `contents: write`. A mergeability row
     would be circular, since a required `cq/acceptance` keeps GitHub's merge state `BLOCKED`
     until it posts, so it is not included.
@@ -133,8 +136,13 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - a commit reachable from such a PR's head.
 
     First-parent merge commits must be clean: their tree equals
-    `git merge-tree --write-tree <p1> <p2>` (git ≥ 2.38, ort). Acceptance is recomputed per PR
-    at that PR's merged head. `gates.policyDiff` is recomputed over `main..tip` (push subject).
+    `git merge-tree --write-tree <p1> <p2>` (git ≥ 2.38, ort). I2's evidence rows are
+    recomputed per PR at that PR's merged head: a head-bound trusted acceptance, no outstanding
+    trusted objection, no unresolved external threads, and the lag cross-check. I2's settle
+    half (≥10 minutes since the head, or an all-clear that postdates it) is not recomputed. Only
+    the merger's recheck (`self-merge-prs`, `merge-recheck.ts`) enforces it, so a PR merged
+    into `merge-queue` by hand skips settle (see Residuals). `gates.policyDiff` is recomputed
+    over `main..tip` (push subject).
     With D11 records dormant until C3, a needs-human tip is refused and each PR's `cq-override`
     record is logged. Break-glass (D-H.4) is the only path for protected-path changes until C3.
 
@@ -176,5 +184,20 @@ paths stay in use, as ADR-0004 D-G.4 allows.
 - **Drift check arming.** It needs the verdict App (with read-only Administration,
   Environments, Secrets and Actions access) or an interim read-only fine-grained
   `CQ_SETTINGS_TOKEN` in `cq-verdict`. Without either, it fails closed on schedule.
+- **Settle is not recomputed at the gate.** The gate and `cq/acceptance` judge I2's
+  evidence rows only (Decisions 10, 12). The merger's recheck (`self-merge-prs`) is the only
+  place settle is enforced. The legacy gate does not check settle either, so this is not a
+  regression. After C2, though, a PR merged by hand into `merge-queue` a minute after its
+  last push would be promoted without any settle check. Fix direction, owned by C2: a
+  server-stamped settle anchor at the gate. That is either the earliest `pull_request`-event
+  run `created_at` at the head compared with the PR's `merged_at`, or an all-clear that
+  postdates the head.
+- **`cq/acceptance` ordering is best-effort.** The stale-verdict guard (Decision 10) reads
+  the newest row in one step and posts in a later one. It compares timestamps at one-second
+  resolution with a strict `>`, and it compares the runner's clock against the server's
+  `started_at`. A sweep that skips a verdict as "unchanged" also leaves no new row. An
+  older snapshot's verdict can therefore occasionally be the newest row. This heals itself:
+  the next event on the PR, or at worst the 15-minute sweep, re-judges and re-posts. The
+  gate never reads `cq/acceptance`; its per-PR recompute is authoritative for promotion.
 - **Gate sweep interval (O-7).** It is every 15 minutes, which bounds promotion latency when a
   wake-up is missed.
