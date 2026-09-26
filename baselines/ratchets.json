@@ -32,6 +32,8 @@
     "^\\.cq/tool/",
     "^baselines/",
     "^src/ops/gates/protectedPaths\\.ts$",
-    "^scripts/denylist-scan$"
+    "^scripts/denylist-scan$",
+    "^policy/protected-paths\\.json$",
+    "^policy/attestations/"
   ]
 }

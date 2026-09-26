@@ -32,6 +32,7 @@ import {
   extractTreeAttributeFree,
   gitChangedPaths,
   gitDiffText,
+  gitListPaths,
   gitMergeBase,
   gitReadBlob,
   gitRevParse,
@@ -285,6 +286,7 @@ describe('revision validation (d)', { timeout: 30_000 }, () => {
     ['gitReadBlob', () => gitReadBlob(repo, `--output=${out()}`, 'secret.ts')],
     ['gitChangedPaths', () => gitChangedPaths(repo, `--output=${out()}`, second)],
     ['gitDiffText', () => gitDiffText(repo, first, `--output=${out()}`, [])],
+    ['gitListPaths', () => gitListPaths(repo, `--output=${out()}`, 'src')],
     ['extract', () => extractTreeAttributeFree(repo, `--output=${out()}`, join(tmp, 'never'))],
   ])('%s rejects an option-shaped revision', async (_name, call) => {
     await expect(call()).rejects.toThrow(/refusing unsafe .* revision/);
@@ -353,6 +355,49 @@ describe('reads', { timeout: 30_000 }, () => {
       /refusing empty or NUL-bearing pathspec/,
     );
   });
+});
+
+describe('gitListPaths (W1.9)', { timeout: 30_000 }, () => {
+  test('lists the regular blobs under a directory, sorted, at each revision', async () => {
+    expect(await gitListPaths(repo, first, 'src')).toEqual(['src/deep/a.ts', 'src/old.ts']);
+    expect(await gitListPaths(repo, second, 'src')).toEqual(['src/deep/a.ts', 'src/new.ts']);
+    expect(await gitListPaths(repo, 'main', 'src/deep')).toEqual(['src/deep/a.ts']);
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  test('an absent prefix, a file prefix and a name-prefix sibling list nothing', async () => {
+    expect(await gitListPaths(repo, first, 'nope')).toEqual([]);
+    expect(await gitListPaths(repo, first, 'src/deep/a.ts')).toEqual([]);
+    // `sub.ts` shares the characters of `sub` but is not under `sub/`.
+    expect(await gitListPaths(repo, first, 'sub')).toEqual([]);
+  });
+
+  test('symlinks and gitlinks are omitted; executables are listed', async () => {
+    expect(await gitListPaths(repo, second, 'vendor')).toEqual([]);
+    const dir = join(tmp, 'list-modes');
+    initRepo(dir);
+    mkdirSync(join(dir, 'wf'));
+    writeFileSync(join(dir, 'wf', 'a.yml'), 'a\n', 'utf8');
+    writeFileSync(join(dir, 'wf', 'run.sh'), '#!/bin/sh\n', 'utf8');
+    chmodSync(join(dir, 'wf', 'run.sh'), 0o755);
+    symlinkSync('/etc/passwd', join(dir, 'wf', 'link.yml'));
+    const head = commitAll(dir, 'modes');
+    expect(await gitListPaths(dir, head, 'wf')).toEqual(['wf/a.yml', 'wf/run.sh']);
+  });
+
+  test('a bad revision throws rather than listing nothing', async () => {
+    await expect(gitListPaths(repo, 'no-such-branch', 'src')).rejects.toThrow(
+      /^ratchet git: ls-tree failed/,
+    );
+    await expect(gitListPaths(repo, missingOid, 'src')).rejects.toThrow(/^ratchet git:/);
+  });
+
+  test.each([[''], ['../x'], ['/abs'], ['.git'], ['a/.GIT'], [':(glob)*'], ['a\\b']])(
+    'refuses the prefix %j before spawning',
+    async (prefix) => {
+      await expect(gitListPaths(repo, first, prefix)).rejects.toThrow(/refusing list prefix/);
+    },
+  );
 });
 
 describe('malformed Git plumbing fails closed', { timeout: 30_000 }, () => {

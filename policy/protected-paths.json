@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "protectedPaths": [
+    "^src/ops/gates/",
+    "^src/ops/ratchet/",
+    "^src/ops/merge/classify",
+    "^src/selfhost/(?:merge-recheck|settle-state|candidates)\\.ts$",
+    "^scripts/ratchet-[^/]+\\.mjs$",
+    "^scripts/denylist-scan$"
+  ],
+  "requiredChecks": ["static", "denylist", "ratchet"]
+}

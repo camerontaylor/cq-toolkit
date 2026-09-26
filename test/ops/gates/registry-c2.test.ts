@@ -23,6 +23,7 @@ describe('gates registry: the two C2 entries', () => {
       'gates.regressionGate',
       'gates.hackDetector',
       'gates.commitGate',
+      'gates.policyDiff',
     ]);
   });
 });
