@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "ratchets": [
+    {
+      "target": "typecheck",
+      "metric": "typecheck-count",
+      "direction": "lower-is-better",
+      "unit": "errors",
+      "evidence": "recompute"
+    },
+    {
+      "target": "coverage",
+      "metric": "coverage",
+      "direction": "higher-is-better",
+      "unit": "pct",
+      "evidence": "measurement"
+    }
+  ],
+  "definitionSet": [
+    "^\\.github/",
+    "(?:^|/)vitest\\.config\\.[^/]+$",
+    "(?:^|/)vite\\.config\\.[^/]+$",
+    "(?:^|/)vitest\\.workspace\\.[^/]+$",
+    "(?:^|/)tsconfig[^/]*\\.json$",
+    "(?:^|/)package\\.json$",
+    "(?:^|/)package-lock\\.json$",
+    "(?:^|/)npm-shrinkwrap\\.json$",
+    "(?:^|/)\\.npmrc$",
+    "(?:^|/)\\.nvmrc$",
+    "(?:^|/)\\.node-version$",
+    "(?:^|/)\\.gitattributes$",
+    "^\\.cq/tool/",
+    "^baselines/",
+    "^src/ops/gates/protectedPaths\\.ts$",
+    "^scripts/denylist-scan$"
+  ]
+}

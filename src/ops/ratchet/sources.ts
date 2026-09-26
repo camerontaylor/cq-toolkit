@@ -21,6 +21,7 @@
 import { readFile } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import type { RawCheckOutput, RunCheck } from '../gates/checkRunner.js';
+import { roundCoveragePct } from './format.js';
 import type { MetricSource } from './metricRegistry.js';
 
 /**
@@ -35,8 +36,9 @@ import type { MetricSource } from './metricRegistry.js';
  *     captured diagnostics hands over the raw text; anything else is null —
  *     the `scripts/ratchet-lib.mjs` `typecheckEvidence` rule, kept here for
  *     the JSON op boundary), and `parse:'coverage-json'` also normalizes
- *     `total.lines.pct` to integer percent (the shared granularity law —
- *     sub-1% cross-runner float noise must never become a verdict). A
+ *     `total.lines.pct` to one decimal place (the shared granularity law,
+ *     `roundCoveragePct` — hundredths-digit cross-runner float noise must
+ *     never become a verdict). A
  *     non-zero or unobservable exit is non-passing evidence for every parse
  *     mode except `tsc-text` (its own exit-1/2 handoff).
  *   - `file` — read `path` (absolute, or workspace-relative) and parse it
@@ -58,11 +60,12 @@ export type MetricSourceSpec =
   | { kind: 'raw'; raw: unknown };
 
 /**
- * Integer-percent normalization of a coverage summary (the ONE shared
- * rounding point, mirroring `scripts/ratchet-lib.mjs`'s
- * `normalizeCoverageSummary`): v8's 2-decimal `total.lines.pct` is NOT stable
- * across environments (93.46 locally vs 93.38 in CI), so the reading is
- * rounded to integer percent before any adapter sees it. A hostile/missing
+ * One-decimal normalization of a coverage summary through the ONE shared
+ * rounding point ({@link roundCoveragePct} in ./format.ts, mirrored by
+ * `scripts/ratchet-lib.mjs`'s `normalizeCoverageSummary`): v8's 2-decimal
+ * `total.lines.pct` is NOT stable across environments (93.46 locally vs
+ * 93.38 in CI), so the reading is rounded half-up to one decimal (93.46 →
+ * 93.5) before any adapter sees it. A hostile/missing
  * shape passes through untouched — the adapter rules it unusable (I5), never
  * a fabricated reading.
  */
@@ -74,8 +77,15 @@ function normalizeCoverage(parsed: unknown): unknown {
     const lines = (total as { lines?: unknown }).lines;
     if (typeof lines !== 'object' || lines === null) return parsed;
     const record = lines as { pct?: unknown };
-    if (typeof record.pct === 'number' && Number.isFinite(record.pct)) {
-      record.pct = Math.round(record.pct);
+    // Do not round an out-of-range reading INTO [0,100]: the adapter must
+    // still see and reject the original non-passing evidence (I5).
+    if (
+      typeof record.pct === 'number' &&
+      Number.isFinite(record.pct) &&
+      record.pct >= 0 &&
+      record.pct <= 100
+    ) {
+      record.pct = roundCoveragePct(record.pct);
     }
   } catch {
     // getter/hostile shape: leave as-is (the adapter rules it unusable)
@@ -115,7 +125,7 @@ const TSC_CONFIG_ERROR = /^error TS\d+:|^.*\.json\(\d+,\d+\): error TS\d+:/m;
  * (null); every other outcome (null exit — signal/timeout/spawn fault — or
  * an abnormal code) is non-passing evidence.
  */
-function parseTscCaptured(raw: RawCheckOutput): unknown | null {
+export function classifyTscCapture(raw: RawCheckOutput): unknown | null {
   const text = `${raw.stdout}${raw.stderr}`;
   if (raw.exitCode === 0) return text.trim() === '' ? { count: 0 } : null;
   if (raw.exitCode === 1 || raw.exitCode === 2) {
@@ -151,7 +161,7 @@ export function makeMetricSource(run: RunCheck, spec: MetricSourceSpec): MetricS
           cwd,
           ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
         });
-        if (spec.parse === 'tsc-text') return parseTscCaptured(raw);
+        if (spec.parse === 'tsc-text') return classifyTscCapture(raw);
         // A timed-out / killed / spawn-failed check (null exit) or a
         // non-zero exit is non-passing evidence: only a CLEAN run's bytes
         // are evidence (the legacy typecheckEvidence rule, applied to every

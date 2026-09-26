@@ -23,11 +23,44 @@ export const PROTECTED_TEST_FILE_PATTERNS: readonly RegExp[] = Object.freeze(
 );
 
 /**
- * Configuration, package metadata, lockfiles, and repository automation that
- * can redefine what the final probe runs or how the result is measured.
+ * Configuration, package metadata, lockfiles, ratchet evidence, and
+ * repository automation that can redefine what the final probe runs or how
+ * the result is measured.
+ *
+ * RATCHET-SET SYNC (composition F1): every shape in the ratchet definition
+ * set is ALSO protected here — `baselines/ratchets.json`'s `definitionSet`
+ * is the trust-ref list that routes a subject's edit to needs-human, and
+ * `test/ops/gates/protectedPaths.test.ts` asserts that direction over the
+ * real manifest, plus the shapes ADR-0004 D-G.1 names that no regex can
+ * enumerate statically (`baselines/**`, `.node-version`, `.cq/tool/**`, the
+ * tsconfig `extends`/`references` graph).
+ *
+ * The relationship is ONE-DIRECTIONAL BY DESIGN, not a mirror: this taxonomy
+ * is deliberately BROADER, because worker-controlled test evidence (a test
+ * root, a `.spec.ts`, a snapshot, `.gitignore`, `.husky`) is not a ratchet
+ * definition and must not become one. So the inverse — a new pattern here
+ * with no definition-set counterpart — is a judgement call, not a test
+ * failure; the two list files are themselves needs-human, which is what makes
+ * that judgement reviewable. The test's reverse table is a LIVENESS guard
+ * (every pattern below has a representative it actually matches), not a
+ * pairing proof.
  */
 export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /\.config\.[^/]+$/i,
+  // Ratchet evidence: the definitions (ratchets.json) and every baseline a
+  // ratchet is measured against. A worker baseline edit is a definition of
+  // what the ratchet means, not ordinary content.
+  /^baselines(?:\/|$)/i,
+  // Node interpreter pin (.node-version is a dotfile but NOT an `rc` file, so
+  // the rc pattern below misses it).
+  /(?:^|\/)\.node-version$/i,
+  // Base-owned tool shims the gates invoke (.cq/tool/**).
+  /^\.cq\/tool(?:\/|$)/i,
+  // The gate's OWN taxonomy and the required-check list it parses: editing
+  // either is editing the rules that judge a worker commit (ADR-0004 D-C.4
+  // puts both in the ratchet definition set for the same reason).
+  /^src\/ops\/gates\/protectedPaths\.ts$/i,
+  /^scripts\/denylist-scan$/i,
   /(?:^|\/)[^/]*\.setup\.[^/]+$/i,
   /(?:^|\/)\.[^/]*rc(?:\.[^/]*)?$/i,
   /(?:^|\/)\.gitignore$/i,

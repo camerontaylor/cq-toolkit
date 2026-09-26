@@ -70,6 +70,7 @@ beforeAll(() => {
       "import { appendFileSync } from 'node:fs';",
       'const args = process.argv.slice(2);',
       "if (process.env.FAKE_GH_LOG) appendFileSync(process.env.FAKE_GH_LOG, JSON.stringify(args) + '\\n');",
+      "if (process.env.FAKE_GH_FAIL_LIST === '1' && args[0] === 'pr' && args[1] === 'list') { process.stderr.write('deliberate gh failure'); process.exit(2); }",
       "if (args[0] === 'pr' && args[1] === 'list') { process.stdout.write(process.env.FAKE_GH_PR_LIST ?? '[]'); process.exit(0); }",
       "if (args[0] === 'pr' && args[1] === 'create') { process.stdout.write((process.env.FAKE_GH_PR_CREATE ?? '" +
         PR_URL +
@@ -219,4 +220,62 @@ describe('makeSubprocessBaselinePrEffects', () => {
       }),
     ).rejects.toThrow(/unsafe head/);
   });
+
+  test('a failed gh list cannot become an absent-PR answer', async () => {
+    const previous = process.env.FAKE_GH_FAIL_LIST;
+    process.env.FAKE_GH_FAIL_LIST = '1';
+    try {
+      const effects = makeSubprocessBaselinePrEffects(work, 'main');
+      await expect(effects.findOpenPrByHead(HEAD)).rejects.toThrow(
+        /gh pr failed: deliberate gh failure/,
+      );
+    } finally {
+      if (previous === undefined) delete process.env.FAKE_GH_FAIL_LIST;
+      else process.env.FAKE_GH_FAIL_LIST = previous;
+    }
+  });
+
+  test.each([
+    ['no URL', 'not a URL', /gh pr create returned no URL/],
+    ['no PR identity', 'https://example.test/not-a-pull', /no PR identity/],
+  ])(
+    'a create response with %s fails closed',
+    async (_label, response, error) => {
+      process.env.FAKE_GH_PR_LIST = '[]';
+      process.env.FAKE_GH_PR_CREATE = response;
+      const effects = makeSubprocessBaselinePrEffects(work, 'main');
+      await expect(
+        effects.commitAndUpsertPr({
+          head: HEAD,
+          base: 'main',
+          title: 'chore(ratchet): tighten baselines',
+          body: 'body',
+          commitMessage: 'chore(ratchet): tighten baselines',
+          files: [{ path: FILE, content: CONTENT }],
+        }),
+      ).rejects.toThrow(error);
+    },
+    60_000,
+  );
+
+  test('a failed origin fetch aborts the proposal and restores the original branch', async () => {
+    const originalOrigin = git(fresh, ['remote', 'get-url', 'origin']).trim();
+    git(fresh, ['remote', 'set-url', 'origin', join(tmp, 'missing-remote.git')]);
+    try {
+      const effects = makeSubprocessBaselinePrEffects(fresh, 'main');
+      await expect(
+        effects.commitAndUpsertPr({
+          head: HEAD,
+          base: 'main',
+          title: 'chore(ratchet): tighten baselines',
+          body: 'body',
+          commitMessage: 'chore(ratchet): tighten baselines',
+          files: [{ path: FILE, content: CONTENT }],
+        }),
+      ).rejects.toThrow(/git fetch failed/);
+      expect(git(fresh, ['branch', '--show-current']).trim()).toBe('main');
+    } finally {
+      git(fresh, ['remote', 'set-url', 'origin', originalOrigin]);
+    }
+  }, 60_000);
 });

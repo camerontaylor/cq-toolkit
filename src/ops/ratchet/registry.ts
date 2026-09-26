@@ -5,7 +5,8 @@
 // central scanner's conventional `export const registry: OpRegistryEntry[]`
 // and every ratchet op gets a CLI subcommand (`ratchet.captureBaseline`,
 // `ratchet.checkRatchet`, `ratchet.monotonicGuard`,
-// `ratchet.proposeBaselineUpdate`).
+// `ratchet.proposeBaselineUpdate`), plus W1.7's trusted verifier pair
+// (`ratchet.verifyRatchet`, `ratchet.recomputeTypecheck`).
 //
 // LAZY RULE (the family convention): module scope imports only zod, node
 // builtins, type-only imports, the pure `./format.js` library (its
@@ -30,6 +31,8 @@ import type { CheckRatchetOutcome } from './checkRatchet.js';
 // before dispatch; the op keeps its own check as defense in depth.
 import { isIso8601Instant } from './format.js';
 import type { DiffVerdict } from './monotonicGuard.js';
+import type { RecomputeTypecheckOutcome } from './recomputeTypecheck.js';
+import type { VerifyRatchetOutcome } from './verifyRatchet.js';
 // The op module's declared Propose* types pin the mirror at compile time.
 import type { ProposeInput, ProposeOutcome } from './proposeBaselineUpdate.js';
 
@@ -40,7 +43,7 @@ import type { ProposeInput, ProposeOutcome } from './proposeBaselineUpdate.js';
  * ./sources.js):
  *   - `command` — run through lane C's CheckRunner; `parse` picks the raw
  *     shape the adapter reads (`text`, `json`, `tsc-text` for the tsc
- *     evidence classification, or `coverage-json` for an integer-percent
+ *     evidence classification, or `coverage-json` for a one-decimal
  *     coverage summary).
  *   - `file` — read a path (absolute or workspace-relative) and parse it.
  *   - `raw` — the raw value verbatim.
@@ -102,11 +105,46 @@ export const MonotonicGuardCommandInputSchema = z
   .object({
     diff: z.string().exactOptional(),
     diffPath: z.string().min(1).exactOptional(),
+    repo: z.string().min(1).exactOptional(),
+    base: z.string().min(1).exactOptional(),
+    head: z.string().min(1).exactOptional(),
   })
   .strict()
-  .refine((input) => (input.diff !== undefined) !== (input.diffPath !== undefined), {
-    message: 'provide exactly one of diff or diffPath',
-  });
+  .refine(
+    (input) =>
+      [input.diff, input.diffPath, input.repo].filter((v) => v !== undefined).length === 1 &&
+      (input.repo === undefined) === (input.base === undefined) &&
+      (input.repo === undefined) === (input.head === undefined),
+    { message: 'provide exactly one of diff, diffPath, or repo+base+head' },
+  );
+
+/**
+ * The `ratchet.verifyRatchet` registry input (the trusted verifier, W1.7):
+ * the trusted checkout, the trust ref and subject, and the untrusted
+ * evidence (artifact path, recompute count).
+ */
+export const VerifyRatchetCommandInputSchema = z
+  .object({
+    repo: z.string().min(1),
+    trustRef: z.string().min(1),
+    subject: z.string().min(1),
+    subjectKind: z.enum(['pr', 'push']),
+    base: z.string().min(1),
+    measureConclusion: z.string().min(1),
+    measurementPath: z.string().min(1).exactOptional(),
+    typecheckCount: z.number().int().nonnegative().exactOptional(),
+  })
+  .strict();
+
+/** The `ratchet.recomputeTypecheck` registry input (the trusted recompute, W1.7). */
+export const RecomputeTypecheckCommandInputSchema = z
+  .object({
+    repo: z.string().min(1),
+    subject: z.string().min(1),
+    scratch: z.string().min(1),
+    timeoutMs: z.number().int().positive().exactOptional(),
+  })
+  .strict();
 
 /** The `ratchet.proposeBaselineUpdate` registry input (the op's own JSON input). */
 export const ProposeBaselineUpdateCommandInputSchema: z.ZodType<ProposeInput> = z
@@ -130,8 +168,10 @@ export const ProposeBaselineUpdateCommandInputSchema: z.ZodType<ProposeInput> = 
 type CheckRatchetCommandInput = z.infer<typeof CheckRatchetCommandInputSchema>;
 type CaptureBaselineCommandInput = z.infer<typeof CaptureBaselineCommandInputSchema>;
 type MonotonicGuardCommandInput = z.infer<typeof MonotonicGuardCommandInputSchema>;
+type VerifyRatchetCommandInput = z.infer<typeof VerifyRatchetCommandInputSchema>;
+type RecomputeTypecheckCommandInput = z.infer<typeof RecomputeTypecheckCommandInputSchema>;
 
-/** Ratchet-family op registry (the four H1–H3 ops; the metric adapters are not ops). */
+/** Ratchet-family op registry (the H1–H3 ops plus W1.7's verifier pair; the metric adapters are not ops). */
 export const registry: OpRegistryEntry[] = [
   {
     name: 'ratchet.checkRatchet',
@@ -198,52 +238,97 @@ export const registry: OpRegistryEntry[] = [
     // Pure guard; the only I/O is reading a diff FILE when the caller hands a
     // path (keeping a large diff out of argv). An unreadable file is an
     // honest `failed`, never a fabricated pass. The diff is rewritten to the
-    // coverage integer-percent comparison basis BEFORE the pure guard judges
+    // coverage one-decimal comparison basis BEFORE the pure guard judges
     // it (the same normalization the local ratchet-check driver applies), so
-    // a fractional `93.46 → 93` re-basis cannot read as a loosening while
-    // the live coverage reading is rounded to 93 (review finding 1). The
+    // a fractional `93.46 → 93.5` re-basis cannot read as a loosening while
+    // the live coverage reading is rounded to 93.5 (review finding 1). The
     // comparison basis is keyed on the coverage METRIC id, so any
     // (target, coverage) baseline normalizes, not just the shipped pair.
     importer: () =>
-      Promise.all([import('./monotonicGuard.js'), import('./format.js')]).then(([m, format]) => {
-        // `baselines/<target>--<metric>--<digest>.json`; sanitized segments
-        // never contain `--`, so the metric segment is unambiguous.
-        const coverageBaseline = /^baselines\/[^/]*--coverage--[^/]*\.json$/;
-        const op: Op<MonotonicGuardCommandInput, DiffVerdict> = async (input) => {
-          // The schema refines this, but direct TS dispatch bypasses the
-          // registry: require EXACTLY one source (both-set is ambiguous).
-          if ((input.diff === undefined) === (input.diffPath === undefined)) {
-            return {
-              status: 'failed',
-              error: 'ratchet: provide exactly one of diff or diffPath',
-            };
-          }
-          let diff: string;
-          if (input.diff !== undefined) {
-            diff = input.diff;
-          } else {
-            const diffPath = input.diffPath;
-            if (diffPath === undefined) {
-              return { status: 'failed', error: 'ratchet: no diff or diffPath supplied' };
-            }
-            try {
-              diff = await readFile(resolve(diffPath), 'utf8');
-            } catch (err) {
+      Promise.all([import('./monotonicGuard.js'), import('./format.js'), import('./git.js')]).then(
+        ([m, format, git]) => {
+          // `baselines/<target>--<metric>--<digest>.json`; sanitized segments
+          // never contain `--`, so the metric segment is unambiguous.
+          const coverageBaseline = /^baselines\/[^/]*--coverage--[^/]*\.json$/;
+          const op: Op<MonotonicGuardCommandInput, DiffVerdict> = async (input) => {
+            // The schema refines this, but direct TS dispatch bypasses the
+            // registry: require EXACTLY one source (both-set is ambiguous).
+            const sources = [input.diff, input.diffPath, input.repo].filter((v) => v !== undefined);
+            if (sources.length !== 1) {
               return {
                 status: 'failed',
-                error:
-                  `ratchet: could not read diff '${diffPath}' — ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
+                error: 'ratchet: provide exactly one of diff, diffPath, or repo+base+head',
               };
             }
-          }
-          return {
-            status: 'ok',
-            value: m.checkDiffMonotonicity(
-              format.normalizeBaselineDiffValues(diff, coverageBaseline),
-            ),
+            let diff: string;
+            if (input.repo !== undefined) {
+              // Ref mode (W1.7): the op takes the diff itself with the
+              // hardened, no-shell argv (no external diff driver, no
+              // textconv, no renames — a rename is a delete plus an add the
+              // guard pairs), over merge-base(base, head)..head.
+              if (input.base === undefined || input.head === undefined) {
+                return { status: 'failed', error: 'ratchet: ref mode needs repo, base and head' };
+              }
+              try {
+                const head = await git.gitRevParse(input.repo, input.head);
+                const from = await git.gitMergeBase(input.repo, input.base, head);
+                diff = await git.gitDiffText(input.repo, from, head, ['baselines/']);
+              } catch (err) {
+                return {
+                  status: 'failed',
+                  error: `ratchet: ${err instanceof Error ? err.message : String(err)}`,
+                };
+              }
+            } else if (input.diff !== undefined) {
+              diff = input.diff;
+            } else {
+              const diffPath = input.diffPath;
+              if (diffPath === undefined) {
+                return { status: 'failed', error: 'ratchet: no diff or diffPath supplied' };
+              }
+              try {
+                diff = await readFile(resolve(diffPath), 'utf8');
+              } catch (err) {
+                return {
+                  status: 'failed',
+                  error:
+                    `ratchet: could not read diff '${diffPath}' — ` +
+                    `${err instanceof Error ? err.message : String(err)}`,
+                };
+              }
+            }
+            return {
+              status: 'ok',
+              value: m.checkDiffMonotonicity(
+                format.normalizeBaselineDiffValues(diff, coverageBaseline),
+              ),
+            };
           };
-        };
+          return op as Op<unknown, unknown>;
+        },
+      ),
+  },
+  {
+    name: 'ratchet.verifyRatchet',
+    inputSchema: VerifyRatchetCommandInputSchema,
+    // The trusted verifier (W1.7): definitions and baselines from the trust
+    // ref via git objects, the head as data. A failing verdict is DATA.
+    importer: () =>
+      import('./verifyRatchet.js').then((m) => {
+        const op: Op<VerifyRatchetCommandInput, VerifyRatchetOutcome> = async (input) =>
+          m.verifyRatchet(input);
+        return op as Op<unknown, unknown>;
+      }),
+  },
+  {
+    name: 'ratchet.recomputeTypecheck',
+    inputSchema: RecomputeTypecheckCommandInputSchema,
+    // The trusted typecheck recompute (W1.7): attribute-free extraction of
+    // the subject tree, the trust checkout's tsc over it.
+    importer: () =>
+      import('./recomputeTypecheck.js').then((m) => {
+        const op: Op<RecomputeTypecheckCommandInput, RecomputeTypecheckOutcome> = async (input) =>
+          m.recomputeTypecheck(input);
         return op as Op<unknown, unknown>;
       }),
   },

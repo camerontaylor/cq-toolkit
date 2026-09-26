@@ -23,9 +23,14 @@ import { describe, expect, it } from 'vitest';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
 
-// The eight template files (source of truth) that carry `uses:` steps or are
-// otherwise part of the pinning policy.
+// The template files (source of truth) that carry `uses:` steps or are
+// otherwise part of the pinning policy — the ratchet family included (W1.7).
 const TEMPLATE_FILES = [
+  'policy/templates/cq-measure.yml',
+  'policy/templates/cq-verify.yml',
+  'policy/templates/ratchet.yml',
+  'policy/templates/ratchet-propose.yml',
+  'policy/templates/ratchet-propose-measure.yml',
   'policy/templates/init-merge-queue.yml',
   'policy/templates/live-merge.yml',
   'policy/templates/merge-queue-gate.yml',

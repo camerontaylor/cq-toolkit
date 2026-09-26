@@ -1,10 +1,10 @@
-# `ratchet.monotonicGuard`
+# `ratchet.recomputeTypecheck`
 
 Generated from the op registry by [`scripts/gen-op-docs.mjs`](../../scripts/gen-op-docs.mjs).
 Do not edit by hand — run `npm run gen:op-docs`.
 
 - **Family:** `ratchet`
-- **CLI:** `cq ratchet.monotonicGuard [--<schema-key>=<value> ...] [--json]`; run `cq ratchet.monotonicGuard --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
+- **CLI:** `cq ratchet.recomputeTypecheck [--<schema-key>=<value> ...] [--json]`; run `cq ratchet.recomputeTypecheck --help` for the input schema (a secondary interface over the SDK — see [`src/cli/README.md`](../../src/cli/README.md))
 
 ## Input schema
 
@@ -16,26 +16,29 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
-    "base": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "diff": {
-      "type": "string"
-    },
-    "diffPath": {
-      "minLength": 1,
-      "type": "string"
-    },
-    "head": {
-      "minLength": 1,
-      "type": "string"
-    },
     "repo": {
       "minLength": 1,
       "type": "string"
+    },
+    "scratch": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "subject": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "timeoutMs": {
+      "exclusiveMinimum": 0,
+      "maximum": 9007199254740991,
+      "type": "integer"
     }
   },
+  "required": [
+    "repo",
+    "subject",
+    "scratch"
+  ],
   "type": "object"
 }
 ```

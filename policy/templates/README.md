@@ -8,18 +8,21 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 
 ## Files
 
-| file                   | what it is                                                                                                                                                                         |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `init-merge-queue.yml` | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD                                                                                              |
-| `merge-queue-gate.yml` | on push to `merge-queue`: wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind a merge-queue-tip guard and two merge-base guards |
-| `sync-merge-queue.yml` | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate                 |
-| `live-merge.yml`       | dispatch-only live drill: runs the F5 merge-prs integration test against a fresh private scratch repo on github.com (records its runs in `docs/drills/2026-09-f5.md`)              |
-| `required-check.md`    | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                         |
-| `affected-tests.md`    | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay                                                                                         |
-| `ratchet.yml`          | required type and coverage baseline checks on pushes and pull requests                                                                                                             |
-| `ratchet-propose.yml`  | post-merge baseline tightening proposals using the automation token                                                                                                                |
-| `self-host/`           | the stage-2 self-hosting automation (scheduled review-loop + merge-prs run from source) as adoptable workflows — `self-host/README.md` carries its files, tokens, and wiring guide |
-| `README.md`            | this guide                                                                                                                                                                         |
+| file                          | what it is                                                                                                                                                                                           |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `init-merge-queue.yml`        | dispatch-only, idempotent bootstrap of the `merge-queue` branch at `origin/main` HEAD                                                                                                                |
+| `merge-queue-gate.yml`        | on push to `merge-queue`: wait until the required checks succeeded on that commit, then fast-forward promote it to `main` behind a merge-queue-tip guard and two merge-base guards                   |
+| `sync-merge-queue.yml`        | on push to `main`: API-only triage (zero clone) that fast-forwards a behind `merge-queue`, reconciles divergence by merge commit, and defers promotion to the gate                                   |
+| `live-merge.yml`              | dispatch-only live drill: runs the F5 merge-prs integration test against a fresh private scratch repo on github.com (records its runs in `docs/drills/2026-09-f5.md`)                                |
+| `required-check.md`           | the I4 pattern — required checks never filter triggers — with this repo's static job as the worked example                                                                                           |
+| `affected-tests.md`           | the per-PR reduced-test-selection pattern, its documented blind spot, and its I4 interplay                                                                                                           |
+| `ratchet.yml`                 | LEGACY required type and coverage baseline checks on pushes and pull requests (head-defined; retired at the ADR-0004 cutover)                                                                        |
+| `cq-measure.yml`              | credential-free head measurement leg (`permissions: {}`): runs the suite, uploads a numbers-only coverage artifact                                                                                   |
+| `cq-verify.yml`               | default-branch `workflow_run` ratchet verifier: definitions and baselines from the trust ref's `baselines/ratchets.json`, typecheck recomputed over the attribute-free head tree, posts `cq/ratchet` |
+| `ratchet-propose-measure.yml` | credential-free post-promotion measurement for baseline proposals                                                                                                                                    |
+| `ratchet-propose.yml`         | `workflow_run` proposer: opens baseline-tightening PRs against `merge-queue` from the measure artifact, token behind `environment: automation`                                                       |
+| `self-host/`                  | the stage-2 self-hosting automation (scheduled review-loop + merge-prs run from source) as adoptable workflows — `self-host/README.md` carries its files, tokens, and wiring guide                   |
+| `README.md`                   | this guide                                                                                                                                                                                           |
 
 ## Placeholder tokens
 
@@ -84,10 +87,14 @@ workflow (`ratchet.yml`) drives the shipped CLI subcommands
 (`ratchet.checkRatchet`, `ratchet.monotonicGuard`); their committed baselines
 live in `baselines/`
 (one schemaVersion-1 file per (target, metric), written by
-`createCaptureBaseline`). Concretely, in this repo: `.github/workflows/ci.yml`
+`createCaptureBaseline`), and the ratchet definitions (the ratchet list and
+the ADR-0004 definition set) live in `baselines/ratchets.json`, which the
+trusted verifier (`cq-verify.yml`, `ratchet.verifyRatchet`) reads at the
+default-branch ref, never from the PR head. Concretely, in this repo: `.github/workflows/ci.yml`
 is `required-check.md` instantiated, the three queue workflows are the three
 queue `.yml` templates instantiated, the live-merge drill workflow is
-`live-merge.yml` instantiated, the two ratchet workflows are their matching
+`live-merge.yml` instantiated, the five ratchet workflows (`ratchet`,
+`cq-measure`, `cq-verify`, `ratchet-propose-measure`, `ratchet-propose`) are their matching
 `.yml` templates instantiated, and `denylist.yml` (which predates the
 templates) carries the required-check trigger shape with the denylist job
 body and a provenance comment pointing back at `required-check.md`. If you

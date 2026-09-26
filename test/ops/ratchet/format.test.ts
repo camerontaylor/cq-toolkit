@@ -19,16 +19,27 @@
 //      collision-RESISTANT with distinct, deterministic paths.
 //   4. tightens/loosens are pure comparators for both directions; equal
 //      values are neither.
+//   5. roundCoveragePct — the coverage granularity law: half-up to ONE
+//      decimal with absolute-epsilon float-noise protection (1.05 → 1.1,
+//      and a sum landing a hair below a half still rounds up), non-finite
+//      input returned unchanged.
+//   6. normalizeBaselineDiffValues re-bases coverage diff values to that
+//      same one-decimal basis: a `93.46 → 93.5` re-basis is an equal no-op,
+//      an on-granularity token keeps its bytes, and a true `93.4 → 93.3`
+//      loosening still fails checkDiffMonotonicity after normalization.
 //
 // Determinism: fixed ISO timestamps, no Date.now(), no Math.random().
 import { describe, expect, test } from 'vitest';
 import {
   baselineRelPath,
   loosens,
+  normalizeBaselineDiffValues,
   parseBaseline,
   renderBaseline,
+  roundCoveragePct,
   tightens,
 } from '../../../src/ops/ratchet/format.js';
+import { checkDiffMonotonicity } from '../../../src/ops/ratchet/monotonicGuard.js';
 import type { BaselineFile, Direction } from '../../../src/ops/ratchet/format.js';
 
 const CAPTURED_AT = '2026-09-15T00:00:00.000Z';
@@ -240,5 +251,119 @@ describe('tightens / loosens', () => {
   test.each(cases)('%s: %j → %j (tightens=%j, loosens=%j)', (d, prev, next, t, l) => {
     expect(tightens(prev, next, d)).toBe(t);
     expect(loosens(prev, next, d)).toBe(l);
+  });
+});
+
+describe('roundCoveragePct (one-decimal half-up coverage granularity)', () => {
+  const cases: Array<[number, number]> = [
+    [93.45, 93.5],
+    [93.44, 93.4],
+    [93.46, 93.5],
+    [93.38, 93.4],
+    [1.05, 1.1],
+    [99.95, 100],
+    [99.94, 99.9],
+    [0, 0],
+    [100, 100],
+    [94, 94],
+    [0.05, 0.1],
+    [0.04, 0],
+    // Accumulated float noise lands a hair BELOW the half
+    // (1.0499999999999998); the absolute epsilon still rounds it up —
+    // a naive Math.round(x * 10) / 10 would give 1.
+    [0.7 + 0.35, 1.1],
+  ];
+
+  test.each(cases)('%j → %j', (input, expected) => {
+    expect(roundCoveragePct(input)).toBe(expected);
+  });
+
+  test('renders cleanly through String (no float tails)', () => {
+    expect(String(roundCoveragePct(93.46))).toBe('93.5');
+    expect(String(roundCoveragePct(99.95))).toBe('100');
+    expect(String(roundCoveragePct(33.35))).toBe('33.4');
+  });
+
+  test('non-finite input is returned unchanged', () => {
+    expect(roundCoveragePct(Number.NaN)).toBeNaN();
+    expect(roundCoveragePct(Number.POSITIVE_INFINITY)).toBe(Number.POSITIVE_INFINITY);
+    expect(roundCoveragePct(Number.NEGATIVE_INFINITY)).toBe(Number.NEGATIVE_INFINITY);
+  });
+});
+
+describe('normalizeBaselineDiffValues (coverage one-decimal comparison basis)', () => {
+  const REL_COV = baselineRelPath('coverage', 'coverage');
+
+  function coverageValueDiff(oldValue: string, newValue: string): string {
+    return (
+      [
+        `diff --git a/${REL_COV} b/${REL_COV}`,
+        'index 1111111..2222222 100644',
+        `--- a/${REL_COV}`,
+        `+++ b/${REL_COV}`,
+        '@@ -2,6 +2,6 @@',
+        '   "target": "coverage",',
+        '   "metric": "coverage",',
+        '   "direction": "higher-is-better",',
+        `-  "value": ${oldValue},`,
+        `+  "value": ${newValue},`,
+        '   "unit": "pct",',
+        `   "capturedAt": "${CAPTURED_AT}"`,
+        ' }',
+      ].join('\n') + '\n'
+    );
+  }
+
+  test('a 2-decimal re-basis 93.46 → 93.5 reads as the equal no-op it is', () => {
+    const raw = coverageValueDiff('93.46', '93.5');
+    const normalized = normalizeBaselineDiffValues(raw, REL_COV);
+    expect(normalized).toContain('-  "value": 93.5,');
+    expect(normalized).toContain('+  "value": 93.5,');
+    expect(normalized).not.toContain('93.46');
+    expect(checkDiffMonotonicity(normalized)).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 1,
+    });
+  });
+
+  test('a 2-decimal re-basis 93.54 → 93.5 is equal too (unnormalized it reads as a loosening)', () => {
+    const raw = coverageValueDiff('93.54', '93.5');
+    expect(checkDiffMonotonicity(raw).ok).toBe(false);
+    expect(checkDiffMonotonicity(normalizeBaselineDiffValues(raw, REL_COV))).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 1,
+    });
+  });
+
+  test('on-granularity tokens (one decimal or integer) keep their exact bytes', () => {
+    const raw = coverageValueDiff('93.4', '94');
+    expect(normalizeBaselineDiffValues(raw, REL_COV)).toBe(raw);
+  });
+
+  test('a TRUE one-decimal loosening 93.4 → 93.3 still fails after normalization', () => {
+    const normalized = normalizeBaselineDiffValues(coverageValueDiff('93.4', '93.3'), REL_COV);
+    const verdict = checkDiffMonotonicity(normalized);
+    expect(verdict.ok).toBe(false);
+    if (verdict.ok) throw new Error('unreachable');
+    expect(verdict.violations).toHaveLength(1);
+    expect(verdict.violations[0]?.why).toBe('loosened');
+  });
+
+  test('a sub-granularity loosening 93.46 → 93.44 is normalized to 93.5 → 93.4 and fails', () => {
+    const normalized = normalizeBaselineDiffValues(coverageValueDiff('93.46', '93.44'), REL_COV);
+    expect(normalized).toContain('-  "value": 93.5,');
+    expect(normalized).toContain('+  "value": 93.4,');
+    expect(checkDiffMonotonicity(normalized).ok).toBe(false);
+  });
+
+  test('a 2-decimal tighten 92.44 → 92.5 still passes (old side normalizes to 92.4)', () => {
+    const normalized = normalizeBaselineDiffValues(coverageValueDiff('92.44', '92.5'), REL_COV);
+    expect(checkDiffMonotonicity(normalized)).toEqual({
+      ok: true,
+      violations: [],
+      filesChecked: 1,
+    });
   });
 });
