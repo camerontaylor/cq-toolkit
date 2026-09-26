@@ -48,8 +48,11 @@ a failed listing) exits 1.
 
 ## Required secrets
 
-Names only in the templates — values live in the adopting repo's Actions
-secrets.
+Names only in the templates — values live in the adopting repo's
+`automation` environment (a main-only deployment branch policy, W1.10
+Decision 8): the jobs that read them declare `environment: automation`, so a
+dispatch from any other ref fails at job admission, before a secret is
+exposed.
 
 | token                     | secret holds                                                                                                                                                                                                                                                                                                                                  |
 | ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

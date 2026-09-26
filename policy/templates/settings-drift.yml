@@ -1,0 +1,98 @@
+# settings-drift — the D13 drift check (W1.10; ADR-0004 D-I, RS-11).
+# Reports the distance between the repository's live GitHub settings
+# (rulesets, classic branch protection, environments and their secret names,
+# repository secrets, Actions settings and event policy) and the committed
+# target state, policy/templates/github-settings.json. It never writes a
+# setting: applying the file is the W7.3a wizard's job.
+#
+# Carrier: a daily `schedule` and `workflow_dispatch` (honoured only on the
+# default ref — ADR-0004 D-A.1), so the default branch's copy of the script
+# and the target file are what runs. The script uses only node builtins and
+# `gh`: no install, no build, no head code.
+#
+# Credential: a verdict-App installation token (read-only Administration,
+# Environments, Secrets and Actions) when `vars.CQ_VERDICT_APP_CLIENT_ID` is
+# set; otherwise the interim read-only fine-grained PAT `CQ_SETTINGS_TOKEN`
+# held in environment `cq-verdict`. With neither, the check FAILS CLOSED
+# ("drift check not armed") — an unarmed drift check is never green. The
+# script itself fails closed while the App ids (`vars.CQ_VERDICT_APP_ID`,
+# `vars.CQ_PROMOTER_APP_ID`) are unset: unregistered Apps are drift.
+#
+# Instantiate: no tokens (the secret and variable names are literal). Drop
+# the result into .github/workflows/. Edit the template, not the
+# instantiation.
+name: settings-drift
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  drift:
+    name: drift
+    # Dispatch is an allowed carrier only on the default ref (D-A.1).
+    if: >-
+      github.event_name == 'schedule' ||
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: cq-verdict
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the trust ref (the default branch)
+        # v5.1.0, immutable commit pin (repo policy)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node 24 (no cache)
+        # v5.0.0, immutable commit pin (repo policy)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+          cache: ''
+      - name: Mint the verdict App token (when the App is registered)
+        id: verdict-app
+        if: vars.CQ_VERDICT_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_VERDICT_APP_KEY }}
+          permission-administration: read
+          permission-environments: read
+          permission-secrets: read
+          permission-actions: read
+      - name: Compare the live settings with github-settings.json
+        env:
+          # Interim fallback: the read-only fine-grained CQ_SETTINGS_TOKEN.
+          GH_TOKEN: ${{ steps.verdict-app.outputs.token || secrets.CQ_SETTINGS_TOKEN }}
+          REPO: ${{ github.repository }}
+          VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          PROMOTER_APP_ID: ${{ vars.CQ_PROMOTER_APP_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo 'drift check not armed: set the verdict App vars or the interim CQ_SETTINGS_TOKEN in environment cq-verdict'
+            exit 1
+          fi
+          rc=0
+          node scripts/github-settings-drift.mjs \
+            --repository="$REPO" \
+            --verdict-app-id="$VERDICT_APP_ID" \
+            --promoter-app-id="$PROMOTER_APP_ID" \
+            > "${RUNNER_TEMP}/drift.txt" 2>&1 || rc=$?
+          cat "${RUNNER_TEMP}/drift.txt"
+          {
+            echo '## settings drift'
+            echo
+            echo '```text'
+            head -c 60000 "${RUNNER_TEMP}/drift.txt" | sed 's/```/` ` `/g'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

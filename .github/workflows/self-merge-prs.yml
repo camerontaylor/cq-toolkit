@@ -31,6 +31,10 @@
 #                              (15:00–01:00 UTC); an adopter replaces them
 #                              BY HAND with their model provider's off-peak
 #                              window. No placeholder text is substituted.
+# ENVIRONMENT (W1.10 Decision 8): the job runs in environment `automation`
+# (main-only branch policy), which holds SELFHOST_TOKEN's secret, so a
+# dispatch from any other ref fails at job admission, before the secret is
+# exposed.
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — inputs and secrets reach scripts through env: indirection
 # only. Drop the result into .github/workflows/. Edit the template, not
@@ -87,6 +91,7 @@ permissions:
 jobs:
   self-merge-prs:
     runs-on: ubuntu-latest
+    environment: automation
     # The stage-2 switch gives automation ONE ≤20-minute run per slot; the
     # next slot re-enters with the persisted journal.
     timeout-minutes: 20

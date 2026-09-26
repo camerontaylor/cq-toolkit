@@ -1,0 +1,363 @@
+# cq-accept — the DEFAULT-BRANCH I2 acceptance verifier (W1.10 Decision 10;
+# ADR-0004 D-B, D-F). Posts `cq/acceptance` on merge-queue PR heads.
+#
+# Carrier (P1): `workflow_run` on `cq-signal` (PR, label, review and
+# merge-queue push events), a `schedule` sweep (every 15 minutes: a review
+# dismissal, a thread resolution or a settle change can arrive without an
+# event this workflow sees) and `workflow_dispatch` with a PR number
+# (honoured only on the default ref — ADR-0004 D-A.1). GitHub runs the
+# DEFAULT BRANCH's copy of this file for all three, so a pull request cannot
+# edit what judges it (RS-4 T-2/T-8).
+#
+# What is judged (Decision 10, the RS-3 rules in merge-recheck.ts composed
+# read-only by src/selfhost/acceptance.ts): the PR is open, not a draft and
+# into merge-queue; its head is the subject; the snapshot is complete and
+# passes the I11 REST lag cross-check; no unresolved external review thread
+# and no outstanding trusted objection; a trusted acceptance is bound to the
+# head. Settle and mergeability are not judged here.
+#
+# DATA-ONLY: the verifier reads PR, review and thread API data with this
+# job's GITHUB_TOKEN. Nothing is checked out but the trust ref, and no head
+# byte is fetched at all. The trust set comes from `vars.*` (P7 keys,
+# Decision 11); blank means the conservative default.
+#
+# Jobs:
+#   - `resolve` verifies the triggering run (workflow path, repository id —
+#     fork runs are refused) and resolves the targets: `{pr, subject}` pairs.
+#     A PR event judges the one open same-repo PR into merge-queue whose head
+#     is the run's `head_sha`; a merge-queue push has nothing to judge; the
+#     sweep lists open same-repo non-draft PRs into merge-queue (at most 30).
+#   - `judge` builds the trusted toolkit, runs the acceptance CLI per target
+#     and posts one `cq/acceptance` check run per target. A `fail` verdict is
+#     a RED CHECK RUN, not a red job: the job fails only when the verifier
+#     crashed or a post failed. The sweep skips a post when the newest
+#     `cq/acceptance` run on that head from the same app already carries the
+#     same conclusion and trust binding.
+#
+# Identity (Decision 6): the check run is posted with a verdict-App token in
+# environment `cq-verdict` when `vars.CQ_VERDICT_APP_CLIENT_ID` is set, and
+# with this job's GITHUB_TOKEN otherwise. EXPAND (ADR-0004 D-H.2):
+# `cq/acceptance` becomes required (pinned to the verdict App) at C2.
+# `external_id` binds `<trust-sha>:<subject-sha>`.
+name: cq-accept
+
+on:
+  workflow_run:
+    workflows:
+      - cq-signal
+    types:
+      - completed
+  schedule:
+    - cron: '3,18,33,48 * * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 'merge-queue PR number to judge (its current head is the subject)'
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: cq-accept-${{ github.event.workflow_run.id || inputs.pr || 'sweep' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.event_name == 'workflow_run' ||
+      github.event_name == 'schedule' ||
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - name: Verify the trigger and resolve the targets
+        id: targets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          PR_INPUT: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+          [[ "$REPO_ID" =~ ^[0-9]+$ ]] || {
+            echo "refusing: repository id '$REPO_ID'"; exit 1; }
+          case "$EVENT" in
+            workflow_run)
+              case "$RUN_ID" in
+                ''|*[!0-9]*)
+                  echo "refusing: run id '$RUN_ID' is not numeric"
+                  exit 1;;
+              esac
+              # Re-read the run from the API by id: the fields below are
+              # the server's, not a payload a dispatcher could shape.
+              run="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
+              path="$(jq -r '.path' <<<"$run")"
+              event="$(jq -r '.event' <<<"$run")"
+              head_repo="$(jq -r '.head_repository.id' <<<"$run")"
+              subject="$(jq -r '.head_sha' <<<"$run")"
+              branch="$(jq -r '.head_branch' <<<"$run")"
+              [ "$path" = ".github/workflows/cq-signal.yml" ] || {
+                echo "refusing: run path '$path'"; exit 1; }
+              [ "$head_repo" = "$REPO_ID" ] || {
+                echo "refusing: fork or foreign run (repo id $head_repo)"
+                exit 1; }
+              [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || {
+                echo "refusing: head_sha '$subject'"; exit 1; }
+              case "$event" in
+                pull_request|pull_request_review|pull_request_review_comment)
+                  # The PR comes from the commit→PR API, never from
+                  # pull_requests[] (ADR-0004 D-C.2).
+                  targets="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
+                    --jq "[.[] | select(.state == \"open\"
+                       and .head.sha == \"${subject}\"
+                       and .head.repo.id == ${REPO_ID}
+                       and .base.ref == \"merge-queue\")
+                       | {pr: .number, subject: .head.sha}]")"
+                  count="$(jq 'length' <<<"$targets")"
+                  case "$count" in
+                    0)
+                      # A PR into another base: acceptance is not judged.
+                      echo "no open same-repo PR into merge-queue has head ${subject}"
+                      targets='[]';;
+                    1) ;;
+                    *)
+                      echo "refusing: ${count} open same-repo PRs"
+                      echo "into merge-queue have head ${subject}"
+                      exit 1;;
+                  esac
+                  ;;
+                push)
+                  [ "$branch" = "merge-queue" ] || {
+                    echo "refusing: push run on '$branch'"; exit 1; }
+                  echo 'merge-queue push: nothing to judge'
+                  targets='[]'
+                  ;;
+                *) echo "refusing: event '$event'"; exit 1;;
+              esac
+              ;;
+            schedule)
+              targets="$(gh api --paginate \
+                "repos/${REPO}/pulls?state=open&base=merge-queue&per_page=100" \
+                --jq ".[] | select(.head.repo.id == ${REPO_ID}
+                   and .draft == false and .base.ref == \"merge-queue\")
+                   | {pr: .number, subject: .head.sha}" |
+                jq -s '.[0:30]')"
+              ;;
+            workflow_dispatch)
+              [[ "$PR_INPUT" =~ ^[1-9][0-9]*$ ]] || {
+                echo "refusing: PR number '$PR_INPUT'"; exit 1; }
+              pull="$(gh api "repos/${REPO}/pulls/${PR_INPUT}")"
+              [ "$(jq -r '.state' <<<"$pull")" = open ] || {
+                echo "refusing: PR #${PR_INPUT} is not open"; exit 1; }
+              [ "$(jq -r '.head.repo.id' <<<"$pull")" = "$REPO_ID" ] || {
+                echo "refusing: PR #${PR_INPUT} is from a fork"; exit 1; }
+              [ "$(jq -r '.base.ref' <<<"$pull")" = merge-queue ] || {
+                echo "refusing: PR #${PR_INPUT} is not into merge-queue"
+                exit 1; }
+              targets="$(jq -c '[{pr: .number, subject: .head.sha}]' \
+                <<<"$pull")"
+              ;;
+            *) echo "refusing: event '$EVENT'"; exit 1;;
+          esac
+          # Every target is a positive PR number and a 40-hex subject.
+          targets="$(jq -c '.' <<<"$targets")"
+          jq -e 'type == "array" and all(.[];
+              (.pr | type) == "number" and .pr >= 1 and .pr == (.pr | floor)
+              and (.subject | type) == "string"
+              and (.subject | test("^[0-9a-f]{40}$")))' \
+            <<<"$targets" >/dev/null || {
+            echo "refusing: malformed targets ${targets}"; exit 1; }
+          echo "targets: ${targets}"
+          echo "targets=${targets}" >> "$GITHUB_OUTPUT"
+
+  judge:
+    name: judge
+    needs: resolve
+    if: needs.resolve.outputs.targets != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: cq-verdict
+    # Read scopes for the trust checkout and the PR/review API data;
+    # `checks: write` is the verdict's own scope (used only when no verdict
+    # App token is minted).
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    env:
+      # The trust set (P7 keys, Decision 11). Blank or unset = the
+      # conservative default.
+      CQ_MERGE_TRUSTED_BOTS: ${{ vars.CQ_MERGE_TRUSTED_BOTS }}
+      CQ_MERGE_ACCEPT_REVIEW_STATES: ${{ vars.CQ_MERGE_ACCEPT_REVIEW_STATES }}
+      CQ_MERGE_TRUSTED_ASSOCIATIONS: ${{ vars.CQ_MERGE_TRUSTED_ASSOCIATIONS }}
+    steps:
+      - name: Check out the trust ref (the default branch)
+        # v5.1.0, immutable commit pin (repo policy)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: trust
+          persist-credentials: false
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
+        # v5.0.0, immutable commit pin (repo policy)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+          cache: ''
+      - name: Install and build the trusted toolkit
+        working-directory: trust
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: 'Judge (CLI: selfhost/acceptance)'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRUST: ${{ github.sha }}
+          TARGETS: ${{ needs.resolve.outputs.targets }}
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/cq-accept"
+          mkdir -p "$dir"
+          : > "${dir}/crashed"
+          jq -c '.[]' <<<"$TARGETS" | while read -r target; do
+            pr="$(jq -r '.pr' <<<"$target")"
+            subject="$(jq -r '.subject' <<<"$target")"
+            [[ "$pr" =~ ^[1-9][0-9]*$ ]] || {
+              echo "refusing: PR number '$pr'"; exit 1; }
+            [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "refusing: subject '$subject'"; exit 1; }
+            verdict="${dir}/${pr}.json"
+            node trust/dist/selfhost/acceptance.js \
+              --repository="$REPO" --pr="$pr" --subject="$subject" \
+              --base=merge-queue --state=open > "$verdict" || true
+            if ! jq -e -s \
+              'length == 1 and (.[0] | type) == "object"
+               and (.[0].status | type) == "string"
+               and (.[0].value == null or (.[0].value | type) == "object")
+               and (.[0].error == null or (.[0].error | type) == "string")
+               and (.[0].detail == null or (.[0].detail | type) == "string")
+               and (.[0].status != "ok" or
+                 ((.[0].value | type) == "object"
+                  and (.[0].value.verdict | IN("pass", "fail"))
+                  and (.[0].value.report | type) == "array"
+                  and all(.[0].value.report[]; type == "string")))' \
+              "$verdict" >/dev/null 2>&1; then
+              msg='acceptance check emitted no valid JSON result'
+              printf '%s\n' "{\"status\":\"failed\",\"error\":\"$msg\"}" \
+                > "$verdict"
+            fi
+            cat "$verdict"
+            jq -e '.status == "ok"' "$verdict" >/dev/null ||
+              echo "#${pr}" >> "${dir}/crashed"
+            # Anything but an ok result with verdict "pass" is a failure.
+            # The summary is the run report, fenced and capped.
+            jq -n --slurpfile v "$verdict" \
+              --arg sha "$subject" --arg ext "${TRUST}:${subject}" \
+              --argjson pr "$pr" '
+              ($v[0] // {}) as $r
+              | ($r.value.verdict // "fail") as $verdict
+              | (if $r.status == "ok" then ($r.value.report | join("\n"))
+                 else (($r.error // $r.detail
+                   // "acceptance check returned no error detail")
+                   | tostring)
+                 end) as $report
+              | (if ($report | length) > 60000
+                 then $report[0:60000] + "\n(report truncated)"
+                 else $report end) as $report
+              | {
+                  name: "cq/acceptance",
+                  head_sha: $sha,
+                  external_id: $ext,
+                  status: "completed",
+                  conclusion: (if $r.status == "ok" and $verdict == "pass"
+                    then "success" else "failure" end),
+                  output: {
+                    title: (if $r.status != "ok"
+                      then "acceptance: check " + ($r.status // "crashed")
+                      else "acceptance: " + $verdict
+                        + " (#" + ($pr | tostring) + ")" end),
+                    summary: ("```text\n"
+                      + ($report | gsub("`{3,}"; "` ` `"))
+                      + "\n```"
+                      + "\n\ntrust ref `" + $ext + "`")
+                  }
+                }' > "${dir}/${pr}.check-run.json"
+          done
+      - name: Mint the verdict App token (when the App is registered)
+        id: verdict-app
+        if: vars.CQ_VERDICT_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_VERDICT_APP_KEY }}
+          permission-checks: write
+      - name: Post the cq/acceptance check runs
+        env:
+          GH_TOKEN: ${{ steps.verdict-app.outputs.token || github.token }}
+          EVENT: ${{ github.event_name }}
+          REPO: ${{ github.repository }}
+          VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          TARGETS: ${{ needs.resolve.outputs.targets }}
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/cq-accept"
+          [ -z "$VERDICT_APP_ID" ] || [[ "$VERDICT_APP_ID" =~ ^[0-9]+$ ]] || {
+            echo "refusing: CQ_VERDICT_APP_ID '$VERDICT_APP_ID'"; exit 1; }
+          echo '## cq/acceptance' >> "$GITHUB_STEP_SUMMARY"
+          for pr in $(jq -r '.[].pr' <<<"$TARGETS"); do
+            [[ "$pr" =~ ^[1-9][0-9]*$ ]] || {
+              echo "refusing: PR number '$pr'"; exit 1; }
+            check="${dir}/${pr}.check-run.json"
+            subject="$(jq -r '.head_sha' "$check")"
+            [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "refusing: subject '$subject'"; exit 1; }
+            {
+              echo
+              jq -r '"**" + .output.title + "**\n\n" + .output.summary' \
+                "$check"
+            } >> "$GITHUB_STEP_SUMMARY"
+            if [ "$EVENT" = schedule ]; then
+              # The sweep re-posts only a changed verdict: the newest
+              # cq/acceptance run on the head from the SAME app (the
+              # verdict App when set, else GitHub Actions).
+              newest="$(gh api --paginate \
+                "repos/${REPO}/commits/${subject}/check-runs?check_name=cq/acceptance&filter=all&per_page=100" \
+                --jq '.check_runs[]
+                  | {id, app_id: .app.id, app_slug: .app.slug,
+                     conclusion, external_id}' |
+                jq -s --arg app "$VERDICT_APP_ID" '
+                  map(select(if $app == ""
+                    then .app_slug == "github-actions"
+                    else (.app_id | tostring) == $app end))
+                  | max_by(.id) // {}')"
+              if jq -e --slurpfile c "$check" '
+                  .conclusion == $c[0].conclusion
+                  and .external_id == $c[0].external_id' \
+                  <<<"$newest" >/dev/null; then
+                echo "#${pr}: unchanged ($(jq -r '.conclusion' <<<"$newest")) — not re-posted"
+                continue
+              fi
+            fi
+            gh api -X POST "repos/${REPO}/check-runs" \
+              --input "$check" --jq '.html_url'
+          done
+          # A fail verdict is a red check run, not a red job: the job fails
+          # only when the verifier itself crashed.
+          if [ -s "${dir}/crashed" ]; then
+            echo "acceptance verifier crashed for: $(tr '\n' ' ' < "${dir}/crashed")"
+            exit 1
+          fi

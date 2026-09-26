@@ -35,10 +35,14 @@
 #     `cq-override` label record it checked — is the check-run summary and
 #     the step summary.
 #
-# EXPAND (ADR-0004 D-H.2): `cq/policy` is NOT a required check yet. W1.10's
-# C2 makes it required and moves the posting step to the verdict App. The
-# check run is posted with this job's GITHUB_TOKEN, which ADR-0004 D-F says
-# is not a trust anchor (any workflow can forge one). The `cq-override` label
+# EXPAND (ADR-0004 D-H.2; W1.10 Decision 6): `cq/policy` is NOT a required
+# check yet. `judge` runs in environment `cq-verdict` and posts with a
+# verdict-App token when `vars.CQ_VERDICT_APP_CLIENT_ID` is set; otherwise
+# with this job's GITHUB_TOKEN, which ADR-0004 D-F says is not a trust anchor
+# (any workflow can forge one). C2 requires the App and makes `cq/policy`
+# required, pinned to it. All verdict posters (cq-policy, cq-verify,
+# cq-accept) switch together, so the gate's verdict selection and the
+# posters never disagree about the authoritative app. The `cq-override` label
 # stays DORMANT — logged, never honoured — until the C3 attestation
 # (ADR-0004 D-H.3) is on the trust ref. `external_id` binds
 # `<trust-sha>:<subject-sha>`.
@@ -158,9 +162,12 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The verdict signer's environment (Decision 6): its only secret is the
+    # verdict App key, reached only by the mint step below.
+    environment: cq-verdict
     # Read scopes for the trust checkout, the object fetch and the timeline;
-    # `checks: write` is the verdict's own scope. No environment and no
-    # secret but GITHUB_TOKEN: this job runs trusted code over head DATA.
+    # `checks: write` is the verdict's own scope (used only when no verdict
+    # App token is minted). This job runs trusted code over head DATA.
     permissions:
       contents: read
       checks: write
@@ -303,9 +310,18 @@ jobs:
               > "${RUNNER_TEMP}/verdict.json"
           fi
           cat "${RUNNER_TEMP}/verdict.json"
+      - name: Mint the verdict App token (when the App is registered)
+        id: verdict-app
+        if: vars.CQ_VERDICT_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_VERDICT_APP_KEY }}
+          permission-checks: write
       - name: Post the cq/policy check run and the run report
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.verdict-app.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}

@@ -10,9 +10,10 @@
 //      one job, no secrets, no checkout, no action, a no-op body.
 //   3. cq-policy runs from the default branch (`workflow_run` on cq-signal;
 //      dispatch honoured only on the default ref), refuses fork and foreign
-//      runs, holds no environment and no secret but GITHUB_TOKEN, checks out
-//      only the trust ref with no persisted credential, never runs head code,
-//      reads the posture from `vars.*`, and posts `cq/policy`.
+//      runs, signs in environment `cq-verdict` (W1.10 Decision 6) with a
+//      verdict-App token when its variable is set and GITHUB_TOKEN otherwise,
+//      checks out only the trust ref with no persisted credential, never runs
+//      head code, reads the posture from `vars.*`, and posts `cq/policy`.
 //   4. The resolver, verdict guard and posting programs behave as documented
 //      when actually run (bash + jq, with `gh` stubbed).
 import { spawnSync } from 'node:child_process';
@@ -146,7 +147,7 @@ describe('cq-signal is a wake-up only (ADR-0004 D-B)', () => {
 
 describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)', () => {
   it.each(bothCopies('cq-policy.yml'))(
-    '%s: default-branch carrier, no environment, GITHUB_TOKEN only',
+    '%s: default-branch carrier, judge signs in cq-verdict, no other secret',
     (_label, text) => {
       const body = code(text);
       const on = onBlock(body);
@@ -156,11 +157,21 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(on).not.toMatch(/pull_request|push:/);
       expect(body).toMatch(/^permissions: \{\}$/m);
       expect([...jobBlocks(body).keys()]).toEqual(['resolve', 'judge']);
-      expect(body).not.toMatch(/^\s*environment:/m);
-      // The only secret is GITHUB_TOKEN (spelled `github.token` here).
+      // Only the signing job has an environment (Decision 6).
+      expect([...body.matchAll(/^\s*environment: (.*)$/gm)].map((m) => m[1])).toEqual([
+        'cq-verdict',
+      ]);
+      expect(jobBlocks(body).get('judge')).toMatch(/^ {4}environment: cq-verdict$/m);
+      // The only secret is the verdict App key, reached only by the mint step.
       for (const m of body.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
-        expect(m[1]).toBe('GITHUB_TOKEN');
+        expect(m[1]).toBe('CQ_VERDICT_APP_KEY');
       }
+      const judgeSteps = steps(jobBlocks(body).get('judge') ?? '');
+      const mint = judgeSteps.filter((s) => s.includes('actions/create-github-app-token@'));
+      expect(mint).toHaveLength(1);
+      expect(mint[0]).toMatch(/^ {8}if: vars\.CQ_VERDICT_APP_CLIENT_ID != ''$/m);
+      expect(mint[0]).toMatch(/^ {10}permission-checks: write$/m);
+      expect(judgeSteps.filter((s) => s.includes('secrets.'))).toEqual(mint);
       expect(body).toContain('${{ github.token }}');
       // Every `${{ }}` reaches a script through env:, never run: text.
       for (const job of jobBlocks(body).values()) {
@@ -250,13 +261,17 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(judge).toContain('--arg ext "${TRUST}:${SUBJECT}"');
       expect(judge).toContain('$GITHUB_STEP_SUMMARY');
       expect(judge).toContain('policy check emitted no valid JSON result');
-      // The fetch credential lives in the fetch step's env only.
-      const tokenSteps = steps(judge).filter((s) => s.includes('${{ github.token }}'));
+      // The fetch credential lives in the fetch step's env only; the post
+      // runs under the verdict-App token when minted (Decision 6).
+      const tokenSteps = steps(judge).filter((s) => s.includes('github.token }}'));
       expect(tokenSteps.map((s) => s.split('\n')[0])).toEqual([
         '      - name: Fetch the subject, base and cq-state objects (no checkout)',
         '      - name: Fetch the PR timeline label events (API data, not head bytes)',
         '      - name: Post the cq/policy check run and the run report',
       ]);
+      expect(tokenSteps[2]).toContain(
+        'GH_TOKEN: ${{ steps.verdict-app.outputs.token || github.token }}',
+      );
       const judgeStep = steps(judge).find((s) => s.includes('gates.policyDiff')) ?? '';
       expect(judgeStep).not.toMatch(/GH_TOKEN|github\.token/);
     },

@@ -16,11 +16,22 @@
 # delete_repo scope); docs/drills/2026-09-f5.md records past runs and the
 # repos to delete by hand.
 #
-# SECRETS: this file carries a NAME only. PROMOTE_TOKEN must be a classic
-# token holding the 'repo' scope PLUS 'read:org' — proven live, `gh pr edit`
-# (the retarget-self effect's exact argv shape) fails its GraphQL lookup
-# without read:org, which fails every retarget-self action in the drill.
-# The value reaches the drill through env indirection and is never echoed.
+# SECRETS: this file carries a NAME only. The drill credential must be a
+# classic token holding the 'repo' scope PLUS 'read:org' — proven live,
+# `gh pr edit` (the retarget-self effect's exact argv shape) fails its
+# GraphQL lookup without read:org, which fails every retarget-self action in
+# the drill. The value reaches the drill through env indirection and is never
+# echoed.
+#
+# ENVIRONMENT (W1.10 Decision 8; closes #170): the job runs in environment
+# `drill` (main-only branch policy, owner review allowed), which holds the
+# drill credential. A dispatch from any other ref fails at job admission,
+# before the secret is exposed — the drill no longer reaches the promotion
+# credential at all.
+#
+# Instantiate (each token below is written in double braces in the body):
+#   DRILL_SECRET -> NAME of the `drill` environment secret holding the drill
+#                   credential above, e.g. GH_TOKEN.
 name: live-merge
 
 on:
@@ -49,6 +60,7 @@ jobs:
     # The drill's own vitest budget is 20 minutes; 30 covers setup plus the
     # drill with headroom.
     timeout-minutes: 30
+    environment: drill
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -83,7 +95,7 @@ jobs:
       - name: Run the live merge drill
         env:
           LIVE_GH: '1'
-          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          GH_TOKEN: ${{ secrets.{{DRILL_SECRET}} }}
           TEST_FILTER: ${{ inputs.testFilter || '' }}
           CQ_DRILL_OWNER: ${{ vars.CQ_DRILL_OWNER || github.repository_owner }}
         run: |

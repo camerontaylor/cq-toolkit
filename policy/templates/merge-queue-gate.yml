@@ -2,9 +2,16 @@
 # by pure fast-forward (I3). Runs on every push to merge-queue; waits until
 # every required check on the gate's wait list has SUCCEEDED on the gated
 # commit (never promotes unchecked, never promotes a failure), then
-# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). This workflow is the
-# ONLY component that advances main. See policy/templates/README.md for the
-# token table and the entitlement facts.
+# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). See
+# policy/templates/README.md for the token table and the entitlement facts.
+#
+# RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): during C1 this gate runs
+# ALONGSIDE cq-gate (gate.yml, the P1 promotion job); the two are the only
+# components that advance main, and both promote with an atomic
+# compare-and-swap push, so running both is race-safe (RS-4 T-20). It reads
+# the repository-level PROMOTE_SECRET: once the owner moves that secret into
+# environment `promote`, this gate fails closed and cq-gate carries every
+# promotion. C2 deletes this file.
 #
 # Instantiate (each token below is written in double braces in the body):
 #   PROMOTE_SECRET   -> NAME of the repo secret holding a PAT with

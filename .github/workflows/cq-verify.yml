@@ -19,7 +19,8 @@
 #   - `resolve` verifies the triggering run (workflow path, event, repository
 #     id — fork runs are refused) and resolves the subject from `head_sha`,
 #     never `head_branch`; a PR subject's base comes from the commit→PR API.
-#   - `fetch` has read-only repository access and transfers the trust and
+#   - `fetch` has read-only repository access (a step-scoped credential,
+#     never persisted into .git/config) and transfers the trust and
 #     subject git objects — and the base ref, so the merge-base that starts
 #     the judged range travels with them — as a bundle, without executing
 #     head code. This keeps private repositories usable without a token in
@@ -32,18 +33,21 @@
 #     re-validates it in a job that holds no write scope and no secrets;
 #     only a numbers-only JSON crosses to `judge`, which therefore never
 #     unpacks a single byte the head authored (F5).
-#   - `judge` runs the trusted verifier over git objects + those numbers and
-#     posts the `cq/ratchet` check run. It runs no head code, holds
-#     `checks: write` only, and checks the trust ref out of the bundle with
-#     no persisted credential.
+#   - `judge` is the SIGNING job: it runs the trusted verifier over git
+#     objects + those numbers and posts the `cq/ratchet` check run. It runs
+#     no head code, holds `checks: write` only, runs in environment
+#     `cq-verdict`, and checks the trust ref out of the bundle with no
+#     persisted credential. `compute` stays credential-free: the signing
+#     environment never reaches a job that runs `tsc` over head content.
 #
-# INTERIM IDENTITY (until W1.10): the verdict is posted with this job's
-# GITHUB_TOKEN (`checks: write`). ADR-0004 D-F: such a check run is not yet a
-# trust anchor — any workflow can forge a GITHUB_TOKEN check run. W1.10 moves
-# the posting step to the verdict App in env `cq-verdict` and makes
-# `cq/ratchet` required with expected source = that App. Until then the
-# legacy `ratchet` check (ratchet.yml) stays the required one (expand/contract,
-# ADR-0004 D-H.2). `external_id` already binds `<trust-sha>:<subject-sha>`.
+# IDENTITY (EXPAND, ADR-0004 D-H.2; W1.10 Decision 6): `judge` posts with a
+# verdict-App token when `vars.CQ_VERDICT_APP_CLIENT_ID` is set, and with its
+# GITHUB_TOKEN (`checks: write`) otherwise. ADR-0004 D-F: a GITHUB_TOKEN check
+# run is not a trust anchor — any workflow can forge one. C2 requires the App
+# and makes `cq/ratchet` required with expected source = that App; until
+# then the legacy `ratchet` check (ratchet.yml) stays the required one. All
+# verdict posters (cq-policy, cq-verify, cq-accept) switch together.
+# `external_id` binds `<trust-sha>:<subject-sha>`.
 name: cq-verify
 
 on:
@@ -164,16 +168,25 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
-          # The read-only checkout token is needed for the subject fetch.
-          # This job never executes head code; the bundle has no git config.
-          persist-credentials: true
+          # The subject fetch below scopes its own read-only credential to
+          # that step; nothing persists into .git/config.
+          persist-credentials: false
       - name: Bundle the trust, subject and base objects (no head code)
         env:
+          GH_TOKEN: ${{ github.token }}
           BASE: ${{ needs.resolve.outputs.base }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}
           TRUST: ${{ github.sha }}
         run: |
           set -euo pipefail
+          # A step-scoped read-only credential, passed through git's
+          # environment config (never argv, never .git/config), so it ends
+          # with this step.
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
           git fetch --no-tags origin "$SUBJECT" \
             "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
           git update-ref refs/cq-transfer/trust "$TRUST"
@@ -339,10 +352,13 @@ jobs:
     if: ${{ !cancelled() && needs.resolve.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # The verdict signer's environment (Decision 6): its only secret is the
+    # verdict App key, reached only by the mint step below.
+    environment: cq-verdict
     # F5: `checks: write` is the verdict's own scope and nothing else — no
     # repository read, no artifact read. The trust ref, the subject objects
     # and the base all arrive in the `cq-verify-source` bundle, so this job
-    # holds no credential at all (ADR-0004 D-G.3).
+    # needs no repository credential (ADR-0004 D-G.3).
     permissions:
       checks: write
     steps:
@@ -430,9 +446,18 @@ jobs:
               > "${RUNNER_TEMP}/verdict.json"
           fi
           cat "${RUNNER_TEMP}/verdict.json"
+      - name: Mint the verdict App token (when the App is registered)
+        id: verdict-app
+        if: vars.CQ_VERDICT_APP_CLIENT_ID != ''
+        # v3.2.0, immutable commit pin (repo policy)
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CQ_VERDICT_APP_KEY }}
+          permission-checks: write
       - name: Post the cq/ratchet check run
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.verdict-app.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           TRUST: ${{ github.sha }}
           SUBJECT: ${{ needs.resolve.outputs.subject }}

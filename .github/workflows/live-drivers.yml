@@ -14,14 +14,19 @@
 #   3. The DD-1 abort spike's ai-sdk lane (scripts/dd1-abort-spike.mjs
 #      --lane ai-sdk — the measured abort-vs-spend evidence run).
 #
-# SECRETS: this file carries NAMES only. The values arrive as repo Actions
-# secrets (Z_AI_API_KEY, DEEPSEEK_API_KEY — the scripts map/rename in-process
-# and never print a value). As of 2026-09-15 the repo has none of these
+# SECRETS: this file carries NAMES only. The values arrive as `drill`
+# environment secrets (Z_AI_API_KEY, DEEPSEEK_API_KEY — the scripts
+# map/rename in-process and never print a value). As of 2026-09-15 the repo has none of these
 # configured yet; until they land, a dispatch fails at the scripts' own
 # credential gates (`… refusing to run`) — fail LOUDLY by design, never a
 # silent skip. Spend discipline: every leg caps itself (Budget.maxUsd 2 /
 # maxTokens, MAX_ATTEMPTS, the governed wall clock); the demo and spike are
 # the same bounded scripts the executor ran locally per the T1.6 keys rule.
+#
+# ENVIRONMENT (W1.10 Decision 8; closes #170): the job runs in environment
+# `drill` (main-only branch policy, owner review allowed), which holds the
+# provider keys. A dispatch from any other ref fails at job admission, before
+# any key is exposed.
 name: live-drivers
 
 on:
@@ -42,8 +47,9 @@ jobs:
   live-drivers:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    environment: drill
     env:
-      # Names only — the values live in the repo's Actions secrets.
+      # Names only — the values live in the `drill` environment's secrets.
       Z_AI_API_KEY: ${{ secrets.Z_AI_API_KEY }}
       DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
     steps:

@@ -1,21 +1,43 @@
 # instantiated from policy/templates/sync-merge-queue.yml — edit the template, not this file
 # Template: sync-merge-queue — keeps main and merge-queue level after
 # anything lands on main. API-only triage (no checkout; cost model: zero
-# clone), every call through the GitHub REST API with GH_TOKEN = the promote
-# PAT. Never uses force anywhere: the refs API PATCH with force=false is the
-# server-side fast-forward invariant — the server itself rejects any non-ff
-# update with 422, which is the whole reason an ff-only queue needs no
-# client-side trust. This workflow NEVER advances main itself: when
-# merge-queue is ahead, it dispatches merge-queue-gate — the sole promotion
-# path — so nothing reaches main except behind the gate's required-check
-# wait, the merge-queue-tip guard, and the merge-base guards. See
-# policy/templates/README.md for the token table and the entitlement facts.
+# clone). It NEVER writes a branch itself (W1.10 Decision 9; ADR-0004
+# D-A.2/D-I):
+#   - behind or diverged (main has commits merge-queue lacks): it opens, or
+#     reuses, a `main → merge-queue` pull request. Ruleset R2 requires a PR
+#     for every merge-queue update by a non-admin identity, so a direct ref
+#     PATCH or merges-API call would be refused anyway. The sync PR is judged
+#     like any PR, merged with a merge commit (I3), and admitted to main by
+#     the gate's closure rule. A conflicting sync PR is visible on its own —
+#     there is no separate divergence issue.
+#   - ahead (merge-queue has commits main lacks): promotion is the gates'
+#     job, never sync's. It dispatches BOTH merge-queue-gate.yml and gate.yml
+#     on the DEFAULT ref (`ref=main`, D-A.2: a dispatch runs the dispatched
+#     ref's copy of the workflow, so never merge-queue's). Each gate resolves
+#     the merge-queue tip itself. During C1 both gates run; C2 retires
+#     merge-queue-gate.yml and its dispatch below.
+# See policy/templates/README.md for the token table and the entitlement
+# facts.
 #
-# Instantiate: replace the PROMOTE_SECRET token (written in double braces
-# in the body) with the NAME of the repo secret holding a PAT with
-# contents:write (branch writes via the refs and merge APIs), actions:write
-# (dispatching the gate), and issues:write (the divergence alarm). Drop the
-# result into .github/workflows/. Edit the template, not the instantiation.
+# Credentials: reads and the gate dispatches use this job's own GITHUB_TOKEN
+# (`actions: write` is for the two dispatches only — the automation App has
+# no actions permission). Only the sync-PR list/create uses the automation
+# credential, because a pull request opened with GITHUB_TOKEN triggers no
+# workflows, so its checks would never run. The job runs in environment
+# `automation` (main-only branch policy).
+#
+# Instantiate (each token below is written in double braces in the body):
+#   AUTOMATION_SECRET -> NAME of the secret holding the automation
+#                        credential (Pull requests read/write, Contents
+#                        read), e.g. CQ_AUTOMATION_TOKEN in `automation`.
+#   INTERIM_SECRET    -> NAME of the secret used when AUTOMATION_SECRET is
+#                        empty (the interim fallback until the automation
+#                        credential is provisioned), e.g. PROMOTE_TOKEN.
+#                        Set it to the same name as AUTOMATION_SECRET to
+#                        have no fallback.
+# Instantiated files reference both as `${{ secrets.<name> }}` — names,
+# never values. Drop the result into .github/workflows/. Edit the template,
+# not the instantiation.
 name: sync-merge-queue
 
 on:
@@ -23,11 +45,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  contents: read
+permissions: {}
 
 # Triage runs serialize so two concurrent syncs cannot race each other into
-# a spurious conflict issue; a running sync is never cancelled mid-PATCH.
+# duplicate sync PRs; a running sync is never cancelled mid-call.
 concurrency:
   group: merge-queue-sync
   cancel-in-progress: false
@@ -35,72 +56,96 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: automation
+    permissions:
+      actions: write
+      contents: read
+      pull-requests: read
     steps:
       - name: Triage main vs merge-queue (API only, zero clone)
         env:
-          GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
+          AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN || secrets.PROMOTE_TOKEN }}
+          REPO_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY}"
+          owner="${GITHUB_REPOSITORY_OWNER}"
           compare_api="repos/${repo}/compare/main...merge-queue"
-          compare_html="https://github.com/${repo}/compare/main...merge-queue"
+          [[ "$REPO_ID" =~ ^[0-9]+$ ]] || {
+            echo "refusing: repository id '$REPO_ID'"; exit 1; }
 
           # gh api -i prints "HTTP/x.y CODE", headers, a blank line, then
           # the response body — for success AND error statuses alike. Read
           # the REAL status code; the callers below exit 1 on any status
-          # that is not the one predicted case (a rotated PAT, a missing
-          # scope, a rate limit, or a 5xx must fail loudly, never
-          # masquerade as non-ff/conflict and never open the divergence
-          # issue). Returning nonzero here means gh produced no HTTP
-          # response at all — a loud failure too.
+          # that is not the one predicted case (a rotated credential, a
+          # missing scope, a rate limit, or a 5xx must fail loudly, never
+          # masquerade as success). Returning nonzero here means gh produced
+          # no HTTP response at all — a loud failure too. The first argument
+          # is the token the call runs under.
           API_CODE=""
-          api_call() {
-            local raw
-            raw="$(gh api -i "$@")" || true
+          API_BODY=""
+          api_as() {
+            local token="$1" raw
+            shift
+            raw="$(GH_TOKEN="$token" gh api -i "$@")" || true
             API_CODE="$(printf '%s\n' "${raw}" | sed -n '1s|^HTTP/[0-9.]* \([0-9][0-9][0-9]\).*$|\1|p')"
+            API_BODY="$(printf '%s\n' "${raw}" | sed '1,/^\r\{0,1\}$/d')"
             if [ -z "${API_CODE}" ]; then
               echo "gh api returned no HTTP response ($*) — failing loudly" >&2
               return 1
             fi
           }
 
-          open_divergence_issue() {
-            gh issue create \
-              --repo "${repo}" \
-              --title "merge-queue diverged from main — needs merge/conflict resolution" \
-              --body "sync-merge-queue could not reconcile the branches automatically.
+          open_sync_pr() {
+            if [ -z "${AUTOMATION_TOKEN}" ]; then
+              echo "sync not armed: no automation credential — set the automation secret (or the interim fallback) in environment automation"
+              exit 1
+            fi
+            # Reuse an open same-repo sync PR (head main, base merge-queue):
+            # it already carries every main commit, since a PR's head is
+            # the live branch.
+            api_as "${AUTOMATION_TOKEN}" \
+              "repos/${repo}/pulls?state=open&base=merge-queue&head=${owner}:main"
+            [ "${API_CODE}" = 200 ] || {
+              echo "unexpected HTTP ${API_CODE} listing sync PRs (expected 200) — failing loudly"
+              exit 1; }
+            existing="$(jq -r --argjson id "$REPO_ID" \
+              '[.[] | select(.head.repo.id == $id and .head.ref == "main")]
+               | .[0].html_url // empty' <<<"${API_BODY}")"
+            if [ -n "${existing}" ]; then
+              echo "reusing the open sync PR ${existing}"
+              return 0
+            fi
+            api_as "${AUTOMATION_TOKEN}" -X POST "repos/${repo}/pulls" \
+              -f title='sync: main → merge-queue' \
+              -f head='main' \
+              -f base='merge-queue' \
+              -f body="sync-merge-queue opened this PR because main has commits merge-queue lacks.
 
-          Compare: ${compare_html}
-
-          Merge main into merge-queue (merge commit, never squash) and
-          resolve any conflicts; the gate will fast-forward main afterwards."
-          }
-
-          merge_main_into_merge_queue() {
-            # I3: the only reconciliation is a merge commit of main into
-            # merge-queue (merge method merge, base merge-queue, head main).
-            api_call -X POST "repos/${repo}/merges" \
-              -f base="merge-queue" \
-              -f head="main" \
-              -f merge_method="merge" \
-              -f commit_message="Merge main into merge-queue (sync-merge-queue)"
+          It is judged like any PR into merge-queue (the required checks, cq/policy, cq/ratchet and cq/acceptance). Merge it with a MERGE COMMIT (never squash or rebase, I3); the gate's closure rule then admits that merge commit to main. If it conflicts, resolve the conflict on a branch and merge that into merge-queue."
             case "${API_CODE}" in
               201)
-                echo "merged main into merge-queue with a merge commit (I3)"
-                ;;
-              204)
-                # 204 (no content) means nothing to merge: merge-queue
-                # already contains main — a concurrent sync got here first.
-                echo "no-op: the merge API returned 204 (merge-queue already contains main)"
-                ;;
-              409)
-                # 409 is the ONE predicted failure: the merge API created
-                # nothing because the branches conflict — surface it.
-                echo "merge API refused with 409 (conflict) — opening the divergence issue"
-                open_divergence_issue
+                echo "opened the sync PR $(jq -r '.html_url' <<<"${API_BODY}")"
                 ;;
               *)
-                echo "unexpected HTTP ${API_CODE} from the merge API (only 409 means conflict) — failing loudly, never opening the divergence issue on an unpredicted status"
+                echo "unexpected HTTP ${API_CODE} opening the sync PR (expected 201) — failing loudly"
+                exit 1
+                ;;
+            esac
+          }
+
+          dispatch_gate() {
+            # The job's own GITHUB_TOKEN, on the default ref (D-A.2).
+            api_as "${GH_TOKEN}" -X POST \
+              "repos/${repo}/actions/workflows/$1/dispatches" -f ref='main'
+            case "${API_CODE}" in
+              204)
+                echo "dispatched $1 on main"
+                ;;
+              *)
+                echo "unexpected HTTP ${API_CODE} dispatching $1 (expected 204) — failing loudly"
                 exit 1
                 ;;
             esac
@@ -115,51 +160,18 @@ jobs:
             identical)
               echo "main and merge-queue are identical — nothing to do"
               ;;
-            behind)
-              # merge-queue is behind main: fast-forward it to main's HEAD.
-              # force=false is the server-side ff invariant: the refs API
-              # rejects any non-ff update with 422, so this can only move
-              # merge-queue FORWARD to exactly main.
-              api_call -X PATCH "repos/${repo}/git/refs/heads/merge-queue" \
-                -f sha="${main_sha}" \
-                -F force=false
-              case "${API_CODE}" in
-                200)
-                  echo "fast-forwarded merge-queue to main ${main_sha} (force=false)"
-                  ;;
-                422)
-                  # 422 is the ONE predicted failure: non-ff, meaning
-                  # merge-queue moved concurrently — reconcile instead.
-                  echo "PATCH of refs/heads/merge-queue rejected with 422 (non-ff) — merge-queue moved concurrently; treating as diverged"
-                  merge_main_into_merge_queue
-                  ;;
-                *)
-                  echo "unexpected HTTP ${API_CODE} PATCHing refs/heads/merge-queue (only 422 means non-ff) — failing loudly, never guessing and never forcing"
-                  exit 1
-                  ;;
-              esac
+            behind|diverged)
+              # main has commits merge-queue lacks: they reach the queue
+              # only through a PR (R2), merged with a merge commit (I3).
+              open_sync_pr
               ;;
             ahead)
-              # merge-queue is ahead of main: promotion is the gate's job,
-              # never sync's (the gate is the ONLY component that advances
-              # main, and only after the required checks succeeded on the
-              # queue HEAD). Dispatch it; the gate's merge-base guards make
-              # re-dispatch idempotent, and its concurrency group
-              # serializes this dispatch behind any running promotion.
-              api_call -X POST "repos/${repo}/actions/workflows/merge-queue-gate.yml/dispatches" \
-                -f ref="merge-queue"
-              case "${API_CODE}" in
-                204)
-                  echo "merge-queue is ahead of main — dispatched merge-queue-gate (the sole promotion path)"
-                  ;;
-                *)
-                  echo "unexpected HTTP ${API_CODE} dispatching merge-queue-gate (expected 204) — failing loudly"
-                  exit 1
-                  ;;
-              esac
-              ;;
-            diverged)
-              merge_main_into_merge_queue
+              # merge-queue is ahead of main: promotion is the gates' job.
+              # Their tip and merge-base guards make re-dispatch idempotent,
+              # and their concurrency groups serialize it behind any
+              # running promotion.
+              dispatch_gate merge-queue-gate.yml
+              dispatch_gate gate.yml
               ;;
             *)
               echo "unexpected compare status '${status}' — refusing to act"

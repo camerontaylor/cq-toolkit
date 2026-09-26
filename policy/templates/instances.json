@@ -2,6 +2,11 @@
   "schemaVersion": 1,
   "instances": [
     {
+      "workflow": "cq-accept.yml",
+      "template": "cq-accept.yml",
+      "tokens": {}
+    },
+    {
       "workflow": "cq-measure.yml",
       "template": "cq-measure.yml",
       "tokens": {}
@@ -22,16 +27,27 @@
       "tokens": {}
     },
     {
+      "workflow": "gate.yml",
+      "template": "gate.yml",
+      "tokens": {
+        "GATE_WORKFLOWS": "ci.yml,denylist.yml",
+        "GATE_TIMEOUT_MIN": "20"
+      }
+    },
+    {
       "workflow": "init-merge-queue.yml",
       "template": "init-merge-queue.yml",
       "tokens": {
-        "PROMOTE_SECRET": "PROMOTE_TOKEN"
+        "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
+        "INTERIM_SECRET": "PROMOTE_TOKEN"
       }
     },
     {
       "workflow": "live-merge.yml",
       "template": "live-merge.yml",
-      "tokens": {}
+      "tokens": {
+        "DRILL_SECRET": "GH_TOKEN"
+      }
     },
     {
       "workflow": "merge-queue-gate.yml",
@@ -43,11 +59,6 @@
       }
     },
     {
-      "workflow": "ratchet.yml",
-      "template": "ratchet.yml",
-      "tokens": {}
-    },
-    {
       "workflow": "ratchet-propose-measure.yml",
       "template": "ratchet-propose-measure.yml",
       "tokens": {}
@@ -55,6 +66,11 @@
     {
       "workflow": "ratchet-propose.yml",
       "template": "ratchet-propose.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "ratchet.yml",
+      "template": "ratchet.yml",
       "tokens": {}
     },
     {
@@ -73,10 +89,16 @@
       }
     },
     {
+      "workflow": "settings-drift.yml",
+      "template": "settings-drift.yml",
+      "tokens": {}
+    },
+    {
       "workflow": "sync-merge-queue.yml",
       "template": "sync-merge-queue.yml",
       "tokens": {
-        "PROMOTE_SECRET": "PROMOTE_TOKEN"
+        "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
+        "INTERIM_SECRET": "PROMOTE_TOKEN"
       }
     }
   ],
