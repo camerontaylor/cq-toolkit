@@ -1,0 +1,150 @@
+{
+  "_doc": "D13 settings-as-code: the TARGET state of the repository's GitHub settings (ADR-0004 D-I, RS-11 branch matrix; W1.10 methods note). Rulesets R0/R1/R2 replace classic branch protection; environments pin deployment policy, admin bypass, reviewers and a secret-name allowlist (interimSecrets are the interim PAT names, reported as notices until ADR-0004 D-H.3 C3); reviewers \"any\" means not compared. scripts/github-settings-drift.mjs renders the quoted VERDICT_APP_ID and PROMOTER_APP_ID placeholders to numbers and reports drift against the live settings; applying this file is the W7.3a wizard's job. This _doc field is ignored by the comparator.",
+  "schemaVersion": 1,
+  "rulesets": [
+    {
+      "name": "cq-r0-history",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/heads/main", "refs/heads/merge-queue"],
+          "exclude": []
+        }
+      },
+      "rules": [{ "type": "non_fast_forward" }, { "type": "deletion" }],
+      "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+    },
+    {
+      "name": "cq-r1-main",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/heads/main"],
+          "exclude": []
+        }
+      },
+      "rules": [{ "type": "update" }],
+      "bypass_actors": [
+        {
+          "actor_id": "{{PROMOTER_APP_ID}}",
+          "actor_type": "Integration",
+          "bypass_mode": "always"
+        },
+        { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+      ]
+    },
+    {
+      "name": "cq-r2-merge-queue",
+      "target": "branch",
+      "enforcement": "active",
+      "conditions": {
+        "ref_name": {
+          "include": ["refs/heads/merge-queue"],
+          "exclude": []
+        }
+      },
+      "rules": [
+        {
+          "type": "pull_request",
+          "parameters": {
+            "required_approving_review_count": 0,
+            "dismiss_stale_reviews_on_push": false,
+            "require_code_owner_review": false,
+            "require_last_push_approval": false,
+            "required_review_thread_resolution": true,
+            "allowed_merge_methods": ["merge"]
+          }
+        },
+        {
+          "type": "required_status_checks",
+          "parameters": {
+            "strict_required_status_checks_policy": false,
+            "do_not_enforce_on_create": false,
+            "required_status_checks": [
+              { "context": "cq/policy", "integration_id": "{{VERDICT_APP_ID}}" },
+              { "context": "cq/ratchet", "integration_id": "{{VERDICT_APP_ID}}" },
+              { "context": "cq/acceptance", "integration_id": "{{VERDICT_APP_ID}}" },
+              { "context": "static", "integration_id": 15368 },
+              { "context": "denylist", "integration_id": 15368 },
+              { "context": "from-source", "integration_id": 15368 },
+              { "context": "pack-audit", "integration_id": 15368 }
+            ]
+          }
+        }
+      ],
+      "bypass_actors": [{ "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }]
+    }
+  ],
+  "classicBranchProtection": {
+    "main": null,
+    "merge-queue": null
+  },
+  "environments": {
+    "cq-verdict": {
+      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "can_admins_bypass": false,
+      "reviewers": [],
+      "secrets": ["CQ_VERDICT_APP_KEY"],
+      "interimSecrets": ["CQ_SETTINGS_TOKEN"]
+    },
+    "promote": {
+      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "can_admins_bypass": false,
+      "reviewers": [],
+      "secrets": ["CQ_PROMOTER_APP_KEY"],
+      "interimSecrets": ["PROMOTE_TOKEN"]
+    },
+    "automation": {
+      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "can_admins_bypass": false,
+      "reviewers": [],
+      "secrets": ["CQ_AUTOMATION_APP_KEY", "Z_AI_API_KEY"],
+      "interimSecrets": ["CQ_AUTOMATION_TOKEN", "GH_TOKEN"]
+    },
+    "drill": {
+      "deployment_branch_policy": { "protected_branches": false, "custom_branch_policies": true },
+      "branch_policies": [{ "name": "main", "type": "branch" }],
+      "can_admins_bypass": true,
+      "reviewers": "any",
+      "secrets": ["GH_TOKEN", "Z_AI_API_KEY", "DEEPSEEK_API_KEY"],
+      "interimSecrets": []
+    }
+  },
+  "repositorySecrets": [],
+  "actions": {
+    "default_workflow_permissions": "read",
+    "can_approve_pull_request_reviews": false
+  },
+  "actionsEventPolicy": {
+    "name": "cq-allowed-events",
+    "target": "actions",
+    "enforcement": "active",
+    "conditions": {
+      "workflow_path": {
+        "include": ["~ALL"],
+        "exclude": []
+      }
+    },
+    "rules": [
+      {
+        "type": "restrict_action_events",
+        "parameters": {
+          "allowed_events": [
+            "pull_request",
+            "pull_request_review",
+            "pull_request_review_comment",
+            "push",
+            "schedule",
+            "workflow_dispatch",
+            "workflow_run"
+          ]
+        }
+      }
+    ]
+  }
+}
