@@ -32,11 +32,17 @@ that holds the write token, and bypasses merge-queue.
   direction, unit, evidence kind: head `measurement` or trusted `recompute`) and the D-C.4
   definition set (anchored regex sources, the repo's path-pattern idiom). The verifier reads it
   **from the trust ref** with `git cat-file blob <trust>:baselines/ratchets.json`, never from
-  the head. Baseline values are read from the trust ref the same way.
+  the head. Baseline values are read as git objects at BOTH ends: the trust ref's canonical
+  baseline is authoritative, and the subject's canonical baseline must also exist and parse
+  with the same identity. The effective baseline is the STRICTER of the two, so a tightening
+  that has landed in merge-queue is enforced before promotion — the window between a landing
+  and its promotion is not a free regression, and a subject can only ever raise its own bar.
 - **Ratchet git plumbing** (`src/ops/ratchet/git.ts`): every git call is `execFile` with an
   argv array, never a shell, prefixed with the closed-form hardening from #221's design note
   (`--no-pager --literal-pathspecs -c core.fsmonitor=false -c core.quotePath=true`). Diffs add
-  W1.8's `--text --no-ext-diff --no-textconv --no-renames --src-prefix=a/ --dst-prefix=b/`.
+  W1.8's `--text --no-ext-diff --no-textconv --no-renames --src-prefix=a/ --dst-prefix=b/`
+  plus `--no-color --no-relative`, which pin repository config (`color.diff=always`,
+  `diff.relative=true`) that would otherwise reshape the patch text a parser consumes.
   Head content is read attribute-free (`ls-tree -r -z` + `cat-file --batch`), never
   `git archive` or a checkout.
 - **Verifier** `ratchet.verifyRatchet`: definition check (subject diff vs `merge-base` for a
