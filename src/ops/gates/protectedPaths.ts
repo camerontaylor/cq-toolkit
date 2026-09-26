@@ -61,6 +61,11 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   // puts both in the ratchet definition set for the same reason).
   /^src\/ops\/gates\/protectedPaths\.ts$/i,
   /^scripts\/denylist-scan$/i,
+  // D11 protected paths (ADR-0004 D-G.1): policy templates instantiate the
+  // repository's workflows and the doctrine, and lint rules define what the
+  // static gate enforces, so both are enforcement definitions, not content.
+  /^policy(?:\/|$)/i,
+  /^lint(?:\/|$)/i,
   /(?:^|\/)[^/]*\.setup\.[^/]+$/i,
   /(?:^|\/)\.[^/]*rc(?:\.[^/]*)?$/i,
   /(?:^|\/)\.gitignore$/i,
@@ -92,6 +97,17 @@ export function isProtectedConfigPath(path: string): boolean {
   return (
     PROTECTED_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(path)) || /\.snap$/i.test(path)
   );
+}
+
+/**
+ * True when a repo-relative path is a D11 protected policy path (ADR-0004
+ * D-G.1): exactly the configuration patterns above. Deliberately WITHOUT the
+ * test-root, test-file and `.snap` patterns — tests and snapshots are worker
+ * evidence (W1.8), not D11 enforcement definitions, so a human-authored test
+ * change is not a D11 event.
+ */
+export function isProtectedPolicyPath(path: string): boolean {
+  return PROTECTED_CONFIG_PATH_PATTERNS.some((pattern) => pattern.test(path));
 }
 
 /** True when a repo-relative path is any kind of protected worker evidence. */

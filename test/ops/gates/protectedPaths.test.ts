@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   PROTECTED_STAGE_PATTERNS,
+  isProtectedPolicyPath,
   isProtectedStagePath,
 } from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
@@ -100,6 +101,8 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],
   '^src\\/ops\\/gates\\/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
   '^scripts\\/denylist-scan$': ['scripts/denylist-scan'],
+  '^policy(?:\\/|$)': ['policy/DOCTRINE.md', 'policy/templates/ratchet.yml'],
+  '^lint(?:\\/|$)': ['lint/plugin.mjs', 'lint/rules/x.mjs'],
   '(?:^|\\/)[^/]*\\.setup\\.[^/]+$': ['vitest.setup.ts'],
   '(?:^|\\/)\\.[^/]*rc(?:\\.[^/]*)?$': ['.npmrc', 'packages/a/.npmrc'],
   '(?:^|\\/)\\.gitignore$': ['.gitignore', 'packages/a/.gitignore'],
@@ -135,5 +138,37 @@ describe('worker gate pattern liveness (reverse direction)', () => {
     expect(new RegExp(source, 'i').test(path)).toBe(true);
     // …and the stage path gate really does protect it.
     expect(isProtectedStagePath(path)).toBe(true);
+  });
+});
+
+describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
+  test.each([
+    'policy/DOCTRINE.md',
+    'policy/templates/cq-policy.yml',
+    'lint/x',
+    'lint/rules/no-vendor-sdk-in-kernel.mjs',
+    '.github/workflows/ci.yml',
+    'baselines/ratchets.json',
+  ])('%s is a protected policy path', (path) => {
+    expect(isProtectedPolicyPath(path)).toBe(true);
+  });
+
+  test.each([
+    // Tests and snapshots are worker evidence, not enforcement definitions.
+    'src/foo.test.ts',
+    '__snapshots__/a.snap',
+    'test/unit/a.ts',
+    'src/index.ts',
+    // Anchored at the repo root: a nested `policy/` or `lint/` is content.
+    'src/policy/index.ts',
+    'src/lint/index.ts',
+    'policyish/a.md',
+  ])('%s is not a protected policy path', (path) => {
+    expect(isProtectedPolicyPath(path)).toBe(false);
+  });
+
+  test('policy and lint paths are also denied to sweep workers', () => {
+    expect(isProtectedStagePath('policy/templates/ratchet.yml')).toBe(true);
+    expect(isProtectedStagePath('lint/plugin.mjs')).toBe(true);
   });
 });
