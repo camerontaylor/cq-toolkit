@@ -76,8 +76,10 @@ event that no later `unlabeled` event follows. It is **valid** only if all of th
   tuple on `cq-state`, never a commit timestamp. With no such record the label is invalid.
 
 A valid record is **honoured**, turning needs-human into pass, only when the C3 attestation file
-(`policy/attestations/c3.json`) is present on the trust ref. Until then the report logs the label
-as `dormant`, with every field it checked. The APPROVED-review record form belongs to W1.10,
+(`policy/attestations/c3.json`) is on the trust ref **and** has exactly the shape
+`{ "schemaVersion": 1, "attests": "C3", "attestedAt": "<canonical ISO 8601 UTC>", "note"?: … }`.
+A stray, empty or placeholder file does not arm records; the report notes why. Until then the
+report logs the label as `dormant`, with every field it checked. The APPROVED-review record form belongs to W1.10,
 alongside the acceptance check.
 
 ## Workflow wiring (expand, ADR-0004 D-H.2)
@@ -136,13 +138,33 @@ alongside the acceptance check.
    (`.github/**`), and it is a definition change wherever `^\.github/` is in the set, as it is
    here.
 
-7. **Inputs to required checks are definitions.** The `static`, `denylist` and `ratchet` jobs
-   read `.oxlintrc.json`, `.oxfmtrc.json`, `knip.json`, `lint/**`, the `scripts/ratchet-*.mjs`,
+7. **The configuration inputs of required checks are definitions.** The `static`, `denylist`
+   and `ratchet` jobs read `.oxlintrc.json`, `.oxfmtrc.json`, `knip.json`, `lint/**`, the `scripts/ratchet-*.mjs`,
    `gen-op-docs` and `copy-prompt-assets` scripts, and `policy/denylist/**`. All of them are now
    in the definition set and the taxonomy. Otherwise a PR could neuter a required check,
    for example by switching off Oxlint rules, and pass under `diff-check` (D-G.2: "neutering
    one isn't removing it").
+
+   This covers their configuration, not the code they run. `static` loads the head-built
+   `dist/ops/ratchet/*` engine through `ratchet-lib.mjs` `loadEngine`. The legacy `ratchet` job
+   runs the head build of `dist/cli.js`. The rest of the head's `src/**` is in the same position.
+   See the first residual in Decision 8.
+
 8. **Residuals, recorded.**
+   - **Required checks that execute head-built `src/**` can be neutered under `diff-check`
+     until W1.10's C2.** A PR that makes, say, the typecheck-count adapter always pass yields
+     only a `protected-path` finding for `src/ops/ratchet/**`. `src/kernel/**` and `src/cli.ts`
+     yield no finding at all. What limits this today:
+     - `cq/ratchet` is recomputed from a trust-built toolkit, which covers `ratchet` but not
+       `static`;
+     - the `human` posture (blank) routes `src/ops/ratchet/**` to a human through the project
+       policy list.
+
+     `^src/ops/ratchet/` was not added to the definition set, because the definition set is
+     mirrored into the W1.8 worker-deny taxonomy, and that would also stop sweep workers editing
+     the ratchet engine. W1.10's C2, trust-built required checks, closes the gap
+     (composition review F3).
+
    - Local `uses: ./` tracing is one level deep. A chain that already exists can be edited at
      its second link; creating a new chain edits a traced file.
    - `cq-policy` concurrency is keyed per signal run, so a stale run can post after a newer one.

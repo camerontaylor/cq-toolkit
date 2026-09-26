@@ -54,6 +54,7 @@ import {
   evaluateOverrideLabel,
   formatOverride,
   headObservationEpoch,
+  parseC3Attestation,
   type OverrideEvaluation,
 } from './overrideRecord.js';
 import type { ProtectedPathsConfig, ProtectedPathsPosture } from './policyConfig.js';
@@ -317,7 +318,16 @@ async function evaluateOverride(
 
   let attested = false;
   try {
-    attested = (await gitReadBlob(input.repo, trust, C3_ATTESTATION_PATH)) !== null;
+    const text = await gitReadBlob(input.repo, trust, C3_ATTESTATION_PATH);
+    if (text !== null) {
+      const check = parseC3Attestation(text);
+      attested = check.armed;
+      if (!check.armed) {
+        notes.push(
+          `attestation: ${C3_ATTESTATION_PATH} present but invalid (${check.reason}) — records stay dormant`,
+        );
+      }
+    }
   } catch (err) {
     notes.push(
       `attestation: ${C3_ATTESTATION_PATH} unreadable at the trust ref — ${messageOf(err)}`,

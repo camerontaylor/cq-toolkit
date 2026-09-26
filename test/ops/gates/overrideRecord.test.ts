@@ -8,6 +8,7 @@ import {
   evaluateOverrideLabel,
   formatOverride,
   headObservationEpoch,
+  parseC3Attestation,
 } from '../../../src/ops/gates/overrideRecord.js';
 import type { SettleState } from '../../../src/selfhost/settle-state.js';
 
@@ -286,5 +287,28 @@ describe('formatOverride', () => {
   test('control characters in API strings are neutralised', () => {
     const lines = formatOverride(evaluate([labelEvent({ login: 'ev\nil\u001b[31m' })]));
     expect(lines).toContain('  actor.login: ev?il?[31m');
+  });
+});
+
+describe('parseC3Attestation: presence alone never arms D-G.4 records (composition F5)', () => {
+  const valid = { schemaVersion: 1, attests: 'C3', attestedAt: '2026-09-26T00:00:00Z' };
+
+  test('the exact shape arms', () => {
+    expect(parseC3Attestation(JSON.stringify(valid))).toEqual({ armed: true });
+    expect(parseC3Attestation(JSON.stringify({ ...valid, note: 'PATs revoked' }))).toEqual({
+      armed: true,
+    });
+  });
+
+  test.each([
+    ['empty file', ''],
+    ['empty object', '{}'],
+    ['placeholder text', 'TODO'],
+    ['wrong attests', JSON.stringify({ ...valid, attests: 'C2' })],
+    ['wrong version', JSON.stringify({ ...valid, schemaVersion: 2 })],
+    ['non-canonical time', JSON.stringify({ ...valid, attestedAt: '2026-09-26' })],
+    ['an extra key', JSON.stringify({ ...valid, armed: true })],
+  ])('%s stays dormant', (_label, text) => {
+    expect(parseC3Attestation(text).armed).toBe(false);
   });
 });

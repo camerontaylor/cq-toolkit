@@ -1132,7 +1132,11 @@ function keyedLint(path: string, scan: OkScan): KeyedLint[] {
         const run = valueText(lines, runSpan);
         const envSpan = step.keys.get('env');
         const env = [detail.envText, envSpan ? valueText(lines, envSpan) : ''].join('\n');
-        const why = headRun(run, env);
+        // YAML folds single newlines of a `>` block or a multi-line plain
+        // scalar into spaces; a literal `|` block keeps them.
+        const style = lines[runSpan.at]!.value;
+        const folds = style.startsWith('>') || (style !== '' && !style.startsWith('|'));
+        const why = headRun(run, env, folds);
         if (why !== null) {
           add(
             `head-run:${job.id}:${why.line}`,
@@ -1145,6 +1149,10 @@ function keyedLint(path: string, scan: OkScan): KeyedLint[] {
   return [...out].map(([key, finding]) => ({ key, finding }));
 }
 
+/** An expression body compared against {@link BASE_EXPRESSIONS}: trimmed, spaces collapsed, lower-cased. */
+const normaliseExpression = (body: string): string =>
+  body.trim().replace(/\s+/g, ' ').toLowerCase();
+
 const mentionsHead = (text: string): string | undefined => {
   const lower = text.toLowerCase();
   return HEAD_TOKENS.find((t) => lower.includes(t));
@@ -1154,7 +1162,7 @@ const mentionsHead = (text: string): string | undefined => {
 function headCheckoutValue(value: string): string | null {
   if (value.toLowerCase().includes('refs/pull/')) return 'refs/pull/';
   for (const m of value.matchAll(EXPRESSION)) {
-    const expr = m[1]!.trim().replace(/\s+/g, ' ').toLowerCase();
+    const expr = normaliseExpression(m[1]!);
     if (!BASE_EXPRESSIONS.has(expr))
       return `expression \${{ ${m[1]!.trim()} }} is not a base value`;
   }
@@ -1164,21 +1172,33 @@ function headCheckoutValue(value: string): string | null {
 
 /**
  * Why a `run:` script may check out head code, or `null`. Fetching objects
- * is fine; moving the worktree to `FETCH_HEAD` or a head expression (inline
- * or via the step/job/workflow `env:`) is not, and `refs/pull/` or
- * `pull/${{` anywhere is.
+ * is fine; moving the worktree to `FETCH_HEAD`, or to anything named by a
+ * `${{ }}` expression outside the base allow-list (inline or via the
+ * step/job/workflow `env:`), is not, and `refs/pull/` or `pull/${{` anywhere
+ * is. `folds` is true for a `>` block or multi-line plain scalar, which YAML
+ * folds to one line at run time; a literal `|` block is never folded.
  */
-function headRun(script: string, env: string): { signal: string; line: string } | null {
+function headRun(
+  script: string,
+  env: string,
+  folds: boolean,
+): { signal: string; line: string } | null {
   // Join shell line continuations first: `git \` + `checkout …` is one
   // command, and every leg below must see it whole.
-  const joined = script.replace(/\\\r?\n/g, ' ');
-  // A folded (`>`) or multi-line plain `run:` value executes with single
-  // newlines folded to spaces, which the scanner cannot tell apart from a
-  // literal block here — so judge the folded reading too. Folding only ever
-  // adds matches: it can over-flag, never hide one.
-  const folded = joined.replace(/\r?\n(?!\r?\n)/g, ' ');
-  // The literal reading first, so lint keys stay stable for unfolded scripts.
-  return headRunOf(joined, env) ?? headRunOf(folded, env);
+  const joined = script.replace(/\r\n/g, '\n').replace(/\\\n/g, ' ');
+  // The literal reading first, so lint keys stay stable.
+  const literal = headRunOf(joined, env);
+  if (literal !== null || !folds) return literal;
+  // The folded reading replaces one character with one, so an offset in it
+  // names the same row of the literal reading: the match is keyed by the row
+  // its `git` starts on, never the whole folded script (regression keys).
+  const folded = joined.replace(/\n(?!\n)/g, ' ');
+  const why = headRunOf(folded, env);
+  if (why === null) return null;
+  const at = folded.search(GIT_MOVE);
+  if (at === -1) return why;
+  const row = joined.slice(0, at).split('\n').length - 1;
+  return { signal: why.signal, line: (joined.split('\n')[row] ?? '').trim() };
 }
 
 /** {@link headRun} over one reading of the script. */
@@ -1190,10 +1210,32 @@ function headRunOf(run: string, env: string): { signal: string; line: string } |
   if (!GIT_MOVE.test(run)) return null;
   const moveLine = first(GIT_MOVE);
   if (/FETCH_HEAD/.test(run)) return { signal: 'FETCH_HEAD', line: moveLine };
-  for (const text of [run, env]) {
-    for (const m of text.matchAll(EXPRESSION)) {
-      const token = mentionsHead(m[1]!);
-      if (token !== undefined) return { signal: `head expression (${token})`, line: moveLine };
+  // The same allow-list as the checkout `ref:` leg: once the worktree moves,
+  // any expression that is not a base value may name head code. Inline, it
+  // counts anywhere in the script (a shell variable may carry it to the
+  // move); through `env:`, it counts when a moving `git` row names the
+  // variable — an env value the move never reads cannot steer it.
+  const nonBase = (body: string): { signal: string; line: string } | null => {
+    const expr = normaliseExpression(body);
+    if (BASE_EXPRESSIONS.has(expr)) return null;
+    const token = mentionsHead(body);
+    const signal =
+      token === undefined ? `non-base expression (${expr})` : `head expression (${token})`;
+    return { signal, line: moveLine };
+  };
+  for (const m of run.matchAll(EXPRESSION)) {
+    const hit = nonBase(m[1]!);
+    if (hit !== null) return hit;
+  }
+  const moveRows = rows.filter((r) => GIT_MOVE.test(r));
+  for (const entry of env.split('\n')) {
+    const kv = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$/.exec(entry);
+    if (kv === null) continue;
+    const named = new RegExp(`\\$\\{?${kv[1]!}\\b`);
+    if (!moveRows.some((r) => named.test(r))) continue;
+    for (const m of kv[2]!.matchAll(EXPRESSION)) {
+      const hit = nonBase(m[1]!);
+      if (hit !== null) return hit;
     }
   }
   return null;

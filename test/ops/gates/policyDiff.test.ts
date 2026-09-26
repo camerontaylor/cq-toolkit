@@ -197,6 +197,7 @@ let root: string;
 let repo: string;
 let trust: string;
 let attestedTrust: string;
+let placeholderTrust: string;
 let eventsDir: string;
 let savedPath: string | undefined;
 
@@ -426,9 +427,16 @@ beforeAll(() => {
   execFileSync('git', ['init', '-q', '-b', 'main', repo], { env: GIT_ENV });
   trust = importCommits(repo, { main: { files: TRUST_FILES } }, null)['main']!;
   gitIn(repo, ['update-ref', 'refs/heads/merge-queue', trust]);
-  attestedTrust = importCommits(repo, {
-    attested: { files: { 'policy/attestations/c3.json': '{}\n' } },
-  })['attested']!;
+  const attestations = importCommits(repo, {
+    attested: {
+      files: {
+        'policy/attestations/c3.json': `${JSON.stringify({ schemaVersion: 1, attests: 'C3', attestedAt: '2026-09-26T00:00:00Z' })}\n`,
+      },
+    },
+    'placeholder-attestation': { files: { 'policy/attestations/c3.json': '{}\n' } },
+  });
+  attestedTrust = attestations['attested']!;
+  placeholderTrust = attestations['placeholder-attestation']!;
 }, HOOK_MS);
 
 afterAll(() => {
@@ -908,6 +916,21 @@ describe('policyDiff: the override record', SLOW, () => {
     expect(out.report.at(-1)).toBe(
       'verdict: pass (needs-human authorized by the D11 override record)',
     );
+  });
+
+  test('a placeholder attestation file does not arm records (F5): dormant, noted', async () => {
+    const out = await run(
+      subject,
+      'human',
+      withRecord(events('valid.json', [labelEvent()]), placeholderTrust),
+    );
+    expect(out.override.status).toBe('dormant');
+    expect(out.verdict).toBe('needs-human');
+    expect(
+      out.report.some((line) =>
+        line.startsWith('attestation: policy/attestations/c3.json present but invalid ('),
+      ),
+    ).toBe(true);
   });
 
   test('without the attestation the record is dormant and logged: needs-human', async () => {

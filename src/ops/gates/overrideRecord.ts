@@ -57,6 +57,39 @@ const isCanonicalUtc = (value: string): boolean => {
 };
 
 /**
+ * The C3 attestation file (ADR-0004 D-H.3 C3): the one switch that lets an
+ * override record turn needs-human into pass, so presence alone never arms
+ * it. Only this exact shape does; a stray, empty or placeholder file stays
+ * dormant.
+ */
+const C3AttestationSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    attests: z.literal('C3'),
+    attestedAt: z.string().refine(isCanonicalUtc, 'attestedAt is not canonical ISO 8601 UTC'),
+    note: z.string().exactOptional(),
+  })
+  .strict();
+
+/** Whether attestation text arms D-G.4 records; `reason` says why not. */
+export function parseC3Attestation(
+  text: string,
+): { armed: true } | { armed: false; reason: string } {
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return { armed: false, reason: 'not valid JSON' };
+  }
+  const parsed = C3AttestationSchema.safeParse(data);
+  if (parsed.success) return { armed: true };
+  const issues = parsed.error.issues
+    .map((issue) => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`)
+    .join('; ');
+  return { armed: false, reason: `schema violation — ${issues}` };
+}
+
+/**
  * The shape the current application must have. Unknown extra keys (the API
  * returns many) are ignored; a MISSING `performed_via_github_app` is
  * malformed, not "no App", so an absent field can never read as a user action.

@@ -902,6 +902,39 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
       1,
     ],
     [
+      'head_commit.id in run (F2)',
+      ['      - run: git checkout ${{ github.event.workflow_run.head_commit.id }}'],
+      1,
+    ],
+    [
+      'a literal | block of independent lines stays clean (F1)',
+      [
+        '      - env:',
+        '          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          git fetch --no-tags origin "$HEAD_SHA"',
+        '          # objects only: we never checkout the head',
+      ],
+      0,
+    ],
+    [
+      'an env head value the moving git row never reads (F2 precision)',
+      [
+        '      - env:',
+        '          BASE: ${{ needs.resolve.outputs.base }}',
+        '          TRUST: ${{ github.sha }}',
+        '        run: |',
+        '          git -C trust update-ref "refs/remotes/origin/${BASE}" refs/x',
+        '          git -C trust checkout --detach "$TRUST"',
+      ],
+      0,
+    ],
+    [
+      'a non-base env value the moving git row reads (F2)',
+      ['      - env:', '          REF: ${{ inputs.ref }}', '        run: git checkout "$REF"'],
+      1,
+    ],
+    [
       'head checkout folded by a > scalar',
       [
         '      - run: >',
@@ -952,6 +985,28 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
     ],
   ])('workflow_run: %s', (_label, steps, count) => {
     expect(lint(flow('workflow_run', ...steps))).toHaveLength(count);
+  });
+
+  test.each([
+    ['github.event.after', '${{ github.event.after }}'],
+    ["bracketed pull_request['head']['sha']", "${{ github.event.pull_request['head']['sha'] }}"],
+  ])('pull_request_target: git checkout of %s is linted (F2)', (_label, expr) => {
+    expect(lint(flow('pull_request_target', `      - run: git checkout ${expr}`))).toHaveLength(1);
+  });
+
+  test('a > block edit elsewhere does not re-lint a base-owned folded violation (F1/F4)', () => {
+    const block = (extra: string) =>
+      flow(
+        'workflow_run',
+        '      - run: >',
+        '          git',
+        '          checkout ${{ github.event.workflow_run.head_sha }}',
+        '',
+        `          echo ${extra}`,
+      );
+    const before = block('one');
+    expect(lint(before)).toHaveLength(1);
+    expect(diffWorkflow(PATH, before, block('two'))).toEqual([]);
   });
 
   test('the same head checkout is not linted under pull_request', () => {
