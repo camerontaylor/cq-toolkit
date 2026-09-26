@@ -902,6 +902,20 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
       1,
     ],
     [
+      'head checkout folded by a > scalar',
+      [
+        '      - run: >',
+        '          git',
+        '          checkout ${{ github.event.workflow_run.head_sha }}',
+      ],
+      1,
+    ],
+    [
+      'head checkout folded by a multi-line plain scalar',
+      ['      - run: git', '          checkout ${{ github.event.workflow_run.head_sha }}'],
+      1,
+    ],
+    [
       'FETCH_HEAD across a line continuation',
       [
         '      - run: |',

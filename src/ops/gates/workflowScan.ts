@@ -1171,7 +1171,18 @@ function headCheckoutValue(value: string): string | null {
 function headRun(script: string, env: string): { signal: string; line: string } | null {
   // Join shell line continuations first: `git \` + `checkout …` is one
   // command, and every leg below must see it whole.
-  const run = script.replace(/\\\r?\n/g, ' ');
+  const joined = script.replace(/\\\r?\n/g, ' ');
+  // A folded (`>`) or multi-line plain `run:` value executes with single
+  // newlines folded to spaces, which the scanner cannot tell apart from a
+  // literal block here — so judge the folded reading too. Folding only ever
+  // adds matches: it can over-flag, never hide one.
+  const folded = joined.replace(/\r?\n(?!\r?\n)/g, ' ');
+  // The literal reading first, so lint keys stay stable for unfolded scripts.
+  return headRunOf(joined, env) ?? headRunOf(folded, env);
+}
+
+/** {@link headRun} over one reading of the script. */
+function headRunOf(run: string, env: string): { signal: string; line: string } | null {
   const rows = run.split('\n').map((r) => r.trim());
   const first = (re: RegExp): string => rows.find((r) => re.test(r)) ?? rows[0] ?? '';
   if (/refs\/pull\//i.test(run)) return { signal: 'refs/pull/', line: first(/refs\/pull\//i) };

@@ -125,12 +125,17 @@ alongside the acceptance check.
    base-owned violations would fail every edit to such a file; `cq-verify.yml`'s `fetch` job
    (W1.7) has two. Findings are keyed by rule, job and signal. So a new violation is still
    reported inside a job that already has one.
-6. **The head-execution lint is static.** It catches checkouts of non-base expressions and
-   head tokens (directly or through `env:`), and worktree moves to `FETCH_HEAD`, head
-   expressions or PR refs. It does not model arbitrary shell. A `run:` that builds a head ref
-   through indirection the scanner cannot see is a residual. Such a change still lands on a
-   protected path (`.github/**`), and it is a definition change wherever `^\.github/` is in
-   the set, as it is here.
+6. **The head-execution lint is static.** It catches:
+   - checkouts of non-base expressions and head tokens, by any owner's `checkout` action;
+   - `run:` scripts that move the worktree to `FETCH_HEAD`, a head expression (inline or via
+     `env:`) or a PR ref. Shell line continuations are joined first, and the YAML-folded reading
+     of a `run:` value is judged too.
+
+   It does not model arbitrary shell. A `run:` that builds a head ref through indirection the
+   scanner cannot see is a residual. Such a change still lands on a protected path
+   (`.github/**`), and it is a definition change wherever `^\.github/` is in the set, as it is
+   here.
+
 7. **Inputs to required checks are definitions.** The `static`, `denylist` and `ratchet` jobs
    read `.oxlintrc.json`, `.oxfmtrc.json`, `knip.json`, `lint/**`, the `scripts/ratchet-*.mjs`,
    `gen-op-docs` and `copy-prompt-assets` scripts, and `policy/denylist/**`. All of them are now
