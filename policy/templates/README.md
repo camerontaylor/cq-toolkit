@@ -19,6 +19,8 @@ source of truth — see "The bootstrap rule" for what that commits you to.
 | `ratchet.yml`                 | LEGACY required type and coverage baseline checks on pushes and pull requests (head-defined; retired at the ADR-0004 cutover)                                                                        |
 | `cq-measure.yml`              | credential-free head measurement leg (`permissions: {}`): runs the suite, uploads a numbers-only coverage artifact                                                                                   |
 | `cq-verify.yml`               | default-branch `workflow_run` ratchet verifier: definitions and baselines from the trust ref's `baselines/ratchets.json`, typecheck recomputed over the attribute-free head tree, posts `cq/ratchet` |
+| `cq-signal.yml`               | head-defined wake-up (`permissions: {}`, no checkout, no-op body): PR, label, review and merge-queue push events fire the default-branch verifiers                                                   |
+| `cq-policy.yml`               | default-branch `workflow_run` D11 verifier: trust-ref `gates.policyDiff` over the head's git objects, posture from `vars.CQ_MERGE_PROTECTED_PATHS`, posts `cq/policy` (not yet required)             |
 | `ratchet-propose-measure.yml` | credential-free post-promotion measurement for baseline proposals                                                                                                                                    |
 | `ratchet-propose.yml`         | `workflow_run` proposer: opens baseline-tightening PRs against `merge-queue` from the measure artifact, token behind `environment: automation`                                                       |
 | `self-host/`                  | the stage-2 self-hosting automation (scheduled review-loop + merge-prs run from source) as adoptable workflows — `self-host/README.md` carries its files, tokens, and wiring guide                   |
@@ -95,7 +97,8 @@ is `required-check.md` instantiated, the three queue workflows are the three
 queue `.yml` templates instantiated, the live-merge drill workflow is
 `live-merge.yml` instantiated, the five ratchet workflows (`ratchet`,
 `cq-measure`, `cq-verify`, `ratchet-propose-measure`, `ratchet-propose`) are their matching
-`.yml` templates instantiated, and `denylist.yml` (which predates the
+`.yml` templates instantiated, the two D11 policy workflows (`cq-signal`,
+`cq-policy`) are theirs, and `denylist.yml` (which predates the
 templates) carries the required-check trigger shape with the denylist job
 body and a provenance comment pointing back at `required-check.md`. If you
 find yourself editing a file under `.github/workflows/`, stop: edit the

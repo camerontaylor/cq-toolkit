@@ -28,6 +28,8 @@ const WORKFLOWS_DIR = join(ROOT, '.github/workflows');
 const TEMPLATE_FILES = [
   'policy/templates/cq-measure.yml',
   'policy/templates/cq-verify.yml',
+  'policy/templates/cq-signal.yml',
+  'policy/templates/cq-policy.yml',
   'policy/templates/ratchet.yml',
   'policy/templates/ratchet-propose.yml',
   'policy/templates/ratchet-propose-measure.yml',
