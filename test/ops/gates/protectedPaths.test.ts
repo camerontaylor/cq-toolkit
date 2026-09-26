@@ -14,7 +14,10 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { isProtectedStagePath } from '../../../src/ops/gates/protectedPaths.js';
+import {
+  PROTECTED_STAGE_PATTERNS,
+  isProtectedStagePath,
+} from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
 
 const REPO_ROOT = join(__dirname, '..', '..', '..');
@@ -70,5 +73,67 @@ describe('worker gate / ratchet definition-set sync (F1, F2)', () => {
   test('the definition set is not merely the old workflows-only subset (F6)', () => {
     expect(MANIFEST.definitionSet).toContain('^\\.github/');
     expect(MANIFEST.definitionSet).not.toContain('^\\.github/workflows/');
+  });
+});
+
+/**
+ * A path each protected pattern is meant to catch, keyed by that pattern's
+ * exact `.source`. This is the REVERSE direction of the table above: keyed by
+ * pattern, so a pattern added to the taxonomy with no representative here
+ * fails the test instead of going untested.
+ *
+ * It is a LIVENESS guard, not a pairing proof. The taxonomy is deliberately
+ * broader than the ratchet definition set (test evidence is worker-controlled
+ * but is not a ratchet definition), so "every representative is a definition
+ * path" is neither true nor wanted — see the RATCHET-SET SYNC note on
+ * `PROTECTED_CONFIG_PATH_PATTERNS`.
+ */
+const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
+  '(^|\\/)(?:test|tests|spec|specs|__tests__|__mocks__|__fixtures__|__snapshots__)\\/': [
+    'test/unit/a.ts',
+    'src/__mocks__/fs.ts',
+  ],
+  '\\.(?:test|spec)\\.[cm]?[jt]sx?$': ['src/a.test.ts', 'src/b.spec.mts'],
+  '\\.config\\.[^/]+$': ['vitest.config.ts', 'packages/a/vite.config.js'],
+  '^baselines(?:\\/|$)': ['baselines/coverage--coverage--a8ceec8f7024.json'],
+  '(?:^|\\/)\\.node-version$': ['.node-version'],
+  '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],
+  '^src\\/ops\\/gates\\/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
+  '^scripts\\/denylist-scan$': ['scripts/denylist-scan'],
+  '(?:^|\\/)[^/]*\\.setup\\.[^/]+$': ['vitest.setup.ts'],
+  '(?:^|\\/)\\.[^/]*rc(?:\\.[^/]*)?$': ['.npmrc', 'packages/a/.npmrc'],
+  '(?:^|\\/)\\.gitignore$': ['.gitignore', 'packages/a/.gitignore'],
+  '(?:^|\\/)\\.gitattributes$': ['.gitattributes'],
+  '(?:^|\\/)(?:tsconfig(?:\\.[^/]+)?\\.json|package\\.json|biome\\.jsonc?)$': [
+    'tsconfig.json',
+    'package.json',
+  ],
+  '^\\.github(?:\\/|$)': ['.github/workflows/ci.yml', '.github/actions/a/action.yml'],
+  '^\\.husky(?:\\/|$)': ['.husky/pre-commit'],
+  '(?:^|\\/)vitest\\.(?:workspace|projects)\\.(?:[cm]?[jt]sx?|json)$': ['vitest.workspace.json'],
+  '(?:^|\\/)(?:package(?:-lock)?\\.json|npm-shrinkwrap\\.json|yarn\\.lock|pnpm-lock\\.yaml|bun\\.lockb?|poetry\\.lock|uv\\.lock|pdm\\.lock|Pipfile\\.lock|Gemfile\\.lock|Cargo\\.lock|composer\\.lock|mix\\.lock|go\\.sum)$':
+    ['package-lock.json', 'npm-shrinkwrap.json'],
+  '\\.snap$': ['src/__snapshots__/a.snap'],
+};
+
+describe('worker gate pattern liveness (reverse direction)', () => {
+  const sources = [...new Set(PROTECTED_STAGE_PATTERNS.map((pattern) => pattern.source))];
+
+  test('every protected pattern has a representative path', () => {
+    // Keyed by source, so a NEW pattern without an entry here fails loudly.
+    expect(Object.keys(PATTERN_REPRESENTATIVES).sort()).toEqual([...sources].sort());
+  });
+
+  test.each(
+    PROTECTED_STAGE_PATTERNS.flatMap((pattern) => {
+      const reps = PATTERN_REPRESENTATIVES[pattern.source] ?? [];
+      return reps.map((path) => [pattern.source, path] as const);
+    }),
+  )('%s actually matches %s', (source, path) => {
+    // The representative is matched by ITS OWN pattern (all are built with
+    // the `i` flag), so a pattern that can never match anything is caught.
+    expect(new RegExp(source, 'i').test(path)).toBe(true);
+    // …and the stage path gate really does protect it.
+    expect(isProtectedStagePath(path)).toBe(true);
   });
 });

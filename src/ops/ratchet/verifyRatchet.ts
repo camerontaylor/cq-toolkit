@@ -7,7 +7,8 @@
 //     ratchet list and the definition set) and every baseline value are read
 //     with `git cat-file` AT `trustRef`, never from a working tree the head
 //     could have written (A5: a renamed target and a looser baseline in the
-//     head change nothing here — the trust ref's list is what is enumerated).//   - BASELINES are read as git objects at BOTH ends: the trust ref's
+//     head change nothing here — the trust ref's list is what is enumerated).
+//   - BASELINES are read as git objects at BOTH ends: the trust ref's
 //     canonical baseline is authoritative, and the SUBJECT's canonical
 //     baseline must also exist, parse with the same identity, and is compared
 //     as the STRICTER of the two (ADR-0004 D-B, W1.7 fix-forward F3/F4).

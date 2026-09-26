@@ -27,14 +27,23 @@ export const PROTECTED_TEST_FILE_PATTERNS: readonly RegExp[] = Object.freeze(
  * repository automation that can redefine what the final probe runs or how
  * the result is measured.
  *
- * RATCHET-SET SYNC (composition F1): every shape here is also a member of
- * `baselines/ratchets.json`'s `definitionSet` — the trust ref's list that
- * routes a subject's edit to needs-human — so a path the worker gate protects
- * and the ratchet does not (or the reverse) cannot drift silently.
- * `test/ops/gates/protectedPaths.test.ts` asserts the two directions over the
+ * RATCHET-SET SYNC (composition F1): every shape in the ratchet definition
+ * set is ALSO protected here — `baselines/ratchets.json`'s `definitionSet`
+ * is the trust-ref list that routes a subject's edit to needs-human, and
+ * `test/ops/gates/protectedPaths.test.ts` asserts that direction over the
  * real manifest, plus the shapes ADR-0004 D-G.1 names that no regex can
  * enumerate statically (`baselines/**`, `.node-version`, `.cq/tool/**`, the
  * tsconfig `extends`/`references` graph).
+ *
+ * The relationship is ONE-DIRECTIONAL BY DESIGN, not a mirror: this taxonomy
+ * is deliberately BROADER, because worker-controlled test evidence (a test
+ * root, a `.spec.ts`, a snapshot, `.gitignore`, `.husky`) is not a ratchet
+ * definition and must not become one. So the inverse — a new pattern here
+ * with no definition-set counterpart — is a judgement call, not a test
+ * failure; the two list files are themselves needs-human, which is what makes
+ * that judgement reviewable. The test's reverse table is a LIVENESS guard
+ * (every pattern below has a representative it actually matches), not a
+ * pairing proof.
  */
 export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   /\.config\.[^/]+$/i,
