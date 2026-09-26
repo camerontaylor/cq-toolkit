@@ -48,16 +48,17 @@ new timeout or ratchet.
 
 ### Plan 003 measurements (advisory)
 
-Single-file runs on the same loaded host, wall time including the global
-build; test time in brackets. None ran in a quiet (<3.0 load) window.
+Single-file runs on the same loaded host; none ran in a quiet (<3.0 load)
+window. "Wall" includes the global build; "test" is vitest's per-test
+duration sum for the file.
 
-| File                                                           | Before                                                                                                                                             | After                                             | Load (start → end)                    |
-| -------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------- |
-| `test/e2e/sweep/sweep.e2e.test.ts` (5 contracts)               | 513s (5 contracts, rescue on; load 5.7 → 7.4 with 4 other vitest runs); a later profile at load ≈6 had the interrupt contract hit its 180s timeout | 145.9s [134.8s], 157.3s [145.2s], 156.8s [146.1s] | 3.64 → 4.81, 5.31 → 4.33, 5.37 → 4.60 |
-| `test/driver/acp.test.ts` (conformance + 51 in-process)        | 44.2s (all driver-specific cases real)                                                                                                             | 4.5s test time                                    | ≈5.4                                  |
-| `test/driver/acp.real.test.ts` (7)                             | —                                                                                                                                                  | 1.3s test time                                    | ≈5.4                                  |
-| `test/driver/subprocess.test.ts` (conformance + 22 in-process) | 20.1s                                                                                                                                              | 0.2s test time                                    | ≈5.4                                  |
-| `test/driver/subprocess.real.test.ts` (12)                     | —                                                                                                                                                  | 5.1s test time                                    | ≈5.4                                  |
+| File                                                           | Before                                                                                                                                                  | After                                                        | Load (start → end)                    |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------- |
+| `test/e2e/sweep/sweep.e2e.test.ts` (5 contracts)               | 513s wall (5 contracts, rescue on; load 5.7 → 7.4 with 4 other vitest runs); a later profile at load ≈6 had the interrupt contract hit its 180s timeout | wall 145.9s / 157.3s / 156.8s; test 134.8s / 145.2s / 146.1s | 3.64 → 4.81, 5.31 → 4.33, 5.37 → 4.60 |
+| `test/driver/acp.test.ts` (conformance + 51 in-process)        | 44.2s test (all driver-specific cases real)                                                                                                             | 4.5s test                                                    | ≈5.4                                  |
+| `test/driver/acp.real.test.ts` (7)                             | —                                                                                                                                                       | 1.3s test                                                    | ≈5.4                                  |
+| `test/driver/subprocess.test.ts` (conformance + 22 in-process) | 20.1s test                                                                                                                                              | 0.2s test                                                    | ≈5.4                                  |
+| `test/driver/subprocess.real.test.ts` (12)                     | —                                                                                                                                                       | 5.1s test                                                    | ≈5.4                                  |
 
 The sweep e2e misses the ≤120s goal on this host by about 25s of test
 time; its five contracts are each one real fleet over real git, and the
