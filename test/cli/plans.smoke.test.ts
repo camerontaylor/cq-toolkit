@@ -50,12 +50,14 @@
 // test"). Their real instances stay pinned in-process by test/plans/** and
 // test/e2e/** (D4/E4/F4/G3 lanes).
 //
-// BUILD ON DEMAND: CI's static job runs the suite BEFORE its build step, and
-// a dist-gated skip would make this smoke green because it was omitted (the
-// plan's explicit stop condition). So the suite builds dist/ once when it is
-// missing OR STALE (older than the newest src/** file — a stale dist would
-// certify obsolete code) and never silently skips.
-import { execFileSync, spawnSync, type SpawnSyncReturns } from 'node:child_process';
+// BUILT BY GLOBAL SETUP: test/global-setup.ts builds dist/ once before any
+// test is collected (CI's static job runs the suite BEFORE its own build
+// step, so the smoke cannot rely on that one). This file never builds and
+// never silently skips: a MISSING or STALE dist/ (older than the newest
+// build input — e.g. a watch-mode rerun after a source edit, which global
+// setup does not rebuild) fails the smoke loudly rather than certifying
+// obsolete code.
+import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { existsSync, mkdtempSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, dirname, join, resolve } from 'node:path';
@@ -96,8 +98,6 @@ const SWEEP_AGENT = join(ROOT, 'test', 'fixtures', 'scratch-repo', 'sweep-agent.
 
 /** Hard per-CLI budget: a hung plan child must fail the smoke, not stall CI. */
 const CLI_TIMEOUT_MS = 180_000;
-/** The build hook's budget (tsc emit on a cold runner). */
-const BUILD_TIMEOUT_MS = 300_000;
 
 /**
  * The smoke table: every plan the registry discovers, the exit code its floor
@@ -119,14 +119,13 @@ let planDir = '';
 
 beforeAll(
   async () => {
-    ensureBuiltCli();
+    assertFreshBuiltCli();
     scratchRepo = mkdtempSync(join(tmpdir(), 'cq-plans-smoke-repo-'));
     planDir = mkdtempSync(join(tmpdir(), 'cq-plans-smoke-plan-'));
     await generateScratchRepo(scratchRepo);
   },
-  // A margin over the build budget: a near-limit build must not starve the
-  // scratch-repo setup and misreport the failure as a hook timeout.
-  BUILD_TIMEOUT_MS + 120_000,
+  // The scratch-repo setup's budget (real git on a loaded host).
+  120_000,
 );
 
 afterAll(() => {
@@ -161,28 +160,19 @@ function newestMtimeMs(target: string): number {
 }
 
 /**
- * Build dist/ when the BUILT CLI is missing OR STALE (older than the newest
- * build input): a dist built from older sources OR config would make the
- * whole smoke certify obsolete code. CI's static job tests before it builds,
- * so this is the only way the smoke can run there without a dist-gated skip.
+ * The BUILT CLI must exist and be at least as new as every build input: a
+ * dist built from older sources OR config would make the whole smoke
+ * certify obsolete code. Global setup owns the build; this only refuses.
  */
-function ensureBuiltCli(): void {
+function assertFreshBuiltCli(): void {
   const distMtime = existsSync(DIST_CLI) ? statSync(DIST_CLI).mtimeMs : 0;
   const newestInput = Math.max(...BUILD_INPUTS.map(newestMtimeMs));
   if (distMtime > 0 && distMtime >= newestInput) return;
-  try {
-    execFileSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'build'], {
-      cwd: ROOT,
-      stdio: 'pipe',
-      timeout: BUILD_TIMEOUT_MS,
-    });
-  } catch (err) {
-    const e = err as { stdout?: string | Buffer; stderr?: string | Buffer };
-    throw new Error(
-      `plans.smoke: could not build dist/ (the built CLI is the point) — ` +
-        `run \`npm run build\`\n${String(e.stdout ?? '')}${String(e.stderr ?? '')}`,
-    );
-  }
+  throw new Error(
+    `plans.smoke: dist/ is ${distMtime === 0 ? 'missing' : 'stale'} (the built CLI is the ` +
+      'point) — test/global-setup.ts builds it before collection; rerun the suite ' +
+      '(watch mode does not rebuild) or run `npm run build`',
+  );
 }
 
 /**
