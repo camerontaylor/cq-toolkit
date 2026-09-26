@@ -98,7 +98,12 @@ interface World {
   unitInputs: SweepUnitDispatchInput[];
   trackerInputs: unknown[];
   assembleInputs: AssemblePrsInput[];
-  markerReads: Array<{ runStateDir: string | undefined }>;
+  markerReads: Array<{
+    repoRoot: string;
+    worktreesDir: string;
+    runPrefix: string;
+    runStateDir: string | undefined;
+  }>;
   /** Every plan dispatched through the (real) kernel runner, in order. */
   dispatched: Plan[];
 }
@@ -112,6 +117,8 @@ async function worldFor(
     runStateDir?: string | null;
     /** The in-plan planner job's report (default: the phase-A report). */
     inPlanReport?: PlanSweepReport;
+    /** The tracker-branch leg's result (default ok). */
+    trackerResult?: OpResult<unknown>;
     opts?: Partial<SweepRunOpts>;
   } = {},
 ): Promise<World> {
@@ -150,7 +157,7 @@ async function worldFor(
       'pr.ensureTrackerBranch',
       entry('pr.ensureTrackerBranch', (input) => {
         trackerInputs.push(input);
-        return { status: 'ok', value: { created: true } };
+        return options.trackerResult ?? { status: 'ok', value: { created: true } };
       }),
     ],
     [
@@ -180,8 +187,8 @@ async function worldFor(
         dispatched.push(plan);
         return runPlan(plan, runOpts, view);
       },
-      readMarkers: async (_repoRoot, _worktreesDir, _runPrefix, runStateDir) => {
-        markerReads.push({ runStateDir });
+      readMarkers: async (repoRoot, worktreesDir, runPrefix, runStateDir) => {
+        markerReads.push({ repoRoot, worktreesDir, runPrefix, runStateDir });
         return options.markers ?? [];
       },
     },
@@ -235,7 +242,10 @@ describe('runSweep: fleet gate and marker-filtered assembly', () => {
     // unit never yields an empty-diff PR.
     expect(world.assembleInputs).toHaveLength(1);
     expect(world.assembleInputs[0]?.packages.map((pkg) => pkg.name)).toEqual(['alpha']);
-    expect(world.trackerInputs).toHaveLength(1);
+    // The tracker leg carries the declared template's input verbatim.
+    expect(world.trackerInputs).toEqual([
+      { repoRoot: '/repo', runPrefix: 'cq/run', base: 'main', branch: 'cq/run/tracker' },
+    ]);
     // Journal: run 0 = units, run 1 = tracker branch THEN the assembler
     // (dependsOn: the tracker head exists before the assembler opens a PR).
     expect(await openRunLog(world.opts.journalDir).runs()).toHaveLength(2);
@@ -306,6 +316,27 @@ describe('runSweep: fleet gate and marker-filtered assembly', () => {
     expect(world.assembleInputs[0]?.packages).toEqual([
       expect.objectContaining({ name: '@scope/gamma', branch: 'cq/run/fix/scope-gamma' }),
     ]);
+  });
+
+  test('a failed tracker-branch leg blocks the assembler: no PR without the tracker head', async () => {
+    const world = await worldFor(
+      [ALPHA],
+      { alpha: () => OK },
+      {
+        markers: [markerOf(ALPHA)],
+        trackerResult: fail('the tracker branch push was rejected'),
+      },
+    );
+    const outcome = await runSweep(world.opts, world.deps);
+    const assembleRun = outcome.assembleRun as RunReport;
+    expect(rowOf(assembleRun, 'sweep-tracker-branch')?.result.status).toBe('failed');
+    const assembleRow = rowOf(assembleRun, 'sweep-assemble');
+    expect(assembleRow?.result.status).toBe('failed');
+    if (assembleRow?.result.status === 'failed') {
+      expect(assembleRow.result.error).toMatch(/^blocked: /);
+    }
+    expect(assembleRun.counts).toMatchObject({ failed: 1, blocked: 1 });
+    expect(world.assembleInputs).toHaveLength(0);
   });
 
   test('an empty planner report runs no units and dispatches no assemble', async () => {
@@ -474,8 +505,18 @@ describe('runSweep: dispatch enrichment, prep mode, and guards', () => {
       expect(input.driver).toEqual(world.opts.driver);
       expect(input.check).toEqual(world.opts.check);
     }
-    // The marker read uses the SAME vouched dir the units wrote under.
-    expect(world.markerReads).toEqual([{ runStateDir: '/vouched/run-state' }]);
+    // The marker read uses the SAME repo, worktrees, prefix and vouched dir
+    // the units wrote under.
+    expect(world.markerReads).toEqual([
+      {
+        repoRoot: '/repo',
+        worktreesDir: 'worktrees',
+        runPrefix: 'cq/run',
+        runStateDir: '/vouched/run-state',
+      },
+    ]);
+    // push:false reaches the tracker leg too (a local-only run).
+    expect(world.trackerInputs).toEqual([expect.objectContaining({ push: false })]);
   });
 
   test('runStateDir null OMITS the field (the #174 no-vouch branch) and reads markers from the derived dir', async () => {
@@ -485,7 +526,7 @@ describe('runSweep: dispatch enrichment, prep mode, and guards', () => {
     expect(Object.hasOwn(world.unitInputs[0] as object, 'runStateDir')).toBe(false);
     // push defaults to true when the caller does not say otherwise.
     expect(world.unitInputs[0]?.push).toBe(true);
-    expect(world.markerReads).toEqual([{ runStateDir: undefined }]);
+    expect(world.markerReads).toEqual([expect.objectContaining({ runStateDir: undefined })]);
   });
 
   test('with no allowlist overlay, each unit job carries its DEFAULT per-package scope (jZ59w)', async () => {
