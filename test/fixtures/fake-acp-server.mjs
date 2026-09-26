@@ -61,6 +61,7 @@ process.stdin.on('data', (chunk) => {
   while (nl !== -1) {
     const line = buffer.slice(0, nl).trim();
     buffer = buffer.slice(nl + 1);
+    nl = buffer.indexOf('\n'); // advance BEFORE any `continue` — a skipped line must not spin the loop
     if (line === '') continue;
     let frame;
     try {
@@ -70,7 +71,6 @@ process.stdin.on('data', (chunk) => {
       continue;
     }
     persona.onFrame(frame);
-    nl = buffer.indexOf('\n');
   }
 });
 process.stdin.on('end', () => {
