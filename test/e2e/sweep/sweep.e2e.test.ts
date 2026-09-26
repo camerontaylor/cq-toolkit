@@ -494,7 +494,11 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
     'beta faults after alpha completed: salvage says alpha reuse / beta resume; the re-invoke reuses both trees and re-probes both baselines (I7)',
     { timeout: 180_000 },
     async () => {
-      const scene = await scenario('cq/e2e-interrupt');
+      const base = await scenario('cq/e2e-interrupt');
+      // Rescue OFF: the rescue lane is a composition decision pinned
+      // in-process (test/plans/sweep-run.test.ts); a real -r2 here is one
+      // more full unit run proving nothing the contract needs.
+      const scene = { ...base, config: { ...base.config, rescue: { maxRedispatch: 0 } } };
       // The I7 re-probe observable: the run-state baseline snapshot is
       // rewritten exactly once per unit run (right after the baseline probe),
       // so a re-run's fresh mtime is the re-probe's evidence.
@@ -512,14 +516,12 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
       );
       const beta = unitRow(first.run, 'beta');
       expect(beta.status).toBe('failed');
-      // A real driver fault carries the RETRYABLE [INFRA] class, so the
-      // rescue lane re-dispatched it through the central registry — and the
-      // persisting fault failed the -r2 attempt too.
+      // A real driver fault carries the RETRYABLE [INFRA] class (the rescue
+      // lane's input); with the budget at 0 nothing is re-dispatched.
       expect(beta.error).toMatch(
         /^\[INFRA\] sweep\.unit beta: the fixer worker stopped with reason 'error'/,
       );
-      expect(first.rescueRuns?.map((run) => run.jobs[0]?.jobId)).toEqual(['sweep-beta-fix-r2']);
-      expect(first.rescueRuns?.[0]?.jobs[0]?.result.status).toBe('failed');
+      expect(first.rescueRuns).toBeUndefined();
       // The fleet gate: one failed unit withholds the assemble dispatch.
       expect(first.assembleRun).toBeUndefined();
       expect(scene.gh.created).toHaveLength(0); // no PR without its full fleet
@@ -588,11 +590,10 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
         assembled.packages,
       );
 
-      // Journaled runs: units 1 (0), the beta rescue re-dispatch (1), units
-      // 2 (2), the marker-filtered assemble (3) — each complete with a
-      // run-finished frame.
+      // Journaled runs: units 1 (0), units 2 (1), the marker-filtered
+      // assemble (2) — each complete with a run-finished frame.
       const runIds = await openRunLog(scene.journalDir).runs();
-      expect(runIds).toHaveLength(4);
+      expect(runIds).toHaveLength(3);
       await expectCompleteJournal(
         scene.journalDir,
         [
@@ -600,7 +601,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
           ['sweep-alpha-fix', 'sweep.unit'],
           ['sweep-beta-fix', 'sweep.unit'],
         ],
-        2,
+        1,
       );
       await expectCompleteJournal(
         scene.journalDir,
@@ -608,7 +609,7 @@ describe('sweep e2e: interrupt mid-run → salvage → re-invoke', () => {
           ['sweep-tracker-branch', 'pr.ensureTrackerBranch'],
           ['sweep-assemble', 'pr.assemblePrs'],
         ],
-        3,
+        2,
       );
 
       // The re-invoke's output is failures-only clean as well.
@@ -746,6 +747,9 @@ describe('sweep e2e: stranded commit retry', () => {
         ...scene,
         config: {
           ...scene.config,
+          // Rescue OFF (pinned in-process): a real -r2 would re-run the unit
+          // against the same missing origin.
+          rescue: { maxRedispatch: 0 },
           packages: [SCRATCH_PACKAGES[0] as { name: string; path: string }],
           packageFiles: { alpha: SCRATCH_PACKAGE_FILES['alpha'] ?? [] },
         },
