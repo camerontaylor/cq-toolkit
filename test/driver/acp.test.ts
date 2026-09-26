@@ -1012,13 +1012,12 @@ describe('acp driver specifics (fake ACP server)', () => {
       expect(result.stopReason).toBe('error');
       expect(result.usage).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }); // never settled protocol-side
       const narration = await narrationOf(store, result.sessionId as string);
-      // EITHER bound branch may fire depending on how the OS chunks the
-      // 1.1 MB write: the complete-line bound (this test's subject) or the
-      // unterminated-accumulation overflow — both fail the connection.
-      const bounded =
-        narration.some((line) => line.includes('exceeds the')) ||
-        narration.some((line) => line.includes('stdout line buffer overflow'));
-      expect(bounded).toBe(true);
+      // In-process the whole frame is ONE stdout chunk, newline included,
+      // so the complete-line bound (this test's subject) is the branch that
+      // fires — never the unterminated-accumulation overflow a real pipe's
+      // chunking could reach first.
+      expect(narration.some((line) => line.includes('exceeds the'))).toBe(true);
+      expect(narration.some((line) => line.includes('stdout line buffer overflow'))).toBe(false);
       const failure = narration.find((line) => line.includes('"prompt-failure"'));
       expect(failure !== undefined && failure.includes('oversized frame')).toBe(true);
     });
