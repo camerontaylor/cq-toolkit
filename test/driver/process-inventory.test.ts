@@ -28,6 +28,17 @@ const PROCESS_ENTRY_POINTS = [
   /\brunSweepPlan\s*\(/,
 ] as const;
 
+/**
+ * Process-backed files a SPAWN TRACE found that no entry-point pattern can
+ * name without also catching files that never spawn. Each needs its reason;
+ * the documented inventory is the scan plus this list.
+ */
+const TRACED_PROCESS_FILES: Readonly<Record<string, string>> = {
+  // The analyze registry's default importers run an ast-grep shim and a
+  // node verifier through the real runner.
+  'test/ops/analyze/registry.test.ts': 'analyze registry default runner',
+};
+
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
 /** Every discovered test file (the lanes' universe) that calls a known entry point. */
@@ -41,7 +52,11 @@ async function processBackedTestFiles(): Promise<string[]> {
 }
 
 describe('real-process inventory', () => {
-  test('the documented process-backed test list matches the known entry points', async () => {
-    expect(await processBackedTestFiles()).toEqual(documentedProcessTestFiles(REPOSITORY_ROOT));
+  test('the documented process-backed test list matches the known entry points plus the traced files', async () => {
+    const scanned = await processBackedTestFiles();
+    const traced = Object.keys(TRACED_PROCESS_FILES);
+    // A traced file the scan already names is a stale entry — drop it.
+    expect(traced.filter((file) => scanned.includes(file))).toEqual([]);
+    expect([...scanned, ...traced].sort()).toEqual(documentedProcessTestFiles(REPOSITORY_ROOT));
   });
 });

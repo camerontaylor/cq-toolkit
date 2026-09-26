@@ -199,6 +199,7 @@ it against the known entry-point scan. The current list is:
 - `test/e2e/sweep/sweep.e2e.test.ts`
 - `test/harness/tools.test.ts`
 - `test/helpers/git-template.test.ts`
+- `test/ops/analyze/registry.test.ts`
 - `test/ops/gates/adapters.test.ts`
 - `test/ops/merge/executeMerges.test.ts`
 - `test/ops/pr/ensureTrackerBranch.test.ts`
@@ -247,9 +248,11 @@ Plan 003 F3 made the existing lane names honest without touching CI:
   `claude-agent.test.ts` and `ai-sdk.test.ts` through the shared driver
   conformance suite. The `buildTools` and in-process driver patterns list
   them; `claude-agent.sdk-presence.test.ts` matches without spawning (its
-  run is refused pre-dispatch). `test/ops/analyze/registry.test.ts` still
-  spawns (an `ast-grep` shim and a `node` verifier through the analyze
-  registry's real runner) with no known entry point in the test itself.
+  run is refused pre-dispatch). `test/ops/analyze/registry.test.ts` spawns
+  (an `ast-grep` shim and a `node` verifier through the analyze registry's
+  real runner) with no entry point in the test itself, so the guard lists
+  it explicitly as a TRACED file: the documented inventory is the pattern
+  scan plus that reasoned list.
 - Correction (plan 003 F2): the earlier "57 of 58 driver-specific ACP tests
   spawn" was wrong — 11 never spawned (7 construct no driver, 4 assert zero
   pre-dispatch spawns), so **47 of 58** did. After F2, `acp.test.ts` and
