@@ -15,11 +15,16 @@ export type JsonLineFrame = Record<string, unknown>;
 
 export interface JsonLinePeer {
   send(frame: JsonLineFrame): void;
+  /** Raw stdout bytes: a partial frame, or several frames in ONE flush. */
+  write(text: string): void;
   stderr(line: string): void;
   finish(code?: number | null, signal?: NodeJS.Signals | null): void;
 }
 
-export type JsonLineScript = (frame: JsonLineFrame, peer: JsonLinePeer) => void;
+export type JsonLineScript = ((frame: JsonLineFrame, peer: JsonLinePeer) => void) & {
+  /** A signal the fake child survives (a SIGTERM-ignoring vendor); default none. */
+  ignoresSignal?: (signal: NodeJS.Signals) => boolean;
+};
 
 /** A deterministic tool outcome used only by conformance scripts. */
 export async function runFakeTool(
@@ -92,6 +97,9 @@ function createLinePeer(
     send(frame) {
       if (!closed) stdout.write(`${JSON.stringify(frame)}\n`);
     },
+    write(text) {
+      if (!closed) stdout.write(text);
+    },
     stderr(line) {
       if (!closed) stderr.write(`${line}\n`);
     },
@@ -145,7 +153,8 @@ export function fakeAcpSpawn(scriptFactory: (opts: AcpSpawnOptions) => JsonLineS
       kill(signal?: NodeJS.Signals): boolean;
     };
     let closed = false;
-    const parts = createLinePeer(scriptFactory(opts), (code, signal) => {
+    const script = scriptFactory(opts);
+    const parts = createLinePeer(script, (code, signal) => {
       closed = true;
       child.exitCode = code;
       child.signalCode = signal;
@@ -161,6 +170,7 @@ export function fakeAcpSpawn(scriptFactory: (opts: AcpSpawnOptions) => JsonLineS
     child.pid = 4242;
     child.kill = (signal: NodeJS.Signals = 'SIGTERM'): boolean => {
       if (closed) return false;
+      if (script.ignoresSignal?.(signal) === true) return true; // delivered, survived
       parts.finish(null, signal);
       return true;
     };
