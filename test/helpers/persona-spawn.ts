@@ -111,9 +111,15 @@ export function agentPersonaSpawn(extraEnv: Record<string, string> = {}): SpawnF
       peer = bound;
       if (started || frame['method'] !== 'stdin') return;
       started = true;
-      void persona.run().then(() => {
-        if (!stayAlive) bound.finish(exitCode);
-      });
+      persona.run().then(
+        () => {
+          if (!stayAlive) bound.finish(exitCode);
+        },
+        (error: unknown) => {
+          bound.stderr(`fake agent persona error: ${String(error)}`);
+          bound.finish(1);
+        },
+      );
     };
     if (persona.ignoresSigterm) script.ignoresSignal = (signal) => signal === 'SIGTERM';
     return script;
