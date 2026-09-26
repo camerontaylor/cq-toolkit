@@ -8,17 +8,20 @@
 # this directory (policy/templates/self-host/). W0.6 disables the self-host
 # conflict stage: DIRTY candidates are reported as needs-human rather than
 # dispatched to a model. Reviews are counted under the trust rules; the former
-# blanket `awaiting` premise was incorrect.
+# blanket `awaiting` premise was incorrect. Scheduled runs carry the maxUsd
+# budget cap (I9 — an honest, reported stop) and the governor wall-clock
+# ladder (a wedged governed job is escalated by the ladder instead of
+# stalling the slot).
 #
-# Instantiate:
-#   {{SELFHOST_TOKEN}}      -> NAME of the repository secret holding a PAT
+# Instantiate (each token below is written in double braces in the body):
+#   SELFHOST_TOKEN          -> NAME of the repository secret holding a PAT
 #                              with repo scope on the target repo (the
 #                              dispatch merges PRs as its user; gh rides it
 #                              as GH_TOKEN). Instantiated files reference it
 #                              as `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that
 #                              embeds a token value is a denylist-class bug.
-#   {{SELFHOST_DRIVER_KEY}} -> Reserved only for adopter documentation; this
+#   SELFHOST_DRIVER_KEY     -> Reserved only for adopter documentation; this
 #                              merge template does not dispatch conflict
 #                              agents, so it declares no driver secret.
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
@@ -93,8 +96,9 @@ jobs:
           # PINNED TO MAIN: schedule/dispatch always run main's trusted code
           # under GH_TOKEN — workflow_dispatch accepts any write-
           # collaborator's branch as ref, and that branch's code must never
-          # execute here. Branches are validated LOCALLY pre-merge; the
-          # automation runs only merged main.
+          # execute here. Branches are validated LOCALLY pre-merge (in this
+          # repo: two CodeRabbit cycles + the gates); the automation runs
+          # only merged main.
           ref: main
           # npm runs repo code below, so the checkout token must not
           # survive checkout; gh rides GH_TOKEN, not the checkout
@@ -133,8 +137,9 @@ jobs:
             self-merge-prs-state-
       - name: Classify and merge eligible PRs (dist/selfhost/self-merge-prs.js)
         env:
-          # Step-scoped on purpose: the token must never reach npm ci's
-          # lifecycle scripts — it reaches ONLY this step.
+          # Step-scoped on purpose (the live-review.yml round-3
+          # discipline): the token must never reach npm ci's lifecycle
+          # scripts — it reaches ONLY this step.
           GH_TOKEN: ${{ secrets.{{SELFHOST_TOKEN}} }}
           # gh resolves the repo from the environment (effects never pass
           # -R); the entry also receives --repo $GH_REPO explicitly.

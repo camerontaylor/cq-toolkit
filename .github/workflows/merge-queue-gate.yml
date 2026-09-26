@@ -1,4 +1,27 @@
 # instantiated from policy/templates/merge-queue-gate.yml — edit the template, not this file
+# Template: merge-queue-gate — promotes checked merge-queue commits to main
+# by pure fast-forward (I3). Runs on every push to merge-queue; waits until
+# every required check on the gate's wait list has SUCCEEDED on the gated
+# commit (never promotes unchecked, never promotes a failure), then
+# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). This workflow is the
+# ONLY component that advances main. See policy/templates/README.md for the
+# token table and the entitlement facts.
+#
+# Instantiate (each token below is written in double braces in the body):
+#   PROMOTE_SECRET   -> NAME of the repo secret holding a PAT with
+#                       contents:write. It is used for the checkout
+#                       remote (so the ff-push below uses it —
+#                       GITHUB_TOKEN pushes do not trigger the
+#                       on:push:main sync workflow) and, as GH_TOKEN,
+#                       for the check-runs API wait (GITHUB_TOKEN with
+#                       contents:read also works for that wait alone).
+#   GATE_CHECKS      -> the gate's wait list: comma list of required check
+#                       names, e.g. static,denylist
+#   GATE_TIMEOUT_MIN -> minutes to wait for the checks before refusing
+#                       (default 20)
+# No ${{ }} expression is ever interpolated into a run: script in this
+# workflow — inputs reach scripts through env: indirection only. Drop the
+# result into .github/workflows/. Edit the template, not the instantiation.
 name: merge-queue-gate
 
 on:
@@ -48,9 +71,9 @@ jobs:
           GH_TOKEN: ${{ secrets.PROMOTE_TOKEN }}
         run: |
           set -euo pipefail
-          # 'ratchet' IS on this list (ws-k stage-1 wiring): the required
-          # ratchet check must gate promotion like static/denylist, or the
-          # queue could fast-forward main while ratchet is pending/failed.
+          # EVERY required check belongs on this wait list (README
+          # "How instantiation works" step 4): a required check missing here
+          # lets the gate fast-forward main while it is pending or failed.
           checks="$(echo 'static,denylist,ratchet' | tr -d ' ' | tr ',' ' ')"
           # Fail closed on an empty gate wait list: an empty list would run
           # the wait loop zero times and promote with NO check validated.

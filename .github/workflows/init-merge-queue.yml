@@ -1,4 +1,16 @@
 # instantiated from policy/templates/init-merge-queue.yml — edit the template, not this file
+# Template: init-merge-queue — one-time (and forever-idempotent) bootstrap of
+# the merge-queue branch at origin/main HEAD. See policy/templates/README.md
+# for the token table and the entitlement facts behind the queue design.
+#
+# Instantiate: replace the PROMOTE_SECRET token (written in double braces
+# in the body) with the NAME of the repo secret holding a PAT with
+# contents:write (creating a branch is a write), then drop the result into
+# .github/workflows/ and run it once from the Actions tab.
+# The first bootstrap can equally be a plain
+#   git push origin origin/main:refs/heads/merge-queue
+# by an admin — this workflow exists so the bootstrap is repeatable and
+# auditable instead. Edit the template, not the instantiation.
 name: init-merge-queue
 
 on:

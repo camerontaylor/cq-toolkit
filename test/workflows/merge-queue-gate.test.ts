@@ -156,11 +156,10 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     ).toBe(extractAwkProgram(template.text));
     // Each file quotes its check list differently ('static,denylist,ratchet'
     // generated — whatever the wait list currently holds — and
-    // '{{GATE_CHECKS}}' template) and names the subject of the guard comment
-    // differently ('an empty {{GATE_CHECKS}}' template, 'an empty gate wait
-    // list' generated) — the two sanctioned token-level divergences of the
-    // instantiation. Normalize BOTH to placeholders before comparing; ANY
-    // other drift still fails. The generated list is matched by SHAPE, and
+    // '{{GATE_CHECKS}}' template) — the sanctioned token-level divergence of
+    // the instantiation (the whole-file lockstep is template-render.test.ts).
+    // Normalize BOTH to a placeholder before comparing; ANY other drift still
+    // fails. The generated list is matched by SHAPE, and
     // only as the `echo` argument (`(echo )'[a-z]+(?:,[a-z]+)*'` — a bare `tr ','` must
     // NOT match, whose comma is in the class but is not the wait list), so a
     // future wait-list change ('static,denylist,ratchet' was the second
@@ -170,9 +169,7 @@ describe('merge-queue-gate: fail-closed mechanics (generated file and template i
     const normalize = (text: string): string =>
       extractFailClosedSnippet(text)
         .replace(/(echo )'[a-z]+(?:,[a-z]+)*'/, `$1'<LIST>'`)
-        .replace(`'{{GATE_CHECKS}}'`, `'<LIST>'`)
-        .replace(`an empty {{GATE_CHECKS}}:`, `an empty <SUBJECT>:`)
-        .replace(`an empty gate wait list:`, `an empty <SUBJECT>:`);
+        .replace(`'{{GATE_CHECKS}}'`, `'<LIST>'`);
     expect(
       normalize(generated.text),
       'the files drifted outside the behavioral cases: the fail-closed guard snippet',

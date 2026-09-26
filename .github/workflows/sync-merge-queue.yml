@@ -1,4 +1,21 @@
 # instantiated from policy/templates/sync-merge-queue.yml — edit the template, not this file
+# Template: sync-merge-queue — keeps main and merge-queue level after
+# anything lands on main. API-only triage (no checkout; cost model: zero
+# clone), every call through the GitHub REST API with GH_TOKEN = the promote
+# PAT. Never uses force anywhere: the refs API PATCH with force=false is the
+# server-side fast-forward invariant — the server itself rejects any non-ff
+# update with 422, which is the whole reason an ff-only queue needs no
+# client-side trust. This workflow NEVER advances main itself: when
+# merge-queue is ahead, it dispatches merge-queue-gate — the sole promotion
+# path — so nothing reaches main except behind the gate's required-check
+# wait, the merge-queue-tip guard, and the merge-base guards. See
+# policy/templates/README.md for the token table and the entitlement facts.
+#
+# Instantiate: replace the PROMOTE_SECRET token (written in double braces
+# in the body) with the NAME of the repo secret holding a PAT with
+# contents:write (branch writes via the refs and merge APIs), actions:write
+# (dispatching the gate), and issues:write (the divergence alarm). Drop the
+# result into .github/workflows/. Edit the template, not the instantiation.
 name: sync-merge-queue
 
 on:

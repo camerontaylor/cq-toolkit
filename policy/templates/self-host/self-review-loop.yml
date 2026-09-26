@@ -4,10 +4,12 @@
 # repository's open PRs — fetch → classify → respond → resolve, one
 # ≤20-minute scheduled run per slot. Wiring, secrets, the cron-window rule,
 # the budget caps, and the I2 single-identity caveat: README.md in this
-# directory (policy/templates/self-host/).
+# directory (policy/templates/self-host/). The trusted build and the
+# privileged loop are intentionally split: secret-bearing effects are
+# isolated to the main-only privileged job below.
 #
-# Instantiate:
-#   {{SELFHOST_TOKEN}}      -> NAME of the repository secret holding a PAT
+# Instantiate (each token below is written in double braces in the body):
+#   SELFHOST_TOKEN          -> NAME of the repository secret holding a PAT
 #                              with repo scope on the target repo (the loop
 #                              posts review replies and resolves threads as
 #                              its user; gh rides it as GH_TOKEN).
@@ -15,7 +17,7 @@
 #                              `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that
 #                              embeds a token value is a denylist-class bug.
-#   {{SELFHOST_DRIVER_KEY}} -> NAME of the repository secret holding the
+#   SELFHOST_DRIVER_KEY     -> NAME of the repository secret holding the
 #                              model provider API key (the fix workers'
 #                              driver through the ai-sdk route).
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
