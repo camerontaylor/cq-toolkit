@@ -752,17 +752,50 @@ describe('runGate', () => {
     expect(behind.policyInputs).toEqual([]);
   });
 
-  test('a trust ref that trails main refuses before any other check', async () => {
+  test('a trailing trust ref with the tip contained in main is a noop, not a refusal', async () => {
+    // The second carrier's run after a promotion: main moved to the tip, and
+    // this run's trust checkout is the old main.
+    for (const [tipSha, mainSha] of [
+      [M1, M1],
+      [MAIN, M1],
+    ] as const) {
+      const h = harness(world(tipSha, mainSha));
+      h.deps.git = fakeGit({
+        revParse: (_r, rev) =>
+          Promise.resolve(
+            rev === 'refs/remotes/origin/main'
+              ? mainSha
+              : rev === 'refs/remotes/origin/merge-queue'
+                ? tipSha
+                : rev,
+          ),
+        isAncestor: (_r, a, b) => Promise.resolve(a === b || (a === MAIN && b === M1)),
+      });
+      const r = await runGate(h.deps, cfg({ trustRef: X }));
+      expect(r.verdict, `tip ${tipSha} main ${mainSha}`).toBe('noop');
+      expect(r.report.join('\n')).not.toMatch(/trails main/);
+      expect(h.acceptanceInputs).toEqual([]);
+      expect(h.policyInputs).toEqual([]);
+      expect(dispatches(h.calls)).toEqual([]);
+    }
+  });
+
+  test('a trailing trust ref with the tip ahead refuses before any judging check', async () => {
     const h = harness(world());
     const r = await runGate(h.deps, cfg({ trustRef: X }));
     expect(r.verdict).toBe('refused');
     expect(r).toMatchObject({ tip: M1, main: MAIN });
     expect(r.report.at(-1)).toBe(
-      `refused: trust ref ${X} trails main ${MAIN}: this run's code and definitions are not main's; the next wake or sweep retries`,
+      `refused: trust ref ${X} trails main ${MAIN}: this run's code and definitions are not main's; the next sweep retries`,
     );
     expect(h.acceptanceInputs).toEqual([]);
     expect(h.policyInputs).toEqual([]);
     expect(dispatches(h.calls)).toEqual([]);
+    // No closure read either: only the two ref reads happened.
+    expect(h.calls.map((c) => c[1])).toEqual([
+      'repos/o/r/git/ref/heads/merge-queue',
+      'repos/o/r/git/ref/heads/main',
+    ]);
   });
 
   test('diverged refuses', async () => {

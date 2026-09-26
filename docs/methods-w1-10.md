@@ -114,15 +114,24 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - a trusted objection is outstanding;
     - there is no trusted acceptance bound to the head.
 
-    These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The sweep judges every
-    eligible PR (above 200 it refuses loudly; none is dropped). The `judge` job is
-    serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the schedule). The
-    sweep and a per-PR run hold different locks. Every row we post carries its snapshot time as
-    `started_at`, so before posting, each run selects the head's same-app `cq/acceptance` row
-    with the latest `started_at` (ties: the greater id) and skips when that snapshot is later
-    than its own; the sweep's "unchanged" dedupe compares against the same row. That guard
-    is best-effort, so an older snapshot's post can still occasionally land after a newer
-    one's (see Residuals). Settle stays in the
+    These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The sweep's cost is
+    bounded, not its coverage dropped: it sorts the eligible PRs by number and judges a
+    rotating window of 25 (about 4 REST reads per PR at 4 sweeps an hour, so roughly 400 of
+    the `GITHUB_TOKEN`'s 1000 requests an hour, whatever the queue's size). The window's
+    offset is the sweep ordinal (the workflow's schedule-run count; `github.run_number`
+    counts every run) times 25, modulo the count, wrapping, so every eligible PR is judged
+    within `ceil(count / 25)` sweeps; per-PR events still judge each PR as it changes. The
+    `judge` job is serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the
+    schedule). The sweep and a per-PR run hold different locks. Every row we post carries its
+    snapshot time as both `started_at` and `completed_at`, so posted order is snapshot order
+    for GitHub's "latest" row and for every consumer that orders by `completed_at`. Before
+    posting, each run selects the head's same-app `cq/acceptance` row with the latest
+    `started_at` (ties: the greater id) and skips when that snapshot is later than its own.
+    The sweep's "unchanged" dedupe compares against the same row, and it re-posts anyway when
+    the latest-`completed_at` row is a different row (a stale row is what GitHub shows).
+    The clock bounding a row's date (its future bound) is read per PR. That guard is
+    best-effort, so an older snapshot's post can still occasionally land after a newer one's
+    (see Residuals). Settle stays in the
     merger's recheck, because the ledger write needs `contents: write`. A mergeability row
     would be circular, since a required `cq/acceptance` keeps GitHub's merge state `BLOCKED`
     until it posts, so it is not included.
@@ -133,9 +142,12 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     only, `OWNER`/`MEMBER`/`COLLABORATOR`. The structural automation identities are always
     excluded (`trustPolicyFromConfig`). The gate uses the same resolver.
 12. **The gate's closure and recompute (D-K.3/4).** The gate resolves `tip` and `main` itself.
-    It refuses unless the resolved `main` equals its trust ref (`github.sha`): a `decide` run
+    A tip already contained in `main` is a `noop`, decided from git objects alone. Otherwise it
+    refuses unless the resolved `main` equals its trust ref (`github.sha`): a `decide` run
     queued behind an earlier promotion would otherwise judge the new `main` with the old
-    code and definitions; the next wake or sweep retries. Every commit in `main..tip` must be one of:
+    code and definitions; the next sweep retries. Ordering the noop first keeps the second
+    carrier's run after a promotion (ci and cq-measure both wake the gate) a green `noop`.
+    Every commit in `main..tip` must be one of:
     - a first-parent merge commit on `merge-queue` of a merged PR into `merge-queue`, where the
       PR's recorded merge commit is that commit and its second parent is the PR head;
     - a commit reachable from such a PR's head.
@@ -204,11 +216,18 @@ paths stay in use, as ADR-0004 D-G.4 allows.
   postdates the head.
 - **`cq/acceptance` ordering is best-effort.** The stale-verdict guard (Decision 10) reads
   the latest-snapshot row in one call and posts in a later one. It compares snapshot times on
-  both sides (each row's `started_at` is its judge step's snapshot stamp, taken on that run's
-  runner clock), at one-second resolution with a strict `>`. A sweep that skips a verdict as "unchanged" also leaves no new row. An
-  older snapshot's verdict can therefore occasionally be the newest row. This heals itself:
-  the next event on the PR, or at worst the 15-minute sweep, re-judges and re-posts. The
-  gate never reads `cq/acceptance`; its per-PR recompute is authoritative for promotion.
+  both sides (each row's `started_at` and `completed_at` are its judge step's snapshot stamp,
+  taken on that run's runner clock), at one-second resolution with a strict `>`. A stale
+  snapshot can therefore occasionally be posted after a newer one; because its
+  `completed_at` is its own (earlier) snapshot time, it is still not the latest-completed
+  row. Rows posted before rows carried `completed_at` are stamped with their POST time, so
+  one of them can be GitHub's latest row while older than the reference row. The sweep then
+  re-posts even an unchanged verdict, because the latest-completed row is not the reference
+  row. This heals itself on the next event on the PR, or at worst on the first sweep whose
+  window holds the PR (within `ceil(count / 25)` sweeps of 15 minutes). It is bounded, not
+  prevented: a row whose `completed_at` is later than the healing snapshot stays GitHub's
+  latest until a later snapshot is posted. The gate never reads `cq/acceptance`; its per-PR
+  recompute is authoritative for promotion.
 - **The Actions event policy is checked only by the owner-run drift check.** GitHub gates its
   read behind Administration: write, and the CI drift credential is read-only by design, so
   the scheduled check reports it as unchecked (a `notice:`); the owner runs
