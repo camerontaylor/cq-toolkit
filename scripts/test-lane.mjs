@@ -1,6 +1,7 @@
 // `npm run test:unit` / `npm run test:e2e`: run one lane of the suite, with
 // membership derived from the process-entry inventory (scripts/lib/
-// test-lanes.mjs). Extra arguments pass through to `vitest run`.
+// test-lanes.mjs). Extra arguments pass through to `vitest run`; vitest ORs
+// positional filters, so a filter narrows `unit` but only widens `e2e`.
 import { laneArgs } from './lib/test-lanes.mjs';
 import { ROOT, run } from './lib/owned-files.mjs';
 
