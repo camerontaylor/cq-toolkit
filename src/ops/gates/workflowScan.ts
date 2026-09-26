@@ -1031,6 +1031,9 @@ const BASE_EXPRESSIONS: ReadonlySet<string> = new Set([
 
 const EXPRESSION = /\$\{\{([\s\S]*?)(?:\}\}|$)/g;
 const GIT_MOVE = /\bgit\b[^\n;&|]*?\b(?:checkout|switch|reset|worktree)\b/;
+/** A shell variable assignment and its right-hand side (optionally `export`/`local`/`declare`d). */
+const SHELL_ASSIGNMENT =
+  /(?:^|[\s;&|(])(?:(?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|]*)/g;
 const FALSE_LITERALS = new Set(['false', 'False', 'FALSE']);
 
 /**
@@ -1133,9 +1136,11 @@ function keyedLint(path: string, scan: OkScan): KeyedLint[] {
         const envSpan = step.keys.get('env');
         const env = [detail.envText, envSpan ? valueText(lines, envSpan) : ''].join('\n');
         // YAML folds single newlines of a `>` block or a multi-line plain
-        // scalar into spaces; a literal `|` block keeps them.
+        // scalar into spaces; a literal `|` block keeps them. An empty inline
+        // value is a plain scalar starting on the next line (`run:` cannot
+        // hold a mapping), so it folds too.
         const style = lines[runSpan.at]!.value;
-        const folds = style.startsWith('>') || (style !== '' && !style.startsWith('|'));
+        const folds = !style.startsWith('|');
         const why = headRun(run, env, folds);
         if (why !== null) {
           add(
@@ -1214,7 +1219,9 @@ function headRunOf(run: string, env: string): { signal: string; line: string } |
   // any expression that is not a base value may name head code. Inline, it
   // counts anywhere in the script (a shell variable may carry it to the
   // move); through `env:`, it counts when a moving `git` row names the
-  // variable — an env value the move never reads cannot steer it.
+  // variable or a shell variable assigned from it (one-line assignments,
+  // followed to a fixed point) — an env value the move never reads cannot
+  // steer it.
   const nonBase = (body: string): { signal: string; line: string } | null => {
     const expr = normaliseExpression(body);
     if (BASE_EXPRESSIONS.has(expr)) return null;
@@ -1228,15 +1235,39 @@ function headRunOf(run: string, env: string): { signal: string; line: string } |
     if (hit !== null) return hit;
   }
   const moveRows = rows.filter((r) => GIT_MOVE.test(r));
+  // Env variables whose value holds a non-base expression, with that hit.
+  const tainted = new Map<string, { signal: string; line: string }>();
   for (const entry of env.split('\n')) {
     const kv = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$/.exec(entry);
     if (kv === null) continue;
-    const named = new RegExp(`\\$\\{?${kv[1]!}\\b`);
-    if (!moveRows.some((r) => named.test(r))) continue;
     for (const m of kv[2]!.matchAll(EXPRESSION)) {
       const hit = nonBase(m[1]!);
-      if (hit !== null) return hit;
+      if (hit !== null) {
+        tainted.set(kv[1]!, hit);
+        break;
+      }
     }
+  }
+  const reads = (text: string, name: string): boolean => new RegExp(`\\$\\{?${name}\\b`).test(text);
+  // Propagate through shell assignments (`R="$HEAD"`, `export R=${HEAD}`).
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const row of rows) {
+      for (const a of row.matchAll(SHELL_ASSIGNMENT)) {
+        const [, name, rhs] = a;
+        if (tainted.has(name!)) continue;
+        for (const [source, hit] of tainted) {
+          if (reads(rhs!, source)) {
+            tainted.set(name!, hit);
+            grew = true;
+            break;
+          }
+        }
+      }
+    }
+  }
+  for (const [name, hit] of tainted) {
+    if (moveRows.some((r) => reads(r, name))) return hit;
   }
   return null;
 }

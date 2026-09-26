@@ -129,14 +129,18 @@ alongside the acceptance check.
    reported inside a job that already has one.
 6. **The head-execution lint is static.** It catches:
    - checkouts of non-base expressions and head tokens, by any owner's `checkout` action;
-   - `run:` scripts that move the worktree to `FETCH_HEAD`, a head expression (inline or via
-     `env:`) or a PR ref. Shell line continuations are joined first, and the YAML-folded reading
-     of a `run:` value is judged too.
+   - `run:` scripts that move the worktree to `FETCH_HEAD` or a PR ref, or to anything a non-base
+     `${{ }}` expression names. The expression counts anywhere inline, or through a step, job or
+     workflow `env:` variable that a moving `git` row reads, directly or via one-line shell
+     assignments followed to a fixed point (`R="$HEAD_REF"`).
+   - Before those checks run, shell line continuations are joined. For a `>` block or a plain
+     multi-line value, including one that starts on the next line, the YAML-folded reading is
+     judged as well; a literal `|` block is never folded.
 
-   It does not model arbitrary shell. A `run:` that builds a head ref through indirection the
-   scanner cannot see is a residual. Such a change still lands on a protected path
-   (`.github/**`), and it is a definition change wherever `^\.github/` is in the set, as it is
-   here.
+   It does not model arbitrary shell. These remain residuals: functions, `eval`, command
+   substitution into files, and cross-step `$GITHUB_ENV` writes. Such a change still lands on a
+   protected path (`.github/**`), and it is a definition change wherever `^\.github/` is in the
+   set, as it is here.
 
 7. **The configuration inputs of required checks are definitions.** The `static`, `denylist`
    and `ratchet` jobs read `.oxlintrc.json`, `.oxfmtrc.json`, `knip.json`, `lint/**`, the `scripts/ratchet-*.mjs`,
@@ -151,6 +155,11 @@ alongside the acceptance check.
    See the first residual in Decision 8.
 
 8. **Residuals, recorded.**
+   - **Folded-lint keys are by row (R2-3).** A folded match is keyed by the row its `git` starts
+     on, so that edits elsewhere in a base-owned `>` block do not re-report an old violation.
+     The flip side: editing the payload rows of an already-violating folded command (for
+     example, swapping which head expression it checks out) does not re-lint. The edit still
+     lands on `.github/**`, a protected and, here, a definition path.
    - **Required checks that execute head-built `src/**` can be neutered under `diff-check`
      until W1.10's C2.** A PR that makes, say, the typecheck-count adapter always pass yields
      only a `protected-path` finding for `src/ops/ratchet/**`. `src/kernel/**` and `src/cli.ts`

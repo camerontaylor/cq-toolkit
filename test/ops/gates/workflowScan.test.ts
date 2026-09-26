@@ -935,6 +935,53 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
       1,
     ],
     [
+      'plain scalar starting on the next line folds (R2-1)',
+      [
+        '      - run:',
+        '          git',
+        '          checkout ${{ github.event.workflow_run.head_sha }}',
+      ],
+      1,
+    ],
+    [
+      'plain scalar on the next line hides no FETCH_HEAD checkout (R2-1)',
+      ['      - run:', '          git', '          checkout FETCH_HEAD'],
+      1,
+    ],
+    [
+      'env head value through a one-line reassignment (R2-2)',
+      [
+        '      - env:',
+        '          HEAD_REF: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          R="$HEAD_REF"',
+        '          git checkout "$R"',
+      ],
+      1,
+    ],
+    [
+      'env head value through two exported hops (R2-2)',
+      [
+        '      - env:',
+        '          HEAD_REF: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          export A=${HEAD_REF}; B="pre-$A"',
+        '          git switch --detach "$B"',
+      ],
+      1,
+    ],
+    [
+      'a reassigned base value stays clean (R2-2 precision)',
+      [
+        '      - env:',
+        '          TRUST: ${{ github.sha }}',
+        '        run: |',
+        '          R="$TRUST"',
+        '          git checkout "$R"',
+      ],
+      0,
+    ],
+    [
       'head checkout folded by a > scalar',
       [
         '      - run: >',
