@@ -591,7 +591,8 @@ interface Step {
 interface JobDetail {
   readonly lines: readonly Line[];
   readonly steps: readonly Step[];
-  readonly envText: string;
+  /** The workflow-level and job-level `env:` blocks, each as its own source text. */
+  readonly envTexts: readonly string[];
 }
 
 /** Private scan-level detail: the normalised top-level `name:`. */
@@ -970,7 +971,7 @@ function readJob(
   JOB_DETAIL.set(job, {
     lines,
     steps,
-    envText: [level.workflowEnv, envSpan ? valueText(lines, envSpan) : ''].join('\n'),
+    envTexts: [level.workflowEnv, envSpan ? valueText(lines, envSpan) : ''],
   });
   return job;
 }
@@ -1033,7 +1034,39 @@ const EXPRESSION = /\$\{\{([\s\S]*?)(?:\}\}|$)/g;
 const GIT_MOVE = /\bgit\b[^\n;&|]*?\b(?:checkout|switch|reset|worktree)\b/;
 /** A shell variable assignment and its right-hand side (optionally `export`/`local`/`declare`d). */
 const SHELL_ASSIGNMENT =
-  /(?:^|[\s;&|(])(?:(?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|'[^']*'|[^\s;&|]*)/g;
+  /(?:^|[\s;&|(])(?:(?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)\+?=/g;
+
+/**
+ * `NAME → value` for every entry of each `env:` source text. A value is the
+ * key row's inline text plus every deeper row after it, so a folded `>`,
+ * literal `|` or next-line plain scalar value is read whole. Text before any
+ * key (an `env:` given as one expression, e.g. `${{ fromJSON(…) }}`) defines
+ * names the scanner cannot know: it is kept under {@link ANY_ENV_NAME}.
+ */
+/** The entry name for env text whose variable names are unknowable. */
+const ANY_ENV_NAME = '*';
+
+function envEntries(sources: readonly string[]): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const source of sources) {
+    let keyIndent: number | null = null;
+    let current: string | null = null;
+    for (const row of source.split('\n')) {
+      if (row.trim() === '') continue;
+      const indent = row.length - row.trimStart().length;
+      const kv = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$/.exec(row);
+      if (kv !== null && (keyIndent === null || indent <= keyIndent)) {
+        keyIndent ??= indent;
+        current = kv[1]!;
+        out.set(current, kv[2]!);
+      } else {
+        const name = current ?? ANY_ENV_NAME;
+        out.set(name, out.has(name) ? `${out.get(name)!}\n${row}` : row);
+      }
+    }
+  }
+  return out;
+}
 const FALSE_LITERALS = new Set(['false', 'False', 'FALSE']);
 
 /**
@@ -1134,7 +1167,7 @@ function keyedLint(path: string, scan: OkScan): KeyedLint[] {
       if (runSpan) {
         const run = valueText(lines, runSpan);
         const envSpan = step.keys.get('env');
-        const env = [detail.envText, envSpan ? valueText(lines, envSpan) : ''].join('\n');
+        const env = [...detail.envTexts, envSpan ? valueText(lines, envSpan) : ''];
         // YAML folds single newlines of a `>` block or a multi-line plain
         // scalar into spaces; a literal `|` block keeps them. An empty inline
         // value is a plain scalar starting on the next line (`run:` cannot
@@ -1185,7 +1218,7 @@ function headCheckoutValue(value: string): string | null {
  */
 function headRun(
   script: string,
-  env: string,
+  env: readonly string[],
   folds: boolean,
 ): { signal: string; line: string } | null {
   // Join shell line continuations first: `git \` + `checkout …` is one
@@ -1207,7 +1240,7 @@ function headRun(
 }
 
 /** {@link headRun} over one reading of the script. */
-function headRunOf(run: string, env: string): { signal: string; line: string } | null {
+function headRunOf(run: string, env: readonly string[]): { signal: string; line: string } | null {
   const rows = run.split('\n').map((r) => r.trim());
   const first = (re: RegExp): string => rows.find((r) => re.test(r)) ?? rows[0] ?? '';
   if (/refs\/pull\//i.test(run)) return { signal: 'refs/pull/', line: first(/refs\/pull\//i) };
@@ -1237,28 +1270,36 @@ function headRunOf(run: string, env: string): { signal: string; line: string } |
   const moveRows = rows.filter((r) => GIT_MOVE.test(r));
   // Env variables whose value holds a non-base expression, with that hit.
   const tainted = new Map<string, { signal: string; line: string }>();
-  for (const entry of env.split('\n')) {
-    const kv = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:(.*)$/.exec(entry);
-    if (kv === null) continue;
-    for (const m of kv[2]!.matchAll(EXPRESSION)) {
+  for (const [name, value] of envEntries(env)) {
+    for (const m of value.matchAll(EXPRESSION)) {
       const hit = nonBase(m[1]!);
       if (hit !== null) {
-        tainted.set(kv[1]!, hit);
+        tainted.set(name, hit);
         break;
       }
     }
   }
-  const reads = (text: string, name: string): boolean => new RegExp(`\\$\\{?${name}\\b`).test(text);
-  // Propagate through shell assignments (`R="$HEAD"`, `export R=${HEAD}`).
+  // `${!x}` indirection can read ANY variable, so it reads every tainted one.
+  // An unknowable env name (ANY_ENV_NAME) is read by any variable reference.
+  const reads = (text: string, name: string): boolean =>
+    text.includes('${!') ||
+    (name === ANY_ENV_NAME
+      ? /\$\{?[A-Za-z_]/.test(text)
+      : new RegExp(`\\$\\{?${name}\\b`).test(text));
+  // Propagate through shell assignments (`R="$HEAD"`, `export R=${HEAD}`,
+  // `R+="$HEAD"`, `R="$(printf '%s' "$HEAD")"`). The right-hand side runs to
+  // the end of the row, so nested quotes and command substitutions stay
+  // inside it; reading too far can only over-taint.
   for (let grew = true; grew;) {
     grew = false;
     for (const row of rows) {
       for (const a of row.matchAll(SHELL_ASSIGNMENT)) {
-        const [, name, rhs] = a;
-        if (tainted.has(name!)) continue;
+        const name = a[1]!;
+        if (tainted.has(name)) continue;
+        const rhs = row.slice(a.index + a[0].length);
         for (const [source, hit] of tainted) {
-          if (reads(rhs!, source)) {
-            tainted.set(name!, hit);
+          if (reads(rhs, source)) {
+            tainted.set(name, hit);
             grew = true;
             break;
           }

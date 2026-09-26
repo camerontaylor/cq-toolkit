@@ -981,6 +981,63 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
       ],
       0,
     ],
+    ...(['>', '|', ''] as const).map((style): [string, string[], number] => [
+      `env head value spelled as a ${style || 'next-line plain'} scalar (N1)`,
+      [
+        '      - env:',
+        `          HEAD_REF:${style === '' ? '' : ` ${style}`}`,
+        '            ${{ github.event.workflow_run.head_sha }}',
+        '        run: git checkout "$HEAD_REF"',
+      ],
+      1,
+    ]),
+    [
+      'a multi-line env base value stays clean (N1 precision)',
+      [
+        '      - env:',
+        '          TRUST: |',
+        '            ${{ github.sha }}',
+        '        run: git checkout "$TRUST"',
+      ],
+      0,
+    ],
+    [
+      'an env given as one expression defines unknowable names (N1)',
+      ['      - env: ${{ fromJSON(inputs.env) }}', '        run: git checkout "$REF"'],
+      1,
+    ],
+    [
+      'env head value through a += append (N2)',
+      [
+        '      - env:',
+        '          HEAD_REF: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          R="v1-"; R+="$HEAD_REF"; git checkout "$R"',
+      ],
+      1,
+    ],
+    [
+      'env head value through a command substitution with nested quotes (N3)',
+      [
+        '      - env:',
+        '          HEAD_REF: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          R="$(printf \'%s\' "$HEAD_REF")"',
+        '          git checkout "$R"',
+      ],
+      1,
+    ],
+    [
+      'env head value through ${!x} indirection (N3)',
+      [
+        '      - env:',
+        '          HEAD_REF: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          x=HEAD_REF',
+        '          git checkout "${!x}"',
+      ],
+      1,
+    ],
     [
       'head checkout folded by a > scalar',
       [
