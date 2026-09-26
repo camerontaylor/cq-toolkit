@@ -892,6 +892,50 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
     ['refs/pull/ in run', ['      - run: git fetch origin refs/pull/1/head'], 1],
     ['pull/${{ in run', ['      - run: curl https://x/pull/${{ github.event.number }}'], 1],
     ['base checkout in run', ['      - run: git checkout "$GITHUB_SHA"'], 0],
+    [
+      'head checkout across a line continuation',
+      [
+        '      - run: |',
+        '          git \\',
+        '            checkout ${{ github.event.workflow_run.head_sha }}',
+      ],
+      1,
+    ],
+    [
+      'FETCH_HEAD across a line continuation',
+      [
+        '      - run: |',
+        '          git fetch origin "$SHA"',
+        '          git \\',
+        '            checkout FETCH_HEAD',
+      ],
+      1,
+    ],
+    [
+      "a fork's checkout with a head ref",
+      [
+        '      - uses: evil/checkout@main',
+        '        with:',
+        '          persist-credentials: false',
+        '          ref: ${{ github.event.workflow_run.head_sha }}',
+      ],
+      1,
+    ],
+    [
+      'a checkout subaction with a head ref',
+      [
+        '      - uses: actions/checkout/sub@v4',
+        '        with:',
+        '          persist-credentials: false',
+        '          ref: ${{ github.event.workflow_run.head_sha }}',
+      ],
+      1,
+    ],
+    [
+      "a fork's checkout without persist-credentials: false",
+      ['      - uses: evil/checkout@main', '      - run: make'],
+      1,
+    ],
   ])('workflow_run: %s', (_label, steps, count) => {
     expect(lint(flow('workflow_run', ...steps))).toHaveLength(count);
   });

@@ -1091,7 +1091,9 @@ function keyedLint(path: string, scan: OkScan): KeyedLint[] {
     let persistOrdinal = 0;
     for (const step of detail.steps) {
       const uses = literalOf(lines, step.keys.get('uses'));
-      const isCheckout = uses !== null && /^actions\/checkout(?:@|$)/i.test(uses);
+      // Any owner's `checkout` (a fork, a subaction path): the D-G.3 rules
+      // are about what the step does, not whose copy it is.
+      const isCheckout = uses !== null && /(?:^|\/)checkout(?:\/[^@]*)?(?:@|$)/i.test(uses);
       const persistSpan = step.inputs.get('persist-credentials');
       const persist = persistSpan ? literalOf(lines, persistSpan) : null;
       if (persistSpan && !(persist !== null && FALSE_LITERALS.has(persist))) {
@@ -1166,7 +1168,10 @@ function headCheckoutValue(value: string): string | null {
  * or via the step/job/workflow `env:`) is not, and `refs/pull/` or
  * `pull/${{` anywhere is.
  */
-function headRun(run: string, env: string): { signal: string; line: string } | null {
+function headRun(script: string, env: string): { signal: string; line: string } | null {
+  // Join shell line continuations first: `git \` + `checkout …` is one
+  // command, and every leg below must see it whole.
+  const run = script.replace(/\\\r?\n/g, ' ');
   const rows = run.split('\n').map((r) => r.trim());
   const first = (re: RegExp): string => rows.find((r) => re.test(r)) ?? rows[0] ?? '';
   if (/refs\/pull\//i.test(run)) return { signal: 'refs/pull/', line: first(/refs\/pull\//i) };
