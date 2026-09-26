@@ -157,10 +157,13 @@ posture `CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default).
 
 Interim credentials (reported by the drift check until C3):
 
-- `PROMOTE_TOKEN` — fine-grained PAT, Contents read/write + Workflows write
-  - Metadata read. Read by the legacy `merge-queue-gate` (repository-level
-    during C1) and by `cq-gate` only at its push; also the fallback for the
-    sync/init automation credential.
+- `PROMOTE_TOKEN` — the promotion PAT. Read by the legacy
+  `merge-queue-gate` (repository-level during C1) and by `cq-gate` only at
+  its push. While `CQ_AUTOMATION_TOKEN` is absent it is also the sync/init
+  fallback, and opening the sync PR then needs Pull requests read/write.
+  Re-scope it to a fine-grained PAT with only Contents read/write, Workflows
+  write and Metadata read once `CQ_AUTOMATION_TOKEN` exists (owner step 2),
+  never before.
 - `CQ_AUTOMATION_TOKEN` — the sync PR, the init bootstrap and the baseline
   proposals (Pull requests read/write, Contents write).
 - `CQ_SETTINGS_TOKEN` — read-only fine-grained PAT (Administration,
