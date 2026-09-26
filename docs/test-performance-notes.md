@@ -189,6 +189,7 @@ it against the known entry-point scan. The current list is:
 
 - `test/cli/i1.test.ts`
 - `test/cli/plans.smoke.test.ts`
+- `test/cli/registry-props.test.ts`
 - `test/driver/acp.real.test.ts`
 - `test/driver/ai-sdk.test.ts`
 - `test/driver/claude-agent.sdk-presence.test.ts`
@@ -218,6 +219,7 @@ it against the known entry-point scan. The current list is:
 - `test/ops/sweep/salvage.test.ts`
 - `test/ops/sweep/unit-registry.test.ts`
 - `test/ops/sweep/worktreeFor.test.ts`
+- `test/plans/analyze.test.ts`
 - `test/scripts/demo-eval-axes.test.ts`
 - `test/scripts/knip.test.ts`
 - `test/scripts/oxlint-boundaries.test.ts`
@@ -254,6 +256,12 @@ Plan 003 F3 made the existing lane names honest without touching CI:
   real runner) with no entry point in the test itself, so the guard lists
   it explicitly as a TRACED file: the documented inventory is the pattern
   scan plus that reasoned list.
+- The full `test:unit` spawn trace (80 files, 2,017 tests, quiet window:
+  load 3.00 → 3.46) then found two more central-registry dispatches of
+  `gates.checkRunner`: `test/plans/analyze.test.ts` (its probe runs `tsc`)
+  and `test/cli/registry-props.test.ts` (generated inputs exec the sample
+  command `x`). Both joined the traced list; every other launch in the lane
+  was vitest's own workers and the global build.
 - Correction (plan 003 F2): the earlier "57 of 58 driver-specific ACP tests
   spawn" was wrong — 11 never spawned (7 construct no driver, 4 assert zero
   pre-dispatch spawns), so **47 of 58** did. After F2, `acp.test.ts` and

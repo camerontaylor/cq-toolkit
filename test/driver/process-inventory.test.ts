@@ -37,6 +37,12 @@ const TRACED_PROCESS_FILES: Readonly<Record<string, string>> = {
   // The analyze registry's default importers run an ast-grep shim and a
   // node verifier through the real runner.
   'test/ops/analyze/registry.test.ts': 'analyze registry default runner',
+  // Central-registry dispatch of gates.checkRunner: the analyze plan's probe
+  // runs `tsc`; the registry property suite invokes every entry with
+  // generated inputs, so the check runner execs the sample command 'x'
+  // (ENOENT here, a real launch wherever an `x` is on PATH).
+  'test/plans/analyze.test.ts': 'analyze plan probe runs tsc via gates.checkRunner',
+  'test/cli/registry-props.test.ts': 'generated-input dispatch of gates.checkRunner',
 };
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
