@@ -6,7 +6,7 @@
 // workflows actually use. The CLI is spawned for its fail-closed branch
 // (no App ids), which must exit before any gh call, and against a fake `gh`
 // (CQ_GH_BIN) serving a clean live state — never the network.
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -522,7 +522,7 @@ describe('github-settings-drift CLI', () => {
     });
   }
 
-  it('fails closed without App ids and reads no API', { timeout: 60_000 }, () => {
+  it('fails closed without App ids and reads no API', { timeout: 180_000 }, () => {
     for (const args of [
       ['--repository=a/b'],
       ['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id='],
@@ -539,7 +539,7 @@ describe('github-settings-drift CLI', () => {
 
   it(
     'refuses a malformed repository or App id as a usage error (exit 2)',
-    { timeout: 60_000 },
+    { timeout: 180_000 },
     () => {
       for (const args of [
         ['--repository=a'],
@@ -556,7 +556,7 @@ describe('github-settings-drift CLI', () => {
     },
   );
 
-  it('treats a gh failure as an error, never as absent (exit 2)', { timeout: 60_000 }, () => {
+  it('treats a gh failure as an error, never as absent (exit 2)', { timeout: 180_000 }, () => {
     const res = runCli(['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id=2']);
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/github-settings-drift: error: gh api repos\/a\/b\/rulesets/);
@@ -604,62 +604,100 @@ describe('github-settings-drift CLI: the Actions event policy read', () => {
     return out;
   }
 
-  const FAKE_GH = `#!/usr/bin/env node
-const fs = require('node:fs');
-const path = process.argv[process.argv.length - 1];
-const status = JSON.parse(process.env.FAKE_GH_STATUS || '{}')[path];
-if (status !== undefined) {
-  process.stderr.write('gh: fake refusal (HTTP ' + status + ')\\n');
-  process.exit(1);
-}
-if (/\\/branches\\/[^/]+\\/protection$/.test(path)) {
-  process.stdout.write('{"message":"Branch not protected"}');
-  process.stderr.write('gh: Branch not protected (HTTP 404)\\n');
-  process.exit(1);
-}
-const data = JSON.parse(fs.readFileSync(process.env.FAKE_GH_DATA, 'utf8'));
-if (!(path in data)) {
-  process.stderr.write('gh: Not Found (HTTP 404)\\n');
-  process.exit(1);
-}
-process.stdout.write(JSON.stringify(data[path]));
+  // The fake is a POSIX sh script over pre-written response files: the CLI
+  // spawns it once per API read, and a shell starts far faster than node
+  // (this suite's runtime is dominated by those spawns). Its behaviour is
+  // the REST API's: `status.txt` lines (`<code> <path>`) refuse that path
+  // with `(HTTP <code>)`; a branch-protection read is the 404 of an
+  // unprotected branch; `index.tsv` lines (`<file>\t<path>`) serve a
+  // response; any other path is a 404. Only shell builtins run per call
+  // except the final `cat`.
+  const FAKE_GH = `#!/bin/sh
+for path; do :; done
+dir=\${FAKE_GH_DIR:?}
+while IFS=' ' read -r code p; do
+  if [ "$p" = "$path" ]; then
+    printf 'gh: fake refusal (HTTP %s)\\n' "$code" >&2
+    exit 1
+  fi
+done < "$dir/status.txt"
+case "$path" in
+  */branches/*/protection)
+    printf '%s' '{"message":"Branch not protected"}'
+    printf 'gh: Branch not protected (HTTP 404)\\n' >&2
+    exit 1;;
+esac
+tab=$(printf '\\t')
+while IFS="$tab" read -r file p; do
+  if [ "$p" = "$path" ]; then exec cat "$dir/$file"; fi
+done < "$dir/index.tsv"
+printf 'gh: Not Found (HTTP 404)\\n' >&2
+exit 1
 `;
 
-  function runFake(extra: string[], status: Record<string, number>) {
+  /** Write the fake gh and its responses into a fresh dir; the CLI's argv and env. */
+  function fakeSetup(extra: string[], status: Record<string, number>) {
     const dir = mkdtempSync(join(tmpdir(), 'settings-drift-gh-'));
+    const bin = join(dir, 'gh');
+    writeFileSync(bin, FAKE_GH);
+    chmodSync(bin, 0o755);
+    const index = Object.entries(apiResponses()).map(([path, body], i) => {
+      const file = `r${String(i)}.json`;
+      writeFileSync(join(dir, file), JSON.stringify(body));
+      return `${file}\t${path}\n`;
+    });
+    writeFileSync(join(dir, 'index.tsv'), index.join(''));
+    writeFileSync(
+      join(dir, 'status.txt'),
+      Object.entries(status)
+        .map(([path, code]) => `${String(code)} ${path}\n`)
+        .join(''),
+    );
+    return {
+      dir,
+      args: [
+        SCRIPT,
+        '--repository=o/r',
+        `--verdict-app-id=${VERDICT}`,
+        `--promoter-app-id=${PROMOTER}`,
+        ...extra,
+      ],
+      env: { ...process.env, CQ_GH_BIN: bin, FAKE_GH_DIR: dir },
+    };
+  }
+
+  function runFake(extra: string[], status: Record<string, number>) {
+    const { dir, args, env } = fakeSetup(extra, status);
     try {
-      const bin = join(dir, 'gh.cjs');
-      writeFileSync(bin, FAKE_GH);
-      chmodSync(bin, 0o755);
-      const data = join(dir, 'data.json');
-      writeFileSync(data, JSON.stringify(apiResponses()));
-      return spawnSync(
-        process.execPath,
-        [
-          SCRIPT,
-          '--repository=o/r',
-          `--verdict-app-id=${VERDICT}`,
-          `--promoter-app-id=${PROMOTER}`,
-          ...extra,
-        ],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            CQ_GH_BIN: bin,
-            FAKE_GH_DATA: data,
-            FAKE_GH_STATUS: JSON.stringify(status),
-          },
-        },
-      );
+      return spawnSync(process.execPath, args, { encoding: 'utf8', env });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   }
 
+  interface CliResult {
+    status: number | null;
+    stdout: string;
+    stderr: string;
+  }
+
+  /** runFake, without blocking: independent CLI runs can overlap. */
+  function runFakeAsync(extra: string[], status: Record<string, number>): Promise<CliResult> {
+    const { dir, args, env } = fakeSetup(extra, status);
+    return new Promise<CliResult>((done, fail) => {
+      const child = spawn(process.execPath, args, { env });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.setEncoding('utf8').on('data', (chunk: string) => (stdout += chunk));
+      child.stderr.setEncoding('utf8').on('data', (chunk: string) => (stderr += chunk));
+      child.on('error', fail);
+      child.on('close', (code) => done({ status: code, stdout, stderr }));
+    }).finally(() => rmSync(dir, { recursive: true, force: true }));
+  }
+
   const LIST = `${REPO}/actions/policies?${PAGE}`;
 
-  it('a readable live state equal to the target is clean (exit 0)', { timeout: 60_000 }, () => {
+  it('a readable live state equal to the target is clean (exit 0)', { timeout: 180_000 }, () => {
     const res = runFake([], {});
     expect(res.stderr).toBe('');
     expect(res.stdout).toBe('github-settings-drift: o/r: 0 drift line(s), 0 notice(s)\n');
@@ -668,7 +706,7 @@ process.stdout.write(JSON.stringify(data[path]));
 
   it(
     'a 403 on the list read is UNCHECKED: a notice, no drift from it (exit 0)',
-    { timeout: 60_000 },
+    { timeout: 180_000 },
     () => {
       const res = runFake([], { [LIST]: 403 });
       expect(res.stderr).toBe('');
@@ -683,7 +721,7 @@ process.stdout.write(JSON.stringify(data[path]));
     },
   );
 
-  it('--require-event-policy turns that 403 into an error (exit 2)', { timeout: 60_000 }, () => {
+  it('--require-event-policy turns that 403 into an error (exit 2)', { timeout: 180_000 }, () => {
     const res = runFake(['--require-event-policy'], { [LIST]: 403 });
     expect(res.status).toBe(2);
     expect(res.stdout).toBe('');
@@ -696,15 +734,20 @@ process.stdout.write(JSON.stringify(data[path]));
 
   it(
     'every other failure stays an error (exit 2), never unchecked or absent',
-    { timeout: 60_000 },
-    () => {
-      for (const [path, code] of [
+    { timeout: 180_000 },
+    async () => {
+      // The four cases are independent CLI runs: run them concurrently.
+      const cases = [
         [LIST, 404],
         [LIST, 500],
         [`${REPO}/actions/policies/5486`, 403],
         [`${REPO}/actions/permissions/workflow`, 403],
-      ] as const) {
-        const res = runFake([], { [path]: code });
+      ] as const;
+      const results = await Promise.all(
+        cases.map(([path, code]) => runFakeAsync([], { [path]: code })),
+      );
+      for (const [i, res] of results.entries()) {
+        const [path, code] = cases[i] ?? ['', 0];
         expect(res.status, `${path} ${code}`).toBe(2);
         expect(res.stdout, `${path} ${code}`).not.toContain('notice:');
         expect(res.stderr).toMatch(/github-settings-drift: error: /);

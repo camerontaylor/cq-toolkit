@@ -118,9 +118,13 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     bounded, not its coverage dropped: it sorts the eligible PRs by number and judges a
     rotating window of 25 (about 4 REST reads per PR at 4 sweeps an hour, so roughly 400 of
     the `GITHUB_TOKEN`'s 1000 requests an hour, whatever the queue's size). The window's
-    offset is the sweep ordinal (the workflow's schedule-run count; `github.run_number`
-    counts every run) times 25, modulo the count, wrapping, so every eligible PR is judged
-    within `ceil(count / 25)` sweeps; per-PR events still judge each PR as it changes. The
+    cursor comes from the clock, not from state: `slot = floor(epoch_seconds / 900)` (the
+    sweep's cron fires every 15 minutes) and the offset is `(slot × 25) mod count`, wrapping.
+    A run count would not do: retention deletes old schedule runs, so it stalls or goes
+    backwards, and `github.run_number` counts every run. The slot is monotonic without state,
+    and a late or skipped schedule firing only shifts the window, so every eligible PR is
+    judged within `ceil(count / 25)` consecutive 15-minute slots plus any skipped firings;
+    per-PR events still judge each PR as it changes. The
     `judge` job is serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the
     schedule). The sweep and a per-PR run hold different locks. Every row we post carries its
     snapshot time as both `started_at` and `completed_at`, so posted order is snapshot order
@@ -224,7 +228,8 @@ paths stay in use, as ADR-0004 D-G.4 allows.
   one of them can be GitHub's latest row while older than the reference row. The sweep then
   re-posts even an unchanged verdict, because the latest-completed row is not the reference
   row. This heals itself on the next event on the PR, or at worst on the first sweep whose
-  window holds the PR (within `ceil(count / 25)` sweeps of 15 minutes). It is bounded, not
+  window holds the PR (within `ceil(count / 25)` consecutive 15-minute slots plus any
+  skipped firings). It is bounded, not
   prevented: a row whose `completed_at` is later than the healing snapshot stays GitHub's
   latest until a later snapshot is posted. The gate never reads `cq/acceptance`; its per-PR
   recompute is authoritative for promotion.

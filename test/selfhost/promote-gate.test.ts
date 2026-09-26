@@ -706,7 +706,9 @@ describe('runGate', () => {
     expect(r.verdict).toBe('would-promote');
     expect(r).toMatchObject({ tip: M1, main: MAIN });
     expect(pushed).toBe(false);
+    // Judged twice: before the waits and again just before the (dry-run) push.
     expect(h.acceptanceInputs).toEqual([
+      { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
       { pr: 7, subject: H1, base: 'merge-queue', state: 'merged' },
     ]);
     expect(h.policyInputs).toEqual([
@@ -854,6 +856,80 @@ describe('runGate', () => {
     expect(r.verdict).toBe('refused');
     expect(r.report.at(-1)).toMatch(/acceptance: PR\(s\) #7 lack I2 acceptance evidence/);
     expect(h.policyInputs).toEqual([]);
+  });
+
+  test('acceptance re-judged after the waits: a change during the wait refuses, no push', async () => {
+    // With --push and as a dry run: neither promotes nor says would-promote.
+    for (const push of [true, false]) {
+      let calls = 0;
+      let pushed = false;
+      const h = harness(world(), {
+        acceptance: (input) => {
+          calls += 1;
+          if (calls === 1) return passAcceptance(input);
+          return Promise.resolve({
+            verdict: 'fail',
+            pr: input.pr,
+            subject: input.subject,
+            acceptedBy: [],
+            report: ['fail (objection): outstanding trusted objection'],
+          });
+        },
+      });
+      h.deps.git = fakeGit({
+        pushAtomic: () => {
+          pushed = true;
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      });
+      const r = await runGate(h.deps, cfg({ push, pushToken: push ? 'tok' : null }));
+      expect(r.verdict, `push ${String(push)}`).toBe('refused');
+      expect(calls).toBe(2);
+      expect(pushed).toBe(false);
+      expect(r.report.at(-1)).toBe(
+        'refused: acceptance: PR #7: acceptance changed during the wait',
+      );
+      const text = r.report.join('\n');
+      expect(text).toMatch(/verdict cq\/ratchet: success/);
+      expect(text).toMatch(/acceptance pass 1 PR #7 .*: pass/);
+      expect(text).toMatch(/acceptance pass 2 PR #7 .*: fail/);
+      expect(text).toMatch(/outstanding trusted objection/);
+      expect(text).not.toMatch(/push: /);
+    }
+  });
+
+  test('acceptance passing both times promotes; judged once before the verdict reads, once after', async () => {
+    const order: string[] = [];
+    let pushed = false;
+    const h = harness(world());
+    const gh = h.deps.gh;
+    h.deps.gh = (args) => {
+      if ((args[1] ?? '').includes('/check-runs?')) order.push('verdict-read');
+      return gh(args);
+    };
+    h.deps.acceptance = (input) => {
+      order.push(`acceptance #${String(input.pr)}`);
+      h.acceptanceInputs.push(input);
+      return passAcceptance(input);
+    };
+    h.deps.git = fakeGit({
+      pushAtomic: () => {
+        order.push('push');
+        pushed = true;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 'tok' }));
+    expect(r.verdict).toBe('promoted');
+    expect(pushed).toBe(true);
+    expect(h.acceptanceInputs).toHaveLength(2);
+    const first = order.indexOf('verdict-read');
+    expect(first).toBeGreaterThan(0);
+    expect(order.slice(0, first)).toEqual(['acceptance #7']);
+    expect(order.slice(order.lastIndexOf('verdict-read') + 1)).toEqual(['acceptance #7', 'push']);
+    const text = r.report.join('\n');
+    expect(text).toMatch(/acceptance pass 1 PR #7 .*: pass/);
+    expect(text).toMatch(/acceptance pass 2 PR #7 .*: pass/);
   });
 
   test('policy needs-human refuses (break-glass), with the override still logged', async () => {
@@ -1132,6 +1208,7 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     expect(git(remote, ['rev-parse', 'main'])).toBe(tip);
     expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(tip);
     expect(h.acceptanceInputs).toEqual([
+      { pr: 7, subject: head, base: 'merge-queue', state: 'merged' },
       { pr: 7, subject: head, base: 'merge-queue', state: 'merged' },
     ]);
   });

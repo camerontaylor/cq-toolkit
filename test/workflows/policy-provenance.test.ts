@@ -646,7 +646,7 @@ ${script}`;
   );
 
   it.each(bothCopies('cq-accept.yml'))(
-    '%s: the sweep judges a rotating 25-PR window that reaches every eligible PR',
+    '%s: the sweep judges a rotating 25-PR window, cursor from the 15-minute clock slot, that reaches every eligible PR',
     { timeout: 60_000 },
     (_label, text) => {
       const script = runScript(
@@ -660,10 +660,12 @@ ${script}`;
   [ "$1" = --paginate ] && shift
   case "$1" in
     repos/o/r/pulls\\?*) jq -c "$3" <<<"$PULLS";;
-    'repos/o/r/actions/workflows/cq-accept.yml/runs?event=schedule&per_page=1')
-      jq -c "$3" <<<"{\\"total_count\\": $SWEEPS}";;
     *) return 9;;
   esac
+}
+date() {
+  [ "$*" = '-u +%s' ] || return 9
+  printf '%s\\n' "$NOW"
 }
 ${script}`;
       const pull = (n: number, over: Record<string, unknown> = {}) => ({
@@ -677,7 +679,10 @@ ${script}`;
       const dir = mkdtempSync(join(tmpdir(), 'cq-accept-sweep-'));
       try {
         const out = join(dir, 'out');
-        const sweep = (pulls: unknown[], sweeps: number | string = 0) => {
+        // The clock at a given 15-minute slot, some seconds into it (a late
+        // firing lands anywhere inside its slot).
+        const at = (slot: number, into = 437): string => String(slot * 900 + into);
+        const sweep = (pulls: unknown[], slot: number | string = 0) => {
           writeFileSync(out, '');
           const r = spawnSync('bash', ['-c', shell], {
             encoding: 'utf8',
@@ -689,7 +694,7 @@ ${script}`;
               RUN_ID: '',
               PR_INPUT: '',
               PULLS: JSON.stringify(pulls),
-              SWEEPS: String(sweeps),
+              NOW: typeof slot === 'number' ? at(slot) : slot,
               GITHUB_OUTPUT: out,
             },
           });
@@ -722,19 +727,26 @@ ${script}`;
         expect(windows[0]).toEqual(range(1, 25));
         expect(windows[1]).toEqual([...range(26, 45), ...range(1, 5)]);
         expect(windows[2]).toEqual(range(6, 30));
-        // ceil(45 / 25) = 2 consecutive sweeps reach every eligible PR, from
-        // any starting ordinal; drafts and forks are never judged.
-        for (const start of [0, 1, 7, 1_000_003]) {
+        // The cursor is the slot alone: the second within it does not move
+        // the window, and no run count is read.
+        const onTime = sweep(all, 1);
+        const late = sweep(all, at(1, 899));
+        expect(ids(late)).toEqual(ids(onTime));
+        expect(late.out).toMatch(/slot 1: 45 eligible PRs; judging 25 from index 25/);
+        // ceil(45 / 25) = 2 consecutive slots reach every eligible PR, from
+        // any starting slot (a present-day one included); drafts and forks
+        // are never judged.
+        for (const start of [0, 1, 7, 1_000_003, Math.floor(1_790_000_000 / 900)]) {
           const seen = new Set([
             ...(ids(sweep(all, start)) ?? []),
             ...(ids(sweep(all, start + 1)) ?? []),
           ]);
           expect(
             [...seen].sort((a, b) => a - b),
-            `from sweep ${String(start)}`,
+            `from slot ${String(start)}`,
           ).toEqual(range(1, 45));
         }
-        // At most one window: every eligible PR, sorted, whatever the ordinal.
+        // At most one window: every eligible PR, sorted, whatever the slot.
         for (const n of [0, 3]) {
           const few = sweep([pull(9), pull(100, { draft: true }), pull(2), pull(5)], n);
           expect(few.status, few.out).toBe(0);
@@ -748,10 +760,13 @@ ${script}`;
             ),
           ).toEqual(range(1, 25));
         }
-        // A malformed ordinal refuses.
-        const bad = sweep(all, '"-1"');
-        expect(bad.status, bad.out).toBe(1);
-        expect(bad.out).toMatch(/refusing: schedule run count/);
+        // A malformed clock refuses, and no targets are emitted.
+        for (const clock of ['-1', '', 'soon', '12a', '0900']) {
+          const bad = sweep(all, clock);
+          expect(bad.status, `clock '${clock}': ${bad.out}`).toBe(1);
+          expect(bad.out).toMatch(/refusing: clock/);
+          expect(bad.targets).toBeUndefined();
+        }
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

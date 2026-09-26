@@ -29,8 +29,9 @@
 #     is the run's `head_sha`; a merge-queue push has nothing to judge; the
 #     sweep lists every open same-repo non-draft PR into merge-queue and
 #     judges a rotating window of 25 of them (sorted by number, advancing
-#     one window per sweep, wrapping), so its API cost is fixed and every
-#     eligible PR is reached within ceil(count / 25) sweeps.
+#     one window per 15-minute slot of the clock, wrapping), so its API cost
+#     is fixed and every eligible PR is reached within ceil(count / 25)
+#     consecutive slots (plus any skipped schedule firings).
 #     It also emits judge's lock: `pr-<n>` for a single-PR event or a
 #     dispatch, `sweep` for the schedule.
 #   - `judge` builds the trusted toolkit, runs the acceptance CLI per target
@@ -179,20 +180,23 @@ jobs:
                 jq -s 'sort_by(.pr)')"
               count="$(jq 'length' <<<"$targets")"
               if [ "$count" -gt "$window" ]; then
-                # The window advances by one window per sweep. The sweep's
-                # ordinal is the count of this workflow's schedule runs,
-                # which grows by one per sweep; github.run_number would not
-                # do (it counts every run, each cq-signal completion too).
-                # Consecutive sweeps' windows are consecutive and wrap, so
-                # every eligible PR is judged within ceil(count / 25)
-                # sweeps; per-PR events still judge each PR as it changes.
-                sweep="$(gh api \
-                  "repos/${REPO}/actions/workflows/cq-accept.yml/runs?event=schedule&per_page=1" \
-                  --jq '.total_count')"
-                [[ "$sweep" =~ ^[0-9]+$ ]] || {
-                  echo "refusing: schedule run count '$sweep'"; exit 1; }
-                offset=$(( (sweep % count) * window % count ))
-                echo "sweep ${sweep}: ${count} eligible PRs; judging ${window} from index ${offset}"
+                # The window's cursor is derived from time: the 15-minute
+                # slot `floor(epoch_seconds / 900)` (the sweep's cron fires
+                # every 15 minutes), offset = (slot x 25) mod count. It is
+                # monotonic without state (a run count is not: retention
+                # deletes old runs, so it stalls or goes backwards; and
+                # github.run_number counts every run, each cq-signal
+                # completion too). A late or skipped schedule firing only
+                # shifts the window, so every eligible PR is still reached
+                # within ceil(count / 25) consecutive 15-minute slots plus
+                # any skipped firings; per-PR events still judge each PR as
+                # it changes.
+                now="$(date -u +%s)"
+                [[ "$now" =~ ^(0|[1-9][0-9]*)$ ]] || {
+                  echo "refusing: clock '$now'"; exit 1; }
+                slot=$(( now / 900 ))
+                offset=$(( (slot % count) * window % count ))
+                echo "slot ${slot}: ${count} eligible PRs; judging ${window} from index ${offset}"
                 targets="$(jq -c --argjson o "$offset" --argjson w "$window" \
                   '. as $all | [range($o; $o + $w) | $all[. % ($all | length)]]' \
                   <<<"$targets")"
@@ -436,7 +440,7 @@ jobs:
             # a legitimate newer row as future-dated), for the rows' future
             # bound.
             now="$(date -u +%s)"
-            [[ "$now" =~ ^[0-9]+$ ]] || {
+            [[ "$now" =~ ^(0|[1-9][0-9]*)$ ]] || {
               echo "refusing: clock '$now'"; exit 1; }
             ceiling="$(jq -rn --argjson s "$now" '$s + 120 | todate')"
             # The reference row: the cq/acceptance run on the head from the

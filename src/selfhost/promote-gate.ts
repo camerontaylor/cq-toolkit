@@ -58,9 +58,11 @@
 //      dispatching cq-verify once when none is bound to main.
 //   9. the block-only head-defined runs (checkVerifiedRun, D-F.2) green: the
 //      newest `merge-queue` push run of each on the tip.
-//  10. promote: `push --atomic` of tip onto main and merge-queue, leased on
-//      the (main, tip) read at step 1 — one `--force-with-lease=<ref>:<oid>`
-//      per ref, never a plain force. A queue or main that moved (advanced OR
+//  10. promote: step 5 re-run first (a dismissal, new objection or newly
+//      unresolved thread during the wait moves no ref, so the leases would
+//      not catch it; any change refuses), then `push --atomic` of tip onto
+//      main and merge-queue, leased on the (main, tip) read at step 1 — one
+//      `--force-with-lease=<ref>:<oid>` per ref, never a plain force. A queue or main that moved (advanced OR
 //      rewound) since step 1 fails its lease, and --atomic refuses both.
 import { pathToFileURL } from 'node:url';
 import type { OpResult } from '../kernel/types.js';
@@ -746,21 +748,9 @@ async function gateBody(
   report.push(`merges: ${String(closure.admitted.length)} first-parent merge(s) clean`);
 
   // 5. I2 evidence (not settle — see the header) per admitted PR, at its
-  //    merged head.
-  const rejected: number[] = [];
-  for (const a of closure.admitted) {
-    const result = await deps.acceptance({
-      pr: a.pr,
-      subject: a.head,
-      base: QUEUE_BRANCH,
-      state: 'merged',
-    });
-    report.push(
-      `acceptance PR #${String(a.pr)} (I2 evidence; settle not judged): ${result.verdict}`,
-    );
-    for (const line of result.report) report.push(`  ${line}`);
-    if (result.verdict !== 'pass') rejected.push(a.pr);
-  }
+  //    merged head. Re-judged in step 10a after the waits (a dismissal, new
+  //    objection or reopened thread moves no ref, so the leases cannot see it).
+  const rejected = await judgeAdmitted(deps, closure.admitted, report, 'pass 1');
   if (rejected.length > 0) {
     refuse(
       `acceptance: PR(s) ${rejected.map((n) => `#${String(n)}`).join(', ')} lack I2 acceptance evidence`,
@@ -802,6 +792,15 @@ async function gateBody(
   // 8–9. Verdicts and verified runs, waited for within one deadline.
   await awaitVerdicts(deps, cfg, tip, main, report, refuse);
 
+  // 10a. I2 evidence again, now that the waits are over: the wait can take up
+  //      to timeoutMin, and a change in acceptance moves no ref.
+  const changed = await judgeAdmitted(deps, closure.admitted, report, 'pass 2');
+  if (changed.length > 0) {
+    refuse(
+      `acceptance: ${changed.map((n) => `PR #${String(n)}`).join(', ')}: acceptance changed during the wait`,
+    );
+  }
+
   // 10. Promote.
   if (!cfg.push) {
     report.push('push: dry run (no --push)');
@@ -827,6 +826,33 @@ async function gateBody(
   }
   report.push(`push: main and ${QUEUE_BRANCH} at ${tip}`);
   return { verdict: 'promoted' };
+}
+
+/**
+ * Steps 5 and 10a: judge I2 evidence for every admitted PR at its merged head,
+ * reporting each outcome under `pass`; returns the PRs that did not pass.
+ */
+async function judgeAdmitted(
+  deps: GateDeps,
+  admitted: readonly AdmittedPr[],
+  report: string[],
+  pass: string,
+): Promise<number[]> {
+  const rejected: number[] = [];
+  for (const a of admitted) {
+    const result = await deps.acceptance({
+      pr: a.pr,
+      subject: a.head,
+      base: QUEUE_BRANCH,
+      state: 'merged',
+    });
+    report.push(
+      `acceptance ${pass} PR #${String(a.pr)} (I2 evidence; settle not judged): ${result.verdict}`,
+    );
+    for (const line of result.report) report.push(`  ${line}`);
+    if (result.verdict !== 'pass') rejected.push(a.pr);
+  }
+  return rejected;
 }
 
 /** Step 7: evaluate and log each admitted PR's cq-override record. Never throws. */
