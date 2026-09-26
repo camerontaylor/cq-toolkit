@@ -7,9 +7,10 @@
 // the committed workflow, and every table/coverage error in
 // policy/templates/instances.json. --write re-instantiates: it writes each
 // instance's rendered text to .github/workflows/ — but writes NOTHING while
-// any table or render error stands other than "listed but does not exist"
-// for a workflow (the new instance --write is there to create). The
-// mechanics live in scripts/lib/render-templates.mjs.
+// any table or render error stands other than a missing workflow listed
+// only in "instances" with a valid render (the new instance --write is there
+// to create; a missing "nonTemplated" workflow still blocks). The mechanics
+// live in scripts/lib/render-templates.mjs.
 
 import { writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -32,12 +33,14 @@ if (process.argv.length !== 3 || (mode !== '--check' && mode !== '--write')) {
 const { errors, results } = collectRenders(ROOT);
 const problems = [...errors];
 if (mode === '--write') {
-  const blockers = writeBlockers(errors);
+  const blockers = writeBlockers(errors, results);
   if (blockers.length > 0) {
     for (const problem of blockers) console.error(`render-templates: ${problem}`);
     console.error('render-templates: --write refused (nothing written): fix the table first');
     process.exit(1);
   }
+  // Only creatable missing instances remain, and the loop below creates them.
+  problems.length = 0;
 }
 for (const { workflow, template, expected, actual } of results) {
   if (expected === null) continue;

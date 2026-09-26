@@ -114,7 +114,8 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - a trusted objection is outstanding;
     - there is no trusted acceptance bound to the head.
 
-    These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The `judge` job is
+    These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The sweep judges every
+    eligible PR (above 200 it refuses loudly; none is dropped). The `judge` job is
     serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the schedule). The
     sweep and a per-PR run hold different locks. Every row we post carries its snapshot time as
     `started_at`, so before posting, each run selects the head's same-app `cq/acceptance` row
@@ -132,7 +133,9 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     only, `OWNER`/`MEMBER`/`COLLABORATOR`. The structural automation identities are always
     excluded (`trustPolicyFromConfig`). The gate uses the same resolver.
 12. **The gate's closure and recompute (D-K.3/4).** The gate resolves `tip` and `main` itself.
-    Every commit in `main..tip` must be one of:
+    It refuses unless the resolved `main` equals its trust ref (`github.sha`): a `decide` run
+    queued behind an earlier promotion would otherwise judge the new `main` with the old
+    code and definitions; the next wake or sweep retries. Every commit in `main..tip` must be one of:
     - a first-parent merge commit on `merge-queue` of a merged PR into `merge-queue`, where the
       PR's recorded merge commit is that commit and its second parent is the PR head;
     - a commit reachable from such a PR's head.
@@ -172,8 +175,10 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     result byte for byte with `.github/workflows/`. Every workflow must be either instantiated
     or listed as non-templated with a reason, and every template must be either instantiated or
     listed as adopter-only. `scripts/render-templates.mjs --write` re-instantiates the
-    workflows. It writes nothing while any table error stands other than a listed workflow
-    that does not exist yet, and table names must be plain file names (no `..`).
+    workflows. It writes nothing while any table error stands other than a workflow listed
+    only in `instances`, with a valid render, that does not exist yet (the file it creates);
+    a missing `nonTemplated` workflow still blocks. Table names must be plain file names
+    (no `..`).
 
 ## Residuals (recorded, not fixed here)
 
@@ -182,7 +187,10 @@ paths stay in use, as ADR-0004 D-G.4 allows.
   occur in a solo-owner repository (the owner authors every PR). Its evaluation in
   `gates.policyDiff` and the gate's per-PR authorization (the `M^1..M^2` range for a merged PR)
   land with C3.
-- **Interim verdict forgery (T-13).** Decision 5.
+- **Interim verdict forgery (T-13).** Decision 5. Interim `cq/acceptance` rows are
+  forgeable the same way, but can no longer be made sticky: cq-accept's reference row
+  ignores a row dated past its own clock plus 120 s, or whose `external_id` is not exactly
+  `<40-hex>:<head>`, so a far-future row cannot suppress later posts.
 - **Drift check arming.** It needs the verdict App (with read-only Administration,
   Environments, Secrets and Actions access) or an interim read-only fine-grained
   `CQ_SETTINGS_TOKEN` in `cq-verdict`. Without either, it fails closed on schedule.

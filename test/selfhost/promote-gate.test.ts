@@ -51,7 +51,8 @@ const M1 = sha('c');
 const H2 = sha('d');
 const M2 = sha('e');
 const X = sha('f');
-const TRUST = sha('9');
+// The trust checkout is main's head: the gate refuses a trust ref that trails main.
+const TRUST = MAIN;
 const REPO_ID = 42;
 
 const pr = (over: Partial<MergedPr> = {}): MergedPr => ({
@@ -746,9 +747,22 @@ describe('runGate', () => {
           rev === 'refs/remotes/origin/main' ? M1 : rev.startsWith('refs/') ? MAIN : rev,
         ),
     });
-    const r = await runGate(behind.deps, cfg());
+    const r = await runGate(behind.deps, cfg({ trustRef: M1 }));
     expect(r.verdict).toBe('noop');
     expect(behind.policyInputs).toEqual([]);
+  });
+
+  test('a trust ref that trails main refuses before any other check', async () => {
+    const h = harness(world());
+    const r = await runGate(h.deps, cfg({ trustRef: X }));
+    expect(r.verdict).toBe('refused');
+    expect(r).toMatchObject({ tip: M1, main: MAIN });
+    expect(r.report.at(-1)).toBe(
+      `refused: trust ref ${X} trails main ${MAIN}: this run's code and definitions are not main's; the next wake or sweep retries`,
+    );
+    expect(h.acceptanceInputs).toEqual([]);
+    expect(h.policyInputs).toEqual([]);
+    expect(dispatches(h.calls)).toEqual([]);
   });
 
   test('diverged refuses', async () => {
@@ -1078,7 +1092,7 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     h.deps.git = realGateGit;
     const r = await runGate(
       h.deps,
-      cfg({ repo: trust, push: true, pushToken: 'tok', remoteUrl: remote }),
+      cfg({ repo: trust, trustRef: main, push: true, pushToken: 'tok', remoteUrl: remote }),
     );
     expect(r.report.at(-1)).toBe(`push: main and merge-queue at ${tip}`);
     expect(r.verdict).toBe('promoted');
@@ -1104,7 +1118,7 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     };
     const r = await runGate(
       h.deps,
-      cfg({ repo: trust, push: true, pushToken: 'tok', remoteUrl: remote }),
+      cfg({ repo: trust, trustRef: main, push: true, pushToken: 'tok', remoteUrl: remote }),
     );
     expect(r.verdict).toBe('refused');
     expect(r.report.at(-1)).toMatch(/atomic leased push was rejected/);

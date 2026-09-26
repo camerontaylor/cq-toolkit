@@ -5,7 +5,6 @@ export const WORKFLOWS_DIR: string;
 export const TABLE_PATH: string;
 export const WORKFLOW_NAME: RegExp;
 export const TEMPLATE_NAME: RegExp;
-export function writeBlockers(errors: readonly string[]): string[];
 export function provenanceHeader(template: string): string;
 export function templateTokens(text: string): string[];
 export function renderTemplate(
@@ -25,5 +24,9 @@ export interface RenderResult {
   expected: string | null;
   actual: string | null;
 }
+export function writeBlockers(
+  errors: readonly string[],
+  results: readonly RenderResult[],
+): string[];
 export function collectRenders(root: string): { errors: string[]; results: RenderResult[] };
 export function firstDifference(expected: string, actual: string): string | null;

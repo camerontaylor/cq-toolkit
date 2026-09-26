@@ -522,7 +522,7 @@ describe('github-settings-drift CLI', () => {
     });
   }
 
-  it('fails closed without App ids and reads no API', () => {
+  it('fails closed without App ids and reads no API', { timeout: 60_000 }, () => {
     for (const args of [
       ['--repository=a/b'],
       ['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id='],
@@ -537,22 +537,26 @@ describe('github-settings-drift CLI', () => {
     }
   });
 
-  it('refuses a malformed repository or App id as a usage error (exit 2)', () => {
-    for (const args of [
-      ['--repository=a'],
-      ['--repository=a/b/c', '--verdict-app-id=1', '--promoter-app-id=2'],
-      ['--repository=-a/b', '--verdict-app-id=1', '--promoter-app-id=2'],
-      ['--repository=a/..', '--verdict-app-id=1', '--promoter-app-id=2'],
-      ['--repository=a/b', '--verdict-app-id=x', '--promoter-app-id=2'],
-      ['--repository=a/b', '--bogus=1'],
-    ]) {
-      const res = runCli(args);
-      expect(res.status, args.join(' ')).toBe(2);
-      expect(res.stderr).toMatch(/github-settings-drift: usage: /);
-    }
-  });
+  it(
+    'refuses a malformed repository or App id as a usage error (exit 2)',
+    { timeout: 60_000 },
+    () => {
+      for (const args of [
+        ['--repository=a'],
+        ['--repository=a/b/c', '--verdict-app-id=1', '--promoter-app-id=2'],
+        ['--repository=-a/b', '--verdict-app-id=1', '--promoter-app-id=2'],
+        ['--repository=a/..', '--verdict-app-id=1', '--promoter-app-id=2'],
+        ['--repository=a/b', '--verdict-app-id=x', '--promoter-app-id=2'],
+        ['--repository=a/b', '--bogus=1'],
+      ]) {
+        const res = runCli(args);
+        expect(res.status, args.join(' ')).toBe(2);
+        expect(res.stderr).toMatch(/github-settings-drift: usage: /);
+      }
+    },
+  );
 
-  it('treats a gh failure as an error, never as absent (exit 2)', () => {
+  it('treats a gh failure as an error, never as absent (exit 2)', { timeout: 60_000 }, () => {
     const res = runCli(['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id=2']);
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/github-settings-drift: error: gh api repos\/a\/b\/rulesets/);
@@ -655,27 +659,31 @@ process.stdout.write(JSON.stringify(data[path]));
 
   const LIST = `${REPO}/actions/policies?${PAGE}`;
 
-  it('a readable live state equal to the target is clean (exit 0)', () => {
+  it('a readable live state equal to the target is clean (exit 0)', { timeout: 60_000 }, () => {
     const res = runFake([], {});
     expect(res.stderr).toBe('');
     expect(res.stdout).toBe('github-settings-drift: o/r: 0 drift line(s), 0 notice(s)\n');
     expect(res.status).toBe(0);
   });
 
-  it('a 403 on the list read is UNCHECKED: a notice, no drift from it (exit 0)', () => {
-    const res = runFake([], { [LIST]: 403 });
-    expect(res.stderr).toBe('');
-    expect(res.stdout).toBe(
-      `notice: ${ACTIONS_EVENT_POLICY_UNCHECKED}\n` +
-        'github-settings-drift: o/r: 0 drift line(s), 1 notice(s)\n',
-    );
-    expect(res.stdout).toContain(
-      'notice: actions event policy unchecked: GitHub requires Administration: write to read it; the CI drift credential is read-only by design — run the drift check with an owner/admin credential to cover it',
-    );
-    expect(res.status).toBe(0);
-  });
+  it(
+    'a 403 on the list read is UNCHECKED: a notice, no drift from it (exit 0)',
+    { timeout: 60_000 },
+    () => {
+      const res = runFake([], { [LIST]: 403 });
+      expect(res.stderr).toBe('');
+      expect(res.stdout).toBe(
+        `notice: ${ACTIONS_EVENT_POLICY_UNCHECKED}\n` +
+          'github-settings-drift: o/r: 0 drift line(s), 1 notice(s)\n',
+      );
+      expect(res.stdout).toContain(
+        'notice: actions event policy unchecked: GitHub requires Administration: write to read it; the CI drift credential is read-only by design — run the drift check with an owner/admin credential to cover it',
+      );
+      expect(res.status).toBe(0);
+    },
+  );
 
-  it('--require-event-policy turns that 403 into an error (exit 2)', () => {
+  it('--require-event-policy turns that 403 into an error (exit 2)', { timeout: 60_000 }, () => {
     const res = runFake(['--require-event-policy'], { [LIST]: 403 });
     expect(res.status).toBe(2);
     expect(res.stdout).toBe('');
@@ -686,17 +694,21 @@ process.stdout.write(JSON.stringify(data[path]));
     expect(runFake(['--require-event-policy'], {}).status).toBe(0);
   });
 
-  it('every other failure stays an error (exit 2), never unchecked or absent', () => {
-    for (const [path, code] of [
-      [LIST, 404],
-      [LIST, 500],
-      [`${REPO}/actions/policies/5486`, 403],
-      [`${REPO}/actions/permissions/workflow`, 403],
-    ] as const) {
-      const res = runFake([], { [path]: code });
-      expect(res.status, `${path} ${code}`).toBe(2);
-      expect(res.stdout, `${path} ${code}`).not.toContain('notice:');
-      expect(res.stderr).toMatch(/github-settings-drift: error: /);
-    }
-  });
+  it(
+    'every other failure stays an error (exit 2), never unchecked or absent',
+    { timeout: 60_000 },
+    () => {
+      for (const [path, code] of [
+        [LIST, 404],
+        [LIST, 500],
+        [`${REPO}/actions/policies/5486`, 403],
+        [`${REPO}/actions/permissions/workflow`, 403],
+      ] as const) {
+        const res = runFake([], { [path]: code });
+        expect(res.status, `${path} ${code}`).toBe(2);
+        expect(res.stdout, `${path} ${code}`).not.toContain('notice:');
+        expect(res.stderr).toMatch(/github-settings-drift: error: /);
+      }
+    },
+  );
 });

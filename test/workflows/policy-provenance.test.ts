@@ -644,6 +644,79 @@ ${script}`;
       }
     },
   );
+
+  it.each(bothCopies('cq-accept.yml'))(
+    '%s: the sweep judges every eligible PR (no fixed slice) and refuses loudly above 200',
+    { timeout: 60_000 },
+    (_label, text) => {
+      const script = runScript(
+        jobBlocks(code(text)).get('resolve') ?? '',
+        'Verify the trigger and resolve the targets',
+      );
+      const SHA = '0123456789abcdef0123456789abcdef01234567';
+      const shell = `gh() {
+  [ "$1" = api ] || return 9
+  shift
+  [ "$1" = --paginate ] && shift
+  case "$1" in
+    repos/o/r/pulls\\?*) ;;
+    *) return 9;;
+  esac
+  jq -c "$3" <<<"$PULLS"
+}
+${script}`;
+      const pull = (n: number, over: Record<string, unknown> = {}) => ({
+        number: n,
+        state: 'open',
+        draft: false,
+        head: { sha: SHA, repo: { id: 42 } },
+        base: { ref: 'merge-queue' },
+        ...over,
+      });
+      const dir = mkdtempSync(join(tmpdir(), 'cq-accept-sweep-'));
+      try {
+        const out = join(dir, 'out');
+        const sweep = (pulls: unknown[]) => {
+          writeFileSync(out, '');
+          const r = spawnSync('bash', ['-c', shell], {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              EVENT: 'schedule',
+              REPO: 'o/r',
+              REPO_ID: '42',
+              RUN_ID: '',
+              PR_INPUT: '',
+              PULLS: JSON.stringify(pulls),
+              GITHUB_OUTPUT: out,
+            },
+          });
+          const targets = /^targets=(.*)$/m.exec(readFileSync(out, 'utf8'))?.[1];
+          return {
+            status: r.status,
+            out: r.stdout + r.stderr,
+            targets: targets === undefined ? undefined : (JSON.parse(targets) as unknown[]),
+          };
+        };
+        // 45 eligible PRs (past the old 30 slice) plus ineligible ones.
+        const eligible = Array.from({ length: 45 }, (_, i) => pull(i + 1));
+        const r = sweep([
+          ...eligible,
+          pull(100, { draft: true }),
+          pull(101, { head: { sha: SHA, repo: { id: 7 } } }),
+        ]);
+        expect(r.status, r.out).toBe(0);
+        expect(r.targets).toEqual(eligible.map((p) => ({ pr: p.number, subject: SHA })));
+        const big = sweep(Array.from({ length: 201 }, (_, i) => pull(i + 1)));
+        expect(big.status, big.out).toBe(1);
+        expect(big.out).toMatch(/refusing: 201 eligible PRs into merge-queue exceed/);
+        expect(big.targets).toBeUndefined();
+        expect(sweep(Array.from({ length: 200 }, (_, i) => pull(i + 1))).targets).toHaveLength(200);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 });
 
 // W1.10 fresh-review fix — the post step's stale-verdict guard and the
@@ -660,6 +733,10 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
   const OLDER = '2026-09-27T09:59:00Z';
   const NEWER = '2026-09-27T10:00:05Z';
   const APP = '999';
+  const TRUST_SHA = '89abcdef0123456789abcdef0123456789abcdef';
+  // This run's clock (the step's `date -u +%s`, stubbed): ten minutes
+  // after JUDGED, so every fixture row is in the past.
+  const NOW_EPOCH = String(Date.parse('2026-09-27T10:10:00Z') / 1000);
   const POST = `api -X POST repos/o/r/check-runs --input`;
   type Row = {
     id: number;
@@ -675,10 +752,13 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
         ? { id: 15368, slug: 'github-actions' }
         : { id: Number(APP), slug: 'cq-verdict' },
     conclusion: r.conclusion ?? 'success',
-    external_id: r.ext ?? `trust:${SHA}`,
+    external_id: r.ext ?? `${TRUST_SHA}:${SHA}`,
     started_at: r.started,
   });
-  const STUB = `gh() {
+  const STUB = `date() {
+  if [ "$*" = '-u +%s' ]; then echo "$NOW_EPOCH"; else command date "$@"; fi
+}
+gh() {
   printf '%s\\n' "$*" >> "$ARGV_LOG"
   [ "$1" = api ] || return 9
   shift
@@ -778,7 +858,7 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
               name: 'cq/acceptance',
               head_sha: SHA,
               conclusion: 'success',
-              external_id: `trust:${SHA}`,
+              external_id: `${TRUST_SHA}:${SHA}`,
               started_at: opts.payloadStarted ?? judged,
               output: { title: 'pass', summary: 'ok' },
             }),
@@ -788,6 +868,7 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
             env: {
               PATH: process.env['PATH'] ?? '',
               SHA,
+              NOW_EPOCH,
               ARGV_LOG: argv,
               POSTED_LOG: postedLog,
               RUNNER_TEMP: dir,
@@ -935,7 +1016,7 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
         );
         expectRun(
           {
-            rows: [{ id: 3, app: 'actions', started: OLDER, ext: `other:${SHA}` }],
+            rows: [{ id: 3, app: 'actions', started: OLDER, ext: `${'0'.repeat(40)}:${SHA}` }],
             event: 'schedule',
           },
           true,
@@ -946,6 +1027,46 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
           true,
           'sweep, unchanged row from the other app only',
         );
+
+        // Forged interim rows cannot become sticky (r2 #4): a row dated
+        // past this run's clock + 120 s skew is ignored, and so is a row
+        // whose external_id is not exactly `<40-hex>:<this head>`.
+        for (const started of ['2099-01-01T00:00:00Z', '2026-09-27T10:12:01Z']) {
+          expect(
+            expectRun(
+              { rows: [{ id: 9, app: 'actions', started, conclusion: 'failure' }] },
+              true,
+              `future-dated row ${started} ignored`,
+            ),
+          ).not.toMatch(/not posted/);
+        }
+        // Within the skew it still counts.
+        expectRun(
+          { rows: [{ id: 9, app: 'actions', started: '2026-09-27T10:12:00Z' }] },
+          false,
+          'row within the skew',
+        );
+        // The sweep never dedupes against a future-dated row either.
+        expectRun(
+          { rows: [{ id: 9, app: 'actions', started: '2099-01-01T00:00:00Z' }], event: 'schedule' },
+          true,
+          'sweep ignores a future-dated row',
+        );
+        for (const ext of [
+          `trust:${SHA}`,
+          `${TRUST_SHA}:${'1'.repeat(40)}`,
+          `${TRUST_SHA}:${SHA}x`,
+          `${TRUST_SHA.toUpperCase()}:${SHA}`,
+          '',
+        ]) {
+          expect(
+            expectRun(
+              { rows: [{ id: 9, app: 'actions', started: NEWER, ext }] },
+              true,
+              `malformed external_id '${ext}' ignored`,
+            ),
+          ).not.toMatch(/not posted/);
+        }
 
         // A payload whose started_at is not judged-at refuses.
         {

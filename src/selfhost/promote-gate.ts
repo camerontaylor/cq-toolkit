@@ -8,7 +8,10 @@
 // module, built from the trust checkout (`github.sha` on the default branch),
 // and the trust ref's lists (protected paths, ratchet definitions). The gate
 // RESOLVES ITS OWN SUBJECT — `tip` and `main` come from the refs API, never
-// from an event payload, a PR artifact or a workflow input — and it runs NO
+// from an event payload, a PR artifact or a workflow input — and refuses
+// unless that `main` IS the trust ref (a run queued behind an earlier
+// promotion would otherwise judge the new main with the old definitions),
+// and it runs NO
 // HEAD CODE: the queue tip is only git objects (read with the hardened
 // no-shell helpers in ../ops/ratchet/git.ts, #221) and API data. Every read
 // uses the job's own read-only GITHUB_TOKEN (gh reads GH_TOKEN). The
@@ -22,7 +25,9 @@
 // THE CHECKS (cheap and pure first, the waits last; every refusal is final
 // for this run — the next sweep retries — and every check's outcome is
 // reported):
-//   1. subject: tip/main from the API; both objects present locally; the
+//   1. subject: tip/main from the API; main equals the trust ref (a run
+//      queued behind an earlier promotion trails main and refuses: its code
+//      and definitions are not main's); both objects present locally; the
 //      fetched remote-tracking refs still equal the API values.
 //   2. ancestry: tip == main or tip ⊑ main → noop; main ⋢ tip → diverged.
 //   3. closure over main..tip (checkClosure): every first-parent commit is
@@ -654,6 +659,14 @@ async function gateBody(
   const main = await refSha(MAIN_BRANCH);
   setSubject(tip, main);
   report.push(`subject: tip ${tip} (${QUEUE_BRANCH}), main ${main} (API)`);
+  // A run queued behind another promotion keeps its trust checkout
+  // (`github.sha`) at the OLD main while the API already shows the new one:
+  // its code and definitions are not main's, so it must not judge.
+  if (main !== cfg.trustRef.toLowerCase()) {
+    refuse(
+      `trust ref ${cfg.trustRef} trails main ${main}: this run's code and definitions are not main's; the next wake or sweep retries`,
+    );
+  }
   for (const [sha, what] of [
     [tip, 'tip'],
     [main, 'main'],

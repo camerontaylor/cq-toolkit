@@ -67,12 +67,20 @@ const safeName = (name, pattern) =>
   pattern.test(name) &&
   name.split('/').every((segment) => segment !== '..' && segment !== '.');
 
+const MISSING_INSTANCE = /: workflow (\S+) is listed in "instances" but does not exist$/;
+
 /**
  * The --write blockers among collectRenders' errors: every error except a
- * listed workflow that does not exist yet (the one --write creates).
+ * missing workflow listed ONLY in "instances" and backed by a rendered
+ * instance in `results` (the file --write is about to create). A missing
+ * workflow named by "nonTemplated" (deleted or misspelled) still blocks.
  */
-export function writeBlockers(errors) {
-  return errors.filter((error) => !/: workflow \S+ is listed but does not exist$/.test(error));
+export function writeBlockers(errors, results) {
+  const creatable = new Set(results.filter((r) => r.expected !== null).map((r) => r.workflow));
+  return errors.filter((error) => {
+    const missing = MISSING_INSTANCE.exec(error);
+    return missing === null || !creatable.has(missing[1]);
+  });
 }
 
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -92,7 +100,8 @@ export function validateTable(table, workflows, templates) {
   if (table.schemaVersion !== 1) errors.push('schemaVersion must be 1');
   const workflowSeen = new Map();
   const templateSeen = new Map();
-  const count = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+  // name → the sections listing it, one element per listing.
+  const count = (map, key, section) => map.set(key, [...(map.get(key) ?? []), section]);
   for (const section of ['instances', 'nonTemplated', 'adopterOnly']) {
     const entries = table[section];
     if (!Array.isArray(entries)) {
@@ -133,18 +142,23 @@ export function validateTable(table, workflows, templates) {
           }
         }
       }
-      if (isNonEmptyString(entry.workflow)) count(workflowSeen, entry.workflow);
-      if (isNonEmptyString(entry.template)) count(templateSeen, entry.template);
+      if (isNonEmptyString(entry.workflow)) count(workflowSeen, entry.workflow, section);
+      if (isNonEmptyString(entry.template)) count(templateSeen, entry.template, section);
     });
   }
   const coverage = (kind, seen, onDisk, sections) => {
     for (const name of onDisk) {
-      const n = seen.get(name) ?? 0;
+      const n = seen.get(name)?.length ?? 0;
       if (n === 0) errors.push(`${kind} ${name} is not accounted for (add it to ${sections})`);
       if (n > 1) errors.push(`${kind} ${name} is listed ${n} times (exactly once allowed)`);
     }
-    for (const name of seen.keys()) {
-      if (!onDisk.includes(name)) errors.push(`${kind} ${name} is listed but does not exist`);
+    // A missing name is tagged with the section(s) listing it: --write may
+    // create only a workflow listed once, in "instances" (writeBlockers).
+    for (const [name, listedIn] of seen) {
+      if (!onDisk.includes(name)) {
+        const where = listedIn.map((section) => `"${section}"`).join(', ');
+        errors.push(`${kind} ${name} is listed in ${where} but does not exist`);
+      }
     }
   };
   coverage('workflow', workflowSeen, workflows, '"instances" or "nonTemplated"');

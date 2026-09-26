@@ -8,7 +8,8 @@
 // The table's names are file names (a workflow directly under
 // .github/workflows/, a template at most one directory under
 // policy/templates/, never a `..` segment), and --write writes nothing
-// while any table error but "listed but does not exist" stands.
+// while any table error stands but a missing workflow listed only in
+// "instances" with a valid render (the one --write creates).
 import { spawnSync } from 'node:child_process';
 import {
   copyFileSync,
@@ -100,7 +101,7 @@ describe('template render-diff: coverage', () => {
       'nonTemplated[0]: "reason" must be a non-empty string',
       'workflow a.yml is listed 2 times (exactly once allowed)',
       'workflow c.yml is not accounted for (add it to "instances" or "nonTemplated")',
-      'workflow ghost.yml is listed but does not exist',
+      'workflow ghost.yml is listed in "nonTemplated" but does not exist',
       'template d.yml is not accounted for (add it to "instances" or "adopterOnly")',
     ]);
     expect(
@@ -204,15 +205,30 @@ describe('renderTemplate', () => {
 });
 
 describe('render-templates --write refuses an invalid table', () => {
-  it('writeBlockers passes only a missing workflow through', () => {
+  it('writeBlockers passes only a missing, rendered instance workflow through', () => {
+    const results = [
+      { workflow: 'new.yml', template: 'a.yml', expected: 'x', actual: null },
+      { workflow: 'broken.yml', template: 'b.yml', expected: null, actual: null },
+    ];
     expect(
-      writeBlockers([
-        `${TABLE_PATH}: workflow new.yml is listed but does not exist`,
-        `${TABLE_PATH}: template gone.yml is listed but does not exist`,
-        `${TABLE_PATH}: instances[0]: workflow "../x" is not a file name directly under .github/workflows/`,
-      ]),
+      writeBlockers(
+        [
+          `${TABLE_PATH}: workflow new.yml is listed in "instances" but does not exist`,
+          `${TABLE_PATH}: workflow ghost.yml is listed in "nonTemplated" but does not exist`,
+          `${TABLE_PATH}: workflow dup.yml is listed in "instances", "nonTemplated" but does not exist`,
+          `${TABLE_PATH}: workflow unrendered.yml is listed in "instances" but does not exist`,
+          `${TABLE_PATH}: workflow broken.yml is listed in "instances" but does not exist`,
+          `${TABLE_PATH}: template gone.yml is listed in "adopterOnly" but does not exist`,
+          `${TABLE_PATH}: instances[0]: workflow "../x" is not a file name directly under .github/workflows/`,
+        ],
+        results,
+      ),
     ).toEqual([
-      `${TABLE_PATH}: template gone.yml is listed but does not exist`,
+      `${TABLE_PATH}: workflow ghost.yml is listed in "nonTemplated" but does not exist`,
+      `${TABLE_PATH}: workflow dup.yml is listed in "instances", "nonTemplated" but does not exist`,
+      `${TABLE_PATH}: workflow unrendered.yml is listed in "instances" but does not exist`,
+      `${TABLE_PATH}: workflow broken.yml is listed in "instances" but does not exist`,
+      `${TABLE_PATH}: template gone.yml is listed in "adopterOnly" but does not exist`,
       `${TABLE_PATH}: instances[0]: workflow "../x" is not a file name directly under .github/workflows/`,
     ]);
   });
@@ -267,7 +283,8 @@ describe('render-templates --write refuses an invalid table', () => {
     });
     try {
       const r = write(root);
-      expect(r.stderr).toMatch(/workflow a\.yml is listed but does not exist/);
+      expect(r.status, r.stderr).toBe(0);
+      expect(r.stdout).toMatch(/wrote \.github\/workflows\/a\.yml \(from a\.yml\)/);
       expect(existsSync(join(root, WORKFLOWS_DIR, 'a.yml'))).toBe(true);
       expect(readFileSync(join(root, WORKFLOWS_DIR, 'a.yml'), 'utf8')).toBe(
         `# instantiated from ${TEMPLATES_DIR}/a.yml — edit the template, not this file\nname: a\n`,
@@ -276,4 +293,32 @@ describe('render-templates --write refuses an invalid table', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it(
+    'a phantom nonTemplated workflow writes nothing (not even a stale instance) and exits 1',
+    { timeout: 30_000 },
+    () => {
+      const root = scratch({
+        schemaVersion: 1,
+        instances: [{ workflow: 'a.yml', template: 'a.yml', tokens: {} }],
+        nonTemplated: [{ workflow: 'ghost.yml', reason: 'deleted or misspelled' }],
+        adopterOnly: [],
+      });
+      try {
+        // A stale committed instance --write would otherwise rewrite.
+        writeFileSync(join(root, WORKFLOWS_DIR, 'a.yml'), 'stale\n');
+        const r = write(root);
+        expect(r.status).toBe(1);
+        expect(r.stderr).toMatch(
+          /workflow ghost\.yml is listed in "nonTemplated" but does not exist/,
+        );
+        expect(r.stderr).toMatch(/--write refused \(nothing written\)/);
+        expect(r.stdout).not.toMatch(/wrote/);
+        expect(readFileSync(join(root, WORKFLOWS_DIR, 'a.yml'), 'utf8')).toBe('stale\n');
+        expect(existsSync(join(root, WORKFLOWS_DIR, 'ghost.yml'))).toBe(false);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
 });
