@@ -867,9 +867,9 @@ describe('diffWorkflow', () => {
   test('the real cq-verify.yml violation is base-owned for an unrelated edit', () => {
     const text = readFileSync(join(WORKFLOW_DIR, 'cq-verify.yml'), 'utf8');
     expect(diffWorkflow(PATH, text, `${text}# trailing comment\n`)).toEqual([]);
-    expect(
-      kinds(diffWorkflow(PATH, text, text.replace('timeout-minutes: 5', 'timeout-minutes: 6'))),
-    ).not.toContain('lint');
+    const edited = text.replace('timeout-minutes: 5', 'timeout-minutes: 6');
+    expect(edited).not.toBe(text);
+    expect(kinds(diffWorkflow(PATH, text, edited))).not.toContain('lint');
   });
 
   test('adding a lint violation to an existing workflow is linted', () => {
