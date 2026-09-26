@@ -5,8 +5,9 @@
 // documented list equal to the known-entry-point scan, and
 // test/scripts/test-lanes.test.ts proves the lanes are disjoint and cover
 // every test file.
-import { globSync, readFileSync } from 'node:fs';
-import { join, sep } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { globSync } from 'tinyglobby';
 import { configDefaults } from 'vitest/config';
 
 /**
@@ -29,11 +30,18 @@ export function documentedProcessTestFiles(root) {
   return files.sort();
 }
 
-/** Every test file vitest discovers (repo-relative, posix, sorted). */
-export function allTestFiles(root) {
-  return globSync(configDefaults.include, { cwd: root, exclude: TEST_EXCLUDE })
-    .map((file) => file.split(sep).join('/'))
-    .sort();
+/**
+ * Every test file vitest discovers (repo-relative, posix, sorted): vitest's
+ * own globber and options (dot paths included), with any extra exclude
+ * globs appended as `--exclude` appends them.
+ */
+export function allTestFiles(root, extraExclude = []) {
+  return globSync(configDefaults.include, {
+    cwd: root,
+    dot: true,
+    ignore: [...TEST_EXCLUDE, ...extraExclude],
+    expandDirectories: false,
+  }).sort();
 }
 
 /** The two lanes' members: unit = all − inventory, e2e = inventory. */
@@ -46,7 +54,7 @@ export function laneFiles(root) {
 /**
  * The vitest CLI arguments selecting a lane: the unit lane EXCLUDES every
  * inventory file (exact paths, as globs); the e2e lane passes them as
- * filters (vitest matches a filter as a path substring).
+ * filters (vitest matches a filter as a case-insensitive path substring).
  */
 export function laneArgs(lane, root) {
   const inventory = documentedProcessTestFiles(root);

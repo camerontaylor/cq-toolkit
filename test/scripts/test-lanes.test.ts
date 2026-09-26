@@ -29,19 +29,21 @@ describe('test lanes', () => {
   test('the lane CLI args select exactly the lane members under vitest semantics', () => {
     const all = allTestFiles(ROOT);
     const { unit, e2e } = laneFiles(ROOT);
-    // unit: every --exclude names exactly one discovered file, verbatim.
+    // unit: vitest appends each --exclude to its ignore globs, so discovery
+    // under those globs must be exactly the unit lane (an inventory path with
+    // glob metacharacters, e.g. `[1]`, would also exclude a sibling here).
     const unitArgs = laneArgs('unit', ROOT);
     const excluded = unitArgs.filter((_, index) => unitArgs[index - 1] === '--exclude');
     expect(unitArgs.filter((arg) => arg === '--exclude')).toHaveLength(excluded.length);
-    for (const glob of excluded) expect(all.filter((file) => file === glob)).toEqual([glob]);
-    expect(all.filter((file) => !excluded.includes(file))).toEqual(unit);
-    // e2e: vitest matches a filter as a path SUBSTRING — each filter must
-    // select exactly its own file, never a sibling.
+    expect(excluded).toEqual(e2e);
+    expect(allTestFiles(ROOT, excluded)).toEqual(unit);
+    // e2e: vitest matches a filter as a case-insensitive path SUBSTRING —
+    // each filter must select exactly its own file, never a sibling.
     const filters = laneArgs('e2e', ROOT);
-    for (const filter of filters) {
-      expect(all.filter((file) => file.includes(filter))).toEqual([filter]);
-    }
-    expect(all.filter((file) => filters.some((filter) => file.includes(filter)))).toEqual(e2e);
+    const selects = (filter: string) => (file: string) =>
+      file.toLowerCase().includes(filter.toLowerCase());
+    for (const filter of filters) expect(all.filter(selects(filter))).toEqual([filter]);
+    expect(all.filter((file) => filters.some((filter) => selects(filter)(file)))).toEqual(e2e);
     expect(() => laneArgs('everything', ROOT)).toThrow(/unknown test lane 'everything'/);
   });
 
