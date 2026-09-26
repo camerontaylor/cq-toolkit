@@ -1,22 +1,26 @@
 // The subprocess driver instantiation — T1.5 slice 2.
 //
-// Two layers, mirroring test/driver/ai-sdk.test.ts:
+// No child process in this file (plan 003 F2): the OS-level contracts —
+// the signal ladder, the process-group kill, real argv and sidecars, the
+// bounded stdout tail, the real child env — live in
+// subprocess.real.test.ts against the fake agent CLI as a REAL process.
+// Two layers here, mirroring test/driver/ai-sdk.test.ts:
 //   1. THE CONFORMANCE SUITE (test/driver/conformance.ts, verbatim) run
-//      against the real SubprocessDriver spawning a FAKE agent CLI
-//      (test/fixtures/fake-agent-cli.mjs) through the driver's `spawn`
-//      override — no real `claude` binary, no network, no vendor SDK. The
-//      suite's ModelDirective maps onto FAKE_AGENT_* env vars for the
-//      fixture; the fixture's scripted tool_use is EXECUTED FOR REAL
-//      against the invocation workspace (read/run/edit with harness-
-//      matching denial reasons), which is what makes the I6 isolation pair
+//      against the real SubprocessDriver over the fakeManagedSpawn
+//      transport with a conformance script speaking the stream-json
+//      shapes — no real `claude` binary, no network, no vendor SDK. The
+//      script's tool_use is EXECUTED FOR REAL against the invocation
+//      workspace (runFakeTool), which is what makes the I6 isolation pair
 //      observable through a genuine filesystem.
-//   2. DRIVER-SPECIFIC tests: THE REMAP TEST (an unknown model name on the
+//   2. DRIVER-SPECIFIC tests over the fake agent CLI's PERSONA
+//      (test/fixtures/fake-agent-persona.mjs — the same script the real
+//      fixture process runs) driven in-process through the driver's
+//      `spawn` override: THE REMAP TEST (an unknown model name on the
 //      default routing table throws BEFORE any spawn — the spawn-hook
-//      counter stays at zero), the SIGTERM→SIGKILL grace ladder (both rungs
-//      observed in order against a real stubborn child), the graceful
-//      single-rung abort, junk-line tolerance, --resume argv + sidecar
-//      continuation, denial/structured/usage/cost mapping, and the
-//      budget-usage + unknown-model-mode error paths.
+//      counter stays at zero), junk-line tolerance, denial/result-cause/
+//      structured mapping, the budget-usage + unknown-model-mode + signal-
+//      death error paths, workspace reuse, and the served-model/sandbox
+//      markers — plus the process-free argv, env, and validation checks.
 //
 // All runs ride the conformance routing table (a 'conformance' +
 // 'conformance-priced' endpoint extension of the default table) so no test
