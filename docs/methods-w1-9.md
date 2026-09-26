@@ -139,8 +139,14 @@ alongside the acceptance check.
        `declare`, `typeset` and `readonly` forms, `+=` appends, and right-hand sides with nested
        quotes or `$(…)` command substitutions (read to the end of the row, which can only
        over-taint);
-     - `${!x}` indirection counts as reading every tainted variable, and a `declare`, `local`
-       or `typeset -n` nameref aliases the variable it names.
+     - `${!x}` indirection counts as reading every tainted variable. A `declare`, `local` or
+       `typeset -n` nameref aliases the variable it names **only when the flag and the target
+       share a row**. Three nameref edge cases:
+       - a split-row nameref (`declare -n r`, then `r=HEAD_REF` on a later row) is a residual
+         (review R5 N1);
+       - `declare -n r=$(echo HEAD_REF)` escapes;
+       - `export -n` (un-export) is also read as a nameref, a false positive accepted as
+         over-taint.
    - Before those checks run, shell line continuations are joined. For a `>` block or a plain
      multi-line value, including one that starts on the next line, the YAML-folded reading is
      judged as well; a literal `|` block is never folded.
