@@ -52,6 +52,15 @@ const REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   // the C3 attestation that activates override records are definitions.
   '^policy/protected-paths\\.json$': ['policy/protected-paths.json'],
   '^policy/attestations/': ['policy/attestations/c3.json'],
+  // W1.9 H3: what the required checks run is measurement configuration.
+  '(?:^|/)\\.oxlintrc\\.json$': ['.oxlintrc.json'],
+  '(?:^|/)\\.oxfmtrc\\.json$': ['.oxfmtrc.json'],
+  '^knip\\.json$': ['knip.json'],
+  '^lint/': ['lint/plugin.mjs', 'lint/rules/x.mjs'],
+  '^scripts/ratchet-[^/]+\\.mjs$': ['scripts/ratchet-typecheck.mjs', 'scripts/ratchet-lib.mjs'],
+  '^scripts/gen-op-docs\\.mjs$': ['scripts/gen-op-docs.mjs'],
+  '^scripts/copy-prompt-assets\\.mjs$': ['scripts/copy-prompt-assets.mjs'],
+  '^policy/denylist/': ['policy/denylist/patterns.yml'],
 };
 
 describe('worker gate / ratchet definition-set sync (F1, F2)', () => {
@@ -105,6 +114,12 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],
   '^src\\/ops\\/gates\\/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
   '^scripts\\/denylist-scan$': ['scripts/denylist-scan'],
+  '^scripts\\/ratchet-[^/]+\\.mjs$': ['scripts/ratchet-typecheck.mjs'],
+  '^scripts\\/(?:gen-op-docs|copy-prompt-assets)\\.mjs$': [
+    'scripts/gen-op-docs.mjs',
+    'scripts/copy-prompt-assets.mjs',
+  ],
+  '(?:^|\\/)knip\\.jsonc?$': ['knip.json', 'packages/a/knip.jsonc'],
   '^policy(?:\\/|$)': ['policy/DOCTRINE.md', 'policy/templates/ratchet.yml'],
   '^lint(?:\\/|$)': ['lint/plugin.mjs', 'lint/rules/x.mjs'],
   '(?:^|\\/)[^/]*\\.setup\\.[^/]+$': ['vitest.setup.ts'],

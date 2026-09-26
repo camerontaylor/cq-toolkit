@@ -38,21 +38,21 @@ and `policy/protected-paths.json` (`protectedPaths` regex sources plus `required
 
 Findings (each carries a kind, a path and a one-line reason):
 
-| kind                   | rule                                                                                                                                                                                                                                                                                                              |
-| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `protected-path`       | any changed path in the protected set: taxonomy ∪ definition set ∪ tsconfig graph ∪ policy-file list                                                                                                                                                                                                              |
-| `baseline-loosened`    | the monotonic guard (`checkDiffMonotonicity`, one-decimal re-basis) rejects the `baselines/` diff: a loosened or unreplaced baseline                                                                                                                                                                              |
-| `target-removed`       | a ratchet `(target, metric)` present in the range base's manifest is absent from the subject's                                                                                                                                                                                                                    |
-| `definition-changed`   | a definition-set or tsconfig-graph path changed, except canonical baseline value files, which the guard judges                                                                                                                                                                                                    |
-| `entry-removed`        | a `definitionSet`, `protectedPaths` or `requiredChecks` entry was removed, or the subject's list file is unparseable                                                                                                                                                                                              |
-| `required-check`       | a produced required check loses every producer, or a producing job's normalised text, its workflow's context or file parse changed                                                                                                                                                                                |
-| `workflow-new`         | a workflow file absent at the range base                                                                                                                                                                                                                                                                          |
-| `workflow-removed`     | a workflow file deleted, which removes its triggers                                                                                                                                                                                                                                                               |
-| `trigger-changed`      | a workflow's top-level `on:` block differs                                                                                                                                                                                                                                                                        |
-| `privileged-job`       | a job privileged at either end was added or changed: it has a permission other than `read`/`none` (or inherits one), uses a secret other than `GITHUB_TOKEN`, sets `environment:`, or calls a reusable workflow; also a workflow-level context change or a changed local `uses: ./` target under a privileged job |
-| `workflow-unparseable` | a changed workflow is outside the scanner's recognised YAML subset (fails closed)                                                                                                                                                                                                                                 |
-| `unsafe-path`          | a changed path fails `assertRepoRelPath` (#224's `.git` segment and others)                                                                                                                                                                                                                                       |
-| `lint`                 | D-G.3, run in both postures and always a failure: a `pull_request_target` workflow with `environment:` or a non-`GITHUB_TOKEN` secret, a `pull_request_target`/`workflow_run` workflow checking out a head ref, or `persist-credentials: true` in a job with `run:` steps                                         |
+| kind                   | rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `protected-path`       | any changed path in the protected set: taxonomy ∪ definition set ∪ tsconfig graph ∪ policy-file list                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `baseline-loosened`    | the monotonic guard (`checkDiffMonotonicity`, one-decimal re-basis) rejects the `baselines/` diff: a loosened or unreplaced baseline                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `target-removed`       | a ratchet `(target, metric)` present in the range base's manifest is absent from the subject's                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `definition-changed`   | a definition-set or tsconfig-graph path changed, except canonical baseline value files, which the guard judges                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `entry-removed`        | a `definitionSet`, `protectedPaths` or `requiredChecks` entry was removed, or the subject's list file is unparseable                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `required-check`       | a produced required check loses every producer; a producing job's normalised text, its workflow's context or file parse changes; a job the range base lacks newly produces a required check (a phantom that could shadow it); or, when no producer resolves statically at the range base (matrix, dynamic name, reusable call), any changed workflow holds such a job or is unparseable                                                                                                                                                                                                                                                                            |
+| `workflow-new`         | a workflow file absent at the range base                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `workflow-removed`     | a workflow file deleted, which removes its triggers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `trigger-changed`      | a workflow's top-level `on:` block or `name:` differs (a rename changes which `workflow_run` consumers fire)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `privileged-job`       | a job privileged at either end was added or changed: it has a permission other than `read`/`none` (or inherits one), uses a secret other than `GITHUB_TOKEN`, sets `environment:`, or calls a reusable workflow; also a workflow-level context change or a changed local `uses: ./` target under a privileged job                                                                                                                                                                                                                                                                                                                                                  |
+| `workflow-unparseable` | a changed workflow is outside the scanner's recognised YAML subset (fails closed)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `unsafe-path`          | a changed path fails `assertRepoRelPath` (#224's `.git` segment and others)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `lint`                 | D-G.3, in both postures and always a failure, **regression-only**: a finding is keyed by rule, job and signal, and one already present at the range base is base-owned. The rules: a `pull_request_target` workflow with `environment:` or a non-`GITHUB_TOKEN` secret; in a `pull_request_target`/`workflow_run` workflow, a checkout whose `ref:`/`repository:` uses a non-base `${{ }}` expression or a head token, a `run:` moving the worktree to `FETCH_HEAD`, a head expression or a PR ref, or a checkout without `persist-credentials: false` in a job with `run:` steps; and `persist-credentials` other than literal `false` in a job with `run:` steps |
 
 Verdict: `fail` if there is any lint finding. Otherwise the posture decides:
 
@@ -102,8 +102,14 @@ alongside the acceptance check.
 1. **The YAML subset scanner has no parser dependency.** A dependency would change the lockfile
    and add a parser to the privileged path. The scanner recognises block-style workflows and
    fails closed on anything else (tabs, flow-style `jobs`/`on`, anchors, aliases, merge keys,
-   multi-document files, duplicate keys). Fail-closed output is needs-human, so the scanner can
-   only over-flag.
+   multi-document files, duplicate keys). It also rejects every parser differential the Opus
+   improvement pass found. That covers backslash escapes in double-quoted scalars, quoted keys
+   other than `"on"`, and keys outside case-sensitive allow-lists at the top, job and step
+   levels. It also covers line breaks other than `\n`/`\r\n` (lone CR, U+0085, U+2028,
+   U+2029), control characters, and flow mappings other than inline `permissions`. Keys are
+   matched by their parsed name, never by regex over text. Fail-closed output is needs-human.
+   The intent is that the scanner only over-flags; the regression tests pin each differential
+   found so far.
 2. **Canonical baseline value files are judged by the guard, not the definition rule.** ADR-0004
    D-C.4 names only `baselines/ratchets.json`; D-G.1 names `baselines/**` for loosening only.
    W1.7's `^baselines/` definition entry still routes baseline edits to needs-human in
@@ -115,9 +121,45 @@ alongside the acceptance check.
    `uses: ./` targets are traced; `run:` references are not. Under `diff-check`, a script a
    privileged job runs is guarded only if the definition set or the policy list names it, which
    is the ADR's "normal acceptance" model.
-5. **The per-call opt-in uses the object shape**, `{ 'merge.protectedPaths': … }`, as W1.11's
+5. **Lint is regression-only.** ADR-0004 D-G.3 says "always failure". Linting unchanged,
+   base-owned violations would fail every edit to such a file; `cq-verify.yml`'s `fetch` job
+   (W1.7) has two. Findings are keyed by rule, job and signal. So a new violation is still
+   reported inside a job that already has one.
+6. **The head-execution lint is static.** It catches checkouts of non-base expressions and
+   head tokens (directly or through `env:`), and worktree moves to `FETCH_HEAD`, head
+   expressions or PR refs. It does not model arbitrary shell. A `run:` that builds a head ref
+   through indirection the scanner cannot see is a residual. Such a change still lands on a
+   protected path (`.github/**`), and it is a definition change wherever `^\.github/` is in
+   the set, as it is here.
+7. **Inputs to required checks are definitions.** The `static`, `denylist` and `ratchet` jobs
+   read `.oxlintrc.json`, `.oxfmtrc.json`, `knip.json`, `lint/**`, the `scripts/ratchet-*.mjs`,
+   `gen-op-docs` and `copy-prompt-assets` scripts, and `policy/denylist/**`. All of them are now
+   in the definition set and the taxonomy. Otherwise a PR could neuter a required check,
+   for example by switching off Oxlint rules, and pass under `diff-check` (D-G.2: "neutering
+   one isn't removing it").
+8. **Residuals, recorded.**
+   - Local `uses: ./` tracing is one level deep. A chain that already exists can be edited at
+     its second link; creating a new chain edits a traced file.
+   - `cq-policy` concurrency is keyed per signal run, so a stale run can post after a newer one.
+     The verdict is bound to `<trust>:<subject>` in `external_id`, and W1.10's gate selects by
+     trust SHA.
+   - Whether head-defined workflows with `contents: write` can write `cq-state`, and so forge a
+     head epoch, is an RS-3/W1.10 question. It is moot while the record is dormant.
+9. **The per-call opt-in uses the object shape**, `{ 'merge.protectedPaths': … }`, as W1.11's
    `SandboxOptIn` does and §3.1 describes. The CLI `--opt-in` flag is W3.6's.
 
 ## Evidence
 
-(Filled in at the end of the task.)
+- Hermetic op tests (`test/ops/gates/policyDiff.test.ts`) run in both postures. They cover
+  every finding kind; the #224 composition, where a `.GIT` segment and a backslash path become
+  `unsafe-path` and are never read; and the #221/W1.7 no-shell composition. In that test a
+  repo configured with `diff.external`, a textconv driver selected by a head `.gitattributes`,
+  `core.fsmonitor` and `core.pager` runs none of them, and the loosened baseline is still
+  reported. They also cover the override record: dormant without the attestation, honoured
+  with it, and an App-applied label invalid either way (the A14 row). Finally, they check that
+  the registry schema rejects a posture field in op input.
+- The scanner tests run every real workflow in this repo, and all of them scan.
+- A smoke run of the built CLI over this branch, `main..HEAD` under `human`, returned
+  `needs-human`. It listed the new workflows, the templates and `protectedPaths.ts`, and logged
+  the override record as absent.
+- CodeRabbit CLI cycles and gate runs are recorded in the PR body.

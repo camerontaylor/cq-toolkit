@@ -34,6 +34,14 @@
     "^src/ops/gates/protectedPaths\\.ts$",
     "^scripts/denylist-scan$",
     "^policy/protected-paths\\.json$",
-    "^policy/attestations/"
+    "^policy/attestations/",
+    "(?:^|/)\\.oxlintrc\\.json$",
+    "(?:^|/)\\.oxfmtrc\\.json$",
+    "^knip\\.json$",
+    "^lint/",
+    "^scripts/ratchet-[^/]+\\.mjs$",
+    "^scripts/gen-op-docs\\.mjs$",
+    "^scripts/copy-prompt-assets\\.mjs$",
+    "^policy/denylist/"
   ]
 }

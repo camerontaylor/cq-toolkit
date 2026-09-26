@@ -200,14 +200,16 @@ const REJECT_REASONS = new Map<string, string>([
   ['complex key', 'complex key is outside the subset'],
   ['duplicate top-level key', 'duplicate top-level key "name"'],
   ['on spelled twice', 'duplicate top-level key "on"'],
-  ['quoted "true" key', 'ambiguous top-level key "true"'],
+  ['quoted "true" key', 'quoted key is outside the subset'],
   ['ambiguous On key', 'ambiguous top-level key "On"'],
   ['duplicate job id', 'duplicate job id "a"'],
-  ['duplicate quoted job id', 'duplicate job id "a"'],
+  ['quoted job id', 'quoted key is outside the subset'],
   ['duplicate job-child key', 'duplicate key "runs-on" in job "a"'],
-  ['flow-mapping jobs', '`jobs:` with an inline value is outside the subset'],
-  ['flow-mapping on', 'flow-mapping `on:` is outside the subset'],
-  ['flow-mapping job', 'job "a" has an inline value'],
+  ['flow-mapping jobs', 'flow mapping is outside the subset'],
+  ['flow-mapping on', 'flow mapping is outside the subset'],
+  ['flow-mapping job', 'flow mapping is outside the subset'],
+  ['jobs with a scalar value', '`jobs:` with an inline value is outside the subset'],
+  ['job with a scalar value', 'job "a" has an inline value'],
   ['multi-line flow on', 'multi-line flow collection is outside the subset'],
   ['multi-line quoted scalar', 'multi-line quoted scalar is outside the subset'],
   ['inconsistent job indentation', 'inconsistent job indentation'],
@@ -248,11 +250,13 @@ describe('scanWorkflow: fails closed outside the subset', () => {
     ['quoted "true" key', wf('"true": push', ...body)],
     ['ambiguous On key', wf('On: push', ...body)],
     ['duplicate job id', wf('on: push', ...body, '  a:', '    runs-on: y')],
-    ['duplicate quoted job id', wf('on: push', ...body, "  'a':", '    runs-on: y')],
+    ['quoted job id', wf('on: push', ...body, "  'a':", '    runs-on: y')],
     ['duplicate job-child key', wf('on: push', ...body, '    runs-on: y')],
     ['flow-mapping jobs', wf('on: push', 'jobs: {a: {runs-on: x}}')],
     ['flow-mapping on', wf('on: {push: {}}', ...body)],
     ['flow-mapping job', wf('on: push', 'jobs:', '  a: {runs-on: x}')],
+    ['jobs with a scalar value', wf('on: push', 'jobs: x')],
+    ['job with a scalar value', wf('on: push', 'jobs:', '  a: x')],
     ['multi-line flow on', wf('on: [push,', '  pull_request]', ...body)],
     ['multi-line quoted scalar', wf('on: push', ...body, '    if: "a', '      b"')],
     ['inconsistent job indentation', wf('on: push', ...body, ' b:', '    runs-on: x')],
@@ -270,6 +274,131 @@ describe('scanWorkflow: fails closed outside the subset', () => {
     const scan = scanWorkflow(text);
     expect(scan.ok).toBe(false);
     expect(scan.ok ? '' : scan.reason).toContain(REJECT_REASONS.get(label));
+  });
+});
+
+describe('scanWorkflow: parser differentials fail closed (C1/C2)', () => {
+  const head = ['on: push', 'permissions: {}', 'jobs:', '  a:', '    runs-on: x'];
+  const step = (...lines: string[]) => wf(...head, '    steps:', ...lines);
+  test.each<[string, string, string]>([
+    // C1(a): any backslash escape in a double-quoted scalar, key or value.
+    ['escaped double-quoted value', wf(...head, '    name: "a\\u0041"'), 'backslash escape'],
+    [
+      'escaped double-quoted key',
+      wf(...head, '    "permi\\x73sions": write-all'),
+      'backslash escape',
+    ],
+    ['escaped step value', step('      - uses: "actions/checkout\\x40v5"'), 'backslash escape'],
+    // C1(b): quoted keys anywhere except the top-level on.
+    ['quoted top-level name key', wf('"name": x', ...head), 'quoted key'],
+    ['quoted job key', wf(...head, "    'permissions': write-all"), 'quoted key'],
+    ['quoted step key', step('      - "uses": ./x'), 'quoted key'],
+    [
+      'quoted with key',
+      step('      - uses: actions/checkout@v5', '        with:', "          'ref': x"),
+      'quoted key',
+    ],
+    [
+      'quoted on child key',
+      wf('on:', '  "push":', 'jobs:', '  a:', '    runs-on: x'),
+      'quoted key',
+    ],
+    // C1(c): keys outside the allow-lists; keys are case-sensitive.
+    ['unknown top-level key', wf('foo: x', ...head), 'unknown top-level key "foo"'],
+    ['Permissions top-level', wf('Permissions: write-all', ...head), 'unknown top-level key'],
+    [
+      'Permissions job key',
+      wf(...head, '    Permissions: write-all'),
+      'unknown key "Permissions" in job',
+    ],
+    [
+      'Environment job key',
+      wf(...head, '    Environment: prod'),
+      'unknown key "Environment" in job',
+    ],
+    ['unknown step key', step('      - Uses: ./x'), 'unknown key "Uses" in step 1'],
+    ['step that is not a mapping', step('      - echo'), 'is not a mapping'],
+    [
+      'duplicate step key',
+      step('      - run: a', '        run: b'),
+      'duplicate key "run" in step 1',
+    ],
+    [
+      'duplicate with key',
+      step('      - uses: x', '        with:', '          ref: a', '          ref: b'),
+      'duplicate key "ref"',
+    ],
+    ['flow-mapping step', step('      - { uses: ./flow }'), 'flow mapping'],
+    [
+      'flow-mapping with',
+      step('      - uses: actions/checkout@v5', '        with: { ref: x }'),
+      'flow mapping',
+    ],
+    ['flow map inside a flow sequence', wf(...head, '    needs: [{a: b}]'), 'flow mapping'],
+    ['nested inline sequence', step('      - - run: x'), 'nested inline sequence'],
+    // C2: line breaks and controls.
+    ['bare CR', `on: push\rjobs:\n  a:\n    runs-on: x\n`, 'bare carriage return'],
+    ['NEL', wf(...head, '    name: a\u0085b'), 'Unicode line break'],
+    ['LINE SEPARATOR', wf(...head, '    name: a\u2028b'), 'Unicode line break'],
+    ['PARAGRAPH SEPARATOR', wf(...head, '    name: a\u2029b'), 'Unicode line break'],
+    ['NUL', wf(...head, '    name: a\u0000b'), 'control character'],
+    ['vertical tab', wf(...head, '    name: a\u000Bb'), 'control character'],
+    ['DEL', wf(...head, '    name: a\u007Fb'), 'control character'],
+    ['C1 control', wf(...head, '    name: a\u009Bb'), 'control character'],
+    ['NUL inside a run block', step('      - run: |', '          a\u0000b'), 'control character'],
+    ['BOM after offset 0', `on: push\n\uFEFF${wf(...head.slice(1))}`, 'byte-order mark'],
+    [
+      'tab after a colon',
+      wf(...head, '    environment:\tprod'),
+      'tab outside block-scalar content',
+    ],
+    ['NBSP separator', wf(...head, '    environment:\u00A0prod'), 'non-ASCII space'],
+  ])('%s', (_label, text, reason) => {
+    const scan = scanWorkflow(text);
+    expect(scan.ok ? 'ok' : scan.reason).toContain(reason);
+  });
+
+  test('tabs inside block-scalar content and comment lines are allowed', () => {
+    expect(
+      scanWorkflow(step('      - run: |', '          printf "a\\tb"\techo', '    #\tnote')).ok,
+    ).toBe(true);
+  });
+
+  test('the top-level on may be quoted; snapshot is a documented job key', () => {
+    expect(
+      scanWorkflow(
+        wf("'on': push", 'permissions: {}', 'jobs:', '  a:', '    snapshot: img', '    runs-on: x'),
+      ).ok,
+    ).toBe(true);
+  });
+
+  test('single-quoted values are fine and read as literals', () => {
+    const a = job(step("      - uses: './tools/x'", "      - run: 'echo it''s'"), 'a');
+    expect(a.localUses).toEqual(['tools/x']);
+    expect(a.hasRunSteps).toBe(true);
+  });
+
+  test('uses/run/ref are key-based: text inside a run block is not a step key', () => {
+    const a = job(step('      - run: |', '          uses: ./evil', '          run: x'), 'a');
+    expect(a.localUses).toEqual([]);
+    expect(
+      lintWorkflow(
+        PATH,
+        ok(
+          wf(
+            'on: workflow_run',
+            'permissions: {}',
+            'jobs:',
+            '  a:',
+            '    runs-on: x',
+            '    steps:',
+            '      - run: |',
+            '          uses: actions/checkout@v5',
+            '          ref: ${{ inputs.x }}',
+          ),
+        ),
+      ),
+    ).toEqual([]);
   });
 });
 
@@ -424,11 +553,10 @@ describe('scanWorkflow: privilege', () => {
         '    steps:',
         '      - uses: ./.github/actions/setup/',
         "      - uses: './tools/x'",
-        '      - { uses: ./flow }',
         '      - uses: actions/checkout@v5',
       ],
     );
-    expect(a.localUses).toEqual(['.github/actions/setup', 'tools/x', 'flow']);
+    expect(a.localUses).toEqual(['.github/actions/setup', 'tools/x']);
     expect(a.hasRunSteps).toBe(false);
     const reusable = withJob(['permissions: {}'], ['    uses: ./.github/workflows/w.yml']);
     expect(reusable.localUses).toEqual(['.github/workflows/w.yml']);
@@ -566,7 +694,7 @@ describe('lintWorkflow (ADR-0004 D-G.3)', () => {
       1,
     ]),
     [
-      '2: pull_request_target flow-map checkout',
+      '2: pull_request_target quoted-uses checkout',
       wf(
         'on: pull_request_target',
         'permissions: {}',
@@ -575,7 +703,8 @@ describe('lintWorkflow (ADR-0004 D-G.3)', () => {
         '    runs-on: x',
         '    steps:',
         "      - uses: 'actions/checkout@v5'",
-        '        with: { ref: "${{ github.event.pull_request.head.ref }}" }',
+        '        with:',
+        '          ref: "${{ github.event.pull_request.head.ref }}"',
       ),
       1,
     ],
@@ -689,6 +818,141 @@ describe('lintWorkflow (ADR-0004 D-G.3)', () => {
     ],
   ])('%s', (_label, text, count) => {
     expect(lint(text)).toHaveLength(count);
+  });
+});
+
+describe('lintWorkflow: head checkout and credentials (H1)', () => {
+  /** A one-job workflow on `trigger` whose steps are `steps`. */
+  const flow = (trigger: string, ...steps: string[]) =>
+    wf(
+      `on: ${trigger}`,
+      'permissions: {}',
+      'jobs:',
+      '  a:',
+      '    runs-on: x',
+      '    steps:',
+      ...steps,
+    );
+  const checkout = (...withLines: string[]) => [
+    '      - uses: actions/checkout@v5',
+    '        with:',
+    '          persist-credentials: false',
+    ...withLines.map((l) => `          ${l}`),
+  ];
+  const lint = (text: string) => lintWorkflow(PATH, ok(text)).map((f) => f.reason);
+
+  test.each<[string, string[], number]>([
+    ['base sha', checkout('ref: ${{ github.sha }}'), 0],
+    ['base default branch', checkout('ref: ${{ github.event.repository.default_branch }}'), 0],
+    ['base ref, spaced and cased', checkout('ref: ${{GitHub.Event.Pull_Request.Base.Ref}}'), 0],
+    ['base repository', checkout('repository: ${{ github.repository }}'), 0],
+    ['literal branch', checkout('ref: main'), 0],
+    ['head sha', checkout('ref: ${{ github.event.workflow_run.head_sha }}'), 1],
+    ['unlisted expression', checkout('ref: ${{ inputs.ref }}'), 1],
+    [
+      'base OR head',
+      checkout('ref: ${{ github.event.pull_request.base.sha || github.head_ref }}'),
+      1,
+    ],
+    [
+      'head repository',
+      checkout('repository: ${{ github.event.pull_request.head.repo.full_name }}'),
+      1,
+    ],
+    ['literal PR ref', checkout('ref: refs/pull/1/merge'), 1],
+    ['block-scalar ref', checkout('ref: >-', '  ${{ github.event.workflow_run.head_sha }}'), 1],
+    [
+      'fetch objects only',
+      [
+        '      - env:',
+        '          SHA: ${{ github.event.workflow_run.head_sha }}',
+        '        run: git fetch origin "$SHA"',
+      ],
+      0,
+    ],
+    [
+      'checkout FETCH_HEAD',
+      ['      - run: |', '          git fetch origin "$SHA"', '          git checkout FETCH_HEAD'],
+      1,
+    ],
+    [
+      'head expression inline',
+      ['      - run: git checkout ${{ github.event.workflow_run.head_sha }}'],
+      1,
+    ],
+    [
+      'head expression via step env',
+      [
+        '      - env:',
+        '          SHA: ${{ github.event.workflow_run.head_sha }}',
+        '        run: git -c x=y switch --detach "$SHA"',
+      ],
+      1,
+    ],
+    ['refs/pull/ in run', ['      - run: git fetch origin refs/pull/1/head'], 1],
+    ['pull/${{ in run', ['      - run: curl https://x/pull/${{ github.event.number }}'], 1],
+    ['base checkout in run', ['      - run: git checkout "$GITHUB_SHA"'], 0],
+  ])('workflow_run: %s', (_label, steps, count) => {
+    expect(lint(flow('workflow_run', ...steps))).toHaveLength(count);
+  });
+
+  test('the same head checkout is not linted under pull_request', () => {
+    expect(
+      lint(flow('pull_request', ...checkout('ref: ${{ github.event.pull_request.head.sha }}'))),
+    ).toEqual([]);
+    expect(lint(flow('pull_request', '      - run: git checkout FETCH_HEAD'))).toEqual([]);
+  });
+
+  test('a head expression in job env reaches a run step', () => {
+    const text = wf(
+      'on: pull_request_target',
+      'permissions: {}',
+      'jobs:',
+      '  a:',
+      '    runs-on: x',
+      '    env:',
+      '      SHA: ${{ github.event.pull_request.head.sha }}',
+      '    steps:',
+      '      - run: git worktree add w "$SHA"',
+    );
+    expect(lint(text)).toHaveLength(1);
+  });
+
+  test.each<[string, string[], number]>([
+    [
+      'checkout without persist-credentials, with run steps',
+      ['      - uses: actions/checkout@v5', '      - run: make'],
+      1,
+    ],
+    [
+      'persist-credentials: False literal',
+      [
+        '      - uses: actions/checkout@v5',
+        '        with:',
+        '          persist-credentials: False',
+        '      - run: make',
+      ],
+      0,
+    ],
+    [
+      'expression value is not a false literal',
+      [
+        '      - uses: actions/checkout@v5',
+        '        with:',
+        '          persist-credentials: ${{ false }}',
+        '      - run: make',
+      ],
+      2,
+    ],
+    ['no run steps', ['      - uses: actions/checkout@v5'], 0],
+  ])('pull_request_target: %s', (_label, steps, count) => {
+    expect(lint(flow('pull_request_target', ...steps))).toHaveLength(count);
+  });
+
+  test('missing persist-credentials: false is not linted for push', () => {
+    expect(lint(flow('push', '      - uses: actions/checkout@v5', '      - run: make'))).toEqual(
+      [],
+    );
   });
 });
 
@@ -872,6 +1136,75 @@ describe('diffWorkflow', () => {
     expect(kinds(diffWorkflow(PATH, text, edited))).not.toContain('lint');
   });
 
+  test('a new signal in an already-violating job is not suppressed', () => {
+    const prt = wf(
+      'on: pull_request_target',
+      'permissions: {}',
+      'jobs:',
+      '  a:',
+      '    environment: prod',
+      '    runs-on: x',
+      '    steps:',
+      '      - run: make',
+    );
+    const withSecret = prt.replace('run: make', 'run: make ${{ secrets.K }}');
+    expect(
+      diffWorkflow(PATH, prt, withSecret)
+        .filter((f) => f.kind === 'lint')
+        .map((f) => f.reason),
+    ).toEqual(['pull_request_target job a has secret K']);
+    const oneCheckout = wf(
+      'on: workflow_run',
+      'permissions: {}',
+      'jobs:',
+      '  a:',
+      '    runs-on: x',
+      '    steps:',
+      '      - uses: actions/checkout@v5',
+      '      - run: make',
+    );
+    const twoCheckouts = oneCheckout.replace(
+      '      - run: make',
+      '      - uses: actions/checkout@v5\n      - run: make',
+    );
+    expect(kinds(diffWorkflow(PATH, oneCheckout, oneCheckout.replace('make', 'make all')))).toEqual(
+      [],
+    );
+    expect(diffWorkflow(PATH, oneCheckout, twoCheckouts).map((f) => f.reason)).toEqual([
+      'workflow_run job a checkout #2 lacks persist-credentials: false and the job has run: steps',
+    ]);
+    const headRef = (ref: string) =>
+      oneCheckout.replace(
+        'actions/checkout@v5',
+        `actions/checkout@v5\n        with:\n          ref: \${{ ${ref} }}`,
+      );
+    expect(
+      kinds(
+        diffWorkflow(
+          PATH,
+          headRef('github.head_ref'),
+          headRef('github.event.workflow_run.head_sha'),
+        ),
+      ),
+    ).toEqual(['lint']);
+  });
+
+  test('a workflow rename is a trigger change (workflow_run watchers match on name)', () => {
+    const findings = diffWorkflow(
+      PATH,
+      READ_ONLY,
+      READ_ONLY.replace('name: ci', 'name: cq-signal'),
+    );
+    expect(kinds(findings)).toEqual(['trigger-changed']);
+    expect(findings[0]!.reason).toContain('ci -> name: cq-signal');
+    expect(kinds(diffWorkflow(PATH, READ_ONLY, READ_ONLY.replace('name: ci\n', '')))).toEqual([
+      'trigger-changed',
+    ]);
+    expect(
+      diffWorkflow(PATH, READ_ONLY, READ_ONLY.replace('name: ci', 'name: ci # comment')),
+    ).toEqual([]);
+  });
+
   test('adding a lint violation to an existing workflow is linted', () => {
     const findings = diffWorkflow(
       PATH,
@@ -911,12 +1244,17 @@ describe('the repository workflows', () => {
     for (const j of scan.jobs.values()) expect(j.privileged).toBe(false);
   });
 
-  test('ci.yml is lint-clean; cq-verify.yml trips rule 3 in its fetch job (reported, not changed)', () => {
-    expect(lintWorkflow('.github/workflows/ci.yml', ok(read('ci.yml')))).toEqual([]);
+  test('only cq-verify.yml trips the lint (base-owned fetch job; reported, not changed)', () => {
+    for (const f of files.filter((name) => name !== 'cq-verify.yml')) {
+      expect([f, lintWorkflow(`.github/workflows/${f}`, ok(read(f)))]).toEqual([f, []]);
+    }
     expect(
       lintWorkflow('.github/workflows/cq-verify.yml', ok(read('cq-verify.yml'))).map(
         (f) => f.reason,
       ),
-    ).toEqual(['job fetch sets persist-credentials: true and has run: steps']);
+    ).toEqual([
+      'job fetch sets persist-credentials: true and has run: steps',
+      'workflow_run job fetch checkout #1 lacks persist-credentials: false and the job has run: steps',
+    ]);
   });
 });

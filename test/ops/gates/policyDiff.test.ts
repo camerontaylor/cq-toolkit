@@ -95,7 +95,8 @@ const MANIFEST = {
 const POLICY = {
   schemaVersion: 1,
   protectedPaths: ['^src/guarded/'],
-  requiredChecks: ['static'],
+  // `build` has NO statically resolvable producer: matrix.yml's job is a matrix.
+  requiredChecks: ['static', 'build'],
 };
 
 const wf = (...lines: string[]): string => `${lines.join('\n')}\n`;
@@ -134,7 +135,25 @@ const DEPLOY = wf(
   '      - run: echo deploy',
 );
 
+/** Non-privileged matrix job: GitHub suffixes its check names, so it resolves no producer. */
+const MATRIX = wf(
+  'name: matrix',
+  'on:',
+  '  pull_request:',
+  'permissions:',
+  '  contents: read',
+  'jobs:',
+  '  build:',
+  '    runs-on: ubuntu-latest',
+  '    strategy:',
+  '      matrix:',
+  '        node: [22, 24]',
+  '    steps:',
+  '      - run: npm run build',
+);
+
 const CI_PATH = '.github/workflows/ci.yml';
+const MATRIX_PATH = '.github/workflows/matrix.yml';
 const DEPLOY_PATH = '.github/workflows/deploy.yml';
 const MANIFEST_PATH = 'baselines/ratchets.json';
 const COVERAGE_PATH = baselineRelPath('coverage', 'coverage');
@@ -159,6 +178,7 @@ const TRUST_FILES: Readonly<Record<string, string>> = {
   'package.json': '{ "name": "fixture" }\n',
   [CI_PATH]: CI,
   [DEPLOY_PATH]: DEPLOY,
+  [MATRIX_PATH]: MATRIX,
   'actions/setup/action.yml': 'runs:\n  using: composite\n  steps: []\n',
   'src/a.ts': 'export const a = 1;\n',
   'src/guarded/g.ts': 'export const g = 1;\n',
@@ -509,6 +529,19 @@ describe('policyDiff: workflows', SLOW, () => {
         files: { [CI_PATH]: edit(CI_PATH, 'permissions:\n', 'env:\n  CI: "1"\npermissions:\n') },
       },
       rename: { files: { [CI_PATH]: edit(CI_PATH, '  static:\n', '  lint:\n') } },
+      'phantom-job': {
+        files: {
+          [CI_PATH]: `${CI}  shadow:\n    name: static\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n`,
+        },
+      },
+      'matrix-edit': {
+        files: { [MATRIX_PATH]: edit(MATRIX_PATH, 'npm run build', 'npm run build -- --fast') },
+      },
+      'dynamic-name': {
+        files: {
+          [CI_PATH]: `${CI}  dyn:\n    name: \${{ github.event_name }}\n    runs-on: ubuntu-latest\n    steps:\n      - run: 'true'\n`,
+        },
+      },
       lint: {
         files: {
           [CI_PATH]: edit(
@@ -532,9 +565,50 @@ describe('policyDiff: workflows', SLOW, () => {
     c = importCommits(repo, specs);
   }, HOOK_MS);
 
-  test('a new workflow needs a human', async () => {
+  test('a new workflow needs a human; a copied producer is a phantom producer', async () => {
     const out = await run(c['new-wf']!, 'diff-check');
-    expect(kinds(out)).toEqual(['protected-path', 'workflow-new']);
+    expect(kinds(out)).toEqual(['protected-path', 'required-check', 'workflow-new']);
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: '.github/workflows/new.yml',
+      reason: 'adds a producer of required check static (.github/workflows/new.yml:static)',
+    });
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a new same-name job in an existing workflow is a phantom producer', async () => {
+    const out = await run(c['phantom-job']!, 'diff-check');
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: CI_PATH, reason: 'changes a protected path' },
+      {
+        kind: 'required-check',
+        path: CI_PATH,
+        reason: `adds a producer of required check static (${CI_PATH}:shadow)`,
+      },
+    ]);
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a required check with no resolvable producer fails closed when a matrix producer changes', async () => {
+    const out = await run(c['matrix-edit']!, 'diff-check');
+    expect(out.findings).toEqual([
+      { kind: 'protected-path', path: MATRIX_PATH, reason: 'changes a protected path' },
+      {
+        kind: 'required-check',
+        path: MATRIX_PATH,
+        reason: `producer of required check build unresolvable; ${MATRIX_PATH} changed`,
+      },
+    ]);
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('...or when a changed workflow gains a dynamically named job', async () => {
+    const out = await run(c['dynamic-name']!, 'diff-check');
+    expect(out.findings).toContainEqual({
+      kind: 'required-check',
+      path: CI_PATH,
+      reason: `producer of required check build unresolvable; ${CI_PATH} changed`,
+    });
     expect(out.verdict).toBe('needs-human');
   });
 

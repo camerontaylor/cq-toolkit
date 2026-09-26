@@ -60,6 +60,7 @@ import type { ProtectedPathsConfig, ProtectedPathsPosture } from './policyConfig
 import { isProtectedPolicyPath } from './protectedPaths.js';
 import {
   diffWorkflow,
+  hasUnresolvableCheckName,
   isWorkflowPath,
   producersOf,
   scanWorkflow,
@@ -232,6 +233,16 @@ async function workflowsAt(
     out.set(path, { text, scan: scanWorkflow(text) });
   }
   return out;
+}
+
+/**
+ * True when a scanned workflow has a job whose check-run name cannot be
+ * decided statically — exactly the jobs `producersOf` refuses to count: a
+ * dynamic or non-literal `name:`, a reusable-workflow call, or a matrix
+ * (GitHub suffixes matrix check names), per `hasUnresolvableCheckName`.
+ */
+function hasUnresolvableJob(scan: Extract<WorkflowScan, { ok: true }>): boolean {
+  return [...scan.jobs.values()].some(hasUnresolvableCheckName);
 }
 
 /** True when `path` is `target` or under it (`.` is the repository root: every path). */
@@ -561,24 +572,60 @@ export function createPolicyDiff(
       }
       return out;
     };
+    // Changed workflows (safe paths only) whose check names cannot all be
+    // decided statically at either end: unparseable, or carrying a job
+    // producersOf never counts (matrix, dynamic name, reusable call).
+    const unresolvable: string[] = [];
+    for (const path of safe) {
+      if (!isWorkflowPath(path)) continue;
+      const sides = [baseFlows.get(path)?.scan, subjectFlows.get(path)?.scan];
+      if (sides.some((scan) => scan !== undefined && (!scan.ok || hasUnresolvableJob(scan)))) {
+        unresolvable.push(path);
+      }
+    }
     for (const check of policy.requiredChecks) {
       const before = producers(baseFlows, check);
-      if (before.size === 0) continue;
-      if (producers(subjectFlows, check).size === 0) {
+      const after = producers(subjectFlows, check);
+      // Phantom producers: a job the range base lacks that produces the
+      // check by name would shadow it, whatever it runs.
+      for (const [wf, jobs] of after) {
+        const had = new Set(before.get(wf) ?? []);
+        for (const id of jobs) {
+          if (!had.has(id)) {
+            add('required-check', wf, `adds a producer of required check ${check} (${wf}:${id})`);
+          }
+        }
+      }
+      if (before.size === 0) {
+        // No statically resolvable producer at the range base: the check may
+        // come from a job whose name the scanner cannot decide. Fail closed
+        // when any such workflow changed.
+        for (const path of unresolvable) {
+          add(
+            'required-check',
+            path,
+            `producer of required check ${check} unresolvable; ${path} changed`,
+          );
+        }
+        continue;
+      }
+      if (after.size === 0) {
         add('required-check', [...before.keys()].join(', '), `removed required check ${check}`);
       }
       for (const [wf, jobs] of before) {
         if (!safeSet.has(wf)) continue;
         const baseScan = baseFlows.get(wf)?.scan;
-        const after = subjectFlows.get(wf)?.scan;
+        const afterScan = subjectFlows.get(wf)?.scan;
         if (baseScan?.ok !== true) continue;
         const changes: string[] = [];
-        if (after === undefined) changes.push('workflow removed');
-        else if (!after.ok) changes.push('workflow unparseable at the subject');
+        if (afterScan === undefined) changes.push('workflow removed');
+        else if (!afterScan.ok) changes.push('workflow unparseable at the subject');
         else {
-          if (after.context !== baseScan.context) changes.push('workflow-level context changed');
+          if (afterScan.context !== baseScan.context) {
+            changes.push('workflow-level context changed');
+          }
           for (const id of jobs) {
-            const job = after.jobs.get(id);
+            const job = afterScan.jobs.get(id);
             if (job === undefined) changes.push(`job ${id} removed`);
             else if (job.text !== baseScan.jobs.get(id)?.text) changes.push(`job ${id} changed`);
           }

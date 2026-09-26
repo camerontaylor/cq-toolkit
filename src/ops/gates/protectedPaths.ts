@@ -61,6 +61,13 @@ export const PROTECTED_CONFIG_PATH_PATTERNS: readonly RegExp[] = Object.freeze([
   // puts both in the ratchet definition set for the same reason).
   /^src\/ops\/gates\/protectedPaths\.ts$/i,
   /^scripts\/denylist-scan$/i,
+  // What the required checks RUN (W1.9 H3, ADR-0004 D-C.4 measurement
+  // config): the static gate's drivers and generators, and Knip's config.
+  // The lint config (`.oxlintrc.json`/`.oxfmtrc.json`) is already an `rc`
+  // file below and the lint rules are `lint/**`.
+  /^scripts\/ratchet-[^/]+\.mjs$/i,
+  /^scripts\/(?:gen-op-docs|copy-prompt-assets)\.mjs$/i,
+  /(?:^|\/)knip\.jsonc?$/i,
   // D11 protected paths (ADR-0004 D-G.1): policy templates instantiate the
   // repository's workflows and the doctrine, and lint rules define what the
   // static gate enforces, so both are enforcement definitions, not content.
