@@ -648,8 +648,12 @@ ${script}`;
 
 // W1.10 fresh-review fix — the post step's stale-verdict guard and the
 // sweep's "unchanged" dedupe, run for real (bash + jq, `gh` stubbed and its
-// argv recorded): a verdict is POSTed only when no newer-started same-app
-// row is on the head, and the sweep re-posts only a changed verdict.
+// argv and POSTed payloads recorded). Every row we post carries its SNAPSHOT
+// time as `started_at` (the judge step's judged-at), so rows are modelled
+// with started_at = snapshot time. The reference row is the same-app row
+// with the latest snapshot (not the greatest id); a verdict is POSTed only
+// when that snapshot is not later than its own, and the sweep re-posts only
+// a verdict that differs from the reference row.
 describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 10)', () => {
   const SHA = '0123456789abcdef0123456789abcdef01234567';
   const JUDGED = '2026-09-27T10:00:00Z';
@@ -678,7 +682,11 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
   printf '%s\\n' "$*" >> "$ARGV_LOG"
   [ "$1" = api ] || return 9
   shift
-  if [ "$1" = -X ]; then echo https://example.invalid/run; return 0; fi
+  if [ "$1" = -X ]; then
+    [ "$4" = --input ] || return 9
+    cat "$5" >> "$POSTED_LOG"; echo >> "$POSTED_LOG"
+    echo https://example.invalid/run; return 0
+  fi
   [ "$1" = --paginate ] && shift
   local path="$1"
   shift
@@ -689,6 +697,47 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
   if [ "\${1:-}" = --jq ]; then jq -c "$2" <<<"$RUNS"; else printf '%s\\n' "$RUNS"; fi
 }
 `;
+
+  it.each(bothCopies('cq-accept.yml'))(
+    '%s: judge stamps the payload started_at with its snapshot time (judged-at)',
+    { timeout: 60_000 },
+    (_label, text) => {
+      const script = runScript(
+        jobBlocks(code(text)).get('judge') ?? '',
+        "'Judge (CLI: selfhost/acceptance)'",
+      );
+      expect(script).not.toContain('${{');
+      const dir = mkdtempSync(join(tmpdir(), 'cq-accept-judge-'));
+      try {
+        const node = `node() { printf '%s\\n' "$VERDICT"; }\n`;
+        const r = spawnSync('bash', ['-c', node + script], {
+          encoding: 'utf8',
+          env: {
+            PATH: process.env['PATH'] ?? '',
+            RUNNER_TEMP: dir,
+            GH_TOKEN: 'x',
+            REPO: 'o/r',
+            TRUST: 'trust',
+            TARGETS: JSON.stringify([{ pr: 7, subject: SHA }]),
+            VERDICT: JSON.stringify({
+              status: 'ok',
+              value: { verdict: 'pass', report: ['ok'] },
+            }),
+          },
+        });
+        expect(r.status, r.stdout + r.stderr).toBe(0);
+        const judged = readFileSync(join(dir, 'cq-accept', '7.judged-at'), 'utf8').trim();
+        expect(judged).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+        const payload = JSON.parse(
+          readFileSync(join(dir, 'cq-accept', '7.check-run.json'), 'utf8'),
+        ) as Record<string, unknown>;
+        expect(payload['started_at']).toBe(judged);
+        expect(payload['conclusion']).toBe('success');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.each(bothCopies('cq-accept.yml'))(
     '%s: posts only a verdict no newer same-app row supersedes',
@@ -703,32 +752,44 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
       try {
         const work = join(dir, 'cq-accept');
         mkdirSync(work);
-        writeFileSync(
-          join(work, '7.check-run.json'),
-          JSON.stringify({
-            name: 'cq/acceptance',
-            head_sha: SHA,
-            conclusion: 'success',
-            external_id: `trust:${SHA}`,
-            output: { title: 'pass', summary: 'ok' },
-          }),
-        );
         writeFileSync(join(work, 'crashed'), '');
         const argv = join(dir, 'argv');
+        const postedLog = join(dir, 'posted');
         const run = (opts: {
           rows: Row[];
           event?: string;
           appId?: string;
           judged?: string;
-        }): { status: number | null; posted: boolean; out: string } => {
+          payloadStarted?: string;
+        }): {
+          status: number | null;
+          posted: boolean;
+          payloads: Array<Record<string, unknown>>;
+          out: string;
+        } => {
           writeFileSync(argv, '');
-          writeFileSync(join(work, '7.judged-at'), `${opts.judged ?? JUDGED}\n`);
+          writeFileSync(postedLog, '');
+          const judged = opts.judged ?? JUDGED;
+          writeFileSync(join(work, '7.judged-at'), `${judged}\n`);
+          // What the judge step writes: the payload's started_at is judged-at.
+          writeFileSync(
+            join(work, '7.check-run.json'),
+            JSON.stringify({
+              name: 'cq/acceptance',
+              head_sha: SHA,
+              conclusion: 'success',
+              external_id: `trust:${SHA}`,
+              started_at: opts.payloadStarted ?? judged,
+              output: { title: 'pass', summary: 'ok' },
+            }),
+          );
           const r = spawnSync('bash', ['-c', STUB + script], {
             encoding: 'utf8',
             env: {
               PATH: process.env['PATH'] ?? '',
               SHA,
               ARGV_LOG: argv,
+              POSTED_LOG: postedLog,
               RUNNER_TEMP: dir,
               GITHUB_STEP_SUMMARY: join(dir, 'summary'),
               GH_TOKEN: 'x',
@@ -740,9 +801,14 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
             },
           });
           const calls = readFileSync(argv, 'utf8').split('\n');
+          const payloads = readFileSync(postedLog, 'utf8')
+            .split('\n')
+            .filter((line) => line.trim() !== '')
+            .map((line) => JSON.parse(line) as Record<string, unknown>);
           return {
             status: r.status,
             posted: calls.some((c) => c.startsWith(POST)),
+            payloads,
             out: r.stdout + r.stderr,
           };
         };
@@ -754,6 +820,11 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
           const r = run(opts);
           expect(r.status, `${why}: ${r.out}`).toBe(0);
           expect(r.posted, `${why}: ${r.out}`).toBe(posted);
+          // A POSTed row records its snapshot time, never a POST-time stamp.
+          expect(
+            r.payloads.map((p) => p['started_at']),
+            why,
+          ).toEqual(posted ? [opts.judged ?? JUDGED] : []);
           return r.out;
         };
 
@@ -761,9 +832,76 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
         expect(expectRun({ rows: [] }, true, 'no prior row')).not.toMatch(/not posted/);
         expect(
           expectRun({ rows: [{ id: 3, app: 'actions', started: NEWER }] }, false, 'newer row'),
-        ).toMatch(/a newer verdict \(2026-09-27T10:00:05Z\) postdates this snapshot/);
+        ).toMatch(/a newer snapshot's verdict \(2026-09-27T10:00:05Z\) postdates this snapshot/);
         expectRun({ rows: [{ id: 3, app: 'actions', started: OLDER }] }, true, 'older row');
         expectRun({ rows: [{ id: 3, app: 'actions', started: JUDGED }] }, true, 'same second');
+
+        // The reference row is the latest SNAPSHOT, not the greatest id.
+        // Codex scenario: a sweep read an old snapshot (OLDER) but posted
+        // after a per-PR run posted a newer one (NEWER), so the stale row
+        // has the greater id and the earlier started_at.
+        const lateStaleSweep: Row[] = [
+          { id: 3, app: 'actions', started: NEWER, conclusion: 'failure' },
+          { id: 5, app: 'actions', started: OLDER, conclusion: 'success' },
+        ];
+        // This run's snapshot (JUDGED) is older than the id-3 row's: skipped,
+        // although the greatest-id row (id 5) is older than it.
+        expect(expectRun({ rows: lateStaleSweep }, false, 'older id, later snapshot wins')).toMatch(
+          /a newer snapshot's verdict \(2026-09-27T10:00:05Z\) postdates/,
+        );
+        // A run whose snapshot is the newest still posts over both.
+        expectRun(
+          { rows: lateStaleSweep, judged: '2026-09-27T10:00:09Z' },
+          true,
+          'newest snapshot posts',
+        );
+        // The other ordering: the newer snapshot also has the newer id.
+        expectRun(
+          {
+            rows: [
+              { id: 3, app: 'actions', started: OLDER },
+              { id: 5, app: 'actions', started: NEWER },
+            ],
+          },
+          false,
+          'newer id, later snapshot',
+        );
+        // The stale sweep itself (snapshot OLDER), arriving after the newer
+        // snapshot's row (id 3, NEWER), is skipped — not posted over it.
+        expectRun(
+          {
+            rows: [{ id: 3, app: 'actions', started: NEWER, conclusion: 'failure' }],
+            judged: OLDER,
+            event: 'schedule',
+          },
+          false,
+          'stale sweep verdict skipped',
+        );
+        // Tie on started_at: the greater id is the reference row.
+        const tie: Row[] = [
+          { id: 5, app: 'actions', started: OLDER, conclusion: 'failure' },
+          { id: 3, app: 'actions', started: OLDER, conclusion: 'success' },
+        ];
+        expectRun({ rows: tie, event: 'schedule' }, true, 'tie → greater id (failure) differs');
+        expectRun(
+          {
+            rows: [
+              { id: 5, app: 'actions', started: OLDER, conclusion: 'success' },
+              { id: 3, app: 'actions', started: OLDER, conclusion: 'failure' },
+            ],
+            event: 'schedule',
+          },
+          false,
+          'tie → greater id (success) unchanged',
+        );
+
+        // The sweep dedupes against the latest-snapshot row, not the
+        // greatest id: the greatest-id row matches, the reference does not.
+        expectRun(
+          { rows: lateStaleSweep, judged: '2026-09-27T10:00:09Z', event: 'schedule' },
+          true,
+          'sweep dedupes on the reference row',
+        );
 
         // Same-app selection: each mode ignores the other app's rows.
         const actionsNewer: Row[] = [
@@ -808,6 +946,14 @@ describe('cq-accept posts: stale-verdict guard and sweep dedupe (W1.10 Decision 
           true,
           'sweep, unchanged row from the other app only',
         );
+
+        // A payload whose started_at is not judged-at refuses.
+        {
+          const r = run({ rows: [], payloadStarted: NEWER });
+          expect(r.status).toBe(1);
+          expect(r.out).toContain('refusing: #7 payload started_at is not judged-at');
+          expect(r.posted).toBe(false);
+        }
 
         // A malformed judged-at refuses before any read or post.
         for (const judged of ['', 'yesterday', '2026-09-27 10:00:00Z', `${JUDGED}x`]) {

@@ -116,8 +116,10 @@ paths stay in use, as ADR-0004 D-G.4 allows.
 
     These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The `judge` job is
     serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the schedule). The
-    sweep and a per-PR run hold different locks, so before posting, each run skips when the
-    head's newest same-app `cq/acceptance` row started after its snapshot was read. That guard
+    sweep and a per-PR run hold different locks. Every row we post carries its snapshot time as
+    `started_at`, so before posting, each run selects the head's same-app `cq/acceptance` row
+    with the latest `started_at` (ties: the greater id) and skips when that snapshot is later
+    than its own; the sweep's "unchanged" dedupe compares against the same row. That guard
     is best-effort, so an older snapshot's post can still occasionally land after a newer
     one's (see Residuals). Settle stays in the
     merger's recheck, because the ledger write needs `contents: write`. A mergeability row
@@ -193,11 +195,15 @@ paths stay in use, as ADR-0004 D-G.4 allows.
   run `created_at` at the head compared with the PR's `merged_at`, or an all-clear that
   postdates the head.
 - **`cq/acceptance` ordering is best-effort.** The stale-verdict guard (Decision 10) reads
-  the newest row in one step and posts in a later one. It compares timestamps at one-second
-  resolution with a strict `>`, and it compares the runner's clock against the server's
-  `started_at`. A sweep that skips a verdict as "unchanged" also leaves no new row. An
+  the latest-snapshot row in one call and posts in a later one. It compares snapshot times on
+  both sides (each row's `started_at` is its judge step's snapshot stamp, taken on that run's
+  runner clock), at one-second resolution with a strict `>`. A sweep that skips a verdict as "unchanged" also leaves no new row. An
   older snapshot's verdict can therefore occasionally be the newest row. This heals itself:
   the next event on the PR, or at worst the 15-minute sweep, re-judges and re-posts. The
   gate never reads `cq/acceptance`; its per-PR recompute is authoritative for promotion.
+- **The Actions event policy is checked only by the owner-run drift check.** GitHub gates its
+  read behind Administration: write, and the CI drift credential is read-only by design, so
+  the scheduled check reports it as unchecked (a `notice:`); the owner runs
+  `--require-event-policy` with an admin credential to cover it.
 - **Gate sweep interval (O-7).** It is every 15 minutes, which bounds promotion latency when a
   wake-up is missed.

@@ -3,10 +3,12 @@
 // target renders, a live state equal to it is clean whatever its array
 // order, and every drift class produces its specific line. The template's
 // allowed Actions events are cross-checked against the triggers the repo's
-// workflows actually use. The CLI is spawned only for its fail-closed
-// branch (no App ids), which must exit before any gh call — no network.
+// workflows actually use. The CLI is spawned for its fail-closed branch
+// (no App ids), which must exit before any gh call, and against a fake `gh`
+// (CQ_GH_BIN) serving a clean live state — never the network.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, readdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -17,6 +19,7 @@ import type {
   RuleObject,
 } from '../../scripts/lib/github-settings.d.mts';
 import {
+  ACTIONS_EVENT_POLICY_UNCHECKED,
   compareSettings,
   environmentFromApi,
   renderSettings,
@@ -182,7 +185,7 @@ describe('compareSettings', () => {
 
   it('is order-insensitive (shuffled arrays are not drift)', () => {
     const live = liveFrom(target());
-    for (const r of [...live.rulesets, ...live.actionsEventPolicies]) {
+    for (const r of [...live.rulesets, ...(live.actionsEventPolicies ?? [])]) {
       r.rules.reverse();
       r.bypass_actors?.reverse();
       for (const cond of Object.values(r.conditions)) cond.include.reverse();
@@ -417,7 +420,7 @@ describe('compareSettings', () => {
 
   it('reports allowed events that differ', () => {
     const live = liveFrom(target());
-    const policy = live.actionsEventPolicies[0];
+    const policy = live.actionsEventPolicies?.[0];
     if (policy === undefined) throw new Error('no policy');
     const p = params(policy, 'restrict_action_events');
     p['allowed_events'] = (p['allowed_events'] as string[])
@@ -426,6 +429,15 @@ describe('compareSettings', () => {
     expect(driftOf(live)).toEqual([
       'actions event policy cq-allowed-events: rule restrict_action_events: parameter allowed_events differs: missing ["schedule"] extra ["pull_request_target"]',
     ]);
+  });
+
+  it('reports an unchecked event policy (null) as a notice, never drift or a match', () => {
+    const live = liveFrom(target());
+    live.actionsEventPolicies = null;
+    expect(compareSettings(target(), live)).toEqual({
+      drift: [],
+      notices: [ACTIONS_EVENT_POLICY_UNCHECKED],
+    });
   });
 });
 
@@ -544,5 +556,147 @@ describe('github-settings-drift CLI', () => {
     const res = runCli(['--repository=a/b', '--verdict-app-id=1', '--promoter-app-id=2']);
     expect(res.status).toBe(2);
     expect(res.stderr).toMatch(/github-settings-drift: error: gh api repos\/a\/b\/rulesets/);
+  });
+});
+
+// A fake `gh` (CQ_GH_BIN) serving the target state as the REST API would,
+// so the CLI's read path runs end to end; FAKE_GH_STATUS overrides one
+// path's HTTP status (e.g. the 403 GitHub returns for `actions/policies`
+// to a credential without Administration: write).
+describe('github-settings-drift CLI: the Actions event policy read', () => {
+  const REPO = 'repos/o/r';
+  const PAGE = 'per_page=100';
+
+  function apiResponses(): Record<string, unknown> {
+    const settings = target();
+    const live = liveFrom(settings);
+    const out: Record<string, unknown> = {};
+    out[`${REPO}/rulesets?${PAGE}`] = live.rulesets.map((r) => ({ id: (r as { id?: number }).id }));
+    for (const r of live.rulesets) out[`${REPO}/rulesets/${(r as { id?: number }).id}`] = r;
+    const environments = Object.entries(settings.environments).map(([name, env], i) => ({
+      id: i + 1,
+      name,
+      can_admins_bypass: env.can_admins_bypass,
+      deployment_branch_policy: env.deployment_branch_policy,
+      protection_rules: [],
+    }));
+    out[`${REPO}/environments?${PAGE}`] = { total_count: environments.length, environments };
+    for (const [name, env] of Object.entries(settings.environments)) {
+      const base = `${REPO}/environments/${encodeURIComponent(name)}`;
+      out[`${base}/deployment-branch-policies?${PAGE}`] = {
+        total_count: env.branch_policies.length,
+        branch_policies: env.branch_policies,
+      };
+      out[`${base}/secrets?${PAGE}`] = {
+        total_count: env.secrets.length,
+        secrets: env.secrets.map((n) => ({ name: n })),
+      };
+    }
+    out[`${REPO}/actions/secrets?${PAGE}`] = { total_count: 0, secrets: [] };
+    out[`${REPO}/actions/permissions/workflow`] = live.actions;
+    const policy = live.actionsEventPolicies?.[0];
+    out[`${REPO}/actions/policies?${PAGE}`] = { total_count: 1, policies: [{ id: 5486 }] };
+    out[`${REPO}/actions/policies/5486`] = policy;
+    return out;
+  }
+
+  const FAKE_GH = `#!/usr/bin/env node
+const fs = require('node:fs');
+const path = process.argv[process.argv.length - 1];
+const status = JSON.parse(process.env.FAKE_GH_STATUS || '{}')[path];
+if (status !== undefined) {
+  process.stderr.write('gh: fake refusal (HTTP ' + status + ')\\n');
+  process.exit(1);
+}
+if (/\\/branches\\/[^/]+\\/protection$/.test(path)) {
+  process.stdout.write('{"message":"Branch not protected"}');
+  process.stderr.write('gh: Branch not protected (HTTP 404)\\n');
+  process.exit(1);
+}
+const data = JSON.parse(fs.readFileSync(process.env.FAKE_GH_DATA, 'utf8'));
+if (!(path in data)) {
+  process.stderr.write('gh: Not Found (HTTP 404)\\n');
+  process.exit(1);
+}
+process.stdout.write(JSON.stringify(data[path]));
+`;
+
+  function runFake(extra: string[], status: Record<string, number>) {
+    const dir = mkdtempSync(join(tmpdir(), 'settings-drift-gh-'));
+    try {
+      const bin = join(dir, 'gh.cjs');
+      writeFileSync(bin, FAKE_GH);
+      chmodSync(bin, 0o755);
+      const data = join(dir, 'data.json');
+      writeFileSync(data, JSON.stringify(apiResponses()));
+      return spawnSync(
+        process.execPath,
+        [
+          SCRIPT,
+          '--repository=o/r',
+          `--verdict-app-id=${VERDICT}`,
+          `--promoter-app-id=${PROMOTER}`,
+          ...extra,
+        ],
+        {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            CQ_GH_BIN: bin,
+            FAKE_GH_DATA: data,
+            FAKE_GH_STATUS: JSON.stringify(status),
+          },
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  const LIST = `${REPO}/actions/policies?${PAGE}`;
+
+  it('a readable live state equal to the target is clean (exit 0)', () => {
+    const res = runFake([], {});
+    expect(res.stderr).toBe('');
+    expect(res.stdout).toBe('github-settings-drift: o/r: 0 drift line(s), 0 notice(s)\n');
+    expect(res.status).toBe(0);
+  });
+
+  it('a 403 on the list read is UNCHECKED: a notice, no drift from it (exit 0)', () => {
+    const res = runFake([], { [LIST]: 403 });
+    expect(res.stderr).toBe('');
+    expect(res.stdout).toBe(
+      `notice: ${ACTIONS_EVENT_POLICY_UNCHECKED}\n` +
+        'github-settings-drift: o/r: 0 drift line(s), 1 notice(s)\n',
+    );
+    expect(res.stdout).toContain(
+      'notice: actions event policy unchecked: GitHub requires Administration: write to read it; the CI drift credential is read-only by design — run the drift check with an owner/admin credential to cover it',
+    );
+    expect(res.status).toBe(0);
+  });
+
+  it('--require-event-policy turns that 403 into an error (exit 2)', () => {
+    const res = runFake(['--require-event-policy'], { [LIST]: 403 });
+    expect(res.status).toBe(2);
+    expect(res.stdout).toBe('');
+    expect(res.stderr).toMatch(
+      /github-settings-drift: error: gh api repos\/o\/r\/actions\/policies\?per_page=100 failed: .*HTTP 403.*--require-event-policy/,
+    );
+    // Readable, the flag changes nothing.
+    expect(runFake(['--require-event-policy'], {}).status).toBe(0);
+  });
+
+  it('every other failure stays an error (exit 2), never unchecked or absent', () => {
+    for (const [path, code] of [
+      [LIST, 404],
+      [LIST, 500],
+      [`${REPO}/actions/policies/5486`, 403],
+      [`${REPO}/actions/permissions/workflow`, 403],
+    ] as const) {
+      const res = runFake([], { [path]: code });
+      expect(res.status, `${path} ${code}`).toBe(2);
+      expect(res.stdout, `${path} ${code}`).not.toContain('notice:');
+      expect(res.stderr).toMatch(/github-settings-drift: error: /);
+    }
   });
 });

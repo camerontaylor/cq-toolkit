@@ -7,11 +7,21 @@
 //   node scripts/github-settings-drift.mjs --repository=<owner>/<name>
 //     --verdict-app-id=<n> --promoter-app-id=<n>
 //     [--template=policy/templates/github-settings.json]
+//     [--require-event-policy]
 //
 // gh authenticates from GH_TOKEN. The token needs read access to
 // Administration (rulesets, classic protection), Environments, Secrets
 // (names only) and Actions; until the verdict App exists that is the
 // interim read-only CQ_SETTINGS_TOKEN (methods-w1-10 "Drift check arming").
+//
+// The Actions event policy is the exception: GitHub serves
+// `actions/policies` only to Administration: WRITE (fine-grained PATs and
+// App tokens), and the CI credential is read-only by design (a verdict
+// identity that could rewrite the rulesets pinning its own checks would
+// collapse the ADR-0004 identity split). A 403 on that list read therefore
+// records the policy as UNCHECKED: a `notice:` line, neither a match nor
+// "absent". `--require-event-policy` (the owner-run check, with an admin
+// credential) turns that 403 into an error (exit 2).
 //
 // FAIL CLOSED: an unset or blank App id means the Apps are not registered
 // (RS-11 B1), which is itself drift: the check prints that one line and
@@ -38,6 +48,14 @@ const run = promisify(execFile);
 
 class UsageError extends Error {}
 
+/** A gh api 403 that the caller may interpret. */
+class Forbidden extends Error {
+  /** @param {string} path @param {string} detail */
+  constructor(path, detail) {
+    super(`gh api ${path} failed: ${detail}`);
+  }
+}
+
 /** A gh api 404 that the caller may interpret. */
 class NotFound extends Error {
   /** @param {string} path @param {string} body */
@@ -51,7 +69,13 @@ function parseArgs(argv) {
   /** @type {Record<string, string>} */
   const opts = {};
   const known = new Set(['repository', 'template', 'verdict-app-id', 'promoter-app-id']);
+  let requireEventPolicy = false;
   for (const arg of argv) {
+    if (arg === '--require-event-policy') {
+      if (requireEventPolicy) throw new UsageError('--require-event-policy given twice');
+      requireEventPolicy = true;
+      continue;
+    }
     const m = /^--([a-z-]+)=(.*)$/s.exec(arg);
     if (m === null || !known.has(m[1]))
       throw new UsageError(`unknown argument ${JSON.stringify(arg)}`);
@@ -75,12 +99,13 @@ function parseArgs(argv) {
     template: resolve(opts['template'] ?? DEFAULT_TEMPLATE),
     verdictAppId: (opts['verdict-app-id'] ?? '').trim(),
     promoterAppId: (opts['promoter-app-id'] ?? '').trim(),
+    requireEventPolicy,
   };
 }
 
 /**
- * GET one API path; parsed JSON. A 404 throws NotFound; any other failure
- * throws an Error carrying gh's stderr.
+ * GET one API path; parsed JSON. A 404 throws NotFound, a 403 Forbidden;
+ * any other failure throws an Error carrying gh's stderr.
  * @param {string} path
  */
 async function ghGet(path) {
@@ -100,6 +125,7 @@ async function ghGet(path) {
     const stderr = String(error?.stderr ?? '');
     if (/\(HTTP 404\)/.test(stderr)) throw new NotFound(path, String(error?.stdout ?? ''));
     const detail = stderr.trim() === '' ? String(error?.message ?? error) : stderr.trim();
+    if (/\(HTTP 403\)/.test(stderr)) throw new Forbidden(path, detail);
     throw new Error(`gh api ${path} failed: ${detail}`);
   }
   try {
@@ -127,9 +153,11 @@ function idOf(what, item) {
  * Read the live settings the template names.
  * @param {string} repo  `repos/<owner>/<name>`
  * @param {Record<string, any>} expected
+ * @param {boolean} requireEventPolicy  a 403 on the event-policy list is an
+ *   error, not "unchecked"
  * @returns {Promise<import('./lib/github-settings.mjs').LiveSettings>}
  */
-async function readLive(repo, expected) {
+async function readLive(repo, expected, requireEventPolicy) {
   const rulesetList = complete(
     'rulesets',
     await ghGet(`${repo}/rulesets?per_page=${PAGE}`),
@@ -189,16 +217,33 @@ async function readLive(repo, expected) {
 
   const actions = await ghGet(`${repo}/actions/permissions/workflow`);
 
-  const policyPage = await ghGet(`${repo}/actions/policies?per_page=${PAGE}`);
-  const actionsEventPolicies = [];
-  for (const summary of complete(
-    'actions policies',
-    policyPage?.policies,
-    policyPage?.total_count,
-  )) {
-    actionsEventPolicies.push(
-      await ghGet(`${repo}/actions/policies/${idOf('actions policy', summary)}`),
-    );
+  // Only the LIST read's 403 means "unchecked" (see the header); a 403 on
+  // a per-id read after the list succeeded, and every other failure, stay
+  // errors.
+  /** @type {Record<string, any>[] | null} */
+  let actionsEventPolicies = null;
+  let policyPage;
+  try {
+    policyPage = await ghGet(`${repo}/actions/policies?per_page=${PAGE}`);
+  } catch (error) {
+    if (!(error instanceof Forbidden)) throw error;
+    if (requireEventPolicy) {
+      throw new Error(
+        `${error.message} (--require-event-policy: the event policy read needs Administration: write)`,
+      );
+    }
+  }
+  if (policyPage !== undefined) {
+    actionsEventPolicies = [];
+    for (const summary of complete(
+      'actions policies',
+      policyPage?.policies,
+      policyPage?.total_count,
+    )) {
+      actionsEventPolicies.push(
+        await ghGet(`${repo}/actions/policies/${idOf('actions policy', summary)}`),
+      );
+    }
   }
 
   return {
@@ -227,7 +272,7 @@ async function main() {
   } catch (error) {
     throw new UsageError(error.message);
   }
-  const live = await readLive(opts.repo, expected);
+  const live = await readLive(opts.repo, expected, opts.requireEventPolicy);
   const { drift, notices } = compareSettings(expected, live);
   for (const line of drift) console.log(`drift: ${line}`);
   for (const line of notices) console.log(`notice: ${line}`);

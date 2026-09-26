@@ -116,8 +116,11 @@ export function renderSettings(templateText, ids) {
  * @property {string[]} repositorySecrets  `actions/secrets` → `.secrets[].name`.
  * @property {{ default_workflow_permissions?: string, can_approve_pull_request_reviews?: boolean }} actions
  *   `actions/permissions/workflow`.
- * @property {Record<string, any>[]} actionsEventPolicies
- *   Every Actions policy, each read in full by id (`actions/policies/{id}`).
+ * @property {Record<string, any>[] | null} actionsEventPolicies
+ *   Every Actions policy, each read in full by id (`actions/policies/{id}`);
+ *   null = UNCHECKED (the list read was refused with HTTP 403: GitHub gates
+ *   it behind Administration: write). Unchecked is neither matching nor
+ *   absent: it yields a notice, never a drift line or a pass.
  */
 
 /**
@@ -426,6 +429,10 @@ function compareRuleObject(prefix, expected, actual, drift) {
   }
 }
 
+/** The notice for an event policy the credential could not read (HTTP 403). */
+export const ACTIONS_EVENT_POLICY_UNCHECKED =
+  'actions event policy unchecked: GitHub requires Administration: write to read it; the CI drift credential is read-only by design — run the drift check with an owner/admin credential to cover it';
+
 /**
  * Compare a list of named ruleset-shaped objects by `name`.
  * @param {string} kind  `ruleset` | `actions event policy`
@@ -585,12 +592,16 @@ export function compareSettings(expected, actual) {
   }
 
   const policy = expected.actionsEventPolicy;
-  compareNamed(
-    'actions event policy',
-    policy === undefined || policy === null ? [] : [policy],
-    actual.actionsEventPolicies ?? [],
-    drift,
-  );
+  if (actual.actionsEventPolicies === null) {
+    notices.push(ACTIONS_EVENT_POLICY_UNCHECKED);
+  } else {
+    compareNamed(
+      'actions event policy',
+      policy === undefined || policy === null ? [] : [policy],
+      actual.actionsEventPolicies ?? [],
+      drift,
+    );
+  }
 
   return { drift, notices };
 }

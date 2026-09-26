@@ -15,7 +15,10 @@
 # stalling the slot).
 #
 # Instantiate (each token below is written in double braces in the body):
-#   SELFHOST_TOKEN          -> NAME of the repository secret holding a PAT
+#   SELFHOST_TOKEN          -> NAME of the `automation` ENVIRONMENT
+#                              secret (never a repository secret: GitHub
+#                              applies environment protection only to
+#                              environment secrets) holding a PAT
 #                              with repo scope on the target repo (the
 #                              dispatch merges PRs as its user; gh rides it
 #                              as GH_TOKEN). Instantiated files reference it

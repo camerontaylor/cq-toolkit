@@ -9,7 +9,10 @@
 # isolated to the main-only privileged job below.
 #
 # Instantiate (each token below is written in double braces in the body):
-#   SELFHOST_TOKEN          -> NAME of the repository secret holding a PAT
+#   SELFHOST_TOKEN          -> NAME of the `automation` ENVIRONMENT
+#                              secret (never a repository secret: GitHub
+#                              applies environment protection only to
+#                              environment secrets) holding a PAT
 #                              with repo scope on the target repo (the loop
 #                              posts review replies and resolves threads as
 #                              its user; gh rides it as GH_TOKEN).
@@ -17,9 +20,10 @@
 #                              `${{ secrets.<name> }}` — a name, never a
 #                              value; a template or instantiation that
 #                              embeds a token value is a denylist-class bug.
-#   SELFHOST_DRIVER_KEY     -> NAME of the repository secret holding the
-#                              model provider API key (the fix workers'
-#                              driver through the ai-sdk route).
+#   SELFHOST_DRIVER_KEY     -> NAME of the `automation` ENVIRONMENT
+#                              secret (likewise never a repository secret)
+#                              holding the model provider API key (the fix
+#                              workers' driver through the ai-sdk route).
 #   (cron window)           -> HAND-REPLACED slot (the {{COMMANDS...}}
 #                              convention from ../README.md): the template
 #                              carries THIS repo's two literal crons

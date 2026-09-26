@@ -18,6 +18,13 @@
 # ("drift check not armed") — an unarmed drift check is never green. The
 # script itself fails closed while the App ids (`vars.CQ_VERDICT_APP_ID`,
 # `vars.CQ_PROMOTER_APP_ID`) are unset: unregistered Apps are drift.
+# Read-only is deliberate, and it leaves one item uncovered: GitHub serves
+# the Actions event policy (`actions/policies`) only to Administration:
+# WRITE, which the verdict App must never hold (it could rewrite the
+# rulesets that pin its own checks — ADR-0004's identity split). The script
+# reports that 403 as a `notice:` (unchecked, never a match); the owner
+# covers it with `--require-event-policy` and an admin credential
+# (SELF-HOSTING.md).
 #
 # Instantiate: no tokens (the secret and variable names are literal). Drop
 # the result into .github/workflows/. Edit the template, not the

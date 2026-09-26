@@ -82,8 +82,11 @@ export interface LiveSettings {
   environments: Record<string, LiveEnvironment>;
   repositorySecrets: string[];
   actions: ActionsSettings;
-  actionsEventPolicies: RuleObject[];
+  /** null = unchecked: the list read was refused with HTTP 403 (a notice, not drift). */
+  actionsEventPolicies: RuleObject[] | null;
 }
+
+export const ACTIONS_EVENT_POLICY_UNCHECKED: string;
 
 export function renderSettings(
   templateText: string,

@@ -61,7 +61,10 @@ Literal names (no token; the same in every instantiation): the verdict
 posters (`cq-policy`, `cq-verify`, `cq-accept`) and `settings-drift` read
 `CQ_VERDICT_APP_KEY` from environment `cq-verdict`; `settings-drift` falls
 back to the interim read-only fine-grained PAT `CQ_SETTINGS_TOKEN` there
-(Administration, Environments, Secrets and Actions: read). `gate.yml` reads
+(Administration, Environments, Secrets and Actions: read; the Actions event
+policy, which GitHub serves only to Administration: write, is reported
+unchecked and covered by the owner-run `--require-event-policy` check).
+`gate.yml` reads
 `CQ_PROMOTER_APP_KEY` from environment `promote`. Each App's token is minted
 only when its `vars.CQ_*_APP_CLIENT_ID` repository variable is set; the
 gate's verdict selection keys on `vars.CQ_VERDICT_APP_ID`. The trust set is

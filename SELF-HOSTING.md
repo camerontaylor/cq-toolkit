@@ -172,6 +172,22 @@ Interim credentials (reported by the drift check until C3):
 - `CQ_SETTINGS_TOKEN` — read-only fine-grained PAT (Administration,
   Environments, Secrets, Actions: read) for the drift check.
 
+The scheduled drift check does not cover the Actions event policy: GitHub
+serves `actions/policies` only to Administration: **write**, and the drift
+credentials stay read-only by design (a verdict identity that could rewrite
+the rulesets pinning its own checks would collapse the ADR-0004 identity
+split). It reports the policy as unchecked (a `notice:` line). The owner
+covers it by running the check locally with an owner/admin credential in
+`GH_TOKEN`:
+
+```sh
+node scripts/github-settings-drift.mjs --repository=<owner>/<name> \
+  --verdict-app-id=<n> --promoter-app-id=<n> --require-event-policy
+```
+
+`--require-event-policy` makes a refused event-policy read an error
+(exit 2) instead of a notice.
+
 Owner steps, in order (the RS-11 wizard outline):
 
 1. Register the three Apps (`cq-verdict`, `cq-promoter`, `cq-automation`),
