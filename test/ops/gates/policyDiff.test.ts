@@ -168,6 +168,8 @@ const TRUST_FILES: Readonly<Record<string, string>> = {
 /** A fixture commit: file writes (`null` deletes) on top of `from` (default: the trust commit). */
 interface Spec {
   files: Readonly<Record<string, string | null>>;
+  /** Symlink entries (mode 120000): path → link target. */
+  symlinks?: Readonly<Record<string, string>>;
   from?: string;
 }
 
@@ -219,6 +221,10 @@ function importCommits(
         text(`M 100644 inline ${path}\n`);
         data(content);
       }
+    }
+    for (const [path, target] of Object.entries(spec.symlinks ?? {})) {
+      text(`M 120000 inline ${path}\n`);
+      data(target);
     }
     text('\n');
   });
@@ -513,6 +519,7 @@ describe('policyDiff: workflows', SLOW, () => {
         },
       },
       unparseable: { files: { [CI_PATH]: edit(CI_PATH, 'jobs:\n', 'x: &anchor 1\njobs:\n') } },
+      symlink: { files: {}, symlinks: { '.github/workflows/link.yml': 'ci.yml' } },
       'local-action': {
         files: { 'actions/setup/action.yml': 'runs:\n  using: composite\n  steps: [] # x\n' },
       },
@@ -599,6 +606,16 @@ describe('policyDiff: workflows', SLOW, () => {
       kind: 'required-check',
       path: CI_PATH,
       reason: 'changes the producer of required check static (workflow unparseable at the subject)',
+    });
+    expect(out.verdict).toBe('needs-human');
+  });
+
+  test('a changed workflow path that is a regular file at neither end fails closed', async () => {
+    const out = await run(c['symlink']!, 'diff-check');
+    expect(out.findings).toContainEqual({
+      kind: 'workflow-unparseable',
+      path: '.github/workflows/link.yml',
+      reason: 'changed workflow path is not a regular file at either end',
     });
     expect(out.verdict).toBe('needs-human');
   });

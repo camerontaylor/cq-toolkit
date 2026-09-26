@@ -512,6 +512,16 @@ export function createPolicyDiff(
       if (!isWorkflowPath(path)) continue;
       const before = baseFlows.get(path)?.text ?? null;
       const after = subjectFlows.get(path)?.text ?? null;
+      if (before === null && after === null) {
+        // Changed, yet a regular file at neither end (a symlink or gitlink
+        // edit): nothing to scan, so fail closed rather than report nothing.
+        add(
+          'workflow-unparseable',
+          path,
+          'changed workflow path is not a regular file at either end',
+        );
+        continue;
+      }
       findings.push(...diffWorkflow(path, before, after));
     }
 
