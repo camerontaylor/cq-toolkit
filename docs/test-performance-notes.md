@@ -89,8 +89,10 @@ external boundary still has at least one real fixture-process contract:
 The inventory guard scans every discovered test file for direct
 `node:child_process` imports and the known real-effect entry points
 (`spawnAcpProcess`, `spawnManaged`, the `makeSubprocess*Effects/Deps`
-factories, `makeGhRunner`, `makeCheckRunner`, `realMergeEffects`,
-`generateScratchRepo`, `createGitTemplate`, and `runSweepPlan`). It
+factories, `makeGhRunner`, `makeCheckRunner`, `realMergeEffects`, the
+harness `buildTools` and the in-process `ClaudeAgentDriver`/`AiSdkDriver`
+whose `run` tool executes through the shell, `generateScratchRepo`,
+`createGitTemplate`, and `runSweepPlan`). It
 deliberately guards **known entry points only**: a new or transitive spawn
 helper can evade this scan, so adding one requires conscious inventory review
 rather than pretending the regex is complete. The inventory also defines the
@@ -180,17 +182,22 @@ and write backpressure; both are covered by the real tests above.
 
 ## Process-entry inventory
 
-The committed list lives in `test/driver/process-inventory.test.ts` and is
-checked against the known entry-point scan. The current list is:
+The committed list is this section: `scripts/lib/test-lanes.mjs` parses it
+to derive the test lanes, and `test/driver/process-inventory.test.ts` checks
+it against the known entry-point scan. The current list is:
 
 - `test/cli/i1.test.ts`
 - `test/cli/plans.smoke.test.ts`
 - `test/driver/acp.real.test.ts`
+- `test/driver/ai-sdk.test.ts`
+- `test/driver/claude-agent.sdk-presence.test.ts`
+- `test/driver/claude-agent.test.ts`
 - `test/driver/subprocess.real.test.ts`
 - `test/e2e/analyze/analyze.e2e.test.ts`
 - `test/e2e/merge/live.test.ts`
 - `test/e2e/review/live.test.ts`
 - `test/e2e/sweep/sweep.e2e.test.ts`
+- `test/harness/tools.test.ts`
 - `test/helpers/git-template.test.ts`
 - `test/ops/gates/adapters.test.ts`
 - `test/ops/merge/executeMerges.test.ts`
@@ -235,6 +242,14 @@ Plan 003 F3 made the existing lane names honest without touching CI:
   (`makeSubprocess*Effects/Deps`, `makeGhRunner`, `makeCheckRunner`,
   `realMergeEffects`) moved eight files that launch shims or fixture
   processes into the process lane; a spawn trace of `test:unit` found them.
+- A later trace of suspicious unit files found three more reaching a real
+  shell through the harness `run` tool: `harness/tools.test.ts` directly,
+  `claude-agent.test.ts` and `ai-sdk.test.ts` through the shared driver
+  conformance suite. The `buildTools` and in-process driver patterns list
+  them; `claude-agent.sdk-presence.test.ts` matches without spawning (its
+  run is refused pre-dispatch). `test/ops/analyze/registry.test.ts` still
+  spawns (an `ast-grep` shim and a `node` verifier through the analyze
+  registry's real runner) with no known entry point in the test itself.
 - Correction (plan 003 F2): the earlier "57 of 58 driver-specific ACP tests
   spawn" was wrong — 11 never spawned (7 construct no driver, 4 assert zero
   pre-dispatch spawns), so **47 of 58** did. After F2, `acp.test.ts` and

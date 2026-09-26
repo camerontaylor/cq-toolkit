@@ -19,6 +19,10 @@ const PROCESS_ENTRY_POINTS = [
   /\bmakeGhRunner\s*\(/,
   /\bmakeCheckRunner\s*\(/,
   /\brealMergeEffects\s*\(/,
+  // The harness tool set, whose `run` tool executes through the shell, and
+  // the in-process drivers that hand it to the model.
+  /\bbuildTools\s*\(/,
+  /\bnew (?:ClaudeAgentDriver|AiSdkDriver)\s*\(/,
   /\bgenerateScratchRepo\s*\(/,
   /\bcreateGitTemplate\s*\(/,
   /\brunSweepPlan\s*\(/,
