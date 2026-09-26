@@ -763,13 +763,24 @@ function assertPushUrl(url: string): void {
   if (!safeLocal) throw new Error(`ratchet git: refusing push url '${url}'`);
 }
 
+/** One ref update of {@link gitPushAtomic}: a refspec and the oid the remote ref must hold. */
+export interface LeasedUpdate {
+  /** `<40-hex>:refs/heads/<branch>` — never `+`, never a pattern. */
+  refspec: string;
+  /** The oid the remote branch must still hold for the update to land (its lease). */
+  expected: string;
+}
+
 /**
- * Atomically push `refspecs` (each `<40-hex>:refs/heads/<branch>`) to `url`:
- * `push --atomic --porcelain --no-verify`, NEVER forced — the server's
- * non-fast-forward refusal is the compare-and-swap, and `--atomic` makes one
- * refusal refuse every ref. A rejection or transport failure RESOLVES
- * `{ ok: false, output }` (porcelain stdout + stderr); only invalid input
- * throws, before anything is spawned.
+ * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
+ * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
+ * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
+ * Each lease names the exact oid the caller last read, so the remote ref
+ * must still hold it — a ref that advanced OR was rewound (even to an
+ * ancestor of the new value, which a plain fast-forward push would accept)
+ * refuses, and `--atomic` makes one refusal refuse every ref. A rejection or
+ * transport failure RESOLVES `{ ok: false, output }` (porcelain stdout +
+ * stderr); only invalid input throws, before anything is spawned.
  *
  * The credential travels ONLY through the child env, as a step-scoped
  * `GIT_CONFIG_*` extra-header for `<scheme>://<host>/` — never argv (visible
@@ -784,16 +795,27 @@ function assertPushUrl(url: string): void {
 export async function gitPushAtomic(
   repo: string,
   url: string,
-  refspecs: readonly string[],
+  updates: readonly LeasedUpdate[],
   token: string,
 ): Promise<{ ok: boolean; output: string }> {
   assertPushUrl(url);
-  if (refspecs.length === 0) throw new Error('ratchet git: refusing an empty push');
-  for (const spec of refspecs) {
-    const match = PUSH_REFSPEC.exec(spec);
+  if (updates.length === 0) throw new Error('ratchet git: refusing an empty push');
+  const leases: string[] = [];
+  const branches = new Set<string>();
+  for (const { refspec, expected } of updates) {
+    const match = PUSH_REFSPEC.exec(refspec);
     const branch = match?.[2];
-    if (branch === undefined) throw new Error(`ratchet git: refusing push refspec '${spec}'`);
+    if (branch === undefined) throw new Error(`ratchet git: refusing push refspec '${refspec}'`);
     assertRev(branch, 'push branch');
+    if (branches.has(branch))
+      throw new Error(`ratchet git: refusing a second update of '${branch}'`);
+    branches.add(branch);
+    if (!OID.test(expected)) {
+      throw new Error(
+        `ratchet git: refusing lease '${expected}' for '${branch}' (not a 40-hex oid)`,
+      );
+    }
+    leases.push(`--force-with-lease=refs/heads/${branch}:${expected}`);
   }
   const env = gitEnv();
   delete env['GIT_ASKPASS'];
@@ -822,7 +844,16 @@ export async function gitPushAtomic(
   }
   const res = await execGitWithEnv(
     repo,
-    ['push', '--atomic', '--porcelain', '--no-verify', '--end-of-options', url, ...refspecs],
+    [
+      'push',
+      '--atomic',
+      '--porcelain',
+      '--no-verify',
+      ...leases,
+      '--end-of-options',
+      url,
+      ...updates.map((u) => u.refspec),
+    ],
     env,
   );
   let output = `${res.stdout.toString('utf8')}${res.stderr}`.trim();

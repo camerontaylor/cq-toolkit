@@ -12,7 +12,7 @@
 //   3. the paths that carry the protected-path list and the required-check
 //      list are in the definition set (D-C.4's last bullet).
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   PROTECTED_STAGE_PATTERNS,
@@ -189,5 +189,101 @@ describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
   test('policy and lint paths are also denied to sweep workers', () => {
     expect(isProtectedStagePath('policy/templates/ratchet.yml')).toBe(true);
     expect(isProtectedStagePath('lint/plugin.mjs')).toBe(true);
+  });
+});
+
+// W1.10 (#220, Decision 14) — the check code the promotion gate and the I2
+// acceptance verifier DECIDE through must be protected, not just the two
+// entry points: a PR that weakens a helper they call (say, the unresolved-
+// thread count) would otherwise land as an ordinary change and weaken
+// `cq/acceptance` and the gate's per-PR recompute without owner
+// break-glass. This walks the relative-import closure of the entry points
+// (value imports only; `import type` / `export type` erase at build) and
+// asserts every file matches a `policy/protected-paths.json` regex.
+describe('protected-paths.json covers the gate and acceptance import closure', () => {
+  const ENTRY_POINTS = ['src/selfhost/acceptance.ts', 'src/selfhost/promote-gate.ts'];
+
+  /**
+   * Closure files that need NOT be protected, each with its reason. Keep it
+   * minimal: a file carrying decision logic gets a regex in
+   * policy/protected-paths.json instead. Empty today — every value import
+   * in the closure is covered (src/kernel/types.ts is reached only through
+   * `import type`, so it is not in the closure).
+   */
+  const ALLOWLIST: Readonly<Record<string, string>> = {};
+
+  /** Relative value-import specifiers of one TS source (type-only forms excluded). */
+  function valueImports(text: string): string[] {
+    const out: string[] = [];
+    const fromRe = /^\s*(import|export)\s+(type\s+)?[^;'"]*?\bfrom\s+'(\.{1,2}\/[^']+)'/gm;
+    for (const m of text.matchAll(fromRe)) {
+      if (m[2] === undefined && m[3] !== undefined) out.push(m[3]);
+    }
+    for (const m of text.matchAll(/^\s*import\s+'(\.{1,2}\/[^']+)'/gm)) {
+      if (m[1] !== undefined) out.push(m[1]);
+    }
+    for (const m of text.matchAll(/\bimport\(\s*'(\.{1,2}\/[^']+)'\s*\)/g)) {
+      if (m[1] !== undefined) out.push(m[1]);
+    }
+    return out;
+  }
+
+  function closure(entries: readonly string[]): string[] {
+    const seen = new Set<string>();
+    const stack = [...entries];
+    while (stack.length > 0) {
+      const file = stack.pop() ?? '';
+      if (seen.has(file)) continue;
+      seen.add(file);
+      const text = readFileSync(join(REPO_ROOT, file), 'utf8');
+      for (const spec of valueImports(text)) {
+        const target = posix.normalize(
+          posix.join(posix.dirname(file), spec.replace(/\.js$/, '.ts')),
+        );
+        expect(target.startsWith('src/'), `${file} imports ${spec} outside src/`).toBe(true);
+        stack.push(target);
+      }
+    }
+    return [...seen].sort();
+  }
+
+  const POLICY = JSON.parse(
+    readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
+  ) as { protectedPaths: string[] };
+  const REGEXES = POLICY.protectedPaths.map((source) => new RegExp(source));
+
+  test('the import scanner keeps value imports and drops type-only ones', () => {
+    expect(
+      valueImports(
+        [
+          "import { a, type B } from './a.js';",
+          "import type { C } from './c.js';",
+          "export type { D } from './d.js';",
+          "export { e } from '../e.js';",
+          "export * from './f.js';",
+          "import {\n  g,\n  h,\n} from './g.js';",
+          "import './side.js';",
+          "const m = await import('./dyn.js');",
+          "import { x } from 'node:fs';",
+        ].join('\n'),
+      ),
+    ).toEqual(['./a.js', '../e.js', './f.js', './g.js', './side.js', './dyn.js']);
+  });
+
+  test('every closure file is protected or allowlisted with a reason', () => {
+    const files = closure(ENTRY_POINTS);
+    expect(files).toEqual(expect.arrayContaining([...ENTRY_POINTS, 'src/ops/review/threads.ts']));
+    const uncovered = files.filter(
+      (file) => !REGEXES.some((re) => re.test(file)) && !Object.hasOwn(ALLOWLIST, file),
+    );
+    expect(uncovered).toEqual([]);
+    // The allowlist never goes stale: each entry is in the closure and unprotected.
+    for (const file of Object.keys(ALLOWLIST)) {
+      expect(files, file).toContain(file);
+      expect(
+        REGEXES.some((re) => re.test(file)),
+        file,
+      ).toBe(false);
+    }
   });
 });

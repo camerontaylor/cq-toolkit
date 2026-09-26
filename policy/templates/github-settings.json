@@ -1,5 +1,5 @@
 {
-  "_doc": "D13 settings-as-code: the TARGET state of the repository's GitHub settings (ADR-0004 D-I, RS-11 branch matrix; W1.10 methods note). Rulesets R0/R1/R2 replace classic branch protection; environments pin deployment policy, admin bypass, reviewers and a secret-name allowlist (interimSecrets are the interim PAT names, reported as notices until ADR-0004 D-H.3 C3); reviewers \"any\" means not compared. scripts/github-settings-drift.mjs renders the quoted VERDICT_APP_ID and PROMOTER_APP_ID placeholders to numbers and reports drift against the live settings; applying this file is the W7.3a wizard's job. This _doc field is ignored by the comparator.",
+  "_doc": "D13 settings-as-code: the TARGET state of the repository's GitHub settings (ADR-0004 D-I, RS-11 branch matrix; W1.10 methods note). Rulesets R0/R1/R2 replace classic branch protection; environments pin deployment policy, admin bypass, reviewers, prevent_self_review, wait_timer (any other protection rule type, e.g. a custom deployment protection rule, is drift) and a secret-name allowlist (interimSecrets are the interim PAT names, reported as notices until ADR-0004 D-H.3 C3); reviewers \"any\" means not compared. scripts/github-settings-drift.mjs renders the quoted VERDICT_APP_ID and PROMOTER_APP_ID placeholders to numbers and reports drift against the live settings; applying this file is the W7.3a wizard's job. This _doc field is ignored by the comparator.",
   "schemaVersion": 1,
   "rulesets": [
     {
@@ -87,6 +87,8 @@
       "branch_policies": [{ "name": "main", "type": "branch" }],
       "can_admins_bypass": false,
       "reviewers": [],
+      "prevent_self_review": false,
+      "wait_timer": 0,
       "secrets": ["CQ_VERDICT_APP_KEY"],
       "interimSecrets": ["CQ_SETTINGS_TOKEN"]
     },
@@ -95,6 +97,8 @@
       "branch_policies": [{ "name": "main", "type": "branch" }],
       "can_admins_bypass": false,
       "reviewers": [],
+      "prevent_self_review": false,
+      "wait_timer": 0,
       "secrets": ["CQ_PROMOTER_APP_KEY"],
       "interimSecrets": ["PROMOTE_TOKEN"]
     },
@@ -103,6 +107,8 @@
       "branch_policies": [{ "name": "main", "type": "branch" }],
       "can_admins_bypass": false,
       "reviewers": [],
+      "prevent_self_review": false,
+      "wait_timer": 0,
       "secrets": ["CQ_AUTOMATION_APP_KEY", "Z_AI_API_KEY"],
       "interimSecrets": ["CQ_AUTOMATION_TOKEN", "GH_TOKEN"]
     },
@@ -111,6 +117,8 @@
       "branch_policies": [{ "name": "main", "type": "branch" }],
       "can_admins_bypass": true,
       "reviewers": "any",
+      "prevent_self_review": false,
+      "wait_timer": 0,
       "secrets": ["GH_TOKEN", "Z_AI_API_KEY", "DEEPSEEK_API_KEY"],
       "interimSecrets": []
     }

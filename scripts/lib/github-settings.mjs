@@ -24,6 +24,10 @@
 //   environments and Actions event policies present live but absent from
 //   the file are drift too (an unlisted environment would escape the
 //   secret allowlist; GitHub auto-creates an environment on first use).
+// - Environment protection: prevent_self_review and wait_timer are pinned
+//   per environment; a protection rule of any type the file cannot express
+//   (anything but required_reviewers, wait_timer, branch_policy — e.g. a
+//   custom deployment protection rule) is drift.
 // - Output is deterministic: fixed section order, names sorted.
 
 const PLACEHOLDERS = Object.freeze({
@@ -84,6 +88,15 @@ export function renderSettings(templateText, ids) {
  * @property {Reviewer[]} reviewers
  *   The `required_reviewers` protection rule's reviewers, normalized by
  *   environmentFromApi ([] when there is no such rule).
+ * @property {boolean} prevent_self_review
+ *   The `required_reviewers` rule's `prevent_self_review` (false when there
+ *   is no such rule).
+ * @property {number} wait_timer
+ *   The `wait_timer` rule's minutes (0 when there is no such rule).
+ * @property {string[]} other_rules
+ *   The type of every protection rule other than `required_reviewers`,
+ *   `wait_timer` and `branch_policy` (e.g. a custom deployment protection
+ *   rule) — sorted; the target has none, so any entry is drift.
  * @property {string[]} secrets  `environments/{name}/secrets` → `.secrets[].name`.
  */
 
@@ -122,6 +135,9 @@ function reviewerFromApi(entry) {
   return { type, id: who.id };
 }
 
+/** The protection-rule types the comparator models; any other type is drift. */
+const MODELED_RULE_TYPES = Object.freeze(['required_reviewers', 'wait_timer', 'branch_policy']);
+
 /**
  * Assemble one LiveEnvironment from the environment object
  * (`environments/{name}` or an entry of `environments`), its
@@ -134,10 +150,22 @@ function reviewerFromApi(entry) {
 export function environmentFromApi(env, branchPolicies, secretNames) {
   const dbp = env.deployment_branch_policy;
   const rules = Array.isArray(env.protection_rules) ? env.protection_rules : [];
-  const reviewers = rules
-    .filter((rule) => rule?.type === 'required_reviewers')
+  const reviewerRules = rules.filter((rule) => rule?.type === 'required_reviewers');
+  const reviewers = reviewerRules
     .flatMap((rule) => (Array.isArray(rule.reviewers) ? rule.reviewers : []))
     .map(reviewerFromApi);
+  // Any rule saying `true` wins: a self-review ban is never hidden by a
+  // second rule. A malformed value is kept as-is so it shows as drift.
+  const prevent = reviewerRules.map((rule) => rule.prevent_self_review);
+  const preventSelfReview = prevent.includes(true)
+    ? true
+    : (prevent.find((value) => value !== false && value !== undefined) ?? false);
+  const timers = rules.filter((rule) => rule?.type === 'wait_timer').map((rule) => rule.wait_timer);
+  const waitTimer = timers.find((value) => value !== 0) ?? 0;
+  const otherRules = rules
+    .map((rule) => String(rule?.type ?? 'unknown'))
+    .filter((type) => !MODELED_RULE_TYPES.includes(type))
+    .sort(byString);
   return {
     deployment_branch_policy:
       dbp === null || dbp === undefined
@@ -149,6 +177,9 @@ export function environmentFromApi(env, branchPolicies, secretNames) {
     branch_policies: branchPolicies.map((p) => ({ name: p.name, type: p.type })),
     can_admins_bypass: env.can_admins_bypass,
     reviewers,
+    prevent_self_review: preventSelfReview,
+    wait_timer: waitTimer,
+    other_rules: otherRules,
     secrets: [...secretNames],
   };
 }
@@ -457,6 +488,18 @@ function compareEnvironment(name, expected, actual, drift, notices) {
   if (expected.can_admins_bypass !== actual.can_admins_bypass) {
     drift.push(
       `${prefix}: can_admins_bypass differs: expected ${canon(expected.can_admins_bypass)} actual ${canon(actual.can_admins_bypass)}`,
+    );
+  }
+  for (const key of ['prevent_self_review', 'wait_timer']) {
+    if (canon(expected[key]) !== canon(actual[key])) {
+      drift.push(
+        `${prefix}: ${key} differs: expected ${canon(expected[key])} actual ${canon(actual[key])}`,
+      );
+    }
+  }
+  for (const type of actual.other_rules ?? []) {
+    drift.push(
+      `${prefix}: protection rule of type ${JSON.stringify(type)} present live (the target has no custom deployment protection rules)`,
     );
   }
   if (expected.reviewers !== 'any') {

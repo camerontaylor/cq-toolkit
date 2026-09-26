@@ -38,6 +38,10 @@ export interface EnvironmentTarget {
   can_admins_bypass: boolean;
   /** `"any"` = not compared (drill: the owner may be a required reviewer). */
   reviewers: Reviewer[] | 'any';
+  /** Pinned: the `required_reviewers` rule's self-review ban. */
+  prevent_self_review: boolean;
+  /** Pinned: the `wait_timer` rule's minutes. */
+  wait_timer: number;
   secrets: string[];
   interimSecrets: string[];
 }
@@ -64,6 +68,10 @@ export interface LiveEnvironment {
   branch_policies: { name: string; type: string }[];
   can_admins_bypass: boolean;
   reviewers: Reviewer[];
+  prevent_self_review: boolean;
+  wait_timer: number;
+  /** Protection-rule types other than required_reviewers/wait_timer/branch_policy (drift). */
+  other_rules: string[];
   secrets: string[];
 }
 

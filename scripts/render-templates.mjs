@@ -6,14 +6,21 @@
 // --check exits 1 listing every instance whose rendered text differs from
 // the committed workflow, and every table/coverage error in
 // policy/templates/instances.json. --write re-instantiates: it writes each
-// instance's rendered text to .github/workflows/ (still exiting 1 on any
-// table or render error). The mechanics live in scripts/lib/render-templates.mjs.
+// instance's rendered text to .github/workflows/ — but writes NOTHING while
+// any table or render error stands other than "listed but does not exist"
+// for a workflow (the new instance --write is there to create). The
+// mechanics live in scripts/lib/render-templates.mjs.
 
 import { writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { WORKFLOWS_DIR, collectRenders, firstDifference } from './lib/render-templates.mjs';
+import {
+  WORKFLOWS_DIR,
+  collectRenders,
+  firstDifference,
+  writeBlockers,
+} from './lib/render-templates.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const mode = process.argv[2];
@@ -24,6 +31,14 @@ if (process.argv.length !== 3 || (mode !== '--check' && mode !== '--write')) {
 
 const { errors, results } = collectRenders(ROOT);
 const problems = [...errors];
+if (mode === '--write') {
+  const blockers = writeBlockers(errors);
+  if (blockers.length > 0) {
+    for (const problem of blockers) console.error(`render-templates: ${problem}`);
+    console.error('render-templates: --write refused (nothing written): fix the table first');
+    process.exit(1);
+  }
+}
 for (const { workflow, template, expected, actual } of results) {
   if (expected === null) continue;
   if (mode === '--write') {

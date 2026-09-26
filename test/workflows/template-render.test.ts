@@ -5,7 +5,21 @@
 // instantiated or listed as adopter-only. The render is the README's "How
 // instantiation works": literal `{{TOKEN}}` replacement plus the provenance
 // header. Re-instantiate with `node scripts/render-templates.mjs --write`.
-import { readFileSync } from 'node:fs';
+// The table's names are file names (a workflow directly under
+// .github/workflows/, a template at most one directory under
+// policy/templates/, never a `..` segment), and --write writes nothing
+// while any table error but "listed but does not exist" stands.
+import { spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -20,6 +34,7 @@ import {
   renderTemplate,
   templateTokens,
   validateTable,
+  writeBlockers,
 } from '../../scripts/lib/render-templates.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -88,6 +103,30 @@ describe('template render-diff: coverage', () => {
       'workflow ghost.yml is listed but does not exist',
       'template d.yml is not accounted for (add it to "instances" or "adopterOnly")',
     ]);
+    expect(
+      validateTable(
+        {
+          schemaVersion: 1,
+          instances: [
+            { workflow: '../../package.json', template: 'a.yml', tokens: {} },
+            { workflow: 'sub/x.yml', template: '../a.yml', tokens: {} },
+            { workflow: 'x.txt', template: 'a/b/c.yml', tokens: {} },
+          ],
+          nonTemplated: [{ workflow: '..', reason: 'r' }],
+          adopterOnly: [{ template: './a.yml', reason: 'r' }],
+        },
+        [],
+        [],
+      ).filter((e) => !/listed|accounted/.test(e)),
+    ).toEqual([
+      'instances[0]: workflow "../../package.json" is not a file name directly under .github/workflows/',
+      'instances[1]: workflow "sub/x.yml" is not a file name directly under .github/workflows/',
+      'instances[1]: template "../a.yml" is not a .yml/.yaml path under policy/templates/ (at most one directory, no \'..\')',
+      'instances[2]: workflow "x.txt" is not a file name directly under .github/workflows/',
+      'instances[2]: template "a/b/c.yml" is not a .yml/.yaml path under policy/templates/ (at most one directory, no \'..\')',
+      'nonTemplated[0]: workflow ".." is not a file name directly under .github/workflows/',
+      'adopterOnly[0]: template "./a.yml" is not a .yml/.yaml path under policy/templates/ (at most one directory, no \'..\')',
+    ]);
     expect(validateTable({ schemaVersion: 2 }, [], [])).toEqual([
       'schemaVersion must be 1',
       '"instances" must be an array',
@@ -138,5 +177,80 @@ describe('renderTemplate', () => {
     expect(firstDifference('a\n', 'a')).toBe(
       'first difference at line 2: rendered "", committed <end of file>',
     );
+  });
+});
+
+describe('render-templates --write refuses an invalid table', () => {
+  it('writeBlockers passes only a missing workflow through', () => {
+    expect(
+      writeBlockers([
+        `${TABLE_PATH}: workflow new.yml is listed but does not exist`,
+        `${TABLE_PATH}: template gone.yml is listed but does not exist`,
+        `${TABLE_PATH}: instances[0]: workflow "../x" is not a file name directly under .github/workflows/`,
+      ]),
+    ).toEqual([
+      `${TABLE_PATH}: template gone.yml is listed but does not exist`,
+      `${TABLE_PATH}: instances[0]: workflow "../x" is not a file name directly under .github/workflows/`,
+    ]);
+  });
+
+  /** A scratch repo root with the CLI, its lib, one template and `table`. */
+  function scratch(table: unknown): string {
+    const root = mkdtempSync(join(tmpdir(), 'cq-render-'));
+    mkdirSync(join(root, 'scripts', 'lib'), { recursive: true });
+    mkdirSync(join(root, TEMPLATES_DIR), { recursive: true });
+    mkdirSync(join(root, WORKFLOWS_DIR), { recursive: true });
+    copyFileSync(
+      join(ROOT, 'scripts/render-templates.mjs'),
+      join(root, 'scripts/render-templates.mjs'),
+    );
+    copyFileSync(
+      join(ROOT, 'scripts/lib/render-templates.mjs'),
+      join(root, 'scripts/lib/render-templates.mjs'),
+    );
+    writeFileSync(join(root, TEMPLATES_DIR, 'a.yml'), 'name: a\n');
+    writeFileSync(join(root, 'package.json'), '{"keep":true}\n');
+    writeFileSync(join(root, TABLE_PATH), JSON.stringify(table));
+    return root;
+  }
+  const write = (root: string) =>
+    spawnSync(process.execPath, [join(root, 'scripts/render-templates.mjs'), '--write'], {
+      encoding: 'utf8',
+    });
+
+  it('an escaping workflow path writes nothing and exits 1', { timeout: 30_000 }, () => {
+    const root = scratch({
+      schemaVersion: 1,
+      instances: [{ workflow: '../../package.json', template: 'a.yml', tokens: {} }],
+      nonTemplated: [],
+      adopterOnly: [],
+    });
+    try {
+      const r = write(root);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/--write refused \(nothing written\)/);
+      expect(readFileSync(join(root, 'package.json'), 'utf8')).toBe('{"keep":true}\n');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a new instance whose workflow does not exist yet is created', { timeout: 30_000 }, () => {
+    const root = scratch({
+      schemaVersion: 1,
+      instances: [{ workflow: 'a.yml', template: 'a.yml', tokens: {} }],
+      nonTemplated: [],
+      adopterOnly: [],
+    });
+    try {
+      const r = write(root);
+      expect(r.stderr).toMatch(/workflow a\.yml is listed but does not exist/);
+      expect(existsSync(join(root, WORKFLOWS_DIR, 'a.yml'))).toBe(true);
+      expect(readFileSync(join(root, WORKFLOWS_DIR, 'a.yml'), 'utf8')).toBe(
+        `# instantiated from ${TEMPLATES_DIR}/a.yml — edit the template, not this file\nname: a\n`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

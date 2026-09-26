@@ -494,3 +494,154 @@ ${script}`;
     },
   );
 });
+
+// W1.10 review fix-forward — each App is named by a PAIR of repository
+// variables: the client id mints its token, the numeric id selects its
+// verdicts (gate, cq-accept's sweep dedupe) or is rendered into the settings
+// target (drift). Every job that reads either half refuses, in a LEADING
+// step, when exactly one of a pair is set (Decisions 6, 7).
+describe('App variable pairs are refused half-set (W1.10 Decisions 6, 7)', () => {
+  const VERDICT_STEP = 'Refuse a half-registered verdict App (paired vars)';
+  const BOTH_STEP = 'Refuse a half-registered App (paired vars)';
+  const CASES: Array<[string, string, string, boolean]> = [
+    ['cq-policy.yml', 'judge', VERDICT_STEP, false],
+    ['cq-verify.yml', 'judge', VERDICT_STEP, false],
+    ['cq-accept.yml', 'judge', VERDICT_STEP, false],
+    ['gate.yml', 'decide', BOTH_STEP, true],
+    ['settings-drift.yml', 'drift', BOTH_STEP, true],
+  ];
+  const copies = CASES.flatMap(([file, job, step, promoter]) =>
+    bothCopies(file).map(
+      ([label, text]) =>
+        [label, job, step, promoter, text] as [string, string, string, boolean, string],
+    ),
+  );
+
+  it.each(copies)(
+    '%s: the %s job refuses a half-set pair first, through env: only',
+    { timeout: 60_000 },
+    (_label, jobId, stepName, promoter, text) => {
+      const job = jobBlocks(code(text)).get(jobId) ?? '';
+      const first = steps(job)[0] ?? '';
+      expect(first.startsWith(`      - name: ${stepName}\n`)).toBe(true);
+      const envNames = promoter
+        ? {
+            VERDICT_APP_ID: 'CQ_VERDICT_APP_ID',
+            VERDICT_CLIENT_ID: 'CQ_VERDICT_APP_CLIENT_ID',
+            PROMOTER_APP_ID: 'CQ_PROMOTER_APP_ID',
+            PROMOTER_CLIENT_ID: 'CQ_PROMOTER_APP_CLIENT_ID',
+          }
+        : { APP_ID: 'CQ_VERDICT_APP_ID', CLIENT_ID: 'CQ_VERDICT_APP_CLIENT_ID' };
+      for (const [name, variable] of Object.entries(envNames)) {
+        expect(first).toContain(`          ${name}: \${{ vars.${variable} }}`);
+      }
+      const script = runScript(job, stepName);
+      expect(script).not.toContain('${{');
+      const runWith = (env: Record<string, string>) =>
+        spawnSync('bash', ['-c', script], {
+          encoding: 'utf8',
+          env: { PATH: process.env['PATH'] ?? '', ...env },
+        });
+      const pairs = promoter
+        ? [
+            ['VERDICT_APP_ID', 'VERDICT_CLIENT_ID'],
+            ['PROMOTER_APP_ID', 'PROMOTER_CLIENT_ID'],
+          ]
+        : [['APP_ID', 'CLIENT_ID']];
+      const blank = Object.fromEntries(Object.keys(envNames).map((k) => [k, '']));
+      const full = Object.fromEntries(Object.keys(envNames).map((k) => [k, '123']));
+      expect(runWith(blank).status).toBe(0);
+      expect(runWith(full).status).toBe(0);
+      for (const [id, client] of pairs) {
+        for (const half of [id, client]) {
+          const r = runWith({ ...blank, [half ?? '']: '123' });
+          expect(r.status, `${half ?? ''} alone`).toBe(1);
+          expect(r.stdout).toMatch(/refusing: set vars\.\S+ and/);
+          expect(r.stdout).toMatch(/together \(exactly one is set\)/);
+          const r2 = runWith({ ...full, [half === id ? (client ?? '') : (id ?? '')]: '' });
+          expect(r2.status, `${half ?? ''} alone (other pair full)`).toBe(1);
+        }
+      }
+    },
+  );
+});
+
+// W1.10 review fix-forward — cq/acceptance posts are ordered per PR: judge
+// holds a per-PR lock that resolve emits, so two runs for one PR never judge
+// and post concurrently (an older snapshot can never post last).
+describe('cq-accept serializes judge per PR (W1.10 Decision 10)', () => {
+  it.each(bothCopies('cq-accept.yml'))(
+    '%s: judge locks on resolve.outputs.lock; no workflow-level group',
+    (_label, text) => {
+      const body = code(text);
+      expect(body).not.toMatch(/^concurrency:/m);
+      const judge = jobBlocks(body).get('judge') ?? '';
+      expect(judge).toMatch(
+        /^ {4}concurrency:\n {6}group: cq-accept-\$\{\{ needs\.resolve\.outputs\.lock \}\}\n {6}cancel-in-progress: false$/m,
+      );
+      expect(jobBlocks(body).get('resolve')).toMatch(
+        /^ {6}lock: \$\{\{ steps\.targets\.outputs\.lock \}\}$/m,
+      );
+    },
+  );
+
+  it.each(bothCopies('cq-accept.yml'))(
+    '%s: resolve emits pr-<n> for a dispatch and sweep for the schedule',
+    { timeout: 60_000 },
+    (_label, text) => {
+      const script = runScript(
+        jobBlocks(code(text)).get('resolve') ?? '',
+        'Verify the trigger and resolve the targets',
+      );
+      const SHA = '0123456789abcdef0123456789abcdef01234567';
+      const pull = {
+        number: 7,
+        state: 'open',
+        draft: false,
+        head: { sha: SHA, repo: { id: 42 } },
+        base: { ref: 'merge-queue' },
+      };
+      const shell = `gh() {
+  [ "$1" = api ] || return 9
+  shift
+  [ "$1" = --paginate ] && shift
+  local path="$1" data
+  shift
+  case "$path" in
+    repos/o/r/pulls/7) data="$PULL";;
+    repos/o/r/pulls\\?*) data="$PULLS";;
+    *) return 9;;
+  esac
+  if [ "\${1:-}" = --jq ]; then jq -c "$2" <<<"$data"; else printf '%s\\n' "$data"; fi
+}
+${script}`;
+      const dir = mkdtempSync(join(tmpdir(), 'cq-accept-lock-'));
+      try {
+        const out = join(dir, 'out');
+        const lockFor = (env: Record<string, string>): string | undefined => {
+          rmSync(out, { force: true });
+          const r = spawnSync('bash', ['-c', shell], {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              REPO: 'o/r',
+              REPO_ID: '42',
+              RUN_ID: '',
+              PR_INPUT: '',
+              PULL: JSON.stringify(pull),
+              PULLS: JSON.stringify([pull, { ...pull, number: 8 }]),
+              GITHUB_OUTPUT: out,
+              ...env,
+            },
+          });
+          expect(r.status, r.stderr + r.stdout).toBe(0);
+          return /^lock=(.*)$/m.exec(readFileSync(out, 'utf8'))?.[1];
+        };
+        expect(lockFor({ EVENT: 'workflow_dispatch', PR_INPUT: '7' })).toBe('pr-7');
+        expect(lockFor({ EVENT: 'schedule' })).toBe('sweep');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+});

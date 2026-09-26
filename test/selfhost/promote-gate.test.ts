@@ -4,13 +4,17 @@
 // Pure rules: checkClosure (accepted merges pass; a direct push, a merge with
 // no PR, a PR head that is not M^2, a PR into main, an unmerged PR, a fork
 // PR, an octopus, and a commit reachable only through an unadmitted merge
-// all refuse), selectVerdict (app-id and interim modes), checkVerifiedRun
-// (path/event/repo/sha/conclusion and job shape), parseGateArgs.
+// all refuse), selectVerdict (app-id and interim modes), verifierRanAt (the
+// interim "default-branch cq-verify ran at main" rule), checkVerifiedRun
+// (path/event/branch/repo/sha/conclusion and job shape), parseGateArgs.
 //
 // runGate end-to-end over a fake gh (a route table, every argv recorded), a
 // fake acceptance and policy diff, a fake clock, and either fake git or —
 // for the real promotion — the real hardened helpers over a temp repository
-// pushing to a local bare remote.
+// pushing to a local bare remote (including a queue rewound between the
+// gate's read and its leased push). mainWith: the push credential is out of
+// the env before any gh/git child runs, and `--push` without it is refused
+// before any read.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -25,12 +29,14 @@ import {
   POLL_MS,
   checkClosure,
   checkVerifiedRun,
+  mainWith,
   parseGateArgs,
   realGateGit,
   remoteUrlFor,
   runGate,
   selectVerdict,
   toMergedPr,
+  verifierRanAt,
   type GateConfig,
   type GateDeps,
   type GateGit,
@@ -198,7 +204,6 @@ const run = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   status: 'completed',
   conclusion: 'success',
   completed_at: '2026-09-01T00:00:00Z',
-  check_suite: { id: 11 },
   ...over,
 });
 
@@ -206,8 +211,7 @@ const appWant: VerdictWant = {
   tip: TIP,
   main: MAIN,
   verdictAppId: 500,
-  defaultBranch: 'main',
-  suiteRuns: new Map(),
+  verifierRan: false,
 };
 
 describe('selectVerdict (app-id mode)', () => {
@@ -255,46 +259,86 @@ describe('selectVerdict (app-id mode)', () => {
 });
 
 describe('selectVerdict (interim mode)', () => {
-  const goodRun = {
-    path: '.github/workflows/cq-verify.yml',
-    event: 'workflow_run',
-    head_branch: 'main',
-  };
-  const want = (suiteRun: unknown): VerdictWant => ({
+  const want = (verifierRan: boolean): VerdictWant => ({
     ...appWant,
     verdictAppId: null,
-    suiteRuns: new Map([[11, suiteRun]]),
+    verifierRan,
   });
   const actionsRow = run({ app: { id: 15368, slug: 'github-actions' } });
 
-  test('slug + path + event + branch pass, and the report marks the interim form', () => {
-    const s = selectVerdict([actionsRow], want(goodRun));
+  test('slug + binding + a completed verifier run pass; the report marks the interim form', () => {
+    const s = selectVerdict([actionsRow], want(true));
     expect(s.state).toBe('success');
     expect(s.lines[0]).toBe(
-      'interim verdict selection (app slug + workflow path; forgeable per RS-4 T-13; ends at C2)',
+      'interim verdict selection (app slug + binding + a completed default-branch cq-verify run at main; forgeable per RS-4 T-13; ends at C2)',
     );
-    expect(
-      selectVerdict([actionsRow], want({ ...goodRun, event: 'workflow_dispatch' })).state,
-    ).toBe('success');
   });
 
-  test('each of slug, path, event, branch is checked', () => {
-    expect(selectVerdict([run({ app: { id: 1, slug: 'other' } })], want(goodRun)).state).toBe(
-      'missing',
-    );
-    for (const bad of [
-      { ...goodRun, path: '.github/workflows/evil.yml' },
-      { ...goodRun, event: 'push' },
-      { ...goodRun, event: 'pull_request' },
-      { ...goodRun, head_branch: 'feature' },
-      null,
-    ]) {
-      expect(selectVerdict([actionsRow], want(bad)).state).toBe('missing');
-    }
+  test('no completed default-branch verifier run at main → every row is missing', () => {
+    const s = selectVerdict([actionsRow], want(false));
+    expect(s.state).toBe('missing');
+    expect(s.lines.join('\n')).toMatch(/no completed cq-verify\.yml run on the default branch/);
     expect(
-      selectVerdict([run({ app: { slug: 'github-actions' }, check_suite: null })], want(goodRun))
+      selectVerdict([run({ app: { slug: 'github-actions' }, status: 'in_progress' })], want(false))
         .state,
     ).toBe('missing');
+  });
+
+  test('slug, head_sha and binding are each checked', () => {
+    expect(selectVerdict([run({ app: { id: 1, slug: 'other' } })], want(true)).state).toBe(
+      'missing',
+    );
+    expect(
+      selectVerdict([run({ app: { slug: 'github-actions' }, head_sha: MAIN })], want(true)).state,
+    ).toBe('missing');
+    const other = selectVerdict(
+      [run({ app: { slug: 'github-actions' }, external_id: `${sha('1')}:${TIP}` })],
+      want(true),
+    );
+    expect(other.state).toBe('missing');
+    expect(other.lines.join('\n')).toMatch(/bound to another main 1/);
+  });
+});
+
+describe('verifierRanAt (interim)', () => {
+  const vwant = { main: MAIN, defaultBranch: 'main', repositoryId: REPO_ID };
+  const vrun = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+    id: 31,
+    path: '.github/workflows/cq-verify.yml',
+    event: 'workflow_run',
+    head_branch: 'main',
+    head_sha: MAIN,
+    head_repository: { id: REPO_ID },
+    status: 'completed',
+    conclusion: 'success',
+    created_at: '2026-09-01T00:00:00Z',
+    ...over,
+  });
+
+  test('a completed workflow_run or workflow_dispatch run at main counts; newest wins', () => {
+    expect(verifierRanAt([vrun()], vwant)).toBe(31);
+    expect(
+      verifierRanAt([vrun({ event: 'workflow_dispatch', conclusion: 'failure' })], vwant),
+    ).toBe(31);
+    expect(
+      verifierRanAt([vrun(), vrun({ id: 32, created_at: '2026-09-02T00:00:00Z' })], vwant),
+    ).toBe(32);
+    expect(verifierRanAt([], vwant)).toBeNull();
+  });
+
+  test('path, event, branch, sha, repository and status are each checked', () => {
+    for (const over of [
+      { path: '.github/workflows/evil.yml' },
+      { event: 'push' },
+      { event: 'pull_request' },
+      { head_branch: 'merge-queue' },
+      { head_sha: TIP },
+      { head_repository: { id: 1 } },
+      { head_repository: null },
+      { status: 'in_progress' },
+    ]) {
+      expect(verifierRanAt([vrun(over)], vwant), JSON.stringify(over)).toBeNull();
+    }
   });
 });
 
@@ -304,6 +348,7 @@ describe('checkVerifiedRun', () => {
     id: 77,
     path: '.github/workflows/ci.yml',
     event: 'push',
+    head_branch: 'merge-queue',
     head_repository: { id: REPO_ID },
     head_sha: TIP,
     status: 'completed',
@@ -334,6 +379,8 @@ describe('checkVerifiedRun', () => {
     const cases: [Record<string, unknown>, RegExp][] = [
       [{ path: '.github/workflows/other.yml' }, /path/],
       [{ event: 'workflow_dispatch' }, /event/],
+      [{ head_branch: 'x' }, /head branch 'x' is not 'merge-queue'/],
+      [{ head_branch: null }, /head branch/],
       [{ head_repository: { id: 1 } }, /head repository/],
       [{ head_sha: MAIN }, /head_sha/],
       [{ conclusion: 'failure' }, /conclusion 'failure'/],
@@ -419,7 +466,8 @@ interface World {
   measureRuns: unknown[];
   verifiedRuns: Map<string, unknown[]>;
   jobs: unknown[];
-  suiteRuns: Map<number, unknown>;
+  /** cq-verify runs (the interim verifier-ran read). */
+  verifyRuns: unknown[];
   dispatchCode: number;
   /** Called on each check-runs read (lets a test publish the verdict later). */
   onCheckRuns?: (n: number) => void;
@@ -466,16 +514,15 @@ function fakeGh(world: World, calls: string[][]): GhFn {
       checkReads += 1;
       return Promise.resolve(ok(world.checkRuns.map((rows) => ({ check_runs: rows }))));
     }
-    if (q === 'repos/o/r/actions/runs') {
-      const id = Number(/check_suite_id=(\d+)/.exec(path)?.[1]);
-      const r = world.suiteRuns.get(id);
-      return Promise.resolve(ok({ workflow_runs: r === undefined ? [] : [r] }));
-    }
     m = /^repos\/o\/r\/actions\/workflows\/([^/]+)\/runs$/.exec(q);
     if (m !== null) {
       const file = m[1] ?? '';
       const runs =
-        file === 'cq-measure.yml' ? world.measureRuns : (world.verifiedRuns.get(file) ?? []);
+        file === 'cq-measure.yml'
+          ? world.measureRuns
+          : file === 'cq-verify.yml'
+            ? world.verifyRuns
+            : (world.verifiedRuns.get(file) ?? []);
       return Promise.resolve(ok([{ workflow_runs: runs }]));
     }
     if (/^repos\/o\/r\/actions\/runs\/\d+\/jobs$/.test(q)) {
@@ -489,6 +536,7 @@ const greenRun = (file: string, tip: string): Record<string, unknown> => ({
   id: 100,
   path: `.github/workflows/${file}`,
   event: 'push',
+  head_branch: 'merge-queue',
   head_repository: { id: REPO_ID },
   head_sha: tip,
   status: 'completed',
@@ -541,7 +589,7 @@ function world(tip = M1, main = MAIN, over: Partial<World> = {}): World {
       ['denylist.yml', [greenRun('denylist.yml', tip)]],
     ]),
     jobs: [greenJob],
-    suiteRuns: new Map(),
+    verifyRuns: [],
     dispatchCode: 0,
     ...over,
   };
@@ -677,6 +725,12 @@ describe('runGate', () => {
     expect(text).toMatch(/verified ci\.yml: success/);
     expect(text).toMatch(/push: dry run/);
     expect(dispatches(h.calls)).toEqual([]);
+    // Verified runs are the queue's own push runs: branch-filtered.
+    expect(h.calls.map((c) => c[1])).toContain(
+      `repos/o/r/actions/workflows/ci.yml/runs?head_sha=${M1}&event=push&branch=merge-queue&per_page=100`,
+    );
+    // App mode never reads the interim verifier runs.
+    expect(h.calls.some((c) => (c[1] ?? '').includes('cq-verify.yml/runs'))).toBe(false);
   });
 
   test('noop when tip == main or tip is an ancestor of main', async () => {
@@ -851,28 +905,80 @@ describe('runGate', () => {
     expect(h.sleeps).toEqual([POLL_MS]);
   });
 
-  test('interim mode resolves each suite run and marks the report', async () => {
+  test('interim mode: a completed default-branch verifier run at main admits the row', async () => {
+    const verifyRun = {
+      id: 31,
+      path: '.github/workflows/cq-verify.yml',
+      event: 'workflow_run',
+      head_branch: 'main',
+      head_sha: MAIN,
+      head_repository: { id: REPO_ID },
+      status: 'completed',
+      created_at: '2026-09-01T00:00:00Z',
+    };
     const w = world(M1, MAIN, {
-      checkRuns: [
-        [
-          verdictRow(M1, MAIN, {
-            app: { id: 15368, slug: 'github-actions' },
-            check_suite: { id: 11 },
-          }),
-        ],
-      ],
-      suiteRuns: new Map([
-        [
-          11,
-          { path: '.github/workflows/cq-verify.yml', event: 'workflow_run', head_branch: 'main' },
-        ],
-      ]),
+      checkRuns: [[verdictRow(M1, MAIN, { app: { id: 15368, slug: 'github-actions' } })]],
+      verifyRuns: [verifyRun],
     });
     const h = harness(w);
     const r = await runGate(h.deps, cfg({ verdictAppId: null }));
     expect(r.verdict).toBe('would-promote');
-    expect(r.report.join('\n')).toMatch(/interim verdict selection/);
-    expect(h.calls.some((c) => c[1] === 'repos/o/r/actions/runs?check_suite_id=11')).toBe(true);
+    const text = r.report.join('\n');
+    expect(text).toMatch(/interim verdict selection/);
+    expect(text).toMatch(new RegExp(`interim: cq-verify\\.yml run 31 completed at ${MAIN}`));
+    expect(h.calls.map((c) => c[1])).toContain(
+      `repos/o/r/actions/workflows/cq-verify.yml/runs?head_sha=${MAIN}&branch=main&per_page=100`,
+    );
+    expect(h.calls.some((c) => (c[1] ?? '').includes('check_suite_id'))).toBe(false);
+  });
+
+  test('interim mode: no verifier run yet → missing, one dispatch, then admitted', async () => {
+    const w = world(M1, MAIN, {
+      checkRuns: [[verdictRow(M1, MAIN, { app: { id: 15368, slug: 'github-actions' } })]],
+      measureRuns: [{ ...greenRun('cq-measure.yml', M1), id: 555 }],
+    });
+    w.onCheckRuns = (n) => {
+      if (n === 1) {
+        w.verifyRuns = [
+          {
+            id: 32,
+            path: '.github/workflows/cq-verify.yml',
+            event: 'workflow_dispatch',
+            head_branch: 'main',
+            head_sha: MAIN,
+            head_repository: { id: REPO_ID },
+            status: 'completed',
+          },
+        ];
+      }
+    };
+    const h = harness(w);
+    const r = await runGate(h.deps, cfg({ verdictAppId: null }));
+    expect(r.verdict).toBe('would-promote');
+    expect(dispatches(h.calls)).toHaveLength(1);
+    expect(h.sleeps).toEqual([POLL_MS]);
+  });
+
+  test('the push is leased on the (main, tip) read at step 1', async () => {
+    const h = harness(world());
+    const seen: unknown[] = [];
+    h.deps.git = fakeGit({
+      pushAtomic: (_repo, _url, updates, token) => {
+        seen.push({ updates, token });
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
+    expect(r.verdict).toBe('promoted');
+    expect(seen).toEqual([
+      {
+        updates: [
+          { refspec: `${M1}:refs/heads/main`, expected: MAIN },
+          { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
+        ],
+        token: 't',
+      },
+    ]);
   });
 
   test('a rejected push refuses with the porcelain output', async () => {
@@ -912,9 +1018,16 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     rmSync(tmp, { recursive: true, force: true });
   });
 
-  test('promotes tip onto main and merge-queue atomically', async () => {
-    const trust = join(tmp, 'trust');
-    const remote = join(tmp, 'remote.git');
+  /** trust clone + bare remote: main <- tip (merge of `feature` head); origin/* fetched. */
+  function setup(name: string): {
+    trust: string;
+    remote: string;
+    main: string;
+    head: string;
+    tip: string;
+  } {
+    const trust = join(tmp, `${name}-trust`);
+    const remote = join(tmp, `${name}-remote.git`);
     mkdirSync(trust);
     mkdirSync(remote);
     git(remote, ['init', '-q', '--bare', '-b', 'main']);
@@ -937,7 +1050,10 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     git(trust, ['update-ref', 'refs/remotes/origin/main', main]);
     git(trust, ['update-ref', 'refs/remotes/origin/merge-queue', tip]);
     git(trust, ['push', '-q', remote, `${main}:refs/heads/main`, `${tip}:refs/heads/merge-queue`]);
+    return { trust, remote, main, head, tip };
+  }
 
+  function prWorld(tip: string, main: string, head: string): World {
     const w = world(tip, main);
     w.prs = new Map([
       [
@@ -953,7 +1069,12 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
         ],
       ],
     ]);
-    const h = harness(w);
+    return w;
+  }
+
+  test('promotes tip onto main and merge-queue atomically', async () => {
+    const { trust, remote, main, head, tip } = setup('ok');
+    const h = harness(prWorld(tip, main, head));
     h.deps.git = realGateGit;
     const r = await runGate(
       h.deps,
@@ -966,5 +1087,108 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     expect(h.acceptanceInputs).toEqual([
       { pr: 7, subject: head, base: 'merge-queue', state: 'merged' },
     ]);
+  });
+
+  test('a queue rewound to an ancestor during the wait is refused; main unchanged', async () => {
+    const { trust, remote, main, head, tip } = setup('rewind');
+    const h = harness(prWorld(tip, main, head));
+    // Break-glass rewinds merge-queue to the PR head (an ancestor of the
+    // tip) after the gate's step-1 read, just before its push. A plain
+    // fast-forward push would re-promote the dropped merge.
+    h.deps.git = {
+      ...realGateGit,
+      pushAtomic: (repo, url, updates, token) => {
+        git(remote, ['update-ref', 'refs/heads/merge-queue', head]);
+        return realGateGit.pushAtomic(repo, url, updates, token);
+      },
+    };
+    const r = await runGate(
+      h.deps,
+      cfg({ repo: trust, push: true, pushToken: 'tok', remoteUrl: remote }),
+    );
+    expect(r.verdict).toBe('refused');
+    expect(r.report.at(-1)).toMatch(/atomic leased push was rejected/);
+    expect(git(remote, ['rev-parse', 'main'])).toBe(main);
+    expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(head);
+  });
+});
+
+describe('mainWith (the CLI seam)', () => {
+  const ARGV = [
+    '--repo=/nonexistent/trust',
+    '--repository=o/r',
+    `--repositoryId=${String(REPO_ID)}`,
+    `--trustRef=${TRUST}`,
+    '--defaultBranch=main',
+  ];
+  const TOKEN = 'ghp_PROMOTETOKEN0123456789';
+
+  function mainHarness(env: NodeJS.ProcessEnv) {
+    const lines: string[] = [];
+    const ghEnvs: NodeJS.ProcessEnv[] = [];
+    const pushTokens: string[] = [];
+    let ghBuilt = false;
+    const deps = {
+      makeGh: (): GhFn => {
+        ghBuilt = true;
+        // The env every gh child would inherit, as of each call.
+        return () => {
+          ghEnvs.push({ ...env });
+          return Promise.resolve({ code: 1, stdout: '', stderr: 'HTTP 502' });
+        };
+      },
+      git: fakeGit({
+        pushAtomic: (_r, _u, _updates, token) => {
+          pushTokens.push(token);
+          return Promise.resolve({ ok: true, output: '' });
+        },
+      }),
+      sleep: () => Promise.resolve(),
+      nowMs: () => 0,
+      write: (line: string) => lines.push(line),
+    };
+    return { deps, lines, ghEnvs, pushTokens, ghBuilt: () => ghBuilt };
+  }
+
+  test('the token leaves the env before any gh child runs', async () => {
+    const env: NodeJS.ProcessEnv = { CQ_PROMOTE_TOKEN: TOKEN, KEEP: 'x' };
+    const h = mainHarness(env);
+    const code = await mainWith([...ARGV, '--push'], env, h.deps);
+    expect(code).toBe(1);
+    expect(env).toEqual({ KEEP: 'x' });
+    expect(h.ghEnvs.length).toBeGreaterThan(0);
+    for (const childEnv of h.ghEnvs) {
+      expect(childEnv).not.toHaveProperty('CQ_PROMOTE_TOKEN');
+      expect(JSON.stringify(childEnv)).not.toContain(TOKEN);
+    }
+    expect(h.lines).toHaveLength(1);
+    expect(h.lines[0]).not.toContain(TOKEN);
+    const out = JSON.parse(h.lines[0] ?? '') as { status: string; value: { verdict: string } };
+    expect(out.status).toBe('ok');
+    expect(out.value.verdict).toBe('refused');
+  });
+
+  test('--push without the token is refused before any read', async () => {
+    for (const env of [{}, { CQ_PROMOTE_TOKEN: '' }] as NodeJS.ProcessEnv[]) {
+      const h = mainHarness(env);
+      const code = await mainWith([...ARGV, '--push'], env, h.deps);
+      expect(code).toBe(1);
+      expect(h.ghBuilt()).toBe(false);
+      expect(h.ghEnvs).toEqual([]);
+      expect(JSON.parse(h.lines[0] ?? '')).toEqual({
+        status: 'failed',
+        error: '--push requires CQ_PROMOTE_TOKEN',
+      });
+      expect(env).not.toHaveProperty('CQ_PROMOTE_TOKEN');
+    }
+  });
+
+  test('a dry run without the token still runs (and strips a stray token)', async () => {
+    const env: NodeJS.ProcessEnv = { CQ_PROMOTE_TOKEN: TOKEN };
+    const h = mainHarness(env);
+    expect(await mainWith(ARGV, env, h.deps)).toBe(1);
+    expect(h.ghBuilt()).toBe(true);
+    expect(h.pushTokens).toEqual([]);
+    expect(env).toEqual({});
   });
 });

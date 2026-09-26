@@ -56,6 +56,9 @@ function liveFrom(settings: GithubSettings): LiveSettings {
       branch_policies: clone(env.branch_policies),
       can_admins_bypass: env.can_admins_bypass,
       reviewers: env.reviewers === 'any' ? [] : clone(env.reviewers),
+      prevent_self_review: env.prevent_self_review,
+      wait_timer: env.wait_timer,
+      other_rules: [],
       secrets: [...env.secrets],
     };
   }
@@ -312,6 +315,9 @@ describe('compareSettings', () => {
       branch_policies: [],
       can_admins_bypass: true,
       reviewers: [],
+      prevent_self_review: false,
+      wait_timer: 0,
+      other_rules: [],
       secrets: [],
     };
     expect(driftOf(live)).toEqual([
@@ -347,6 +353,27 @@ describe('compareSettings', () => {
       'environment promote: can_admins_bypass differs: expected false actual true',
       'environment promote: required reviewers differ: expected [] actual [{"login":"owner","type":"User"}]',
     ]);
+  });
+
+  it('reports prevent_self_review, a wait timer and a custom protection rule', () => {
+    const live = liveFrom(target());
+    const promote = live.environments['promote'];
+    const drill = live.environments['drill'];
+    if (promote === undefined || drill === undefined) throw new Error('no env');
+    promote.wait_timer = 30;
+    promote.other_rules = ['deployment_protection_rule'];
+    drill.prevent_self_review = true;
+    expect(driftOf(live)).toEqual([
+      'environment drill: prevent_self_review differs: expected false actual true',
+      'environment promote: wait_timer differs: expected 0 actual 30',
+      'environment promote: protection rule of type "deployment_protection_rule" present live (the target has no custom deployment protection rules)',
+    ]);
+  });
+
+  it('pins wait_timer 0 and prevent_self_review false on every environment', () => {
+    for (const [name, env] of Object.entries(target().environments)) {
+      expect([name, env.wait_timer, env.prevent_self_review]).toEqual([name, 0, false]);
+    }
   });
 
   it('reports an unlisted environment secret as drift and an interim one as a notice', () => {
@@ -435,15 +462,43 @@ describe('environmentFromApi', () => {
         { type: 'User', login: 'owner' },
         { type: 'Team', slug: 'core' },
       ],
+      prevent_self_review: false,
+      wait_timer: 0,
+      other_rules: [],
       secrets: ['GH_TOKEN'],
+    });
+    const guarded = environmentFromApi(
+      {
+        name: 'promote',
+        can_admins_bypass: false,
+        deployment_branch_policy: null,
+        protection_rules: [
+          { id: 2, type: 'wait_timer', wait_timer: 30 },
+          { id: 3, type: 'required_reviewers', prevent_self_review: true, reviewers: [] },
+          { id: 5, type: 'deployment_protection_rule', app: { slug: 'x' } },
+          { id: 6 },
+        ],
+      },
+      [],
+      [],
+    );
+    expect(guarded).toMatchObject({
+      prevent_self_review: true,
+      wait_timer: 30,
+      other_rules: ['deployment_protection_rule', 'unknown'],
     });
     expect(
       environmentFromApi(
         { name: 'x', can_admins_bypass: true, deployment_branch_policy: null },
         [],
         [],
-      ).deployment_branch_policy,
-    ).toBeNull();
+      ),
+    ).toMatchObject({
+      deployment_branch_policy: null,
+      prevent_self_review: false,
+      wait_timer: 0,
+      other_rules: [],
+    });
   });
 });
 

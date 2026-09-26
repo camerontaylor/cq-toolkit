@@ -10,9 +10,13 @@
 //     real merge commit's tree), null on a conflict; an "evil merge" (a merge
 //     commit whose tree differs from the merge-tree result) is detected by
 //     comparing gitTreeOf;
-//   - gitPushAtomic: a fast-forward push lands both refs; a non-ff push is a
-//     resolved rejection (ok:false, porcelain output); --atomic makes a stale
-//     merge-queue refspec reject main too; bad url/refspec/rev are refused
+//   - gitPushAtomic: a leased push (one --force-with-lease per ref, the oids
+//     the caller read — leases only, never a plain force) lands both refs; a
+//     lease that no longer holds is a resolved rejection (ok:false, porcelain
+//     output) — including a ref REWOUND to an ancestor between read and push,
+//     which a plain fast-forward push would have accepted; --atomic makes one
+//     failed lease reject the other ref too (asserted from a remote where
+//     the other ref WOULD move); bad url/refspec/branch/lease are refused
 //     before spawn; the token never appears in the output.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -185,6 +189,27 @@ describe('gitPushAtomic', { timeout: 60_000 }, () => {
   let c3: string;
 
   const remoteRef = (ref: string): string => git(remote, ['rev-parse', ref]);
+  /** Set the remote refs directly (each test starts from its own state). */
+  const setRemote = (main: string, queue: string): void => {
+    git(remote, ['update-ref', 'refs/heads/main', main]);
+    git(remote, ['update-ref', 'refs/heads/merge-queue', queue]);
+  };
+  /** Promote `to` onto both refs, leased on the (main, queue) the caller read. */
+  const promote = (
+    url: string,
+    to: string,
+    readMain: string,
+    readQueue: string,
+  ): ReturnType<typeof gitPushAtomic> =>
+    gitPushAtomic(
+      work,
+      url,
+      [
+        { refspec: `${to}:refs/heads/main`, expected: readMain },
+        { refspec: `${to}:refs/heads/merge-queue`, expected: readQueue },
+      ],
+      TOKEN,
+    );
 
   beforeAll(() => {
     remote = join(tmp, 'remote.git');
@@ -195,46 +220,66 @@ describe('gitPushAtomic', { timeout: 60_000 }, () => {
     c1 = commitFile(work, 'x.txt', '1\n', 'c1');
     c2 = commitFile(work, 'x.txt', '2\n', 'c2');
     c3 = commitFile(work, 'x.txt', '3\n', 'c3');
-    git(work, ['push', '-q', remote, `${c1}:refs/heads/main`, `${c1}:refs/heads/merge-queue`]);
+    git(work, ['push', '-q', remote, `${c3}:refs/heads/main`, `${c3}:refs/heads/merge-queue`]);
   }, 120_000);
 
-  test('a fast-forward atomic push lands both refs', async () => {
-    const res = await gitPushAtomic(
-      work,
-      remote,
-      [`${c2}:refs/heads/main`, `${c2}:refs/heads/merge-queue`],
-      TOKEN,
-    );
+  test('a leased atomic push lands both refs', async () => {
+    setRemote(c1, c2);
+    const res = await promote(remote, c2, c1, c2);
     expect(res.ok).toBe(true);
     expect(remoteRef('main')).toBe(c2);
     expect(remoteRef('merge-queue')).toBe(c2);
     expect(res.output).not.toContain(TOKEN);
   });
 
-  test('a stale merge-queue refspec rejects main too (atomic CAS)', async () => {
-    // The queue advanced to c3 remotely; promoting c2 would rewind it.
-    git(work, ['push', '-q', remote, `${c3}:refs/heads/merge-queue`]);
-    const res = await gitPushAtomic(
-      work,
-      `file://${remote}`,
-      [`${c2}:refs/heads/main`, `${c2}:refs/heads/merge-queue`],
-      TOKEN,
-    );
+  test('an advanced merge-queue fails its lease and --atomic keeps main unmoved', async () => {
+    // Read: main c1, queue c2. The queue then advanced to c3 remotely. The
+    // main update alone (c1 → c2) would succeed; --atomic must refuse it.
+    setRemote(c1, c3);
+    const res = await promote(`file://${remote}`, c2, c1, c2);
     expect(res.ok).toBe(false);
     expect(res.output).toMatch(/rejected/);
-    expect(remoteRef('main')).toBe(c2);
+    expect(remoteRef('main')).toBe(c1);
     expect(remoteRef('merge-queue')).toBe(c3);
   });
 
-  test('a non-fast-forward push is a resolved rejection, never forced', async () => {
-    const res = await gitPushAtomic(work, remote, [`${c1}:refs/heads/main`], TOKEN);
+  test('a merge-queue rewound to an ancestor between read and push is refused', async () => {
+    // Read: main c1, queue c3. Break-glass then rewinds the queue to c2 (an
+    // ancestor of c3): a plain push of c3 would fast-forward it back.
+    setRemote(c1, c2);
+    const res = await promote(remote, c3, c1, c3);
     expect(res.ok).toBe(false);
-    expect(res.output).toMatch(/rejected|non-fast-forward/);
+    expect(res.output).toMatch(/rejected/);
+    expect(remoteRef('main')).toBe(c1);
+    expect(remoteRef('merge-queue')).toBe(c2);
+  });
+
+  test('a main rewound between read and push is refused', async () => {
+    // Read: main c2, queue c3. main is then rewound to c1.
+    setRemote(c1, c3);
+    const res = await promote(remote, c3, c2, c3);
+    expect(res.ok).toBe(false);
+    expect(res.output).toMatch(/rejected/);
+    expect(remoteRef('main')).toBe(c1);
+    expect(remoteRef('merge-queue')).toBe(c3);
+  });
+
+  test('a single stale lease is a resolved rejection', async () => {
+    setRemote(c2, c2);
+    const res = await gitPushAtomic(
+      work,
+      remote,
+      [{ refspec: `${c3}:refs/heads/main`, expected: c1 }],
+      TOKEN,
+    );
+    expect(res.ok).toBe(false);
+    expect(res.output).toMatch(/rejected|stale/);
     expect(remoteRef('main')).toBe(c2);
   });
 
-  test('bad url / refspec / branch are refused before spawn', async () => {
-    const good = [`${c3}:refs/heads/main`];
+  test('bad url / refspec / branch / lease are refused before spawn', async () => {
+    setRemote(c2, c2);
+    const good = [{ refspec: `${c3}:refs/heads/main`, expected: c2 }];
     for (const url of [
       'relative/path',
       'http://github.com/o/r.git',
@@ -246,7 +291,7 @@ describe('gitPushAtomic', { timeout: 60_000 }, () => {
     ]) {
       await expect(gitPushAtomic(work, url, good, TOKEN)).rejects.toThrow(/refusing push url/);
     }
-    for (const spec of [
+    for (const refspec of [
       `+${c3}:refs/heads/main`,
       `${c3}:refs/tags/v1`,
       'main:refs/heads/main',
@@ -254,8 +299,26 @@ describe('gitPushAtomic', { timeout: 60_000 }, () => {
       `${c3}:refs/heads/a..b`,
       `${c3}`,
     ]) {
-      await expect(gitPushAtomic(work, remote, [spec], TOKEN)).rejects.toThrow(/refusing/);
+      await expect(gitPushAtomic(work, remote, [{ refspec, expected: c2 }], TOKEN)).rejects.toThrow(
+        /refusing/,
+      );
     }
+    for (const expected of ['main', c2.slice(0, 12), '', `${c2}\n`, c2.toUpperCase()]) {
+      await expect(
+        gitPushAtomic(work, remote, [{ refspec: `${c3}:refs/heads/main`, expected }], TOKEN),
+      ).rejects.toThrow(/refusing lease/);
+    }
+    await expect(
+      gitPushAtomic(
+        work,
+        remote,
+        [
+          { refspec: `${c3}:refs/heads/main`, expected: c2 },
+          { refspec: `${c1}:refs/heads/main`, expected: c2 },
+        ],
+        TOKEN,
+      ),
+    ).rejects.toThrow(/second update/);
     await expect(gitPushAtomic(work, remote, [], TOKEN)).rejects.toThrow(/empty push/);
     await expect(
       gitPushAtomic(work, 'https://github.invalid/o/r.git', good, 'a\nb'),
@@ -267,7 +330,7 @@ describe('gitPushAtomic', { timeout: 60_000 }, () => {
     const res = await gitPushAtomic(
       work,
       'https://127.0.0.1.invalid/o/r.git',
-      [`${c3}:refs/heads/main`],
+      [{ refspec: `${c3}:refs/heads/main`, expected: c2 }],
       TOKEN,
     );
     expect(res.ok).toBe(false);

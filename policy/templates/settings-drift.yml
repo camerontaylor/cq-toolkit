@@ -44,6 +44,27 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Refuse a half-registered App (paired vars)
+        # Each App is named by a PAIR: the client id mints its token, the
+        # numeric id selects its verdicts / pins its bypass. Exactly one of
+        # a pair set would make those disagree (Decisions 6, 7).
+        env:
+          VERDICT_APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          VERDICT_CLIENT_ID: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+          PROMOTER_APP_ID: ${{ vars.CQ_PROMOTER_APP_ID }}
+          PROMOTER_CLIENT_ID: ${{ vars.CQ_PROMOTER_APP_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ "${VERDICT_APP_ID:+set}" != "${VERDICT_CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_VERDICT_APP_ID and'
+            echo 'vars.CQ_VERDICT_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
+          if [ "${PROMOTER_APP_ID:+set}" != "${PROMOTER_CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_PROMOTER_APP_ID and'
+            echo 'vars.CQ_PROMOTER_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
       - name: Check out the trust ref (the default branch)
         # v5.1.0, immutable commit pin (repo policy)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

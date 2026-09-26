@@ -145,9 +145,13 @@ Only `drill` may have the owner as a required reviewer. The target state has
 no repository-level secrets.
 
 Repository variables: `CQ_VERDICT_APP_ID` and `CQ_VERDICT_APP_CLIENT_ID`
-(verdict App: posting, the gate's verdict selection, the drift check);
-`CQ_PROMOTER_APP_ID` and `CQ_PROMOTER_APP_CLIENT_ID` (promoter App: the
-gate's push, R1's bypass); the trust set `CQ_MERGE_TRUSTED_BOTS`,
+(verdict App: the client id mints the posting token, the numeric id drives
+the gate's verdict selection, cq-accept's sweep dedupe and the drift
+check); `CQ_PROMOTER_APP_ID` and `CQ_PROMOTER_APP_CLIENT_ID` (promoter App:
+the client id mints the gate's push token, the numeric id is R1's bypass
+actor). Each pair is set together or not at all: every verdict poster,
+`cq-gate` and `settings-drift` refuse when exactly one of a pair is set.
+Then the trust set `CQ_MERGE_TRUSTED_BOTS`,
 `CQ_MERGE_ACCEPT_REVIEW_STATES`, `CQ_MERGE_TRUSTED_ASSOCIATIONS` and the
 posture `CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default).
 
@@ -165,9 +169,16 @@ Interim credentials (reported by the drift check until C3):
 Owner steps, in order (the RS-11 wizard outline):
 
 1. Register the three Apps (`cq-verdict`, `cq-promoter`, `cq-automation`),
-   install them on this repository only, and set the four App variables.
+   install them on this repository only, and set the four App variables
+   (each id together with its client id).
 2. Create the four environments with the `main`-only branch policy; put
-   each App key and interim secret into its environment above.
+   each App key and interim secret into its environment above. In
+   particular, provision `CQ_AUTOMATION_TOKEN` in `automation` now, before
+   step 3: `sync-merge-queue` and `init-merge-queue` fall back to
+   `PROMOTE_TOKEN` only while it is a repository-level secret (an
+   `automation` job cannot read a secret held in `promote`). Skip this and
+   step 3 disarms sync (the behind/diverged sync PR fails with "sync not
+   armed"), and init fails with no checkout credential.
 3. Move `PROMOTE_TOKEN` from the repository into `promote`. From here the
    legacy gate fails closed and `cq-gate` carries every promotion.
 4. Delete the remaining repository-level secrets; run `settings-drift` until

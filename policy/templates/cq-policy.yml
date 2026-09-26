@@ -176,6 +176,20 @@ jobs:
       # The posture (Annex B §B.6.3). Blank or unset = `human`.
       CQ_MERGE_PROTECTED_PATHS: ${{ vars.CQ_MERGE_PROTECTED_PATHS }}
     steps:
+      - name: Refuse a half-registered verdict App (paired vars)
+        # Posters mint on the client id; the gate and the sweep dedupe
+        # select on the numeric id. Exactly one set would make them
+        # disagree about which app is authoritative (Decision 6).
+        env:
+          APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          CLIENT_ID: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ "${APP_ID:+set}" != "${CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_VERDICT_APP_ID and'
+            echo 'vars.CQ_VERDICT_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
       - name: Check out the trust ref (the default branch)
         # v5.1.0, immutable commit pin (repo policy)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09

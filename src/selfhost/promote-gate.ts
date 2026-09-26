@@ -13,9 +13,11 @@
 // no-shell helpers in ../ops/ratchet/git.ts, #221) and API data. Every read
 // uses the job's own read-only GITHUB_TOKEN (gh reads GH_TOKEN). The
 // promotion credential (CQ_PROMOTE_TOKEN: the promoter-App installation token
-// once `vars.CQ_PROMOTER_APP_ID` is set, else the interim PAT) is removed
-// from the process env at startup and reaches exactly one place: the atomic
-// push's step-scoped GIT_CONFIG_* extra-header. It is never logged.
+// minted when `vars.CQ_PROMOTER_APP_CLIENT_ID` is set — paired with
+// `vars.CQ_PROMOTER_APP_ID`, gate.yml refuses exactly one of the two — else
+// the interim PAT) is removed from the process env at startup and reaches
+// exactly one place: the atomic push's step-scoped GIT_CONFIG_* extra-header.
+// It is never logged.
 //
 // THE CHECKS (cheap and pure first, the waits last; every refusal is final
 // for this run — the next sweep retries — and every check's outcome is
@@ -38,11 +40,15 @@
 //      break-glass (ADR-0004 D-G.4, D-H.4).
 //   7. each admitted PR's `cq-override` record is LOGGED (never decisive).
 //   8. a valid `cq/ratchet` verdict on tip bound to main (selectVerdict:
-//      verdict-App numeric id, or the interim slug + workflow path form),
-//      waited for — dispatching cq-verify once when none is bound to main.
-//   9. the block-only head-defined runs (checkVerifiedRun, D-F.2) green.
-//  10. promote: `push --atomic` of tip onto main and merge-queue, never
-//      forced — the server's non-fast-forward refusal is the CAS.
+//      verdict-App numeric id, or the interim slug + binding + "the
+//      default-branch cq-verify ran at main" form), waited for —
+//      dispatching cq-verify once when none is bound to main.
+//   9. the block-only head-defined runs (checkVerifiedRun, D-F.2) green: the
+//      newest `merge-queue` push run of each on the tip.
+//  10. promote: `push --atomic` of tip onto main and merge-queue, leased on
+//      the (main, tip) read at step 1 — one `--force-with-lease=<ref>:<oid>`
+//      per ref, never a plain force. A queue or main that moved (advanced OR
+//      rewound) since step 1 fails its lease, and --atomic refuses both.
 import { pathToFileURL } from 'node:url';
 import type { OpResult } from '../kernel/types.js';
 import {
@@ -64,6 +70,7 @@ import {
   gitRangeCommits,
   gitRevParse,
   gitTreeOf,
+  type LeasedUpdate,
   type RangeCommit,
 } from '../ops/ratchet/git.js';
 import { GhError, ghJson, ghNameOk, makeGhRunner, slurpedComments } from '../ops/review/gh.js';
@@ -305,10 +312,11 @@ export interface VerdictWant {
   main: string;
   /** The verdict App's numeric id; null selects the interim form. */
   verdictAppId: number | null;
-  /** The default branch the interim poster's run must be on. */
-  defaultBranch: string;
-  /** Interim form: each row's check-suite workflow run (`actions/runs?check_suite_id=`), null when none. */
-  suiteRuns: ReadonlyMap<number, unknown>;
+  /**
+   * Interim form: whether a completed default-branch cq-verify run exists at
+   * trust sha `main` (verifierRanAt). Ignored in App mode.
+   */
+  verifierRan: boolean;
 }
 
 export interface VerdictSelection {
@@ -322,6 +330,39 @@ export interface VerdictSelection {
 /** The interim workflow path the verdict must be posted from. */
 const VERIFY_PATH = `${WORKFLOWS_DIR}/${VERIFY_WORKFLOW}`;
 
+export interface VerifierWant {
+  /** The trust sha the default-branch verifier must have run at. */
+  main: string;
+  defaultBranch: string;
+  repositoryId: number;
+}
+
+/**
+ * Interim form (Decision 5): the id of the newest COMPLETED default-branch
+ * cq-verify run at trust sha `main` among `runs` (from `GET
+ * actions/workflows/cq-verify.yml/runs?head_sha=<main>&branch=<default>`),
+ * or null. A run counts when its path is `.github/workflows/cq-verify.yml`,
+ * its event `workflow_run`|`workflow_dispatch`, its head branch the default
+ * branch, its head sha `main` and its head repository this repository. Pure.
+ */
+export function verifierRanAt(runs: readonly unknown[], want: VerifierWant): number | null {
+  const ran = runs
+    .map(asRecord)
+    .filter((r) => {
+      const event = r['event'];
+      return (
+        r['path'] === VERIFY_PATH &&
+        (event === 'workflow_run' || event === 'workflow_dispatch') &&
+        r['head_branch'] === want.defaultBranch &&
+        r['head_sha'] === want.main &&
+        asInt(asRecord(r['head_repository'])['id']) === want.repositoryId &&
+        r['status'] === 'completed'
+      );
+    })
+    .sort(newestFirst('created_at'));
+  return asInt(ran[0]?.['id']);
+}
+
 /**
  * Select the `cq/ratchet` verdict on `tip` bound to `main` from check-run
  * rows (D-F.1, methods note Decision 5). A row is VALID when its poster is
@@ -329,21 +370,27 @@ const VERIFY_PATH = `${WORKFLOWS_DIR}/${VERIFY_WORKFLOW}`;
  * is completed:
  *   - App mode (`verdictAppId` set): `app.id === verdictAppId`, a NUMERIC
  *     compare — never the slug; rows from any other app are ignored.
- *   - Interim mode: `app.slug === 'github-actions'` AND the row's check-suite
- *     workflow run has path `.github/workflows/cq-verify.yml`, event
- *     `workflow_run`|`workflow_dispatch` and head branch = the default
- *     branch. Forgeable (RS-4 T-13); ends at C2.
+ *   - Interim mode: `app.slug === 'github-actions'`, and the default-branch
+ *     verifier actually ran at trust sha `main` (`verifierRan`, see
+ *     verifierRanAt). The row itself cannot be tied to that run: a check run
+ *     posted through the API lands in the check suite of whichever workflow
+ *     run owns the tip's suite (observed: the cq-signal push run's), never
+ *     the cq-verify run's. Forgeable (RS-4 T-13); ends at C2.
  * The newest valid row (by `completed_at`, ties → higher id) wins and must
  * be `success`. With no valid row: `pending` when an authoritative row bound
- * to main is still running, else `missing`.
+ * to main is still running, else `missing` — including every interim row
+ * while no default-branch verifier run at `main` has completed.
  */
 export function selectVerdict(rows: readonly unknown[], want: VerdictWant): VerdictSelection {
   const lines: string[] = [];
   const interim = want.verdictAppId === null;
   if (interim) {
     lines.push(
-      'interim verdict selection (app slug + workflow path; forgeable per RS-4 T-13; ends at C2)',
+      'interim verdict selection (app slug + binding + a completed default-branch cq-verify run at main; forgeable per RS-4 T-13; ends at C2)',
     );
+    if (!want.verifierRan) {
+      lines.push(`no completed ${VERIFY_WORKFLOW} run on the default branch at ${want.main}`);
+    }
   } else {
     lines.push(`verdict selection: app id ${String(want.verdictAppId)}`);
   }
@@ -351,16 +398,7 @@ export function selectVerdict(rows: readonly unknown[], want: VerdictWant): Verd
   const authoritative = (row: Rec): boolean => {
     const app = asRecord(row['app']);
     if (!interim) return asInt(app['id']) === want.verdictAppId;
-    if (app['slug'] !== INTERIM_VERDICT_SLUG) return false;
-    const suiteId = asInt(asRecord(row['check_suite'])['id']);
-    if (suiteId === null) return false;
-    const run = asRecord(want.suiteRuns.get(suiteId));
-    const event = run['event'];
-    return (
-      run['path'] === VERIFY_PATH &&
-      (event === 'workflow_run' || event === 'workflow_dispatch') &&
-      run['head_branch'] === want.defaultBranch
-    );
+    return app['slug'] === INTERIM_VERDICT_SLUG && want.verifierRan;
   };
   let ignored = 0;
   let otherBase = 0;
@@ -413,8 +451,10 @@ export interface VerifiedRunCheck {
 
 /**
  * Judge the newest push run of a block-only head-defined workflow on `tip`
- * (D-F.2): path `.github/workflows/<file>`, event `push`, head repository =
- * this repository, `head_sha === tip`, completed with conclusion `success`,
+ * (D-F.2): path `.github/workflows/<file>`, event `push`, head branch
+ * `merge-queue` (a push of the same sha to another branch is not the
+ * queue's run), head repository = this repository, `head_sha === tip`,
+ * completed with conclusion `success`,
  * and at least one job, every job completed `success` (a `skipped` job is
  * NOT success — I4: a skipped required check is missing), with a non-null
  * `runner_id` and a non-empty `steps` list (a job that never ran on a
@@ -435,6 +475,9 @@ export function checkVerifiedRun(
   const path = `${WORKFLOWS_DIR}/${want.file}`;
   if (r['path'] !== path) return fail(`path '${clean(asString(r['path']))}' is not '${path}'`);
   if (r['event'] !== 'push') return fail(`event '${clean(asString(r['event']))}' is not 'push'`);
+  if (r['head_branch'] !== QUEUE_BRANCH) {
+    return fail(`head branch '${clean(asString(r['head_branch']))}' is not '${QUEUE_BRANCH}'`);
+  }
   if (asInt(asRecord(r['head_repository'])['id']) !== want.repositoryId) {
     return fail('head repository is not this repository');
   }
@@ -478,7 +521,7 @@ export interface GateGit {
   pushAtomic(
     repo: string,
     url: string,
-    refspecs: readonly string[],
+    updates: readonly LeasedUpdate[],
     token: string,
   ): Promise<{ ok: boolean; output: string }>;
 }
@@ -738,16 +781,21 @@ async function gateBody(
     return { verdict: 'would-promote' };
   }
   if (cfg.pushToken === null) refuse('push: no push credential');
+  // The leases are the step-1 reads: main must still be `main` and the
+  // queue still `tip` (the queue update is a pure lease check).
   const pushed = await git.pushAtomic(
     cfg.repo,
     cfg.remoteUrl,
-    [`${tip}:refs/heads/${MAIN_BRANCH}`, `${tip}:refs/heads/${QUEUE_BRANCH}`],
+    [
+      { refspec: `${tip}:refs/heads/${MAIN_BRANCH}`, expected: main },
+      { refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`, expected: tip },
+    ],
     cfg.pushToken ?? '',
   );
   if (!pushed.ok) {
     report.push(...pushed.output.split('\n').map((line) => `  push: ${clean(line)}`));
     refuse(
-      'push: the atomic push was rejected (a concurrent queue or main move); next sweep retries',
+      'push: the atomic leased push was rejected (main or the queue moved since the read); next sweep retries',
     );
   }
   report.push(`push: main and ${QUEUE_BRANCH} at ${tip}`);
@@ -814,11 +862,10 @@ async function awaitVerdicts(
   refuse: (why: string) => never,
 ): Promise<void> {
   const repoPath = `repos/${cfg.owner}/${cfg.name}`;
-  const getJson = (path: string): Promise<unknown> => ghJson<unknown>(deps.gh, ['api', path]);
   const getSlurp = (path: string): Promise<unknown> =>
     ghJson<unknown>(deps.gh, ['api', path, '--paginate', '--slurp']);
   const deadline = deps.nowMs() + cfg.timeoutMin * 60_000;
-  const suiteRuns = new Map<number, unknown>();
+  let verifierRun: number | null = null;
   let dispatched = false;
   let polls = 0;
 
@@ -829,25 +876,26 @@ async function awaitVerdicts(
     // 8. The verdict.
     const checksPath = `${repoPath}/commits/${tip}/check-runs?check_name=${encodeURIComponent(VERDICT_CHECK)}&filter=all&per_page=100`;
     const rows = pagesOf(await getSlurp(checksPath), 'check_runs', checksPath);
-    if (cfg.verdictAppId === null) {
-      for (const raw of rows) {
-        const row = asRecord(raw);
-        if (asRecord(row['app'])['slug'] !== INTERIM_VERDICT_SLUG) continue;
-        const suiteId = asInt(asRecord(row['check_suite'])['id']);
-        if (suiteId === null || suiteRuns.has(suiteId)) continue;
-        const runs = asRecord(
-          await getJson(`${repoPath}/actions/runs?check_suite_id=${String(suiteId)}`),
-        );
-        const list = Array.isArray(runs['workflow_runs']) ? runs['workflow_runs'] : [];
-        if (list.length === 1) suiteRuns.set(suiteId, list[0]);
+    if (cfg.verdictAppId === null && verifierRun === null) {
+      // Interim: did the default-branch verifier run at trust sha `main`?
+      const verifyPath = `${repoPath}/actions/workflows/${VERIFY_WORKFLOW}/runs?head_sha=${main}&branch=${encodeURIComponent(cfg.defaultBranch)}&per_page=100`;
+      verifierRun = verifierRanAt(
+        pagesOf(await getSlurp(verifyPath), 'workflow_runs', verifyPath),
+        {
+          main,
+          defaultBranch: cfg.defaultBranch,
+          repositoryId: cfg.repositoryId,
+        },
+      );
+      if (verifierRun !== null) {
+        report.push(`interim: ${VERIFY_WORKFLOW} run ${String(verifierRun)} completed at ${main}`);
       }
     }
     const verdict = selectVerdict(rows, {
       tip,
       main,
       verdictAppId: cfg.verdictAppId,
-      defaultBranch: cfg.defaultBranch,
-      suiteRuns,
+      verifierRan: verifierRun !== null,
     });
     lines.push(`verdict ${VERDICT_CHECK}: ${verdict.state}`, ...verdict.lines.map((l) => `  ${l}`));
     if (verdict.state === 'failure') {
@@ -863,7 +911,7 @@ async function awaitVerdicts(
     // 9. Verified head-defined runs.
     let allGreen = verdict.state === 'success';
     for (const file of cfg.verifiedWorkflows) {
-      const runsPath = `${repoPath}/actions/workflows/${file}/runs?head_sha=${tip}&event=push&per_page=100`;
+      const runsPath = `${repoPath}/actions/workflows/${file}/runs?head_sha=${tip}&event=push&branch=${QUEUE_BRANCH}&per_page=100`;
       const runs = pagesOf(await getSlurp(runsPath), 'workflow_runs', runsPath).map(asRecord);
       const newest = [...runs].sort(newestFirst('created_at'))[0] ?? null;
       let check = checkVerifiedRun(newest, null, { file, tip, repositoryId: cfg.repositoryId });
@@ -1073,50 +1121,81 @@ export function remoteUrlFor(server: string, owner: string, name: string): strin
 /** The token env var (read once, then removed from process.env). */
 export const PROMOTE_TOKEN_ENV = 'CQ_PROMOTE_TOKEN';
 
+/** What {@link mainWith} runs over (the seam main() fills with the real ones). */
+export interface MainDeps {
+  /** Build the gh transport. Called only AFTER the token is out of the env. */
+  makeGh(): GhFn;
+  git: GateGit;
+  sleep(ms: number): Promise<void>;
+  nowMs(): number;
+  /** Receives the ONE JSON result line (newline-terminated). */
+  write(line: string): void;
+}
+
 /**
- * The CLI entry. Takes the push credential out of process.env FIRST, so no
- * child (gh, git reads) inherits it; parses flags and config; runs the gate
- * over the real gh runner and git helpers; prints ONE JSON line. Exit 0 for
- * promoted / would-promote / noop, 1 for refused or failed.
+ * The CLI body over an explicit argv, env and deps. Takes the push
+ * credential out of `env` FIRST — `env` is process.env in main(), which every
+ * gh and git child inherits — so no child sees it; parses flags and config;
+ * refuses `--push` without the credential before any read; runs the gate and
+ * writes ONE JSON line. Returns the exit code: 0 for promoted /
+ * would-promote / noop, 1 for refused or failed.
  */
-async function main(): Promise<void> {
-  const token = process.env[PROMOTE_TOKEN_ENV];
-  delete process.env[PROMOTE_TOKEN_ENV];
+export async function mainWith(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  deps: MainDeps,
+): Promise<number> {
+  const token = env[PROMOTE_TOKEN_ENV];
+  delete env[PROMOTE_TOKEN_ENV];
   let line: string;
+  let code = 0;
   try {
-    const args = parseGateArgs(process.argv.slice(2));
+    const args = parseGateArgs(argv);
     const pushToken = token === undefined || token === '' ? null : token;
     if (args.push && pushToken === null) {
       throw new Error(`--push requires ${PROMOTE_TOKEN_ENV}`);
     }
     const remoteUrl = remoteUrlFor(
-      process.env['GITHUB_SERVER_URL'] ?? 'https://github.com',
+      env['GITHUB_SERVER_URL'] ?? 'https://github.com',
       args.owner,
       args.name,
     );
-    const trust = resolveAcceptanceTrust(process.env);
-    const policyDiff = createPolicyDiff(resolveProtectedPathsConfig({ env: process.env }));
-    const gh = makeGhRunner();
+    const trust = resolveAcceptanceTrust(env);
+    const policyDiff = createPolicyDiff(resolveProtectedPathsConfig({ env }));
+    const gh = deps.makeGh();
     const result = await runGate(
       {
         gh,
-        git: realGateGit,
+        git: deps.git,
         acceptance: (input) =>
           judgeAcceptance({ gh, owner: args.owner, repo: args.name, policy: trust.policy }, input),
         policyDiff,
-        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-        nowMs: () => Date.now(),
+        sleep: deps.sleep,
+        nowMs: deps.nowMs,
       },
       { ...args, pushToken, remoteUrl },
     );
     const report = [...trust.report.map((l) => `trust: ${l}`), ...result.report];
     line = JSON.stringify({ status: 'ok', value: { ...result, report } });
-    if (result.verdict === 'refused') process.exitCode = 1;
+    if (result.verdict === 'refused') code = 1;
   } catch (error) {
     line = JSON.stringify({ status: 'failed', error: describeError(error) });
-    process.exitCode = 1;
+    code = 1;
   }
-  process.stdout.write(`${line}\n`);
+  deps.write(`${line}\n`);
+  return code;
+}
+
+/** The CLI entry: {@link mainWith} over process.argv, process.env and the real deps. */
+async function main(): Promise<void> {
+  const code = await mainWith(process.argv.slice(2), process.env, {
+    makeGh: () => makeGhRunner(),
+    git: realGateGit,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    nowMs: () => Date.now(),
+    write: (line) => process.stdout.write(line),
+  });
+  if (code !== 0) process.exitCode = code;
 }
 
 const invokedDirectly =

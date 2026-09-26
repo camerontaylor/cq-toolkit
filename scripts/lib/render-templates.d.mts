@@ -3,6 +3,9 @@ export const TOKEN_PATTERN: RegExp;
 export const TEMPLATES_DIR: string;
 export const WORKFLOWS_DIR: string;
 export const TABLE_PATH: string;
+export const WORKFLOW_NAME: RegExp;
+export const TEMPLATE_NAME: RegExp;
+export function writeBlockers(errors: readonly string[]): string[];
 export function provenanceHeader(template: string): string;
 export function templateTokens(text: string): string[];
 export function renderTemplate(

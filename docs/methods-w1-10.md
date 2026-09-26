@@ -10,22 +10,23 @@ paths stay in use, as ADR-0004 D-G.4 allows.
 
 ## What lands
 
-| Plan bullet (as superseded)                                  | Where                                                                                                                  |
-| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
-| I2 acceptance as a required status on merge-queue PRs        | `cq-accept.yml` posts `cq/acceptance`; ruleset R2 in `github-settings.json` requires it                                |
-| `enforce_admins` per the RS-11 branch matrix                 | rulesets R0/R1/R2 in `policy/templates/github-settings.json` (bypass lists per ruleset; classic protection absent)     |
-| logged override label                                        | the gate's run report logs each promoted PR's `cq-override` record (W1.9 logs it per PR in `cq/policy`)                |
-| gate filters by app slug and workflow path (superseded, D-F) | `src/selfhost/promote-gate.ts` verdict selection: verdict App numeric id; interim slug + workflow path                 |
-| branch protection as code plus a drift check (D13)           | `github-settings.json` + `scripts/github-settings-drift.mjs` + `settings-drift.yml`                                    |
-| promotion job per P1 (D-K)                                   | `gate.yml`: `wake` → `decide` (env `promote`, sole member of group `promote`), logic in `src/selfhost/promote-gate.ts` |
-| PROMOTE_TOKEN re-scoped or replaced                          | the promoter App token when `vars.CQ_PROMOTER_APP_ID` is set; otherwise the interim PAT, used only for the push        |
-| #170 secret into a protected environment                     | `environment: drill` on `live-review`, `live-merge`, `live-drivers`; all secret holders moved to environments          |
-| template render-diff test                                    | `policy/templates/instances.json` + `scripts/render-templates.mjs` + `test/workflows/template-render.test.ts`          |
+| Plan bullet (as superseded)                                  | Where                                                                                                                   |
+| ------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| I2 acceptance as a required status on merge-queue PRs        | `cq-accept.yml` posts `cq/acceptance`; ruleset R2 in `github-settings.json` requires it                                 |
+| `enforce_admins` per the RS-11 branch matrix                 | rulesets R0/R1/R2 in `policy/templates/github-settings.json` (bypass lists per ruleset; classic protection absent)      |
+| logged override label                                        | the gate's run report logs each promoted PR's `cq-override` record (W1.9 logs it per PR in `cq/policy`)                 |
+| gate filters by app slug and workflow path (superseded, D-F) | `src/selfhost/promote-gate.ts` verdict selection: verdict App numeric id; interim slug + a default-branch cq-verify run |
+| branch protection as code plus a drift check (D13)           | `github-settings.json` + `scripts/github-settings-drift.mjs` + `settings-drift.yml`                                     |
+| promotion job per P1 (D-K)                                   | `gate.yml`: `wake` → `decide` (env `promote`, sole member of group `promote`), logic in `src/selfhost/promote-gate.ts`  |
+| PROMOTE_TOKEN re-scoped or replaced                          | the promoter App token when `vars.CQ_PROMOTER_APP_CLIENT_ID` is set; otherwise the interim PAT, used only for the push  |
+| #170 secret into a protected environment                     | `environment: drill` on `live-review`, `live-merge`, `live-drivers`; all secret holders moved to environments           |
+| template render-diff test                                    | `policy/templates/instances.json` + `scripts/render-templates.mjs` + `test/workflows/template-render.test.ts`           |
 
 ## Decisions
 
 1. **Scope is C1.** The new gate runs next to `merge-queue-gate.yml`. Both promote with an
-   atomic compare-and-swap push, so running both is race-safe (RS-4 T-20). The new gate is
+   atomic compare-and-swap push, so running both is race-safe (RS-4 T-20). The new gate's
+   push is leased on the refs it read (Decision 13). The new gate is
    stricter, so the old gate promotes this PR and everything else during C1. C2 (remove the old
    gate, make `cq/*` required) needs the verdict App and is the owner's cutover. Applying
    `github-settings.json` is the W7.3a wizard's job. Here the file is the target, and the drift
@@ -53,19 +54,30 @@ paths stay in use, as ADR-0004 D-G.4 allows.
 5. **Verdict selection (D-F.1), with an interim form.** When `vars.CQ_VERDICT_APP_ID` is set, a
    verdict is a check run with that numeric `app.id`, `head_sha` equal to the subject, and
    `external_id` equal to `<trust-sha>:<subject>`. The newest such row wins, and rows from any
-   other app are ignored. Until the App exists, the interim form is the plan's literal wording:
-   app slug `github-actions` **and** the posting run's workflow path, event and branch, read
-   through the check suite. The interim form is forgeable (RS-4 T-13: an Actions check run can
-   attach to a real run's suite). It is no weaker than the old gate, which trusted check names
-   alone. C2 ends it.
+   other app are ignored. Until the App exists, the interim form is app slug `github-actions`,
+   the same `external_id` binding, **and** a completed default-branch verifier run at the trust
+   sha: `GET actions/workflows/cq-verify.yml/runs?head_sha=<main>&branch=<default>` must hold a
+   run with path `.github/workflows/cq-verify.yml`, event `workflow_run` or
+   `workflow_dispatch`, head branch the default branch and this repository as head repository.
+   The row cannot be tied to that run through its check suite, as the plan's wording
+   suggested: a `cq/ratchet` row that cq-verify posts on the queue tip lands in the check suite
+   of the tip's `cq-signal` push run (path `.github/workflows/cq-signal.yml`, event `push`,
+   `head_sha` = tip), observed live. A suite lookup therefore never matched, and the gate
+   could never promote. The interim form is forgeable (RS-4 T-13): any Actions job can post
+   a `github-actions` row with the binding once the verifier has run at `main`. It is no
+   weaker than the old gate, which trusted check names alone. C2 ends it.
 6. **All verdict posters switch together.** `cq-policy`, `cq-verify` and `cq-accept` sign in
-   environment `cq-verdict`. They mint a verdict-App token when `vars.CQ_VERDICT_APP_ID` is set
-   and fall back to `GITHUB_TOKEN` otherwise, so the gate's selection and the posters never
-   disagree about which app is authoritative.
+   environment `cq-verdict`. They mint a verdict-App token when `vars.CQ_VERDICT_APP_CLIENT_ID`
+   is set and fall back to `GITHUB_TOKEN` otherwise. The gate (and cq-accept's sweep dedupe)
+   selects on `vars.CQ_VERDICT_APP_ID`. The two are a pair: every poster, the gate and the
+   drift check refuse in a leading step when exactly one of them is set, so the gate's
+   selection and the posters never disagree about which app is authoritative.
 7. **PROMOTE_TOKEN is replaced by structure.** `decide` does every read with its own
    `GITHUB_TOKEN` (`contents`/`checks`/`actions`/`pull-requests`/`issues`: read). The promotion
    credential reaches only the push. That credential is a promoter-App installation token when
-   `vars.CQ_PROMOTER_APP_ID` is set, and otherwise the interim `PROMOTE_TOKEN`. The interim PAT
+   `vars.CQ_PROMOTER_APP_CLIENT_ID` is set, and otherwise the interim `PROMOTE_TOKEN`. The
+   client id is paired with `vars.CQ_PROMOTER_APP_ID` (R1's bypass actor, rendered by the
+   drift check): `gate.yml` and `settings-drift.yml` refuse when exactly one is set. The interim PAT
    is re-scoped to a fine-grained PAT with Contents read/write, Workflows write and Metadata read
    (RS-11 matrix row 2). The old gate keeps reading the repo-level `PROMOTE_TOKEN`. Once the
    owner moves that secret into `promote` (main-only), the old gate fails closed, and the new
@@ -80,7 +92,9 @@ paths stay in use, as ADR-0004 D-G.4 allows.
      a non-default ref fails at job admission, before any secret is exposed (RS-11 T-11-1).
 
    Only `drill` may have the owner as a required reviewer, with self-review allowed. The drift
-   check pins `can_admins_bypass`. The target state has no repository-level secrets
+   check pins `can_admins_bypass`, `prevent_self_review` (false everywhere) and `wait_timer`
+   (0 everywhere; a timer on `promote` would stall every gate run into its timeout). Any
+   other protection rule type, such as a custom deployment protection rule, is drift. The target state has no repository-level secrets
    (`total_count == 0`). Environment secret names must be in a committed allowlist, and the
    interim PAT names are listed separately and reported until C3.
 
@@ -99,7 +113,9 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - a trusted objection is outstanding;
     - there is no trusted acceptance bound to the head.
 
-    These are the RS-3 rules in `merge-recheck.ts`, composed read-only. Settle stays in the
+    These are the RS-3 rules in `merge-recheck.ts`, composed read-only. The `judge` job is
+    serialized per PR (`resolve` emits the lock `pr-<n>`, or `sweep` for the schedule), so an
+    older snapshot's post cannot land after a newer one's. Settle stays in the
     merger's recheck, because the ledger write needs `contents: write`. A mergeability row
     would be circular, since a required `cq/acceptance` keeps GitHub's merge state `BLOCKED`
     until it posts, so it is not included.
@@ -128,18 +144,25 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - `--end-of-options`.
 
     The push credential travels in a step-scoped `GIT_CONFIG_*` extra-header, never in argv or
-    `.git/config`.
+    `.git/config`. The push is a real compare-and-swap: `--atomic` with one
+    `--force-with-lease=refs/heads/<ref>:<oid>` per ref, leased on the `main` and `tip` the
+    gate read at step 1, and never a plain force. A non-forced push would accept a ref that
+    was rewound to an ancestor during the wait (break-glass dropping a merge) and quietly
+    fast-forward it back.
 
 14. **Protected paths (#220, W1.8).** `^src/ops/ratchet/` was already in the trust ref's
     `policy/protected-paths.json`. W1.10 adds the new check-code paths (`promote-gate.ts`,
-    `acceptance.ts`, the settings scripts). `.github/**` and `policy/**` are covered by the
-    taxonomy.
+    `acceptance.ts`, `state-branch.ts`, the settings scripts) and the review modules the gate
+    and acceptance decide through (`src/ops/review/gh.ts`, `threads.ts`). A test walks the
+    value-import closure of `acceptance.ts` and `promote-gate.ts` and requires every file in
+    it to be protected. `.github/**` and `policy/**` are covered by the taxonomy.
 15. **Render-diff test.** `policy/templates/instances.json` records, for each instantiated
     workflow, its template and token values. The test renders every template and compares the
     result byte for byte with `.github/workflows/`. Every workflow must be either instantiated
     or listed as non-templated with a reason, and every template must be either instantiated or
     listed as adopter-only. `scripts/render-templates.mjs --write` re-instantiates the
-    workflows.
+    workflows. It writes nothing while any table error stands other than a listed workflow
+    that does not exist yet, and table names must be plain file names (no `..`).
 
 ## Residuals (recorded, not fixed here)
 

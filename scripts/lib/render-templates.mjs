@@ -55,6 +55,26 @@ const ENTRY_KEYS = {
   adopterOnly: ['template', 'reason'],
 };
 
+/** A workflow name: one file directly under .github/workflows/. */
+export const WORKFLOW_NAME = /^[A-Za-z0-9._-]+\.ya?ml$/;
+
+/** A template name: a file under policy/templates/, at most one directory deep. */
+export const TEMPLATE_NAME = /^(?:[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+\.ya?ml$/;
+
+/** `name` matches `pattern` and has no `.`/`..` path segment. */
+const safeName = (name, pattern) =>
+  typeof name === 'string' &&
+  pattern.test(name) &&
+  name.split('/').every((segment) => segment !== '..' && segment !== '.');
+
+/**
+ * The --write blockers among collectRenders' errors: every error except a
+ * listed workflow that does not exist yet (the one --write creates).
+ */
+export function writeBlockers(errors) {
+  return errors.filter((error) => !/: workflow \S+ is listed but does not exist$/.test(error));
+}
+
 const isObject = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim() !== '';
 
@@ -90,8 +110,17 @@ export function validateTable(table, workflows, templates) {
       }
       for (const key of ENTRY_KEYS[section]) {
         if (key === 'tokens') continue;
-        if (!isNonEmptyString(entry[key]))
+        if (!isNonEmptyString(entry[key])) {
           errors.push(`${at}: "${key}" must be a non-empty string`);
+        } else if (key === 'workflow' && !safeName(entry[key], WORKFLOW_NAME)) {
+          errors.push(
+            `${at}: workflow ${JSON.stringify(entry[key])} is not a file name directly under ${WORKFLOWS_DIR}/`,
+          );
+        } else if (key === 'template' && !safeName(entry[key], TEMPLATE_NAME)) {
+          errors.push(
+            `${at}: template ${JSON.stringify(entry[key])} is not a .yml/.yaml path under ${TEMPLATES_DIR}/ (at most one directory, no '..')`,
+          );
+        }
       }
       if (section === 'instances') {
         if (!isObject(entry.tokens)) {
@@ -149,7 +178,13 @@ export function collectRenders(root) {
   const errors = validateTable(table, workflows, templates).map((e) => `${TABLE_PATH}: ${e}`);
   const results = [];
   for (const entry of Array.isArray(table?.instances) ? table.instances : []) {
-    if (!isObject(entry) || !templates.includes(entry.template) || !isObject(entry.tokens))
+    if (
+      !isObject(entry) ||
+      !safeName(entry.workflow, WORKFLOW_NAME) ||
+      !safeName(entry.template, TEMPLATE_NAME) ||
+      !templates.includes(entry.template) ||
+      !isObject(entry.tokens)
+    )
       continue;
     let expected = null;
     try {

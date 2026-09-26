@@ -28,6 +28,8 @@
 #     A PR event judges the one open same-repo PR into merge-queue whose head
 #     is the run's `head_sha`; a merge-queue push has nothing to judge; the
 #     sweep lists open same-repo non-draft PRs into merge-queue (at most 30).
+#     It also emits judge's lock: `pr-<n>` for a single-PR event or a
+#     dispatch, `sweep` for the schedule.
 #   - `judge` builds the trusted toolkit, runs the acceptance CLI per target
 #     and posts one `cq/acceptance` check run per target. A `fail` verdict is
 #     a RED CHECK RUN, not a red job: the job fails only when the verifier
@@ -58,9 +60,10 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: cq-accept-${{ github.event.workflow_run.id || inputs.pr || 'sweep' }}
-  cancel-in-progress: false
+# No workflow-level concurrency: `resolve` is read-only and idempotent, and
+# the ordering that matters is the POSTS. `judge` holds a per-PR lock
+# instead (see there); a workflow-level group keyed on the triggering run
+# would never serialize two runs for the same PR.
 
 jobs:
   resolve:
@@ -80,6 +83,7 @@ jobs:
       pull-requests: read
     outputs:
       targets: ${{ steps.targets.outputs.targets }}
+      lock: ${{ steps.targets.outputs.lock }}
     steps:
       - name: Verify the trigger and resolve the targets
         id: targets
@@ -182,6 +186,18 @@ jobs:
             echo "refusing: malformed targets ${targets}"; exit 1; }
           echo "targets: ${targets}"
           echo "targets=${targets}" >> "$GITHUB_OUTPUT"
+          # judge's lock: one PR per single-PR event or dispatch, one
+          # shared lock for the sweep.
+          if [ "$EVENT" = schedule ]; then
+            lock=sweep
+          elif [ "$(jq 'length' <<<"$targets")" = 1 ]; then
+            lock="pr-$(jq -r '.[0].pr' <<<"$targets")"
+          else
+            lock=none
+          fi
+          [[ "$lock" =~ ^(pr-[1-9][0-9]*|sweep|none)$ ]] || {
+            echo "refusing: lock '$lock'"; exit 1; }
+          echo "lock=${lock}" >> "$GITHUB_OUTPUT"
 
   judge:
     name: judge
@@ -190,6 +206,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment: cq-verdict
+    # Serialized per PR: two runs for the same PR (an approval, then a
+    # changes-requested review) never judge and post concurrently, so an
+    # older snapshot's post can never land after a newer one's. A newer
+    # queued run replaces an older queued one; the newest snapshot is read
+    # when judge starts. The sweep shares one lock (it is serialized
+    # against other sweeps only; the next sweep corrects a stale row).
+    concurrency:
+      group: cq-accept-${{ needs.resolve.outputs.lock }}
+      cancel-in-progress: false
     # Read scopes for the trust checkout and the PR/review API data;
     # `checks: write` is the verdict's own scope (used only when no verdict
     # App token is minted).
@@ -204,6 +229,20 @@ jobs:
       CQ_MERGE_ACCEPT_REVIEW_STATES: ${{ vars.CQ_MERGE_ACCEPT_REVIEW_STATES }}
       CQ_MERGE_TRUSTED_ASSOCIATIONS: ${{ vars.CQ_MERGE_TRUSTED_ASSOCIATIONS }}
     steps:
+      - name: Refuse a half-registered verdict App (paired vars)
+        # Posters mint on the client id; the gate and the sweep dedupe
+        # select on the numeric id. Exactly one set would make them
+        # disagree about which app is authoritative (Decision 6).
+        env:
+          APP_ID: ${{ vars.CQ_VERDICT_APP_ID }}
+          CLIENT_ID: ${{ vars.CQ_VERDICT_APP_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          if [ "${APP_ID:+set}" != "${CLIENT_ID:+set}" ]; then
+            echo 'refusing: set vars.CQ_VERDICT_APP_ID and'
+            echo 'vars.CQ_VERDICT_APP_CLIENT_ID together (exactly one is set)'
+            exit 1
+          fi
       - name: Check out the trust ref (the default branch)
         # v5.1.0, immutable commit pin (repo policy)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
