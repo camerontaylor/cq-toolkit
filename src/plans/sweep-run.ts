@@ -48,7 +48,6 @@ import {
   RETRYABLE_FAULT_CLASSES,
   sweepUnitFaultClass,
   sweepUnitSegments,
-  type CommittedMarker,
   type SweepUnitCheckConfig,
   type SweepUnitDispatchInput,
   type SweepUnitDriverConfig,
@@ -99,12 +98,7 @@ export interface SweepRunDeps {
   /** The kernel runner every dispatch goes through; default the kernel's runPlan. */
   runPlan?: typeof runPlan;
   /** The committed-marker read the assemble filter uses; default readCommittedMarkers. */
-  readMarkers?: (
-    repoRoot: string,
-    worktreesDir: string,
-    runPrefix: string,
-    runStateDir?: string,
-  ) => Promise<CommittedMarker[]>;
+  readMarkers?: typeof readCommittedMarkers;
 }
 
 /** One sweep invocation's outcome: the phase-A report, the phase-B run, the default output. */
