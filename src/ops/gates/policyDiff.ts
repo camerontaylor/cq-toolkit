@@ -156,8 +156,16 @@ function compiles(source: string): boolean {
 const PolicyListSchema = z
   .object({
     schemaVersion: z.literal(1),
+    // Anchored like the definition set's entries, so no source can widen
+    // what its text appears to say.
     protectedPaths: z.array(
-      z.string().min(1).refine(compiles, { message: 'protectedPaths entry must compile' }),
+      z
+        .string()
+        .min(1)
+        .refine((source) => source.startsWith('^') || source.startsWith('(?:^|/)'), {
+          message: 'protectedPaths entry must be anchored (start with ^ or (?:^|/))',
+        })
+        .refine(compiles, { message: 'protectedPaths entry must compile' }),
     ),
     requiredChecks: z.array(z.string().min(1)),
   })
@@ -379,12 +387,14 @@ export function createPolicyDiff(
     let subjectPolicy: Side<PolicyList>;
     let baseFlows: Flows;
     let subjectFlows: Flows;
+    let policyAbsent = false;
     try {
       manifest = await loadTrustedManifest(input.repo, trust);
       graph = new Set(await tsconfigGraphPaths(input.repo, trust));
       const trustPolicy = await gitReadBlob(input.repo, trust, POLICY_LIST_PATH);
       // Absent at the trust ref: no project lists. Present but invalid: the
       // check cannot know what it is meant to protect, so it cannot judge.
+      policyAbsent = trustPolicy === null;
       policy =
         trustPolicy === null
           ? { schemaVersion: 1, protectedPaths: [], requiredChecks: [] }
@@ -642,6 +652,11 @@ export function createPolicyDiff(
 
     // The override record (logged whatever the verdict).
     const notes: string[] = [];
+    if (policyAbsent) {
+      notes.push(
+        `policy list: ${POLICY_LIST_PATH} absent at the trust ref — project protectedPaths and requiredChecks are inactive`,
+      );
+    }
     const override = await evaluateOverride(input, trust, subject, notes);
 
     let verdict = judge(config.posture, findings);

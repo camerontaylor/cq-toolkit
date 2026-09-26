@@ -239,6 +239,12 @@ describe('cq-policy runs trusted code over head data (ADR-0004 D-B, D-G, D-H.2)'
       expect(judge).toContain('node trust/dist/cli.js gates.policyDiff');
       expect(judge).toContain('OWNER_ID: ${{ github.repository_owner_id }}');
       expect(judge).toContain('repos/${REPO}/issues/${PR}/timeline');
+      // I11: the override record reads the COMPLETE, chronological label
+      // history — every page, slurped in API order.
+      expect(judge).toContain('gh api --paginate "repos/${REPO}/issues/${PR}/timeline"');
+      expect(judge).toContain(`jq -s '.' > "\${RUNNER_TEMP}/label-events.json"`);
+      // A head-authored path cannot close the summary's code fence.
+      expect(judge).toContain(`($report | gsub("${'`'}{3,}"; "${'` ` `'}"))`);
       expect(judge).toContain('name: "cq/policy"');
       expect(judge).toContain('external_id: $ext');
       expect(judge).toContain('--arg ext "${TRUST}:${SUBJECT}"');

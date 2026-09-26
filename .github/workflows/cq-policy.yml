@@ -338,7 +338,9 @@ jobs:
                     then "policy: check " + ($r.status // "crashed")
                     elif $verdict == "needs-human" then "needs-human (D11)"
                     else "policy: " + $verdict end),
-                  summary: ("```text\n" + $report + "\n```"
+                  summary: ("```text\n"
+                    + ($report | gsub("`{3,}"; "` ` `"))
+                    + "\n```"
                     + "\n\ntrust ref `" + $ext + "`")
                 }
               }' > "${RUNNER_TEMP}/check-run.json"
