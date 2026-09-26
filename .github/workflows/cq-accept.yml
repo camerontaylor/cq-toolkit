@@ -63,7 +63,9 @@ permissions: {}
 # No workflow-level concurrency: `resolve` is read-only and idempotent, and
 # the ordering that matters is the POSTS. `judge` holds a per-PR lock
 # instead (see there); a workflow-level group keyed on the triggering run
-# would never serialize two runs for the same PR.
+# would never serialize two runs for the same PR. The sweep's lock is shared
+# only among sweeps, so the post step also refuses to land a verdict whose
+# snapshot predates the newest same-app verdict on that head.
 
 jobs:
   resolve:
@@ -280,6 +282,9 @@ jobs:
             [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || {
               echo "refusing: subject '$subject'"; exit 1; }
             verdict="${dir}/${pr}.json"
+            # Stamped BEFORE the snapshot read: the post step skips this
+            # verdict if a same-app verdict on the head started later.
+            date -u +%Y-%m-%dT%H:%M:%SZ > "${dir}/${pr}.judged-at"
             node trust/dist/selfhost/acceptance.js \
               --repository="$REPO" --pr="$pr" --subject="$subject" \
               --base=merge-queue --state=open > "$verdict" || true
@@ -370,20 +375,32 @@ jobs:
               jq -r '"**" + .output.title + "**\n\n" + .output.summary' \
                 "$check"
             } >> "$GITHUB_STEP_SUMMARY"
+            judged_at="$(cat "${dir}/${pr}.judged-at")"
+            [[ "$judged_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || {
+              echo "refusing: judged-at '$judged_at'"; exit 1; }
+            # The newest cq/acceptance run on the head from the SAME app
+            # (the verdict App when set, else GitHub Actions).
+            newest="$(gh api --paginate \
+              "repos/${REPO}/commits/${subject}/check-runs?check_name=cq/acceptance&filter=all&per_page=100" \
+              --jq '.check_runs[]
+                | {id, app_id: .app.id, app_slug: .app.slug,
+                   conclusion, external_id, started_at}' |
+              jq -s --arg app "$VERDICT_APP_ID" '
+                map(select(if $app == ""
+                  then .app_slug == "github-actions"
+                  else (.app_id | tostring) == $app end))
+                | max_by(.id) // {}')"
+            # Runs for one head are not all serialized (the sweep and a
+            # per-PR run hold different locks), so a verdict judged from an
+            # older snapshot must never land on top of a newer one: skip
+            # when the newest row started after this snapshot was read.
+            if jq -e --arg t "$judged_at" \
+                '(.started_at // "") > $t' <<<"$newest" >/dev/null; then
+              echo "#${pr}: a newer verdict ($(jq -r '.started_at' <<<"$newest")) postdates this snapshot (${judged_at}) — not posted"
+              continue
+            fi
             if [ "$EVENT" = schedule ]; then
-              # The sweep re-posts only a changed verdict: the newest
-              # cq/acceptance run on the head from the SAME app (the
-              # verdict App when set, else GitHub Actions).
-              newest="$(gh api --paginate \
-                "repos/${REPO}/commits/${subject}/check-runs?check_name=cq/acceptance&filter=all&per_page=100" \
-                --jq '.check_runs[]
-                  | {id, app_id: .app.id, app_slug: .app.slug,
-                     conclusion, external_id}' |
-                jq -s --arg app "$VERDICT_APP_ID" '
-                  map(select(if $app == ""
-                    then .app_slug == "github-actions"
-                    else (.app_id | tostring) == $app end))
-                  | max_by(.id) // {}')"
+              # The sweep re-posts only a changed verdict.
               if jq -e --slurpfile c "$check" '
                   .conclusion == $c[0].conclusion
                   and .external_id == $c[0].external_id' \

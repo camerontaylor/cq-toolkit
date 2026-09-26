@@ -73,7 +73,8 @@ paths stay in use, as ADR-0004 D-G.4 allows.
    drift check refuse in a leading step when exactly one of them is set, so the gate's
    selection and the posters never disagree about which app is authoritative.
 7. **PROMOTE_TOKEN is replaced by structure.** `decide` does every read with its own
-   `GITHUB_TOKEN` (`contents`/`checks`/`actions`/`pull-requests`/`issues`: read). The promotion
+   `GITHUB_TOKEN` (`contents`/`checks`/`pull-requests`/`issues`: read; `actions: write`, used
+   only to dispatch `cq-verify` on the default ref when the tip's verdict is missing). The promotion
    credential reaches only the push. That credential is a promoter-App installation token when
    `vars.CQ_PROMOTER_APP_CLIENT_ID` is set, and otherwise the interim `PROMOTE_TOKEN`. The
    client id is paired with `vars.CQ_PROMOTER_APP_ID` (R1's bypass actor, rendered by the
