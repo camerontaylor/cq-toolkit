@@ -93,7 +93,7 @@ checked against the known entry-point scan. The current list is:
 
 - `test/cli/i1.test.ts`
 - `test/cli/plans.smoke.test.ts`
-- `test/driver/acp.test.ts`
+- `test/driver/acp.real.test.ts`
 - `test/driver/subprocess.test.ts`
 - `test/e2e/analyze/analyze.e2e.test.ts`
 - `test/e2e/merge/live.test.ts`
