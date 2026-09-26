@@ -447,6 +447,7 @@ describe('gates registry entry', () => {
       'gates.regressionGate',
       'gates.hackDetector',
       'gates.commitGate',
+      'gates.policyDiff',
     ]);
     const valid = { adapter: 'tsc-lines', command: { command: 'tsc', args: ['--noEmit'] } };
     expect(CheckRunnerInputSchema.parse(valid)).toEqual({

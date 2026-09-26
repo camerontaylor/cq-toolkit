@@ -1,9 +1,10 @@
 // Gates lane C1+C2+C3 — registry slice: the `gates.checkRunner`,
-// `gates.baselineProbe`, `gates.regressionGate`, `gates.hackDetector`, and
-// `gates.commitGate` op entries, typed against the FROZEN OpRegistryEntry
-// (src/kernel/types.ts). The probe's importer binds the default subprocess
-// runner — the lane's only I/O wiring — through DYNAMIC imports, so loading
-// the registry never loads an op module: module scope imports only zod and
+// `gates.baselineProbe`, `gates.regressionGate`, `gates.hackDetector`,
+// `gates.commitGate` and (W1.9) `gates.policyDiff` op entries, typed
+// against the FROZEN OpRegistryEntry (src/kernel/types.ts). The probe's
+// importer binds the default subprocess runner — the lane's only I/O
+// wiring — through DYNAMIC imports, so loading the registry never loads an
+// op module: module scope imports only zod and
 // types (the type-only imports are erased at compile time), keeping the
 // lazy-import pattern. The zod schemas are registry-time mirrors of the
 // lane's types and live HERE (the shared spot, C1's CheckRunnerInputSchema
@@ -16,8 +17,13 @@ import type { CheckFailure, CheckRunnerInput, FailureSet } from './checkRunner.j
 import type { CommitGateInput } from './commitGate.js';
 import type { FingerprintConfig } from './fingerprint.js';
 import type { HackDetectorInput } from './hackDetector.js';
+import type { PolicyDiffInput, PolicyDiffOutcome } from './policyDiff.js';
 import type { RegressionGateInput } from './regressionGate.js';
 // Shared protected-path taxonomy helper: './protectedPaths.js'.
+// gates.policyDiff helpers (W1.9), reached through './policyDiff.js': the
+// workflow scanner './workflowScan.js' and the override record
+// './overrideRecord.js'; the posture resolver './policyConfig.js' is bound
+// by the importer below.
 
 /**
  * Registry-time mirror of {@link CheckRunnerInput}: the full input, and
@@ -200,6 +206,28 @@ export const CommitGateInputSchema: z.ZodType<CommitGateInput> = z
   })
   .strict();
 
+/**
+ * Registry-time mirror of {@link PolicyDiffInput} (W1.9, D11): the full
+ * input, and only it. STRICT and deliberately WITHOUT a posture field — the
+ * posture comes from the project env / per-call opt-in at dispatch
+ * (RS-15 Annex B §B.1), never from plan JSON or op input, so a subject
+ * cannot relax its own check. Numeric ids are positive integers.
+ */
+export const PolicyDiffInputSchema: z.ZodType<PolicyDiffInput> = z
+  .object({
+    repo: z.string().min(1),
+    trustRef: z.string().min(1),
+    subject: z.string().min(1),
+    subjectKind: z.enum(['pr', 'push']),
+    base: z.string().min(1),
+    pr: z.number().int().positive().exactOptional(),
+    repository: z.string().min(1).exactOptional(),
+    ownerId: z.number().int().positive().exactOptional(),
+    labelEventsPath: z.string().min(1).exactOptional(),
+    settleRef: z.string().min(1).exactOptional(),
+  })
+  .strict();
+
 /** Gates-lane op registry (C1 runner; C2 probe + gate; C3 hack detector + commit gate). */
 export const registry: OpRegistryEntry[] = [
   {
@@ -239,5 +267,25 @@ export const registry: OpRegistryEntry[] = [
     name: 'gates.commitGate',
     inputSchema: CommitGateInputSchema,
     importer: () => import('./commitGate.js').then((m) => m.commitGate as Op<unknown, unknown>),
+  },
+  {
+    name: 'gates.policyDiff',
+    inputSchema: PolicyDiffInputSchema,
+    // The D11 policy check (W1.9). The posture is resolved ONCE per dispatch
+    // from the project env (the per-call opt-in is W3.6's CLI flag) and bound
+    // into the op; an invalid posture value is `failed`, never a fallback.
+    importer: () =>
+      Promise.all([import('./policyDiff.js'), import('./policyConfig.js')]).then(([m, cfg]) => {
+        const op: Op<PolicyDiffInput, PolicyDiffOutcome> = async (input) => {
+          let config;
+          try {
+            config = cfg.resolveProtectedPathsConfig({ env: process.env });
+          } catch (err) {
+            return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+          }
+          return m.createPolicyDiff(config)(input);
+        };
+        return op as Op<unknown, unknown>;
+      }),
   },
 ];

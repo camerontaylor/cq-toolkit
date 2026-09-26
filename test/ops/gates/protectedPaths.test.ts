@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { describe, expect, test } from 'vitest';
 import {
   PROTECTED_STAGE_PATTERNS,
+  isProtectedPolicyPath,
   isProtectedStagePath,
 } from '../../../src/ops/gates/protectedPaths.js';
 import { tsconfigGraphPaths } from '../../../src/ops/ratchet/internal/definitions.js';
@@ -47,6 +48,19 @@ const REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   // F2: the protected-path list and the required-check list ARE definitions.
   '^src/ops/gates/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
   '^scripts/denylist-scan$': ['scripts/denylist-scan'],
+  // W1.9 (ADR-0004 D-C.4): the D11 protected-path / required-check list and
+  // the C3 attestation that activates override records are definitions.
+  '^policy/protected-paths\\.json$': ['policy/protected-paths.json'],
+  '^policy/attestations/': ['policy/attestations/c3.json'],
+  // W1.9 H3: what the required checks run is measurement configuration.
+  '(?:^|/)\\.oxlintrc\\.json$': ['.oxlintrc.json'],
+  '(?:^|/)\\.oxfmtrc\\.json$': ['.oxfmtrc.json'],
+  '^knip\\.json$': ['knip.json'],
+  '^lint/': ['lint/plugin.mjs', 'lint/rules/x.mjs'],
+  '^scripts/ratchet-[^/]+\\.mjs$': ['scripts/ratchet-typecheck.mjs', 'scripts/ratchet-lib.mjs'],
+  '^scripts/gen-op-docs\\.mjs$': ['scripts/gen-op-docs.mjs'],
+  '^scripts/copy-prompt-assets\\.mjs$': ['scripts/copy-prompt-assets.mjs'],
+  '^policy/denylist/': ['policy/denylist/patterns.yml'],
 };
 
 describe('worker gate / ratchet definition-set sync (F1, F2)', () => {
@@ -100,6 +114,14 @@ const PATTERN_REPRESENTATIVES: Readonly<Record<string, readonly string[]>> = {
   '^\\.cq\\/tool(?:\\/|$)': ['.cq/tool/lint.sh'],
   '^src\\/ops\\/gates\\/protectedPaths\\.ts$': ['src/ops/gates/protectedPaths.ts'],
   '^scripts\\/denylist-scan$': ['scripts/denylist-scan'],
+  '^scripts\\/ratchet-[^/]+\\.mjs$': ['scripts/ratchet-typecheck.mjs'],
+  '^scripts\\/(?:gen-op-docs|copy-prompt-assets)\\.mjs$': [
+    'scripts/gen-op-docs.mjs',
+    'scripts/copy-prompt-assets.mjs',
+  ],
+  '(?:^|\\/)knip\\.jsonc?$': ['knip.json', 'packages/a/knip.jsonc'],
+  '^policy(?:\\/|$)': ['policy/DOCTRINE.md', 'policy/templates/ratchet.yml'],
+  '^lint(?:\\/|$)': ['lint/plugin.mjs', 'lint/rules/x.mjs'],
   '(?:^|\\/)[^/]*\\.setup\\.[^/]+$': ['vitest.setup.ts'],
   '(?:^|\\/)\\.[^/]*rc(?:\\.[^/]*)?$': ['.npmrc', 'packages/a/.npmrc'],
   '(?:^|\\/)\\.gitignore$': ['.gitignore', 'packages/a/.gitignore'],
@@ -135,5 +157,37 @@ describe('worker gate pattern liveness (reverse direction)', () => {
     expect(new RegExp(source, 'i').test(path)).toBe(true);
     // …and the stage path gate really does protect it.
     expect(isProtectedStagePath(path)).toBe(true);
+  });
+});
+
+describe('isProtectedPolicyPath (D11, ADR-0004 D-G.1)', () => {
+  test.each([
+    'policy/DOCTRINE.md',
+    'policy/templates/cq-policy.yml',
+    'lint/x',
+    'lint/rules/no-vendor-sdk-in-kernel.mjs',
+    '.github/workflows/ci.yml',
+    'baselines/ratchets.json',
+  ])('%s is a protected policy path', (path) => {
+    expect(isProtectedPolicyPath(path)).toBe(true);
+  });
+
+  test.each([
+    // Tests and snapshots are worker evidence, not enforcement definitions.
+    'src/foo.test.ts',
+    '__snapshots__/a.snap',
+    'test/unit/a.ts',
+    'src/index.ts',
+    // Anchored at the repo root: a nested `policy/` or `lint/` is content.
+    'src/policy/index.ts',
+    'src/lint/index.ts',
+    'policyish/a.md',
+  ])('%s is not a protected policy path', (path) => {
+    expect(isProtectedPolicyPath(path)).toBe(false);
+  });
+
+  test('policy and lint paths are also denied to sweep workers', () => {
+    expect(isProtectedStagePath('policy/templates/ratchet.yml')).toBe(true);
+    expect(isProtectedStagePath('lint/plugin.mjs')).toBe(true);
   });
 });

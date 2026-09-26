@@ -1,0 +1,355 @@
+# cq-policy — the DEFAULT-BRANCH protected-path policy verifier (D11;
+# ADR-0004 D-B, D-G; W1.9).
+#
+# Carrier (P1): `workflow_run` on `cq-signal` (plus `workflow_dispatch`,
+# honoured only on the default ref — ADR-0004 D-A.1). GitHub runs the DEFAULT
+# BRANCH's copy of this file for both, so a pull request cannot edit what
+# judges it (RS-4 T-2/T-8). Everything that decides comes from the trust ref
+# (`github.sha` here, the default-branch tip):
+#   - the verifier code: the toolkit built from the trust checkout with
+#     `npm ci --ignore-scripts` (never the head's dist/ or node_modules);
+#   - the protected-path lists, the ratchet definition set and the policy
+#     file, read by `gates.policyDiff` AT THE TRUST REF;
+#   - the posture: `vars.CQ_MERGE_PROTECTED_PATHS`, a repository variable
+#     read by this default-branch definition and mapped to the env key the
+#     resolver reads (RS-15 Annex B §B.6.3). Blank or unset is the
+#     conservative `human`; op input never carries the posture.
+#
+# DATA-ONLY: the head is fetched as git objects into the trust repository and
+# read with git plumbing — never checked out, never installed, never
+# executed. No head code runs anywhere in this workflow, so it needs no
+# compute/sign split (contrast `cq-verify.yml`, whose recompute runs `tsc`
+# over head content). The label records come from the PR timeline API, never
+# from anything the head authored.
+#
+# Jobs:
+#   - `resolve` verifies the triggering run (workflow path, event, repository
+#     id — fork runs are refused) and resolves the subject from `head_sha`,
+#     never `head_branch`; a PR subject's PR and base come from the
+#     commit→PR API.
+#   - `judge` builds the trusted toolkit, fetches the subject, the base and
+#     (when present) `cq-state` as objects with a step-scoped read-only
+#     credential, fetches the timeline label events, runs `gates.policyDiff`
+#     and posts `cq/policy`. The run report — including every field of the
+#     `cq-override` label record it checked — is the check-run summary and
+#     the step summary.
+#
+# EXPAND (ADR-0004 D-H.2): `cq/policy` is NOT a required check yet. W1.10's
+# C2 makes it required and moves the posting step to the verdict App. The
+# check run is posted with this job's GITHUB_TOKEN, which ADR-0004 D-F says
+# is not a trust anchor (any workflow can forge one). The `cq-override` label
+# stays DORMANT — logged, never honoured — until the C3 attestation
+# (ADR-0004 D-H.3) is on the trust ref. `external_id` binds
+# `<trust-sha>:<subject-sha>`.
+name: cq-policy
+
+on:
+  workflow_run:
+    workflows:
+      - cq-signal
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      signal_run_id:
+        description: 'cq-signal run id to judge (its head_sha is the subject)'
+        required: true
+
+permissions: {}
+
+concurrency:
+  group: cq-policy-${{ github.event.workflow_run.id || inputs.signal_run_id }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: resolve
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    if: >-
+      github.event_name == 'workflow_run' ||
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    outputs:
+      subject: ${{ steps.run.outputs.subject }}
+      kind: ${{ steps.run.outputs.kind }}
+      base: ${{ steps.run.outputs.base }}
+      pr: ${{ steps.run.outputs.pr }}
+    steps:
+      - name: Verify the triggering run and resolve the subject
+        id: run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REPO_ID: ${{ github.repository_id }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.signal_run_id }}
+        run: |
+          set -euo pipefail
+          case "$RUN_ID" in
+            ''|*[!0-9]*)
+              echo "refusing: run id '$RUN_ID' is not numeric"
+              exit 1;;
+          esac
+          # Re-read the run from the API by id: the fields below are the
+          # server's, not a payload a dispatcher could shape.
+          run="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}")"
+          path="$(jq -r '.path' <<<"$run")"
+          event="$(jq -r '.event' <<<"$run")"
+          head_repo="$(jq -r '.head_repository.id' <<<"$run")"
+          subject="$(jq -r '.head_sha' <<<"$run")"
+          branch="$(jq -r '.head_branch' <<<"$run")"
+          [ "$path" = ".github/workflows/cq-signal.yml" ] || {
+            echo "refusing: run path '$path'"; exit 1; }
+          [ "$head_repo" = "$REPO_ID" ] || {
+            echo "refusing: fork or foreign run (repo id $head_repo)"
+            exit 1; }
+          [[ "$subject" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "refusing: head_sha '$subject'"; exit 1; }
+          pr=''
+          case "$event" in
+            pull_request|pull_request_review|pull_request_review_comment)
+              # The subject is head_sha; the PR (and its base) comes from
+              # the commit→PR API, never from pull_requests[]
+              # (ADR-0004 D-C.2). Exactly one open same-repo PR into
+              # merge-queue or main must carry the subject as its head:
+              # the label record is per PR, so an ambiguous PR is refused.
+              matches="$(gh api "repos/${REPO}/commits/${subject}/pulls" \
+                --jq "[.[] | select(.state == \"open\"
+                   and .head.sha == \"${subject}\"
+                   and .head.repo.id == ${REPO_ID}
+                   and (.base.ref == \"merge-queue\"
+                     or .base.ref == \"main\"))
+                   | {number, base: .base.ref}]")"
+              count="$(jq 'length' <<<"$matches")"
+              [ "$count" = 1 ] || {
+                echo "refusing: ${count} open same-repo PRs"
+                echo "into merge-queue/main have head ${subject}"
+                exit 1; }
+              pr="$(jq -r '.[0].number' <<<"$matches")"
+              base="$(jq -r '.[0].base' <<<"$matches")"
+              [[ "$pr" =~ ^[0-9]+$ ]] || {
+                echo "refusing: PR number '$pr'"; exit 1; }
+              kind='pr'
+              ;;
+            push)
+              [ "$branch" = "merge-queue" ] || {
+                echo "refusing: push run on '$branch'"; exit 1; }
+              kind='push'
+              base='main'
+              ;;
+            *) echo "refusing: event '$event'"; exit 1;;
+          esac
+          {
+            echo "subject=${subject}"
+            echo "kind=${kind}"
+            echo "base=${base}"
+            echo "pr=${pr}"
+          } >> "$GITHUB_OUTPUT"
+
+  judge:
+    name: judge
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Read scopes for the trust checkout, the object fetch and the timeline;
+    # `checks: write` is the verdict's own scope. No environment and no
+    # secret but GITHUB_TOKEN: this job runs trusted code over head DATA.
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: read
+      issues: read
+    env:
+      # The posture (Annex B §B.6.3). Blank or unset = `human`.
+      CQ_MERGE_PROTECTED_PATHS: ${{ vars.CQ_MERGE_PROTECTED_PATHS }}
+    steps:
+      - name: Check out the trust ref (the default branch)
+        # v5.1.0, immutable commit pin (repo policy)
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: trust
+          fetch-depth: 0
+          # The object fetch below scopes its own credential to that step;
+          # nothing persists into the trusted build or the verifier.
+          persist-credentials: false
+      - name: Set up Node 24 (no cache — deciding jobs restore nothing, D-C.7)
+        # v5.0.0, immutable commit pin (repo policy)
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: 24
+          cache: ''
+      - name: Install and build the trusted toolkit
+        working-directory: trust
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+      - name: Fetch the subject, base and cq-state objects (no checkout)
+        id: objects
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ needs.resolve.outputs.base }}
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+        run: |
+          set -euo pipefail
+          # A step-scoped read-only credential, passed through git's
+          # environment config (never argv, never .git/config), so it ends
+          # with this step.
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"
+          export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}"
+          git -C trust fetch --no-tags origin "$SUBJECT" \
+            "+refs/heads/${BASE}:refs/remotes/origin/${BASE}"
+          git -C trust cat-file -e "${SUBJECT}^{commit}"
+          # cq-state (the settle ledger) may not exist yet: only its
+          # ABSENCE is tolerated (ls-remote exit 2); any other failure
+          # fails the step. Without it no label record can be valid.
+          rc=0
+          git -C trust ls-remote --exit-code origin \
+            refs/heads/cq-state >/dev/null || rc=$?
+          settle=''
+          case "$rc" in
+            0)
+              git -C trust fetch --no-tags origin \
+                '+refs/heads/cq-state:refs/remotes/origin/cq-state'
+              settle='refs/remotes/origin/cq-state'
+              ;;
+            2) echo 'cq-state is absent: no settle ledger to read';;
+            *) echo "ls-remote cq-state failed (exit $rc)"; exit 1;;
+          esac
+          echo "settle_ref=${settle}" >> "$GITHUB_OUTPUT"
+      - name: Fetch the PR timeline label events (API data, not head bytes)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          KIND: ${{ needs.resolve.outputs.kind }}
+          PR: ${{ needs.resolve.outputs.pr }}
+        run: |
+          set -euo pipefail
+          [ "$KIND" = 'pr' ] || exit 0
+          [[ "$PR" =~ ^[0-9]+$ ]] || {
+            echo "refusing: PR number '$PR'"; exit 1; }
+          # Chronological API order is kept: the current application is
+          # the last `labeled` event with no later `unlabeled`.
+          gh api --paginate "repos/${REPO}/issues/${PR}/timeline" \
+            --jq '.[] | select(.event == "labeled"
+              or .event == "unlabeled")' |
+            jq -s '.' > "${RUNNER_TEMP}/label-events.json"
+          jq -e 'type == "array"' "${RUNNER_TEMP}/label-events.json" \
+            >/dev/null
+      - name: 'Judge (CLI: gates.policyDiff)'
+        env:
+          TRUST: ${{ github.sha }}
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+          KIND: ${{ needs.resolve.outputs.kind }}
+          BASE: ${{ needs.resolve.outputs.base }}
+          PR: ${{ needs.resolve.outputs.pr }}
+          OWNER_ID: ${{ github.repository_owner_id }}
+          SETTLE_REF: ${{ steps.objects.outputs.settle_ref }}
+        run: |
+          set -euo pipefail
+          verdict="${RUNNER_TEMP}/verdict.json"
+          args=(
+            --repo=trust
+            --trustRef="$TRUST"
+            --subject="$SUBJECT"
+            --subjectKind="$KIND"
+            --base="refs/remotes/origin/${BASE}"
+          )
+          if [ "$KIND" = 'pr' ]; then
+            # Numeric flags are JSON-parsed by the CLI (--pr=12 → 12).
+            [[ "$PR" =~ ^[0-9]+$ ]] || {
+              echo "refusing: PR number '$PR'"; exit 1; }
+            [[ "$OWNER_ID" =~ ^[0-9]+$ ]] || {
+              echo "refusing: owner id '$OWNER_ID'"; exit 1; }
+            args+=(
+              --pr="$PR"
+              --repository="$GITHUB_REPOSITORY"
+              --ownerId="$OWNER_ID"
+              --labelEventsPath="${RUNNER_TEMP}/label-events.json"
+            )
+            if [ -n "$SETTLE_REF" ]; then
+              args+=(--settleRef="$SETTLE_REF")
+            fi
+          fi
+          node trust/dist/cli.js gates.policyDiff "${args[@]}" \
+            > "$verdict" || true
+          if ! jq -e -s \
+            'length == 1 and (.[0] | type) == "object"
+             and (.[0].status | type) == "string"
+             and (.[0].value == null or (.[0].value | type) == "object")
+             and (.[0].error == null or (.[0].error | type) == "string")
+             and (.[0].detail == null or (.[0].detail | type) == "string")
+             and (.[0].status != "ok" or
+               ((.[0].value | type) == "object"
+                and (.[0].value.verdict
+                  | IN("pass", "fail", "needs-human"))
+                and (.[0].value.posture | type) == "string"
+                and (.[0].value.postureLayer | type) == "string"
+                and (.[0].value.report | type) == "array"
+                and all(.[0].value.report[]; type == "string")))' \
+            "${RUNNER_TEMP}/verdict.json" >/dev/null 2>&1; then
+            msg='policy check emitted no valid JSON result'
+            printf '%s\n' "{\"status\":\"failed\",\"error\":\"$msg\"}" \
+              > "${RUNNER_TEMP}/verdict.json"
+          fi
+          cat "${RUNNER_TEMP}/verdict.json"
+      - name: Post the cq/policy check run and the run report
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TRUST: ${{ github.sha }}
+          SUBJECT: ${{ needs.resolve.outputs.subject }}
+        run: |
+          set -euo pipefail
+          # Anything but an ok result with verdict "pass" is a failure;
+          # needs-human is a failure titled for D11. The summary is the run
+          # report (where the cq-override label record is logged), fenced
+          # so paths render verbatim, and capped under the API's limit.
+          jq -n --slurpfile v "${RUNNER_TEMP}/verdict.json" \
+            --arg sha "$SUBJECT" --arg ext "${TRUST}:${SUBJECT}" '
+            ($v[0] // {}) as $r
+            | ($r.value.verdict // "fail") as $verdict
+            | (if $r.status == "ok" then ($r.value.report | join("\n"))
+               else (($r.error // $r.detail
+                 // "policy check returned no error detail") | tostring)
+               end) as $report
+            | (if ($report | length) > 60000
+               then $report[0:60000] + "\n(report truncated)"
+               else $report end) as $report
+            | {
+                name: "cq/policy",
+                head_sha: $sha,
+                external_id: $ext,
+                status: "completed",
+                conclusion: (if $r.status == "ok" and $verdict == "pass"
+                  then "success" else "failure" end),
+                output: {
+                  title: (if $r.status != "ok"
+                    then "policy: check " + ($r.status // "crashed")
+                    elif $verdict == "needs-human" then "needs-human (D11)"
+                    else "policy: " + $verdict end),
+                  summary: ("```text\n"
+                    + ($report | gsub("`{3,}"; "` ` `"))
+                    + "\n```"
+                    + "\n\ntrust ref `" + $ext + "`")
+                }
+              }' > "${RUNNER_TEMP}/check-run.json"
+          {
+            echo '## cq/policy'
+            echo
+            jq -r '"**" + .output.title + "**\n\n" + .output.summary' \
+              "${RUNNER_TEMP}/check-run.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh api -X POST "repos/${REPO}/check-runs" \
+            --input "${RUNNER_TEMP}/check-run.json" --jq '.html_url'
+          jq -e '.conclusion == "success"' \
+            "${RUNNER_TEMP}/check-run.json" >/dev/null

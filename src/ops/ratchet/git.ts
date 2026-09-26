@@ -309,6 +309,40 @@ export async function gitReadBlob(repo: string, rev: string, path: string): Prom
   return out.toString('utf8');
 }
 
+/**
+ * Every REGULAR-blob path (100644/100755) at or under the repo-relative
+ * directory `prefix` at `rev`, sorted (W1.9: the policy diff enumerates
+ * `.github/workflows` at both ends of the judged range). Built like
+ * {@link gitReadBlob}: `ls-tree -r -z --full-tree` with the revision resolved
+ * as `<rev>^{commit}` (a bad revision throws, an absent prefix lists
+ * nothing) and the prefix placed after `--` under `--literal-pathspecs`.
+ * Symlinks, gitlinks and trees are not file content and are omitted; every
+ * listed path is validated with {@link assertRepoRelPath}, so a hostile tree
+ * entry throws rather than reaching a caller.
+ */
+export async function gitListPaths(repo: string, rev: string, prefix: string): Promise<string[]> {
+  assertRepoRelPath(prefix, 'list prefix');
+  assertRev(rev, 'list');
+  const listing = await runGit(repo, [
+    'ls-tree',
+    '-r',
+    '-z',
+    '--full-tree',
+    '--end-of-options',
+    `${rev}^{commit}`,
+    '--',
+    prefix,
+  ]);
+  const paths: string[] = [];
+  for (const entry of parseLsTree(listing)) {
+    // ls-tree prefix-matches path components; keep exactly the directory's contents.
+    if (!entry.path.startsWith(`${prefix}/`)) continue;
+    assertRepoRelPath(entry.path, 'tree path');
+    if (entry.type === 'blob' && REGULAR_BLOB_MODES.has(entry.mode)) paths.push(entry.path);
+  }
+  return paths.sort();
+}
+
 /** Split `-z` name output into paths (empty trailing record dropped). */
 function splitNul(out: Buffer): string[] {
   const text = out.toString('utf8');

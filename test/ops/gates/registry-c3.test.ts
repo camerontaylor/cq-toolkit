@@ -19,6 +19,8 @@ describe('the C3 registry entries', () => {
       'gates.regressionGate',
       'gates.hackDetector',
       'gates.commitGate',
+      // W1.9 (D11): the protected-path policy check follows the C3 slice.
+      'gates.policyDiff',
     ]);
   });
 });
