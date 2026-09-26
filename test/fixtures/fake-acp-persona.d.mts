@@ -5,7 +5,11 @@ export interface AcpPersonaIo {
   runCommand(
     command: string,
     cwd: string,
-    done: (err: (Error & { code?: number | string }) | null, stdout: string, stderr: string) => void,
+    done: (
+      err: (Error & { code?: number | string }) | null,
+      stdout: string,
+      stderr: string,
+    ) => void,
   ): void;
   closeInput(then: () => void): void;
   pauseInput(): void;

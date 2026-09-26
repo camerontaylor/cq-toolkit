@@ -4,7 +4,7 @@
 // cannot drift:
 //   - test/fixtures/fake-agent-cli.mjs — a REAL process (the subprocess
 //     driver's real-process contracts and the T1.7 smoke lane);
-//   - test/helpers/agent-persona-spawn.ts — in-process, over the
+//   - test/helpers/persona-spawn.ts — in-process, over the
 //     fakeManagedSpawn transport (no child process).
 // The host supplies `io` for everything process-level: stdout/stderr
 // writes, the exit code, the `run` tool's command execution, the self-kill,

@@ -189,7 +189,8 @@ export function fakeManagedSpawn(scriptFactory: (opts: SpawnOptions) => JsonLine
     const close = new Promise<ProcessClose>((resolve) => {
       resolveClose = resolve;
     });
-    const parts = createLinePeer(scriptFactory(opts), (code, signal) => {
+    const script = scriptFactory(opts);
+    const parts = createLinePeer(script, (code, signal) => {
       if (closed) return;
       closed = true;
       resolveClose({ code, signal, stdout: stdoutText, stderr: stderrText, droppedBytes: 0 });
@@ -243,6 +244,7 @@ export function fakeManagedSpawn(scriptFactory: (opts: SpawnOptions) => JsonLine
       },
       kill(signal) {
         if (closed) return false;
+        if (script.ignoresSignal?.(signal) === true) return true; // delivered, survived
         parts.finish(null, signal);
         return true;
       },

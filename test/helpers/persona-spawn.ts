@@ -1,14 +1,16 @@
-// The in-process ACP persona host (plan 003 F2): the REAL fake-ACP-server
-// persona (test/fixtures/fake-acp-persona.mjs — the same protocol code the
-// real fixture process runs) driven over the fakeAcpSpawn transport, with
-// no child process. Driver-specific tests about OUR folding/verdict/
-// permission/replay/usage logic run here; OS-level contracts (real stdio,
-// signals, pipes, sidecars) keep the real fixture process.
+// The in-process persona hosts (plan 003 F2): the fixtures' REAL personas
+// (test/fixtures/fake-acp-persona.mjs and fake-agent-persona.mjs — the
+// same code the real fixture processes run) driven over the transport
+// fakes, with no child process. Driver-specific tests about OUR folding/
+// verdict/permission/replay/usage logic run here; OS-level contracts (real
+// stdio, signals, pipes, process groups, sidecars) keep the real fixtures.
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
+import type { SpawnFn } from '../../src/driver/subprocess/index.js';
 import { createAcpPersona } from '../fixtures/fake-acp-persona.mjs';
-import { fakeAcpSpawn } from './transport-fakes.js';
+import { createAgentPersona } from '../fixtures/fake-agent-persona.mjs';
+import { fakeAcpSpawn, fakeManagedSpawn } from './transport-fakes.js';
 import type { JsonLinePeer, JsonLineScript } from './transport-fakes.js';
 
 /** Per-spawn persona pids: session and tool-call ids stay unique per spawn, as with real pids. */
@@ -67,6 +69,51 @@ export function acpPersonaSpawn(extraEnv: Record<string, string> = {}): AcpSpawn
     const script: JsonLineScript = (frame, bound) => {
       peer = bound;
       persona.onFrame(frame);
+    };
+    if (persona.ignoresSigterm) script.ignoresSignal = (signal) => signal === 'SIGTERM';
+    return script;
+  });
+}
+
+/**
+ * The fake agent CLI persona seam: each spawn runs a fresh persona over the
+ * driver's argv and child env (plus `extraEnv`) in the invocation's
+ * workspace. The script starts on the prompt (the transport's stdin frame);
+ * when it ends the fake child exits with the persona's exit code, unless
+ * the persona asked to stay alive (then only a kill ends it).
+ */
+export function agentPersonaSpawn(extraEnv: Record<string, string> = {}): SpawnFn {
+  return fakeManagedSpawn((opts) => {
+    let peer: JsonLinePeer | undefined;
+    let exitCode = 0;
+    let stayAlive = false;
+    const persona = createAgentPersona({
+      argv: opts.args,
+      env: { ...opts.env, ...extraEnv },
+      pid: nextPersonaPid++,
+      cwd: opts.cwd,
+      io: {
+        write: (text) => peer?.write(text),
+        writeErr: (text) => peer?.stderr(text.replace(/\n$/, '')),
+        setExitCode: (code) => {
+          exitCode = code;
+        },
+        runCommand: runEchoRedirect,
+        killSelf: (signal) => peer?.finish(null, signal),
+        spawnGrandchild: () => processOnly('grandchild'),
+        keepAlive: () => {
+          stayAlive = true;
+        },
+      },
+    });
+    let started = false;
+    const script: JsonLineScript = (frame, bound) => {
+      peer = bound;
+      if (started || frame['method'] !== 'stdin') return;
+      started = true;
+      void persona.run().then(() => {
+        if (!stayAlive) bound.finish(exitCode);
+      });
     };
     if (persona.ignoresSigterm) script.ignoresSignal = (signal) => signal === 'SIGTERM';
     return script;

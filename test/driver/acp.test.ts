@@ -58,7 +58,7 @@ import type { ExecutableProbe } from '../../src/driver/acp/binaries.js';
 import type { AcpDriverOptions } from '../../src/driver/acp/index.js';
 import { argvForShimSpawn } from '../../src/driver/acp/process.js';
 import type { AcpSpawnFn } from '../../src/driver/acp/process.js';
-import { acpPersonaSpawn } from '../helpers/acp-persona-spawn.js';
+import { acpPersonaSpawn } from '../helpers/persona-spawn.js';
 import { fakeAcpSpawn, runFakeTool } from '../helpers/transport-fakes.js';
 import type { JsonLineFrame, JsonLinePeer } from '../helpers/transport-fakes.js';
 import {

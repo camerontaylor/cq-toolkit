@@ -14,7 +14,9 @@ model. One spawn per run, no daemon, no pooling, no retries.
   `zcode-acp-server@0.37.3`).
 - **Wire vocabulary:** `src/driver/acp/protocol.ts` — OURS, zero imports
   of `@agentclientprotocol/sdk` or any vendor package.
-- **Fixture:** `test/fixtures/fake-acp-server.mjs` — the whole suite
+- **Fixture:** `test/fixtures/fake-acp-persona.mjs` (the wire persona),
+  hosted as a real process by `test/fixtures/fake-acp-server.mjs` and
+  in-process by `test/helpers/persona-spawn.ts` — the whole suite
   passes with NO harness binary present.
 
 ## Binaries, and how they are discovered

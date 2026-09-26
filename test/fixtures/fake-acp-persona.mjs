@@ -4,7 +4,7 @@
 //   - test/fixtures/fake-acp-server.mjs — a REAL process over stdio (the
 //     driver spawns it with cwd = the invocation's workspace; there IS no
 //     argv — the protocol is newline-delimited JSON-RPC 2.0);
-//   - test/helpers/acp-persona-spawn.ts — in-process, over the
+//   - test/helpers/persona-spawn.ts — in-process, over the
 //     fakeAcpSpawn transport (no child process).
 // The host supplies `io` for everything process-level: stdout/stderr
 // writes, exit, the `run` tool's command execution, and the two OS-only
