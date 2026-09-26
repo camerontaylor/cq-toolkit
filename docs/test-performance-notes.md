@@ -69,13 +69,16 @@ external boundary still has at least one real fixture-process contract:
 | Subprocess child environment (#183)              | None (the fake ignores the env allowlist)                                                                        | `test/driver/subprocess.real.test.ts` — `a REAL spawned worker cannot see a marker secret`                                                             | The production spawn path's actual child environment.                                                                                          |
 | ACP/subprocess transport shape                   | Shared JSON-line engine plus one adapter per seam                                                                | `test/driver/process-inventory.test.ts`                                                                                                                | The known process-backed test-file inventory remains explicit and reviewable.                                                                  |
 
-The inventory guard scans `*.test.ts` files for direct `node:child_process`
-imports and the known real-effect entry points (`spawnAcpProcess`,
-`spawnManaged`, `makeSubprocessWorktreeEffects`, `generateScratchRepo`,
-`createGitTemplate`, and `runSweepPlan`). It deliberately guards **known
-entry points only**: a new or transitive spawn helper can evade this scan, so
-adding one requires conscious inventory review rather than pretending the
-regex is complete.
+The inventory guard scans every discovered test file for direct
+`node:child_process` imports and the known real-effect entry points
+(`spawnAcpProcess`, `spawnManaged`, the `makeSubprocess*Effects/Deps`
+factories, `makeGhRunner`, `makeCheckRunner`, `realMergeEffects`,
+`generateScratchRepo`, `createGitTemplate`, and `runSweepPlan`). It
+deliberately guards **known entry points only**: a new or transitive spawn
+helper can evade this scan, so adding one requires conscious inventory review
+rather than pretending the regex is complete. The inventory also defines the
+test lanes (below), so a missed entry point puts a process-backed file in
+`test:unit`.
 
 ## Classification
 
@@ -169,16 +172,24 @@ checked against the known entry-point scan. The current list is:
 - `test/driver/subprocess.real.test.ts`
 - `test/e2e/analyze/analyze.e2e.test.ts`
 - `test/e2e/merge/live.test.ts`
+- `test/e2e/review/live.test.ts`
 - `test/e2e/sweep/sweep.e2e.test.ts`
 - `test/helpers/git-template.test.ts`
+- `test/ops/gates/adapters.test.ts`
+- `test/ops/merge/executeMerges.test.ts`
 - `test/ops/pr/ensureTrackerBranch.test.ts`
+- `test/ops/pr/registry.test.ts`
+- `test/ops/pr/runReport.test.ts`
 - `test/ops/ratchet/captureBaseline.test.ts`
 - `test/ops/ratchet/effects.test.ts`
 - `test/ops/ratchet/monotonicGuard.test.ts`
+- `test/ops/review/gh.test.ts`
 - `test/ops/review/registry.test.ts`
+- `test/ops/review/traps.test.ts`
 - `test/ops/sweep/cleanup.test.ts`
 - `test/ops/sweep/ledger-suppression.test.ts`
 - `test/ops/sweep/planSweep.test.ts`
+- `test/ops/sweep/salvage.test.ts`
 - `test/ops/sweep/unit-registry.test.ts`
 - `test/ops/sweep/worktreeFor.test.ts`
 - `test/scripts/demo-eval-axes.test.ts`
@@ -189,33 +200,39 @@ checked against the known entry-point scan. The current list is:
 - `test/scripts/tooling-commands.test.ts`
 - `test/workflows/merge-queue-gate.test.ts`
 
-## Lane-partition record (proposals only; no CI changes)
+## Lane-partition record (no CI changes)
 
-The current lane proposal is not a process-free split:
+Plan 003 F3 made the existing lane names honest without touching CI:
 
-- `test:unit` is not process-free: **21 of the 25** inventory files live in
-  that lane, so its name and membership currently overstate isolation.
+- `npm run test:unit` and `npm run test:e2e` run `scripts/test-lane.mjs`,
+  which derives membership from the inventory list above
+  (`scripts/lib/test-lanes.mjs`): **`test:e2e` is exactly the inventory**
+  and **`test:unit` is every other discovered test file**. `npm run test`
+  still runs everything.
+- `test/scripts/test-lanes.test.ts` proves the lanes are disjoint, that
+  their union is every file vitest discovers (including `lint/rules/`), that
+  each lane's CLI arguments select exactly its members under vitest's
+  exclude-glob and filter-substring semantics, and that the discovery model
+  matches `vitest.config.ts`.
+- Widening the inventory guard to the src spawn-effect factories
+  (`makeSubprocess*Effects/Deps`, `makeGhRunner`, `makeCheckRunner`,
+  `realMergeEffects`) moved eight files that launch shims or fixture
+  processes into the process lane; a spawn trace of `test:unit` found them.
 - Correction (plan 003 F2): the earlier "57 of 58 driver-specific ACP tests
   spawn" was wrong — 11 never spawned (7 construct no driver, 4 assert zero
   pre-dispatch spawns), so **47 of 58** did. After F2, `acp.test.ts` and
   `subprocess.test.ts` spawn nothing; the real contracts live in
   `acp.real.test.ts` (7) and `subprocess.real.test.ts` (12).
+- `plans.smoke.test.ts` no longer builds: global setup owns the build, and
+  the smoke refuses a missing or stale `dist/` instead of rebuilding.
 
-Recorded proposals, for a later policy/template decision rather than this PR:
+Recorded proposals, for a later policy/template decision:
 
-1. Rename the lanes to `test:fast` and `test:process`, with membership derived
-   from this inventory list.
+1. Rename the lanes to `test:fast` and `test:process`. The names are wired
+   into `.github/workflows/ci.yml`, which is not template-regenerable under
+   `policy/templates/README.md`, so a rename needs a separate policy
+   decision.
 2. Introduce a `test/process/` tree for process-backed tests.
-3. Split ACP into separate conformance/fake and real fixture files (done in
-   plan 003 F2, for subprocess too).
-
-These would be carried through `package.json` and `policy/templates/` as
-proposals. `.github/workflows/ci.yml` is not template-regenerable under
-`policy/templates/README.md`, so changing the CI step requires a separate
-policy decision; U4 does not edit CI.
-
-`plans.smoke.test.ts` also has its own redundant build path; that is a
-follow-up outside PR-4's files.
 
 ### Transport-fake follow-ups
 
