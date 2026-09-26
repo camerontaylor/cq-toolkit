@@ -139,14 +139,16 @@ alongside the acceptance check.
        `declare`, `typeset` and `readonly` forms, `+=` appends, and right-hand sides with nested
        quotes or `$(…)` command substitutions (read to the end of the row, which can only
        over-taint);
-     - `${!x}` indirection counts as reading every tainted variable.
+     - `${!x}` indirection counts as reading every tainted variable, and a `declare`, `local`
+       or `typeset -n` nameref aliases the variable it names.
    - Before those checks run, shell line continuations are joined. For a `>` block or a plain
      multi-line value, including one that starts on the next line, the YAML-folded reading is
      judged as well; a literal `|` block is never folded.
 
    It does not model arbitrary shell. These remain residuals: shell functions, `eval`, `read`
-   and here-docs, values round-tripped through files, arrays, and cross-step `$GITHUB_ENV` or
-   `$GITHUB_OUTPUT` writes. Such a change still lands on a protected path (`.github/**`), and
+   and here-docs, loop variables (`for r in "$HEAD_REF"`), `printf -v`-style assignments,
+   `$(…)` substitutions spanning several rows, values round-tripped through files, arrays, and
+   cross-step `$GITHUB_ENV` or `$GITHUB_OUTPUT` writes. Such a change still lands on a protected path (`.github/**`), and
    it is a definition change wherever `^\.github/` is in the set, as it is here.
 
 7. **The configuration inputs of required checks are definitions.** The `static`, `denylist`

@@ -1007,6 +1007,17 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
       1,
     ],
     [
+      'env head value through a declare -n nameref (r4 F2)',
+      [
+        '      - env:',
+        '          HEAD_REF: ${{ github.event.workflow_run.head_sha }}',
+        '        run: |',
+        '          declare -n r=HEAD_REF',
+        '          git checkout "$r"',
+      ],
+      1,
+    ],
+    [
       'env head value through a += append (N2)',
       [
         '      - env:',
@@ -1096,6 +1107,47 @@ describe('lintWorkflow: head checkout and credentials (H1)', () => {
     ["bracketed pull_request['head']['sha']", "${{ github.event.pull_request['head']['sha'] }}"],
   ])('pull_request_target: git checkout of %s is linted (F2)', (_label, expr) => {
     expect(lint(flow('pull_request_target', `      - run: git checkout ${expr}`))).toHaveLength(1);
+  });
+
+  test.each<[string, string[], number]>([
+    [
+      'a workflow-level env head value (r4 F1)',
+      ['  HEAD_REF: ${{ github.event.workflow_run.head_sha }}'],
+      1,
+    ],
+    [
+      'a workflow-level folded env head value (r4 F1)',
+      ['  HEAD_REF: >', '    ${{ github.event.workflow_run.head_sha }}'],
+      1,
+    ],
+    ['a workflow-level env base value (r4 F1 precision)', ['  TRUST: ${{ github.sha }}'], 0],
+  ])('%s read by a moving git row', (_label, envLines, count) => {
+    const text = wf(
+      'on: workflow_run',
+      'permissions: {}',
+      'env:',
+      ...envLines,
+      'jobs:',
+      '  a:',
+      '    runs-on: x',
+      '    steps:',
+      `      - run: git checkout "$${envLines[0]!.trim().split(':')[0]}"`,
+    );
+    expect(lint(text)).toHaveLength(count);
+  });
+
+  test('a workflow-level env given as one expression taints any reference (r4 F1)', () => {
+    const text = wf(
+      'on: workflow_run',
+      'permissions: {}',
+      'env: ${{ fromJSON(inputs.env) }}',
+      'jobs:',
+      '  a:',
+      '    runs-on: x',
+      '    steps:',
+      '      - run: git checkout "$REF"',
+    );
+    expect(lint(text)).toHaveLength(1);
   });
 
   test('a > block edit elsewhere does not re-lint a base-owned folded violation (F1/F4)', () => {

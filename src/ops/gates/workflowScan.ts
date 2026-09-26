@@ -823,7 +823,13 @@ function scanOrThrow(text: string): OkScan {
     return b ? secretReasons(normalise(lines.slice(b.start, b.end)), ` (workflow ${k})`) : [];
   });
   const envBlock = byKey.get('env');
-  const workflowEnv = envBlock ? normalise(lines.slice(envBlock.start, envBlock.end)) : '';
+  // The block's VALUE only (inline text plus body), as `valueText` gives the
+  // job and step levels: the `env:` key row itself is not an entry.
+  const workflowEnv = envBlock
+    ? [lines[envBlock.start]!.value, normalise(lines.slice(envBlock.start + 1, envBlock.end))]
+        .filter((text) => text !== '')
+        .join('\n')
+    : '';
 
   const jobs = readJobs(lines, jobsBlock, { topGrants, workflowSecrets, workflowEnv });
   const scan: OkScan = { ok: true, on: onText, context, triggers, jobs };
@@ -1034,7 +1040,7 @@ const EXPRESSION = /\$\{\{([\s\S]*?)(?:\}\}|$)/g;
 const GIT_MOVE = /\bgit\b[^\n;&|]*?\b(?:checkout|switch|reset|worktree)\b/;
 /** A shell variable assignment and its right-hand side (optionally `export`/`local`/`declare`d). */
 const SHELL_ASSIGNMENT =
-  /(?:^|[\s;&|(])(?:(?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)\+?=/g;
+  /(?:^|[\s;&|(])((?:export|local|declare|typeset|readonly)\s+(?:-\w+\s+)*)?([A-Za-z_][A-Za-z0-9_]*)\+?=/g;
 
 /**
  * `NAME → value` for every entry of each `env:` source text. A value is the
@@ -1294,11 +1300,16 @@ function headRunOf(run: string, env: readonly string[]): { signal: string; line:
     grew = false;
     for (const row of rows) {
       for (const a of row.matchAll(SHELL_ASSIGNMENT)) {
-        const name = a[1]!;
+        const name = a[2]!;
         if (tainted.has(name)) continue;
         const rhs = row.slice(a.index + a[0].length);
+        // A nameref (`declare -n r=HEAD_REF`) aliases the variable its bare
+        // right-hand word names.
+        const nameref = /\s-\w*n/.test(` ${a[1] ?? ''}`)
+          ? /^["']?([A-Za-z_][A-Za-z0-9_]*)/.exec(rhs)?.[1]
+          : undefined;
         for (const [source, hit] of tainted) {
-          if (reads(rhs, source)) {
+          if (reads(rhs, source) || nameref === source) {
             tainted.set(name, hit);
             grew = true;
             break;
