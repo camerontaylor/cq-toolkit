@@ -542,6 +542,16 @@ export const QuarantineReleasedJournalEventSchema = z
   })
   .strict();
 
+export const BudgetTrippedJournalEventSchema = z
+  .object({
+    type: z.literal('budget-tripped'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    tripKind: z.enum(['exhausted', 'token-cap', 'breach', 'signal']),
+    reason: z.string(),
+  })
+  .strict();
+
 export const RunFinishedJournalEventSchema = z
   .object({
     type: z.literal('run-finished'),
@@ -580,4 +590,5 @@ export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion(
   ReservationRefusedJournalEventSchema,
   JobQuarantinedJournalEventSchema,
   QuarantineReleasedJournalEventSchema,
+  BudgetTrippedJournalEventSchema,
 ]);

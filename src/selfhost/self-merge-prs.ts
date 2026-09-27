@@ -519,7 +519,11 @@ export async function runSelfMergePrs(
     });
   // The governed run's return IS the honest report (admission, the ladder,
   // spend observation, and the stop are the runner's; no post-pass).
-  const report = await runPlan(plan, runOptions, view, { governor });
+  // allowAdvisory is the recorded W2.3 escape (A12c): a scheduled merge run
+  // is unattended by design and every lane is ADVISORY at v1.1 — without the
+  // escape it would refuse its one job; the cap stays enforced through the
+  // evidence folds and (W2.3) reservation capacity.
+  const report = await runPlan(plan, runOptions, view, { governor, allowAdvisory: true });
   const jobRow = report.jobs.find((row) => row.jobId === MERGE_PRS_PLAN_RUN_JOB_ID);
   const outcome =
     jobRow !== undefined && jobRow.result.status === 'ok'

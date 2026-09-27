@@ -782,6 +782,7 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
       `--ops-root=${opsRoot}`,
       `--journal-dir=${fresh.journalDir}`,
       '--max-tokens=10',
+      '--allow-advisory-budget', // W2.3 A12c: a token cap is ADVISORY — unattended dispatch needs the escape
     ]);
     expect(freshRun.code).toBe(0); // empty dir → nothing seeded → caps start at zero
     expect(RunReportSchema.parse(JSON.parse(freshRun.out)).counts.done).toBe(2);
@@ -800,6 +801,7 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
       `--ops-root=${opsRoot}`,
       `--journal-dir=${journalDir}`,
       '--max-tokens=10',
+      '--allow-advisory-budget', // W2.3 A12c escape — the seeded trip under test is the budget family
     ]);
     // The seeded 100-token rollup trips the 10-token cap: job a is refused
     // at admission, b is re-marked by the honest-stop pass → exit 3.
@@ -1045,14 +1047,16 @@ describe('run-plan through the governed kernel', () => {
     expect(RunReportSchema.parse(JSON.parse(out)).counts.done).toBe(1);
   });
 
-  test('--max-usd=0 is accepted: a zero-budget hard-zero cap does not reject the run (exit 0)', async () => {
+  test('--max-usd=0 is accepted: a hard-zero ceiling now REFUSES dispatch loudly (W2.3 reserve-then-settle, exit 3)', async () => {
     // RunPlanInputSchema used z.number().positive(), rejecting --max-usd=0 as
     // a usage error — but the governor explicitly accepts maxUsd >= 0 (a
-    // valid hard-zero spend ceiling, src/kernel/governor.ts). The cap binds
-    // only on PRICED spend: the echo fixture reports no usage, so nothing
-    // trips and the trivial plan still passes. The cap DOES govern the run
-    // (the CLI governs exactly when the operator sets a cap) — but with no
-    // journal dir the governed ledger starts at zero and journals nothing.
+    // valid hard-zero spend ceiling, src/kernel/governor.ts). Under W2.2 the
+    // cap bound only on PRICED spend, so a no-usage plan ran to completion
+    // (exit 0) — the fail-open corner. Under W2.3 reserve-then-settle the
+    // admission invariant S + O + r <= C admits NOTHING at C = 0: the first
+    // reserve trips `exhausted` before any dispatch, the row is
+    // budget-exhausted, and the run exits 3 — a zero budget that dispatches
+    // anyway is exactly the lie the cap exists to prevent.
     const { planPath } = await writePlanFile(singleJobPlan('echo'));
     const { code, out, err } = await capture([
       'run-plan',
@@ -1060,12 +1064,12 @@ describe('run-plan through the governed kernel', () => {
       `--ops-root=${opsRoot}`,
       '--max-usd=0',
     ]);
-    expect(code).toBe(0);
+    expect(code).toBe(3);
     const report = RunReportSchema.parse(JSON.parse(out));
-    expect(report.counts.done).toBe(1);
-    expect(report.counts['budget-exhausted']).toBe(0);
-    expect(report.stoppedEarly).toBe(false);
-    expect(err).toContain('cq: done 1');
+    expect(report.counts.done).toBe(0);
+    expect(report.counts['budget-exhausted']).toBe(1);
+    expect(report.stoppedEarly).toBe(false); // the refusal row IS the verdict; nothing was gated
+    expect(err).not.toContain('cq: done 1');
   });
 
   test('annex §3 rule-7 notice: the governed run after an ungoverned-marked run narrates the excluded runs', async () => {
@@ -1081,7 +1085,7 @@ describe('run-plan through the governed kernel', () => {
       `--journal-dir=${journalDir}`,
       '--concurrency=1',
     ];
-    const first = await capture([...base, '--max-usd=5']);
+    const first = await capture([...base, '--max-usd=5', '--allow-advisory-budget']);
     expect(first.code).toBe(0);
     expect(first.err).not.toContain('bound excludes'); // nothing to exclude yet
 
@@ -1096,11 +1100,11 @@ describe('run-plan through the governed kernel', () => {
     }
     expect(markedRunIds).toHaveLength(1);
 
-    const third = await capture([...base, '--max-usd=5']);
+    const third = await capture([...base, '--max-usd=5', '--allow-advisory-budget']);
     expect(third.code).toBe(0);
     expect(third.err).toContain(`cq: bound excludes ungoverned runs ${markedRunIds[0] as string}`);
 
-    const jsonMode = await capture([...base, '--max-usd=5', '--json']);
+    const jsonMode = await capture([...base, '--max-usd=5', '--allow-advisory-budget', '--json']);
     expect(jsonMode.code).toBe(0);
     expect(jsonMode.err).toBe(''); // machine mode stays silent
   });

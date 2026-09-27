@@ -507,7 +507,7 @@ describe('the wall-clock ladder through the governed runner (ws-a item 1)', () =
         independentPlan('async-errors', 1, 'hang'),
         { concurrency: 1, stopOnError: false },
         viewWith(entry('hang', hangOp)),
-        { governor },
+        { governor, allowAdvisory: true },
       ),
       clock,
     );
@@ -554,7 +554,10 @@ describe('the wall-clock ladder through the governed runner (ws-a item 1)', () =
     const registry = viewWith(entry('hang', hangOp), entry('ok', countingOk));
 
     const report = await pumped(
-      runPlan(plan, { concurrency: 1, stopOnError: false }, registry, { governor }),
+      runPlan(plan, { concurrency: 1, stopOnError: false }, registry, {
+        governor,
+        allowAdvisory: true,
+      }),
       clock,
     );
 
@@ -601,6 +604,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // report (the deleted withBudgetStop post-pass is gone).
     const report = await runPlan(plan, { concurrency: 2, stopOnError: false }, registry, {
       governor,
+      allowAdvisory: true,
     });
 
     // I9 honesty, both directions: the trip gated NO undispatched work —
@@ -654,6 +658,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     // re-marks it, transitively with d.
     const report = await runPlan(plan, { concurrency: 1, stopOnError: true }, registry, {
       governor,
+      allowAdvisory: true,
     });
     expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
     expect(report.jobs[3]?.result).toEqual({ status: 'budget-exhausted' });
@@ -689,6 +694,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     const registry = viewWith(entry('spendy', spendyOp), entry('ok', okOp));
     const report = await runPlan(plan, { concurrency: 1, stopOnError: true }, registry, {
       governor,
+      allowAdvisory: true,
     });
     // ALL of d, b, c AND the diamond root a are budget-caused — the memoized
     // verdict is reused for the second branch instead of dropping it.
@@ -729,6 +735,7 @@ describe('USD cap trips mid-run (ws-a item 3)', () => {
     const registry = viewWith(entry('fail', failOp), entry('spendy', spendyOp), entry('ok', okOp));
     const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry, {
       governor,
+      allowAdvisory: true,
     });
     // Only s3 and s4 move (queued → budget-exhausted). f2 keeps its real
     // verdict AND its blocked count — the honest-stop pass re-marks only
@@ -805,6 +812,7 @@ describe('DD-9 (T1.6b): parallel token rollup + api-equivalent USD', () => {
 
     const report = await runPlan(plan, { concurrency: 1, stopOnError: false }, registry, {
       governor,
+      allowAdvisory: true,
     });
 
     // The run did NOT continue past the cap: j1 folded 120 tokens (under),
@@ -1002,7 +1010,7 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('lying', lyingOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(report.jobs[0]?.result.status).toBe('failed');
     expect(report.jobs[0]?.result).toMatchObject({
@@ -1035,7 +1043,7 @@ describe('token-side NaN fail-open closed (review round 2)', () => {
         independentPlan('plan-cost-lying', 1, 'costly'),
         { concurrency: 1, stopOnError: false },
         viewWith(entry('costly', costlyOp)),
-        { governor: costGovernor },
+        { governor: costGovernor, allowAdvisory: true },
       );
       expect(costGovernor.usage).toBeUndefined(); // the WHOLE lying result folded nothing
       expect(costGovernor.usdSpent).toBe(0); // no cost claimed
@@ -1121,7 +1129,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('worker', workerOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     // The op never called reportUsage/reportCost — the RETURNED value is the
     // budget evidence, folded through the governed completed branch.
@@ -1147,7 +1155,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('unpriced', unpricedWorkerOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0);
@@ -1176,7 +1184,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('double', doubleEvidenceOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE); // once — not {input: 200, output: 100, …}
     expect(governor.usdSpent).toBe(0.02); // the cost folded (once)
@@ -1201,7 +1209,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('mapped', mappedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0.03);
@@ -1221,7 +1229,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('mapped-unpriced', mappedUnpricedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toEqual(WORKER_USAGE);
     expect(governor.usdSpent).toBe(0);
@@ -1248,7 +1256,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('lying-report', lyingOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.usage).toBeUndefined();
     expect(governor.usdSpent).toBe(0);
@@ -1301,7 +1309,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('mirror-lying', mirrorLyingOp)),
-        { governor },
+        { governor, allowAdvisory: true },
       );
       expect(governor.usage).toBeUndefined(); // every measurement dropped
       expect(governor.usdSpent).toBe(0); // no cost folds off unschemable usage
@@ -1593,7 +1601,7 @@ describe('dual caps (ws-a item 4)', () => {
       plan,
       { concurrency: 6, stopOnError: false },
       viewWith(entry('fake', gatedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     await waitFor(() => entered.length === 2, 'ceiling to admit exactly 2');
     expect(highWater).toBe(2);
@@ -1615,7 +1623,7 @@ describe('dual caps (ws-a item 4)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', gatedOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     await waitFor(() => entered.length === 2, 'the pool to admit exactly 2');
     expect(highWater).toBe(2);
@@ -1637,7 +1645,7 @@ describe('dual caps (ws-a item 4)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toHaveLength(4); // the quota, exactly
     expect(governor.dispatchCount).toBe(4);
@@ -1688,7 +1696,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('flaky', flaky)),
-        { governor: createGovernor({ maxAttemptsPerJob: 2 }) },
+        { governor: createGovernor({ maxAttemptsPerJob: 2 }), allowAdvisory: true },
       );
       expect(calls).toEqual(['j1']);
       const events1 = await log.read(run1.runId);
@@ -1709,7 +1717,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('flaky', flaky)),
-        { governor: governor2 },
+        { governor: governor2, allowAdvisory: true },
       );
       expect(calls).toEqual(['j1', 'j1']); // attempt 2 happened
       expect(
@@ -1743,7 +1751,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('flaky', flaky)),
-        { governor: governor3 },
+        { governor: governor3, allowAdvisory: true },
       );
       expect(calls).toEqual(['j1', 'j1']); // UNCHANGED — no third dispatch
       expect(run3.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
@@ -1817,7 +1825,7 @@ describe('attempt caps (ws-a item 2)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOk)),
-        { governor },
+        { governor, allowAdvisory: true },
       );
       expect(calls).toEqual([]); // a third dispatch never runs the op
       expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
@@ -2086,7 +2094,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual(['c2']); // the interrupted job re-dispatched (and completed)
     expect(report.counts).toEqual({
@@ -2183,7 +2191,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor: runGovernor },
+      { governor: runGovernor, allowAdvisory: true },
     );
     expect(runGovernor.tripReason).toMatch(/seeded usd rollup 1\.5 exceeded cap 1/);
     expect(runGovernor.usdSpent).toBe(1.5);
@@ -2259,7 +2267,7 @@ describe('resume after a budget-exhausted stop (ws-a item 5)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOk)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual([]); // zero further dispatches
     expect(report.jobs[0]?.result).toEqual({ status: 'budget-exhausted' });
@@ -2301,7 +2309,7 @@ describe('journal evidence for a killed run (ws-a item 6)', () => {
           plan,
           { concurrency: 1, stopOnError: false, journalDir: dir },
           viewWith(entry('hang', hangOp), entry('ok', okOp)),
-          { governor },
+          { governor, allowAdvisory: true },
         ),
         clock,
       );
