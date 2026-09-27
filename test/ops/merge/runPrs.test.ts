@@ -136,6 +136,10 @@ class FakeMergeEffects implements MergeEffects {
   /** Prs whose FIRST mergePr fails and later ones succeed — the pass-2
    * retry scripting hook (a pass-1 failure that pass 2 can recover). */
   readonly mergeFailOnce = new Set<number>();
+  /** retarget-self prs whose retargetBase fails — the failed-retarget
+   * scripting hook (a failed retarget withholds the pr, and the executor
+   * then blocks its plan-ordered descendants). */
+  readonly retargetFailures = new Set<number>();
   /** Refs whose head MOVES between the baseline validate (call 1) and any
    * later validate — the plan→run drift-stale scripting hook. */
   readonly driftRefs = new Set<string>();
@@ -185,6 +189,9 @@ class FakeMergeEffects implements MergeEffects {
 
   async retargetBase(pr: number, newBase: string): Promise<GhResult> {
     this.calls.push(`retarget:${String(pr)}:base=${newBase}`);
+    if (this.retargetFailures.has(pr)) {
+      return { code: 1, stdout: '', stderr: 'refused by the forge' };
+    }
     return OK;
   }
 
@@ -1013,13 +1020,17 @@ describe('runMergePrs', () => {
     const effects = new FakeMergeEffects();
     effects.mergeFailures.add(44); // the eligible root's merge is refused
     effects.driftRefs.add(headRefFor(48)); // 48's head moves after the baseline → stale
-    // The #153-aware blocked shape: a failed MERGE can only orphan a child
-    // when the failing entry is itself a stacked merge — a same-pass
-    // merge root's children defer at plan time now. 50 is a retarget-self
-    // root (its rung 49 closed), 51 merges into 50's branch and is
-    // refused, 52 blocks on 51.
-    effects.mergeFailures.add(51);
-    effects.baseRefs.set(51, 'feat/50');
+    // The GENERALIZED #153 shape (PR #234 r1): a failed merge can only
+    // orphan a child when the failing entry is itself a stacked merge —
+    // and the generalized planner no longer orders such a child at all.
+    // So the executor's blocked leg is driven by a failed RETARGET here:
+    // 50 is a retarget-self root (its rung 49 closed), its retarget is
+    // refused, 51 (its plan-ordered depth-1 child) blocks on the failed
+    // ancestor, and 52 — which the pre-generalization planner ORDERED
+    // into 51's would-be-orphaned branch — is withheld at plan time
+    // (stack_base_merging_this_pass): 51 merges earlier in the pass, so
+    // merging 52 into 51's branch would strand it off the trunk.
+    effects.retargetFailures.add(50);
     const { resolve, calls } = fakeResolve(escalated('a human must reconcile the semantics'));
 
     const outcome = await runMergePrs(
@@ -1049,16 +1060,18 @@ describe('runMergePrs', () => {
     // No second pass: nothing acted.
     expect(outcome.secondPass).toBeNull();
     expect(outcome.firstPass.merged).toEqual([]);
-    // The execution buckets: 44 failed, 48 stale (drift), 51 failed, and
-    // 52 blocked by its failed ancestor. 47 never reached execution — the
-    // planner withheld it (#153).
-    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44, 51]);
+    // The execution buckets: 44 failed, 48 stale (drift), 50's retarget
+    // failed, and 51 blocked by its failed ancestor. 47 AND 52 never
+    // reached execution — the generalized planner withheld both
+    // (#153: 47's base is a same-pass merge root; 52's base 51 merges
+    // earlier in the pass under retarget-self root 50).
+    expect(outcome.firstPass.failed.map((entry) => entry.pr)).toEqual([44, 50]);
     expect(outcome.firstPass.stale.map((entry) => entry.pr)).toEqual([48]);
-    expect(outcome.firstPass.blocked.map((entry) => entry.pr)).toEqual([52]);
+    expect(outcome.firstPass.blocked.map((entry) => entry.pr)).toEqual([51]);
     // Dedupe + priority pinned on pr 45: it is BOTH an escalation AND a
     // planner withhold ('not_eligible' — it is conflicting) — the decided
     // escalation's summary wins, the planner's gate reason does not.
-    expect(outcome.needsHuman.map((row) => row.pr)).toEqual([41, 44, 45, 47, 48, 51, 52]);
+    expect(outcome.needsHuman.map((row) => row.pr)).toEqual([41, 44, 45, 47, 48, 50, 51, 52]);
     const reasonOf = (pr: number): string => {
       const row = outcome.needsHuman.find((candidate) => candidate.pr === pr);
       if (row === undefined) throw new Error(`no needsHuman row for pr ${String(pr)}`);
@@ -1070,11 +1083,12 @@ describe('runMergePrs', () => {
     expect(reasonOf(47)).toBe('stack_base_merging_this_pass');
     // The stale row carries the drift detail (baseline sha vs moved sha).
     expect(reasonOf(48)).toContain('head moved between plan and run');
-    expect(reasonOf(51)).toBe('gh pr merge 51 --merge failed (exit 1): refused by the forge');
-    expect(reasonOf(52)).toBe('blocked_by_ancestor');
+    expect(reasonOf(50)).toBe('gh pr edit 50 --base main failed (exit 1): refused by the forge');
+    expect(reasonOf(51)).toBe('blocked_by_ancestor');
+    expect(reasonOf(52)).toBe('stack_base_merging_this_pass');
     // The final report is pass 1, so its post-mortem names all four
     // execution outcomes.
-    expect(outcome.diagnosis.needsHuman).toEqual([44, 48, 51, 52]);
+    expect(outcome.diagnosis.needsHuman).toEqual([44, 48, 50, 51]);
     expect(calls).toHaveLength(1);
   });
 

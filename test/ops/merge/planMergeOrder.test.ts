@@ -11,7 +11,10 @@
 //   3. CLOSED-ANCESTOR RETARGET: an open PR whose base head is owned by a
 //      CLOSED PR is planned AS A ROOT — depth 0, basePr null — with
 //      action 'retarget-self' (the caller retargets its base onto the
-//      base branch); its own descendants still merge normally.
+//      base branch); its depth-1 descendants still merge normally (that
+//      rung does not merge this pass), while deeper rungs defer under
+//      the generalized #153 gate — a base that merges earlier in the
+//      pass holds its children.
 //   4. TRUNCATED FAIL-CLOSED (UC §3 row 42): a truncated fetch is never
 //      ordered for merge — needs-human, review_data_truncated — and beats
 //      the unclassified gate (first match wins, F1's row order).
@@ -214,7 +217,7 @@ describe('planMergeOrder — closed-ancestor retarget-self', () => {
 // Same-pass merge-root deferral (review-debt #153)
 // ---------------------------------------------------------------------------
 
-describe('planMergeOrder — same-pass merge-root deferral (#153)', () => {
+describe('planMergeOrder — same-pass merge deferral (#153, generalized in PR #234 r1)', () => {
   test('a child of a same-pass merge root is withheld with stack_base_merging_this_pass', () => {
     // The F5 strand shape: 7 merges onto main THIS pass, closing 7 and
     // orphaning branch 'a' — 8 merged into 'a' would land on a dead branch
@@ -241,11 +244,13 @@ describe('planMergeOrder — same-pass merge-root deferral (#153)', () => {
     expect(nextPass.needsHuman).toEqual([]);
   });
 
-  test('children of a retarget-self root are NOT withheld — that rung stays open', () => {
+  test('children of a retarget-self root are NOT withheld at depth 1 — that rung stays open', () => {
     // The root's base is a CLOSED rung (retarget-self), not a same-pass
-    // merge root: the retargeted PR remains open and merges in a later
-    // pass, carrying its subtree's content with it — the documented
-    // I2-safe reading the #153 gate must not disturb.
+    // merge root: the retargeted PR remains OPEN and does not merge this
+    // pass, so its depth-1 child still merges. Scope note (PR #234 r1):
+    // this holds at DEPTH 1 ONLY — the gate's rule is general (any child
+    // whose base merges earlier in the order defers), and the depth-≥2
+    // strand under this exact shape is the regression test below.
     const result = plan('main', [
       planned(1, 'main', 'gone', { state: 'closed' }),
       planned(2, 'gone', 'live'),
@@ -256,6 +261,43 @@ describe('planMergeOrder — same-pass merge-root deferral (#153)', () => {
       { pr: 3, action: 'merge', basePr: 2, depth: 1, baseRefName: 'live' },
     ]);
     expect(result.needsHuman).toEqual([]);
+  });
+
+  test('REGRESSION (PR #234 r1): the #153 strand recurs at depth ≥2 under a retarget-self root', () => {
+    // The reviewer's shape: with a closed rung below it, 2 = retarget-self,
+    // 3 = merge (into 2's branch — safe, 2 stays open), 4 = merge into 3's
+    // branch. Merging 3 closes 3 and orphans branch 'top', so 4 merged
+    // into it would strand off the trunk while the forge reports it
+    // merged. The pre-generalization gate checked merge ROOTS only — 2 is
+    // not a root-merge and 3 is not a root at all, so 4 was ordered. The
+    // executor cannot catch this either: 4's base REF ('top') never
+    // changes; only 3's PR status flips. Generalized, the gate withholds
+    // any child whose base merges earlier in the order.
+    const result = plan('main', [
+      planned(1, 'main', 'gone', { state: 'closed' }),
+      planned(2, 'gone', 'live'),
+      planned(3, 'live', 'top'),
+      planned(4, 'top', 'above'),
+    ]);
+    expect(result.order).toEqual([
+      { pr: 2, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'gone' },
+      { pr: 3, action: 'merge', basePr: 2, depth: 1, baseRefName: 'live' },
+    ]);
+    expect(result.needsHuman).toEqual([{ pr: 4, reason: 'stack_base_merging_this_pass' }]);
+    // And the generalized gate converges like the merge-root deferral:
+    // next pass 3 is CLOSED, so 4 re-plans stacked on a closed rung —
+    // retarget-self onto the trunk, content reaching the base branch.
+    const nextPass = plan('main', [
+      planned(1, 'main', 'gone', { state: 'closed' }),
+      planned(2, 'gone', 'live'),
+      planned(3, 'live', 'top', { state: 'closed' }),
+      planned(4, 'top', 'above'),
+    ]);
+    expect(nextPass.order).toEqual([
+      { pr: 2, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'gone' },
+      { pr: 4, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'top' },
+    ]);
+    expect(nextPass.needsHuman).toEqual([]);
   });
 
   test('gate precedence: an already-gated child of a merge root keeps its gate reason', () => {
