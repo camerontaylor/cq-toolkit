@@ -277,7 +277,11 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
  * (review r3, PR #222), so the doctrine holds on every surface.
  */
 const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): boolean => {
-  if (state === null) return false;
+  // DISMISSED is refused twice over: the dispatch boundary rejects it in
+  // the configured set, and the doctrine holds DISMISSED void outright —
+  // an explicit guard keeps a non-typechecked caller that hands the pure
+  // function a hostile set from resurrecting a retracted review.
+  if (state === null || state === 'DISMISSED') return false;
   const accepted = config.acceptReviewStates ?? ['APPROVED', 'COMMENTED'];
   return accepted.some((candidate) => candidate === state);
 };
