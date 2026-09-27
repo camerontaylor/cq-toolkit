@@ -9,10 +9,13 @@
 // instance's rendered text to .github/workflows/ — but writes NOTHING while
 // any table or render error stands other than a missing workflow listed
 // only in "instances" with a valid render (the new instance --write is there
-// to create; a missing "nonTemplated" workflow still blocks). The mechanics
-// live in scripts/lib/render-templates.mjs.
+// to create; a missing "nonTemplated" workflow still blocks). It never
+// follows a link: a destination (or the workflows directory) that exists as
+// anything but a regular file (directory) blocks the whole write, and a new
+// instance is created exclusively. The mechanics live in
+// scripts/lib/render-templates.mjs.
 
-import { writeFileSync } from 'node:fs';
+import { lstatSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -34,6 +37,32 @@ const { errors, results } = collectRenders(ROOT);
 const problems = [...errors];
 if (mode === '--write') {
   const blockers = writeBlockers(errors, results);
+  // No write follows a symlink (a link here could point anywhere).
+  const kind = (path) => {
+    try {
+      const st = lstatSync(path);
+      return st.isSymbolicLink()
+        ? 'link'
+        : st.isFile()
+          ? 'file'
+          : st.isDirectory()
+            ? 'dir'
+            : 'other';
+    } catch (error) {
+      if (error?.code === 'ENOENT') return 'absent';
+      throw error;
+    }
+  };
+  for (const dir of ['.github', WORKFLOWS_DIR]) {
+    if (kind(join(ROOT, dir)) !== 'dir') blockers.push(`${dir} is not a plain directory`);
+  }
+  for (const { workflow, expected, actual } of results) {
+    if (expected === null || expected === actual) continue;
+    const k = kind(join(ROOT, WORKFLOWS_DIR, workflow));
+    if (k !== 'file' && k !== 'absent') {
+      blockers.push(`${WORKFLOWS_DIR}/${workflow} exists as a ${k}, not a regular file`);
+    }
+  }
   if (blockers.length > 0) {
     for (const problem of blockers) console.error(`render-templates: ${problem}`);
     console.error('render-templates: --write refused (nothing written): fix the table first');
@@ -46,7 +75,11 @@ for (const { workflow, template, expected, actual } of results) {
   if (expected === null) continue;
   if (mode === '--write') {
     if (expected !== actual) {
-      writeFileSync(join(ROOT, WORKFLOWS_DIR, workflow), expected);
+      // A new instance is created exclusively ('wx'); an existing one was
+      // checked to be a regular file above.
+      writeFileSync(join(ROOT, WORKFLOWS_DIR, workflow), expected, {
+        flag: actual === null ? 'wx' : 'w',
+      });
       console.log(`wrote ${WORKFLOWS_DIR}/${workflow} (from ${template})`);
     }
     continue;

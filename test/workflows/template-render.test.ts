@@ -16,6 +16,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  symlinkSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -289,6 +290,25 @@ describe('render-templates --write refuses an invalid table', () => {
       expect(readFileSync(join(root, WORKFLOWS_DIR, 'a.yml'), 'utf8')).toBe(
         `# instantiated from ${TEMPLATES_DIR}/a.yml — edit the template, not this file\nname: a\n`,
       );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('a symlinked instance destination writes nothing and exits 1', { timeout: 30_000 }, () => {
+    const root = scratch({
+      schemaVersion: 1,
+      instances: [{ workflow: 'a.yml', template: 'a.yml', tokens: {} }],
+      nonTemplated: [],
+      adopterOnly: [],
+    });
+    try {
+      symlinkSync(join(root, 'package.json'), join(root, WORKFLOWS_DIR, 'a.yml'));
+      const r = write(root);
+      expect(r.status).toBe(1);
+      expect(r.stderr).toMatch(/a\.yml exists as a link, not a regular file/);
+      expect(r.stderr).toMatch(/--write refused \(nothing written\)/);
+      expect(readFileSync(join(root, 'package.json'), 'utf8')).toBe('{"keep":true}\n');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
