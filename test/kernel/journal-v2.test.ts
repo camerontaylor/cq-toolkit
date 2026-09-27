@@ -24,7 +24,13 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { claimSeq, foldOrderRuns, openRunLog, type FoldRun } from '../../src/kernel/journal.js';
+import {
+  assertNoSeqGap,
+  claimSeq,
+  foldOrderRuns,
+  openRunLog,
+  type FoldRun,
+} from '../../src/kernel/journal.js';
 import { JournalEventSchema } from '../../src/kernel/schema.js';
 import type { JournalEvent, RunStartedJournalEvent } from '../../src/kernel/types.js';
 
@@ -199,6 +205,46 @@ describe('claimSeq', () => {
 
   test('invalid startAt throws', async () => {
     await expect(claimSeq(dir, 'plan-x', 0)).rejects.toThrow(/startAt/);
+  });
+});
+
+describe('assertNoSeqGap — the claimSeq tombstones are read on the fold path (review H2)', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cq-seqgap-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test('tombstones within the folded seq pass (ordinary claims)', async () => {
+    await writeFile(join(dir, 'plan-x.seq.1'), '', 'utf8');
+    await writeFile(join(dir, 'plan-x.seq.2'), '', 'utf8');
+    await expect(assertNoSeqGap(dir, 'plan-x', 2)).resolves.toBeUndefined();
+  });
+
+  test('a tombstone beyond the highest folded seq throws: a claimed run\u2019s file is gone', async () => {
+    await writeFile(join(dir, 'plan-x.seq.1'), '', 'utf8');
+    await writeFile(join(dir, 'plan-x.seq.3'), '', 'utf8');
+    await expect(assertNoSeqGap(dir, 'plan-x', 1)).rejects.toThrow(
+      /journal: corrupt — seq gap for plan 'plan-x': claim tombstone 'plan-x\.seq\.3' exists/,
+    );
+  });
+
+  test('another plan\u2019s tombstones never trip this plan\u2019s check (planId-namespaced)', async () => {
+    await writeFile(join(dir, 'plan-other.seq.9'), '', 'utf8');
+    await expect(assertNoSeqGap(dir, 'plan-x', 0)).resolves.toBeUndefined();
+  });
+
+  test('a missing journal dir passes (nothing claimed yet)', async () => {
+    await expect(assertNoSeqGap(join(dir, 'absent'), 'plan-x', 0)).resolves.toBeUndefined();
+  });
+
+  test('non-numeric seq suffixes are ignored, not crashes', async () => {
+    await writeFile(join(dir, 'plan-x.seq.junk'), '', 'utf8');
+    await expect(assertNoSeqGap(dir, 'plan-x', 0)).resolves.toBeUndefined();
   });
 });
 

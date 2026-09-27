@@ -52,8 +52,9 @@
 // invocation, its JobOutcome reconstructed from that journal event.
 // Everything else re-runs — continue-from-first-failure emerges naturally.
 // Skipped jobs are RE-ATTESTED in the new run with a job-finished event (no
-// job-started — no dispatch happened), copying opId/inputsHash/result/usage
-// after hash verification: each run's journal is then self-contained, so the
+// job-started — no dispatch happened), copying
+// opId/inputsHash/result/usage/costUSD after hash verification: each run's
+// journal is then self-contained, so the
 // fold rule survives chained resumes.
 //
 // Governed mode (the 4th `gov` param — ADR-0003 §2, W2.2): with a
@@ -77,6 +78,10 @@
 // maps on the 'runPlan: ' prefix):
 //   - an ungoverned run over governed history (run governed or opt in with
 //     `budget.ungovernedOverGoverned`);
+//   - the marker itself on a plan with NO governed history — the opt-in names
+//     that one condition, and honouring it history-less would strand the
+//     run's spend outside every future ledger (drop the opt-in, run
+//     governed);
 //   - a governed run over v1 journals with unaccounted dispatches — v1
 //     journals carry no spend, so the cap could not bind what already ran
 //     (opt in with `budget.legacyJournal=reset`; the reset is recorded on the
@@ -84,6 +89,8 @@
 //   - a cap RAISE over the last governed run's capUsd without
 //     `budget.raiseCap` (the honoured raise is recorded as raiseCap
 //     from→to).
+// A `{ governor: undefined }` handle is refused at the top, beside the caps
+// guard (`runPlan: governance requires a governor`).
 // `budget.ungovernedOverGoverned` instead marks THIS run UNGOVERNED (the
 // `ungoverned` marker on its v2 run-started): ops execute exactly as the
 // ungoverned path, with no admission, no spend observation, and no caps; it
@@ -138,6 +145,7 @@
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
 import {
+  assertNoSeqGap,
   assertSafeRunId,
   candidateRunsForPlan,
   foldOrderRuns,
@@ -187,7 +195,7 @@ interface OutcomeEntry {
   state: JobState;
   /** Per-job usage rollup — replay-sourced, or the governed evidence sums. */
   usage?: Usage;
-  /** Per-job modeled USD rollup (governed runs; replay copies usage only). */
+  /** Per-job modeled USD rollup (governed evidence sums; replay copies it too). */
   costUSD?: number;
   origin: EntryOrigin;
 }
@@ -462,6 +470,13 @@ export async function runPlan(
   if ((opts.maxUsd !== undefined || opts.maxTokens !== undefined) && gov === undefined) {
     throw new Error('runPlan: caps require governance');
   }
+  // The handle's mirror guard: a `{ governor: undefined }` Governance handle
+  // must not degrade to a silent no-op run that still journals a
+  // governed-looking v2 record (seq claimed, `governance` block) — fail loud
+  // exactly like the caps guard above (review M4).
+  if (gov !== undefined && gov.governor === undefined) {
+    throw new Error('runPlan: governance requires a governor');
+  }
   if (!Number.isInteger(opts.concurrency) || opts.concurrency < 1) {
     throw new Error(`runPlan: concurrency must be an integer >= 1, got ${opts.concurrency}`);
   }
@@ -534,6 +549,13 @@ export async function runPlan(
   const v1DispatchRuns: string[] = [];
   const priorResets = new Set<string>();
   let prevCapUsd: number | undefined;
+  // No `prevCapTokens` twin, deliberately (review M1): the raise refusal (c)
+  // gates only the USD bound because USD is the ledger's BINDING unit — a cap
+  // raise that outruns prior spend is a real budget-integrity change. Token
+  // caps are ADVISORY on every lane in v1.1 (ADR-0003 §2.3 — the DD-9
+  // unpriced-model backstop, not a binding ceiling), so a token-cap raise has
+  // no spend-integrity consequence to gate; a predecessor check would be
+  // enforcement theatre. Symmetry lands when token caps become binding.
   let maxPriorSeq = 0;
   let priorRuns: FoldRun[] = [];
   const seedRuns: Array<{ runId: string; v1: boolean; events: readonly JournalEvent[] }> = [];
@@ -607,6 +629,16 @@ export async function runPlan(
       }
     }
     // No prior run for this plan → fresh run; nothing to replay.
+
+    // The fold-order corruption checks are loud on duplicates
+    // (foldOrderRuns) and on GAPS: a claim tombstone beyond the highest
+    // folded seq means a claimed run's FILE is gone (deleted — its spend
+    // would silently vanish from the ledger seed), or an orphaned claim
+    // (crash between claimSeq and the first append — the operator deletes
+    // the tombstone). See journal.assertNoSeqGap (review H2).
+    if (journalDir !== undefined) {
+      await assertNoSeqGap(journalDir, plan.id, maxPriorSeq);
+    }
   }
 
   // --- Refusals (before anything is emitted or claimed) ---------------------
@@ -619,6 +651,17 @@ export async function runPlan(
         `runPlan: plan ${plan.id} has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned`,
       );
     }
+  } else if (ungovernedMarked && governedRunIds.length === 0) {
+    // (a') The marker HONOURED with no governed history (review H3):
+    // `budget.ungovernedOverGoverned` names exactly one condition — an
+    // ungoverned run OVER governed history. On a plan with none there is
+    // nothing to opt out of, and honouring the marker would dispatch this
+    // run's ops with no admission and strand its spend outside every future
+    // ledger — a silent forfeit. Refuse, naming the condition and both
+    // resolutions (the operator almost certainly meant to run governed).
+    throw new Error(
+      `runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan ${plan.id} has no governed history — the marker exists for an ungoverned run OVER governed history; drop the opt-in and run governed`,
+    );
   } else if (!ungovernedMarked) {
     // (b) Governed over unaccounted v1 dispatches — whether or not resume is
     // set: v1 journals carry no spend, so the cap cannot bind what already
@@ -672,6 +715,17 @@ export async function runPlan(
           : [...run.events],
       ),
     );
+    // Annex §3 rule 7: a later governed run announces that the bound excludes
+    // the plan's ungoverned-marked runs from the ledger seed — the CLI turns
+    // this event into `cq: bound excludes ungoverned runs <runIds>`. Fold
+    // order, so the list is deterministic.
+    if (ungovernedRunIds.length > 0) {
+      governor.record({
+        kind: 'bound-excluded-ungoverned',
+        runIds: [...ungovernedRunIds],
+        atMs: governor.now(),
+      });
+    }
   }
 
   // --- Run-level cancel signal (ADR-0003 §2.3) ------------------------------
@@ -798,15 +852,41 @@ export async function runPlan(
     // admitted this run — attribution needs no marker strings.
     const admittedJobIds = new Set<string>();
 
+    // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
+    // not failed. This is a PREDICATE, not a run-start snapshot: the trip
+    // lands MID-RUN (a dispatch trips the governor while later waves are
+    // still waiting), so every decision point below must evaluate it at its
+    // own moment — a snapshot taken before the waves would fall back to the
+    // plain rule for exactly the rows the cancel reached, fabricating
+    // `blocked` rows for them (review r1 major; supersedes the composition
+    // brief's single-site fix shape).
+    const cancelledRun = (): boolean =>
+      governedDispatch &&
+      governor !== undefined &&
+      governor.tripped &&
+      governor.tripKind === 'signal';
+
+    // Is this dependency a DEFINITIVE non-success for blocking purposes?
+    // failed/blocked/budget-exhausted (transitively) — never a merely queued
+    // sibling still awaiting dispatch, and, under a signal stop, never an
+    // UNRESOLVED row: no entry (the cancel landed before the dep's wave) and
+    // a dispatch cancelled while it waited (result 'indeterminate', which the
+    // counts policy maps to failed) are both unresolved, not failures — the
+    // pair stays re-runnable on resume, so only a definitive non-success
+    // blocks (README "undispatched rows stay queued").
+    const definitivelyNotOk = (dep: string): boolean => {
+      const entry = entries.get(dep);
+      if (entry === undefined) return !cancelledRun();
+      const { state } = entry;
+      if (state === 'done' || state === 'queued') return false;
+      return !(cancelledRun() && entry.result.status === 'indeterminate');
+    };
+
     const blockedResult = (job: ManifestJob): OpResult<unknown> => {
-      // Name a dependency that DEFINITIVELY did not succeed (failed/blocked/
-      // budget-exhausted), not a merely queued sibling still awaiting dispatch.
-      // Both call sites guarantee such a dep exists (wave: the job was not
-      // ready; sweep: anyNotOk), so the first find always hits.
-      const notOk = job.dependsOn.find((dep) => {
-        const state = entries.get(dep)?.state;
-        return state !== 'done' && state !== 'queued';
-      });
+      // Name a dependency that definitively did not succeed. Both call sites
+      // guarantee one exists (wave: the plain rule — this is only reached
+      // when not cancelled; sweep: anyNotOk), so the first find always hits.
+      const notOk = job.dependsOn.find(definitivelyNotOk);
       return {
         status: 'failed',
         error: `blocked: dependency '${notOk}' did not succeed`,
@@ -1076,18 +1156,6 @@ export async function runPlan(
 
     const runOne = governedDispatch ? governedRunOne : plainRunOne;
 
-    // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
-    // not failed: the wave loop must not fabricate blocked rows for jobs
-    // whose dependencies are merely UNCLASSIFIED (the cancel landed before
-    // their wave), and the stop sweep treats an undefined dep state as
-    // unresolved — only a definitive non-success (failed/blocked/
-    // budget-exhausted) blocks; the rest stays queued, re-runnable on
-    // resume (review cycle 4).
-    const cancelledRun =
-      governedDispatch &&
-      governor !== undefined &&
-      governor.tripped &&
-      governor.tripKind === 'signal';
     for (const wave of waveJobs) {
       if (stop.requested) break;
       const submissions: Array<Promise<void>> = [];
@@ -1096,7 +1164,11 @@ export async function runPlan(
         // done — they carry a verified prior ok).
         const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
         if (!ready) {
-          if (!cancelledRun) {
+          // Under a signal stop the row stays UNCLASSIFIED here — it may be
+          // merely unresolved (the cancel landed before its dependency could
+          // dispatch), and fabricating `blocked` at dispatch time would lie
+          // about it; the stop sweep below owns the classification.
+          if (!cancelledRun()) {
             entries.set(job.id, {
               result: blockedResult(job),
               state: 'blocked',
@@ -1108,7 +1180,9 @@ export async function runPlan(
         // Replay skip: terminal ok + same op + same input hash → zero
         // invocation, outcome reconstructed from the journal event. Re-attested
         // with a finish-only event so THIS run's journal stays self-contained
-        // for the next resume.
+        // for the next resume — copying usage AND costUSD (annex §3 rule 1;
+        // the ledger seed prices a run from its own journal, so a dropped
+        // costUSD would make the re-attested spend invisible).
         const prior = replay.get(job.id);
         if (
           prior !== undefined &&
@@ -1125,11 +1199,13 @@ export async function runPlan(
             inputsHash: prior.inputsHash,
             result: prior.result,
             ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+            ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
           });
           entries.set(job.id, {
             result: prior.result,
             state: 'done',
             ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+            ...(prior.costUSD !== undefined ? { costUSD: prior.costUSD } : {}),
             origin: 'replayed',
           });
           continue;
@@ -1157,22 +1233,19 @@ export async function runPlan(
     // budget-caused, so a blocked row whose failed dep was a genuine failure
     // stays failed.
     //
-    // Under a governed SIGNAL stop the undefined-dep rule inverts: an
-    // unclassified dependency did not FAIL — the run was cancelled before it
-    // could dispatch — so only a definitive non-success blocks, and a dep
-    // with no row leaves the job queued (indeterminate, re-runnable on
-    // resume) (review cycle 4). See cancelledRun above the wave loop.
+    // Under a governed SIGNAL stop the `definitivelyNotOk` predicate above
+    // inverts the never-classified rule: an unclassified dependency did not
+    // FAIL — the run was cancelled before it could dispatch — and neither did
+    // a dispatch cancelled while it waited for a slot (its result is
+    // 'indeterminate'): only a definitive non-success blocks, everything else
+    // stays queued (indeterminate, re-runnable on resume). The predicate is
+    // evaluated NOW — after dispatching has ended, so the trip state is final
+    // — which is what makes a MID-RUN cancel classify correctly (review
+    // cycle 4; r1 major).
     for (const wave of waveJobs) {
       for (const job of wave) {
         if (entries.has(job.id)) continue;
-        const depStates = job.dependsOn.map((dep) => entries.get(dep)?.state);
-        // undefined (no entry) counts as not-ok — honest (except under a
-        // signal stop, see above).
-        const anyNotOk = depStates.some((state) =>
-          cancelledRun
-            ? state !== undefined && state !== 'done' && state !== 'queued'
-            : state !== 'done' && state !== 'queued',
-        );
+        const anyNotOk = job.dependsOn.some(definitivelyNotOk);
         if (anyNotOk) {
           entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
         } else {

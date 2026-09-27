@@ -22,10 +22,11 @@
 // corrupted plan FILE CONTENT (unparseable JSON or a PlanSchema failure); and
 // the kernel's own input-validation class — a thrown error whose message
 // starts with 'runPlan: ' (duplicate job ids, the concurrency bound,
-// resume:true without journalDir, caps without governance, and the LEDGER
-// refusals: a run over governed history without governance, a governed run
-// over v1 journals with unaccounted dispatches, a cap raise over the last
-// governed cap) or 'journal: ' (the runId filename-safety assert: a
+// resume:true without journalDir, caps without governance, governance
+// without a governor, and the LEDGER refusals: a run over governed history
+// without governance, the ungoverned marker on a plan with no governed
+// history, a governed run over v1 journals with unaccounted dispatches, a
+// cap raise over the last governed cap) or 'journal: ' (the runId filename-safety assert: a
 // PlanSchema-valid plan whose id cannot become a journal file name, e.g.
 // 'bad/id', thrown by assertSafeRunId inside runPlan when --journal-dir
 // is set — the plan id is still the defective input). RUNTIME throws are
@@ -306,11 +307,13 @@ export async function runPlanThroughKernel(
     // Kernel-input-class throws are INPUT defects → exit 2, consistent with
     // the schema/content defects above: messages starting 'runPlan: '
     // (duplicate job ids, the concurrency bound, resume:true without
-    // journalDir, caps without governance, AND the ledger refusals — a run
-    // over governed history without governance, a governed run over v1
-    // journals with unaccounted dispatches, a cap raise over the last
-    // governed cap: each names the operator's resolution, an opt-in or a
-    // flag change, so the invocation is the defective input), messages
+    // journalDir, caps without governance, governance without a governor,
+    // AND the ledger refusals — a run over governed history without
+    // governance, the ungoverned marker on a plan with no governed history,
+    // a governed run over v1 journals with unaccounted dispatches, a cap
+    // raise over the last governed cap: each names the operator's
+    // resolution, an opt-in or a flag change, so the invocation is the
+    // defective input), messages
     // starting 'journal: ' — the runId filename-safety assert
     // (assertSafeRunId, via makeRunId inside runPlan) fires on a
     // PlanSchema-valid plan whose id is journal-unsafe ('bad/id'): the id
@@ -331,6 +334,24 @@ export async function runPlanThroughKernel(
       return EXIT_CODES.usage;
     }
     throw err;
+  }
+
+  // ADR-0003 annex §3 rule 7: when this governed run's ledger bound excluded
+  // the plan's ungoverned-marked runs from the spend seed, the operator must
+  // see it — the runner records the fact on the governor's event stream and
+  // the CLI narrates it (human mode only, like all narration; json stays
+  // machine-only). Fold-ordered runIds, deduped defensively.
+  if (governance !== undefined) {
+    const excludedRunIds = governance.governor.events.flatMap((event) =>
+      event.kind === 'bound-excluded-ungoverned' ? event.runIds : [],
+    );
+    if (excludedRunIds.length > 0) {
+      narrateIfHuman(
+        io,
+        mode,
+        `bound excludes ungoverned runs ${[...new Set(excludedRunIds)].join(' ')}`,
+      );
+    }
   }
 
   // Output: the ONE stdout artifact first, then failures-only narration

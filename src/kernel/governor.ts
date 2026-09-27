@@ -658,7 +658,15 @@ export type GovernorEvent =
     }
   | { kind: 'usage'; jobKey: string; usd?: number; atMs: number }
   | { kind: 'budget-tripped'; tripKind: TripKind; reason: string; atMs: number }
-  | { kind: 'seeded'; jobs: number; attempts: number; atMs: number };
+  | { kind: 'seeded'; jobs: number; attempts: number; atMs: number }
+  /**
+   * Recorded by the governed runner's fold (not seedFromJournal — the runner
+   * owns the exclusion decision): the spend bound EXCLUDED these
+   * ungoverned-marked runs of the plan from the ledger seed (ADR-0003 annex
+   * §3 rule 7). The CLI surfaces it as
+   * `cq: bound excludes ungoverned runs <runIds>`; runIds are in fold order.
+   */
+  | { kind: 'bound-excluded-ungoverned'; runIds: string[]; atMs: number };
 
 /** The admission gate's verdict for one dispatch. */
 export type AdmissionDecision =
@@ -1075,21 +1083,27 @@ export class BudgetGovernor {
     let unpricedClosingUsage = false;
     // Usage/USD dedupe: only a finish that closes an open start represents a
     // dispatch's own spend; an orphan finish (re-attestation) restates an
-    // already-counted dispatch and is skipped.
+    // already-counted dispatch and is skipped. Keyed PER (run, job): a
+    // finish closes only its OWN run's start. A jobId-only key would let run
+    // B's finish-only re-attestation close the start run A left open when it
+    // died before its finish — charging the re-attested (already-counted)
+    // spend a second time and, when the re-attestation carried usage without
+    // costUSD, tripping a spurious DD-9 `exhausted` at the next seed
+    // (review r1).
     const openStarts = new Set<string>();
     for (const event of events) {
       if (event.type === 'job-started') {
         jobIds.add(event.jobId);
         startsByJob.set(event.jobId, (startsByJob.get(event.jobId) ?? 0) + 1);
         totalStarts += 1;
-        openStarts.add(event.jobId);
+        openStarts.add(`${event.runId}:${event.jobId}`);
         continue;
       }
       if (event.type !== 'job-finished') {
         continue;
       }
       jobIds.add(event.jobId);
-      const closed = openStarts.delete(event.jobId); // any finish closes its start
+      const closed = openStarts.delete(`${event.runId}:${event.jobId}`); // any finish closes ITS OWN RUN's start
       if (!closed) {
         continue;
       }

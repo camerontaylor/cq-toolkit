@@ -284,6 +284,54 @@ export interface FoldRun {
 }
 
 /**
+ * THE SEQ-GAP CHECK — the reader-side twin of {@link claimSeq}. The claim
+ * tombstones (`<planId>.seq.<n>`) are written on every v2 run but were never
+ * read back; `foldOrderRuns` throws on duplicate seqs yet is silent on GAPS,
+ * so a deleted run FILE would silently lower the seeded spend while its
+ * tombstone kept proving the run existed. Called by the runner's fold with
+ * the highest `seq` actually folded from run-started events: a tombstone
+ * beyond it means a seq was claimed but its run is gone — corruption, never
+ * silently folded (annex §2 uniqueness is by construction for writers; a
+ * violation on READ is a corrupted dir).
+ *
+ * Fail-closed trade, named: a crash between `claimSeq` and the first append
+ * leaves an ORPHAN tombstone that also trips this check — the next run
+ * refuses with this error until the operator deletes the named tombstone
+ * (nothing was dispatched under a claimed-but-unstarted seq, so deleting it
+ * is safe and the claim retries at that ordinal). That is the honest
+ * direction: a one-file operator fix beats a ledger that silently forgets
+ * spend.
+ */
+export async function assertNoSeqGap(
+  journalDir: string,
+  planId: string,
+  maxFoldedSeq: number,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(journalDir);
+  } catch (err) {
+    if (isEnoent(err)) return; // no dir yet — no tombstones exist
+    throw err;
+  }
+  const prefix = `${planId}.seq.`;
+  let maxTombstone = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const ordinal = Number(name.slice(prefix.length));
+    if (Number.isInteger(ordinal) && ordinal > maxTombstone) maxTombstone = ordinal;
+  }
+  if (maxTombstone > maxFoldedSeq) {
+    throw new Error(
+      `journal: corrupt — seq gap for plan '${planId}': claim tombstone '${prefix}${maxTombstone}' exists ` +
+        `but the highest folded run-started seq is ${maxFoldedSeq} — a claimed run's file is missing, so its ` +
+        `spend cannot seed the ledger. If the tombstone is an orphaned claim (a crash between claimSeq and ` +
+        `the first append), delete '${prefix}${maxTombstone}' and re-run.`,
+    );
+  }
+}
+
+/**
  * THE FOLD ORDER (ADR-0003 annex §3, r1 m4): v1 runs (run-started without
  * `journalVersion`) ordered by `at` then runId, ALL before every v2 run; v2
  * runs ordered by `seq`. The injected clock can no longer reorder the fold —

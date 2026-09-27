@@ -1068,6 +1068,43 @@ describe('run-plan through the governed kernel', () => {
     expect(err).toContain('cq: done 1');
   });
 
+  test('annex §3 rule-7 notice: the governed run after an ungoverned-marked run narrates the excluded runs', async () => {
+    // Run 1: governed (capped) — creates the governed history. Run 2: the
+    // ungoverned-marked opt-in — sits outside the bound. Run 3: governed
+    // again — its ledger seed excludes run 2, and the CLI must say so
+    // (human mode). A --json governed run narrates nothing.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    const base = [
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--concurrency=1',
+    ];
+    const first = await capture([...base, '--max-usd=5']);
+    expect(first.code).toBe(0);
+    expect(first.err).not.toContain('bound excludes'); // nothing to exclude yet
+
+    const marked = await capture([...base, '--opt-in=budget.ungovernedOverGoverned']);
+    expect(marked.code).toBe(0);
+
+    const log = openRunLog(journalDir);
+    const markedRunIds: string[] = [];
+    for (const runId of await log.runs()) {
+      const started = (await log.read(runId))[0] as { type: string; ungoverned?: unknown };
+      if (started.type === 'run-started' && 'ungoverned' in started) markedRunIds.push(runId);
+    }
+    expect(markedRunIds).toHaveLength(1);
+
+    const third = await capture([...base, '--max-usd=5']);
+    expect(third.code).toBe(0);
+    expect(third.err).toContain(`cq: bound excludes ungoverned runs ${markedRunIds[0] as string}`);
+
+    const jsonMode = await capture([...base, '--max-usd=5', '--json']);
+    expect(jsonMode.code).toBe(0);
+    expect(jsonMode.err).toBe(''); // machine mode stays silent
+  });
+
   test('an UNCAPPED run with --journal-dir stays v1-identical: the run-started record carries NO journalVersion', async () => {
     // The CLI's recorded policy: governance rides exactly the operator's
     // cap — an uncapped run gets no governor, no ledger, and no v2 journal.

@@ -199,7 +199,13 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   with a definitively-failed dependency keeps its real verdict. Executed
   rows are never rewritten. A `signal` trip re-marks nothing: undispatched
   rows stay `queued`, and the report claims `earlyStopReason: 'signal'`
-  when queued rows remain. Counts move only the re-marked rows.
+  when queued rows remain. The cancel rule holds MID-RUN and TRANSITIVELY:
+  the trip is evaluated at each classification point (not snapshotted at
+  run start), and a dependency cancelled while it waited for its slot
+  (`result: 'indeterminate'`) is UNRESOLVED, not failed — its dependents
+  stay `queued` too, never fabricated `blocked` (a cancel is not a verdict;
+  everything undispatched re-runs on resume). Counts move only the
+  re-marked rows.
 - **Composable with resume (ledger continuity).** A run the governor
   stopped still leaves journal evidence: an in-process kill produces a
   terminal budget-exhausted record; a hard-crashed job has `job-started`
@@ -209,18 +215,58 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   map is resume-gated): attempts seed as `1 + |prior job-started(jobId)|`,
   the dispatch count and the usage/`costUSD` rollups seed from
   job-finished events (a finish counts only when it CLOSES an open start),
-  so a run continues the SAME budget. The refusals guard the ledger:
-  governed history refuses an ungoverned run (opt-in
+  so a run continues the SAME budget. The seed's open-start dedupe is
+  keyed PER (run, job): a finish closes only its own run's start, so a
+  finish-only re-attestation in a later run can never close (and
+  double-charge) the start of a run that died first. Identity residual
+  (recorded, unreachable from the CLI today): the attempt seed keys on
+  `job.id`, which the PLAN controls — a plan that renames its job ids
+  between runs presents as fresh jobs and resets its per-job attempt
+  lineage (rename evasion); stable identity needs a plan-external job
+  identity, which is not in v1.1.
+  The fold's corruption checks are loud on DUPLICATES (two v2 runs sharing
+  one `seq`) and on GAPS: a `claimSeq` tombstone (`<planId>.seq.<n>`)
+  beyond the highest folded run-started `seq` throws
+  `journal: corrupt — seq gap` — a claimed run whose FILE is gone (deleted;
+  its spend would silently vanish from the seed), or an orphaned claim (a
+  crash between claimSeq and the first append — safe to resolve by deleting
+  the named tombstone, which the error says). The refusals guard the
+  ledger: governed history refuses an ungoverned run (opt-in
   `budget.ungovernedOverGoverned` marks the run ungoverned on its v2
-  record instead); v1 journals with unaccounted dispatches refuse a
-  governed run (opt-in `budget.legacyJournal=reset` charges them zero and
-  records exactly which runs the bound excludes — sticky); a cap RAISE
-  over the last governed run's `capUsd` refuses (opt-in
-  `budget.raiseCap`). Consequence: budget-exhausted rows are terminal and
+  record instead — and the marker is honoured ONLY over actual governed
+  history: on a plan with none it is refused, since honouring it would
+  strand that run's spend outside every future ledger); v1 journals with
+  unaccounted dispatches refuse a governed run (opt-in
+  `budget.legacyJournal=reset` charges them zero and records exactly which
+  runs the bound excludes — sticky); a cap RAISE over the last governed
+  run's `capUsd` refuses (opt-in `budget.raiseCap` — the predecessor check
+  gates the USD bound only, because token caps are ADVISORY in v1.1
+  (ADR-0003 §2.3) and a token-cap raise has no spend-integrity consequence
+  to gate). When a governed run's seed excludes ungoverned-marked runs,
+  the runner records the fact on the governor's event stream and the CLI
+  narrates `cq: bound excludes ungoverned runs <runIds>` (annex §3 rule 7).
+  Consequence: budget-exhausted rows are terminal and
   are NOT auto-retried by resume in any effective sense — a seeded,
   still-tripped governor re-marks them without op invocation; only an
   input change (new `inputsHash`, which defeats even ok-skip in replay)
   puts them back under the caps as genuinely new work.
+  Cost scope, named (do not double-count): the RUN-level `costUSD` on a
+  report is the cumulative seeded LEDGER (prior runs' finishes plus this
+  run's evidence), while each per-row `costUSD` is THIS run's evidence
+  only (a replay-skipped row restates the copied prior cost) — summing
+  rows across runs double-counts; the run-level figure is the ledger.
+  Recorded ledger-integrity residuals (W2.2 scope ends here):
+  - **The journal is trusted by possession.** Anyone with write access to
+    `--journal-dir` can edit a `job-finished.costUSD` undetected — the
+    fold validates shape, not provenance. The future fix is a per-run
+    chained hash over the journal lines, verified at fold time.
+  - **No plan lock yet (deferred to W2.4).** Concurrent governed runs over
+    one journal dir are ≈2C: two processes can both fold and both dispatch
+    before either's spend lands. The W2.4 lock (ADR-0003 §2.5 — a
+    kernel-held socket, not an mtime) closes it; a naive `open('wx')` lock
+    was rejected for W2.2 because a crashed holder would wedge the plan
+    (fail-closed with no stale-lock recovery), which is a worse operational
+    failure than the documented race.
 
 ## Governor config
 

@@ -1376,6 +1376,78 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
   });
 });
 
+describe('seedFromJournal dedupe closes a finish only against ITS OWN run\u2019s start (review r1)', () => {
+  // Run R0 completed c1 (priced, counted). Run A started c1 and died before
+  // its finish. Run B re-attested c1 finish-only (the replay re-attestation,
+  // restating R0's already-counted spend). A jobId-only openStarts key let
+  // B's orphan finish CLOSE A's open start — charging R0's spend a second
+  // time and, when the re-attestation carried usage without costUSD,
+  // tripping a spurious DD-9 `exhausted` at the next seed.
+  const PRICED = { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 };
+  const runStart = (runId: string, at: string): JournalEvent => ({
+    type: 'run-started',
+    runId,
+    at,
+    planId: 'plan-seed-dedupe',
+  });
+  const started = (runId: string, at: string, attempt: number): JournalEvent => ({
+    type: 'job-started',
+    runId,
+    at,
+    jobId: 'c1',
+    op: 'fake',
+    attempt,
+  });
+  const finished = (runId: string, at: string, costUSD?: number): JournalEvent => ({
+    type: 'job-finished',
+    runId,
+    at,
+    jobId: 'c1',
+    opId: 'fake',
+    inputsHash: 'h1',
+    result: { status: 'ok', value: 'c1' },
+    usage: PRICED,
+    ...(costUSD !== undefined ? { costUSD } : {}),
+  });
+  // Run R0: c1 completed ok, priced and counted. Run A: a start with no
+  // finish (the crash). Run B: the finish-only re-attestation (no start of
+  // its own), restating R0's already-counted spend.
+  const base: JournalEvent[] = [
+    runStart('r0', '2026-09-16T00:00:00.000Z'),
+    started('r0', '2026-09-16T00:00:00.000Z', 1),
+    finished('r0', '2026-09-16T00:00:01.000Z', 0.1),
+    runStart('rA', '2026-09-16T00:01:00.000Z'),
+    started('rA', '2026-09-16T00:01:00.000Z', 2),
+    runStart('rB', '2026-09-16T00:02:00.000Z'),
+    finished('rB', '2026-09-16T00:02:01.000Z', 0.1),
+  ];
+
+  test('a cross-run close is unreachable: the re-attested spend is charged ONCE (R0\u2019s finish)', () => {
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    governor.seedFromJournal(base);
+    expect(governor.usdSpent).toBe(0.1); // R0's finish only — B's restatement skipped
+    expect(governor.usage).toEqual(PRICED);
+    expect(governor.tripped).toBe(false);
+    // Both prior starts (R0's and A's) still seed the attempt count.
+    expect(governor.attemptsFor('c1')).toBe(2);
+  });
+
+  test('an UNPRICED re-attestation does not trip a spurious seed exhausted off a dead run\u2019s open start', () => {
+    // Same shape, but B's re-attestation restates usage with no costUSD (the
+    // v1-era finish shape). It closes nothing, so it prices nothing — the
+    // unpriced rule fires only for CLOSING finishes.
+    const events: JournalEvent[] = [
+      ...base.slice(0, 5), // R0's priced pair + A's unfinishable start
+      runStart('rB', '2026-09-16T00:02:00.000Z'),
+      finished('rB', '2026-09-16T00:02:01.000Z'), // usage, no costUSD
+    ];
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    governor.seedFromJournal(events);
+    expect(governor.usdSpent).toBe(0.1);
+    expect(governor.tripped).toBe(false); // no spurious exhausted
+  });
+});
+
 describe('observeCost rejects invalid USD before mutating the rollup (#15-1)', () => {
   test.each([NaN, Infinity, -0.01])('usd %p throws and leaves the rollup untouched', (bad) => {
     const governor = new BudgetGovernor({ maxUsd: 1 });

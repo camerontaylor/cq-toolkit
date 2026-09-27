@@ -38,7 +38,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import { currentJobContext, createGovernor } from '../../src/kernel/governor.js';
-import type { GovernorEvent } from '../../src/kernel/governor.js';
+import type { Governance, GovernorEvent } from '../../src/kernel/governor.js';
 import { openRunLog } from '../../src/kernel/journal.js';
 import { makeManifest } from '../../src/kernel/manifest.js';
 import { runPlan, type OpRegistryView } from '../../src/kernel/runner.js';
@@ -156,6 +156,28 @@ describe('caps require governance', () => {
       ),
     ).rejects.toThrow('runPlan: caps require governance');
     expect(calls).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. Governance without a governor — the caps guard's mirror (review M4)
+// ---------------------------------------------------------------------------
+
+describe('governance requires a governor', () => {
+  test('a { governor: undefined } Governance handle throws before anything runs', async () => {
+    // Without this guard the handle degrades to a silent no-op run that still
+    // journals a governed-looking v2 record (seq claimed, governance block) —
+    // the exact dishonesty the caps guard exists to prevent for caps.
+    const calls: string[] = [];
+    await expect(
+      runPlan(
+        independentPlan('plan-gov-no-governor', 1),
+        { concurrency: 1, stopOnError: false },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: undefined } as unknown as Governance,
+      ),
+    ).rejects.toThrow('runPlan: governance requires a governor');
+    expect(calls).toEqual([]); // no op ran — no silent ungoverned dispatch
   });
 });
 
@@ -769,7 +791,111 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
     const report = await runPromise;
     expect(calls).toEqual([]); // j2 never ran
     expect(report.jobs[1]?.result).toMatchObject({ status: 'indeterminate' });
-    expect(report.jobs[1]?.result).not.toHaveProperty('status', 'budget-exhausted');
+    expect(report.jobs[1]?.result.status).not.toBe('budget-exhausted');
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('signal');
+    const shortCircuits = governor.events.filter((event) => event.kind === 'short-circuited');
+    expect(shortCircuits.map((event) => event.reason)).toContain('cancelled-while-queued');
+  });
+
+  test('a MID-RUN abort over an a→b→c chain never fabricates blocked rows: [done, queued, queued] (r1 major)', async () => {
+    // cancelledRun is a PREDICATE, not a run-start snapshot: the signal lands
+    // DURING wave 1 (while a runs), so at wave 3 the old snapshot (still
+    // false) fell back to the plain rule and marked c BLOCKED on b's missing
+    // entry — the cancel fabricating a failure. The predicate sees the trip
+    // at c's own decision point; b and c stay queued (re-runnable on resume).
+    const calls: string[] = [];
+    const governor = createGovernor({});
+    const external = new AbortController();
+    let aEntered = false;
+    const okAfterAbort = async (): Promise<OpResult<unknown>> => {
+      aEntered = true;
+      // The op observes the composed cancel and completes with a REAL ok
+      // verdict — a keeps its outcome; only the undispatched tail is
+      // cancelled.
+      await new Promise<void>((resolve) => {
+        currentJobContext()?.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return okOp({ jobId: 'a' });
+    };
+    const plan: Plan = {
+      id: 'plan-signal-mid-chain',
+      jobs: [
+        { id: 'a', op: 'hang', input: { jobId: 'a' } },
+        { id: 'b', op: 'fake', input: { jobId: 'b' }, dependsOn: ['a'] },
+        { id: 'c', op: 'fake', input: { jobId: 'c' }, dependsOn: ['b'] },
+      ],
+    };
+    const runPromise = runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('hang', okAfterAbort), entry('fake', countingOp(calls))),
+      { governor, signal: external.signal },
+    );
+    await waitFor(() => aEntered, 'a to enter');
+    external.abort(); // mid-run: b and c are still undispatched
+    const report = await runPromise;
+    expect(calls).toEqual([]); // b and c never ran
+    expect(rowStatuses(report)).toEqual(['ok', 'indeterminate', 'indeterminate']);
+    expect(report.jobs[1]?.result).toEqual({
+      status: 'indeterminate',
+      detail: 'queued: run stopped before dispatch',
+    });
+    expect(report.counts).toEqual({
+      queued: 2,
+      running: 0,
+      blocked: 0, // the point: no fabricated blocked rows
+      done: 1,
+      failed: 0,
+      'budget-exhausted': 0,
+    });
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('signal');
+  });
+
+  test('a slot-wait cancel over a chain: the cancelled-while-queued dep stays UNRESOLVED — its dependent is queued, never blocked (composition H1)', async () => {
+    // The cycle-2 slot-wait shape extended to a chain: j2 parks on the single
+    // in-flight slot, the trip lands, and j2's row is written `indeterminate`
+    // (a cancel, not a verdict). stateFromResult maps indeterminate → failed,
+    // so the old sweep read j3's dependency as DEFINITIVELY failed and
+    // fabricated a blocked row; under a cancel that indeterminate is
+    // unresolved — j3 stays queued, re-runnable on resume.
+    const calls: string[] = [];
+    const governor = createGovernor({ inFlightCeiling: 1 });
+    const external = new AbortController();
+    let j1Entered = false;
+    const hangUntilAbort = async (): Promise<OpResult<unknown>> => {
+      j1Entered = true;
+      await new Promise<void>((resolve) => {
+        currentJobContext()?.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { status: 'indeterminate', detail: 'cancelled by run signal' };
+    };
+    const plan: Plan = {
+      id: 'plan-signal-slot-chain',
+      jobs: [
+        { id: 'j1', op: 'hang', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j3', op: 'fake', input: { jobId: 'j3' }, dependsOn: ['j2'] },
+      ],
+    };
+    const runPromise = runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false },
+      viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
+      { governor, signal: external.signal },
+    );
+    await waitFor(() => j1Entered, 'j1 to enter');
+    external.abort(); // j2 is admitted, waiting on the single in-flight slot
+    const report = await runPromise;
+    expect(calls).toEqual([]); // j2 and j3 never ran the op
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'indeterminate' }); // j2 cancelled-while-queued
+    expect(report.jobs[2]?.result).toEqual({
+      status: 'indeterminate',
+      detail: 'queued: run stopped before dispatch',
+    }); // j3 NOT blocked
+    expect(report.counts.blocked).toBe(0);
+    expect(report.counts.queued).toBe(1);
     expect(report.stoppedEarly).toBe(true);
     expect(report.earlyStopReason).toBe('signal');
     const shortCircuits = governor.events.filter((event) => event.kind === 'short-circuited');
@@ -811,7 +937,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
     const report = await runPromise;
     expect(calls).toEqual([]); // j2 never ran
     expect(report.jobs[1]?.result).toMatchObject({ status: 'indeterminate' });
-    expect(report.jobs[1]?.result).not.toHaveProperty('status', 'budget-exhausted');
+    expect(report.jobs[1]?.result.status).not.toBe('budget-exhausted');
     expect(report.stoppedEarly).toBe(true);
     expect(report.earlyStopReason).toBe('signal');
     // The gate left NO j2 evidence: no admission, no short-circuit record,
@@ -1351,5 +1477,220 @@ describe('governed journal v2 + resume', () => {
     expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 3 });
     expect(jobStarts(events).map((event) => event.attempt)).toEqual([3]);
     expect(report.counts.done).toBe(1);
+  });
+
+  test('budget.ungovernedOverGoverned with NO governed history refuses — the marker names a condition the plan does not have (composition H3)', async () => {
+    // Fresh dir: no prior runs. Honouring the marker here would dispatch the
+    // ops ungoverned and strand this run's spend outside every future ledger
+    // — a silent forfeit. The refusal names the condition and the resolution.
+    const calls: string[] = [];
+    await expect(
+      runPlan(
+        independentPlan('plan-gov-mark-nohistory', 1),
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: createGovernor({}), optIn: ['budget.ungovernedOverGoverned'] },
+      ),
+    ).rejects.toThrow(
+      'runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan plan-gov-mark-nohistory has no governed history',
+    );
+    expect(calls).toEqual([]); // never dispatched
+    expect(await readdir(dir)).toEqual([]); // nothing claimed or emitted — before any state
+  });
+
+  test('replay-skip re-attestation copies the prior finish\u2019s costUSD, not just usage (composition M2)', async () => {
+    const USAGE = { input: 6, output: 3, cacheRead: 0, cacheWrite: 0 };
+    const calls: string[] = [];
+    const spendy = async (raw: unknown): Promise<OpResult<unknown>> => {
+      calls.push((raw as { jobId: string }).jobId);
+      currentJobContext()?.reportResult({ usage: USAGE, costUSD: 0.25 });
+      return { status: 'ok', value: 'done' };
+    };
+    const plan = independentPlan('plan-gov-reattest-cost', 1, 'spendy');
+    await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      viewWith(entry('spendy', spendy)),
+      { governor: createGovernor({ maxUsd: 5 }) },
+    );
+    // Resume: the job replay-skips (zero invocation); the re-attested
+    // finish-only event must carry usage AND costUSD (annex §3 rule 1) so
+    // this run's journal self-containedly prices the fold.
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('spendy', spendy)),
+      { governor: createGovernor({ maxUsd: 5 }) },
+    );
+    expect(calls).toEqual(['j1']); // run 1 only — the resume skipped
+    const events2 = await openRunLog(dir).read(report2.runId);
+    expect(jobFinishes(events2)).toMatchObject([
+      { jobId: 'j1', result: { status: 'ok' }, usage: USAGE, costUSD: 0.25 },
+    ]);
+  });
+
+  test('a claim tombstone beyond the highest folded seq refuses the fold — a deleted run file cannot silently lower the seed (composition H2)', async () => {
+    const plan: Plan = {
+      id: 'plan-gov-seqgap',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const log = openRunLog(dir);
+    const run1 = 'plan-gov-seqgap--r1--aa';
+    await log.append(run1, {
+      type: 'run-started',
+      runId: run1,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'plan-gov-seqgap',
+      journalVersion: 2,
+      seq: 1,
+      governance: { attended: false },
+    });
+    // The seq-2 claim tombstone EXISTS but its run file does not: a deleted
+    // run (or an orphaned claim). The fold sees maxPriorSeq 1 and must refuse
+    // — governed AND plain — instead of silently forgetting the missing
+    // run's spend.
+    await appendFile(join(dir, 'plan-gov-seqgap.seq.2'), '', 'utf8');
+    const calls: string[] = [];
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: createGovernor({}) },
+      ),
+    ).rejects.toThrow(/journal: corrupt — seq gap for plan 'plan-gov-seqgap'/);
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+        viewWith(entry('fake', countingOp(calls))),
+      ),
+    ).rejects.toThrow(/seq gap/);
+    expect(calls).toEqual([]);
+  });
+
+  test('ANNEX §5 golden: a verbatim v1 journal replays with a zero-invocation skip and a v1-shaped run-started', async () => {
+    // The golden replay rule (annex §5), against a file written RAW exactly
+    // as a v1 binary wrote it — versionless run-started, attempt-1
+    // job-started, the frozen replay record, run-finished. The ungoverned
+    // resume must skip the job (ok + same op + same inputsHash) with zero op
+    // invocation and write its OWN run-started still v1-shaped.
+    const plan: Plan = {
+      id: 'plan-gov-golden-v1',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+    const v1RunId = 'plan-gov-golden-v1--20260101--abcd1234';
+    const v1Lines = [
+      JSON.stringify({
+        type: 'run-started',
+        runId: v1RunId,
+        at: '2026-01-01T00:00:00.000Z',
+        planId: 'plan-gov-golden-v1',
+      }),
+      JSON.stringify({
+        type: 'job-started',
+        runId: v1RunId,
+        at: '2026-01-01T00:00:00.000Z',
+        jobId: 'j1',
+        op: 'fake',
+        attempt: 1,
+      }),
+      JSON.stringify({
+        type: 'job-finished',
+        runId: v1RunId,
+        at: '2026-01-01T00:00:01.000Z',
+        jobId: 'j1',
+        opId: 'fake',
+        inputsHash: hash,
+        result: { status: 'ok', value: 'j1' },
+      }),
+      JSON.stringify({
+        type: 'run-finished',
+        runId: v1RunId,
+        at: '2026-01-01T00:00:02.000Z',
+        stoppedEarly: false,
+      }),
+    ];
+    await appendFile(join(dir, `${v1RunId}.ndjson`), `${v1Lines.join('\n')}\n`, 'utf8');
+
+    const calls: string[] = [];
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('fake', countingOp(calls))),
+    );
+    expect(calls).toEqual([]); // the v1 ok finish skips — zero invocation
+    expect(report.counts.done).toBe(1);
+    const log = openRunLog(dir);
+    const runs = await log.runs();
+    expect(runs).toHaveLength(2);
+    const events = await log.read(report.runId);
+    const started = events[0] as { type: string; journalVersion?: unknown; seq?: unknown };
+    expect(started.type).toBe('run-started');
+    expect('journalVersion' in started).toBe(false); // the new run is v1-shaped too
+    expect('seq' in started).toBe(false);
+    // The self-contained re-attestation: this run's journal carries the
+    // finish-only event for j1.
+    expect(jobFinishes(events)).toMatchObject([
+      { jobId: 'j1', opId: 'fake', result: { status: 'ok' } },
+    ]);
+  });
+
+  test('ANNEX §4 row 1: an ungoverned run over v1-only history works unchanged (skip + re-run, no refusal)', async () => {
+    // v1 history: j1 finished ok (skips), j2 started and never finished (the
+    // crash — re-runs). The plain path neither refuses nor changes shape.
+    const plan: Plan = {
+      id: 'plan-gov-v1row1',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const manifest = makeManifest(plan);
+    const v1RunId = 'plan-gov-v1row1--20260101--beefcafe';
+    const log = openRunLog(dir);
+    await log.append(v1RunId, {
+      type: 'run-started',
+      runId: v1RunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'plan-gov-v1row1',
+    });
+    await log.append(v1RunId, {
+      type: 'job-started',
+      runId: v1RunId,
+      at: '2026-01-01T00:00:00.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(v1RunId, {
+      type: 'job-finished',
+      runId: v1RunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: manifest.jobs[0]?.inputsHash ?? '',
+      result: { status: 'ok', value: 'j1' },
+    });
+    await log.append(v1RunId, {
+      type: 'job-started',
+      runId: v1RunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j2',
+      op: 'fake',
+      attempt: 1,
+    });
+
+    const calls: string[] = [];
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('fake', countingOp(calls))),
+    );
+    expect(calls).toEqual(['j2']); // j1 skipped (verified ok); j2 re-runs
+    expect(report.counts.done).toBe(2);
+    const events = await log.read(report.runId);
+    expect(jobStarts(events).map((event) => event.jobId)).toEqual(['j2']); // j1 was never re-dispatched
   });
 });
