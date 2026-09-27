@@ -34,7 +34,11 @@
 # satisfy the denylist-scan REQUIRED_WORKFLOW_CHECKS pairing (ratchet.yml ↔
 # ratchet): both triggers present as top-level entries, zero filter keys.
 # More trigger surface just means the check runs more often — harmless.
-# Skips live nowhere: the ratchet never skips. The check name is 'ratchet'
+# Skips live nowhere but the ONE job-level guard below: a `cq-state`
+# settle-ledger push is not a reviewable change, so the check has nothing
+# to report on (review-debt #226); the trigger surface itself stays
+# unfiltered, and a skipped job on an unprotected branch has no merge
+# consequence. The check name is 'ratchet'
 # (the job's name:, identical to its id — the pairing requires it);
 # registration in branch protection is attempted out-of-band by the lane
 # leader, not here. Instantiated per policy/templates/required-check.md
@@ -59,6 +63,10 @@ jobs:
     name: ratchet
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The `cq-state` settle ledger is machine-written; its pushes are not
+    # reviewable changes (review-debt #226). Job-level, never a trigger
+    # filter — I4 keeps the trigger surface intact.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
     steps:
       - name: Check out the repo (full history — the guard needs the base diff)
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)

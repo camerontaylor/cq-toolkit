@@ -3,8 +3,12 @@ name: ci
 
 # Invariant I4: required checks never get paths-ignore — nor any path, branch,
 # or tag filter at all. This workflow triggers on every push and on every
-# pull_request, without exception. Skips, if ever needed, belong in job-level
-# `if:` conditions only; no `if:` is needed here.
+# pull_request, without exception. Skips belong in job-level `if:` conditions
+# only; the one sanctioned skip below is the `cq-state` settle-ledger branch
+# (review-debt #226): a machine-written ledger push carries no reviewable
+# change, so running the suite on it only burns runners. The trigger surface
+# itself stays unfiltered — a skipped job on an unprotected branch has no
+# merge consequence.
 on:
   push:
   pull_request:
@@ -15,6 +19,10 @@ permissions:
 jobs:
   static:
     runs-on: ubuntu-latest
+    # The `cq-state` settle ledger is machine-written (selfhost settle-state);
+    # its pushes are not reviewable changes (review-debt #226). Job-level,
+    # never a trigger filter — I4 keeps the trigger surface intact.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
@@ -64,6 +72,9 @@ jobs:
   # so this job's presence cannot dangle a branch-protection wait.
   from-source:
     runs-on: ubuntu-latest
+    # Same cq-state skip as the static job (review-debt #226): the ledger
+    # push is not a reviewable change.
+    if: ${{ github.ref != 'refs/heads/cq-state' }}
     steps:
       - name: Check out the repo
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (immutable commit pin; repo policy)
