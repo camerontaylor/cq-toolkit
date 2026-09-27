@@ -396,12 +396,10 @@ export async function runSelfMergePrs(
   // parent before any writer touches them. Real runs only: the dry run
   // classifies and returns above, never touching the journal.
   const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
-  // The GOVERNED run's own journal dir is created HERE, recursively: the
-  // kernel's v2 seq claim (journal.claimSeq) is an exclusive create that
-  // requires the dir to exist, unlike the v1 append path which created it
-  // lazily on first write.
-  const runJournalDir = join(journalRoot, `merge-${String(nowMs)}`);
-  mkdirSync(runJournalDir, { recursive: true });
+  mkdirSync(journalRoot, { recursive: true });
+  // The GOVERNED run's own journal dir (`merge-<stamp>`) is created by the
+  // kernel — the v2 seq claim (journal.claimSeq) and the append path both
+  // mkdir it recursively on first write.
   // AUTOMATION IDENTITY (module doc): resolved once, before any merge can
   // be attempted; an unresolved identity (other than an integration token)
   // refuses every recheck rather than throwing the run.
@@ -432,10 +430,10 @@ export async function runSelfMergePrs(
     // The governed run's durable kernel journal (the RunReport's evidence
     // trail), namespaced `merge-<stamp>` under the journal root — stamp =
     // the same once-read clock the loop entry stamps its per-PR dirs with;
-    // created above (the seq claim needs the dir to exist). The CLI's
-    // optional --journal-dir is a human-run choice; a scheduled run has no
-    // human to copy stdout, so the entry always persists it.
-    journalDir: runJournalDir,
+    // the kernel creates it on first write. The CLI's optional --journal-dir
+    // is a human-run choice; a scheduled run has no human to copy stdout, so
+    // the entry always persists it.
+    journalDir: join(journalRoot, `merge-${String(nowMs)}`),
   };
   const governor = createGovernor(
     governorConfig(runOptions, { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs }),

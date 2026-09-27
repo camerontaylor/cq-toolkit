@@ -37,10 +37,12 @@ const op = await entry.importer(); // lazy: no op module loads before this
 const result = await op({ sets: [] }); // OpResult — a status-tagged union
 ```
 
-The runner is exported too: `runPlan(plan, opts, registry)` returns a
+The runner is exported too: `runPlan(plan, opts, registry, gov?)` returns a
 serializable `RunReport` (per-job outcomes, usage rollup, honest-stop counts);
-its third argument is an `OpRegistryView`, and budget governance comes from
-wrapping the run with `withBudgetStop`. See [`src/kernel/README.md`](src/kernel/README.md)
+its third argument is an `OpRegistryView`, and budget governance rides the
+optional fourth — a `Governance` handle (`{ governor, clock?, signal?,
+attended?, optIn? }`); caps in `opts` without a handle throw. See
+[`src/kernel/README.md`](src/kernel/README.md)
 for the composition contract and `scripts/smoke-run-plan.mjs` for a worked
 governed run.
 

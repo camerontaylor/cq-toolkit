@@ -751,6 +751,22 @@ describe('governed journal v2 + resume', () => {
     expect(listing.some((name) => name === 'plan-gov-journal.seq.1')).toBe(true);
   });
 
+  test('a governed run over a NOT-YET-EXISTING journal dir creates it (the seq claim mkdirs)', async () => {
+    // The v1 append path created the journal dir lazily on first write; the
+    // v2 seq claim (exclusive create) runs BEFORE any append, so it must
+    // carry the same lazy-create contract — a first governed run with a
+    // fresh `--journal-dir` is the CLI's ordinary case.
+    const freshDir = join(dir, 'fresh-sub');
+    const report = await runPlan(
+      independentPlan('plan-gov-fresh-dir', 1, 'ok'),
+      { concurrency: 1, stopOnError: false, journalDir: freshDir },
+      viewWith(entry('ok', okOp)),
+      { governor: createGovernor({ maxUsd: 5 }) },
+    );
+    const events = await openRunLog(freshDir).read(report.runId);
+    expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 1 });
+  });
+
   test('a governed resume continues attempt numbers (seeded fold → admission attempt 2)', async () => {
     const calls: string[] = [];
     let behave: 'fail' | 'ok' = 'fail';

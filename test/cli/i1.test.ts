@@ -772,11 +772,10 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
         { id: 'b', op: 'echo', input: { msg: 'again' }, dependsOn: ['a'] },
       ],
     });
-    // The governed seq claim (journal.claimSeq) is an EXCLUSIVE create in
-    // the journal dir — the dir must exist (the v1 append path created it
-    // lazily; the governed path, like self-merge-prs, requires it up
-    // front), so the fresh-run half pre-creates it.
-    await mkdir(fresh.journalDir, { recursive: true });
+    // The journal dir does NOT pre-exist: the governed seq claim
+    // (journal.claimSeq) carries the append path's lazy-create contract, so
+    // a first governed run over a fresh --journal-dir works (and this pin
+    // proves it).
     const freshRun = await capture([
       'run-plan',
       `--plan=${fresh.planPath}`,

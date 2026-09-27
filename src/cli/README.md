@@ -11,7 +11,8 @@ THE I1 CLI CONTRACT (landed):
   A plan subcommand takes run-plan's governed-run flags MINUS --plan AND the
   run-plan-reserved --ops-root (RunPlanCommandSchema) and runs the registry
   entry's discoverable floor plan through the same governed composition
-  (runPlan + withBudgetStop); the floor is validated with PlanSchema before
+  (runPlan under a Governance handle when the operator set a cap); the floor
+  is validated with PlanSchema before
   the run, so malformed plan data is a usage error (exit 2).
   `run-plan --plan=<file>` remains the way to run an arbitrary plan JSON, and
   --ops-root remains a run-plan flag (a plan subcommand rejects it with exit

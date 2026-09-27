@@ -235,7 +235,10 @@ async function syncDir(dir: string): Promise<void> {
  * (critic r2 m-b; the lock is W2.4's and this claim does not wait for it).
  * The claim file is a tombstone: it is never read back, only its existence
  * is the claim. `startAt` is the first ordinal to try — the caller passes
- * 1 + the highest seq folded from the plan's existing journals.
+ * 1 + the highest seq folded from the plan's existing journals. The journal
+ * dir is created recursively first (the append path's lazy-create contract:
+ * a FIRST governed run over a not-yet-existing `--journal-dir` claims its
+ * seq instead of failing on the missing dir).
  *
  * Bounded: 10_000 consecutive EEXISTs mean something else is writing these
  * tombstones — corruption, not contention — and throws.
@@ -248,6 +251,7 @@ export async function claimSeq(
   if (!Number.isInteger(startAt) || startAt < 1) {
     throw new Error(`journal: claimSeq startAt must be an integer >= 1, got ${startAt}`);
   }
+  await mkdir(journalDir, { recursive: true });
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   for (let n = startAt; n < startAt + 10_000; n++) {
     try {
