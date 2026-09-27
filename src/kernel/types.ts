@@ -113,8 +113,13 @@ export interface RunOptions {
   resume?: boolean;
 }
 
-/** Reason a run stopped early. Frozen at `budget`: a budget bound was hit before all jobs reached a terminal state. */
-export type RunEarlyStopReason = 'budget';
+/**
+ * Reason a run stopped early. v1.1 (ADR-0003 §2.3) widens the frozen
+ * `budget` with `signal` (a run-level cancel tripped the run; CLI SIGINT/
+ * SIGTERM wiring is W2.5); `stalled` | `deferred` | `lock-lost` | `provider`
+ * arrive with the reservation/profile/lock slices that own them.
+ */
+export type RunEarlyStopReason = 'budget' | 'signal';
 
 /** Per-job outcome row in a run report. */
 export interface JobOutcome {
@@ -165,8 +170,45 @@ export interface Limits {
 }
 
 /**
+ * The v1.1 per-call opt-ins (ADR-0003 §2.1/§2.5; each is journalled on
+ * `run-started` when honoured). Per-call by explicit key only (P7): no env
+ * or profile sets these. `budget.breakLock=<runId>` arrives with the plan
+ * lock (W2.4 territory).
+ */
+export type GovernanceOptIn =
+  | 'budget.legacyJournal=reset'
+  | 'budget.raiseCap'
+  | 'budget.ungovernedOverGoverned';
+
+/**
+ * `run-started.governance` — present iff the run is governed (ADR-0003
+ * annex §2). Plain data; the provenance `config` field (RS-15/W3.6) is not
+ * part of v1.1's W2 slices.
+ */
+export interface GovernanceRecord {
+  /** The run's USD cap, when one is configured (the ledger's C for this run). */
+  capUsd?: number;
+  /** The run's token-rollup cap (DD-9), when configured. */
+  capTokens?: number;
+  /** Operator-declared attendance (P8 default false; declared, never verified). */
+  attended: boolean;
+  /** Present iff `budget.legacyJournal=reset` was honoured: which v1 runs the spend bound excludes. Sticky for the named files. */
+  legacyJournal?: { mode: 'reset'; v1RunIds: string[] };
+  /** Present iff `budget.raiseCap` was honoured: the raised-from → raised-to cap (USD) transition. */
+  raiseCap?: { from: number; to: number };
+}
+
+/**
  * Journal: run started. Every journal event carries `runId` and an ISO-8601
  * `at` timestamp.
+ *
+ * v2 (ADR-0003 annex §2) adds OPTIONAL fields; `journalVersion` absent ⇒ a
+ * v1 record. `seq` is claimed by exclusive create of
+ * `<journalDir>/<planId>.seq.<n>` (unique across the plan's files by
+ * construction) and orders the resume fold; `at` is display-only for v2
+ * runs. `governance` is present iff the run is governed; `ungoverned` is
+ * present iff `budget.ungovernedOverGoverned` was honoured (such runs write
+ * no reservation events and sit outside the spend bound).
  */
 export interface RunStartedJournalEvent {
   type: 'run-started';
@@ -174,6 +216,14 @@ export interface RunStartedJournalEvent {
   /** ISO-8601 timestamp. */
   at: string;
   planId: string;
+  /** Journal schema version; absent ⇒ v1. The only allowed v2 value is 2. */
+  journalVersion?: 2;
+  /** Fold-order ordinal (v2): 1 + max(prior seq) for this plan; unique per plan. */
+  seq?: number;
+  /** Governed-run record (ADR-0003 annex §2); present iff the run is governed. */
+  governance?: GovernanceRecord;
+  /** Present iff the run is an opted-in ungoverned run over governed history. */
+  ungoverned?: { optIn: true };
 }
 
 /** Journal: one job dispatched. `attempt` starts at 1. */
@@ -190,7 +240,9 @@ export interface JobStartedJournalEvent {
  * Journal: one job reached a terminal outcome. Carries the frozen replay
  * record verbatim — `opId` + `inputsHash` + `result` — which identifies the
  * op and its input and reproduces the outcome on resume. The optional
- * `usage` rollup lets a resumed run keep per-job usage/cost accounting.
+ * `usage`/`costUSD` rollups let a resumed run keep per-job spend accounting
+ * (v1.1: a governed runner writes them — journal v2, ADR-0003 annex §2;
+ * `charged` arrives with the reservation slice).
  */
 export interface JobFinishedJournalEvent {
   type: 'job-finished';
@@ -202,6 +254,8 @@ export interface JobFinishedJournalEvent {
   result: OpResult<unknown>;
   /** Per-job token usage rollup, when the driver reported it (USD stays derived-only downstream). */
   usage?: Usage;
+  /** Per-job modeled USD rollup (costBasis 'modeled'), when cost was observed. */
+  costUSD?: number;
 }
 
 /** Journal: run finished (all jobs terminal, or stopped early). */

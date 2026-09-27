@@ -37,6 +37,7 @@ import type {
   WorkerResult,
 } from '../driver/types.js';
 import type {
+  GovernanceRecord,
   Job,
   JobOutcome,
   JobState,
@@ -280,7 +281,36 @@ export const LimitsSchema: z.ZodType<Limits> = z
   })
   .strict();
 
-export const RunEarlyStopReasonSchema: z.ZodType<RunEarlyStopReason> = z.literal('budget');
+export const RunEarlyStopReasonSchema: z.ZodType<RunEarlyStopReason> = z.enum(['budget', 'signal']);
+
+/**
+ * Mirrors `GovernanceRecord` (run-started.governance — ADR-0003 annex §2).
+ * Strict: an unknown governance key fails the journal line, per the
+ * persisted-shape rule.
+ */
+export const GovernanceRecordSchema: z.ZodType<GovernanceRecord> = z
+  .object({
+    // Mirror-only tightenings (review-debt #17 precedent): caps are
+    // non-negative quantities; the frozen type is untouched.
+    capUsd: z.number().nonnegative().exactOptional(),
+    capTokens: z.number().positive().exactOptional(),
+    attended: z.boolean(),
+    legacyJournal: z
+      .object({
+        mode: z.literal('reset'),
+        v1RunIds: z.array(z.string()),
+      })
+      .strict()
+      .exactOptional(),
+    raiseCap: z
+      .object({
+        from: z.number().nonnegative(),
+        to: z.number().nonnegative(),
+      })
+      .strict()
+      .exactOptional(),
+  })
+  .strict();
 
 /** Mirrors `RunCounts`: all six states required, so a missing key fails the ZodType annotation. */
 export const RunCountsSchema: z.ZodType<RunCounts> = z
@@ -354,6 +384,16 @@ export const RunStartedJournalEventSchema = z
     // the mirror now rejects anything else.
     at: z.iso.datetime(),
     planId: z.string(),
+    // Journal v2 (ADR-0003 annex §2), all optional; absent ⇒ v1 record.
+    // An OLD strict v1 reader rejects a v2 line on `journalVersion` itself —
+    // fail closed (annex §4).
+    journalVersion: z.literal(2).exactOptional(),
+    seq: z.number().int().positive().exactOptional(),
+    governance: GovernanceRecordSchema.exactOptional(),
+    ungoverned: z
+      .object({ optIn: z.literal(true) })
+      .strict()
+      .exactOptional(),
   })
   .strict();
 
@@ -381,6 +421,9 @@ export const JobFinishedJournalEventSchema = z
     result: OpResultSchema,
     // Per-job usage rollup for resumed runs (USD stays derived-only downstream).
     usage: UsageSchema.exactOptional(),
+    // v1.1 journal v2 (ADR-0003 annex §2): the job's modeled USD rollup,
+    // written by the governed runner when cost was observed.
+    costUSD: z.number().exactOptional(),
   })
   .strict();
 
