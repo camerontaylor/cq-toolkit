@@ -252,11 +252,13 @@ export async function claimSeq(
     throw new Error(`journal: claimSeq startAt must be an integer >= 1, got ${startAt}`);
   }
   await mkdir(journalDir, { recursive: true });
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
   for (let n = startAt; n < startAt + 10_000; n++) {
     try {
-      handle = await open(join(journalDir, `${planId}.seq.${n}`), 'wx');
-      await handle.writeFile('', 'utf8');
+      // The exclusive open IS the claim — the tombstone's existence, never
+      // its content (it is not read back). Closed immediately so a claimed
+      // seq does not pin the descriptor for the process lifetime.
+      const handle = await open(join(journalDir, `${planId}.seq.${n}`), 'wx');
+      await handle.close();
       return n;
     } catch (err) {
       if (

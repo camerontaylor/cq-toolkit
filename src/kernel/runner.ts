@@ -527,7 +527,7 @@ export async function runPlan(
   let prevCapUsd: number | undefined;
   let maxPriorSeq = 0;
   let priorRuns: FoldRun[] = [];
-  const seedEvents: JournalEvent[] = [];
+  const seedRuns: Array<{ runId: string; v1: boolean; events: readonly JournalEvent[] }> = [];
   if (runLog) {
     // Shared candidate pre-filter (journal.candidateRunsForPlan): runIds
     // embed the plan id (`<planId>--<timestamp>--<random>`) and must carry
@@ -580,17 +580,10 @@ export async function runPlan(
             }
           }
         }
-        // LEDGER POLICY (recorded): attempts and the dispatch count seed
-        // from ALL runs — attempts are spent regardless of who paid; but
-        // usage/costUSD seed ONLY from finishes of runs that are NOT
-        // ungoverned-marked (a marked run sits outside the spend bound by
-        // explicit opt-in, so its finishes must not re-enter the ledger
-        // through the next seed's costUSD/usage folds).
-        seedEvents.push(
-          ...(ungovernedRunIds.includes(prior.runId)
-            ? prior.events.filter((event) => event.type !== 'job-finished')
-            : [...prior.events]),
-        );
+        // The seed fold itself (below) decides what enters the ledger; each
+        // run rides with its version tag so the reset filter can exclude a
+        // v1 run's spend without dropping its attempt/dispatch seeds.
+        seedRuns.push({ runId: prior.runId, v1: !isV2, events: prior.events });
       }
       if (opts.resume === true) {
         for (const event of prior.events) {
@@ -645,7 +638,25 @@ export async function runPlan(
 
   // --- Governed ledger continuity: seed the governor from the fold ---------
   if (governedDispatch && governor !== undefined) {
-    governor.seedFromJournal(seedEvents);
+    // LEDGER POLICY (recorded): attempts and the dispatch count seed from
+    // ALL runs — attempts are spent regardless of who paid — but SPEND (a
+    // job-finished's usage/costUSD) seeds only from runs inside the bound:
+    //   - ungoverned-marked runs sit outside it by explicit opt-in;
+    //   - v1 runs covered by a reset are "charged 0" (annex §4): the sticky
+    //     prior resets, plus — when the refusal above was satisfied by the
+    //     honoured opt-in — this fold's unaccounted v1 runs. Their starts
+    //     still seed attempts and the dispatch quota.
+    const spendExcluded = new Set(priorResets);
+    if (gov?.optIn?.includes('budget.legacyJournal=reset') === true) {
+      for (const resetId of unaccountedV1) spendExcluded.add(resetId);
+    }
+    governor.seedFromJournal(
+      seedRuns.flatMap((run) =>
+        ungovernedRunIds.includes(run.runId) || (run.v1 && spendExcluded.has(run.runId))
+          ? run.events.filter((event) => event.type !== 'job-finished')
+          : [...run.events],
+      ),
+    );
   }
 
   // --- Run-level cancel signal (ADR-0003 §2.3) ------------------------------

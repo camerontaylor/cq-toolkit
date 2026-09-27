@@ -1071,7 +1071,7 @@ export class BudgetGovernor {
     const jobIds = new Set<string>();
     const startsByJob = new Map<string, number>();
     let totalStarts = 0;
-    let foldedCostSeen = false;
+    let unpricedClosingUsage = false;
     // Usage/USD dedupe: only a finish that closes an open start represents a
     // dispatch's own spend; an orphan finish (re-attestation) restates an
     // already-counted dispatch and is skipped.
@@ -1089,7 +1089,6 @@ export class BudgetGovernor {
       }
       jobIds.add(event.jobId);
       const closed = openStarts.delete(event.jobId); // any finish closes its start
-      if (event.costUSD !== undefined) foldedCostSeen = true;
       if (!closed) {
         continue;
       }
@@ -1101,6 +1100,13 @@ export class BudgetGovernor {
         assertValidUsage('seeded usage', event.usage);
         this.usageN =
           this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
+        if (event.costUSD === undefined && totalTokensOf(event.usage) > 0) {
+          // A closing finish with real usage but no costUSD is UNPRICED
+          // spend (an unpriced model's dispatch). Another finish's costUSD
+          // does not price it — DD-9 requires maxUsd to bind every seeded
+          // token, so this state trips below even in a mixed fold.
+          unpricedClosingUsage = true;
+        }
       }
       if (event.costUSD !== undefined) {
         // A seeded NaN/negative cost would poison the USD rollup the same
@@ -1120,21 +1126,18 @@ export class BudgetGovernor {
     // journaled dispatch count so runDispatchQuota carries across resume
     // instead of restarting at 0.
     this.dispatchedCount += totalStarts;
-    // DD-9 fail-loud at seed time: real journaled usage with NO costUSD
-    // anywhere in the fold under a configured maxUsd means the resumed
-    // run's PRIOR usage cannot be priced, so maxUsd cannot bind it — trip
-    // BEFORE the resumed run admits anything (fail loud, never fail open).
-    // v2 governed journals carry costUSD on priced finishes; a v1 journal
-    // with dispatches never reaches this seed (the runner refuses it first).
-    if (
-      this.config.maxUsd !== undefined &&
-      this.usageN !== undefined &&
-      totalTokensOf(this.usageN) > 0 &&
-      !foldedCostSeen
-    ) {
+    // DD-9 fail-loud at seed time: a CLOSING job-finished that carries real
+    // usage (positive tokens) with NO costUSD is unpriced spend — maxUsd
+    // cannot bind it, so trip BEFORE the resumed run admits anything (fail
+    // loud, never fail open). Other finishes' costUSD does not price this
+    // one (the mixed priced/unpriced fold trips too). v2 governed journals
+    // carry costUSD on priced finishes and ABSENT usage when a reservation
+    // settled unknown; a v1 journal with dispatches never reaches this seed
+    // (the runner refuses it first).
+    if (this.config.maxUsd !== undefined && unpricedClosingUsage) {
       this.trip(
         'exhausted',
-        `seeded prior usage (${totalTokensOf(this.usageN)} tokens) cannot be priced — the folded journals carry no costUSD, so maxUsd ${this.config.maxUsd} cannot bind the resumed run's prior usage; refusing to continue past an unenforceable budget (DD-9)`,
+        `seeded prior usage cannot be fully priced — a folded closing job-finished carries usage with no costUSD, so maxUsd ${this.config.maxUsd} cannot bind the resumed run's prior spend; refusing to continue past an unenforceable budget (DD-9)`,
       );
     }
     // A seed that already overruns a cap trips the governor BEFORE the

@@ -1292,7 +1292,7 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
     expect(governor.usage).toEqual(SEED_USAGE);
     expect(governor.tripped).toBe(true); // the seed alone trips — never fail open
     expect(governor.tripReason).toMatch(/prior usage/);
-    expect(governor.tripReason).toMatch(/cannot be priced/);
+    expect(governor.tripReason).toMatch(/cannot be fully priced/);
     expect(governor.tripReason).toMatch(/maxUsd 1 cannot bind/);
     expect(governor.tripReason).toMatch(/DD-9/);
     expect(governor.admit('c1')).toEqual({ decision: 'reject', reason: 'budget' });
@@ -1306,6 +1306,58 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
     expect(governor.usdSpent).toBe(0.1);
     expect(governor.tripped).toBe(false);
     expect(governor.admit('c1')).toEqual({ decision: 'admit', attempt: 2 });
+  });
+
+  test('a MIXED fold — one priced and one unpriced closing finish — trips exhausted (no finish prices another)', () => {
+    // The unpriced dispatch's usage cannot enter the USD rollup, so maxUsd
+    // would silently bind only the priced subset of the prior spend — DD-9
+    // refuses exactly that (review cycle 1, runner-governed seam).
+    const events: JournalEvent[] = [
+      { type: 'run-started', runId: 'r1', at: '2026-09-16T00:00:00.000Z', planId: 'plan-seed-usd' },
+      {
+        type: 'job-started',
+        runId: 'r1',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        op: 'fake',
+        attempt: 1,
+      },
+      {
+        type: 'job-started',
+        runId: 'r1',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c2',
+        op: 'fake',
+        attempt: 1,
+      },
+      {
+        type: 'job-finished',
+        runId: 'r1',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c1',
+        opId: 'fake',
+        inputsHash: 'h1',
+        result: { status: 'ok', value: null },
+        usage: SEED_USAGE,
+        costUSD: 0.2,
+      },
+      {
+        type: 'job-finished',
+        runId: 'r1',
+        at: '2026-09-16T00:00:00.000Z',
+        jobId: 'c2',
+        opId: 'fake',
+        inputsHash: 'h2',
+        result: { status: 'ok', value: null },
+        usage: SEED_USAGE, // real usage, NO costUSD — the unpriced-model shape
+      },
+    ];
+    const governor = new BudgetGovernor({ maxUsd: 1.0 });
+    governor.seedFromJournal(events);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+    expect(governor.tripReason).toMatch(/cannot be fully priced/);
+    expect(governor.admit('c1')).toEqual({ decision: 'reject', reason: 'budget' });
   });
 
   test('a seeded costUSD of NaN throws at seed time (construction-time: fail loud and early)', () => {

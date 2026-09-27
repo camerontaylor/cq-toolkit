@@ -810,6 +810,59 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
     expect(report.counts['budget-exhausted']).toBe(2);
   });
 
+  test('uncapped over GOVERNED history refuses naming --opt-in; the opt-in resolves it (the refusal is actionable)', async () => {
+    // The refusal's message names `--opt-in budget.ungovernedOverGoverned` —
+    // the CLI must actually ACCEPT that flag (review cycle 1: a resolution
+    // the surface cannot express is a dead end). An opt-in alone constructs
+    // a governance handle (uncapped): the ungoverned opt-in marks the run
+    // and it proceeds outside the ledger.
+    const { planPath, journalDir } = await writePlanFile({
+      id: 'i1-optin',
+      jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+    });
+    await writePriorJournal(journalDir, 'i1-optin');
+
+    const refused = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+    ]);
+    expect(refused.code).toBe(2);
+    expect(refused.out).toBe('');
+    expect(refused.err).toMatch(
+      /runPlan: plan i1-optin has governed history; run governed or pass --opt-in budget\.ungovernedOverGoverned/,
+    );
+
+    const opted = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--opt-in=budget.ungovernedOverGoverned',
+    ]);
+    expect(opted.code).toBe(0);
+    const report = RunReportSchema.parse(JSON.parse(opted.out));
+    expect(report.counts.done).toBe(1); // the op ran, ungoverned-marked
+  });
+
+  test('--opt-in validates keys and splits on commas: an unknown key is exit 2', async () => {
+    const { planPath } = await writePlanFile({
+      id: 'i1-optin-bad',
+      jobs: [{ id: 'a', op: 'echo', input: { msg: 'hi' } }],
+    });
+    const bad = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      '--opt-in=budget.raiseCap,budget.nonsense',
+    ]);
+    expect(bad.code).toBe(2);
+    expect(bad.out).toBe('');
+    expect(bad.err).toMatch(/invalid input for 'run-plan'/);
+    expect(bad.err).toMatch(/optIn/);
+  });
+
   test('run-plan null-proto normalizer: --__proto__ is an OWN key → the strict schema rejects it (exit 2)', async () => {
     // With the plain-{} record this flag silently vanished (inherited
     // __proto__ accessor) and the run proceeded to stat('p') — the narration

@@ -952,6 +952,70 @@ describe('governed journal v2 + resume', () => {
     ).rejects.toThrow(/unaccounted dispatches \(1 jobs in plan-gov-v1--legacy2--bb\)/);
   });
 
+  test('an honoured reset excludes a v1 finish\u2019s usage from the ledger seed — reset means charged 0 (annex §4)', async () => {
+    // A versionless journal whose job-finished carries usage (the frozen v1
+    // schema permits the field; v1 writers never emitted it). The reset
+    // charges those dispatches 0, so the usage must not seed the ledger:
+    // neither the DD-9 unpriced fold nor the token/USD seed caps may see it.
+    const plan: Plan = {
+      id: 'plan-gov-v1spend',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const log = openRunLog(dir);
+    const v1RunId = 'plan-gov-v1spend--legacy--cc';
+    await log.append(v1RunId, {
+      type: 'run-started',
+      runId: v1RunId,
+      at: '2026-01-03T00:00:00.000Z',
+      planId: 'plan-gov-v1spend',
+    });
+    await log.append(v1RunId, {
+      type: 'job-started',
+      runId: v1RunId,
+      at: '2026-01-03T00:00:00.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(v1RunId, {
+      type: 'job-finished',
+      runId: v1RunId,
+      at: '2026-01-03T00:01:00.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: 'h1',
+      result: { status: 'failed', error: 'seeded legacy failure' },
+      usage: { input: 100, output: 100, cacheRead: 0, cacheWrite: 0 },
+    });
+
+    // A TIGHT maxTokens (the seeded usage alone would exceed it) proves the
+    // exclusion: the run admits and completes instead of tripping at seed.
+    const governor = createGovernor({ maxUsd: 1, maxTokens: 150 });
+    const calls: string[] = [];
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor, optIn: ['budget.legacyJournal=reset'] },
+    );
+    expect(report.counts.done).toBe(1);
+    expect(governor.tripped).toBe(false);
+    expect(governor.usage).toBeUndefined(); // the v1 usage never entered the ledger
+    expect(governor.usdSpent).toBe(0);
+    // The reset is recorded for stickiness.
+    const events = await log.read(report.runId);
+    expect(events[0]).toMatchObject({
+      type: 'run-started',
+      journalVersion: 2,
+      governance: {
+        capUsd: 1,
+        capTokens: 150,
+        attended: false,
+        legacyJournal: { mode: 'reset', v1RunIds: ['plan-gov-v1spend--legacy--cc'] },
+      },
+    });
+  });
+
   test('a cap raise over the ledger refuses without budget.raiseCap; honoured, it is recorded', async () => {
     const plan: Plan = {
       id: 'plan-gov-raise',

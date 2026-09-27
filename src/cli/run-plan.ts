@@ -12,9 +12,10 @@
 // FLAG SPELLING: the schema keys below are camelCase; the CLI flags are
 // their kebab-case aliases, normalized BEFORE the schema parse (--ops-root →
 // opsRoot, --journal-dir → journalDir, --max-usd → maxUsd, --max-tokens →
-// maxTokens, --stop-on-error → stopOnError); --plan, --concurrency and
-// --resume map 1:1. This kebab convenience is run-plan-ONLY: op subcommands
-// map flags by EXACT schema key (the asymmetry is documented in main.ts).
+// maxTokens, --stop-on-error → stopOnError, --opt-in → optIn); --plan,
+// --concurrency and --resume map 1:1. This kebab convenience is run-plan-ONLY:
+// op subcommands map flags by EXACT schema key (the asymmetry is documented
+// in main.ts).
 //
 // ERROR SHAPES (the 1-vs-2 line): all INPUT defects are exit 2 —
 // schema-invalid flags; a --plan path that is missing or not a regular file;
@@ -47,7 +48,25 @@ import { z } from 'zod';
 import { createGovernor, governorConfig, type Governance } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import { PlanSchema } from '../kernel/schema.js';
-import type { OpRegistryEntry, Plan, RunOptions, RunReport } from '../kernel/types.js';
+import type {
+  GovernanceOptIn,
+  OpRegistryEntry,
+  Plan,
+  RunOptions,
+  RunReport,
+} from '../kernel/types.js';
+
+/**
+ * The governance opt-in keys the CLI accepts (ADR-0003 §2.5) — the exact
+ * GovernanceOptIn union, checked against it by `satisfies` so a key cannot
+ * drift from the kernel surface. Comma-separated on the flag (parseFlags
+ * rejects repeated flags): `--opt-in budget.raiseCap,budget.legacyJournal=reset`.
+ */
+const GOVERNANCE_OPT_IN_KEYS = [
+  'budget.legacyJournal=reset',
+  'budget.raiseCap',
+  'budget.ungovernedOverGoverned',
+] as const satisfies readonly GovernanceOptIn[];
 import { list } from '../registry/index.js';
 import { EXIT_CODES, exitCodeForRunReport } from './exit.js';
 import {
@@ -84,6 +103,24 @@ export const RunPlanInputSchema = z
     maxTokens: z.number().int().positive().optional(),
     /** Resume an interrupted run from its journal; requires journalDir (flag: --resume, maps 1:1). */
     resume: z.boolean().default(false),
+    /**
+     * Governance opt-ins (ADR-0003 §2.5), comma-separated (flag: --opt-in) —
+     * the ledger refusals' named resolutions. An opt-in alone constructs a
+     * governance handle (uncapped): `budget.ungovernedOverGoverned` marks
+     * the run ungoverned; the others resolve governed-history refusals.
+     */
+    optIn: z
+      .preprocess(
+        (value) =>
+          typeof value === 'string'
+            ? value
+                .split(',')
+                .map((key) => key.trim())
+                .filter((key) => key !== '')
+            : value,
+        z.array(z.enum(GOVERNANCE_OPT_IN_KEYS)),
+      )
+      .default([]),
   })
   .strict();
 
@@ -232,12 +269,15 @@ export async function runPlanThroughKernel(
     get: (name) => entryByName.get(name) as OpRegistryEntry<never, never> | undefined,
   };
 
-  // The CLI opts into governance exactly when the operator sets a cap: the
-  // cap is what needs a governor (without admission + spend observation it
-  // would be silently unenforceable — runPlan refuses that shape outright).
-  // An uncapped run stays v1-identical: no governor, no ledger, no v2
-  // journal (the recorded policy choice — governance is not free paperwork,
-  // it exists to bind the caps the operator named).
+  // The CLI opts into governance exactly when the operator sets a cap OR
+  // passes a governance opt-in: the cap is what needs a governor (without
+  // admission + spend observation it would be silently unenforceable —
+  // runPlan refuses that shape outright), and the opt-ins are the ledger
+  // refusals' named resolutions (--opt-in budget.legacyJournal=reset /
+  // budget.raiseCap / budget.ungovernedOverGoverned), so they need a handle
+  // to ride. An uncapped, opt-in-free run stays v1-identical: no governor,
+  // no ledger, no v2 journal (the recorded policy choice — governance is not
+  // free paperwork, it exists to bind the caps the operator named).
   const runOptions: RunOptions = {
     concurrency: input.concurrency,
     stopOnError: input.stopOnError,
@@ -247,12 +287,15 @@ export async function runPlanThroughKernel(
     ...(input.resume ? { resume: true } : {}),
   };
   const governance: Governance | undefined =
-    input.maxUsd !== undefined || input.maxTokens !== undefined
+    input.maxUsd !== undefined || input.maxTokens !== undefined || input.optIn.length > 0
       ? // A capped run governs with a FRESH per-run governor: the runner's
         // fold over the journal dir seeds it (resume or not), so a cumulative
         // cap continues its ledger — construction order is irrelevant here,
         // seeding happens inside runPlan, before anything is admitted.
-        { governor: createGovernor(governorConfig(runOptions, {})) }
+        {
+          governor: createGovernor(governorConfig(runOptions, {})),
+          ...(input.optIn.length > 0 ? { optIn: input.optIn } : {}),
+        }
       : undefined;
   let report: RunReport;
   try {
