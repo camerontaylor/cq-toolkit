@@ -93,10 +93,14 @@ export interface ClassifyPrConfig {
   automationLogin?: string | null | undefined;
   /** Additional logins removed from the trust set. */
   excludedLogins?: readonly string[] | undefined;
-  /** Accepted opinionated states; the legacy blank SDK default is APPROVED and COMMENTED. */
-  acceptReviewStates?:
-    | readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED')[]
-    | undefined;
+  /**
+   * Accepted opinionated states; the legacy blank SDK default is APPROVED
+   * and COMMENTED. DISMISSED is not admissible: a dismissed review is a
+   * retracted one, the doctrine holds DISMISSED void (review r3, PR #222),
+   * and the governed surfaces narrow to the same verdict-carrying set —
+   * the dispatch boundary rejects it outright.
+   */
+  acceptReviewStates?: readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED')[] | undefined;
 }
 
 /**

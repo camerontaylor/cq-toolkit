@@ -60,6 +60,7 @@ import {
   REVIEW_ACCEPT_SETTLE_MS,
   defaultClassifyPrConfig,
 } from '../../../src/ops/merge/classify.config.js';
+import type { ClassifyPrConfig } from '../../../src/ops/merge/classify.config.js';
 import { classifyPr } from '../../../src/ops/merge/classifyPrs.js';
 import type { PrCandidate } from '../../../src/ops/merge/classifyPrs.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../../../src/ops/review/threads.js';
@@ -416,6 +417,24 @@ describe('classifyPr — the explicit all-clear is strict', () => {
     );
     expect(result.verdict).toBe('awaiting');
     expect(result.reason).toBe('settle_window_pending');
+  });
+
+  test('DISMISSED is void even when a hostile runtime config admits it (review r3)', () => {
+    // The dispatch boundary refuses DISMISSED in acceptReviewStates, and
+    // the TS union omits it — but classifyPr is a pure function any
+    // non-typechecked caller can invoke. stateCounts holds the doctrine
+    // directly: a retracted review is never acceptance evidence, whatever
+    // set reaches it. Row 7 fails on the only review → no_acceptable_review.
+    const result = classifyPr(
+      settleCandidate({ reviews: [approved({ id: 'PRR_2', state: 'DISMISSED' })] }),
+      SETTLED_MS,
+      {
+        ...defaultClassifyPrConfig,
+        acceptReviewStates: ['DISMISSED'],
+      } as unknown as ClassifyPrConfig,
+    );
+    expect(result.verdict).toBe('awaiting');
+    expect(result.reason).toBe('no_acceptable_review');
   });
 
   test('a CHANGES_REQUESTED review with an "LGTM" body never reaches the all-clear row — the objection row fires first', () => {

@@ -11,7 +11,10 @@
 //   3. CLOSED-ANCESTOR RETARGET: an open PR whose base head is owned by a
 //      CLOSED PR is planned AS A ROOT — depth 0, basePr null — with
 //      action 'retarget-self' (the caller retargets its base onto the
-//      base branch); its own descendants still merge normally.
+//      base branch); its depth-1 descendants still merge normally (that
+//      rung does not merge this pass), while deeper rungs defer under
+//      the generalized #153 gate — a base that merges earlier in the
+//      pass holds its children.
 //   4. TRUNCATED FAIL-CLOSED (UC §3 row 42): a truncated fetch is never
 //      ordered for merge — needs-human, review_data_truncated — and beats
 //      the unclassified gate (first match wins, F1's row order).
@@ -123,21 +126,30 @@ describe('planMergeOrder — the order (roots first, parents before children)', 
     expect(result.baseBranch).toBe('main');
   });
 
-  test('a linear chain 3 deep: order follows the stack, depth increments', () => {
+  test('a linear chain 3 deep: the root merges, its subtree defers (review-debt #153)', () => {
+    // #153: merging 1 onto main closes 1 and orphans branch 'a' — 2 merged
+    // into it would strand off the trunk. 2 defers with
+    // stack_base_merging_this_pass and 3 cascades behind it; next pass 2
+    // retargets onto main (1 is closed) and re-plans as an ordinary root.
     const result = plan('main', [
       planned(1, 'main', 'a'),
       planned(2, 'a', 'b'),
       planned(3, 'b', 'c'),
     ]);
-    expect(result.order).toEqual([
-      { pr: 1, action: 'merge', basePr: null, depth: 0 },
-      { pr: 2, action: 'merge', basePr: 1, depth: 1, baseRefName: 'a' },
-      { pr: 3, action: 'merge', basePr: 2, depth: 2, baseRefName: 'b' },
+    expect(result.order).toEqual([{ pr: 1, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([
+      { pr: 2, reason: 'stack_base_merging_this_pass' },
+      { pr: 3, reason: 'stack_base_needs_human' },
     ]);
-    expect(result.needsHuman).toEqual([]);
   });
 
   test("two roots with descendants: ALL roots first (PR-number order), then each root's subtree depth-first", () => {
+    // Same-pass merge roots' children defer (#153), so the ordered subtree
+    // here hangs off nothing — children 3 and 4 are withheld with
+    // stack_base_merging_this_pass and grandchild 5 cascades behind 3. The
+    // ORDERING pins below (roots first, PR-number order) survive on the
+    // retarget-self shapes, whose children still merge (see the
+    // closed-ancestor describe).
     const result = plan('main', [
       planned(2, 'main', 'r2'),
       planned(1, 'main', 'r1'),
@@ -147,10 +159,15 @@ describe('planMergeOrder — the order (roots first, parents before children)', 
       planned(4, 'r1', 'c4'),
       planned(5, 'c3', 'g5'),
     ]);
-    expect(result.order.map((entry) => entry.pr)).toEqual([1, 2, 4, 3, 5]);
-    // Depths: roots 0, children 1, grandchild 2.
-    expect(result.order.map((entry) => entry.depth)).toEqual([0, 0, 1, 1, 2]);
-    expect(result.needsHuman).toEqual([]);
+    expect(result.order).toEqual([
+      { pr: 1, action: 'merge', basePr: null, depth: 0 },
+      { pr: 2, action: 'merge', basePr: null, depth: 0 },
+    ]);
+    expect(result.needsHuman).toEqual([
+      { pr: 3, reason: 'stack_base_merging_this_pass' },
+      { pr: 4, reason: 'stack_base_merging_this_pass' },
+      { pr: 5, reason: 'stack_base_needs_human' },
+    ]);
   });
 });
 
@@ -193,6 +210,123 @@ describe('planMergeOrder — closed-ancestor retarget-self', () => {
     ]);
     expect(result.order).toEqual([]);
     expect(result.needsHuman).toEqual([{ pr: 31, reason: 'review_data_truncated' }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Same-pass merge-root deferral (review-debt #153)
+// ---------------------------------------------------------------------------
+
+describe('planMergeOrder — same-pass merge deferral (#153, generalized in PR #234 r1)', () => {
+  test('a child of a same-pass merge root is withheld with stack_base_merging_this_pass', () => {
+    // The F5 strand shape: 7 merges onto main THIS pass, closing 7 and
+    // orphaning branch 'a' — 8 merged into 'a' would land on a dead branch
+    // while the forge reports it merged. Withheld here instead.
+    const result = plan('main', [planned(7, 'main', 'a'), planned(8, 'a', 'b')]);
+    expect(result.order).toEqual([{ pr: 7, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([{ pr: 8, reason: 'stack_base_merging_this_pass' }]);
+  });
+
+  test('next pass the deferred child re-plans as retarget-self (convergence)', () => {
+    // The pass after the deferral: 7 is now CLOSED (it merged), so base
+    // resolution reads branch 'a' as a closed rung — the retarget-self
+    // machinery the deferral relies on. 9 (stacked on 8) rides 8's subtree
+    // once 8 is retargeted onto the trunk.
+    const nextPass = plan('main', [
+      planned(7, 'main', 'a', { state: 'closed' }),
+      planned(8, 'a', 'b'),
+      planned(9, 'b', 'c'),
+    ]);
+    expect(nextPass.order).toEqual([
+      { pr: 8, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'a' },
+      { pr: 9, action: 'merge', basePr: 8, depth: 1, baseRefName: 'b' },
+    ]);
+    expect(nextPass.needsHuman).toEqual([]);
+  });
+
+  test('children of a retarget-self root are NOT withheld at depth 1 — that rung stays open', () => {
+    // The root's base is a CLOSED rung (retarget-self), not a same-pass
+    // merge root: the retargeted PR remains OPEN and does not merge this
+    // pass, so its depth-1 child still merges. Scope note (PR #234 r1):
+    // this holds at DEPTH 1 ONLY — the gate's rule is general (any child
+    // whose base merges earlier in the order defers), and the depth-≥2
+    // strand under this exact shape is the regression test below.
+    const result = plan('main', [
+      planned(1, 'main', 'gone', { state: 'closed' }),
+      planned(2, 'gone', 'live'),
+      planned(3, 'live', 'top'),
+    ]);
+    expect(result.order).toEqual([
+      { pr: 2, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'gone' },
+      { pr: 3, action: 'merge', basePr: 2, depth: 1, baseRefName: 'live' },
+    ]);
+    expect(result.needsHuman).toEqual([]);
+  });
+
+  test('REGRESSION (PR #234 r1): the #153 strand recurs at depth ≥2 under a retarget-self root', () => {
+    // The reviewer's shape: with a closed rung below it, 2 = retarget-self,
+    // 3 = merge (into 2's branch — safe, 2 stays open), 4 = merge into 3's
+    // branch. Merging 3 closes 3 and orphans branch 'top', so 4 merged
+    // into it would strand off the trunk while the forge reports it
+    // merged. The pre-generalization gate checked merge ROOTS only — 2 is
+    // not a root-merge and 3 is not a root at all, so 4 was ordered. The
+    // executor cannot catch this either: 4's base REF ('top') never
+    // changes; only 3's PR status flips. Generalized, the gate withholds
+    // any child whose base merges earlier in the order.
+    const result = plan('main', [
+      planned(1, 'main', 'gone', { state: 'closed' }),
+      planned(2, 'gone', 'live'),
+      planned(3, 'live', 'top'),
+      planned(4, 'top', 'above'),
+    ]);
+    expect(result.order).toEqual([
+      { pr: 2, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'gone' },
+      { pr: 3, action: 'merge', basePr: 2, depth: 1, baseRefName: 'live' },
+    ]);
+    expect(result.needsHuman).toEqual([{ pr: 4, reason: 'stack_base_merging_this_pass' }]);
+    // And the generalized gate converges like the merge-root deferral:
+    // next pass 3 is CLOSED, so 4 re-plans stacked on a closed rung —
+    // retarget-self onto the trunk, content reaching the base branch.
+    const nextPass = plan('main', [
+      planned(1, 'main', 'gone', { state: 'closed' }),
+      planned(2, 'gone', 'live'),
+      planned(3, 'live', 'top', { state: 'closed' }),
+      planned(4, 'top', 'above'),
+    ]);
+    expect(nextPass.order).toEqual([
+      { pr: 2, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'gone' },
+      { pr: 4, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'top' },
+    ]);
+    expect(nextPass.needsHuman).toEqual([]);
+  });
+
+  test('gate precedence: an already-gated child of a merge root keeps its gate reason', () => {
+    // First match wins — the truncation gate fired before base resolution,
+    // and the #153 gate never overwrites an existing reason.
+    const result = plan('main', [
+      planned(1, 'main', 'a'),
+      planned(2, 'a', 'b', { truncated: true }),
+      planned(3, 'b', 'c'),
+    ]);
+    expect(result.order).toEqual([{ pr: 1, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([
+      { pr: 2, reason: 'review_data_truncated' },
+      { pr: 3, reason: 'stack_base_needs_human' },
+    ]);
+  });
+
+  test('a NOT-eligible root defers its child through the cascade, not the #153 gate', () => {
+    // Withheld roots are not merge roots: the child's reason stays
+    // stack_base_needs_human (the base is held, not landing).
+    const result = plan('main', [
+      planned(1, 'main', 'a', { classification: classified('awaiting', 'no_acceptable_review') }),
+      planned(2, 'a', 'b'),
+    ]);
+    expect(result.order).toEqual([]);
+    expect(result.needsHuman).toEqual([
+      { pr: 1, reason: 'not_eligible' },
+      { pr: 2, reason: 'stack_base_needs_human' },
+    ]);
   });
 });
 
@@ -448,13 +582,14 @@ describe('planMergeOrder — duplicate head names', () => {
       planned(3, 'shared', 'child'),
     ]);
     // The child stacks onto owner 1 — never onto 2 (and never into a
-    // dangling edge or a guessed split).
+    // dangling edge or a guessed split). Owner 1 is a same-pass merge
+    // root, so the child defers with the #153 gate (merging into 1's
+    // branch after 1 lands would strand it).
     expect(result.order).toEqual([
       { pr: 1, action: 'merge', basePr: null, depth: 0 },
       { pr: 2, action: 'merge', basePr: null, depth: 0 },
-      { pr: 3, action: 'merge', basePr: 1, depth: 1, baseRefName: 'shared' },
     ]);
-    expect(result.needsHuman).toEqual([]);
+    expect(result.needsHuman).toEqual([{ pr: 3, reason: 'stack_base_merging_this_pass' }]);
   });
 
   test('an open owner outranks a closed owner of the same head (closed is structural)', () => {
@@ -464,12 +599,10 @@ describe('planMergeOrder — duplicate head names', () => {
       planned(12, 'shared', 'child'),
     ]);
     // The child stacks onto the LIVE owner 11 — the closed 10 does not
-    // turn the rung into a retarget-self.
-    expect(result.order).toEqual([
-      { pr: 11, action: 'merge', basePr: null, depth: 0 },
-      { pr: 12, action: 'merge', basePr: 11, depth: 1, baseRefName: 'shared' },
-    ]);
-    expect(result.needsHuman).toEqual([]);
+    // turn the rung into a retarget-self. 11 is a same-pass merge root,
+    // so 12 defers per review-debt #153.
+    expect(result.order).toEqual([{ pr: 11, action: 'merge', basePr: null, depth: 0 }]);
+    expect(result.needsHuman).toEqual([{ pr: 12, reason: 'stack_base_merging_this_pass' }]);
   });
 
   test('two closed owners sharing a head: retarget-self still fires (lowest anchors)', () => {
@@ -509,11 +642,13 @@ describe('planMergeOrder — the base branch is config, not a constant', () => {
     const mainResult = plan('main', mainPrs);
 
     expect(trunkResult.baseBranch).toBe('trunk');
+    // 2 is a child of same-pass merge root 1, so it defers (#153); the
+    // retarget-self entry is unaffected (its rung is already closed).
     expect(trunkResult.order).toEqual([
       { pr: 1, action: 'merge', basePr: null, depth: 0 },
       { pr: 3, action: 'retarget-self', basePr: null, depth: 0, baseRefName: 'merged-rung' },
-      { pr: 2, action: 'merge', basePr: 1, depth: 1, baseRefName: 'a' },
     ]);
+    expect(trunkResult.needsHuman).toEqual([{ pr: 2, reason: 'stack_base_merging_this_pass' }]);
     // Same graph, other name: identical plan shape — only the echoed
     // baseBranch differs. Whatever the queue branch is called, the plan
     // is built from input, never from a hardcoded literal.
