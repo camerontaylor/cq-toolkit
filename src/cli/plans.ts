@@ -9,8 +9,8 @@
 // maps the plan-command flag surface (RunPlanCommandSchema — the run-plan
 // knobs minus `--plan` and the run-plan-reserved `--ops-root`) onto the
 // registry entry's plan and delegates to the recorded governed composition
-// (runPlanThroughKernel: runPlan + withBudgetStop, I9). No plan logic lives
-// here or anywhere under src/cli/**.
+// (runPlanThroughKernel: runPlan under a governor when the operator set a
+// cap — I9). No plan logic lives here or anywhere under src/cli/**.
 //
 // THE PLAN IS THE REGISTRY FLOOR: a shipped plan is a parameterized BUILDER
 // whose real instance needs per-run data the frozen Job schema cannot carry

@@ -82,9 +82,9 @@ export { deriveJobStatuses, openRunLog } from './kernel/journal.js';
 export { runPlan } from './kernel/runner.js';
 export { emitReport, narrate, renderHuman } from './kernel/output.js';
 // Budget governor + rescue lane (T1.3) — re-export only, no logic: the
-// governed-registry seam, the escalation ladder, the honest-stop marker, and
-// the rescue policy table + decision engine. Pure types ride along as
-// `export type`.
+// per-run enforcer behind `runPlan`'s Governance handle, the escalation
+// ladder, and the rescue policy table + decision engine. Pure types ride
+// along as `export type`.
 export type {
   AdmissionDecision,
   Clock,
@@ -106,13 +106,10 @@ export {
   currentJobContext,
   DEFAULT_ABORT_GRACE_MS,
   DEFAULT_KILL_GRACE_MS,
-  governRegistry,
   governorConfig,
   realClock,
   runLadder,
-  seedFromRunLog,
   validSpendEvidence,
-  withBudgetStop,
 } from './kernel/governor.js';
 export type {
   RescueAction,

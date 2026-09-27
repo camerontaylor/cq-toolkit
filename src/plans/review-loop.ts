@@ -73,12 +73,7 @@
 import type { Budget, ModelSpec } from '../driver/types.js';
 import { deepFreeze } from '../harness/config.js';
 import type { HarnessConfig } from '../harness/config.js';
-import {
-  BudgetGovernor,
-  governRegistry,
-  governorConfig,
-  withBudgetStop,
-} from '../kernel/governor.js';
+import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type {
   Job,
@@ -828,8 +823,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
   };
   // The LIMITS half rides opts.limits (review-debt #137): the review path's
   // arming surface for the wall-clock ladder — absent opts.limits keeps the
-  // historical no-ladder behavior ({}, the empty Limits half).
-  const governor = new BudgetGovernor(governorConfig(runOptions, opts.limits ?? {}));
+  // historical no-ladder behavior ({}, the empty Limits half). The ladder
+  // arms through the governor config: runPlan's governed dispatch reads
+  // governor.ladderSpec.
+  const governor = createGovernor(governorConfig(runOptions, opts.limits ?? {}));
   // Worktree HEAD at the job boundary (round-3 item 2): the workers' claims
   // are checked against the OBSERVED worktree movement, not trusted.
   const headBefore = await opts.git(['-C', worktree.path, 'rev-parse', 'HEAD']);
@@ -838,11 +835,10 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
     // observed USD rollup OUT of the loop even when the fix run throws, so a
     // sweep can carry spend forward without a dispatch-log proxy.
     try {
-      return withBudgetStop(
-        await runPlan(plan, runOptions, governRegistry(view, governor)),
-        plan,
-        governor,
-      );
+      // ALWAYS governed: runPlan's governed dispatch owns admission, the
+      // ladder, the evidence folds, and the honest stop — its return IS the
+      // fix report.
+      return await runPlan(plan, runOptions, view, { governor });
     } finally {
       // A throwing observer must never mask the fix run's own outcome.
       try {

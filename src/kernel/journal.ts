@@ -53,8 +53,8 @@ const RUN_ID_TAIL = /^[0-9a-z]+--[0-9a-f]+$/i;
 
 /**
  * The resume/seed candidate filter shared by EVERY consumer that picks a
- * plan's runs out of a journal dir (the runner's replay fold, governor
- * `seedFromRunLog`). A candidate must carry the `<planId>--` prefix AND the
+ * plan's runs out of a journal dir (the runner's replay fold, which also
+ * seeds the governor). A candidate must carry the `<planId>--` prefix AND the
  * two-segment tail, so a planId that itself ends in `--<segment>` ('a' vs
  * 'a--b') cannot match the other plan's files and a corrupt journal of
  * ANOTHER plan cannot block this plan's reads.

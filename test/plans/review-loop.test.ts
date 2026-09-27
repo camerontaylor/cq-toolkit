@@ -2158,7 +2158,7 @@ describe('review-loop propagated spend (onSpend)', () => {
     });
     expect(outcome.status).toBe('ok');
     // The fix op streams the driver's costUSD through the job context, so the
-    // governor's USD rollup (which withBudgetStop also annotates onto
+    // governor's USD rollup (which the governed runner annotates onto
     // fixReport.costUSD) is what the sweep receives — no dispatch-log proxy.
     expect(spent.length).toBeGreaterThan(0);
     expect(spent[spent.length - 1]).toBeCloseTo(0.07);

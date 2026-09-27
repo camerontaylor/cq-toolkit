@@ -57,8 +57,7 @@
 // fold rule survives chained resumes.
 //
 // Governed mode (the 4th `gov` param — ADR-0003 §2, W2.2): with a
-// `Governance` handle the runner itself is the governed composition (the
-// governRegistry decorator seam stays for direct-registry callers). Per
+// `Governance` handle the runner itself IS the governed composition. Per
 // dispatch it ADMITS through the governor keyed on the real plan job id, runs
 // the op through the escalation ladder inside the job context (an external
 // `gov.signal` is composed into the ladder's controller), folds spend

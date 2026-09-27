@@ -388,10 +388,10 @@ describe('runSelfMergePrs — real run', () => {
     expect(result.report.counts['budget-exhausted']).toBe(1);
     // And the stop stays HONEST about its scope: the merge plan is ONE job
     // and it executed, so nothing was undispatched for the trip to gate —
-    // withBudgetStop refuses to fabricate a stoppedEarly claim over it
+    // the governed runner refuses to fabricate a stoppedEarly claim over it
     // (I9 both directions; the kernel's 'a trip that gated NOTHING stays
     // silent' rule). The annotated early-stop form is pinned where gated
-    // rows exist: test/kernel/governor.test.ts.
+    // rows exist: test/kernel/runner-governed.test.ts.
     expect(result.report.stoppedEarly).toBe(false);
     expect(result.report.earlyStopReason).toBeUndefined();
   });

@@ -14,7 +14,9 @@
 //      against RunReportSchema; ALL INPUT defects are usage errors (→2) —
 //      a --plan path that is missing or not a regular file, corrupted plan
 //      FILE CONTENT, and the kernel's own input-validation class ('runPlan: '
-//      — duplicate job ids, resume without a journal dir; 'journal: ' — the
+//      — duplicate job ids, resume without a journal dir, caps without
+//      governance, and the ledger refusals: governed history without
+//      governance, unaccounted v1 dispatches, a cap raise; 'journal: ' — the
 //      runId filename-safety assert on a schema-valid but journal-unsafe plan
 //      id, e.g. 'bad/id', under --journal-dir) — while genuine RUNTIME throws
 //      (a journal-dir pointing at a regular file) narrate 'run-plan threw:'
@@ -36,6 +38,7 @@ import { afterEach, describe, expect, test } from 'vitest';
 import { exitCodeForOpResult, exitCodeForRunReport } from '../../src/cli/exit.js';
 import { parseFlags, runCli, type RunCliOptions } from '../../src/cli/main.js';
 import { narrate, type CliIo } from '../../src/cli/output.js';
+import { openRunLog } from '../../src/kernel/journal.js';
 import { JournalEventSchema, PlanSchema, RunReportSchema } from '../../src/kernel/schema.js';
 import type { OpResult, RunReport } from '../../src/kernel/types.js';
 import { get, list } from '../../src/registry/index.js';
@@ -663,16 +666,21 @@ describe('4bdffd1 pins: silence matrix, null-proto flags, URL-escape, reserved s
   );
 });
 
-// b2602ca successor pins (PR 64 wave-4): resume SEEDS the governor from the
-// journal (a cumulative --max-tokens cap must bind the resumed run to its
-// prior runs' usage — I9 honesty), and run-plan's kebab→camel normalizer
-// keeps the null-prototype flags record so --__proto__ reaches the strict
-// schema as the unknown key it is (exit 2), instead of vanishing through the
-// inherited accessor.
+// b2602ca successor pins (PR 64 wave-4), re-baselined for the v1.1 governed
+// kernel: a CAPPED CLI run governs, and the governed fold continues the
+// dir's ledger WITH OR WITHOUT --resume (a cumulative --max-tokens cap binds
+// the run to its prior runs' usage — I9 honesty; the v1 pin that a fresh run
+// starts at zero survives only for a dir with NO governed history), and
+// run-plan's kebab→camel normalizer keeps the null-prototype flags record so
+// --__proto__ reaches the strict schema as the unknown key it is (exit 2),
+// instead of vanishing through the inherited accessor.
 describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => {
   /**
    * Hand-written prior-run journal, field-for-field against the frozen
-   * JournalEventSchema: run-started (runId/at/planId), job-started
+   * JournalEventSchema: run-started (runId/at/planId + journalVersion 2,
+   * seq 1, governance — the v2 record a GOVERNED run writes and folds; a v1
+   * run-started here would hit the unaccounted-v1-dispatches refusal, since
+   * v1 journals carry no spend the cap could bind), job-started
    * (runId/at/jobId/op/attempt — REQUIRED: the seed's usage fold counts only
    * a finish that CLOSES an open start), job-finished (runId/at/jobId/opId/
    * inputsHash/result/usage). The file name is `<planId>--<seg>--<hex>` —
@@ -685,7 +693,15 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
     const runId = `${planId}--0001--abcd`;
     const at = '2026-01-01T00:00:00.000Z';
     const events = [
-      { type: 'run-started', runId, at, planId },
+      {
+        type: 'run-started',
+        runId,
+        at,
+        planId,
+        journalVersion: 2,
+        seq: 1,
+        governance: { attended: false },
+      },
       { type: 'job-started', runId, at, jobId: 'a', op: 'echo', attempt: 1 },
       {
         type: 'job-finished',
@@ -740,7 +756,37 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
     ]);
   });
 
-  test('the same journal + cap WITHOUT --resume starts at zero: exit 0 (the pin has teeth)', async () => {
+  test('a fresh capped run over a GOVERNED journal continues the ledger: seeded spend trips WITHOUT --resume too (the v1.1 contract)', async () => {
+    // The old v1 pin — "the same journal + cap WITHOUT --resume starts at
+    // zero" — is obsolete: a governed run folds the dir's history for LEDGER
+    // continuity whether or not resume is set (only the replay-skip map is
+    // resume-gated). This is the replacement pin, both halves:
+    //   (a) with NO prior governed history, a fresh capped run starts at
+    //       zero and exits 0;
+    //   (b) over a governed journal, the SAME capped run seeds the prior
+    //       usage and trips — the ledger continues.
+    const fresh = await writePlanFile({
+      id: 'i1-fresh-cap',
+      jobs: [
+        { id: 'a', op: 'echo', input: { msg: 'hi' } },
+        { id: 'b', op: 'echo', input: { msg: 'again' }, dependsOn: ['a'] },
+      ],
+    });
+    // The governed seq claim (journal.claimSeq) is an EXCLUSIVE create in
+    // the journal dir — the dir must exist (the v1 append path created it
+    // lazily; the governed path, like self-merge-prs, requires it up
+    // front), so the fresh-run half pre-creates it.
+    await mkdir(fresh.journalDir, { recursive: true });
+    const freshRun = await capture([
+      'run-plan',
+      `--plan=${fresh.planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${fresh.journalDir}`,
+      '--max-tokens=10',
+    ]);
+    expect(freshRun.code).toBe(0); // empty dir → nothing seeded → caps start at zero
+    expect(RunReportSchema.parse(JSON.parse(freshRun.out)).counts.done).toBe(2);
+
     const { planPath, journalDir } = await writePlanFile({
       id: 'i1-resume',
       jobs: [
@@ -756,9 +802,13 @@ describe('resume seeds the governor; null-proto run-plan flags (wave-4)', () => 
       `--journal-dir=${journalDir}`,
       '--max-tokens=10',
     ]);
-    expect(code).toBe(0); // fresh governor — the prior run's usage is not loaded
+    // The seeded 100-token rollup trips the 10-token cap: job a is refused
+    // at admission, b is re-marked by the honest-stop pass → exit 3.
+    expect(code).toBe(3);
     const report = RunReportSchema.parse(JSON.parse(out));
-    expect(report.counts.done).toBe(2);
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.counts['budget-exhausted']).toBe(2);
   });
 
   test('run-plan null-proto normalizer: --__proto__ is an OWN key → the strict schema rejects it (exit 2)', async () => {
@@ -948,8 +998,9 @@ describe('run-plan through the governed kernel', () => {
     // a usage error — but the governor explicitly accepts maxUsd >= 0 (a
     // valid hard-zero spend ceiling, src/kernel/governor.ts). The cap binds
     // only on PRICED spend: the echo fixture reports no usage, so nothing
-    // trips and the trivial plan still passes (no journal: fresh governor
-    // starts at zero — the seeded-DD-9 path never engages).
+    // trips and the trivial plan still passes. The cap DOES govern the run
+    // (the CLI governs exactly when the operator sets a cap) — but with no
+    // journal dir the governed ledger starts at zero and journals nothing.
     const { planPath } = await writePlanFile(singleJobPlan('echo'));
     const { code, out, err } = await capture([
       'run-plan',
@@ -963,6 +1014,31 @@ describe('run-plan through the governed kernel', () => {
     expect(report.counts['budget-exhausted']).toBe(0);
     expect(report.stoppedEarly).toBe(false);
     expect(err).toContain('cq: done 1');
+  });
+
+  test('an UNCAPPED run with --journal-dir stays v1-identical: the run-started record carries NO journalVersion', async () => {
+    // The CLI's recorded policy: governance rides exactly the operator's
+    // cap — an uncapped run gets no governor, no ledger, and no v2 journal.
+    // The journal then holds a plain v1 record (no journalVersion, no seq,
+    // no governance block), pinned here from the file the run wrote.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
+    const { code, out } = await capture([
+      'run-plan',
+      `--plan=${planPath}`,
+      `--ops-root=${opsRoot}`,
+      `--journal-dir=${journalDir}`,
+      '--concurrency=1',
+    ]);
+    expect(code).toBe(0);
+    expect(RunReportSchema.parse(JSON.parse(out)).counts.done).toBe(1);
+    const log = openRunLog(journalDir);
+    const runs = await log.runs();
+    expect(runs).toHaveLength(1);
+    const events = await log.read(runs[0] as string);
+    const started = events[0] as { type: string; journalVersion?: unknown; seq?: unknown };
+    expect(started.type).toBe('run-started');
+    expect('journalVersion' in started).toBe(false);
+    expect('seq' in started).toBe(false);
   });
 
   test('failing job: exit 1 with a failed row, narrated', async () => {
@@ -988,9 +1064,9 @@ describe('run-plan through the governed kernel', () => {
     expect(human.code).toBe(3);
     expect(RunReportSchema.parse(JSON.parse(human.out)).jobs[0]?.result.status).toBe('needs-human');
     // The budget fixture RETURNS budget-exhausted as its op verdict — an
-    // op-returned row, NOT a governor trip (no caps configured, so
-    // withBudgetStop annotates nothing); exitCodeForRunReport still maps the
-    // row to 3.
+    // op-returned row, NOT a governor trip (no caps configured, so the run
+    // is ungoverned and no governor exists to trip); exitCodeForRunReport
+    // still maps the row to 3.
     const budget = await capture([
       'run-plan',
       `--plan=${(await writePlanFile(singleJobPlan('budget'))).planPath}`,

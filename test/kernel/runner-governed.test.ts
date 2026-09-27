@@ -20,10 +20,19 @@
 //      history / unaccounted v1 dispatches / cap raise) and their opt-ins,
 //      the ungoverned-marked escape hatch, spend-seeded resume tripping, and
 //      the seq-ordered fold beating reversed fake-clock `at` stamps.
+//   6. Honest-stop attribution (the coverage the deleted withBudgetStop
+//      helper owned, re-homed here against the runner-owned pass — W2.2
+//      slice C): dispatch-quota stops re-mark, silent trips stay silent,
+//      fabricated `queued:` verdicts from admitted ops never rewrite, and
+//      diamond-shaped BLOCKED rows over a refused dispatch re-mark
+//      transitively through memoized causality.
+//   7. Chained governed resumes: the fold reads ALL runs (a spent
+//      dispatch quota carries across resumes) and a corrupt sibling-plan
+//      journal cannot block the fold.
 //
 // The fold-ordering unit rules themselves live in journal-v2.test.ts — this
 // file pins only the runner's USE of that order.
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { appendFile, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
@@ -108,6 +117,7 @@ function countingOp(calls: string[], spendUSD?: number) {
 
 /** Narrowed governor-event views for filter predicates. */
 type AdmittedEvent = Extract<GovernorEvent, { kind: 'admitted' }>;
+type ShortCircuitEvent = Extract<GovernorEvent, { kind: 'short-circuited' }>;
 type TrippedEvent = Extract<GovernorEvent, { kind: 'budget-tripped' }>;
 type StartedEvent = Extract<JournalEvent, { type: 'job-started' }>;
 type FinishedEvent = Extract<JournalEvent, { type: 'job-finished' }>;
@@ -287,6 +297,310 @@ describe('governed trip → honest stop (I9)', () => {
     );
     expect(trip?.tripKind).toBe('exhausted');
     expect(trip?.reason).toMatch(/usd rollup 2 exceeded cap 1/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. Honest-stop attribution — the cases the deleted withBudgetStop helper
+//     owned, re-homed against the runner-owned honest-stop pass (W2.2 C)
+// ---------------------------------------------------------------------------
+
+describe('honest-stop attribution through the governed runner (#15-4/#15-6)', () => {
+  test('a dispatch-quota stop re-marks queued rows budget-exhausted (#15-4a)', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ runDispatchQuota: 2 });
+    const plan: Plan = {
+      id: 'plan-quota-stop',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j3', op: 'fake', input: { jobId: 'j3' } }, // refused: dispatch-quota
+        { id: 'j4', op: 'fake', input: { jobId: 'j4' }, dependsOn: ['j2'] }, // wave 2 — never dispatched → queued
+      ],
+    };
+    // j3's refusal is a non-ok terminal → stopOnError halts dispatching; j4
+    // never dispatched (its dep j2 is done) → queued, then re-marked by the
+    // honest-stop pass: a quota stop is budget-family even though `tripped`
+    // stays false (an attempt-cap is per-job and must NOT trigger this).
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor },
+    );
+    expect(governor.tripped).toBe(false); // a quota stop is NOT a USD/token trip
+    const refusals = governor.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
+    expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+    expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
+    expect(report.jobs[3]?.result).toEqual({ status: 'budget-exhausted' });
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 2,
+      failed: 0,
+      'budget-exhausted': 2,
+    });
+  });
+
+  test('a trip that gated NOTHING stays silent: zero re-marked rows → no stoppedEarly claim (#15-4b)', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 0.5 });
+    // j1's cost trips the cap mid-run; j2 (same wave, admitted at its pool
+    // slot) is killed budget-while-queued — both rows are real terminal
+    // verdicts; nothing was ever queued or blocked.
+    const spendy2 = countingOp(calls, 0.6);
+    const report = await runPlan(
+      independentPlan('plan-trip-no-gate', 2, 'spendy'),
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('spendy', spendy2)),
+      { governor },
+    );
+    expect(governor.tripped).toBe(true);
+    expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
+    // I9 honesty: no row was re-marked → no stoppedEarly claim. The report
+    // still carries the ledger's derived cost rollup the governor OBSERVED.
+    expect(report.stoppedEarly).toBe(false);
+    expect(report.earlyStopReason).toBeUndefined();
+    expect(report.costUSD).toBe(0.6); // only j1's evidence ever folded
+    expect(report.counts['budget-exhausted']).toBe(1);
+  });
+
+  test('a fabricated queued: detail from an ADMITTED op is NOT rewritten (#15-6)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    // The op RAN (the governor admitted it) and returned an indeterminate
+    // verdict claiming the runner's never-dispatched marker — executed code
+    // fabricating `queued: …`. The honest-stop pass re-marks only rows it
+    // never dispatched (its own admission records), so the lie keeps the
+    // op's real verdict.
+    const lyingOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportResult({ costUSD: 2.0 }); // trips the 1.0 cap mid-run
+      return { status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' };
+    };
+    const report = await runPlan(
+      independentPlan('plan-queued-fabricated', 1, 'lying'),
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('lying', lyingOp)),
+      { governor },
+    );
+    const admissions = governor.events.filter(
+      (event): event is AdmittedEvent => event.kind === 'admitted',
+    );
+    expect(admissions.map((event) => event.jobKey)).toEqual(['j1']); // the governor ADMITTED this job
+    expect(governor.tripped).toBe(true);
+    expect(rowStatuses(report)).toEqual(['indeterminate']);
+    // The row keeps its REAL verdict — and with nothing re-marked there is
+    // no stoppedEarly claim either.
+    expect(report.jobs[0]?.result).toEqual({
+      status: 'indeterminate',
+      detail: 'queued: (fabricated by the op itself)',
+    });
+    expect(report.stoppedEarly).toBe(false);
+  });
+
+  test('a fabricated queued: row does not condemn its DEPENDENTS either (#15-6, review round 3)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    // The ADMITTED op fabricates `queued: …` AND has a dependent: the
+    // budgetCaused walk reads the row too, so a lying row must not get the
+    // dependent re-marked budget-exhausted.
+    const lyingOp = async (): Promise<OpResult<unknown>> => {
+      currentJobContext()?.reportResult({ costUSD: 2.0 }); // trips the 1.0 cap mid-run
+      return { status: 'indeterminate', detail: 'queued: (fabricated by the op itself)' };
+    };
+    const plan: Plan = {
+      id: 'plan-queued-fabricated-dep',
+      jobs: [
+        { id: 'f1', op: 'lying', input: { jobId: 'f1' } },
+        { id: 'd1', op: 'fake', input: { jobId: 'd1' }, dependsOn: ['f1'] },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('lying', lyingOp), entry('fake', countingOp([]))),
+      { governor },
+    );
+    expect(governor.tripped).toBe(true);
+    // f1 indeterminate → the runner counts it failed; d1 is blocked by it.
+    expect(rowStatuses(report)).toEqual(['indeterminate', 'failed']);
+    // The fabricated row keeps its verdict…
+    expect(report.jobs[0]?.result).toEqual({
+      status: 'indeterminate',
+      detail: 'queued: (fabricated by the op itself)',
+    });
+    // …and the dependent is NOT re-marked budget-exhausted off the lie: it
+    // stays honestly blocked on an unresolved row.
+    expect(report.jobs[1]?.result).toMatchObject({
+      status: 'failed',
+      error: /blocked: dependency 'f1'/,
+    });
+    expect(report.stoppedEarly).toBe(false); // nothing was re-marked
+  });
+
+  test('a diamond of BLOCKED rows over a refused dispatch re-marks transitively (memoized causality)', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ runDispatchQuota: 2 });
+    // j1, j2 spend the quota; j3 is REFUSED (a real budget-exhausted row);
+    // j4/j5 are BLOCKED on j3; the diamond root j6 is blocked on BOTH
+    // branches — the causality walk must reuse each branch's memoized
+    // verdict to re-mark the root (the old visited-marker bug kept roots
+    // dishonestly blocked).
+    const plan: Plan = {
+      id: 'plan-quota-diamond',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j3', op: 'fake', input: { jobId: 'j3' } }, // refused: dispatch-quota
+        { id: 'j4', op: 'fake', input: { jobId: 'j4' }, dependsOn: ['j3'] }, // blocked on the refusal
+        { id: 'j5', op: 'fake', input: { jobId: 'j5' }, dependsOn: ['j3'] }, // blocked on the refusal
+        { id: 'j6', op: 'fake', input: { jobId: 'j6' }, dependsOn: ['j4', 'j5'] }, // the diamond root
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor },
+    );
+    expect(calls).toEqual(['j1', 'j2']); // the quota gated everything after j2
+    expect(governor.tripped).toBe(false); // quota refusal, not a USD/token trip
+    expect(rowStatuses(report)).toEqual([
+      'ok',
+      'ok',
+      'budget-exhausted',
+      'budget-exhausted',
+      'budget-exhausted',
+      'budget-exhausted',
+    ]);
+    expect(report.jobs[3]?.result).toEqual({ status: 'budget-exhausted' }); // blocked → re-marked
+    expect(report.jobs[5]?.result).toEqual({ status: 'budget-exhausted' }); // the root
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 2,
+      failed: 0,
+      'budget-exhausted': 4,
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3c. Chained governed resumes — the deleted seedFromRunLog helper's pins,
+//     now against the runner's own fold (W2.2 slice C)
+// ---------------------------------------------------------------------------
+
+describe('the governed fold reads ALL chained runs (review VB1B)', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'cq-runner-chained-'));
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  test('a spent dispatch quota carries across TWO governed resumes', async () => {
+    const calls: string[] = [];
+    const plan: Plan = {
+      id: 'plan-chained-quota',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j3', op: 'fake', input: { jobId: 'j3' } },
+      ],
+    };
+    // Run 1: j1 and j2 spend the quota of 2; j3 is refused.
+    const report1 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor: createGovernor({ runDispatchQuota: 2 }) },
+    );
+    expect(rowStatuses(report1)).toEqual(['ok', 'ok', 'budget-exhausted']);
+    expect(calls).toEqual(['j1', 'j2']);
+
+    // Resume with a FRESH governor: the fold seeds the spent quota (ALL
+    // prior runs, not just the latest), so j3 stays refused — while j1/j2
+    // replay-skip (a replay consumes no quota).
+    const governor2 = createGovernor({ runDispatchQuota: 2 });
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor: governor2 },
+    );
+    expect(calls).toEqual(['j1', 'j2']); // UNCHANGED — j3 never runs the op
+    expect(rowStatuses(report2)).toEqual(['ok', 'ok', 'budget-exhausted']);
+    const refusals = governor2.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
+    expect(refusals.map((event) => event.reason)).toEqual(['dispatch-quota']);
+    expect(governor2.dispatchCount).toBe(2); // seeded from the fold; refusals do not consume
+  });
+
+  test('a corrupt sibling-plan journal cannot block this plan’s governed resume ("a" vs "a--b", shared filter)', async () => {
+    // Review VB1C r1: a prefix-only candidate filter read a corrupt journal
+    // of plan 'a--b' into plan 'a's fold. The shared candidateRunsForPlan
+    // filter rejects it (the runId remainder after 'a--' is THREE segments,
+    // not the exact two-segment tail), so the governed run below — which
+    // folds the whole dir — never parses the corrupt file.
+    const log = openRunLog(dir);
+    const plan: Plan = {
+      id: 'a',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+    const runId = 'a--r1--aa';
+    await log.append(runId, {
+      type: 'run-started',
+      runId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'a',
+      journalVersion: 2,
+      seq: 1,
+      governance: { attended: false },
+    });
+    await log.append(runId, {
+      type: 'job-started',
+      runId,
+      at: '2026-01-01T00:00:00.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(runId, {
+      type: 'job-finished',
+      runId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: hash,
+      result: { status: 'ok', value: 'j1' },
+    });
+    // A corrupt MIDDLE line in the sibling plan's file (prefix 'a--' matches).
+    await appendFile(
+      join(dir, 'a--b--k3y--c0ffee.ndjson'),
+      `${JSON.stringify({ type: 'run-started', runId: 'a--b--k3y--c0ffee', at: '2026-01-01T00:00:00.000Z', planId: 'a--b' })}\n{"type":"job-started","runI\n`,
+      'utf8',
+    );
+
+    const calls: string[] = [];
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor: createGovernor({}) },
+    );
+    expect(calls).toEqual([]); // j1 replayed from the fold — no corrupt-read blowup
+    expect(report.counts.done).toBe(1);
   });
 });
 

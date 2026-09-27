@@ -1,26 +1,25 @@
 // Budget governor — T1.3 slice 1 (ws-a items 4–5): the per-job wall-clock
 // escalation ladder, per-job/per-run attempt caps, the USD rollup cap, the
-// dual in-flight/dispatch caps, and honest-stop marking (invariant I9).
+// dual in-flight/dispatch caps, and the honest-stop ledger (invariant I9).
 //
-// SEAM — governed-registry decorator (recorded decision, README "Budget
-// governor"): `governRegistry` wraps an OpRegistryView so every op
-// invocation runs under admission caps, the in-flight ceiling, and the
-// escalation ladder. The T1.4 runner integration has since LANDED (W2.2,
-// ADR-0003 §2): `runPlan(plan, opts, registry, gov?)` takes the `Governance`
-// handle below and performs admission (on the real plan job id), the ladder,
-// the DD-9 evidence folds, the v2 journal, and the honest stop ITSELF — the
-// governed-registry decorator remains the composition seam for callers that
-// run the plain (ungoverned) runner. Either way this module NEVER retries:
-// an in-wrapper retry would hide attempts from the journal, which is
-// recorded as journal-dishonest and rejected.
+// SEAM — the governed runner (W2.2, ADR-0003 §2): `runPlan(plan, opts,
+// registry, gov?)` takes the `Governance` handle below and performs admission
+// (on the real plan job id), the ladder, the DD-9 evidence folds, the v2
+// journal, and the honest stop ITSELF — this module is the per-run enforcer
+// the handle carries (createGovernor), not a composition wrapper. The old
+// governed-registry decorator (governRegistry/withBudgetStop/seedFromRunLog)
+// is deleted with no shim: the runner is the one governed composition.
+// Either way this module NEVER retries: an in-wrapper retry would hide
+// attempts from the journal, which is recorded as journal-dishonest and
+// rejected.
 //
 // Invariants honored here:
 //   - I8: the governor decides WHEN to abort (this module) and the kernel
 //     owns WHETHER to retry/escalate (rescue.ts); drivers never decide.
 //     Enforcement is abort-only — this module never re-dispatches.
 //   - I9: honest stop — at a cap the remaining work is marked
-//     budget-exhausted, never fabricated; `withBudgetStop` annotates a
-//     report only when the governor ACTUALLY tripped.
+//     budget-exhausted, never fabricated; the runner claims
+//     stoppedEarly only when the stop ACTUALLY gated undispatched work.
 //   - DD-9: the budget is api-equivalent — maxUsd trips through MODELED cost
 //     (the list-price proxy a subscription lane still produces), maxTokens
 //     rolls up independently as the unpriced-model backstop, and real usage
@@ -37,23 +36,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Usage, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
 import { prepareProcessSignalCleanup } from './process-signals.js';
-import { candidateRunsForPlan, type RunLog } from './journal.js';
-import type { OpRegistryView } from './runner.js';
-import type {
-  GovernanceOptIn,
-  JobOutcome,
-  JobState,
-  JournalEvent,
-  Limits,
-  Op,
-  OpRegistryEntry,
-  OpResult,
-  Plan,
-  RunCounts,
-  RunOptions,
-  RunReport,
-  RunStartedJournalEvent,
-} from './types.js';
+import type { GovernanceOptIn, JournalEvent, Limits, OpResult, RunOptions } from './types.js';
 
 // ---------------------------------------------------------------------------
 // Clock — the injectable time source (tests advance virtual time)
@@ -526,10 +509,9 @@ export function runLadder<T>(
 // ---------------------------------------------------------------------------
 
 /**
- * The governor's configuration — plain data for now (the one runtime-only
- * field is `jobKey`, a function, like the registry's importer; never
- * persisted). Built by hand or via `governorConfig` from the frozen
- * RunOptions/Limits surfaces.
+ * The governor's configuration — plain data (serializable, never persisted).
+ * Built by hand or via `governorConfig` from the frozen RunOptions/Limits
+ * surfaces.
  */
 export interface GovernorConfig {
   /** EFFECTIVE run USD cap = min(RunOptions.maxUsd, Limits.maxUsd) — frozen precedence. */
@@ -557,21 +539,6 @@ export interface GovernorConfig {
    * parallelism is the frozen min(RunOptions.concurrency, ceiling).
    */
   inFlightCeiling?: number;
-  /**
-   * Job-key extractor for per-job caps. The frozen Op contract carries no
-   * job identity, so the governor keys on this when given; otherwise the
-   * `input.jobId` plan-jobId convention (which the runner's ops and the
-   * phase-2 op families follow), else the OP NAME — under that fallback
-   * every dispatch of an op counts as another attempt of that op, so
-   * attempt caps always exist. Stable PER-JOB identity needs config.jobKey
-   * or input.jobId. Runtime-only: never persisted.
-   *
-   * RESUME LIMITATION (recorded): a custom jobKey is NOT seeded on resume —
-   * `seedFromJournal` seeds per journal jobId, so a custom jobKey must
-   * align with those ids or per-job caps reset across resume. (The governed
-   * runner admits on the plan job id and is unaffected.)
-   */
-  jobKey?: (op: string, input: unknown) => string;
 }
 
 function validateConfig(config: GovernorConfig): void {
@@ -611,7 +578,7 @@ function validateConfig(config: GovernorConfig): void {
 export function governorConfig(
   opts: RunOptions,
   limits: Limits,
-  extra?: Pick<GovernorConfig, 'abortGraceMs' | 'killGraceMs' | 'jobKey'>,
+  extra?: Pick<GovernorConfig, 'abortGraceMs' | 'killGraceMs'>,
 ): GovernorConfig {
   const usdCaps = [opts.maxUsd, limits.maxUsd].filter((v): v is number => v !== undefined);
   return {
@@ -627,7 +594,6 @@ export function governorConfig(
     ...(limits.inFlightCeiling !== undefined ? { inFlightCeiling: limits.inFlightCeiling } : {}),
     ...(extra?.abortGraceMs !== undefined ? { abortGraceMs: extra.abortGraceMs } : {}),
     ...(extra?.killGraceMs !== undefined ? { killGraceMs: extra.killGraceMs } : {}),
-    ...(extra?.jobKey !== undefined ? { jobKey: extra.jobKey } : {}),
   };
 }
 
@@ -831,12 +797,13 @@ const isValidUsage = (usage: unknown): usage is Usage => {
 
 /**
  * The per-run budget governor: admission caps, the in-flight ceiling, the
- * USD rollup, the ladder spec, and the event stream. One per run; compose
- * with a registry via `governRegistry` and with a report via
- * `withBudgetStop`. All time flows through the injected clock.
+ * USD rollup, the ladder spec, and the event stream. One per run; the
+ * governed runner (`runPlan`'s `gov` handle) drives admission, the ladder,
+ * and the evidence folds through it. All time flows through the injected
+ * clock.
  */
 export class BudgetGovernor {
-  /** Validated plain-data config (jobKey is the one runtime-only field). */
+  /** Validated plain-data config. */
   readonly config: GovernorConfig;
   readonly clock: Clock;
   /** The observation stream — every event, in fire order (tests assert here). */
@@ -915,33 +882,6 @@ export class BudgetGovernor {
   /** Per-job attempt ordinal so far (0 = never dispatched under this key). */
   attemptsFor(jobKey: string): number {
     return this.attemptsByJob.get(jobKey) ?? 0;
-  }
-
-  /**
-   * Job identity for per-job caps and events: the explicit config.jobKey
-   * extractor when configured, else the input's string `jobId` (the
-   * plan-jobId convention), else the OP NAME. Under that fallback every
-   * dispatch of an op counts as another attempt of that op — the per-job
-   * (here: per-op) attempt cap always EXISTS instead of silently never
-   * tripping; stable per-job identity needs config.jobKey or input.jobId.
-   *
-   * GOVERNED-RUNNER NOTE (W2.2): `runPlan`'s governed path admits on the
-   * real plan job id directly (it does not go through jobKeyFor), and
-   * `seedFromJournal` seeds per journal jobId — the no-identity op-name
-   * fallback stays a governRegistry-seam concern only and is deliberately
-   * NOT seeded (admission on the governed path is keyed on job.id).
-   */
-  jobKeyFor(op: string, input: unknown): string {
-    if (this.config.jobKey !== undefined) {
-      return this.config.jobKey(op, input);
-    }
-    if (typeof input === 'object' && input !== null && 'jobId' in input) {
-      const id = (input as { jobId?: unknown }).jobId;
-      if (typeof id === 'string' && id !== '') {
-        return id;
-      }
-    }
-    return op;
   }
 
   // --- Admission ------------------------------------------------------------
@@ -1115,7 +1055,7 @@ export class BudgetGovernor {
    *
    * CONTRACT on `events`: the ORDERED CONCATENATION of ALL the plan's run
    * journals, oldest-first — exactly what the governed runner's fold
-   * (journal `foldOrderRuns`) and `seedFromRunLog` build. The latest run's
+   * (journal `foldOrderRuns`) builds before seeding. The latest run's
    * journal alone UNDERCOUNTS: a re-attested job appears as a finish-only
    * event (no open start to close, so its usage/cost is skipped) and
    * chained dispatches from earlier runs vanish — silently resetting the
@@ -1222,76 +1162,17 @@ export class BudgetGovernor {
     this.record({ kind: 'seeded', jobs: jobIds.size, attempts: totalStarts, atMs: this.now() });
   }
 
-  /** Append to the observation stream (called by the governed registry). */
+  /** Append to the observation stream (called by the governed runner). */
   record(event: GovernorEvent): void {
     this.events.push(event);
   }
 }
 
 /**
- * The easy path for chained resumes: construct a governor seeded from ALL of
- * the plan's run journals — `log.runs()` (oldest-first) filtered by the
- * `<planId>--` candidate prefix and the run-started `planId` exact matcher,
- * mirroring the runner's own resume rules — and return it. This builds the
- * ordered concatenation that `seedFromJournal`'s events contract requires:
- * the latest run's journal alone undercounts re-attested jobs (finish-only
- * events) and chained dispatches, silently resetting the budget.
- */
-export async function seedFromRunLog(
-  log: RunLog,
-  planId: string,
-  opts?: {
-    config?: GovernorConfig;
-    clock?: Clock;
-  },
-): Promise<BudgetGovernor> {
-  const governor = new BudgetGovernor(opts?.config ?? {}, opts?.clock);
-  const events: JournalEvent[] = [];
-  // Shared candidate filter — journal.candidateRunsForPlan — mirroring the
-  // runner's resume rules (the coupling is declared on both sides): prefix +
-  // two-segment runId tail, so a planId that merely extends this one
-  // ('a' vs 'a--b') cannot slip in and a corrupt journal of ANOTHER plan
-  // cannot block this seed.
-  for (const runId of candidateRunsForPlan(await log.runs(), planId)) {
-    const runEvents = await log.read(runId);
-    const started = runEvents.find(
-      (event): event is RunStartedJournalEvent => event.type === 'run-started',
-    );
-    if (started?.planId !== planId) {
-      continue; // exact matcher — rejects a pathological id that merely shares the prefix
-    }
-    events.push(...runEvents);
-  }
-  governor.seedFromJournal(events);
-  return governor;
-}
-
-// ---------------------------------------------------------------------------
-// The governed-registry decorator — THE seam (recorded decision)
-// ---------------------------------------------------------------------------
-
-/** Terminal status read off a governed value, defensively (contract-violating returns exist). */
-function statusOfValue(value: unknown): GovernedOutcomeStatus {
-  if (typeof value === 'object' && value !== null && 'status' in value) {
-    const status = (value as { status: unknown }).status;
-    if (
-      status === 'ok' ||
-      status === 'failed' ||
-      status === 'needs-human' ||
-      status === 'budget-exhausted' ||
-      status === 'indeterminate'
-    ) {
-      return status;
-    }
-  }
-  return 'invalid';
-}
-
-/**
- * Structural guard for a governed 'ok' value (the same defensive style as
- * statusOfValue — contract-violating returns exist): when the value carries
- * a WorkerResult shape, return it for the DD-9 budget fold; anything else
- * returns undefined and folds nothing. Requires `usage` to be an object
+ * Structural guard for a governed 'ok' value (defensive — contract-violating
+ * returns exist): when the value carries a WorkerResult shape, return it for
+ * the DD-9 budget fold; anything else returns undefined and folds nothing.
+ * Requires `usage` to be an object
  * with FINITE non-negative numeric input/output/cacheRead/cacheWrite
  * (`denials` an array, `stopReason` one of the four frozen
  * DriverStopReason strings; a present `costUSD` must be a finite number
@@ -1383,366 +1264,4 @@ export function validSpendEvidence(result: { usage?: Usage; costUSD?: number }):
     ...(usage !== undefined ? { usage } : {}),
     ...(costUSD !== undefined ? { costUSD } : {}),
   };
-}
-
-/**
- * Wrap one op with the governor: admission caps → in-flight slot → wall-clock
- * ladder (inside the job context, so ops reach the signal/port via
- * currentJobContext()) → honest verdict. Refusals and kills return
- * `{status:'budget-exhausted'}` — a budget bound was hit, the one frozen
- * taxonomy value whose purpose is exactly this; throws pass through so the
- * RUNNER's failure semantics stay in charge.
- */
-function governOp(
-  op: Op<never, never>,
-  opName: string,
-  governor: BudgetGovernor,
-): Op<never, never> {
-  return async (input: never): Promise<OpResult<never>> => {
-    const jobKey = governor.jobKeyFor(opName, input);
-    const admission = governor.admit(jobKey);
-    if (admission.decision === 'reject') {
-      governor.record({
-        kind: 'short-circuited',
-        op: opName,
-        jobKey,
-        reason: admission.reason,
-        atMs: governor.now(),
-      });
-      return { status: 'budget-exhausted' };
-    }
-    governor.record({
-      kind: 'admitted',
-      op: opName,
-      jobKey,
-      attempt: admission.attempt,
-      atMs: governor.now(),
-    });
-    await governor.acquireSlot();
-    try {
-      // The budget can trip while this dispatch waited for a slot; a queued
-      // dispatch that can no longer be paid for does not run (I9: honest).
-      if (governor.tripped) {
-        governor.record({
-          kind: 'short-circuited',
-          op: opName,
-          jobKey,
-          reason: 'budget-while-queued',
-          atMs: governor.now(),
-        });
-        return { status: 'budget-exhausted' };
-      }
-      const attempt = admission.attempt;
-      // The once-only guard: evidence the op STREAMED through the job
-      // context (reportResult) is folded by the callback below — the flags
-      // tell the completion-time WorkerResult fold to skip that evidence
-      // instead of counting it twice. (reportUsage/reportCost are gone:
-      // reportResult is the one streaming channel.)
-      let reportedUsage = false;
-      let reportedCost = false;
-      const outcome = await runLadder(
-        () => op(input),
-        governor.ladderSpec,
-        { op: opName, jobKey, attempt },
-        {
-          clock: governor.clock,
-          onRung: (marker) => {
-            // Keep the marker identity: async delivery failures arrive after
-            // onRung and must remain visible in the recorded event.
-            governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
-          },
-          onResult: (result) => {
-            // The op streamed its driver's evidence in ONE fold: mark only the
-            // measurements observeResult will ACTUALLY fold (the same
-            // sanitizer — a lying value is dropped, so it must not mark the
-            // completion fold as already-counted), then apply DD-9.
-            if (isValidUsage(result.usage) && totalTokensOf(result.usage) > 0) {
-              reportedUsage = true;
-            }
-            if (isValidUsd(result.costUSD)) reportedCost = true;
-            governor.observeResult(jobKey, result);
-          },
-        },
-      );
-      if (outcome.outcome === 'completed') {
-        governor.record({
-          kind: 'completed',
-          op: opName,
-          jobKey,
-          attempt,
-          status: statusOfValue(outcome.value),
-          elapsedMs: outcome.elapsedMs,
-          atMs: governor.now(),
-        });
-        // DD-9 evidence fold: a completed 'ok' result whose value is
-        // WorkerResult-shaped carries this invocation's budget evidence —
-        // fold it ONCE, skipping whatever the op already streamed (the
-        // flags above).
-        if (statusOfValue(outcome.value) === 'ok') {
-          const worker = workerResultOfValue((outcome.value as { value?: unknown }).value);
-          if (worker !== undefined) {
-            governor.observeResult(jobKey, worker, {
-              usageAlreadyCounted: reportedUsage,
-              costAlreadyCounted: reportedCost,
-            });
-          }
-        }
-        return outcome.value;
-      }
-      if (outcome.outcome === 'threw') {
-        governor.record({
-          kind: 'completed',
-          op: opName,
-          jobKey,
-          attempt,
-          status: 'threw',
-          elapsedMs: outcome.elapsedMs,
-          atMs: governor.now(),
-        });
-        throw outcome.error;
-      }
-      // Rung 3 fired: the op was killed — detached in-process with its
-      // rejections suppressed — and the honest known-cause verdict is
-      // returned in its place (I9; see the README for the taxonomy choice).
-      governor.record({
-        kind: 'completed',
-        op: opName,
-        jobKey,
-        attempt,
-        status: 'budget-exhausted',
-        elapsedMs: outcome.elapsedMs,
-        atMs: governor.now(),
-      });
-      return { status: 'budget-exhausted' };
-    } finally {
-      governor.releaseSlot();
-    }
-  };
-}
-
-/**
- * THE SEAM (recorded decision): wrap an OpRegistryView so every op
- * invocation runs under the governor — admission caps, the in-flight
- * ceiling, the wall-clock ladder, usage/cost observation. Purely additive
- * and backwards-compatible: the returned view satisfies OpRegistryView,
- * runPlan (T1.2) consumes it unchanged, ops that never call
- * currentJobContext() behave identically except for cap enforcement, and
- * input validation stays exactly where it was (the entry's inputSchema
- * passes through untouched).
- */
-export function governRegistry(view: OpRegistryView, governor: BudgetGovernor): OpRegistryView {
-  const cache = new Map<string, OpRegistryEntry<never, never> | undefined>();
-  return {
-    get(name: string): OpRegistryEntry<never, never> | undefined {
-      if (cache.has(name)) {
-        return cache.get(name);
-      }
-      const entry = view.get(name);
-      if (entry === undefined) {
-        cache.set(name, undefined);
-        return undefined;
-      }
-      const governed: OpRegistryEntry<never, never> = {
-        name: entry.name,
-        inputSchema: entry.inputSchema,
-        importer: async () => {
-          const op = await entry.importer();
-          return governOp(op, name, governor);
-        },
-      };
-      cache.set(name, governed);
-      return governed;
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Honest stop (I9) — report annotation on a REAL trip only (the
-// stoppedEarly/earlyStopReason claim; `withBudgetStop` additionally annotates
-// the DERIVED costUSD rollup on every path — review-debt #185 — which is not
-// a trip claim).
-// ---------------------------------------------------------------------------
-
-// The runner's never-dispatched row markers (runner.ts is frozen for this
-// slice; these prefixes are its documented row vocabulary).
-const QUEUED_MARKER = 'queued:';
-const BLOCKED_MARKER = 'blocked:';
-
-/**
- * HONEST STOP (I9): annotate a returned run report with the budget stop —
- * `stoppedEarly: true` + `earlyStopReason: 'budget'` (the frozen
- * RunEarlyStopReason's ONLY allowed value; this is its purpose) — and mark
- * the jobs that never reached an op verdict because the budget bound hit:
- *
- *   - rows carrying the runner's `queued: …` marker (never dispatched,
- *     dependencies fine) → OpResult `{status:'budget-exhausted'}`;
- *   - rows carrying a `blocked: …` marker whose ENTIRE dependency
- *     obstruction is transitively budget-caused → budget-exhausted too; a
- *     blocked row with any definitively-failed dependency keeps its real
- *     verdict (that obstruction is evidence, not budget).
- *
- * TWO honesty rules (I9: annotate only a real stop that actually gated
- * undispatched work):
- *   - the STOP must be budget-family: the governor tripped, OR the run hit
- *     the per-run dispatch quota — a 'dispatch-quota' short-circuit stops
- *     the run for budget-family reasons even though `tripped` stays false.
- *     An 'attempt-cap' is PER-JOB (it gates only that job's own
- *     re-dispatch, never the run) and must NOT trigger annotation.
- *   - the stop must actually GATE: if NO row differs from the input report
- *     after the marking pass (identity compare below), nothing undispatched
- *     was gated — the refused rows are themselves real terminal verdicts —
- *     and the report is returned WITHOUT the stoppedEarly claim.
- *
- * Executed rows are never rewritten: a `queued:`-marker row the governor's
- * events show as ADMITTED (or completed) carries a detail fabricated by
- * executed code, not the runner's never-dispatched marker, and keeps its
- * real verdict. Counts are recomputed over the marked rows
- * (needs-human→blocked and indeterminate→failed per the documented T1.2
- * freeze workaround). W2.2: the GOVERNED runner now performs this
- * re-marking itself (it knows which jobs it admitted — no marker sniffing);
- * this helper remains for the governRegistry composition seam:
- * `withBudgetStop(await runPlan(...), plan, governor)`.
- *
- * COST ANNOTATION (review-debt #185): on EVERY return path this helper also
- * sets `RunReport.costUSD` from `governor.usdSpent` when the governor
- * observed any spend and the report carries none — the derived-only run
- * rollup the review-loop sweep carries forward across PRs. The frozen
- * `RunReport.costUSD` field is caller-side derived-by-design; the governor
- * is the composition that actually observed the numbers, so it fills it
- * here rather than leaving every caller to re-derive it.
- */
-export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGovernor): RunReport {
-  // The run-level USD rollup the governor OBSERVED (reportResult /
-  // the WorkerResult fold) — annotated onto the report on EVERY return path
-  // so the caller (ReviewLoopOutcome.fixReport, SelfMergePrsResult.report)
-  // can carry spend forward without re-deriving it. Derived-only (DD-9):
-  // the governor never invents a number, so an empty rollup stays absent
-  // (a fabricated 0 would claim "spent nothing").
-  const annotateCost = (r: RunReport): RunReport =>
-    r.costUSD === undefined && governor.usdSpent > 0 ? { ...r, costUSD: governor.usdSpent } : r;
-  // Honesty rule 1 — a budget-family stop only (see the doc comment): the
-  // trip, or a per-run dispatch-quota refusal. 'attempt-cap' is per-job and
-  // deliberately absent here.
-  const dispatchQuotaRefused = governor.events.some(
-    (event) => event.kind === 'short-circuited' && event.reason === 'dispatch-quota',
-  );
-  if (!governor.tripped && !dispatchQuotaRefused) {
-    return annotateCost(report);
-  }
-  const rowsByJob = new Map<string, JobOutcome>(report.jobs.map((row) => [row.jobId, row]));
-  const depsOf = new Map<string, readonly string[]>(
-    plan.jobs.map((job) => [job.id, job.dependsOn ?? []]),
-  );
-  // Is this job's non-execution attributable to the budget (transitively)?
-  // Memoized per jobId: a diamond dependency (A → B,C → D) must reuse D's
-  // verdict when the SECOND branch reaches it — a visited marker is not a
-  // "no" verdict, and reading it as one kept dishonest `blocked…` verdicts
-  // on diamond roots (I9). inProgress is a cycle guard only (runPlan forbids
-  // cycles) and is never memoized, so a partial walk cannot poison results.
-  const memo = new Map<string, boolean>();
-  const inProgress = new Set<string>();
-  // Provenance predicate (shared by the re-mark pass and budgetCaused below
-  // so the two cannot drift): the runner writes `queued: …` ONLY for jobs it
-  // never dispatched — an 'admitted' or 'completed' event for the jobKey
-  // means the marker came from EXECUTED code (an op fabricating an
-  // indeterminate `queued: …` verdict), not from the runner's
-  // never-dispatch sweep. Conservative: custom config.jobKey layouts simply
-  // never match the row id and behave exactly as before.
-  const hasAdmissionEvidence = (jobKey: string): boolean =>
-    governor.events.some(
-      (event) =>
-        (event.kind === 'admitted' || event.kind === 'completed') && event.jobKey === jobKey,
-    );
-  const budgetCaused = (jobId: string): boolean => {
-    const memoed = memo.get(jobId);
-    if (memoed !== undefined) {
-      return memoed;
-    }
-    if (inProgress.has(jobId)) {
-      return false; // defensive: runPlan forbids cycles
-    }
-    inProgress.add(jobId);
-    let caused = false;
-    const row = rowsByJob.get(jobId);
-    if (row === undefined) {
-      caused = false; // unknown row — conservative: don't attribute
-    } else {
-      switch (row.result.status) {
-        case 'budget-exhausted':
-          caused = true;
-          break;
-        case 'indeterminate':
-          // The SAME provenance rule the re-mark pass applies (shared
-          // predicate above): a `queued:`-prefixed detail on a row the
-          // governor ADMITTED is a lie from executed code — not evidence of
-          // a budget-caused non-execution — so its dependents keep their
-          // real blocked verdicts (review round 3).
-          caused = row.result.detail.startsWith(QUEUED_MARKER) && !hasAdmissionEvidence(jobId);
-          break;
-        case 'failed':
-          if (row.result.error.startsWith(BLOCKED_MARKER)) {
-            caused = (depsOf.get(jobId) ?? []).every((dep) => budgetCaused(dep));
-          }
-          break;
-        case 'ok':
-        case 'needs-human':
-        default:
-          caused = false; // ok / needs-human: real verdicts
-      }
-    }
-    inProgress.delete(jobId);
-    memo.set(jobId, caused);
-    return caused;
-  };
-  const jobs: JobOutcome[] = report.jobs.map((row) => {
-    if (row.result.status === 'indeterminate' && row.result.detail.startsWith(QUEUED_MARKER)) {
-      // Provenance check (hasAdmissionEvidence above — one predicate, both
-      // uses): if the governor's events show an admission (or a completion)
-      // for this jobKey, the marker came from EXECUTED code, not the
-      // runner's never-dispatch sweep — keep the real verdict.
-      if (!hasAdmissionEvidence(row.jobId)) {
-        return { ...row, result: { status: 'budget-exhausted' } };
-      }
-    }
-    if (
-      row.result.status === 'failed' &&
-      row.result.error.startsWith(BLOCKED_MARKER) &&
-      budgetCaused(row.jobId)
-    ) {
-      return { ...row, result: { status: 'budget-exhausted' } };
-    }
-    return row;
-  });
-  // Counts: start from the runner's OWN counts and move only the re-marked
-  // rows (untouched rows are the same object — identity comparison). A full
-  // recompute from result statuses migrates genuinely-blocked rows (result
-  // `failed`, error `blocked: …`) into counts.failed even though the budget
-  // never touched them; a re-marked row was counted by the runner as
-  // `queued` (queued marker) or `blocked` (blocked marker) — move exactly
-  // those.
-  const counts: RunCounts = { ...report.counts };
-  let reMarked = false;
-  report.jobs.forEach((original, index) => {
-    const row = jobs[index];
-    if (row === original) {
-      return; // untouched — the runner's count stands
-    }
-    reMarked = true;
-    const priorState: JobState = original.result.status === 'indeterminate' ? 'queued' : 'blocked';
-    counts[priorState] -= 1;
-    counts['budget-exhausted'] += 1;
-  });
-  // Honesty rule 2 — the stop must have actually GATED undispatched work:
-  // every row kept its real verdict (a refusal row is itself terminal
-  // evidence), so there is no early stop to claim (I9).
-  if (!reMarked) {
-    return annotateCost(report);
-  }
-  return annotateCost({
-    ...report,
-    stoppedEarly: true,
-    earlyStopReason: 'budget',
-    counts,
-    jobs,
-  });
 }
