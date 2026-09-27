@@ -75,9 +75,9 @@ export function createGovernor(config: GovernorConfig, clock?: Clock): BudgetGov
 
 /**
  * Per-run governance for `runPlan(plan, opts, registry, gov?)` (ADR-0003
- * §2.1): the governor that owns admission/caps, an optional injected clock
- * (defaulting to the governor's own — the ladder and the event stream must
- * share one time source), an optional run-level cancel signal (tripping the
+ * §2.1): the governor that owns admission/caps AND the run's one time source
+ * (its own clock drives the ladder and every recorded event — virtualize at
+ * `createGovernor`), an optional run-level cancel signal (tripping the
  * governor with trip kind `signal` stops dispatch — W2.5 wires process
  * signals to one), and the operator-declared attendance flag. Per-call
  * opt-ins ride `optIn` by explicit key only (P7).
@@ -87,7 +87,6 @@ export function createGovernor(config: GovernorConfig, clock?: Clock): BudgetGov
  */
 export interface Governance {
   governor: Governor;
-  clock?: Clock;
   /** Run-level cancel signal; an abort trips the governor (trip kind `signal`). */
   signal?: AbortSignal;
   /** Operator-declared attendance (journalled on run-started; P8 default false). */

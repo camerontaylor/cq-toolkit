@@ -661,6 +661,32 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
     expect(calls).toEqual([]); // j1 replayed from the fold — no corrupt-read blowup
     expect(report.counts.done).toBe(1);
   });
+
+  test('a dependency cycle throws BEFORE anything is claimed or journalled', async () => {
+    // Plan corruption is invalid input: the rejection must precede the seq
+    // claim and the governed run-started append, or the failed invocation
+    // would permanently establish governed history and refuse later
+    // corrected (uncapped, opt-in-free) runs as ungoverned-over-governed.
+    const calls: string[] = [];
+    const plan: Plan = {
+      id: 'plan-gov-cycle',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' }, dependsOn: ['j2'] },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+      ],
+    };
+    await expect(
+      runPlan(
+        plan,
+        { concurrency: 1, stopOnError: false, journalDir: dir },
+        viewWith(entry('fake', countingOp(calls))),
+        { governor: createGovernor({ maxUsd: 5 }) },
+      ),
+    ).rejects.toThrow(/dependency cycle/);
+    expect(calls).toEqual([]); // nothing dispatched either
+    // The journal dir stays empty: no claim tombstone, no run-started file.
+    expect(await readdir(dir)).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------

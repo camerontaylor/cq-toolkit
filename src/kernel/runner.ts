@@ -519,6 +519,36 @@ export async function runPlan(
     manifest.jobs.map((job): [string, ManifestJob] => [job.id, job]),
   );
 
+  // --- Scheduling: missing-dep pre-pass, then waves over the remainder ------
+  // Computed BEFORE the ledger fold and the seq claim: a dependency CYCLE is
+  // plan corruption (frozen evidence rule: fail loudly) and must throw while
+  // nothing is claimed or journalled — a governed run-started written before
+  // the rejection would permanently establish governed history for the plan
+  // and refuse later corrected runs as ungoverned-over-governed (review
+  // thread).
+  const jobIds = new Set(jobById.keys());
+  const unschedulable = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const job of manifest.jobs) {
+      if (unschedulable.has(job.id)) continue;
+      const missingDep = job.dependsOn.find((dep) => !jobIds.has(dep) || unschedulable.has(dep));
+      if (missingDep !== undefined) {
+        unschedulable.add(job.id);
+        changed = true;
+      }
+    }
+  }
+  // Missing deps are already excluded, so topoOrder can only throw on a
+  // genuine cycle — plan corruption (frozen evidence rule: fail loudly).
+  const schedulable = manifest.jobs.filter((job) => !unschedulable.has(job.id));
+  const waves = topoOrder(schedulable);
+  // Waves of job-id strings → waves of jobs (ids come from the same manifest).
+  const waveJobs: ManifestJob[][] = waves.map((wave) =>
+    wave.map((jobId) => jobById.get(jobId) as ManifestJob),
+  );
+
   // One journal surface for both modes: events are ALWAYS produced through
   // the same emit call sites in the same order; with a journalDir they are
   // validated + appended to `<runId>.ndjson`, otherwise the sink is a no-op.
@@ -803,31 +833,9 @@ export async function runPlan(
       await emit({ type: 'run-started', runId, at: now(), planId: plan.id });
     }
 
-    // --- Scheduling: missing-dep pre-pass, then waves over the remainder ---
-    const jobIds = new Set(jobById.keys());
-    const unschedulable = new Set<string>();
-    let changed = true;
-    while (changed) {
-      changed = false;
-      for (const job of manifest.jobs) {
-        if (unschedulable.has(job.id)) continue;
-        const missingDep = job.dependsOn.find((dep) => !jobIds.has(dep) || unschedulable.has(dep));
-        if (missingDep !== undefined) {
-          unschedulable.add(job.id);
-          changed = true;
-        }
-      }
-    }
-    // Missing deps are already excluded, so topoOrder can only throw on a
-    // genuine cycle — plan corruption (frozen evidence rule: fail loudly).
-    const schedulable = manifest.jobs.filter((job) => !unschedulable.has(job.id));
-    const waves = topoOrder(schedulable);
-    // Waves of job-id strings → waves of jobs (ids come from the same manifest).
-    const waveJobs: ManifestJob[][] = waves.map((wave) =>
-      wave.map((jobId) => jobById.get(jobId) as ManifestJob),
-    );
-
-    // blocked rows for jobs whose dependency chain is broken from the start.
+    // --- Unschedulable rows: blocked for a missing dependency from the start
+    // (the pre-pass and waves above already classified them; nothing here can
+    // throw — the cycle check ran before anything was claimed or journalled).
     const entries = new Map<string, OutcomeEntry>();
     for (const job of manifest.jobs) {
       if (!unschedulable.has(job.id)) continue;
@@ -1042,9 +1050,11 @@ export async function runPlan(
               governor.ladderSpec,
               { op: job.op, jobKey: job.id, attempt },
               {
-                // One time source for the ladder and the governor's event
-                // stream: the handle's clock wins, else the governor's own.
-                clock: gov?.clock ?? governor.clock,
+                // ONE time source: the governor's own clock timestamps the
+                // ladder AND every recorded event — an override here would
+                // run the ladder in a different time domain from the event
+                // stream (review thread). Virtualize at createGovernor.
+                clock: governor.clock,
                 // The external run-level signal composes INTO the ladder's
                 // controller (governor.runLadder): ops see the abort through
                 // currentJobContext().signal.
@@ -1091,8 +1101,15 @@ export async function runPlan(
                     usageAlreadyCounted: reportedUsage,
                     costAlreadyCounted: reportedCost,
                   };
-                  governor.observeResult(job.id, worker, counts);
-                  foldIntoJobSums(worker, counts);
+                  // Mirror-strict exactly like the streamed channel above: a
+                  // returned WorkerResult the journal/report mirror would
+                  // reject (fractional counts, extra keys) folds as ZERO
+                  // evidence — otherwise it lands raw in the per-job sums
+                  // and trades the defensive guard for a post-record
+                  // job-finished append throw (review thread).
+                  const spend = validSpendEvidence(worker);
+                  governor.observeResult(job.id, spend, counts);
+                  foldIntoJobSums(spend, counts);
                 }
               }
               result = opResult;

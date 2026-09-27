@@ -1255,11 +1255,12 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
     expect(governor.tripped).toBe(false);
   });
 
-  test('a reportResult measurement the journal mirror would reject folds as ZERO evidence (fractional/extra-keyed usage)', async () => {
+  test('measurements the journal mirror would reject fold as ZERO evidence on BOTH channels (fractional/extra-keyed usage)', async () => {
     // journalDir ON: usage that passes a loose defensive predicate but not
     // the strict UsageSchema used to surface as a post-record job-finished
-    // append throw — after the op had already completed. The fold must
-    // validate the PERSISTED shape (integer cardinalities, strict keys), so
+    // append throw — after the op had already completed. Both spend channels
+    // must validate the PERSISTED shape (integer cardinalities, strict
+    // keys): the STREAMED reportResult channel and the RETURNED WorkerResult
     // an unschemable measurement is zero evidence, never a late throw.
     const dir = await mkdtemp(join(tmpdir(), 'cq-governor-usage-mirror-'));
     try {
@@ -1268,6 +1269,19 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
       );
       const mirrorLyingOp = async (raw: unknown): Promise<OpResult<unknown>> => {
         const jobId = (raw as { jobId: string }).jobId;
+        if (jobId === 'j3') {
+          // Returned-WorkerResult channel: workerResultOfValue passes a
+          // fractional count (finite, non-negative) — the fold must still
+          // not persist it raw.
+          return {
+            status: 'ok',
+            value: {
+              stopReason: 'complete',
+              usage: { input: 2.5, output: 1, cacheRead: 0, cacheWrite: 0 },
+              denials: [],
+            },
+          };
+        }
         const usage =
           jobId === 'j1'
             ? { input: 1.5, output: 2, cacheRead: 0, cacheWrite: 0 } // fractional
@@ -1280,6 +1294,7 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
         jobs: [
           { id: 'j1', op: 'mirror-lying', input: { jobId: 'j1' } },
           { id: 'j2', op: 'mirror-lying', input: { jobId: 'j2' } },
+          { id: 'j3', op: 'mirror-lying', input: { jobId: 'j3' } },
         ],
       };
       const report = await runPlan(
@@ -1288,10 +1303,11 @@ describe('the governed dispatch folds a returned WorkerResult through observeRes
         viewWith(entry('mirror-lying', mirrorLyingOp)),
         { governor },
       );
-      expect(governor.usage).toBeUndefined(); // both measurements dropped
+      expect(governor.usage).toBeUndefined(); // every measurement dropped
       expect(governor.usdSpent).toBe(0); // no cost folds off unschemable usage
       expect(report.jobs[0]?.usage).toBeUndefined();
       expect(report.jobs[1]?.usage).toBeUndefined();
+      expect(report.jobs[2]?.usage).toBeUndefined();
       // The journal stays schema-clean: no job-finished line carries usage.
       const runLog = openRunLog(dir);
       const events = await runLog.read((await runLog.runs())[0]!);
