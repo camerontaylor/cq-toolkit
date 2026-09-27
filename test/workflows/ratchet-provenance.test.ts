@@ -12,7 +12,8 @@
 //   3. The deciding legs (cq-verify, ratchet-propose) run from the default
 //      branch (`workflow_run`), check out only the trust ref, install with
 //      `--ignore-scripts`, restore no cache, and never run the test suite;
-//      cq-verify's compute job (tsc over head content) holds nothing.
+//      cq-verify's compute job (tsc over head content) holds nothing, and
+//      only its signing job (judge) runs in environment `cq-verdict`.
 //   4. ratchet-propose targets merge-queue through the script, consumes the
 //      measure leg's artifact, and holds its token behind `environment:`.
 //   5. The legacy ratchet.yml's target/metric pairs are exactly the trust
@@ -138,7 +139,7 @@ describe('head code runs only in credential-free measurement jobs (ADR-0004 D-D.
 describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)', () => {
   it.each(['cq-verify.yml', 'ratchet-propose.yml'].flatMap(bothCopies))(
     '%s: workflow_run carrier, trust-ref checkout only, --ignore-scripts, no cache, no tests',
-    (label, text) => {
+    (_label, text) => {
       const body = code(text);
       expect(onBlock(body)).toMatch(/^ {2}workflow_run:$/m);
       expect(onBlock(body)).not.toMatch(/pull_request/);
@@ -154,13 +155,10 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(body).toMatch(/cache: ''/);
       expect(body).not.toMatch(/cache: npm|actions\/cache/);
       expect(body).not.toMatch(/vitest|npm test|npm run test/);
-      if (label.includes('cq-verify')) {
-        // Fetch and judge retain a read-only token only while running trust
-        // code or handling git objects; neither checks out the head.
-        expect(body).toMatch(/persist-credentials: true/);
-      } else {
-        expect(body).toMatch(/persist-credentials: false/);
-      }
+      // No checkout persists its credential: fetches scope a read-only
+      // credential to their own step (a GIT_CONFIG_* extra-header).
+      expect(body).toMatch(/persist-credentials: false/);
+      expect(body).not.toMatch(/persist-credentials: true/);
     },
   );
 
@@ -188,6 +186,7 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       const fetch = jobs.get('fetch') ?? '';
       expect(fetch).toMatch(/^ {4}permissions:\n {6}contents: read$/m);
       expect(fetch).toContain('git fetch --no-tags origin "$SUBJECT"');
+      expect(fetch).toContain('GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader"');
       expect(fetch).toContain('git bundle create');
       expect(fetch).not.toMatch(
         /npm ci|npm run|ratchet\.recomputeTypecheck|ratchet\.verifyRatchet/,
@@ -220,8 +219,13 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       // …it consumes the bundle, and the numbers the measurement job vetted.
       expect(judge).toContain('name: cq-verify-source');
       expect(judge).toContain('${{ needs.measurement.outputs.json }}');
-      // Its one token use is posting the verdict itself.
-      expect(judge).toMatch(/GH_TOKEN: \$\{\{ github\.token \}\}/);
+      // Its one token use is posting the verdict itself: the verdict-App
+      // token when minted, else GITHUB_TOKEN (Decision 6). Only judge signs.
+      expect(judge).toContain('GH_TOKEN: ${{ steps.verdict-app.outputs.token || github.token }}');
+      expect(judge).toMatch(/^ {4}environment: cq-verdict$/m);
+      expect([...body.matchAll(/^\s*environment: (.*)$/gm)].map((m) => m[1])).toEqual([
+        'cq-verdict',
+      ]);
       // …and the job that DOES unpack the artifact has no write scope.
       const measurement = jobs.get('measurement') ?? '';
       expect(measurement).toMatch(/^ {4}permissions:\n {6}actions: read$/m);
@@ -229,7 +233,13 @@ describe('deciding legs run trusted code over head data (ADR-0004 D-B, D-C, D-E)
       expect(measurement).toContain('name: cq-measure');
       expect(measurement).toMatch(/run-id: \$\{\{ needs\.resolve\.outputs\.run_id \}\}/);
       expect(measurement).not.toMatch(/checks: write|contents: write|secrets\./);
-      expect(body).not.toMatch(/secrets\./);
+      // The only secret is the verdict App key, in judge's mint step.
+      for (const m of body.matchAll(/secrets\.([A-Za-z0-9_]+)/g)) {
+        expect(m[1]).toBe('CQ_VERDICT_APP_KEY');
+      }
+      for (const [id, job] of jobs) {
+        if (id !== 'judge') expect(job, id).not.toMatch(/secrets\.|create-github-app-token/);
+      }
     },
   );
 

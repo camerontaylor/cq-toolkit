@@ -707,12 +707,14 @@ const toRestComment = (entry: unknown): RestComment | null => {
  *   - a failed/capped/unparseable REST read, or a REST entry that is not an
  *     object / has a malformed id, refuses too — an unverifiable snapshot is
  *     never trusted. NEVER throws.
+ * Exported because the read-only I2 acceptance check (acceptance.ts, the
+ * `cq/acceptance` judgment) runs the same cross-check before it judges.
  */
-const checkReviewDataLag = async (
+export async function checkReviewDataLag(
   deps: ForgeDeps,
   pr: number,
   snapshot: PrSnapshot,
-): Promise<string | null> => {
+): Promise<string | null> {
   const restReviews = await readRestCollection(deps, pr, 'reviews');
   if ('reason' in restReviews) return `review data lag: ${restReviews.reason}`;
   const restComments = await readRestCollection(deps, pr, 'comments');
@@ -769,7 +771,7 @@ const checkReviewDataLag = async (
     );
   }
   return traps.length === 0 ? null : `review data lag: ${traps.join('; ')}`;
-};
+}
 
 // -- the judgment -------------------------------------------------------------
 

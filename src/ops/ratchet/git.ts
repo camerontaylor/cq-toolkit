@@ -170,18 +170,33 @@ export function assertRepoRelPath(path: string, label = 'path'): void {
 interface RawResult {
   ok: boolean;
   timedOut: boolean;
+  /** The child's numeric exit code, or null when it did not exit normally (signal, spawn error). */
+  code: number | null;
   stdout: Buffer;
   stderr: string;
 }
 
 /** One hardened git call, never rejecting: the caller decides what a non-zero exit means. */
 function execGit(repo: string, args: readonly string[]): Promise<RawResult> {
+  return execGitWithEnv(repo, args, gitEnv());
+}
+
+/**
+ * {@link execGit} with an explicit child env. Private: the only caller that
+ * passes anything but {@link gitEnv} is {@link gitPushAtomic}, whose env is
+ * gitEnv() plus the step-scoped credential header.
+ */
+function execGitWithEnv(
+  repo: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): Promise<RawResult> {
   return new Promise((resolve) => {
     execFile(
       'git',
       ['-C', repo, ...GIT_HARDEN, ...args],
       {
-        env: gitEnv(),
+        env,
         encoding: 'buffer',
         maxBuffer: MAX_BUFFER,
         timeout: EXEC_TIMEOUT_MS,
@@ -190,7 +205,14 @@ function execGit(repo: string, args: readonly string[]): Promise<RawResult> {
       },
       (error, stdout, stderr) => {
         const timedOut = error !== null && (error as { killed?: unknown }).killed === true;
-        resolve({ ok: error === null, timedOut, stdout, stderr: stderr.toString('utf8') });
+        const rawCode = error === null ? 0 : (error as { code?: unknown }).code;
+        resolve({
+          ok: error === null,
+          timedOut,
+          code: typeof rawCode === 'number' ? rawCode : null,
+          stdout,
+          stderr: stderr.toString('utf8'),
+        });
       },
     );
   });
@@ -569,4 +591,329 @@ export async function extractTreeAttributeFree(
     await writeFile(target, content, { mode: 0o644, flag: 'wx' });
   }
   return { files: blobs.length, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Commit-graph reads and the atomic push (W1.10, the promotion gate — ADR-0004
+// D-K, methods note Decision 13). Same closed form as everything above:
+// argv arrays, GIT_HARDEN, the scrubbed env, revisions validated before
+// spawn, `--end-of-options` ahead of every revision. The gate reads the
+// queue tip only as git objects; nothing here checks out or runs its code.
+// ---------------------------------------------------------------------------
+
+/** Refuse anything but a 40-hex oid (the `^<oid>` exclusion form takes no ref names). */
+function assertOid(rev: string, label: string): void {
+  if (!OID.test(rev)) throw new Error(`ratchet git: ${label} must be a 40-hex oid, got '${rev}'`);
+}
+
+/** Parse newline-separated rev-list output lines into oid rows (each token validated). */
+function oidLines(out: Buffer, what: string): string[][] {
+  const rows: string[][] = [];
+  for (const line of out.toString('utf8').split('\n')) {
+    if (line === '') continue;
+    const tokens = line.split(' ');
+    for (const token of tokens) {
+      if (!OID.test(token))
+        throw new Error(`ratchet git: ${what} yielded a malformed oid '${token}'`);
+    }
+    rows.push(tokens);
+  }
+  return rows;
+}
+
+/**
+ * Whether `a` is an ancestor of (or equal to) `b` (`merge-base
+ * --is-ancestor`). Exit 1 is the answer "no"; any other failure (an unknown
+ * revision exits 128) throws.
+ */
+export async function gitIsAncestor(repo: string, a: string, b: string): Promise<boolean> {
+  assertRev(a, 'is-ancestor');
+  assertRev(b, 'is-ancestor');
+  const res = await execGit(repo, ['merge-base', '--is-ancestor', '--end-of-options', a, b]);
+  if (res.ok) return true;
+  if (res.timedOut) {
+    throw new Error(`ratchet git: merge-base --is-ancestor timed out after ${EXEC_TIMEOUT_MS}ms`);
+  }
+  if (res.code === 1) return false;
+  throw new Error(
+    `ratchet git: merge-base --is-ancestor failed: ${res.stderr.trim() || `exit ${String(res.code)}`}`,
+  );
+}
+
+/** One commit of a range with its parents, in rev-list order. */
+export interface RangeCommit {
+  sha: string;
+  parents: string[];
+}
+
+/**
+ * Every commit in `from..to` (reachable from `to`, not from `from`) with its
+ * parents, topologically ordered (`rev-list --parents --topo-order`). Both
+ * ends must be 40-hex oids: the exclusion is spelled `^<from>`, which only an
+ * oid can safely carry.
+ */
+export async function gitRangeCommits(
+  repo: string,
+  from: string,
+  to: string,
+): Promise<RangeCommit[]> {
+  assertOid(from, 'range from');
+  assertOid(to, 'range to');
+  const out = await runGit(repo, [
+    'rev-list',
+    '--parents',
+    '--topo-order',
+    '--end-of-options',
+    to,
+    `^${from}`,
+  ]);
+  return oidLines(out, 'rev-list --parents').map(([sha = '', ...parents]) => ({ sha, parents }));
+}
+
+/**
+ * The first-parent chain of `to`, newest first, down to (excluding) the first
+ * commit reachable from `from` (`rev-list --first-parent <to> ^<from>`).
+ * Both ends must be 40-hex oids.
+ */
+export async function gitFirstParentRange(
+  repo: string,
+  from: string,
+  to: string,
+): Promise<string[]> {
+  assertOid(from, 'first-parent from');
+  assertOid(to, 'first-parent to');
+  const out = await runGit(repo, [
+    'rev-list',
+    '--first-parent',
+    '--end-of-options',
+    to,
+    `^${from}`,
+  ]);
+  return oidLines(out, 'rev-list --first-parent').map((row) => {
+    if (row.length !== 1 || row[0] === undefined) {
+      throw new Error('ratchet git: rev-list --first-parent yielded a malformed line');
+    }
+    return row[0];
+  });
+}
+
+/** The 40-hex TREE oid of commit `commit` (`rev-parse --verify <commit>^{commit}^{tree}`). */
+export async function gitTreeOf(repo: string, commit: string): Promise<string> {
+  assertRev(commit, 'tree-of');
+  const out = await runGit(repo, [
+    'rev-parse',
+    '--verify',
+    '--end-of-options',
+    `${commit}^{commit}^{tree}`,
+  ]);
+  const oid = out.toString('utf8').trim();
+  if (!OID.test(oid)) throw new Error(`ratchet git: tree of ${commit} is not an oid ('${oid}')`);
+  return oid;
+}
+
+/**
+ * The tree a clean merge of `p1` and `p2` produces (`merge-tree --write-tree
+ * --no-messages`, the ort strategy; git >= 2.38), or null when the merge
+ * conflicts (exit 1 with a tree oid on stdout — exit 1 WITHOUT one is an
+ * unknown revision, which throws). Writes only loose tree/blob objects — no ref, index or
+ * working-tree change. Anything else throws, including an older git that
+ * lacks `--write-tree`: that version skew surfaces as a gate refusal (a false
+ * refusal, never a false pass — fail closed). Nothing beyond git's defaults
+ * is pinned, so the result is what the forge's own ort merge would produce.
+ */
+export async function gitMergeTreeClean(
+  repo: string,
+  p1: string,
+  p2: string,
+): Promise<string | null> {
+  assertRev(p1, 'merge-tree');
+  assertRev(p2, 'merge-tree');
+  const res = await execGit(repo, [
+    'merge-tree',
+    '--write-tree',
+    '--no-messages',
+    '--end-of-options',
+    p1,
+    p2,
+  ]);
+  if (res.timedOut) throw new Error(`ratchet git: merge-tree timed out after ${EXEC_TIMEOUT_MS}ms`);
+  // Exit 1 is shared by "conflicted" and "cannot merge that" (an unknown
+  // revision): only a conflict prints the (conflicted) tree oid first.
+  const first = res.stdout.toString('utf8').split('\n', 1)[0] ?? '';
+  if (!(res.ok || res.code === 1) || !OID.test(first)) {
+    throw new Error(
+      `ratchet git: merge-tree failed: ${res.stderr.trim() || `exit ${String(res.code)}`}`,
+    );
+  }
+  return res.ok ? first : null;
+}
+
+/** The only remote URL shapes a push may target: an https GitHub-style repo URL. */
+const PUSH_HTTPS_URL = /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+\.git$/;
+
+/** A push refspec: an exact oid onto a branch — never a `+` force, never a pattern. */
+const PUSH_REFSPEC = /^([0-9a-f]{40}):refs\/heads\/(.+)$/;
+
+/** Validate the push target: an https repo URL, or an absolute local path / `file:///` URL. */
+function assertPushUrl(url: string): void {
+  if (PUSH_HTTPS_URL.test(url)) return;
+  const local = url.startsWith('file:///') ? url.slice('file://'.length) : url;
+  // eslint-disable-next-line no-control-regex -- control characters are exactly what is refused
+  const safeLocal = local.startsWith('/') && !/[\u0000-\u001f\u007f]/.test(local);
+  if (!safeLocal) throw new Error(`ratchet git: refusing push url '${url}'`);
+}
+
+/** One ref update of {@link gitPushAtomic}: a refspec and the oid the remote ref must hold. */
+export interface LeasedUpdate {
+  /** `<40-hex>:refs/heads/<branch>` — never `+`, never a pattern. */
+  refspec: string;
+  /** The oid the remote branch must still hold for the update to land (its lease). */
+  expected: string;
+}
+
+/**
+ * The shared remote-credential plumbing of {@link gitPushAtomic} and
+ * {@link gitLsRemoteRef}: validate `url` and build the hardened child env
+ * with the token ONLY as a step-scoped `GIT_CONFIG_*` extra-header — never
+ * argv (visible in the process table), never `.git/config` (persisted).
+ * The same env resets any configured extra-header for that host
+ * (actions/checkout's persisted credential would otherwise ride along),
+ * empties `credential.helper` and `core.askPass` (both are programs) and
+ * drops GIT_ASKPASS/SSH_ASKPASS, so no program is asked for a secret. A
+ * local path or `file:///` URL (tests push to a local bare repo) carries no
+ * header. Returns the strings to redact from any child output.
+ */
+function gitRemoteEnv(url: string, token: string): { env: NodeJS.ProcessEnv; secrets: string[] } {
+  assertPushUrl(url);
+  const env = gitEnv();
+  delete env['GIT_ASKPASS'];
+  delete env['SSH_ASKPASS'];
+  const config: [string, string][] = [
+    ['credential.helper', ''],
+    ['core.askPass', ''],
+  ];
+  const secrets: string[] = [];
+  if (url.startsWith('https://')) {
+    if (token === '' || /[\r\n]/.test(token)) {
+      throw new Error('ratchet git: refusing an empty or multi-line push credential');
+    }
+    const origin = new URL(url).origin;
+    const basic = Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64');
+    secrets.push(token, basic);
+    config.push(
+      [`http.${origin}/.extraheader`, ''],
+      [`http.${origin}/.extraheader`, `AUTHORIZATION: basic ${basic}`],
+    );
+  }
+  env['GIT_CONFIG_COUNT'] = String(config.length);
+  for (const [index, [key, value]] of config.entries()) {
+    env[`GIT_CONFIG_KEY_${String(index)}`] = key;
+    env[`GIT_CONFIG_VALUE_${String(index)}`] = value;
+  }
+  return { env, secrets };
+}
+
+/** Redact every known secret form in `output` (the token and its basic-auth encoding). */
+function redactSecrets(output: string, secrets: readonly string[]): string {
+  let out = output;
+  for (const secret of secrets) out = out.split(secret).join('***');
+  return out;
+}
+
+/**
+ * The oid `url` currently serves for `refs/heads/<ref>`, or null when the
+ * remote lacks it: one hardened `ls-remote <url> refs/heads/<ref>` under
+ * the push credential. Same transport — and therefore the same view of the
+ * remote — as {@link gitPushAtomic}, so a caller can pin a ref it is NOT
+ * updating to the last state the push itself will race against (the gate's
+ * merge-queue pin, D-K.6).
+ */
+export async function gitLsRemoteRef(
+  repo: string,
+  url: string,
+  ref: string,
+  token: string,
+): Promise<string | null> {
+  const { env, secrets } = gitRemoteEnv(url, token);
+  const res = await execGitWithEnv(
+    repo,
+    ['ls-remote', '--end-of-options', url, `refs/heads/${ref}`],
+    env,
+  );
+  const output = redactSecrets(`${res.stdout.toString('utf8')}${res.stderr}`.trim(), secrets);
+  if (res.timedOut) {
+    throw new Error(`ratchet git: ls-remote timed out after ${EXEC_TIMEOUT_MS}ms`);
+  }
+  if (!res.ok || res.code !== 0) {
+    throw new Error(`ratchet git: ls-remote failed: ${output || `exit ${String(res.code)}`}`);
+  }
+  if (output === '') return null;
+  if (output.includes('\n')) {
+    throw new Error(`ratchet git: ls-remote matched multiple refs for '${ref}'`);
+  }
+  const oid = output.split('\t', 1)[0] ?? '';
+  if (!OID.test(oid)) {
+    throw new Error(`ratchet git: ls-remote returned no commit oid ('${output}')`);
+  }
+  return oid;
+}
+
+/**
+ * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
+ * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
+ * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
+ * Each lease names the exact oid the caller last read, so the remote ref
+ * must still hold it — a ref that advanced OR was rewound (even to an
+ * ancestor of the new value, which a plain fast-forward push would accept)
+ * refuses, and `--atomic` makes one refusal refuse every ref. A rejection or
+ * transport failure RESOLVES `{ ok: false, output }` (porcelain stdout +
+ * stderr); only invalid input throws, before anything is spawned.
+ *
+ * The credential travels ONLY through the child env (see
+ * {@link gitRemoteEnv}); the token (and its encoded form) is redacted from
+ * the output.
+ */
+export async function gitPushAtomic(
+  repo: string,
+  url: string,
+  updates: readonly LeasedUpdate[],
+  token: string,
+): Promise<{ ok: boolean; output: string }> {
+  if (updates.length === 0) throw new Error('ratchet git: refusing an empty push');
+  const leases: string[] = [];
+  const branches = new Set<string>();
+  for (const { refspec, expected } of updates) {
+    const match = PUSH_REFSPEC.exec(refspec);
+    const branch = match?.[2];
+    if (branch === undefined) throw new Error(`ratchet git: refusing push refspec '${refspec}'`);
+    assertRev(branch, 'push branch');
+    if (branches.has(branch))
+      throw new Error(`ratchet git: refusing a second update of '${branch}'`);
+    branches.add(branch);
+    if (!OID.test(expected)) {
+      throw new Error(
+        `ratchet git: refusing lease '${expected}' for '${branch}' (not a 40-hex oid)`,
+      );
+    }
+    leases.push(`--force-with-lease=refs/heads/${branch}:${expected}`);
+  }
+  const { env, secrets } = gitRemoteEnv(url, token);
+  const res = await execGitWithEnv(
+    repo,
+    [
+      'push',
+      '--atomic',
+      '--porcelain',
+      '--no-verify',
+      ...leases,
+      '--end-of-options',
+      url,
+      ...updates.map((u) => u.refspec),
+    ],
+    env,
+  );
+  let output = `${res.stdout.toString('utf8')}${res.stderr}`.trim();
+  if (res.timedOut) output = `${output}\npush timed out after ${EXEC_TIMEOUT_MS}ms`.trim();
+  output = redactSecrets(output, secrets);
+  return { ok: res.ok, output };
 }

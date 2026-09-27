@@ -4,8 +4,11 @@
     "^src/ops/gates/",
     "^src/ops/ratchet/",
     "^src/ops/merge/classify",
-    "^src/selfhost/(?:merge-recheck|settle-state|candidates)\\.ts$",
+    "^src/selfhost/(?:merge-recheck|settle-state|state-branch|candidates|acceptance|promote-gate)\\.ts$",
+    "^src/ops/review/(?:gh|threads)\\.ts$",
     "^scripts/ratchet-[^/]+\\.mjs$",
+    "^scripts/(?:github-settings-drift|render-templates)\\.mjs$",
+    "^scripts/lib/(?:github-settings|render-templates)\\.mjs$",
     "^scripts/denylist-scan$"
   ],
   "requiredChecks": ["static", "denylist", "ratchet"]

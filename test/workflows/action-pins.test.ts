@@ -1,7 +1,7 @@
 // Slice C — the action-pinning policy, mechanically enforced:
 //   1. EVERY `uses:` across every generated workflow (all *.yml and *.yaml
 //      under .github/workflows/ — GitHub executes both extensions) and the
-//      eight template files under
+//      template files under
 //      policy/templates/ must be pinned to an immutable commit SHA —
 //      exactly 40 lowercase hex chars after the LAST `@` of the ref.
 //      A mutable tag (`@v5`) can be retargeted after review; a SHA cannot.
@@ -30,6 +30,9 @@ const TEMPLATE_FILES = [
   'policy/templates/cq-verify.yml',
   'policy/templates/cq-signal.yml',
   'policy/templates/cq-policy.yml',
+  'policy/templates/cq-accept.yml',
+  'policy/templates/gate.yml',
+  'policy/templates/settings-drift.yml',
   'policy/templates/ratchet.yml',
   'policy/templates/ratchet-propose.yml',
   'policy/templates/ratchet-propose-measure.yml',

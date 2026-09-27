@@ -1513,17 +1513,10 @@ describe('the repository workflows', () => {
     for (const j of scan.jobs.values()) expect(j.privileged).toBe(false);
   });
 
-  test('only cq-verify.yml trips the lint (base-owned fetch job; reported, not changed)', () => {
-    for (const f of files.filter((name) => name !== 'cq-verify.yml')) {
+  test('every repository workflow lints clean (W1.10 scoped the cq-verify fetch credential)', () => {
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
       expect([f, lintWorkflow(`.github/workflows/${f}`, ok(read(f)))]).toEqual([f, []]);
     }
-    expect(
-      lintWorkflow('.github/workflows/cq-verify.yml', ok(read('cq-verify.yml'))).map(
-        (f) => f.reason,
-      ),
-    ).toEqual([
-      'job fetch sets persist-credentials: true and has run: steps',
-      'workflow_run job fetch checkout #1 lacks persist-credentials: false and the job has run: steps',
-    ]);
   });
 });

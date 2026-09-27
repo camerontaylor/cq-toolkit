@@ -1,23 +1,30 @@
 # Template: merge-queue-gate — promotes checked merge-queue commits to main
 # by pure fast-forward (I3). Runs on every push to merge-queue; waits until
-# every required check named in {{GATE_CHECKS}} has SUCCEEDED on the gated
+# every required check on the gate's wait list has SUCCEEDED on the gated
 # commit (never promotes unchecked, never promotes a failure), then
-# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). This workflow is the
-# ONLY component that advances main. See policy/templates/README.md for the
-# token table and the entitlement facts.
+# ff-pushes it to main behind a merge-queue-tip guard and two merge-base guards (a skipped or missing required check is never a pass). See
+# policy/templates/README.md for the token table and the entitlement facts.
 #
-# Instantiate:
-#   {{PROMOTE_SECRET}}  -> NAME of the repo secret holding a PAT with
-#                          contents:write. It is used for the checkout
-#                          remote (so the ff-push below uses it —
-#                          GITHUB_TOKEN pushes do not trigger the
-#                          on:push:main sync workflow) and, as GH_TOKEN,
-#                          for the check-runs API wait (GITHUB_TOKEN with
-#                          contents:read also works for that wait alone).
-#   {{GATE_CHECKS}}     -> comma list of required check names, e.g.
-#                          static,denylist
-#   {{GATE_TIMEOUT_MIN}} -> minutes to wait for the checks before refusing
-#                          (default 20)
+# RETIRES AT C2 (W1.10; ADR-0004 D-H.3.1): during C1 this gate runs
+# ALONGSIDE cq-gate (gate.yml, the P1 promotion job); the two are the only
+# components that advance main, and both promote with an atomic
+# compare-and-swap push, so running both is race-safe (RS-4 T-20). It reads
+# the repository-level PROMOTE_SECRET: once the owner moves that secret into
+# environment `promote`, this gate fails closed and cq-gate carries every
+# promotion. C2 deletes this file.
+#
+# Instantiate (each token below is written in double braces in the body):
+#   PROMOTE_SECRET   -> NAME of the repo secret holding a PAT with
+#                       contents:write. It is used for the checkout
+#                       remote (so the ff-push below uses it —
+#                       GITHUB_TOKEN pushes do not trigger the
+#                       on:push:main sync workflow) and, as GH_TOKEN,
+#                       for the check-runs API wait (GITHUB_TOKEN with
+#                       contents:read also works for that wait alone).
+#   GATE_CHECKS      -> the gate's wait list: comma list of required check
+#                       names, e.g. static,denylist
+#   GATE_TIMEOUT_MIN -> minutes to wait for the checks before refusing
+#                       (default 20)
 # No ${{ }} expression is ever interpolated into a run: script in this
 # workflow — inputs reach scripts through env: indirection only. Drop the
 # result into .github/workflows/. Edit the template, not the instantiation.
@@ -44,6 +51,15 @@ concurrency:
 
 jobs:
   gate:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file —
+    # with the promote credential one job lower. Push events only ever fire
+    # this file from `merge-queue` (the trigger's branch filter), so the
+    # guard admits them regardless of the ref expression.
+    if: >-
+      github.event_name == 'push' ||
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     steps:
       # The gated sha reaches the script via env: indirection — never a
@@ -70,8 +86,11 @@ jobs:
           GH_TOKEN: ${{ secrets.{{PROMOTE_SECRET}} }}
         run: |
           set -euo pipefail
+          # EVERY required check belongs on this wait list (README
+          # "How instantiation works" step 4): a required check missing here
+          # lets the gate fast-forward main while it is pending or failed.
           checks="$(echo '{{GATE_CHECKS}}' | tr -d ' ' | tr ',' ' ')"
-          # Fail closed on an empty {{GATE_CHECKS}}: an empty list would run
+          # Fail closed on an empty gate wait list: an empty list would run
           # the wait loop zero times and promote with NO check validated.
           if [ -z "${checks// /}" ]; then
             echo "refusing: GATE_CHECKS is empty — the gate would promote with zero checks validated"
