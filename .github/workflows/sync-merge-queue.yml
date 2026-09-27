@@ -26,15 +26,26 @@
 # workflows, so its checks would never run. The job runs in environment
 # `automation` (main-only branch policy).
 #
+# Interim fallback (W1.10 fix round): the automation credential is REQUIRED.
+# `PROMOTE_TOKEN` is used only while the explicit opt-in variable
+# `CQ_AUTOMATION_INTERIM_FALLBACK` is non-empty — an unset automation secret alone
+# never silently promotes the interim PAT into the automation identity.
+#
 # Instantiate (each token below is written in double braces in the body):
 #   AUTOMATION_SECRET -> NAME of the secret holding the automation
 #                        credential (Pull requests read/write, Contents
 #                        read), e.g. CQ_AUTOMATION_TOKEN in `automation`.
 #   INTERIM_SECRET    -> NAME of the secret used when AUTOMATION_SECRET is
-#                        empty (the interim fallback until the automation
-#                        credential is provisioned), e.g. PROMOTE_TOKEN.
+#                        empty AND the opt-in below is set (the interim
+#                        fallback until the automation credential is
+#                        provisioned), e.g. PROMOTE_TOKEN.
 #                        Set it to the same name as AUTOMATION_SECRET to
 #                        have no fallback.
+#   INTERIM_FALLBACK  -> NAME of the repo VARIABLE that arms the interim
+#                        fallback when non-empty, e.g.
+#                        CQ_AUTOMATION_INTERIM_FALLBACK. Unset/empty means
+#                        no fallback: the sync PR then refuses with
+#                        "sync not armed" until AUTOMATION_SECRET exists.
 # Instantiated files reference both as `${{ secrets.<name> }}` — names,
 # never values. Drop the result into .github/workflows/. Edit the template,
 # not the instantiation.
@@ -55,6 +66,15 @@ concurrency:
 
 jobs:
   sync:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file.
+    # Push events only ever fire this file from the default branch (the
+    # trigger's branch filter), so the guard admits them regardless of the
+    # ref expression.
+    if: >-
+      github.event_name == 'push' ||
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: automation
@@ -66,7 +86,7 @@ jobs:
       - name: Triage main vs merge-queue (API only, zero clone)
         env:
           GH_TOKEN: ${{ github.token }}
-          AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN || secrets.PROMOTE_TOKEN }}
+          AUTOMATION_TOKEN: ${{ secrets.CQ_AUTOMATION_TOKEN || (vars.CQ_AUTOMATION_INTERIM_FALLBACK != '' && secrets.PROMOTE_TOKEN || '') }}
           REPO_ID: ${{ github.repository_id }}
         run: |
           set -euo pipefail
@@ -100,7 +120,7 @@ jobs:
 
           open_sync_pr() {
             if [ -z "${AUTOMATION_TOKEN}" ]; then
-              echo "sync not armed: no automation credential — set the automation secret (or the interim fallback) in environment automation"
+              echo "sync not armed: no automation credential — set the automation secret in environment automation (the interim fallback additionally needs a non-empty CQ_AUTOMATION_INTERIM_FALLBACK variable and the interim secret present)"
               exit 1
             fi
             # Reuse an open same-repo sync PR (head main, base merge-queue):

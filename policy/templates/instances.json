@@ -39,7 +39,8 @@
       "template": "init-merge-queue.yml",
       "tokens": {
         "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
-        "INTERIM_SECRET": "PROMOTE_TOKEN"
+        "INTERIM_SECRET": "PROMOTE_TOKEN",
+        "INTERIM_FALLBACK": "CQ_AUTOMATION_INTERIM_FALLBACK"
       }
     },
     {
@@ -98,7 +99,8 @@
       "template": "sync-merge-queue.yml",
       "tokens": {
         "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
-        "INTERIM_SECRET": "PROMOTE_TOKEN"
+        "INTERIM_SECRET": "PROMOTE_TOKEN",
+        "INTERIM_FALLBACK": "CQ_AUTOMATION_INTERIM_FALLBACK"
       }
     }
   ],

@@ -27,6 +27,7 @@ import type { GhFn, GhResult } from '../../src/ops/review/gh.js';
 import type { AcceptanceInput, AcceptanceResult } from '../../src/selfhost/acceptance.js';
 import {
   POLL_MS,
+  QUEUE_BRANCH,
   checkClosure,
   checkVerifiedRun,
   mainWith,
@@ -226,7 +227,11 @@ describe('selectVerdict (app-id mode)', () => {
   test("another app's newer success is ignored; the numeric id decides, never the slug", () => {
     const rows = [
       run({ conclusion: 'failure' }),
-      run({ id: 2, app: { id: 501, slug: 'cq-verdict' }, completed_at: '2026-09-02T00:00:00Z' }),
+      run({
+        id: 2,
+        app: { id: 501, slug: 'cq-verdict' },
+        completed_at: '2026-09-02T00:00:00Z',
+      }),
     ];
     expect(selectVerdict(rows, appWant).state).toBe('failure');
     expect(selectVerdict([run({ app: { id: '500', slug: 'cq-verdict' } })], appWant).state).toBe(
@@ -242,12 +247,30 @@ describe('selectVerdict (app-id mode)', () => {
 
   test('newest valid wins (completed_at, tie → higher id); failure newest → failure', () => {
     const older = run({ id: 5, completed_at: '2026-09-01T00:00:00Z' });
-    const newerFail = run({ id: 3, conclusion: 'failure', completed_at: '2026-09-03T00:00:00Z' });
+    const newerFail = run({
+      id: 3,
+      conclusion: 'failure',
+      completed_at: '2026-09-03T00:00:00Z',
+    });
     expect(selectVerdict([older, newerFail], appWant).state).toBe('failure');
-    const tieFail = run({ id: 9, conclusion: 'neutral', completed_at: '2026-09-01T00:00:00Z' });
-    expect(selectVerdict([older, tieFail], appWant)).toMatchObject({ state: 'failure', winner: 9 });
-    const tieOk = run({ id: 2, conclusion: 'failure', completed_at: '2026-09-01T00:00:00Z' });
-    expect(selectVerdict([tieOk, older], appWant)).toMatchObject({ state: 'success', winner: 5 });
+    const tieFail = run({
+      id: 9,
+      conclusion: 'neutral',
+      completed_at: '2026-09-01T00:00:00Z',
+    });
+    expect(selectVerdict([older, tieFail], appWant)).toMatchObject({
+      state: 'failure',
+      winner: 9,
+    });
+    const tieOk = run({
+      id: 2,
+      conclusion: 'failure',
+      completed_at: '2026-09-01T00:00:00Z',
+    });
+    expect(selectVerdict([tieOk, older], appWant)).toMatchObject({
+      state: 'success',
+      winner: 5,
+    });
   });
 
   test('wrong head_sha is ignored; a running bound row is pending', () => {
@@ -293,7 +316,12 @@ describe('selectVerdict (interim mode)', () => {
       selectVerdict([run({ app: { slug: 'github-actions' }, head_sha: MAIN })], want(true)).state,
     ).toBe('missing');
     const other = selectVerdict(
-      [run({ app: { slug: 'github-actions' }, external_id: `${sha('1')}:${TIP}` })],
+      [
+        run({
+          app: { slug: 'github-actions' },
+          external_id: `${sha('1')}:${TIP}`,
+        }),
+      ],
       want(true),
     );
     expect(other.state).toBe('missing');
@@ -474,7 +502,11 @@ interface World {
   onCheckRuns?: (n: number) => void;
 }
 
-const ok = (value: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(value), stderr: '' });
+const ok = (value: unknown): GhResult => ({
+  code: 0,
+  stdout: JSON.stringify(value),
+  stderr: '',
+});
 
 function fakeGh(world: World, calls: string[][]): GhFn {
   let checkReads = 0;
@@ -483,7 +515,11 @@ function fakeGh(world: World, calls: string[][]): GhFn {
     const path = args[0] === 'api' && args[1] === '-X' ? (args[3] ?? '') : (args[1] ?? '');
     const q = path.split('?')[0] ?? '';
     if (args[2] === 'POST' && q.endsWith('/actions/workflows/cq-verify.yml/dispatches')) {
-      return Promise.resolve({ code: world.dispatchCode, stdout: '', stderr: 'boom' });
+      return Promise.resolve({
+        code: world.dispatchCode,
+        stdout: '',
+        stderr: 'boom',
+      });
     }
     if (q === 'repos/o/r/git/ref/heads/merge-queue') {
       return Promise.resolve(ok({ object: { sha: world.tip, type: 'commit' } }));
@@ -609,6 +645,8 @@ function fakeGit(over: Partial<GateGit> = {}): GateGit {
     firstParentRange: () => Promise.resolve([M1]),
     treeOf: () => Promise.resolve(sha('4')),
     mergeTreeClean: () => Promise.resolve(sha('4')),
+    // The pre-push queue re-read: the fake world's remote still serves the tip.
+    lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? M1 : null),
     pushAtomic: () => Promise.resolve({ ok: true, output: '' }),
     ...over,
   };
@@ -947,7 +985,10 @@ describe('runGate', () => {
       reads += 1;
       if (reads === 1) return res;
       // The recheck read: the same row, now concluded failure.
-      return { ...res, stdout: res.stdout.replaceAll('"success"', '"failure"') };
+      return {
+        ...res,
+        stdout: res.stdout.replaceAll('"success"', '"failure"'),
+      };
     };
     h.deps.git = fakeGit({
       pushAtomic: () => {
@@ -966,7 +1007,9 @@ describe('runGate', () => {
   });
 
   test('policy needs-human refuses (break-glass), with the override still logged', async () => {
-    const h = harness(world(), { policyDiff: () => Promise.resolve(policyOutcome('needs-human')) });
+    const h = harness(world(), {
+      policyDiff: () => Promise.resolve(policyOutcome('needs-human')),
+    });
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
     expect(r.report.at(-1)).toMatch(
@@ -981,7 +1024,9 @@ describe('runGate', () => {
 
   test('a failure verdict refuses immediately (no wait)', async () => {
     const h = harness(
-      world(M1, MAIN, { checkRuns: [[verdictRow(M1, MAIN, { conclusion: 'failure' })]] }),
+      world(M1, MAIN, {
+        checkRuns: [[verdictRow(M1, MAIN, { conclusion: 'failure' })]],
+      }),
     );
     const r = await runGate(h.deps, cfg());
     expect(r.verdict).toBe('refused');
@@ -994,7 +1039,11 @@ describe('runGate', () => {
       checkRuns: [[verdictRow(M1, sha('1'))]],
       measureRuns: [
         { ...greenRun('cq-measure.yml', M1), id: 555 },
-        { ...greenRun('cq-measure.yml', M1), id: 556, path: '.github/workflows/evil.yml' },
+        {
+          ...greenRun('cq-measure.yml', M1),
+          id: 556,
+          path: '.github/workflows/evil.yml',
+        },
       ],
     });
     w.onCheckRuns = (n) => {
@@ -1033,7 +1082,9 @@ describe('runGate', () => {
   });
 
   test('timeout refuses', async () => {
-    const w = world(M1, MAIN, { checkRuns: [[verdictRow(M1, MAIN, { status: 'in_progress' })]] });
+    const w = world(M1, MAIN, {
+      checkRuns: [[verdictRow(M1, MAIN, { status: 'in_progress' })]],
+    });
     const h = harness(w);
     const r = await runGate(h.deps, cfg({ timeoutMin: 2 }));
     expect(r.verdict).toBe('refused');
@@ -1115,7 +1166,7 @@ describe('runGate', () => {
     expect(h.sleeps).toEqual([POLL_MS]);
   });
 
-  test('the push is leased on the (main, tip) read at step 1', async () => {
+  test('the push leases main on the step-1 read and omits the equal-OID merge-queue refspec (D-K.6)', async () => {
     const h = harness(world());
     const seen: unknown[] = [];
     h.deps.git = fakeGit({
@@ -1126,13 +1177,34 @@ describe('runGate', () => {
     });
     const r = await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
     expect(r.verdict).toBe('promoted');
+    // The pre-push ls-remote still shows the queue at the tip (the normal
+    // case), so ONLY main is sent — by construction, not by git's
+    // equal-OID skip.
+    expect(seen).toEqual([
+      {
+        updates: [{ refspec: `${M1}:refs/heads/main`, expected: MAIN }],
+        token: 't',
+      },
+    ]);
+  });
+
+  test('a queue that moved before the push adds its refspec as a pure lease', async () => {
+    const h = harness(world());
+    const seen: unknown[] = [];
+    h.deps.git = fakeGit({
+      lsRemoteRef: (_repo, _url, ref) => Promise.resolve(ref === QUEUE_BRANCH ? H1 : null), // the queue is elsewhere now
+      pushAtomic: (_repo, _url, updates, _token) => {
+        seen.push({ updates });
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    await runGate(h.deps, cfg({ push: true, pushToken: 't' }));
     expect(seen).toEqual([
       {
         updates: [
           { refspec: `${M1}:refs/heads/main`, expected: MAIN },
           { refspec: `${M1}:refs/heads/merge-queue`, expected: M1 },
         ],
-        token: 't',
       },
     ]);
   });
@@ -1228,15 +1300,21 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     return w;
   }
 
-  test('promotes tip onto main and merge-queue atomically', async () => {
+  test('promotes tip onto main with the queue pinned at the tip by the step-1 read', async () => {
     const { trust, remote, main, head, tip } = setup('ok');
     const h = harness(prWorld(tip, main, head));
     h.deps.git = realGateGit;
     const r = await runGate(
       h.deps,
-      cfg({ repo: trust, trustRef: main, push: true, pushToken: 'tok', remoteUrl: remote }),
+      cfg({
+        repo: trust,
+        trustRef: main,
+        push: true,
+        pushToken: 'tok',
+        remoteUrl: remote,
+      }),
     );
-    expect(r.report.at(-1)).toBe(`push: main and merge-queue at ${tip}`);
+    expect(r.report.at(-1)).toBe(`push: main at ${tip} (merge-queue was read at ${tip})`);
     expect(r.verdict).toBe('promoted');
     expect(git(remote, ['rev-parse', 'main'])).toBe(tip);
     expect(git(remote, ['rev-parse', 'merge-queue'])).toBe(tip);
@@ -1246,22 +1324,31 @@ describe('runGate — real git, promoted to a local bare remote', { timeout: 180
     ]);
   });
 
-  test('a queue rewound to an ancestor during the wait is refused; main unchanged', async () => {
+  test('a queue rewound to an ancestor before the push is refused; main unchanged', async () => {
     const { trust, remote, main, head, tip } = setup('rewind');
     const h = harness(prWorld(tip, main, head));
     // Break-glass rewinds merge-queue to the PR head (an ancestor of the
-    // tip) after the gate's step-1 read, just before its push. A plain
-    // fast-forward push would re-promote the dropped merge.
+    // tip) after the gate's step-1 read, observed by the pre-push ls-remote
+    // (the same transport the push uses). The push then carries the queue
+    // refspec as a pure lease at the tip: git refuses it against the rewound
+    // ref, and --atomic refuses main with it — a dropped merge is never
+    // silently re-promoted.
     h.deps.git = {
       ...realGateGit,
-      pushAtomic: (repo, url, updates, token) => {
+      lsRemoteRef: (repo, url, ref, token) => {
         git(remote, ['update-ref', 'refs/heads/merge-queue', head]);
-        return realGateGit.pushAtomic(repo, url, updates, token);
+        return realGateGit.lsRemoteRef(repo, url, ref, token);
       },
     };
     const r = await runGate(
       h.deps,
-      cfg({ repo: trust, trustRef: main, push: true, pushToken: 'tok', remoteUrl: remote }),
+      cfg({
+        repo: trust,
+        trustRef: main,
+        push: true,
+        pushToken: 'tok',
+        remoteUrl: remote,
+      }),
     );
     expect(r.verdict).toBe('refused');
     expect(r.report.at(-1)).toMatch(/atomic leased push was rejected/);
@@ -1320,7 +1407,10 @@ describe('mainWith (the CLI seam)', () => {
     }
     expect(h.lines).toHaveLength(1);
     expect(h.lines[0]).not.toContain(TOKEN);
-    const out = JSON.parse(h.lines[0] ?? '') as { status: string; value: { verdict: string } };
+    const out = JSON.parse(h.lines[0] ?? '') as {
+      status: string;
+      value: { verdict: string };
+    };
     expect(out.status).toBe('ok');
     expect(out.value.verdict).toBe('refused');
   });

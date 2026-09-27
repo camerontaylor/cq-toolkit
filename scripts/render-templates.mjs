@@ -35,24 +35,20 @@ if (process.argv.length !== 3 || (mode !== '--check' && mode !== '--write')) {
 
 const { errors, results } = collectRenders(ROOT);
 const problems = [...errors];
+// No write follows a symlink (a link here could point anywhere). Module
+// scope: the write loop below re-lstats each destination immediately
+// before writing it.
+const kind = (path) => {
+  try {
+    const st = lstatSync(path);
+    return st.isSymbolicLink() ? 'link' : st.isFile() ? 'file' : st.isDirectory() ? 'dir' : 'other';
+  } catch (error) {
+    if (error?.code === 'ENOENT') return 'absent';
+    throw error;
+  }
+};
 if (mode === '--write') {
   const blockers = writeBlockers(errors, results);
-  // No write follows a symlink (a link here could point anywhere).
-  const kind = (path) => {
-    try {
-      const st = lstatSync(path);
-      return st.isSymbolicLink()
-        ? 'link'
-        : st.isFile()
-          ? 'file'
-          : st.isDirectory()
-            ? 'dir'
-            : 'other';
-    } catch (error) {
-      if (error?.code === 'ENOENT') return 'absent';
-      throw error;
-    }
-  };
   for (const dir of ['.github', WORKFLOWS_DIR]) {
     if (kind(join(ROOT, dir)) !== 'dir') blockers.push(`${dir} is not a plain directory`);
   }
@@ -75,8 +71,19 @@ for (const { workflow, template, expected, actual } of results) {
   if (expected === null) continue;
   if (mode === '--write') {
     if (expected !== actual) {
+      // Re-lstat immediately before the write: the check loop above can be
+      // stale by the time this runs, and writeFileSync would follow a link
+      // swapped in between. No write follows a symlink, ever.
+      const k = kind(join(ROOT, WORKFLOWS_DIR, workflow));
+      if (k !== 'file' && k !== 'absent') {
+        console.error(
+          `render-templates: ${WORKFLOWS_DIR}/${workflow} exists as a ${k}, not a regular file`,
+        );
+        console.error('render-templates: --write refused: fix the table first');
+        process.exit(1);
+      }
       // A new instance is created exclusively ('wx'); an existing one was
-      // checked to be a regular file above.
+      // just re-verified to be a regular file.
       writeFileSync(join(ROOT, WORKFLOWS_DIR, workflow), expected, {
         flag: actual === null ? 'wx' : 'w',
       });

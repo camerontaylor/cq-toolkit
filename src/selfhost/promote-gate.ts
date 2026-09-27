@@ -61,10 +61,13 @@
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
 //      not catch it; any change refuses), then one no-wait re-read of steps
-//      8–9 (pass 2 can itself take minutes), then `push --atomic` of tip onto
-//      main and merge-queue, leased on the (main, tip) read at step 1 — one
-//      `--force-with-lease=<ref>:<oid>` per ref, never a plain force. A queue or main that moved (advanced OR
-//      rewound) since step 1 fails its lease, and --atomic refuses both.
+//      8–9 (pass 2 can itself take minutes), then `push --atomic` of tip
+//      onto main — leased on the (main, tip) read at step 1, never a plain
+//      force. One `ls-remote` right before the push re-reads the queue on
+//      the push's own transport: still the tip (the normal case) → only
+//      main is sent (D-K.6 by construction); moved → the merge-queue
+//      refspec rides along as a pure lease whose failure refuses the whole
+//      push, so a break-glass rewind is never re-promoted.
 import { pathToFileURL } from 'node:url';
 import type { OpResult } from '../kernel/types.js';
 import {
@@ -81,6 +84,7 @@ import {
 import {
   gitFirstParentRange,
   gitIsAncestor,
+  gitLsRemoteRef,
   gitMergeTreeClean,
   gitPushAtomic,
   gitRangeCommits,
@@ -444,7 +448,11 @@ export function selectVerdict(rows: readonly unknown[], want: VerdictWant): Verd
     const id = asInt(winner['id']);
     const conclusion = clean(asString(winner['conclusion']));
     lines.push(`winner: check run ${String(id)} conclusion ${conclusion || '(none)'}`);
-    return { state: conclusion === 'success' ? 'success' : 'failure', winner: id, lines };
+    return {
+      state: conclusion === 'success' ? 'success' : 'failure',
+      winner: id,
+      lines,
+    };
   }
   if (running.length > 0) return { state: 'pending', winner: null, lines };
   lines.push(`no ${VERDICT_CHECK} verdict bound to ${binding}`);
@@ -521,7 +529,10 @@ export function checkVerifiedRun(
     const steps = job['steps'];
     if (!Array.isArray(steps) || steps.length === 0) return fail(`job '${name}' has no steps`);
   }
-  return { state: 'success', reason: `run ${id}: ${String(jobs.length)} job(s) green` };
+  return {
+    state: 'success',
+    reason: `run ${id}: ${String(jobs.length)} job(s) green`,
+  };
 }
 
 // -- the orchestrator ------------------------------------------------------------
@@ -534,6 +545,7 @@ export interface GateGit {
   firstParentRange(repo: string, from: string, to: string): Promise<string[]>;
   treeOf(repo: string, commit: string): Promise<string>;
   mergeTreeClean(repo: string, p1: string, p2: string): Promise<string | null>;
+  lsRemoteRef(repo: string, url: string, ref: string, token: string): Promise<string | null>;
   pushAtomic(
     repo: string,
     url: string,
@@ -550,6 +562,7 @@ export const realGateGit: GateGit = {
   firstParentRange: gitFirstParentRange,
   treeOf: gitTreeOf,
   mergeTreeClean: gitMergeTreeClean,
+  lsRemoteRef: gitLsRemoteRef,
   pushAtomic: gitPushAtomic,
 };
 
@@ -812,25 +825,33 @@ async function gateBody(
     report.push('push: dry run (no --push)');
     return { verdict: 'would-promote' };
   }
-  if (cfg.pushToken === null) refuse('push: no push credential');
-  // The leases are the step-1 reads: main must still be `main` and the
-  // queue still `tip` (the queue update is a pure lease check).
-  const pushed = await git.pushAtomic(
-    cfg.repo,
-    cfg.remoteUrl,
-    [
-      { refspec: `${tip}:refs/heads/${MAIN_BRANCH}`, expected: main },
-      { refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`, expected: tip },
-    ],
-    cfg.pushToken ?? '',
-  );
+  const pushToken = cfg.pushToken;
+  if (pushToken === null) refuse('push: no push credential');
+  // The main lease is the step-1 read: main must still be `main`. The last
+  // pre-push observation, on the same transport the push uses, is the queue
+  // ref as the remote serves it NOW. Still the tip — the normal case, which
+  // step 1 pinned the local mirror to — ONLY main is sent (D-K.6 by
+  // construction, not by git's equal-OID skip). Moved — an advance, or a
+  // break-glass rewind to an ancestor — the merge-queue refspec rides along
+  // as a pure lease: leased at the tip it can never land, and --atomic
+  // refuses main with it, so a rewound queue is never re-promoted and an
+  // advanced one makes the next sweep retry from fresh reads.
+  const queueNow = await git.lsRemoteRef(cfg.repo, cfg.remoteUrl, QUEUE_BRANCH, pushToken);
+  const updates: LeasedUpdate[] = [{ refspec: `${tip}:refs/heads/${MAIN_BRANCH}`, expected: main }];
+  if (queueNow !== tip) {
+    updates.push({
+      refspec: `${tip}:refs/heads/${QUEUE_BRANCH}`,
+      expected: tip,
+    });
+  }
+  const pushed = await git.pushAtomic(cfg.repo, cfg.remoteUrl, updates, pushToken);
   if (!pushed.ok) {
     report.push(...pushed.output.split('\n').map((line) => `  push: ${clean(line)}`));
     refuse(
       'push: the atomic leased push was rejected (main or the queue moved since the read); next sweep retries',
     );
   }
-  report.push(`push: main and ${QUEUE_BRANCH} at ${tip}`);
+  report.push(`push: main at ${tip} (${QUEUE_BRANCH} was read at ${tip})`);
   return { verdict: 'promoted' };
 }
 
@@ -979,12 +1000,20 @@ async function awaitVerdicts(
       const runsPath = `${repoPath}/actions/workflows/${file}/runs?head_sha=${tip}&event=push&branch=${QUEUE_BRANCH}&per_page=100`;
       const runs = pagesOf(await getSlurp(runsPath), 'workflow_runs', runsPath).map(asRecord);
       const newest = [...runs].sort(newestFirst('created_at'))[0] ?? null;
-      let check = checkVerifiedRun(newest, null, { file, tip, repositoryId: cfg.repositoryId });
+      let check = checkVerifiedRun(newest, null, {
+        file,
+        tip,
+        repositoryId: cfg.repositoryId,
+      });
       if (check.state === 'pending' && newest !== null && newest['status'] === 'completed') {
         const id = asInt(newest['id']);
         const jobsPath = `${repoPath}/actions/runs/${String(id)}/jobs?per_page=100`;
         const jobs = pagesOf(await getSlurp(jobsPath), 'jobs', jobsPath);
-        check = checkVerifiedRun(newest, jobs, { file, tip, repositoryId: cfg.repositoryId });
+        check = checkVerifiedRun(newest, jobs, {
+          file,
+          tip,
+          repositoryId: cfg.repositoryId,
+        });
       }
       lines.push(`verified ${file}: ${check.state} — ${check.reason}`);
       if (check.state === 'failure') {
@@ -1042,7 +1071,10 @@ async function dispatchVerify(
       .sort(newestFirst('created_at'));
     const measureId = asInt(runs[0]?.['id']);
     if (measureId === null)
-      return { dispatched: false, line: 'waiting (no completed cq-measure push run on tip)' };
+      return {
+        dispatched: false,
+        line: 'waiting (no completed cq-measure push run on tip)',
+      };
     const res = await deps.gh([
       'api',
       '-X',

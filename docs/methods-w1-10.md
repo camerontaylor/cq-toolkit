@@ -177,11 +177,15 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     - `--end-of-options`.
 
     The push credential travels in a step-scoped `GIT_CONFIG_*` extra-header, never in argv or
-    `.git/config`. The push is a real compare-and-swap: `--atomic` with one
-    `--force-with-lease=refs/heads/<ref>:<oid>` per ref, leased on the `main` and `tip` the
-    gate read at step 1, and never a plain force. A non-forced push would accept a ref that
-    was rewound to an ancestor during the wait (break-glass dropping a merge) and quietly
-    fast-forward it back.
+    `.git/config`. The push is a real compare-and-swap: `--atomic` with an explicit
+    `--force-with-lease=refs/heads/main:<oid>` leased on the `main` the gate read at step 1, and
+    never a plain force. Only `main` is sent (D-K.6 holds by construction, not by git's
+    equal-OID skip): the merge-queue refspec the earlier form also sent could never update the
+    queue — step 1 refuses unless the local mirror already held the tip, so it was either an
+    equal-OID no-op or a lease that failed the push — and is omitted outright. A queue that
+    advances during the waits is promoted by the next sweep; the tip pushed here is an ancestor
+    of any queue that grew from it. A non-forced push would accept a ref that was rewound to an
+    ancestor during the wait (break-glass dropping a merge) and quietly fast-forward it back.
 
 14. **Protected paths (#220, W1.8).** `^src/ops/ratchet/` was already in the trust ref's
     `policy/protected-paths.json`. W1.10 adds the new check-code paths (`promote-gate.ts`,
@@ -199,8 +203,55 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     a missing `nonTemplated` workflow still blocks. Table names must be plain file names
     (no `..`).
 
+## The C3 checklist (owner cutover: activate D11 records)
+
+Until C3 the gate cannot honour a D11 override: `policyDiff` is called without
+`settleRef`/`ownerId`, so every override record evaluates invalid, and
+`logOverrides` hard-codes `attested: false`. C3 is done only when ALL of:
+
+- [ ] the D11 attestation lands (the ledger epoch the checks arm against);
+- [ ] `settleRef` and `ownerId` are wired into the gate's `policyDiff` call and
+      into `logOverrides`, so **the gate honours a valid override record**
+      (a record that today only logs as `invalid` becomes decisive — never
+      merely "the label is active");
+- [ ] the D-G.4 review-form record and the gate's per-PR authorization (the
+      `M^1..M^2` range for a merged PR) evaluate;
+- [ ] the promoter credential needs no `actions: write`: `decide`'s only
+      dispatch (`cq-verify`) runs on its own `GITHUB_TOKEN`, restricted to the
+      default ref (pinned by `test/workflows/default-ref-guards.test.ts`). If a
+      future change ever moves that dispatch onto the promoter credential,
+      minting that token with `permission-actions: write` is an owner-side
+      action, recorded here.
+
 ## Residuals (recorded, not fixed here)
 
+- **The sync/init interim fallback is opt-in, not silent (fix round).** `sync-merge-queue` and
+  `init-merge-queue` require `CQ_AUTOMATION_TOKEN`; the `PROMOTE_TOKEN` fallback arms only while
+  the repo variable `CQ_AUTOMATION_INTERIM_FALLBACK` is non-empty. An unset automation secret
+  alone never silently makes the promoter PAT the automation identity (workflows:write). Remove
+  the variable and the interim secret at C3.
+- **W1.2b follow-up F1 (settle-tuple GraphQL-only lag) — open, owned by W1.2b.**
+  `merge-recheck.ts`'s I11 lag cross-check (`checkReviewDataLag`, g0) refuses when a non-PENDING
+  REST review or REST conversation root is missing from the GraphQL snapshot, but the settle
+  tuple and its anchor remain GraphQL-derived: REST-only or REST-fresher review data is never
+  folded into the tuple, and the check is skipped on the run-start `observeOpenPrs` pass.
+  Recorded here because the W1.2b follow-up list is not in this PR's diff
+  (`docs/methods-w1-2.md` "Review data lag", `src/selfhost/merge-recheck.ts` g0); deliberately
+  not widened into this PR.
+- **`protected-paths.json` `requiredChecks` versus ruleset R2 (supersession recorded before
+  C2).** `requiredChecks: ["static", "denylist", "ratchet"]` is the C1 wait list;
+  R2's required list replaces `ratchet` with the verdict-App `cq/ratchet` (plus `cq/policy`,
+  `cq/acceptance`, `from-source`, `pack-audit`). Applying R2 without dropping the classic
+  `ratchet` context would trip D11's "removed required check" rule. C2's order: drop the
+  classic contexts as R2 lands. `test/ops/gates/protectedPaths.test.ts` pins the mapping so
+  the two lists cannot drift apart silently again.
+- **`live-review.yml` and `live-drivers.yml` are not render-enforced (r1 L5).** Both are
+  repo-owned drill harnesses (this repo's scratch-repo convention, provider keys, demo
+  scripts), so templating them would change their semantics rather than adopt a pattern —
+  they stay in `instances.json`'s `nonTemplated`. Their security shape (`environment: drill`,
+  the D-A.1 default-ref dispatch guard) is pinned by `test/workflows/default-ref-guards.test.ts`
+  instead, so the three drill workflows are enforced identically even though only
+  `live-merge.yml` is a rendered instance.
 - **D-G.4 review-form record.** An `APPROVED` review bound to the head from a non-author
   trust-set human is a D11 record form. It is dormant until C3, like the label form, and cannot
   occur in a solo-owner repository (the owner authors every PR). Its evaluation in

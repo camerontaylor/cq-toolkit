@@ -772,51 +772,19 @@ export interface LeasedUpdate {
 }
 
 /**
- * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
- * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
- * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
- * Each lease names the exact oid the caller last read, so the remote ref
- * must still hold it — a ref that advanced OR was rewound (even to an
- * ancestor of the new value, which a plain fast-forward push would accept)
- * refuses, and `--atomic` makes one refusal refuse every ref. A rejection or
- * transport failure RESOLVES `{ ok: false, output }` (porcelain stdout +
- * stderr); only invalid input throws, before anything is spawned.
- *
- * The credential travels ONLY through the child env, as a step-scoped
- * `GIT_CONFIG_*` extra-header for `<scheme>://<host>/` — never argv (visible
- * in the process table), never `.git/config` (persisted). The same env
- * resets any configured extra-header for that host (actions/checkout's
- * persisted credential would otherwise ride along), empties
- * `credential.helper` and `core.askPass` (both are programs) and drops
- * GIT_ASKPASS/SSH_ASKPASS, so no program is asked for a secret. A local
- * path or `file:///` URL (tests push to a local bare repo) carries no
- * header. The token (and its encoded form) is redacted from the output.
+ * The shared remote-credential plumbing of {@link gitPushAtomic} and
+ * {@link gitLsRemoteRef}: validate `url` and build the hardened child env
+ * with the token ONLY as a step-scoped `GIT_CONFIG_*` extra-header — never
+ * argv (visible in the process table), never `.git/config` (persisted).
+ * The same env resets any configured extra-header for that host
+ * (actions/checkout's persisted credential would otherwise ride along),
+ * empties `credential.helper` and `core.askPass` (both are programs) and
+ * drops GIT_ASKPASS/SSH_ASKPASS, so no program is asked for a secret. A
+ * local path or `file:///` URL (tests push to a local bare repo) carries no
+ * header. Returns the strings to redact from any child output.
  */
-export async function gitPushAtomic(
-  repo: string,
-  url: string,
-  updates: readonly LeasedUpdate[],
-  token: string,
-): Promise<{ ok: boolean; output: string }> {
+function gitRemoteEnv(url: string, token: string): { env: NodeJS.ProcessEnv; secrets: string[] } {
   assertPushUrl(url);
-  if (updates.length === 0) throw new Error('ratchet git: refusing an empty push');
-  const leases: string[] = [];
-  const branches = new Set<string>();
-  for (const { refspec, expected } of updates) {
-    const match = PUSH_REFSPEC.exec(refspec);
-    const branch = match?.[2];
-    if (branch === undefined) throw new Error(`ratchet git: refusing push refspec '${refspec}'`);
-    assertRev(branch, 'push branch');
-    if (branches.has(branch))
-      throw new Error(`ratchet git: refusing a second update of '${branch}'`);
-    branches.add(branch);
-    if (!OID.test(expected)) {
-      throw new Error(
-        `ratchet git: refusing lease '${expected}' for '${branch}' (not a 40-hex oid)`,
-      );
-    }
-    leases.push(`--force-with-lease=refs/heads/${branch}:${expected}`);
-  }
   const env = gitEnv();
   delete env['GIT_ASKPASS'];
   delete env['SSH_ASKPASS'];
@@ -842,6 +810,94 @@ export async function gitPushAtomic(
     env[`GIT_CONFIG_KEY_${String(index)}`] = key;
     env[`GIT_CONFIG_VALUE_${String(index)}`] = value;
   }
+  return { env, secrets };
+}
+
+/** Redact every known secret form in `output` (the token and its basic-auth encoding). */
+function redactSecrets(output: string, secrets: readonly string[]): string {
+  let out = output;
+  for (const secret of secrets) out = out.split(secret).join('***');
+  return out;
+}
+
+/**
+ * The oid `url` currently serves for `refs/heads/<ref>`, or null when the
+ * remote lacks it: one hardened `ls-remote <url> refs/heads/<ref>` under
+ * the push credential. Same transport — and therefore the same view of the
+ * remote — as {@link gitPushAtomic}, so a caller can pin a ref it is NOT
+ * updating to the last state the push itself will race against (the gate's
+ * merge-queue pin, D-K.6).
+ */
+export async function gitLsRemoteRef(
+  repo: string,
+  url: string,
+  ref: string,
+  token: string,
+): Promise<string | null> {
+  const { env, secrets } = gitRemoteEnv(url, token);
+  const res = await execGitWithEnv(
+    repo,
+    ['ls-remote', '--end-of-options', url, `refs/heads/${ref}`],
+    env,
+  );
+  const output = redactSecrets(`${res.stdout.toString('utf8')}${res.stderr}`.trim(), secrets);
+  if (res.timedOut) {
+    throw new Error(`ratchet git: ls-remote timed out after ${EXEC_TIMEOUT_MS}ms`);
+  }
+  if (!res.ok || res.code !== 0) {
+    throw new Error(`ratchet git: ls-remote failed: ${output || `exit ${String(res.code)}`}`);
+  }
+  if (output === '') return null;
+  if (output.includes('\n')) {
+    throw new Error(`ratchet git: ls-remote matched multiple refs for '${ref}'`);
+  }
+  const oid = output.split('\t', 1)[0] ?? '';
+  if (!OID.test(oid)) {
+    throw new Error(`ratchet git: ls-remote returned no commit oid ('${output}')`);
+  }
+  return oid;
+}
+
+/**
+ * Atomically push `updates` to `url` as a compare-and-swap: `push --atomic
+ * --porcelain --no-verify` with one explicit `--force-with-lease=refs/heads/
+ * <branch>:<expected>` per update, NEVER plain `--force` or a `+` refspec.
+ * Each lease names the exact oid the caller last read, so the remote ref
+ * must still hold it — a ref that advanced OR was rewound (even to an
+ * ancestor of the new value, which a plain fast-forward push would accept)
+ * refuses, and `--atomic` makes one refusal refuse every ref. A rejection or
+ * transport failure RESOLVES `{ ok: false, output }` (porcelain stdout +
+ * stderr); only invalid input throws, before anything is spawned.
+ *
+ * The credential travels ONLY through the child env (see
+ * {@link gitRemoteEnv}); the token (and its encoded form) is redacted from
+ * the output.
+ */
+export async function gitPushAtomic(
+  repo: string,
+  url: string,
+  updates: readonly LeasedUpdate[],
+  token: string,
+): Promise<{ ok: boolean; output: string }> {
+  if (updates.length === 0) throw new Error('ratchet git: refusing an empty push');
+  const leases: string[] = [];
+  const branches = new Set<string>();
+  for (const { refspec, expected } of updates) {
+    const match = PUSH_REFSPEC.exec(refspec);
+    const branch = match?.[2];
+    if (branch === undefined) throw new Error(`ratchet git: refusing push refspec '${refspec}'`);
+    assertRev(branch, 'push branch');
+    if (branches.has(branch))
+      throw new Error(`ratchet git: refusing a second update of '${branch}'`);
+    branches.add(branch);
+    if (!OID.test(expected)) {
+      throw new Error(
+        `ratchet git: refusing lease '${expected}' for '${branch}' (not a 40-hex oid)`,
+      );
+    }
+    leases.push(`--force-with-lease=refs/heads/${branch}:${expected}`);
+  }
+  const { env, secrets } = gitRemoteEnv(url, token);
   const res = await execGitWithEnv(
     repo,
     [
@@ -858,6 +914,6 @@ export async function gitPushAtomic(
   );
   let output = `${res.stdout.toString('utf8')}${res.stderr}`.trim();
   if (res.timedOut) output = `${output}\npush timed out after ${EXEC_TIMEOUT_MS}ms`.trim();
-  for (const secret of secrets) output = output.split(secret).join('***');
+  output = redactSecrets(output, secrets);
   return { ok: res.ok, output };
 }

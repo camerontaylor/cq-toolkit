@@ -51,6 +51,15 @@ concurrency:
 
 jobs:
   gate:
+    # Dispatch is an allowed carrier only on the default ref (D-A.1): a
+    # dispatch on any other ref would run that ref's copy of this file —
+    # with the promote credential one job lower. Push events only ever fire
+    # this file from `merge-queue` (the trigger's branch filter), so the
+    # guard admits them regardless of the ref expression.
+    if: >-
+      github.event_name == 'push' ||
+      github.ref ==
+      format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     steps:
       # The gated sha reaches the script via env: indirection — never a

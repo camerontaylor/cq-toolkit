@@ -287,3 +287,60 @@ describe('protected-paths.json covers the gate and acceptance import closure', (
     }
   });
 });
+
+// W1.10 fix round (P1 composition L5, direct-diff r1 L3) — the required-
+// check list that gates D11 (`policy/protected-paths.json` `requiredChecks`)
+// and ruleset R2's required list (`policy/templates/github-settings.json`)
+// must not drift apart silently: a check removed from R2 while still listed
+// here would trip D11's "removed required check" rule at C2, and a check
+// added here with no R2 entry would never be enforced there. R2 is the C2
+// target and is a SUPERSET modulo one recorded supersession: the classic
+// `ratchet` context becomes the verdict-App `cq/ratchet` (methods note,
+// Residuals). This pins the mapping so the supersession stays documented.
+describe('requiredChecks are R2 entries or recorded supersessions (C2 tie)', () => {
+  const POLICY = JSON.parse(
+    readFileSync(join(REPO_ROOT, 'policy', 'protected-paths.json'), 'utf8'),
+  ) as { requiredChecks: string[] };
+  const SETTINGS = JSON.parse(
+    readFileSync(join(REPO_ROOT, 'policy', 'templates', 'github-settings.json'), 'utf8'),
+  ) as {
+    rulesets: Array<{
+      name: string;
+      rules: Array<{
+        parameters?: { required_status_checks?: Array<{ context: string }> };
+      }>;
+    }>;
+  };
+
+  /** Classic context → its R2 successor. Every key must stay recorded in the methods Residuals. */
+  const SUPERSEDED: Readonly<Record<string, string>> = {
+    ratchet: 'cq/ratchet',
+  };
+
+  const r2 = SETTINGS.rulesets.find((r) => r.name === 'cq-r2-merge-queue');
+  const r2Contexts = new Set(
+    r2?.rules
+      .flatMap((rule) => rule.parameters?.required_status_checks ?? [])
+      .map((check) => check.context) ?? [],
+  );
+
+  test('R2 exists and carries required status checks', () => {
+    expect(r2Contexts.size).toBeGreaterThan(0);
+  });
+
+  test.each(POLICY.requiredChecks)('requiredChecks entry %s is covered by R2', (context) => {
+    const successor = SUPERSEDED[context];
+    if (successor === undefined) {
+      expect(r2Contexts.has(context), `${context} is in neither R2 nor SUPERSEDED`).toBe(true);
+    } else {
+      expect(r2Contexts.has(successor), `${context} supersedes to missing ${successor}`).toBe(true);
+    }
+  });
+
+  test('every recorded supersession is documented in the methods note Residuals', () => {
+    const methods = readFileSync(join(REPO_ROOT, 'docs', 'methods-w1-10.md'), 'utf8');
+    for (const [from, to] of Object.entries(SUPERSEDED)) {
+      expect(methods).toContain(`replaces \`${from}\` with the verdict-App \`${to}\``);
+    }
+  });
+});

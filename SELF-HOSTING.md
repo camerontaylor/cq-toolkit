@@ -163,7 +163,9 @@ Interim credentials (reported by the drift check until C3):
 - `PROMOTE_TOKEN` — the promotion PAT. Read by the legacy
   `merge-queue-gate` (repository-level during C1) and by `cq-gate` only at
   its push. While `CQ_AUTOMATION_TOKEN` is absent it is also the sync/init
-  fallback, and opening the sync PR then needs Pull requests read/write.
+  fallback, but only with the explicit opt-in
+  (`CQ_AUTOMATION_INTERIM_FALLBACK` non-empty) — the fallback is never
+  silent — and opening the sync PR then needs Pull requests read/write.
   Re-scope it to a fine-grained PAT with only Contents read/write, Workflows
   write and Metadata read once `CQ_AUTOMATION_TOKEN` exists (owner step 2),
   never before.
@@ -197,10 +199,18 @@ Owner steps, in order (the RS-11 wizard outline):
    each App key and interim secret into its environment above. In
    particular, provision `CQ_AUTOMATION_TOKEN` in `automation` now, before
    step 3: `sync-merge-queue` and `init-merge-queue` fall back to
-   `PROMOTE_TOKEN` only while it is a repository-level secret (an
-   `automation` job cannot read a secret held in `promote`). Skip this and
-   step 3 disarms sync (the behind/diverged sync PR fails with "sync not
-   armed"), and init fails with no checkout credential.
+   `PROMOTE_TOKEN` only while it is a repository-level secret AND the
+   explicit opt-in variable `CQ_AUTOMATION_INTERIM_FALLBACK` is non-empty
+   (an `automation` job cannot read a secret held in `promote`). Skip this
+   and step 3 disarms sync (the behind/diverged sync PR fails with "sync
+   not armed"), and init fails with no checkout credential.
+   **Hazard in this step's window (before step 3 arms the trust set): do
+   not break-glass push to `main`.** A break-glass push leaves `main` with
+   commits `merge-queue` lacks (un-ancestored), so every promotion refuses
+   with `diverged` until the sync PR heals the queue — and the sync PR
+   itself cannot merge before step 3, because acceptance needs the armed
+   trust set. A push in this window wedges the queue until step 3 is done;
+   do step 3 first instead.
 3. **Prerequisite: arm the trust set.** With the blank conservative default
    (no bots, `APPROVED` only, human `OWNER`/`MEMBER`/`COLLABORATOR`) no PR in
    this solo-identity repository reaches acceptance, because the owner
