@@ -10,10 +10,15 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { STATE_BRANCH } from '../../src/selfhost/state-branch.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 
-const SKIP = "if: ${{ github.ref != 'refs/heads/cq-state' }}";
+// Built from the owned constant (PR #234 r1), not a 'cq-state' literal:
+// the YAML files spell the branch out, so a STATE_BRANCH rename must fail
+// HERE — a hardcoded literal would let a rename silently disable every
+// guard with no failing test.
+const SKIP = `if: \${{ github.ref != 'refs/heads/${STATE_BRANCH}' }}`;
 
 const read = (rel: string): string => readFileSync(join(ROOT, rel), 'utf8');
 
@@ -24,6 +29,10 @@ function jobIds(text: string): string[] {
   if (start === -1) throw new Error('no jobs: block');
   const ids: string[] = [];
   for (const line of lines.slice(start + 1)) {
+    // A non-indented, non-empty line is the next TOP-LEVEL key — the jobs
+    // block is over, and nothing below it can be read as a job id
+    // (PR #234 r1).
+    if (/^\S/.test(line)) break;
     const m = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(line);
     if (m !== null && m[1] !== undefined) ids.push(m[1]);
   }
@@ -63,10 +72,14 @@ describe('the cq-state skip guards (review-debt #226)', () => {
 
   it('the required-check pattern carries the guard in its worked example', () => {
     const doc = read('policy/templates/required-check.md');
-    expect(doc).toContain(SKIP);
+    // The worked example's fenced YAML block, pinned exactly like ci.yml
+    // (PR #234 r1): a step-level guard in the template doc must fail this,
+    // not pass a bare substring check.
+    const open = doc.indexOf('```yaml');
+    const yaml = doc.slice(open, doc.indexOf('```', open + 7));
+    expectEveryJobGuarded(yaml, 'policy/templates/required-check.md worked example');
     // The template teaches the rule the guard obeys: the `on:` block of the
     // worked example stays filter-free.
-    const yaml = doc.slice(doc.indexOf('```yaml'), doc.indexOf('```', doc.indexOf('```yaml') + 7));
     expect(yaml).toMatch(/on:\n {2}push:\n {2}pull_request:\n/);
   });
 
