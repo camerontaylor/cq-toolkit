@@ -21,6 +21,7 @@ export type {
   Job,
   JobFinishedJournalEvent,
   JobOutcome,
+  JobQuarantinedJournalEvent,
   JobStartedJournalEvent,
   JobState,
   JobStatus,
@@ -33,6 +34,13 @@ export type {
   OpResult,
   Plan,
   PlanRegistryEntry,
+  QuarantineReleasedJournalEvent,
+  ReservationChargeBasis,
+  ReservationClass,
+  ReservationOpenedJournalEvent,
+  ReservationRefusedJournalEvent,
+  ReservationRefusalReason,
+  ReservationSettledJournalEvent,
   RunCounts,
   RunEarlyStopReason,
   RunFinishedJournalEvent,
@@ -87,6 +95,7 @@ export { emitReport, narrate, renderHuman } from './kernel/output.js';
 // along as `export type`.
 export type {
   AdmissionDecision,
+  BudgetReservation,
   Clock,
   Governance,
   Governor,
@@ -98,6 +107,7 @@ export type {
   LadderRung,
   LadderRungMarker,
   LadderSpec,
+  ReserveOutcome,
   TripKind,
 } from './kernel/governor.js';
 export {
@@ -111,6 +121,9 @@ export {
   runLadder,
   validSpendEvidence,
 } from './kernel/governor.js';
+// Per-lane budget classification (W2.3, ADR-0003 §2.4) — re-export only.
+export { classifyDispatch, LANE_CLASSIFICATION } from './kernel/lanes.js';
+export type { BudgetClass, LaneClassificationRow } from './kernel/lanes.js';
 export type {
   RescueAction,
   RescueDecision,
