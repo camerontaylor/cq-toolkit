@@ -434,6 +434,9 @@ describe('the built CLI still drives the subprocess driver + fake agent', () => 
           // ungoverned job context, and its unpriced usage forbids a USD
           // cap (the DD-9 unpriced rule) — a token cap is the honest arm.
           '--max-tokens=10000',
+          // W2.3 A12c: a token cap is ADVISORY — unattended dispatch needs
+          // the escape.
+          '--allow-advisory-budget',
         ],
         env,
         scratchRepo,

@@ -847,9 +847,14 @@ export async function runReviewLoop(opts: ReviewLoopOpts): Promise<ReviewLoopOut
       // ALWAYS governed: runPlan's governed dispatch owns admission, the
       // ladder, the evidence folds, and the honest stop — its return IS the
       // fix report. The operator's opt-ins ride the handle by explicit key
-      // (P7) — absent opts.governanceOptIn, refusals stand.
+      // (P7) — absent opts.governanceOptIn, refusals stand. allowAdvisory is
+      // the recorded W2.3 escape (A12c): this loop runs unattended by
+      // design and every lane is ADVISORY at v1.1, so without the escape it
+      // would refuse every fixer dispatch; its budgets stay enforced through
+      // the evidence folds and (W2.3) reservation capacity.
       return await runPlan(plan, runOptions, view, {
         governor,
+        allowAdvisory: true,
         ...(opts.governanceOptIn !== undefined ? { optIn: opts.governanceOptIn } : {}),
       });
     } finally {

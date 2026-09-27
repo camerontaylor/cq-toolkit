@@ -936,13 +936,14 @@ export class BudgetGovernor {
   readonly clock: Clock;
   /** The observation stream — every event, in fire order (tests assert here). */
   readonly events: GovernorEvent[] = [];
-  /**
-   * Trip observer (W2.3 abort-on-trip): invoked SYNCHRONOUSLY whenever the
-   * governor trips, with the trip kind — the governed runner aborts the
-   * run's in-flight invocations through it. A throwing observer is swallowed
-   * (the trip already landed); the trip is idempotent (first wins).
-   */
-  onTrip?: (tripKind: TripKind) => void;
+  // W2.3 abort-on-trip: the run's ONE cancellation root the governor owns
+  // (I8 — the governor decides WHEN to abort). Aborted the moment the
+  // governor trips, any kind; the runner hands `tripAbortSignal` to every
+  // dispatch ladder, so in-flight ops see the abort through
+  // currentJobContext().signal and settle (their reservations settle when
+  // they return; slots are held until then).
+  private readonly tripAbort = new AbortController();
+  private unbindRunSignalN: (() => void) | undefined;
 
   private dispatchedCount = 0;
   private readonly attemptsByJob = new Map<string, number>();
@@ -1022,6 +1023,40 @@ export class BudgetGovernor {
    */
   get capUsd(): number | undefined {
     return this.config.maxUsd ?? this.inheritedCapUsdN;
+  }
+
+  /** The run's trip signal: aborted the moment the governor trips (any kind). Distinct from the `tripSignal()` METHOD, which TRIPS with kind 'signal'. */
+  get tripAbortSignal(): AbortSignal {
+    return this.tripAbort.signal;
+  }
+
+  /**
+   * Bind the run-level cancel signal (ADR §2.3): an abort trips the governor
+   * with trip kind `signal` (a CANCEL, not a budget event). One binding per
+   * run; a pre-aborted signal trips immediately. Release with
+   * `unbindRunSignal` when the run ends — no trip can outlive it.
+   */
+  bindRunSignal(signal: AbortSignal, detail?: string): void {
+    if (this.unbindRunSignalN !== undefined) {
+      throw new Error('governor: run signal already bound');
+    }
+    if (signal.aborted) {
+      this.tripSignal(detail ?? 'run signal already aborted before dispatch');
+      return;
+    }
+    const onAbort = (): void => {
+      this.tripSignal();
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    this.unbindRunSignalN = (): void => {
+      signal.removeEventListener('abort', onAbort);
+    };
+  }
+
+  /** Release the run-level cancel binding (idempotent). */
+  unbindRunSignal(): void {
+    this.unbindRunSignalN?.();
+    this.unbindRunSignalN = undefined;
   }
 
   /** USD currently held by OPEN reservations (the O in `S + O + r ≤ C`). */
@@ -1409,13 +1444,9 @@ export class BudgetGovernor {
     // Any trip wakes and refuses every capacity waiter (ADR §2.2 step 3).
     const waiters = this.reserveWaiters.splice(0);
     for (const wake of waiters) wake();
-    // The runner's abort-on-trip hook: synchronous, best-effort — an
-    // observer failure must not un-trip the run.
-    try {
-      this.onTrip?.(tripKind);
-    } catch {
-      // deliberately swallowed — the trip state stays authoritative
-    }
+    // Abort-on-trip: the run's in-flight ladders compose `tripAbortSignal`,
+    // so this abort reaches every current op.
+    this.tripAbort.abort();
   }
 
   /**

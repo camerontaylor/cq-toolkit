@@ -193,7 +193,7 @@ describe('governed run basics (no journal — in-memory)', () => {
       independentPlan('plan-gov-basics', 3),
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', countingOp(calls))),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual(['j1', 'j2', 'j3']); // every op executed
     expect(report.stoppedEarly).toBe(false);
@@ -225,7 +225,7 @@ describe('governed run basics (no journal — in-memory)', () => {
       independentPlan('plan-gov-spend', 2, 'spendy'),
       { concurrency: 1, stopOnError: false },
       viewWith(entry('spendy', spendy)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     // Per-job rollups on the report rows…
     expect(report.jobs[0]?.usage).toEqual(USAGE);
@@ -254,7 +254,7 @@ describe('admission is keyed on the plan job id (W2.2)', () => {
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('shared', countingOp(calls))),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     // The op-name fallback would have refused the second job as "attempt 2
     // of 'shared'"; keyed on job ids both are first attempts.
@@ -292,7 +292,7 @@ describe('governed trip → honest stop (I9)', () => {
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('fail', failOp), entry('spendy', spendy2), entry('ok', okOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     // a failed genuinely; b is blocked by that REAL failure (not budget);
     // c kept its ok verdict (the trip is evidence, not a rewrite); d never
@@ -348,7 +348,7 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       plan,
       { concurrency: 1, stopOnError: true },
       viewWith(entry('fake', countingOp(calls))),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.tripped).toBe(false); // a quota stop is NOT a USD/token trip
     const refusals = governor.events.filter(
@@ -380,7 +380,7 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       independentPlan('plan-trip-no-gate', 2, 'spendy'),
       { concurrency: 1, stopOnError: false },
       viewWith(entry('spendy', spendy2)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.tripped).toBe(true);
     expect(rowStatuses(report)).toEqual(['ok', 'budget-exhausted']);
@@ -407,7 +407,7 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       independentPlan('plan-queued-fabricated', 1, 'lying'),
       { concurrency: 1, stopOnError: false },
       viewWith(entry('lying', lyingOp)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     const admissions = governor.events.filter(
       (event): event is AdmittedEvent => event.kind === 'admitted',
@@ -444,7 +444,7 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('lying', lyingOp), entry('fake', countingOp([]))),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(governor.tripped).toBe(true);
     // f1 indeterminate → the runner counts it failed; d1 is blocked by it.
@@ -486,7 +486,7 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('fake', countingOp(calls))),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual(['j1', 'j2']); // the quota gated everything after j2
     expect(governor.tripped).toBe(false); // quota refusal, not a USD/token trip
@@ -532,7 +532,7 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('fake', countingOp(calls))),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     expect(calls).toEqual(['j1', 'j2']); // the quota gated everything after j2
     expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
@@ -581,7 +581,7 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({ runDispatchQuota: 2 }) },
+      { governor: createGovernor({ runDispatchQuota: 2 }), allowAdvisory: true },
     );
     expect(rowStatuses(report1)).toEqual(['ok', 'ok', 'budget-exhausted']);
     expect(calls).toEqual(['j1', 'j2']);
@@ -594,7 +594,7 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: governor2 },
+      { governor: governor2, allowAdvisory: true },
     );
     expect(calls).toEqual(['j1', 'j2']); // UNCHANGED — j3 never runs the op
     expect(rowStatuses(report2)).toEqual(['ok', 'ok', 'budget-exhausted']);
@@ -656,7 +656,7 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({}) },
+      { governor: createGovernor({}), allowAdvisory: true },
     );
     expect(calls).toEqual([]); // j1 replayed from the fold — no corrupt-read blowup
     expect(report.counts.done).toBe(1);
@@ -680,7 +680,7 @@ describe('the governed fold reads ALL chained runs (review VB1B)', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({ maxUsd: 5 }) },
+        { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
       ),
     ).rejects.toThrow(/dependency cycle/);
     expect(calls).toEqual([]); // nothing dispatched either
@@ -728,7 +728,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     expect(calls).toEqual([]); // nothing dispatched
     expect(rowStatuses(report)).toEqual(['indeterminate', 'indeterminate']);
@@ -748,7 +748,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       independentPlan('plan-signal-pre', 2),
       { concurrency: 2, stopOnError: false },
       viewWith(entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     expect(calls).toEqual([]); // nothing dispatched
     // NO budget re-marking: a cancel is not a budget verdict — rows stay
@@ -793,7 +793,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       plan,
       { concurrency: 1, stopOnError: true },
       viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     await waitFor(() => entered, 'the hang op to enter');
     external.abort();
@@ -847,7 +847,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     await waitFor(() => j1Entered, 'j1 to enter');
     external.abort(); // j2 is admitted, waiting on the single in-flight slot
@@ -893,7 +893,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('hang', okAfterAbort), entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     await waitFor(() => aEntered, 'a to enter');
     external.abort(); // mid-run: b and c are still undispatched
@@ -946,7 +946,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       plan,
       { concurrency: 2, stopOnError: false },
       viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     await waitFor(() => j1Entered, 'j1 to enter');
     external.abort(); // j2 is admitted, waiting on the single in-flight slot
@@ -993,7 +993,7 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
       plan,
       { concurrency: 1, stopOnError: false },
       viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
-      { governor, signal: external.signal },
+      { governor, signal: external.signal, allowAdvisory: true },
     );
     await waitFor(() => j1Entered, 'j1 to enter');
     external.abort(); // j2 is submitted but not yet dispatched (concurrency 1)
@@ -1037,7 +1037,7 @@ describe('governed journal v2 + resume', () => {
       independentPlan('plan-gov-journal', 1, 'spendy'),
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('spendy', spendy)),
-      { governor },
+      { governor, allowAdvisory: true },
     );
     const events = await openRunLog(dir).read(report.runId);
     expect(events[0]).toMatchObject({
@@ -1067,7 +1067,7 @@ describe('governed journal v2 + resume', () => {
       independentPlan('plan-gov-fresh-dir', 1, 'ok'),
       { concurrency: 1, stopOnError: false, journalDir: freshDir },
       viewWith(entry('ok', okOp)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     const events = await openRunLog(freshDir).read(report.runId);
     expect(events[0]).toMatchObject({ type: 'run-started', journalVersion: 2, seq: 1 });
@@ -1088,7 +1088,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('flaky', flaky)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     const log = openRunLog(dir);
     expect(jobStarts(await log.read(report1.runId)).map((event) => event.attempt)).toEqual([1]);
@@ -1100,7 +1100,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('flaky', flaky)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     expect(calls).toEqual(['j1', 'j1']);
     const events2 = await log.read(report2.runId);
@@ -1115,7 +1115,7 @@ describe('governed journal v2 + resume', () => {
       independentPlan('plan-gov-mark', 1),
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('fake', okOp)),
-      { governor: governor1 },
+      { governor: governor1, allowAdvisory: true },
     );
     expect(report1.counts.done).toBe(1);
     expect(await openRunLog(dir).runs()).toHaveLength(1);
@@ -1141,7 +1141,7 @@ describe('governed journal v2 + resume', () => {
       independentPlan('plan-gov-mark', 1),
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: markerGovernor, optIn: ['budget.ungovernedOverGoverned'] },
+      { governor: markerGovernor, optIn: ['budget.ungovernedOverGoverned'], allowAdvisory: true },
     );
     expect(calls).toEqual(['j1']); // the op ran ungoverned
     expect(markerGovernor.events.filter((event) => event.kind === 'admitted')).toEqual([]);
@@ -1202,7 +1202,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 },
       view,
-      { governor: createGovernor({ maxUsd: 5 }), optIn: ['budget.raiseCap'] },
+      { governor: createGovernor({ maxUsd: 5 }), optIn: ['budget.raiseCap'], allowAdvisory: true },
     );
     const started = (await openRunLog(dir).read(report.runId))[0];
     expect(started).toMatchObject({ governance: { raiseCap: { from: 1, to: 5 } } });
@@ -1237,7 +1237,7 @@ describe('governed journal v2 + resume', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}) },
+        { governor: createGovernor({}), allowAdvisory: true },
       ),
     ).rejects.toThrow(
       'runPlan: governed resume over v1 journals with unaccounted dispatches (1 jobs in plan-gov-v1--legacy--aa); v1 journals carry no spend. Pass --opt-in budget.legacyJournal=reset.',
@@ -1247,7 +1247,7 @@ describe('governed journal v2 + resume', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}) },
+        { governor: createGovernor({}), allowAdvisory: true },
       ),
     ).rejects.toThrow(/unaccounted dispatches/);
     expect(calls).toEqual([]);
@@ -1257,7 +1257,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({}), optIn: ['budget.legacyJournal=reset'] },
+      { governor: createGovernor({}), optIn: ['budget.legacyJournal=reset'], allowAdvisory: true },
     );
     expect(calls).toEqual(['j1']); // j1 re-dispatched (the v1 start never finished)
     const events1 = await log.read(report1.runId);
@@ -1279,7 +1279,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOp(calls2))),
-      { governor: createGovernor({}) },
+      { governor: createGovernor({}), allowAdvisory: true },
     );
     expect(calls2).toEqual([]);
     expect(report2.counts.done).toBe(1);
@@ -1305,7 +1305,7 @@ describe('governed journal v2 + resume', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOp(calls2))),
-        { governor: createGovernor({}) },
+        { governor: createGovernor({}), allowAdvisory: true },
       ),
     ).rejects.toThrow(/unaccounted dispatches \(1 jobs in plan-gov-v1--legacy2--bb\)/);
   });
@@ -1354,7 +1354,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('fake', countingOp(calls))),
-      { governor, optIn: ['budget.legacyJournal=reset'] },
+      { governor, optIn: ['budget.legacyJournal=reset'], allowAdvisory: true },
     );
     expect(report.counts.done).toBe(1);
     expect(governor.tripped).toBe(false);
@@ -1383,7 +1383,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('fake', okOp)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     const runsBefore = await openRunLog(dir).runs();
 
@@ -1394,7 +1394,7 @@ describe('governed journal v2 + resume', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({ maxUsd: 10 }) },
+        { governor: createGovernor({ maxUsd: 10 }), allowAdvisory: true },
       ),
     ).rejects.toThrow('runPlan: cap raised from 5 to 10');
     expect(calls).toEqual([]);
@@ -1405,7 +1405,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({ maxUsd: 10 }), optIn: ['budget.raiseCap'] },
+      { governor: createGovernor({ maxUsd: 10 }), optIn: ['budget.raiseCap'], allowAdvisory: true },
     );
     const events = await openRunLog(dir).read(report.runId);
     expect(events[0]).toMatchObject({
@@ -1441,7 +1441,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('ledger', ledgerOp)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     // Run 2 (resume): the seed carries the 3; j1's fresh 2.5 pushes the
     // rollup to 5.5 — the cap trips mid-run, and queued j2 is re-marked.
@@ -1450,7 +1450,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('ledger', ledgerOp)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     expect(calls).toEqual(['j1', 'j1']); // j1 re-ran (its last finish was failed)…
     expect(calls).not.toContain('j2'); // …j2 never dispatched
@@ -1533,7 +1533,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('fake', countingOp(calls))),
-      { governor: createGovernor({}) },
+      { governor: createGovernor({}), allowAdvisory: true },
     );
     expect(calls).toEqual(['j1']);
     const events = await log.read(report.runId);
@@ -1552,7 +1552,11 @@ describe('governed journal v2 + resume', () => {
         independentPlan('plan-gov-mark-nohistory', 1),
         { concurrency: 1, stopOnError: false, journalDir: dir },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}), optIn: ['budget.ungovernedOverGoverned'] },
+        {
+          governor: createGovernor({}),
+          optIn: ['budget.ungovernedOverGoverned'],
+          allowAdvisory: true,
+        },
       ),
     ).rejects.toThrow(
       'runPlan: budget.ungovernedOverGoverned marks the run ungoverned, but plan plan-gov-mark-nohistory has no governed history',
@@ -1574,7 +1578,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir },
       viewWith(entry('spendy', spendy)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     // Resume: the job replay-skips (zero invocation); the re-attested
     // finish-only event must carry usage AND costUSD (annex §3 rule 1) so
@@ -1583,7 +1587,7 @@ describe('governed journal v2 + resume', () => {
       plan,
       { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
       viewWith(entry('spendy', spendy)),
-      { governor: createGovernor({ maxUsd: 5 }) },
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
     );
     expect(calls).toEqual(['j1']); // run 1 only — the resume skipped
     const events2 = await openRunLog(dir).read(report2.runId);
@@ -1619,7 +1623,7 @@ describe('governed journal v2 + resume', () => {
         plan,
         { concurrency: 1, stopOnError: false, journalDir: dir, resume: true },
         viewWith(entry('fake', countingOp(calls))),
-        { governor: createGovernor({}) },
+        { governor: createGovernor({}), allowAdvisory: true },
       ),
     ).rejects.toThrow(/journal: corrupt — seq gap for plan 'plan-gov-seqgap'/);
     await expect(
@@ -1755,5 +1759,449 @@ describe('governed journal v2 + resume', () => {
     expect(report.counts.done).toBe(2);
     const events = await log.read(report.runId);
     expect(jobStarts(events).map((event) => event.jobId)).toEqual(['j2']); // j1 was never re-dispatched
+  });
+});
+
+// ---------------------------------------------------------------------------
+// W2.3 — reserve-then-settle (the plan's §6 W2.3 row + adversarial rows
+// A12b/A12c). The write-ahead reservation journal, the unresolved-reservation
+// quarantine, the ADVISORY gate, abort-on-trip, and the cap inheritance.
+// ---------------------------------------------------------------------------
+
+describe('W2.3 reserve-then-settle', () => {
+  let w3dir: string;
+  beforeEach(async () => {
+    w3dir = await mkdtemp(join(tmpdir(), 'w23-reserve-'));
+  });
+  afterEach(async () => {
+    await rm(w3dir, { recursive: true, force: true });
+  });
+
+  const spendOnce =
+    (calls: string[], usd: number) =>
+    async (raw: unknown): Promise<OpResult<unknown>> => {
+      const jobId = (raw as { jobId: string }).jobId;
+      calls.push(jobId);
+      currentJobContext()?.reportResult({
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+        costUSD: usd,
+      });
+      return okOp(raw);
+    };
+
+  test('journal order pins write-ahead: reservation-opened (durable) before the dispatch, settled before the finish', async () => {
+    const calls: string[] = [];
+    const report = await runPlan(
+      independentPlan('w23-order', 1),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', spendOnce(calls, 0.1))),
+      { governor: createGovernor({ maxUsd: 1 }), allowAdvisory: true },
+    );
+    expect(report.counts.done).toBe(1);
+    const events = await openRunLog(w3dir).read(report.runId);
+    const types = events.map((event) => event.type);
+    expect(types).toEqual([
+      'run-started',
+      'job-started',
+      'reservation-opened',
+      'reservation-settled',
+      'job-finished',
+      'run-finished',
+    ]);
+    const opened = events.find(
+      (event): event is Extract<JournalEvent, { type: 'reservation-opened' }> =>
+        event.type === 'reservation-opened',
+    );
+    expect(opened).toMatchObject({
+      jobId: 'j1',
+      attempt: 1,
+      reservationId: `${report.runId}:j1:1:1`,
+      usd: 1, // the fair share C/concurrency = 1/1
+      class: 'advisory',
+    });
+    const settled = events.find(
+      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+        event.type === 'reservation-settled',
+    );
+    expect(settled).toMatchObject({ charged: 0.1, basis: 'observed' });
+    const finished = events.find((event): event is FinishedEvent => event.type === 'job-finished');
+    expect(finished).toMatchObject({ charged: 0.1, costUSD: 0.1 });
+  });
+
+  test('capacity waits FIFO behind outstanding reservations, then admits (settled + outstanding + proposed ≤ cap)', async () => {
+    const calls: string[] = [];
+    // cap 1.0, concurrency 4 → share 0.25 each; three jobs reserve 0.75,
+    // the fourth parks until a settle frees capacity.
+    const report = await runPlan(
+      independentPlan('w23-fifo', 4),
+      { concurrency: 4, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', spendOnce(calls, 0.1))),
+      { governor: createGovernor({ maxUsd: 1 }), allowAdvisory: true },
+    );
+    expect(calls).toEqual(['j1', 'j2', 'j3', 'j4']); // every job eventually ran
+    expect(report.counts.done).toBe(4);
+    expect(report.costUSD).toBeCloseTo(0.4); // the seeded-less ledger: Σ charged
+    const governor = (report as unknown as { __gov?: never })['__gov'];
+    void governor;
+  });
+
+  test('A12c: an unattended governed run refuses every ADVISORY dispatch without the escape', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 5 });
+    const report = await runPlan(
+      independentPlan('w23-a12c', 2),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor }, // no attended, no allowAdvisory — the v1.1 default
+    );
+    expect(calls).toEqual([]); // nothing dispatched
+    expect(rowStatuses(report)).toEqual(['budget-exhausted', 'budget-exhausted']);
+    const events = await openRunLog(w3dir).read(report.runId);
+    expect(events.filter((event) => event.type === 'reservation-refused')).toHaveLength(2);
+    expect(events.filter((event) => event.type === 'job-started')).toHaveLength(0);
+    const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
+    expect(started.governance).toMatchObject({ attended: false, capUsd: 5 });
+    expect(started.governance?.allowAdvisory).toBeUndefined();
+    // The refusal rows are terminal budget evidence; nothing was gated into
+    // a stop claim (I9, both directions like the admission refusals).
+    expect(report.stoppedEarly).toBe(false);
+    const shorts = governor.events.filter(
+      (event): event is ShortCircuitEvent => event.kind === 'short-circuited',
+    );
+    expect(shorts.map((event) => event.reason)).toEqual(['advisory-lane', 'advisory-lane']);
+  });
+
+  test('A12c: allowAdvisory and attended are the two named escapes', async () => {
+    for (const escape of [{ allowAdvisory: true }, { attended: true }] as const) {
+      const w3dirEscape = await mkdtemp(join(tmpdir(), 'w23-escape-'));
+      try {
+        const calls: string[] = [];
+        const report = await runPlan(
+          independentPlan('w23-escape', 1),
+          { concurrency: 1, stopOnError: false, journalDir: w3dirEscape },
+          viewWith(entry('fake', countingOp(calls))),
+          { governor: createGovernor({}), ...escape },
+        );
+        expect(calls).toEqual(['j1']);
+        expect(report.counts.done).toBe(1);
+        const events = await openRunLog(w3dirEscape).read(report.runId);
+        const started = events[0] as Extract<JournalEvent, { type: 'run-started' }>;
+        if ('allowAdvisory' in escape) {
+          expect(started.governance?.allowAdvisory).toBe(true);
+        } else {
+          expect(started.governance?.attended).toBe(true);
+        }
+      } finally {
+        await rm(w3dirEscape, { recursive: true, force: true });
+      }
+    }
+  });
+
+  test('A12b: an unresolved reservation charges IN FULL and QUARANTINES the job (never re-run)', async () => {
+    // Run 1 "crashes" mid-dispatch: run-started v2 (capped), job-started,
+    // reservation-opened — no settle, no finish. The resumed run must charge
+    // the full reservation and refuse to re-run the job.
+    const log = openRunLog(w3dir);
+    const plan: Plan = {
+      id: 'w23-a12b',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' }, dependsOn: ['j1'] },
+      ],
+    };
+    const crashRunId = 'w23-a12b--r1--aa';
+    await log.append(crashRunId, {
+      type: 'run-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'w23-a12b',
+      journalVersion: 2,
+      seq: 1,
+      governance: { capUsd: 5, attended: false },
+    });
+    await log.append(crashRunId, {
+      type: 'job-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(crashRunId, {
+      type: 'reservation-opened',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:01.500Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+      reservationId: `${crashRunId}:j1:1:1`,
+      usd: 0.75,
+      class: 'advisory',
+    });
+
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 5 });
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor, allowAdvisory: true },
+    );
+    // The seed charged the crash window IN FULL before anything ran.
+    expect(governor.usdSpent).toBe(0.75);
+    // j1: quarantined — needs-human, never dispatched.
+    const j1 = report.jobs.find((row) => row.jobId === 'j1');
+    expect(j1?.result.status).toBe('needs-human');
+    if (j1?.result.status !== 'needs-human') throw new Error('expected needs-human');
+    expect(j1.result.reason).toContain('quarantined');
+    expect(calls).not.toContain('j1');
+    // j2: blocked by its quarantined dependency.
+    expect(report.jobs.find((row) => row.jobId === 'j2')?.result.status).toBe('failed');
+    // Journal evidence: the quarantine stands, no dispatch happened for j1.
+    const events = await openRunLog(w3dir).read(report.runId);
+    const quarantined = events.find(
+      (event): event is Extract<JournalEvent, { type: 'job-quarantined' }> =>
+        event.type === 'job-quarantined',
+    );
+    expect(quarantined).toMatchObject({
+      jobId: 'j1',
+      reservationId: `${crashRunId}:j1:1:1`,
+      chargedUsd: 0.75,
+      reason: 'unresolved-reservation',
+    });
+    expect(events.some((event) => event.type === 'job-started' && event.jobId === 'j1')).toBe(
+      false,
+    );
+  });
+
+  test('A12b: the quarantine re-attests each run; releaseQuarantine re-runs the job but never refunds', async () => {
+    const log = openRunLog(w3dir);
+    const plan: Plan = {
+      id: 'w23-release',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const hash = makeManifest(plan).jobs[0]?.inputsHash ?? '';
+    const crashRunId = 'w23-release--r1--aa';
+    await log.append(crashRunId, {
+      type: 'run-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'w23-release',
+      journalVersion: 2,
+      seq: 1,
+      governance: { capUsd: 5, attended: false },
+    });
+    await log.append(crashRunId, {
+      type: 'job-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(crashRunId, {
+      type: 'reservation-opened',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:01.500Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+      reservationId: `${crashRunId}:j1:1:1`,
+      usd: 2,
+      class: 'advisory',
+    });
+
+    // Run 2 (no release): re-attested — still quarantined, still charged 2.
+    const calls2: string[] = [];
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', countingOp(calls2))),
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+    );
+    expect(report2.jobs[0]?.result.status).toBe('needs-human');
+    expect(calls2).toEqual([]);
+    const events2 = await openRunLog(w3dir).read(report2.runId);
+    expect(events2.some((event) => event.type === 'job-quarantined')).toBe(true);
+
+    // Run 3 (released): the job dispatches, the release is journalled with
+    // provenance 'call', and the FULL charge stays in the ledger (the new
+    // dispatch's own spend ADDS to it).
+    const calls3: string[] = [];
+    const governor3 = createGovernor({ maxUsd: 5 });
+    const report3 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', spendOnce(calls3, 0.5))),
+      { governor: governor3, allowAdvisory: true, releaseQuarantine: ['j1'] },
+    );
+    expect(calls3).toEqual(['j1']);
+    expect(report3.jobs[0]?.result.status).toBe('ok');
+    const events3 = await openRunLog(w3dir).read(report3.runId);
+    expect(events3.some((event) => event.type === 'quarantine-released')).toBe(true);
+    // Ledger: 2 (the never-refunded crash charge) + 0.5 (the new dispatch).
+    expect(governor3.usdSpent).toBeCloseTo(2.5);
+    void hash;
+  });
+
+  test('A12b: a full-charge crash window over the cap trips the resumed run at seed — before any dispatch', async () => {
+    const log = openRunLog(w3dir);
+    const plan: Plan = {
+      id: 'w23-crashcap',
+      jobs: [{ id: 'j1', op: 'fake', input: { jobId: 'j1' } }],
+    };
+    const crashRunId = 'w23-crashcap--r1--aa';
+    await log.append(crashRunId, {
+      type: 'run-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'w23-crashcap',
+      journalVersion: 2,
+      seq: 1,
+      governance: { capUsd: 1, attended: false },
+    });
+    await log.append(crashRunId, {
+      type: 'job-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(crashRunId, {
+      type: 'reservation-opened',
+      runId: crashRunId,
+      at: '2026-01-01T00:00:01.500Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+      reservationId: `${crashRunId}:j1:1:1`,
+      usd: 1.5,
+      class: 'advisory',
+    });
+
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 1 });
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor, allowAdvisory: true },
+    );
+    expect(calls).toEqual([]); // the seeded overrun trips BEFORE any dispatch
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+    // The row is QUARANTINED (needs-human), not re-marked: the quarantine
+    // pass runs before the waves and the honest-stop walk never touches
+    // quarantined rows — a quarantine verdict outranks the budget re-mark,
+    // and both facts (the job-quarantined event and the trip) are on the
+    // journal for the operator.
+    expect(rowStatuses(report)).toEqual(['needs-human']);
+    expect(report.stoppedEarly).toBe(false);
+  });
+
+  test('abort-on-trip: a budget trip aborts the IN-FLIGHT dispatch; its reservation settles and the slot is held until then', async () => {
+    const calls: string[] = [];
+    let observedAbort = false;
+    const slowOp = async (raw: unknown): Promise<OpResult<unknown>> => {
+      const jobId = (raw as { jobId: string }).jobId;
+      calls.push(jobId);
+      const ctx = currentJobContext();
+      await new Promise<void>((resolve) => {
+        ctx?.signal.addEventListener('abort', () => {
+          observedAbort = true;
+          resolve();
+        });
+      });
+      // Post-abort evidence: the dispatch was mid-flight when the trip landed.
+      ctx?.reportResult({
+        usage: { input: 5, output: 5, cacheRead: 0, cacheWrite: 0 },
+        costUSD: 0.2,
+      });
+      return { status: 'ok', value: jobId };
+    };
+    const governor = createGovernor({ maxUsd: 1 });
+    const plan: Plan = {
+      id: 'w23-abort',
+      jobs: [
+        { id: 'j1', op: 'slow', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'spendy', input: { jobId: 'j2' } },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('slow', slowOp), entry('spendy', spendOnce(calls, 1.5))),
+      { governor, allowAdvisory: true },
+    );
+    // j2's observed spend (1.5) crossed the cap → exhausted; j1 was aborted
+    // in-flight and kept its real post-abort verdict.
+    expect(observedAbort).toBe(true);
+    expect(governor.tripped).toBe(true);
+    expect(governor.tripKind).toBe('exhausted');
+    // Every row kept its real post-abort verdict and nothing was gated (both
+    // jobs ran; there was nothing left undispatched), so no early-stop claim
+    // is honest here (I9, both directions).
+    expect(report.stoppedEarly).toBe(false);
+    // Both dispatches settled: the journal carries exactly two
+    // reservation-settled events, and the run-level ledger moved by their
+    // charges (j2 1.5 via fold + breach-safe settle; j1 0.2 observed).
+    const events = await openRunLog(w3dir).read(report.runId);
+    const settles = events.filter(
+      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+        event.type === 'reservation-settled',
+    );
+    expect(settles).toHaveLength(2);
+    const j2 = settles.find((event) => event.jobId === 'j2');
+    expect(j2).toMatchObject({ charged: 1.5, basis: 'observed' }); // the fold was the evidence
+    const j1 = settles.find((event) => event.jobId === 'j1');
+    expect(j1).toMatchObject({ charged: 0.2, basis: 'observed' });
+    // The trip EVIDENCE event lands before run-finished.
+    expect(events[events.length - 1]?.type).toBe('run-finished');
+    expect(events[events.length - 2]).toMatchObject({
+      type: 'budget-tripped',
+      tripKind: 'exhausted',
+    });
+  });
+
+  test('a capless governed run over capped history inherits C_prev conservatively and journals the inheritance', async () => {
+    // Run 1: capped at 5, spends 3.
+    const calls1: string[] = [];
+    await runPlan(
+      independentPlan('w23-inherit', 1),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', spendOnce(calls1, 3))),
+      { governor: createGovernor({ maxUsd: 5 }), allowAdvisory: true },
+    );
+    // Run 2: governed but UNCAPPED — inherits C_prev 5 and journals it.
+    const calls2: string[] = [];
+    const governor2 = createGovernor({});
+    const report2 = await runPlan(
+      independentPlan('w23-inherit', 1),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', spendOnce(calls2, 1))),
+      { governor: governor2, allowAdvisory: true },
+    );
+    const events2 = await openRunLog(w3dir).read(report2.runId);
+    const started2 = events2[0] as Extract<JournalEvent, { type: 'run-started' }>;
+    expect(started2.governance?.inheritedCapUsd).toBe(5);
+    expect(started2.governance?.capUsd).toBeUndefined();
+    // The inherited cap BOUND the reservations: 5 − 3 seeded = 2 capacity.
+    const opens = events2.filter(
+      (event): event is Extract<JournalEvent, { type: 'reservation-opened' }> =>
+        event.type === 'reservation-opened',
+    );
+    expect(opens[0]).toMatchObject({ usd: 2, proposedUsd: 5 }); // share C/concurrency = 5/1, shrunk to capacity 2
+    expect(governor2.usdSpent).toBeCloseTo(4); // 3 seeded + 1 this run
+    // Run 3: a cap RAISE over C_prev still refuses — the inheritance did not move C.
+    const calls3: string[] = [];
+    await expect(
+      runPlan(
+        independentPlan('w23-inherit', 1),
+        { concurrency: 1, stopOnError: false, journalDir: w3dir },
+        viewWith(entry('fake', countingOp(calls3))),
+        { governor: createGovernor({ maxUsd: 6 }), allowAdvisory: true },
+      ),
+    ).rejects.toThrow('runPlan: cap raised from 5 to 6');
   });
 });

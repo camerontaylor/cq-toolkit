@@ -401,6 +401,21 @@ export interface RunFinishedJournalEvent {
   earlyStopReason?: RunEarlyStopReason;
 }
 
+/**
+ * Journal (v2, W2.3): the run's budget tripped (ADR-0003 §2.8). Emitted once
+ * per run, just before `run-finished`, with the trip kind and the governor's
+ * reason — the durable evidence for the honest stop the report claims.
+ * `signal` trips are recorded too: the event carries the truth; the
+ * honest-stop CLAIM (budget vs signal) is the run-finished taxonomy's job.
+ */
+export interface BudgetTrippedJournalEvent {
+  type: 'budget-tripped';
+  runId: string;
+  at: string;
+  tripKind: 'exhausted' | 'token-cap' | 'breach' | 'signal';
+  reason: string;
+}
+
 /** NDJSON journal event union, discriminated on `type`. All members plain serializable data. */
 export type JournalEvent =
   | RunStartedJournalEvent
@@ -411,7 +426,8 @@ export type JournalEvent =
   | ReservationSettledJournalEvent
   | ReservationRefusedJournalEvent
   | JobQuarantinedJournalEvent
-  | QuarantineReleasedJournalEvent;
+  | QuarantineReleasedJournalEvent
+  | BudgetTrippedJournalEvent;
 
 /**
  * Registry entry for one op. Runtime-only: never persisted (the importer is
