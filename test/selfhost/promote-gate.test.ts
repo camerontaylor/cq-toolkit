@@ -926,10 +926,43 @@ describe('runGate', () => {
     const first = order.indexOf('verdict-read');
     expect(first).toBeGreaterThan(0);
     expect(order.slice(0, first)).toEqual(['acceptance #7']);
-    expect(order.slice(order.lastIndexOf('verdict-read') + 1)).toEqual(['acceptance #7', 'push']);
+    // Pass 2 follows the waited verdict reads; one no-wait recheck read
+    // follows pass 2; the push comes last.
+    const pass2 = order.lastIndexOf('acceptance #7');
+    expect(order.slice(first, pass2).every((e) => e === 'verdict-read')).toBe(true);
+    expect(order.slice(pass2 + 1)).toEqual(['verdict-read', 'push']);
     const text = r.report.join('\n');
     expect(text).toMatch(/acceptance pass 1 PR #7 .*: pass/);
     expect(text).toMatch(/acceptance pass 2 PR #7 .*: pass/);
+  });
+
+  test('a verdict that turns red after acceptance pass 2 refuses at the recheck, no push', async () => {
+    let reads = 0;
+    let pushed = false;
+    const h = harness(world());
+    const gh = h.deps.gh;
+    h.deps.gh = async (args) => {
+      const res = await gh(args);
+      if (!(args[1] ?? '').includes('/check-runs?')) return res;
+      reads += 1;
+      if (reads === 1) return res;
+      // The recheck read: the same row, now concluded failure.
+      return { ...res, stdout: res.stdout.replaceAll('"success"', '"failure"') };
+    };
+    h.deps.git = fakeGit({
+      pushAtomic: () => {
+        pushed = true;
+        return Promise.resolve({ ok: true, output: '' });
+      },
+    });
+    const r = await runGate(h.deps, cfg({ push: true, pushToken: 'tok' }));
+    expect(r.verdict).toBe('refused');
+    expect(pushed).toBe(false);
+    expect(reads).toBe(2);
+    expect(r.report.join('\n')).toMatch(/recheck before push:/);
+    expect(r.report.at(-1)).toMatch(
+      /newest valid cq\/ratchet verdict on the tip is not success|no longer green after the acceptance pass/,
+    );
   });
 
   test('policy needs-human refuses (break-glass), with the override still logged', async () => {

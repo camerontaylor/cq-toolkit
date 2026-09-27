@@ -60,7 +60,8 @@
 //      newest `merge-queue` push run of each on the tip.
 //  10. promote: step 5 re-run first (a dismissal, new objection or newly
 //      unresolved thread during the wait moves no ref, so the leases would
-//      not catch it; any change refuses), then `push --atomic` of tip onto
+//      not catch it; any change refuses), then one no-wait re-read of steps
+//      8–9 (pass 2 can itself take minutes), then `push --atomic` of tip onto
 //      main and merge-queue, leased on the (main, tip) read at step 1 — one
 //      `--force-with-lease=<ref>:<oid>` per ref, never a plain force. A queue or main that moved (advanced OR
 //      rewound) since step 1 fails its lease, and --atomic refuses both.
@@ -801,6 +802,11 @@ async function gateBody(
     );
   }
 
+  // 10b. Verdicts and verified runs once more, without waiting: pass 2 can
+  //      itself take minutes, and a failed rerun or a newly posted verdict
+  //      moves no ref. One poll; anything short of green refuses.
+  await awaitVerdicts(deps, cfg, tip, main, report, refuse, 'recheck');
+
   // 10. Promote.
   if (!cfg.push) {
     report.push('push: dry run (no --push)');
@@ -905,7 +911,11 @@ async function logOverrides(
   }
 }
 
-/** Steps 8–9: poll until the verdict and every verified run are green, or refuse. */
+/**
+ * Steps 8–9: poll until the verdict and every verified run are green, or
+ * refuse. In `recheck` mode (step 10b) it reads once, never dispatches, and
+ * refuses anything short of green.
+ */
 async function awaitVerdicts(
   deps: GateDeps,
   cfg: GateConfig,
@@ -913,18 +923,20 @@ async function awaitVerdicts(
   main: string,
   report: string[],
   refuse: (why: string) => never,
+  mode: 'wait' | 'recheck' = 'wait',
 ): Promise<void> {
+  const recheck = mode === 'recheck';
   const repoPath = `repos/${cfg.owner}/${cfg.name}`;
   const getSlurp = (path: string): Promise<unknown> =>
     ghJson<unknown>(deps.gh, ['api', path, '--paginate', '--slurp']);
-  const deadline = deps.nowMs() + cfg.timeoutMin * 60_000;
+  const deadline = recheck ? deps.nowMs() : deps.nowMs() + cfg.timeoutMin * 60_000;
   let verifierRun: number | null = null;
   let dispatched = false;
   let polls = 0;
 
   for (;;) {
     polls += 1;
-    const lines: string[] = [];
+    const lines: string[] = recheck ? ['recheck before push:'] : [];
 
     // 8. The verdict.
     const checksPath = `${repoPath}/commits/${tip}/check-runs?check_name=${encodeURIComponent(VERDICT_CHECK)}&filter=all&per_page=100`;
@@ -955,7 +967,7 @@ async function awaitVerdicts(
       report.push(...lines);
       refuse(`verdict: the newest valid ${VERDICT_CHECK} verdict on the tip is not success`);
     }
-    if (verdict.state === 'missing' && !dispatched) {
+    if (verdict.state === 'missing' && !dispatched && !recheck) {
       const outcome = await dispatchVerify(deps, cfg, tip);
       if (outcome.dispatched) dispatched = true;
       report.push(`dispatch ${VERIFY_WORKFLOW}: ${outcome.line}`);
@@ -983,8 +995,13 @@ async function awaitVerdicts(
     }
 
     if (allGreen) {
-      report.push(...lines, `waited: ${String(polls)} poll(s)`);
+      report.push(...lines);
+      if (!recheck) report.push(`waited: ${String(polls)} poll(s)`);
       return;
+    }
+    if (recheck) {
+      report.push(...lines);
+      refuse('recheck: verdicts or verified runs are no longer green after the acceptance pass');
     }
     if (deps.nowMs() >= deadline) {
       report.push(...lines, `waited: ${String(polls)} poll(s)`);

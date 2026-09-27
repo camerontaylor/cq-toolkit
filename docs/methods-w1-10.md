@@ -163,7 +163,10 @@ paths stay in use, as ADR-0004 D-G.4 allows.
     half (≥10 minutes since the head, or an all-clear that postdates it) is not recomputed. Only
     the merger's recheck (`self-merge-prs`, `merge-recheck.ts`) enforces it, so a PR merged
     into `merge-queue` by hand skips settle (see Residuals). `gates.policyDiff` is recomputed
-    over `main..tip` (push subject).
+    over `main..tip` (push subject). The waits for verdicts and verified runs can take
+    minutes, and a state change during them moves no ref, so the leases cannot catch it. After
+    the waits, the gate re-judges every PR's evidence, then re-reads the verdicts and verified
+    runs once without waiting, and only then pushes.
     With D11 records dormant until C3, a needs-human tip is refused and each PR's `cq-override`
     record is logged. Break-glass (D-H.4) is the only path for protected-path changes until C3.
 
