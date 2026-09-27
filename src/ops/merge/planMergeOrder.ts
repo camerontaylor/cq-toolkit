@@ -43,7 +43,14 @@
 //      commits with it — ordering the child while the parent is held
 //      would merge the parent UNINVITED, so the child is held too,
 //      transitively)
-// Rules 1–7 are FIRST MATCH WINS and strictly ordered: the gates (1–4)
+//   8. base PR is a same-pass MERGE root → `stack_base_merging_this_pass`
+//      (review-debt #153: the executor merges the root onto the base
+//      branch FIRST, closing the root's PR and orphaning its branch — a
+//      child merging into that dead branch strands its content off the
+//      trunk while the forge reports it merged. Withheld here, the child
+//      re-enters the NEXT plan stacked on a closed rung, where the
+//      retarget-self rule hands it back as an ordinary root)
+// Rules 1–8 are FIRST MATCH WINS and strictly ordered: the gates (1–4)
 // all run before base resolution (5) and cycle detection (6), so a PR's
 // gate reason is never overwritten by a later rule — a truncated PR with
 // a ghost base stays `review_data_truncated`, and a truncated cycle
@@ -131,6 +138,9 @@ export type PlanBlockReason =
   | 'not_eligible'
   | 'unresolved_base'
   | 'stack_cycle'
+  // Recorded deviation (review-debt #153): the same-pass merge-root
+  // deferral's addition to this frozen vocabulary.
+  | 'stack_base_merging_this_pass'
   | 'stack_base_needs_human';
 
 /** One merge action in the plan. `merge`: merge this PR now (its base is
@@ -325,6 +335,26 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
       current = baseOf.get(current);
     }
     if (cyclic) withhold(pr, 'stack_cycle');
+  }
+
+  // Gate 6.5 — same-pass merge-root deferral (review-debt #153): a child
+  // whose resolved base is a same-pass MERGE root must not merge in this
+  // pass. The executor merges that root onto the base branch first, which
+  // closes the root's PR and orphans its branch — a child merged into the
+  // orphaned branch strands its content off the trunk while the forge
+  // reports it merged (found live by the F5 drill). Withheld here, the
+  // child re-enters the NEXT plan stacked on a closed rung: base
+  // resolution reads the closed owner as history and plans the child
+  // `retarget-self` onto the base branch, so its content reaches the trunk
+  // through its own future root merge. Children of RETARGET-SELF roots are
+  // deliberately NOT withheld: that rung's PR stays open and merges in a
+  // later pass, carrying the subtree's content with it (the documented
+  // I2-safe reading, which is the executor's tested behavior). The gate-7
+  // cascade below then holds the deferral's whole subtree.
+  const mergeRootSet = new Set(mergeRoots);
+  for (const [child, base] of baseOf) {
+    if (excluded.has(child)) continue;
+    if (mergeRootSet.has(base)) withhold(child, 'stack_base_merging_this_pass');
   }
 
   // Children of each base, in PR-number order (baseOf was filled from the

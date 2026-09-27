@@ -272,10 +272,15 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
  * CHANGES_REQUESTED verdict is handled by its own row (isObjection — an
  * objection, not acceptance; the cross-family reading agrees:
  * classifyThreads treats it as actionable feedback to answer). DISMISSED
- * is void; a null/unknown state never counts (fail toward awaiting).
+ * is void; a null/unknown state never counts (fail toward awaiting). The
+ * config knob cannot admit DISMISSED: the dispatch boundary rejects it
+ * (review r3, PR #222), so the doctrine holds on every surface.
  */
-const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): boolean =>
-  state !== null && (config.acceptReviewStates ?? ['APPROVED', 'COMMENTED']).includes(state);
+const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): boolean => {
+  if (state === null) return false;
+  const accepted = config.acceptReviewStates ?? ['APPROVED', 'COMMENTED'];
+  return accepted.some((candidate) => candidate === state);
+};
 
 /**
  * An ACCEPTABLE review for row 7: reviewable evidence whose verdict
@@ -287,9 +292,11 @@ const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean 
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
 /**
- * An OUTSTANDING OBJECTION for row 6: reviewable evidence (non-author,
- * non-skip-notice body, postdating the last commit) whose verdict is
- * CHANGES_REQUESTED — an open objection to the head state. An objection
+ * An OUTSTANDING OBJECTION for row 6: reviewable evidence — a trusted
+ * non-author whose body is screened as a skip notice only when
+ * automation-authored under resolved policy, head-SHA-bound when a head
+ * was supplied, and postdating the last commit — whose verdict is
+ * CHANGES_REQUESTED, an open objection to the head state. An objection
  * is not silence: under NOTHING MERGES UNINVITED it must be resolved or
  * withdrawn (the verdict moves off CHANGES_REQUESTED) before the quiet
  * window can carry the PR, no matter how long the settle.

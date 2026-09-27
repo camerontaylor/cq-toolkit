@@ -155,6 +155,18 @@ const handPlan = (
   baseBranch = 'main',
 ): PlanMergeResult => ({ order, needsHuman, baseBranch });
 
+/** A hand-built root+child stack — the shape planMergeOrder emitted before
+ * review-debt #153 deferred same-pass merge-root children. The executor
+ * takes its plan as gospel, so the dependency-order and cascade semantics
+ * stay pinned against the shape a caller can still hand it. */
+const rootChildPlan = (
+  root: number,
+  child: number,
+  childBaseRef: string,
+  baseBranch = 'main',
+): PlanMergeResult =>
+  handPlan([entry(root), entry(child, 'merge', root, 1, childBaseRef)], [], baseBranch);
+
 const sha = (seed: string): string => seed.repeat(40);
 
 const PR_REF = /^refs\/pull\/(\d+)\/head$/;
@@ -348,7 +360,7 @@ describe('executeMerges — happy path through a FakeMergeEffects (UC row 43: ze
     fake.heads.set(7, sha('a'));
     fake.heads.set(8, sha('b'));
     fake.baseRefs.set(8, 'feat-7'); // the child's plan-time base is its parent's head
-    const plan = stackPlan([planned(7, 'main', 'feat-7'), planned(8, 'feat-7', 'feat-8')]);
+    const plan = rootChildPlan(7, 8, 'feat-7');
 
     const report = await executeMerges({ plan, effects: fake });
 
@@ -516,7 +528,7 @@ describe('executeMerges — (a) live-state revalidation: drift is skipped, never
     fake.heads.set(7, sha('a'));
     fake.heads.set(8, sha('b'));
     fake.driftSha = sha('c');
-    const plan = stackPlan([planned(7, 'main', 'feat-7'), planned(8, 'feat-7', 'feat-8')]);
+    const plan = rootChildPlan(7, 8, 'feat-7');
 
     const report = await executeMerges({ plan, effects: fake });
 
@@ -623,7 +635,7 @@ describe('executeMerges — (g) forge base-ref re-read (#193): a retarget is ski
     fake.heads.set(7, sha('a'));
     fake.heads.set(8, sha('b'));
     fake.baseRefs.set(8, 'main'); // the child was retargeted to the trunk after planning
-    const plan = stackPlan([planned(7, 'main', 'feat-7'), planned(8, 'feat-7', 'feat-8')]);
+    const plan = rootChildPlan(7, 8, 'feat-7');
     const report = await executeMerges({ plan, effects: fake });
 
     expect(report.merged).toEqual([7]);
@@ -826,12 +838,11 @@ describe('executeMerges — (c) failed ancestor blocks descendants, independent 
     fake.heads.set(8, sha('b'));
     fake.heads.set(9, sha('c'));
     fake.mergeQueue.set(7, [{ code: 1, stdout: '', stderr: 'required statuses missing' }]);
-    const plan = stackPlan([
-      planned(7, 'main', 'feat-7'),
-      planned(8, 'feat-7', 'feat-8'),
-      planned(9, 'main', 'feat-9'),
-    ]);
-    // F2's order: roots [7, 9] first, then 7's subtree (8).
+    // Hand-built (#153): a same-pass merge root's child no longer plans,
+    // so the blocked-ancestor cascade is pinned on a handed plan — roots
+    // first (7, 9), then 7's subtree (8), exactly as F2 ordered it.
+    const plan = handPlan([entry(7), entry(9), entry(8, 'merge', 7, 1, 'feat-7')]);
+    // The plan is the executor's gospel — it follows this order exactly.
     expect(plan.order.map((e) => e.pr)).toEqual([7, 9, 8]);
 
     const report = await executeMerges({ plan, effects: fake });
@@ -1641,10 +1652,12 @@ describe('executeMerges — rejecting effects and the transitive cascade (round 
     const fake = new FakeMergeEffects();
     for (const pr of [7, 8, 9]) fake.heads.set(pr, sha(String(pr)));
     fake.mergeQueue.set(7, [{ code: 1, stdout: '', stderr: 'blocked by protection' }]);
-    const plan = stackPlan([
-      planned(7, 'main', 'feat-7'),
-      planned(8, 'feat-7', 'feat-8'),
-      planned(9, 'feat-8', 'feat-9'),
+    // Hand-built (#153): the grandchild cascade is pinned on a handed
+    // root+child+grandchild plan.
+    const plan = handPlan([
+      entry(7),
+      entry(8, 'merge', 7, 1, 'feat-7'),
+      entry(9, 'merge', 8, 2, 'feat-8'),
     ]);
 
     const report = await executeMerges({ plan, effects: fake });
