@@ -703,6 +703,47 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
     );
     expect(admissions.map((event) => event.jobKey)).toEqual(['j1']);
   });
+
+  test('a trip while a dispatch WAITS FOR A SLOT: signal → indeterminate + cancelled-while-queued, never budget-exhausted (cycle 2)', async () => {
+    // The slot-wait window: j2 is ADMITTED and parked on the in-flight slot
+    // when the trip lands — the short-circuit must not claim a budget
+    // exhaustion for a cancel (the TripKind taxonomy's rule), and the row
+    // must stay re-runnable (indeterminate, not budget-exhausted).
+    const calls: string[] = [];
+    const governor = createGovernor({ inFlightCeiling: 1 });
+    const external = new AbortController();
+    let j1Entered = false;
+    const hangUntilAbort = async (): Promise<OpResult<unknown>> => {
+      j1Entered = true;
+      await new Promise<void>((resolve) => {
+        currentJobContext()?.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { status: 'indeterminate', detail: 'cancelled by run signal' };
+    };
+    const plan: Plan = {
+      id: 'plan-signal-slot',
+      jobs: [
+        { id: 'j1', op: 'hang', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const runPromise = runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false },
+      viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
+      { governor, signal: external.signal },
+    );
+    await waitFor(() => j1Entered, 'j1 to enter');
+    external.abort(); // j2 is admitted, waiting on the single in-flight slot
+    const report = await runPromise;
+    expect(calls).toEqual([]); // j2 never ran
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'indeterminate' });
+    expect(report.jobs[1]?.result).not.toHaveProperty('status', 'budget-exhausted');
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('signal');
+    const shortCircuits = governor.events.filter((event) => event.kind === 'short-circuited');
+    expect(shortCircuits.map((event) => event.reason)).toContain('cancelled-while-queued');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -848,6 +889,26 @@ describe('governed journal v2 + resume', () => {
     });
     expect('governance' in (events2[0] as { governance?: unknown })).toBe(false);
     expect(jobStarts(events2).map((event) => event.attempt)).toEqual([1]); // ungoverned attempt
+  });
+
+  test('caps + budget.ungovernedOverGoverned refuse — the marker cannot carry unenforceable caps (cycle 2)', async () => {
+    // The ungoverned marker dispatches with NO admission, so caps riding it
+    // would be silently dead config — fail closed naming both resolutions.
+    const calls: string[] = [];
+    for (const cap of [{ maxUsd: 1 }, { maxTokens: 100 }] as const) {
+      await expect(
+        runPlan(
+          independentPlan('plan-ungov-caps', 1),
+          { concurrency: 1, stopOnError: false, ...cap },
+          viewWith(entry('fake', countingOp(calls))),
+          {
+            governor: createGovernor(cap),
+            optIn: ['budget.ungovernedOverGoverned'],
+          },
+        ),
+      ).rejects.toThrow(/marks the run ungoverned.*drop the caps or drop the opt-in/);
+    }
+    expect(calls).toEqual([]); // never dispatched
   });
 
   test('governed over unaccounted v1 dispatches refuses; legacyJournal=reset honours and records the reset (sticky)', async () => {

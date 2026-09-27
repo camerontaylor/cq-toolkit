@@ -609,7 +609,8 @@ export type ShortCircuitReason =
   | 'budget'
   | 'dispatch-quota'
   | 'attempt-cap'
-  | 'budget-while-queued';
+  | 'budget-while-queued'
+  | 'cancelled-while-queued';
 
 /**
  * WHICH bound tripped (ADR-0003 §2.3 honest-stop taxonomy): `exhausted` — a

@@ -488,6 +488,15 @@ export async function runPlan(
   const governor = gov?.governor;
   const ungovernedMarked = gov?.optIn?.includes('budget.ungovernedOverGoverned') === true;
   const governedDispatch = gov !== undefined && !ungovernedMarked;
+  // A capped run cannot ride the ungoverned opt-in: the marker dispatches
+  // with NO admission, so the caps would be silently unenforceable — the
+  // exact shape the caps-without-governance guard above exists to refuse
+  // (review cycle 2). Fail closed, naming both resolutions.
+  if (ungovernedMarked && (opts.maxUsd !== undefined || opts.maxTokens !== undefined)) {
+    throw new Error(
+      'runPlan: budget.ungovernedOverGoverned marks the run ungoverned (no admission, no ledger), so maxUsd/maxTokens could not be enforced — drop the caps or drop the opt-in',
+    );
+  }
 
   const runId = makeRunId(plan.id, opts.journalDir !== undefined);
   const manifest = makeManifest(plan);
@@ -910,15 +919,27 @@ export async function runPlan(
       try {
         // The budget can trip while this dispatch waited for a slot; a queued
         // dispatch that can no longer be paid for does not run (I9: honest).
+        // The trip KIND decides the verdict: a budget trip leaves the row
+        // budget-exhausted, but a SIGNAL trip is a cancel, not a budget
+        // event — the row is indeterminate (never ran; resume re-runs it)
+        // and the event names the cancel, keeping the trip taxonomy's rule
+        // that a signal stop never claims a budget exhaustion.
         if (governor.tripped) {
+          const cancelled = governor.tripKind === 'signal';
           governor.record({
             kind: 'short-circuited',
             op: job.op,
             jobKey: job.id,
-            reason: 'budget-while-queued',
+            reason: cancelled ? 'cancelled-while-queued' : 'budget-while-queued',
             atMs: governor.now(),
           });
-          result = { status: 'budget-exhausted' };
+          result = cancelled
+            ? {
+                status: 'indeterminate',
+                detail:
+                  'cancelled: the run-level signal tripped the governor before this queued dispatch ran',
+              }
+            : { status: 'budget-exhausted' };
         } else {
           const attempt = admission.attempt;
           const ladderSignal = gov?.signal;
@@ -1133,8 +1154,16 @@ export async function runPlan(
     if (governedDispatch && governor !== undefined) {
       if (governor.tripped && governor.tripKind === 'signal') {
         // Rows keep their states; the run claims the stop only when
-        // undispatched work actually remains.
-        if ([...entries.values()].some((entry) => entry.state === 'queued')) {
+        // undispatched work actually remains — still-queued entries, or a
+        // dispatch that was admitted but cancelled while it waited for a
+        // slot (its row is indeterminate, so the state scan alone misses it).
+        const cancelledWhileQueued = governor.events.some(
+          (event) => event.kind === 'short-circuited' && event.reason === 'cancelled-while-queued',
+        );
+        if (
+          cancelledWhileQueued ||
+          [...entries.values()].some((entry) => entry.state === 'queued')
+        ) {
           stoppedEarly = true;
           earlyStopReason = 'signal';
         }

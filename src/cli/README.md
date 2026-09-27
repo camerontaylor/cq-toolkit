@@ -29,7 +29,10 @@ THE I1 CLI CONTRACT (landed):
 - Flags are a thin JSON-flag mapping onto the op's input schema (values
   JSON-parsed when they parse): ops take EXACT schema keys; run-plan takes
   kebab-case aliases (--ops-root, --journal-dir, --max-usd, --max-tokens,
-  --stop-on-error).
+  --stop-on-error, --opt-in — the governance opt-ins, comma-separated keys
+  from the kernel's GovernanceOptIn union; an opt-in alone constructs the
+  governance handle, so `budget.ungovernedOverGoverned` marks an uncapped
+  run ungoverned).
 - `json`, `help`, and `h` are CLI-reserved keys on every subcommand (narration
   mode / help surface): op input schemas must not declare them. VALUED
   reserved flags (`--json=x`, `--help=x`, `--h=x`) are rejected with exit 2
