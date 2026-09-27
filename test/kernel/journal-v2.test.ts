@@ -82,6 +82,32 @@ describe('journal v2 schema', () => {
     expect(JournalEventSchema.safeParse(extra).success).toBe(false);
   });
 
+  test('v2 markers are v2-only and mutually exclusive: governance/ungoverned/seq without journalVersion, or both markers, is corruption', () => {
+    // No writer emits these shapes: folding a governance-bearing line as v1
+    // would silently downgrade the governed-history refusals (the fold sees
+    // no governed run) instead of failing loud like every other shape
+    // violation, and a both-markers line would sit inside AND outside the
+    // ledger at once (cap provenance from one, spend excluded by the other).
+    const withoutVersion = (marker: 'governance' | 'ungoverned' | 'seq'): JournalEvent =>
+      runStarted({
+        runId: 'plan-x--k--a',
+        ...(marker === 'governance' ? { governance: { attended: false } } : {}),
+        ...(marker === 'ungoverned' ? { ungoverned: { optIn: true } } : {}),
+        ...(marker === 'seq' ? { seq: 1 } : {}),
+      }) as JournalEvent;
+    expect(JournalEventSchema.safeParse(withoutVersion('governance')).success).toBe(false);
+    expect(JournalEventSchema.safeParse(withoutVersion('ungoverned')).success).toBe(false);
+    expect(JournalEventSchema.safeParse(withoutVersion('seq')).success).toBe(false);
+    const both: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      journalVersion: 2,
+      seq: 1,
+      governance: { attended: false },
+      ungoverned: { optIn: true },
+    });
+    expect(JournalEventSchema.safeParse(both).success).toBe(false);
+  });
+
   test('job-finished costUSD parses and stays optional; negative capUsd is malformed', () => {
     const finished: JournalEvent = {
       type: 'job-finished',

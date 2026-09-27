@@ -511,6 +511,43 @@ describe('honest-stop attribution through the governed runner (#15-4/#15-6)', ()
       'budget-exhausted': 4,
     });
   });
+
+  test('a BLOCKED row over an ok dep and a refused dep re-marks budget-exhausted (successful deps do not veto causality)', async () => {
+    const calls: string[] = [];
+    const governor = createGovernor({ runDispatchQuota: 2 });
+    // j1, j2 spend the quota; j3 is REFUSED (a real budget-exhausted row);
+    // j4 depends on the OK j1 AND the refused j3 — j3 alone blocked it (a
+    // succeeded dep blocks nothing), so the causality walk must ignore the
+    // successful dep instead of letting it veto the re-mark.
+    const plan: Plan = {
+      id: 'plan-quota-mixed-deps',
+      jobs: [
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j3', op: 'fake', input: { jobId: 'j3' } }, // refused: dispatch-quota
+        { id: 'j4', op: 'fake', input: { jobId: 'j4' }, dependsOn: ['j1', 'j3'] }, // blocked by j3 only
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor },
+    );
+    expect(calls).toEqual(['j1', 'j2']); // the quota gated everything after j2
+    expect(rowStatuses(report)).toEqual(['ok', 'ok', 'budget-exhausted', 'budget-exhausted']);
+    expect(report.jobs[3]?.result).toEqual({ status: 'budget-exhausted' }); // blocked → re-marked
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('budget');
+    expect(report.counts).toEqual({
+      queued: 0,
+      running: 0,
+      blocked: 0,
+      done: 2,
+      failed: 0,
+      'budget-exhausted': 2,
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

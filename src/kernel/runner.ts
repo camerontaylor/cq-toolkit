@@ -1321,7 +1321,15 @@ export async function runPlan(
                 // re-marks).
                 caused = true;
               } else if (entry.origin === 'blocked') {
-                caused = (depsOf.get(jobId) ?? []).every((dep) => budgetCaused(dep));
+                // Only the deps that actually blocked this row must be
+                // budget-caused: a row is fabricated blocked when SOME dep
+                // definitively did not succeed, so a succeeded (or merely
+                // queued) sibling dep says nothing about the cause and must
+                // not veto the re-mark (a walk over ALL deps let an ok dep
+                // keep a budget-blocked row dishonestly failed).
+                caused = (depsOf.get(jobId) ?? []).every(
+                  (dep) => !definitivelyNotOk(dep) || budgetCaused(dep),
+                );
               }
             }
             inProgress.delete(jobId);

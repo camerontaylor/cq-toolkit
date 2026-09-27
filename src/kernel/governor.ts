@@ -793,11 +793,29 @@ const isValidUsd = (usd: unknown): usd is number => isValidTokensValue(usd);
 const isValidUsage = (usage: unknown): usage is Usage => {
   if (typeof usage !== 'object' || usage === null) return false;
   const record = usage as Record<string, unknown>;
+  // Mirror the persisted UsageSchema exactly (integer cardinalities, strict
+  // keys): a measurement the journal/report mirror would reject cannot fold
+  // — it would trade this defensive guard for a post-record throw after the
+  // op has already completed (review thread).
+  const isCardinality = (value: unknown): value is number =>
+    typeof value === 'number' && Number.isInteger(value) && value >= 0;
   for (const field of ['input', 'output', 'cacheRead', 'cacheWrite'] as const) {
-    if (!isValidTokensValue(record[field])) return false;
+    if (!isCardinality(record[field])) return false;
   }
   const reasoning = record['reasoning'];
-  return reasoning === undefined || isValidTokensValue(reasoning);
+  if (reasoning !== undefined && !isCardinality(reasoning)) return false;
+  for (const key of Object.keys(record)) {
+    if (
+      key !== 'input' &&
+      key !== 'output' &&
+      key !== 'cacheRead' &&
+      key !== 'cacheWrite' &&
+      key !== 'reasoning'
+    ) {
+      return false;
+    }
+  }
+  return true;
 };
 
 // ---------------------------------------------------------------------------
