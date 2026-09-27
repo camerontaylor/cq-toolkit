@@ -295,6 +295,12 @@ export const GovernanceRecordSchema: z.ZodType<GovernanceRecord> = z
     capUsd: z.number().nonnegative().exactOptional(),
     capTokens: z.number().positive().exactOptional(),
     attended: z.boolean(),
+    // W2.3 (A12c): the ADVISORY escape, recorded when the operator passed it.
+    allowAdvisory: z.boolean().exactOptional(),
+    // W2.3: a capless governed run's conservative inheritance of the
+    // previous governed run's capUsd (the ledger's C never silently
+    // disappears between runs).
+    inheritedCapUsd: z.number().nonnegative().exactOptional(),
     legacyJournal: z
       .object({
         mode: z.literal('reset'),
@@ -463,6 +469,76 @@ export const JobFinishedJournalEventSchema = z
     // v1.1 journal v2 (ADR-0003 annex §2): the job's modeled USD rollup,
     // written by the governed runner when cost was observed.
     costUSD: z.number().exactOptional(),
+    // W2.3 (reservation-era runs): the job's reservation-side charge — the
+    // ledger truth that includes a full reservation charge behind an abort.
+    charged: z.number().nonnegative().exactOptional(),
+  })
+  .strict();
+
+// ---------------------------------------------------------------------------
+// Kernel: reservation-era events (journal v2, W2.3 — ADR-0003 §2.8)
+// ---------------------------------------------------------------------------
+
+export const ReservationOpenedJournalEventSchema = z
+  .object({
+    type: z.literal('reservation-opened'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    jobId: z.string(),
+    op: z.string(),
+    attempt: z.number().int().min(1),
+    reservationId: z.string().min(1),
+    // The reserved amount r — non-negative (a zero reservation is legal:
+    // capacity shrunk to the floor of the bound).
+    usd: z.number().nonnegative(),
+    class: z.enum(['hard', 'advisory']),
+    proposedUsd: z.number().nonnegative().exactOptional(),
+  })
+  .strict();
+
+export const ReservationSettledJournalEventSchema = z
+  .object({
+    type: z.literal('reservation-settled'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    jobId: z.string(),
+    reservationId: z.string().min(1),
+    charged: z.number().nonnegative(),
+    basis: z.enum(['observed', 'full']),
+    usage: UsageSchema.exactOptional(),
+  })
+  .strict();
+
+export const ReservationRefusedJournalEventSchema = z
+  .object({
+    type: z.literal('reservation-refused'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    jobId: z.string(),
+    op: z.string(),
+    reason: z.enum(['advisory-lane']),
+  })
+  .strict();
+
+export const JobQuarantinedJournalEventSchema = z
+  .object({
+    type: z.literal('job-quarantined'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    jobId: z.string(),
+    reservationId: z.string().min(1),
+    chargedUsd: z.number().nonnegative(),
+    reason: z.literal('unresolved-reservation'),
+  })
+  .strict();
+
+export const QuarantineReleasedJournalEventSchema = z
+  .object({
+    type: z.literal('quarantine-released'),
+    runId: z.string(),
+    at: z.iso.datetime(),
+    jobId: z.string(),
+    provenance: z.literal('call'),
   })
   .strict();
 
@@ -499,4 +575,9 @@ export const JournalEventSchema: z.ZodType<JournalEvent> = z.discriminatedUnion(
   JobStartedJournalEventSchema,
   JobFinishedJournalEventSchema,
   RunFinishedJournalEventSchema,
+  ReservationOpenedJournalEventSchema,
+  ReservationSettledJournalEventSchema,
+  ReservationRefusedJournalEventSchema,
+  JobQuarantinedJournalEventSchema,
+  QuarantineReleasedJournalEventSchema,
 ]);

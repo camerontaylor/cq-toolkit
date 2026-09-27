@@ -148,6 +148,107 @@ describe('journal v2 schema', () => {
   });
 });
 
+describe('reservation-era journal events (W2.3)', () => {
+  const OPENED: JournalEvent = {
+    type: 'reservation-opened',
+    runId: 'plan-x--k--a',
+    at: AT_A,
+    jobId: 'j1',
+    op: 'op-j1',
+    attempt: 1,
+    reservationId: 'plan-x--k--a:j1:1:1',
+    usd: 0.5,
+    class: 'advisory',
+  };
+
+  test('reservation-opened parses; negative usd, unknown keys, and a hard class are shape-checked', () => {
+    expect(JournalEventSchema.parse(OPENED)).toEqual(OPENED);
+    const withProposal: JournalEvent = { ...OPENED, proposedUsd: 1 };
+    expect(JournalEventSchema.parse(withProposal)).toEqual(withProposal);
+    expect(JournalEventSchema.safeParse({ ...OPENED, usd: -1 }).success).toBe(false);
+    expect(JournalEventSchema.safeParse({ ...OPENED, vendor: true }).success).toBe(false);
+  });
+
+  test('reservation-settled parses; charged is required, negative charged is malformed', () => {
+    const settled: JournalEvent = {
+      type: 'reservation-settled',
+      runId: 'plan-x--k--a',
+      at: AT_B,
+      jobId: 'j1',
+      reservationId: 'plan-x--k--a:j1:1:1',
+      charged: 0.25,
+      basis: 'observed',
+      usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0 },
+    };
+    expect(JournalEventSchema.parse(settled)).toEqual(settled);
+    const full: JournalEvent = {
+      type: 'reservation-settled',
+      runId: 'plan-x--k--a',
+      at: AT_B,
+      jobId: 'j1',
+      reservationId: 'plan-x--k--a:j1:1:1',
+      charged: 0.5,
+      basis: 'full',
+    };
+    expect(JournalEventSchema.parse(full)).toEqual(full);
+    expect(JournalEventSchema.safeParse({ ...settled, charged: -0.5 }).success).toBe(false);
+    const noCharged = { ...settled } as Record<string, unknown>;
+    delete noCharged['charged'];
+    expect(JournalEventSchema.safeParse(noCharged).success).toBe(false);
+  });
+
+  test('reservation-refused parses; the reason enum is closed', () => {
+    const refused: JournalEvent = {
+      type: 'reservation-refused',
+      runId: 'plan-x--k--a',
+      at: AT_A,
+      jobId: 'j1',
+      op: 'op-j1',
+      reason: 'advisory-lane',
+    };
+    expect(JournalEventSchema.parse(refused)).toEqual(refused);
+    expect(JournalEventSchema.safeParse({ ...refused, reason: 'vibes' }).success).toBe(false);
+  });
+
+  test('job-quarantined and quarantine-released parse; provenance is closed to call', () => {
+    const quarantined: JournalEvent = {
+      type: 'job-quarantined',
+      runId: 'plan-x--k--b',
+      at: AT_B,
+      jobId: 'j1',
+      reservationId: 'plan-x--k--a:j1:1:1',
+      chargedUsd: 0.5,
+      reason: 'unresolved-reservation',
+    };
+    expect(JournalEventSchema.parse(quarantined)).toEqual(quarantined);
+    const released: JournalEvent = {
+      type: 'quarantine-released',
+      runId: 'plan-x--k--b',
+      at: AT_B,
+      jobId: 'j1',
+      provenance: 'call',
+    };
+    expect(JournalEventSchema.parse(released)).toEqual(released);
+    expect(JournalEventSchema.safeParse({ ...released, provenance: 'env' }).success).toBe(false);
+  });
+
+  test('job-finished charged parses and stays optional (the reservation-side rollup)', () => {
+    const finished: JournalEvent = {
+      type: 'job-finished',
+      runId: 'plan-x--k--a',
+      at: AT_A,
+      jobId: 'j1',
+      opId: 'op-j1',
+      inputsHash: 'h',
+      result: { status: 'ok', value: 1 },
+      costUSD: 0.25,
+      charged: 0.5,
+    };
+    expect(JournalEventSchema.parse(finished)).toEqual(finished);
+    expect(JournalEventSchema.safeParse({ ...finished, charged: -1 }).success).toBe(false);
+  });
+});
+
 describe('durable append', () => {
   let dir: string;
 

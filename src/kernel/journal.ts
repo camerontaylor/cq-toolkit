@@ -510,7 +510,12 @@ export function deriveJobStatuses(events: readonly JournalEvent[]): JobStatus[] 
         break;
       case 'run-started':
       case 'run-finished':
-        break; // no per-job facts
+      case 'reservation-opened':
+      case 'reservation-settled':
+      case 'reservation-refused':
+      case 'job-quarantined':
+      case 'quarantine-released':
+        break; // no per-job VERDICT facts (a quarantine is not a terminal verdict; the governed runner owns it)
     }
   }
   return [...states].map(([jobId, state]) => ({ jobId, state }));
