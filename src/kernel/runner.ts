@@ -580,9 +580,15 @@ export async function runPlan(
           v1DispatchRuns.push(prior.runId);
         }
         if (isV2 && started.governance !== undefined) {
-          // The LAST governed v2 run in fold order owns the previous cap;
-          // its legacyJournal resets are sticky for the named v1 runs.
-          prevCapUsd = started.governance.capUsd;
+          // The LAST governed v2 run THAT SET A CAP owns the previous cap:
+          // an uncapped governed run (an opt-in-only handle) journals no
+          // capUsd, and letting that undefined clobber prevCapUsd would let
+          // the NEXT run raise the cap without budget.raiseCap (review
+          // cycle 4). Its legacyJournal resets are sticky for the named v1
+          // runs.
+          if (started.governance.capUsd !== undefined) {
+            prevCapUsd = started.governance.capUsd;
+          }
           if (started.governance.legacyJournal !== undefined) {
             for (const resetId of started.governance.legacyJournal.v1RunIds) {
               priorResets.add(resetId);
@@ -1070,6 +1076,18 @@ export async function runPlan(
 
     const runOne = governedDispatch ? governedRunOne : plainRunOne;
 
+    // Under a governed SIGNAL stop the never-dispatched rows are cancelled,
+    // not failed: the wave loop must not fabricate blocked rows for jobs
+    // whose dependencies are merely UNCLASSIFIED (the cancel landed before
+    // their wave), and the stop sweep treats an undefined dep state as
+    // unresolved — only a definitive non-success (failed/blocked/
+    // budget-exhausted) blocks; the rest stays queued, re-runnable on
+    // resume (review cycle 4).
+    const cancelledRun =
+      governedDispatch &&
+      governor !== undefined &&
+      governor.tripped &&
+      governor.tripKind === 'signal';
     for (const wave of waveJobs) {
       if (stop.requested) break;
       const submissions: Array<Promise<void>> = [];
@@ -1078,7 +1096,13 @@ export async function runPlan(
         // done — they carry a verified prior ok).
         const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
         if (!ready) {
-          entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
+          if (!cancelledRun) {
+            entries.set(job.id, {
+              result: blockedResult(job),
+              state: 'blocked',
+              origin: 'blocked',
+            });
+          }
           continue;
         }
         // Replay skip: terminal ok + same op + same input hash → zero
@@ -1132,12 +1156,23 @@ export async function runPlan(
     // below re-marks only rows whose non-execution is transitively
     // budget-caused, so a blocked row whose failed dep was a genuine failure
     // stays failed.
+    //
+    // Under a governed SIGNAL stop the undefined-dep rule inverts: an
+    // unclassified dependency did not FAIL — the run was cancelled before it
+    // could dispatch — so only a definitive non-success blocks, and a dep
+    // with no row leaves the job queued (indeterminate, re-runnable on
+    // resume) (review cycle 4). See cancelledRun above the wave loop.
     for (const wave of waveJobs) {
       for (const job of wave) {
         if (entries.has(job.id)) continue;
         const depStates = job.dependsOn.map((dep) => entries.get(dep)?.state);
-        // undefined (no entry) counts as not-ok — honest.
-        const anyNotOk = depStates.some((state) => state !== 'done' && state !== 'queued');
+        // undefined (no entry) counts as not-ok — honest (except under a
+        // signal stop, see above).
+        const anyNotOk = depStates.some((state) =>
+          cancelledRun
+            ? state !== undefined && state !== 'done' && state !== 'queued'
+            : state !== 'done' && state !== 'queued',
+        );
         if (anyNotOk) {
           entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
         } else {

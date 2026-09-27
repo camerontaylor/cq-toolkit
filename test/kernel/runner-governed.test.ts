@@ -623,6 +623,37 @@ async function waitFor(condition: () => boolean, what: string): Promise<void> {
 }
 
 describe('governed run signal (ADR-0003 §2.3)', () => {
+  test('a PRE-aborted signal over a dependency CHAIN: both rows stay queued, none blocked, earlyStopReason signal (cycle 4)', async () => {
+    // The sweep's undefined-dep rule ("never classified counts as not-ok")
+    // is a PLAIN-path honesty rule: under a governed signal stop the dep did
+    // not fail — the run was cancelled before it could dispatch — so the
+    // dependent row is queued (re-runnable on resume), never blocked.
+    const calls: string[] = [];
+    const governor = createGovernor({});
+    const external = new AbortController();
+    external.abort();
+    const plan: Plan = {
+      id: 'plan-signal-pre-chain',
+      jobs: [
+        { id: 'a', op: 'fake', input: { jobId: 'a' } },
+        { id: 'b', op: 'fake', input: { jobId: 'b' }, dependsOn: ['a'] },
+      ],
+    };
+    const report = await runPlan(
+      plan,
+      { concurrency: 2, stopOnError: false },
+      viewWith(entry('fake', countingOp(calls))),
+      { governor, signal: external.signal },
+    );
+    expect(calls).toEqual([]); // nothing dispatched
+    expect(rowStatuses(report)).toEqual(['indeterminate', 'indeterminate']);
+    expect(report.counts.queued).toBe(2);
+    expect(report.counts.blocked).toBe(0);
+    expect(report.counts['budget-exhausted']).toBe(0);
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('signal');
+  });
+
   test('a PRE-aborted signal stops before any dispatch: rows stay queued, earlyStopReason signal', async () => {
     const calls: string[] = [];
     const governor = createGovernor({});
@@ -954,6 +985,38 @@ describe('governed journal v2 + resume', () => {
       ).rejects.toThrow(/marks the run ungoverned.*drop the caps or drop the opt-in/);
     }
     expect(calls).toEqual([]); // never dispatched
+  });
+
+  test("an uncapped governed run does not clobber the ledger cap — the raise refusal still sees run 1's cap (cycle 4)", async () => {
+    // The ledger's C only moves UP with budget.raiseCap. A capless governed
+    // run (an opt-in-only handle) journals governance WITHOUT capUsd; if the
+    // fold let that undefined clobber prevCapUsd, the next capped run could
+    // raise freely — the refusal must still see run 1's cap.
+    const view = viewWith(entry('fake', okOp));
+    const plan = independentPlan('plan-cap-carry', 1);
+    // r1: governed, capped at 1.
+    await runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 1 }, view, {
+      governor: createGovernor({ maxUsd: 1 }),
+    });
+    // r2: governed, NO cap — the opt-in-free handle is a legal governed shape.
+    await runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir }, view, {
+      governor: createGovernor({}),
+    });
+    // r3: a raise over r1's 1 refuses without the opt-in...
+    await expect(
+      runPlan(plan, { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 }, view, {
+        governor: createGovernor({ maxUsd: 5 }),
+      }),
+    ).rejects.toThrow(/cap raised from 1 to 5/);
+    // ...and proceeds WITH it, recording the raise against r1's cap.
+    const report = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: dir, maxUsd: 5 },
+      view,
+      { governor: createGovernor({ maxUsd: 5 }), optIn: ['budget.raiseCap'] },
+    );
+    const started = (await openRunLog(dir).read(report.runId))[0];
+    expect(started).toMatchObject({ governance: { raiseCap: { from: 1, to: 5 } } });
   });
 
   test('governed over unaccounted v1 dispatches refuses; legacyJournal=reset honours and records the reset (sticky)', async () => {
