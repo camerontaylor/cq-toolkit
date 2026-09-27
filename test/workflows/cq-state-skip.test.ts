@@ -34,14 +34,21 @@ function jobIds(text: string): string[] {
 function expectEveryJobGuarded(text: string, file: string): void {
   const jobs = jobIds(text);
   expect(jobs.length, `${file} declares jobs`).toBeGreaterThan(0);
+  // The guard must sit at the JOB-KEY indent (four spaces — a direct key of
+  // `  <id>:`), so a STEP-level `if:` deeper in the block cannot satisfy it
+  // (CodeRabbit cycle 2). Exact-element match on the block's lines.
+  const jobLevelGuard = `    ${SKIP}`;
   for (const id of jobs) {
     // The job's block runs from its id line to the next job (or EOF).
     const lines = text.split('\n');
     const start = lines.indexOf('jobs:') + 1;
     const idLine = lines.findIndex((line, i) => i >= start && line === `  ${id}:`);
     const next = lines.findIndex((line, i) => i > idLine && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(line));
-    const block = lines.slice(idLine, next === -1 ? lines.length : next).join('\n');
-    expect(block, `${file} job ${id} carries the job-level cq-state skip`).toContain(SKIP);
+    const blockLines = lines.slice(idLine, next === -1 ? lines.length : next);
+    expect(
+      blockLines,
+      `${file} job ${id} carries the cq-state skip at JOB-KEY indentation`,
+    ).toContain(jobLevelGuard);
   }
 }
 
