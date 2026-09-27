@@ -396,13 +396,15 @@ export const RunStartedJournalEventSchema = z
       .exactOptional(),
   })
   .strict()
-  // v2 couplings (annex §2), encoded per the refinements policy above: the
-  // v2 markers ride a journalVersion-2 record only, and the two markers are
-  // mutually exclusive. No writer emits either shape, so an occurrence is
-  // corruption — folding such a line as v1 would silently downgrade the
-  // governed-history refusals (the fold sees no governed run), and a
-  // both-markers line would sit inside AND outside the ledger at once (cap
-  // provenance from one marker, spend excluded by the other).
+  // v2 couplings (annex §2), encoded per the refinements policy above: a v2
+  // record carries EXACTLY ONE of the two governance markers (and both ride
+  // `journalVersion: 2` only, as does `seq`). No writer emits any other
+  // shape, so an occurrence is corruption — folding a marker-bearing line as
+  // v1 would silently downgrade the governed-history refusals (the fold sees
+  // no governed run), a both-markers line would sit inside AND outside the
+  // ledger at once (cap provenance from one marker, spend excluded by the
+  // other), and a markerless v2 line would be ledger-invisible history:
+  // dispatched dispatches no later run is ever refused over (review threads).
   .superRefine((event, ctx) => {
     if (
       event.journalVersion === undefined &&
@@ -419,6 +421,17 @@ export const RunStartedJournalEventSchema = z
         code: 'custom',
         message: 'governance and ungoverned are mutually exclusive',
         path: ['ungoverned'],
+      });
+    }
+    if (
+      event.journalVersion !== undefined &&
+      event.governance === undefined &&
+      event.ungoverned === undefined
+    ) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'a v2 run-started requires exactly one of governance or ungoverned',
+        path: ['governance'],
       });
     }
   });

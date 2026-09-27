@@ -106,6 +106,16 @@ describe('journal v2 schema', () => {
       ungoverned: { optIn: true },
     });
     expect(JournalEventSchema.safeParse(both).success).toBe(false);
+    // …and a v2 record with NEITHER marker is ledger-invisible history: the
+    // fold would count its seq but add it to neither governedRunIds nor
+    // ungovernedRunIds, so later plain runs would never be refused over its
+    // dispatches. Exactly one marker is required.
+    const markerless: JournalEvent = runStarted({
+      runId: 'plan-x--k--a',
+      journalVersion: 2,
+      seq: 1,
+    });
+    expect(JournalEventSchema.safeParse(markerless).success).toBe(false);
   });
 
   test('job-finished costUSD parses and stays optional; negative capUsd is malformed', () => {
