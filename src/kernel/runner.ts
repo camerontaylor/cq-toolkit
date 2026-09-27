@@ -849,6 +849,13 @@ export async function runPlan(
 
       const admission = governor.admit(job.id);
       if (admission.decision === 'reject') {
+        // admit() answers reason 'budget' for EVERY tripped kind, so a
+        // dispatch whose start races the run-level cancel would be labelled
+        // budget-exhausted here and strand unre-runnable on resume. A signal
+        // trip is a CANCEL, not a budget event (TripKind taxonomy — review
+        // cycle 3): return without classifying — the stop sweep marks the
+        // row queued (nothing ran) and the honest-stop pass claims 'signal'.
+        if (governor.tripKind === 'signal') return;
         // A refusal is a real terminal verdict for this run: recorded and
         // journalled (finish-only — no job-started, no dispatch happened).
         governor.record({

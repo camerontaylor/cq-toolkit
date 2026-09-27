@@ -744,6 +744,51 @@ describe('governed run signal (ADR-0003 §2.3)', () => {
     const shortCircuits = governor.events.filter((event) => event.kind === 'short-circuited');
     expect(shortCircuits.map((event) => event.reason)).toContain('cancelled-while-queued');
   });
+
+  test('a trip BEFORE a queued dispatch is ADMITTED: the row stays queued for the stop sweep, never budget-exhausted (cycle 3)', async () => {
+    // The admission-gate window: with concurrency 1, j2's dispatch starts
+    // only after j1 finishes — by then the cancel has tripped the governor,
+    // and admit() answers reason 'budget' for every tripped kind. The cancel
+    // is not a budget event: the gate must return without classifying, so
+    // the row stays re-runnable on resume, never a budget refusal.
+    const calls: string[] = [];
+    const governor = createGovernor({ maxUsd: 1 });
+    const external = new AbortController();
+    let j1Entered = false;
+    const hangUntilAbort = async (): Promise<OpResult<unknown>> => {
+      j1Entered = true;
+      await new Promise<void>((resolve) => {
+        currentJobContext()?.signal.addEventListener('abort', () => resolve(), { once: true });
+      });
+      return { status: 'indeterminate', detail: 'cancelled by run signal' };
+    };
+    const plan: Plan = {
+      id: 'plan-signal-admission',
+      jobs: [
+        { id: 'j1', op: 'hang', input: { jobId: 'j1' } },
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+      ],
+    };
+    const runPromise = runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false },
+      viewWith(entry('hang', hangUntilAbort), entry('fake', countingOp(calls))),
+      { governor, signal: external.signal },
+    );
+    await waitFor(() => j1Entered, 'j1 to enter');
+    external.abort(); // j2 is submitted but not yet dispatched (concurrency 1)
+    const report = await runPromise;
+    expect(calls).toEqual([]); // j2 never ran
+    expect(report.jobs[1]?.result).toMatchObject({ status: 'indeterminate' });
+    expect(report.jobs[1]?.result).not.toHaveProperty('status', 'budget-exhausted');
+    expect(report.stoppedEarly).toBe(true);
+    expect(report.earlyStopReason).toBe('signal');
+    // The gate left NO j2 evidence: no admission, no short-circuit record,
+    // no journalled refusal — the stop sweep owns the queued classification.
+    expect(
+      governor.events.some((event) => event.kind === 'short-circuited' && event.jobKey === 'j2'),
+    ).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
