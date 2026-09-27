@@ -33,26 +33,70 @@
 //
 // Replay (opts.resume === true — which REQUIRES journalDir; requesting resume
 // without one throws before a runId exists or anything is journaled): fold
-// EVERY prior run of this plan in the dir, ordered by each run's run-started
-// `at` (ties by runId — deterministic, mtime-independent), with
-// per-job LAST-FINISH-WINS. Candidate pre-filter: only files whose runId
-// carries this plan's exact `<planId>--` prefix AND whose remainder is the
-// exact two-segment runId tail (`<base36>--<hex>` — so plan 'a' does not
-// match plan 'a--b''s files) are even PARSED (a corrupt journal of ANOTHER
-// plan cannot block this plan's resume), and the run-started event's planId
-// is the exact semantic matcher (the frozen RunStartedJournalEvent DOES
-// carry planId). Folding ALL runs — not just the latest — is the
-// resume-safety point: a later PARTIAL run (crash mid-run) contributes no
-// finishes of its own, so it cannot erase older runs' completed jobs (which
-// would re-execute non-idempotent ops); a later failed re-attempt does
-// override an older ok, per-job last finish wins. A job whose latest prior
-// job-finished has result `ok` AND opId === job.op AND inputsHash === the
-// manifest hash is SKIPPED: zero op invocation, its JobOutcome reconstructed
-// from that journal event. Everything else re-runs — continue-from-first-
-// failure emerges naturally. Skipped jobs are RE-ATTESTED in the new run with
-// a job-finished event (no job-started — no dispatch happened), copying
-// opId/inputsHash/result/usage after hash verification: each run's journal is
-// then self-contained, so the fold rule survives chained resumes.
+// EVERY prior run of this plan in the dir, in THE FOLD ORDER
+// (journal.foldOrderRuns — v1 runs by run-started `at`, ties by runId, ALL
+// before every v2 run; v2 runs by `seq`, so a fake/injected clock can no
+// longer reorder the fold), with per-job LAST-FINISH-WINS. Candidate
+// pre-filter: only files whose runId carries this plan's exact `<planId>--`
+// prefix AND whose remainder is the exact two-segment runId tail
+// (`<base36>--<hex>` — so plan 'a' does not match plan 'a--b''s files) are
+// even PARSED (a corrupt journal of ANOTHER plan cannot block this plan's
+// resume), and the run-started event's planId is the exact semantic matcher
+// (the frozen RunStartedJournalEvent DOES carry planId). Folding ALL runs —
+// not just the latest — is the resume-safety point: a later PARTIAL run
+// (crash mid-run) contributes no finishes of its own, so it cannot erase
+// older runs' completed jobs (which would re-execute non-idempotent ops); a
+// later failed re-attempt does override an older ok, per-job last finish
+// wins. A job whose latest prior job-finished has result `ok` AND
+// opId === job.op AND inputsHash === the manifest hash is SKIPPED: zero op
+// invocation, its JobOutcome reconstructed from that journal event.
+// Everything else re-runs — continue-from-first-failure emerges naturally.
+// Skipped jobs are RE-ATTESTED in the new run with a job-finished event (no
+// job-started — no dispatch happened), copying opId/inputsHash/result/usage
+// after hash verification: each run's journal is then self-contained, so the
+// fold rule survives chained resumes.
+//
+// Governed mode (the 4th `gov` param — ADR-0003 §2, W2.2): with a
+// `Governance` handle the runner itself is the governed composition (the
+// governRegistry decorator seam stays for direct-registry callers). Per
+// dispatch it ADMITS through the governor keyed on the real plan job id, runs
+// the op through the escalation ladder inside the job context (an external
+// `gov.signal` is composed into the ladder's controller), folds spend
+// evidence — the transitional `reportResult` channel plus the completion-time
+// WorkerResult fold — into the per-run ledger and into per-job sums, and owns
+// the honest stop (I9): a budget-family trip (USD/token/unpriced, or a
+// per-run dispatch-quota refusal) re-marks the rows that never dispatched
+// budget-exhausted — transitively, but NEVER past a genuinely-failed
+// dependency — and claims stoppedEarly/earlyStopReason 'budget'; a
+// `signal`-kind trip claims 'signal' and leaves undispatched rows queued (a
+// cancel is not a budget verdict). The governed run always folds the dir's
+// history for LEDGER continuity (attempts, spend, cap checks) even without
+// resume:true — only the replay-skip map is resume-gated — and seeds the
+// governor from it.
+//
+// Governed refusals (thrown BEFORE anything is emitted or claimed; the CLI
+// maps on the 'runPlan: ' prefix):
+//   - an ungoverned run over governed history (run governed or opt in with
+//     `budget.ungovernedOverGoverned`);
+//   - a governed run over v1 journals with unaccounted dispatches — v1
+//     journals carry no spend, so the cap could not bind what already ran
+//     (opt in with `budget.legacyJournal=reset`; the reset is recorded on the
+//     run's governance block and is STICKY for the named runs);
+//   - a cap RAISE over the last governed run's capUsd without
+//     `budget.raiseCap` (the honoured raise is recorded as raiseCap
+//     from→to).
+// `budget.ungovernedOverGoverned` instead marks THIS run UNGOVERNED (the
+// `ungoverned` marker on its v2 run-started): ops execute exactly as the
+// ungoverned path, with no admission, no spend observation, and no caps; it
+// sits outside the spend ledger by explicit opt-in.
+//
+// Governed journal (v2): run-started carries journalVersion 2, a `seq`
+// claimed by exclusive create (journal.claimSeq, BEFORE the event is
+// emitted) and the governance record (caps, attendance, honoured opt-ins).
+// Governed job-started events carry the admission's real attempt ordinal;
+// job-finished events carry the per-job usage/costUSD sums the evidence
+// folds observed. A governed run WITHOUT a journalDir journals nothing
+// (in-memory run): no seq is claimed and no v2 fields exist.
 //
 // Journal-less mode (no journalDir): emit becomes a no-op sink. The same
 // event SEQUENCE is produced through the same emit call sites, but nothing
@@ -67,28 +111,43 @@
 //     human — 'blocked' is the closest "waiting" state; FRICTION: JobState has
 //     no needs-human value); indeterminate→failed (attention needed;
 //     FRICTION: no faithful state — resume re-runs these either way).
-//   - jobs never started (stopOnError): blocked when some dependency
-//     definitively did not succeed (transitively) — even when a sibling
-//     dependency is merely queued (a definitively failed dep means the job
-//     can never run) — otherwise queued ("not yet dispatched" — exactly true
-//     for them). running is always 0 in a returned report (everything
-//     awaited).
+//   - jobs never started (stopOnError, or a governed trip that stopped
+//     dispatch): blocked when some dependency definitively did not succeed
+//     (transitively) — even when a sibling dependency is merely queued (a
+//     definitively failed dep means the job can never run) — otherwise
+//     queued ("not yet dispatched" — exactly true for them). Under a
+//     budget-family stop the queued/blocked rows whose non-execution is
+//     transitively budget-caused are RE-MARKED budget-exhausted (the runner
+//     knows which jobs it admitted — no marker sniffing); running is always
+//     0 in a returned report (everything awaited).
 //   - never-run rows still appear in jobs[] (the frozen JobOutcome doc says
 //     one row per job in the plan): blocked rows carry
 //     {status:'failed', error:'blocked: …'} and queued rows
 //     {status:'indeterminate', detail:'queued: …'} — the least-dishonest
-//     taxonomy values for "did not run".
+//     taxonomy values for "did not run" (budget-re-marked rows become
+//     {status:'budget-exhausted'}).
 //
 // Row order is deterministic: dispatch order (topo wave order, in-wave
 // manifest order; replay-skipped jobs keep their slot), unschedulable
 // (missing-dep) jobs last in manifest order.
 //
-// opts.maxUsd and opts.maxTokens are advisory and untouched here (USD stays
-// derived; T1.3 owns budget enforcement for BOTH caps and honest-stop: this
-// runner always reports stoppedEarly: false with no earlyStopReason).
+// opts.maxUsd/maxTokens REQUIRE governance: without a Governance handle
+// there is no admission gate and no spend observation, so the caps would be
+// silently unenforceable — the guard below throws before anything runs
+// (USD stays derived; the governor owns enforcement for BOTH caps and the
+// honest stop).
 import pLimit from 'p-limit';
 import { randomBytes } from 'node:crypto';
-import { assertSafeRunId, candidateRunsForPlan, openRunLog, type RunLog } from './journal.js';
+import {
+  assertSafeRunId,
+  candidateRunsForPlan,
+  foldOrderRuns,
+  openRunLog,
+  claimSeq,
+  type FoldRun,
+  type RunLog,
+} from './journal.js';
+import { runLadder, validSpendEvidence, workerResultOfValue, type Governance } from './governor.js';
 import { makeManifest, topoOrder, type ManifestJob } from './manifest.js';
 import { OpResultSchema } from './schema.js';
 import type { Usage } from '../driver/types.js';
@@ -101,8 +160,10 @@ import type {
   OpResult,
   Plan,
   RunCounts,
+  RunEarlyStopReason,
   RunOptions,
   RunReport,
+  RunStartedJournalEvent,
 } from './types.js';
 
 /**
@@ -125,14 +186,39 @@ type EntryOrigin = 'executed' | 'replayed' | 'blocked' | 'queued';
 interface OutcomeEntry {
   result: OpResult<unknown>;
   state: JobState;
-  /** Per-job usage rollup — only ever sourced from a replayed journal event. */
+  /** Per-job usage rollup — replay-sourced, or the governed evidence sums. */
   usage?: Usage;
+  /** Per-job modeled USD rollup (governed runs; replay copies usage only). */
+  costUSD?: number;
   origin: EntryOrigin;
 }
 
 /** Error message of an unknown throwable, for `failed` results. */
 function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Σ of the frozen Usage fields — the DD-9 token rollup (`reasoning` is an
+ * `output` breakdown already included in it, never added on top). Identical
+ * to the governor's private fold; kept local so the runner's once-only
+ * evidence flags mark exactly what the governor will fold.
+ */
+function usageTokens(usage: Usage): number {
+  return usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+}
+
+/** Sum two Usage rollups (the governed per-job evidence sums). */
+function addUsage(a: Usage, b: Usage): Usage {
+  return {
+    input: a.input + b.input,
+    output: a.output + b.output,
+    cacheRead: a.cacheRead + b.cacheRead,
+    cacheWrite: a.cacheWrite + b.cacheWrite,
+    ...(a.reasoning !== undefined || b.reasoning !== undefined
+      ? { reasoning: (a.reasoning ?? 0) + (b.reasoning ?? 0) }
+      : {}),
+  };
 }
 
 /**
@@ -362,13 +448,21 @@ async function executeOp(
 
 /**
  * Run one plan to completion (or honest early stop) and return its report.
- * See the header for the full contract.
+ * See the header for the full contract. The optional `gov` handle turns the
+ * run GOVERNED (ADR-0003 §2): admission, spend observation, caps, honest
+ * stop, and the v2 journal — see the header's governed-mode section.
  */
 export async function runPlan(
   plan: Plan,
   opts: RunOptions,
   registry: OpRegistryView,
+  gov?: Governance,
 ): Promise<RunReport> {
+  // Caps guard, BEFORE anything else: a cap without a governor is a lie —
+  // there would be no admission gate and no spend observation to enforce it.
+  if ((opts.maxUsd !== undefined || opts.maxTokens !== undefined) && gov === undefined) {
+    throw new Error('runPlan: caps require governance');
+  }
   if (!Number.isInteger(opts.concurrency) || opts.concurrency < 1) {
     throw new Error(`runPlan: concurrency must be an integer >= 1, got ${opts.concurrency}`);
   }
@@ -389,6 +483,13 @@ export async function runPlan(
     seenJobIds.add(job.id);
   }
 
+  // Governed-run taxonomy: `ungovernedMarked` is the opted-in UNGOVERNED run
+  // over governed history (no admission, no ledger — see the header);
+  // `governedDispatch` is the governed path proper.
+  const governor = gov?.governor;
+  const ungovernedMarked = gov?.optIn?.includes('budget.ungovernedOverGoverned') === true;
+  const governedDispatch = gov !== undefined && !ungovernedMarked;
+
   const runId = makeRunId(plan.id, opts.journalDir !== undefined);
   const manifest = makeManifest(plan);
   const jobById = new Map<string, ManifestJob>(
@@ -403,276 +504,778 @@ export async function runPlan(
   // caller or test consumes an in-memory list). The fold over the sequence —
   // journal deriveJobStatuses over a journaled run's file — is
   // mode-independent by construction.
-  const runLog: RunLog | undefined =
-    opts.journalDir !== undefined ? openRunLog(opts.journalDir) : undefined;
+  const journalDir = opts.journalDir;
+  const runLog: RunLog | undefined = journalDir !== undefined ? openRunLog(journalDir) : undefined;
   const emit = async (event: JournalEvent): Promise<void> => {
     if (runLog) await runLog.append(runId, event);
   };
 
-  // --- Replay: fold EVERY prior run of this plan, per-job last-finish-wins --
+  // --- Fold: EVERY prior run of this plan, v1-then-v2 ----------------------
+  // EVERY run over a journal dir folds (ADR-0003 §2.1 is unqualified: a run
+  // over a dir whose plan history contains a governed v2 run must be
+  // governed — the refusal below needs the history on FRESH runs too, not
+  // just resumes). Within the fold: a governed run ALWAYS uses it for ledger
+  // continuity (attempts, spend, cap checks, refusals); the replay-skip map
+  // stays resume-gated.
   const replay = new Map<string, JobFinishedJournalEvent>();
-  if (opts.resume === true && runLog) {
-    // Shared candidate pre-filter (journal.candidateRunsForPlan — the same
-    // helper governor.seedFromRunLog uses): runIds embed the plan id
-    // (`<planId>--<timestamp>--<random>`) and must carry the exact
-    // two-segment tail, so only THIS plan's files are ever parsed — a planId
-    // that merely extends this one ('a' vs 'a--b') cannot slip in, and a
-    // corrupt middle line in ANOTHER plan's journal cannot block THIS plan's
-    // resume. The run-started planId check below remains the semantic
-    // matcher for every file that IS parsed.
+  // Governed fold facts. governedRunIds is the one fact the UNGOVERNED path
+  // also needs (the refusal below must see governed history on fresh runs,
+  // not only resumes).
+  const governedRunIds: string[] = [];
+  const ungovernedRunIds: string[] = [];
+  const v1DispatchRuns: string[] = [];
+  const priorResets = new Set<string>();
+  let prevCapUsd: number | undefined;
+  let maxPriorSeq = 0;
+  let priorRuns: FoldRun[] = [];
+  const seedEvents: JournalEvent[] = [];
+  if (runLog) {
+    // Shared candidate pre-filter (journal.candidateRunsForPlan): runIds
+    // embed the plan id (`<planId>--<timestamp>--<random>`) and must carry
+    // the exact two-segment tail, so only THIS plan's files are ever
+    // parsed — a planId that merely extends this one ('a' vs 'a--b') cannot
+    // slip in, and a corrupt middle line in ANOTHER plan's journal cannot
+    // block THIS plan's resume. The run-started planId check below remains
+    // the semantic matcher for every file that IS parsed.
     const candidates = candidateRunsForPlan(await runLog.runs(), plan.id);
-    // Parse every candidate, then order the fold by each run's run-started
-    // `at` (ties broken by runId) — NOT by mtime: mtime reflects the last
-    // append and can be perturbed or tied under concurrent runs, while `at`
-    // is the run's own claim about when it started. With that order the
-    // per-job LAST finish wins — within a run (retries append later
-    // finishes) and ACROSS runs: a later partial run contributes only the
-    // jobs it actually finished, so it cannot erase older runs' completed
-    // jobs; a later failed re-attempt DOES override an older ok.
-    const folded: Array<{ at: string; runId: string; events: JournalEvent[] }> = [];
+    const matching: FoldRun[] = [];
     for (const priorRunId of candidates) {
       const priorEvents = await runLog.read(priorRunId);
       let priorPlanId: string | undefined;
-      let startedAt: string | undefined;
       for (const event of priorEvents) {
-        if (event.type === 'run-started' && startedAt === undefined) startedAt = event.at;
-        if (event.type === 'run-started') priorPlanId = event.planId;
+        if (event.type === 'run-started') {
+          priorPlanId = event.planId;
+          break;
+        }
       }
-      if (priorPlanId !== plan.id || startedAt === undefined) continue;
-      folded.push({ at: startedAt, runId: priorRunId, events: priorEvents });
+      if (priorPlanId !== plan.id) continue;
+      matching.push({ runId: priorRunId, events: priorEvents });
     }
-    folded.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.runId < b.runId ? -1 : 1));
-    for (const prior of folded) {
-      for (const event of prior.events) {
-        if (event.type === 'job-finished') replay.set(event.jobId, event);
+    // THE FOLD ORDER (annex §3): v1 runs by (at, runId), all before every
+    // v2 run; v2 runs by `seq` — `at` is display-only for v2, so an
+    // injected clock can no longer reorder the fold. Corruption is loud
+    // (a v2 run without seq, or a duplicate seq, throws from foldOrderRuns).
+    priorRuns = foldOrderRuns(matching);
+    for (const prior of priorRuns) {
+      const started = prior.events.find(
+        (event): event is RunStartedJournalEvent => event.type === 'run-started',
+      );
+      if (started === undefined) continue; // unreachable — the matcher required one
+      const isV2 = started.journalVersion === 2;
+      if (isV2) {
+        if (started.governance !== undefined) governedRunIds.push(prior.runId);
+        if (started.ungoverned !== undefined) ungovernedRunIds.push(prior.runId);
+        if (started.seq !== undefined && started.seq > maxPriorSeq) maxPriorSeq = started.seq;
+      }
+      if (gov !== undefined) {
+        if (!isV2 && prior.events.some((event) => event.type === 'job-started')) {
+          v1DispatchRuns.push(prior.runId);
+        }
+        if (isV2 && started.governance !== undefined) {
+          // The LAST governed v2 run in fold order owns the previous cap;
+          // its legacyJournal resets are sticky for the named v1 runs.
+          prevCapUsd = started.governance.capUsd;
+          if (started.governance.legacyJournal !== undefined) {
+            for (const resetId of started.governance.legacyJournal.v1RunIds) {
+              priorResets.add(resetId);
+            }
+          }
+        }
+        // LEDGER POLICY (recorded): attempts and the dispatch count seed
+        // from ALL runs — attempts are spent regardless of who paid; but
+        // usage/costUSD seed ONLY from finishes of runs that are NOT
+        // ungoverned-marked (a marked run sits outside the spend bound by
+        // explicit opt-in, so its finishes must not re-enter the ledger
+        // through the next seed's costUSD/usage folds).
+        seedEvents.push(
+          ...(ungovernedRunIds.includes(prior.runId)
+            ? prior.events.filter((event) => event.type !== 'job-finished')
+            : [...prior.events]),
+        );
+      }
+      if (opts.resume === true) {
+        for (const event of prior.events) {
+          if (event.type === 'job-finished') replay.set(event.jobId, event);
+        }
       }
     }
     // No prior run for this plan → fresh run; nothing to replay.
   }
 
-  // --- Scheduling: missing-dep pre-pass, then waves over the remainder -----
-  const jobIds = new Set(jobById.keys());
-  const unschedulable = new Set<string>();
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const job of manifest.jobs) {
-      if (unschedulable.has(job.id)) continue;
-      const missingDep = job.dependsOn.find((dep) => !jobIds.has(dep) || unschedulable.has(dep));
-      if (missingDep !== undefined) {
-        unschedulable.add(job.id);
-        changed = true;
+  // --- Refusals (before anything is emitted or claimed) ---------------------
+  let unaccountedV1: string[] = [];
+  if (gov === undefined) {
+    // (a) Ungoverned over governed history: the plan's ledger is governed —
+    // an ungoverned run would split it.
+    if (governedRunIds.length > 0) {
+      throw new Error(
+        `runPlan: plan ${plan.id} has governed history; run governed or pass --opt-in budget.ungovernedOverGoverned`,
+      );
+    }
+  } else if (!ungovernedMarked) {
+    // (b) Governed over unaccounted v1 dispatches — whether or not resume is
+    // set: v1 journals carry no spend, so the cap cannot bind what already
+    // ran there. The reset opt-in is honoured only when NEEDED.
+    unaccountedV1 = v1DispatchRuns.filter((id) => !priorResets.has(id));
+    if (unaccountedV1.length > 0 && !gov.optIn?.includes('budget.legacyJournal=reset')) {
+      const dispatchedJobIds = new Set<string>();
+      for (const prior of priorRuns) {
+        if (!unaccountedV1.includes(prior.runId)) continue;
+        for (const event of prior.events) {
+          if (event.type === 'job-started') dispatchedJobIds.add(event.jobId);
+        }
       }
+      throw new Error(
+        `runPlan: governed resume over v1 journals with unaccounted dispatches (${dispatchedJobIds.size} jobs in ${unaccountedV1.join(' ')}); v1 journals carry no spend. Pass --opt-in budget.legacyJournal=reset.`,
+      );
+    }
+    // (c) Cap raise: the ledger's C only moves UP with the explicit opt-in.
+    const nextCapUsd = governor?.config.maxUsd;
+    if (
+      prevCapUsd !== undefined &&
+      nextCapUsd !== undefined &&
+      nextCapUsd > prevCapUsd &&
+      !gov.optIn?.includes('budget.raiseCap')
+    ) {
+      throw new Error(`runPlan: cap raised from ${prevCapUsd} to ${nextCapUsd}`);
     }
   }
-  // Missing deps are already excluded, so topoOrder can only throw on a
-  // genuine cycle — plan corruption (frozen evidence rule: fail loudly).
-  const schedulable = manifest.jobs.filter((job) => !unschedulable.has(job.id));
-  const waves = topoOrder(schedulable);
-  // Waves of job-id strings → waves of jobs (ids come from the same manifest).
-  const waveJobs: ManifestJob[][] = waves.map((wave) =>
-    wave.map((jobId) => jobById.get(jobId) as ManifestJob),
-  );
+  // The ungoverned-marked path takes NO refusals: it IS the opt-out — its
+  // marker records that this run sits outside the governed ledger, and
+  // refusals (b)/(c) are ledger gates.
 
-  // blocked rows for jobs whose dependency chain is broken from the start.
-  const entries = new Map<string, OutcomeEntry>();
-  for (const job of manifest.jobs) {
-    if (!unschedulable.has(job.id)) continue;
-    const missing = job.dependsOn.find((dep) => !jobIds.has(dep));
-    entries.set(job.id, {
-      result: {
-        status: 'failed',
-        error:
-          missing !== undefined
-            ? `blocked: dependency '${missing}' missing from plan`
-            : 'blocked: upstream dependency did not succeed',
-      },
-      state: 'blocked',
-      origin: 'blocked',
-    });
+  // --- Governed ledger continuity: seed the governor from the fold ---------
+  if (governedDispatch && governor !== undefined) {
+    governor.seedFromJournal(seedEvents);
   }
 
-  await emit({ type: 'run-started', runId, at: now(), planId: plan.id });
+  // --- Run-level cancel signal (ADR-0003 §2.3) ------------------------------
+  // Pre-aborted trips NOW (before the run-started emit); an abort mid-run
+  // trips through the listener. The listener is removed in the finally below
+  // — no trip can outlive this run.
+  let removeSignalListener: (() => void) | undefined;
+  const runSignal = gov?.signal;
+  if (governedDispatch && governor !== undefined && runSignal !== undefined) {
+    if (runSignal.aborted) {
+      governor.tripSignal('run signal already aborted before dispatch');
+    } else {
+      const onAbort = (): void => {
+        governor.tripSignal();
+      };
+      runSignal.addEventListener('abort', onAbort, { once: true });
+      removeSignalListener = (): void => {
+        runSignal.removeEventListener('abort', onAbort);
+      };
+    }
+  }
 
-  // --- Execute waves through one pool, EXACTLY opts.concurrency in flight --
-  const limit = pLimit(opts.concurrency);
-  const stop = { requested: false };
-
-  const runOne = async (job: ManifestJob): Promise<void> => {
-    // p-limit starts queued tasks when a slot frees; re-check the stop flag at
-    // actual start so "do not START any further jobs" holds while in-flight
-    // ones still complete.
-    if (stop.requested) return;
-
-    await emit({
-      type: 'job-started',
-      runId,
-      at: now(),
-      jobId: job.id,
-      op: job.op,
-      attempt: 1, // retries are T1.3; every dispatch this goal is attempt 1
-    });
-
-    const result = await executeOp(job, (name) => registry.get(name));
-
-    if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
-    await emit({
-      type: 'job-finished',
-      runId,
-      at: now(),
-      jobId: job.id,
-      opId: job.op,
-      inputsHash: job.inputsHash,
-      result,
-    });
-    entries.set(job.id, { result, state: stateFromResult(result), origin: 'executed' });
-  };
-
-  const blockedResult = (job: ManifestJob): OpResult<unknown> => {
-    // Name a dependency that DEFINITIVELY did not succeed (failed/blocked/
-    // budget-exhausted), not a merely queued sibling still awaiting dispatch.
-    // Both call sites guarantee such a dep exists (wave: the job was not
-    // ready; sweep: anyNotOk), so the first find always hits.
-    const notOk = job.dependsOn.find((dep) => {
-      const state = entries.get(dep)?.state;
-      return state !== 'done' && state !== 'queued';
-    });
-    return {
-      status: 'failed',
-      error: `blocked: dependency '${notOk}' did not succeed`,
-    };
-  };
-
-  for (const wave of waveJobs) {
-    if (stop.requested) break;
-    const submissions: Array<Promise<void>> = [];
-    for (const job of wave) {
-      // Ready iff every dependency ended ok (skipped-replayed jobs count as
-      // done — they carry a verified prior ok).
-      const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
-      if (!ready) {
-        entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
-        continue;
+  try {
+    // --- Run-started --------------------------------------------------------
+    if (gov !== undefined && runLog && journalDir !== undefined) {
+      // v2 run-started: the seq is CLAIMED by exclusive create BEFORE the
+      // event is emitted (annex §2 — uniqueness by construction; 1 + max
+      // prior seq). A governed run without a journalDir journals nothing:
+      // no claim, no v2 fields (the emit sink below is a no-op anyway).
+      const seq = await claimSeq(journalDir, plan.id, maxPriorSeq + 1);
+      if (ungovernedMarked) {
+        // UNGOVERNED-MARKED run: the marker IS the record — no governance
+        // block, no caps, no ledger (see the header's governed-mode section).
+        const started: RunStartedJournalEvent = {
+          type: 'run-started',
+          runId,
+          at: now(),
+          planId: plan.id,
+          journalVersion: 2,
+          seq,
+          ungoverned: { optIn: true },
+        };
+        await emit(started);
+      } else {
+        const config = governor?.config ?? {};
+        const legacyResetHonoured =
+          unaccountedV1.length > 0 && gov.optIn?.includes('budget.legacyJournal=reset') === true;
+        const raiseCapHonoured =
+          prevCapUsd !== undefined &&
+          config.maxUsd !== undefined &&
+          config.maxUsd > prevCapUsd &&
+          gov.optIn?.includes('budget.raiseCap') === true;
+        const started: RunStartedJournalEvent = {
+          type: 'run-started',
+          runId,
+          at: now(),
+          planId: plan.id,
+          journalVersion: 2,
+          seq,
+          governance: {
+            ...(config.maxUsd !== undefined ? { capUsd: config.maxUsd } : {}),
+            ...(config.maxTokens !== undefined ? { capTokens: config.maxTokens } : {}),
+            attended: gov.attended ?? false,
+            ...(legacyResetHonoured
+              ? { legacyJournal: { mode: 'reset' as const, v1RunIds: [...unaccountedV1] } }
+              : {}),
+            ...(raiseCapHonoured && prevCapUsd !== undefined && config.maxUsd !== undefined
+              ? { raiseCap: { from: prevCapUsd, to: config.maxUsd } }
+              : {}),
+          },
+        };
+        await emit(started);
       }
-      // Replay skip: terminal ok + same op + same input hash → zero
-      // invocation, outcome reconstructed from the journal event. Re-attested
-      // with a finish-only event so THIS run's journal stays self-contained
-      // for the next resume.
-      const prior = replay.get(job.id);
-      if (
-        prior !== undefined &&
-        prior.opId === job.op &&
-        prior.inputsHash === job.inputsHash &&
-        prior.result.status === 'ok'
-      ) {
+    } else {
+      await emit({ type: 'run-started', runId, at: now(), planId: plan.id });
+    }
+
+    // --- Scheduling: missing-dep pre-pass, then waves over the remainder ---
+    const jobIds = new Set(jobById.keys());
+    const unschedulable = new Set<string>();
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const job of manifest.jobs) {
+        if (unschedulable.has(job.id)) continue;
+        const missingDep = job.dependsOn.find((dep) => !jobIds.has(dep) || unschedulable.has(dep));
+        if (missingDep !== undefined) {
+          unschedulable.add(job.id);
+          changed = true;
+        }
+      }
+    }
+    // Missing deps are already excluded, so topoOrder can only throw on a
+    // genuine cycle — plan corruption (frozen evidence rule: fail loudly).
+    const schedulable = manifest.jobs.filter((job) => !unschedulable.has(job.id));
+    const waves = topoOrder(schedulable);
+    // Waves of job-id strings → waves of jobs (ids come from the same manifest).
+    const waveJobs: ManifestJob[][] = waves.map((wave) =>
+      wave.map((jobId) => jobById.get(jobId) as ManifestJob),
+    );
+
+    // blocked rows for jobs whose dependency chain is broken from the start.
+    const entries = new Map<string, OutcomeEntry>();
+    for (const job of manifest.jobs) {
+      if (!unschedulable.has(job.id)) continue;
+      const missing = job.dependsOn.find((dep) => !jobIds.has(dep));
+      entries.set(job.id, {
+        result: {
+          status: 'failed',
+          error:
+            missing !== undefined
+              ? `blocked: dependency '${missing}' missing from plan`
+              : 'blocked: upstream dependency did not succeed',
+        },
+        state: 'blocked',
+        origin: 'blocked',
+      });
+    }
+
+    // --- Execute waves through one pool, EXACTLY opts.concurrency in flight
+    const limit = pLimit(opts.concurrency);
+    const stop = { requested: false };
+    // Governed honest-stop provenance: the runner KNOWS which jobs it
+    // admitted this run — attribution needs no marker strings.
+    const admittedJobIds = new Set<string>();
+
+    const blockedResult = (job: ManifestJob): OpResult<unknown> => {
+      // Name a dependency that DEFINITIVELY did not succeed (failed/blocked/
+      // budget-exhausted), not a merely queued sibling still awaiting dispatch.
+      // Both call sites guarantee such a dep exists (wave: the job was not
+      // ready; sweep: anyNotOk), so the first find always hits.
+      const notOk = job.dependsOn.find((dep) => {
+        const state = entries.get(dep)?.state;
+        return state !== 'done' && state !== 'queued';
+      });
+      return {
+        status: 'failed',
+        error: `blocked: dependency '${notOk}' did not succeed`,
+      };
+    };
+
+    const plainRunOne = async (job: ManifestJob): Promise<void> => {
+      // p-limit starts queued tasks when a slot frees; re-check the stop flag at
+      // actual start so "do not START any further jobs" holds while in-flight
+      // ones still complete.
+      if (stop.requested) return;
+
+      await emit({
+        type: 'job-started',
+        runId,
+        at: now(),
+        jobId: job.id,
+        op: job.op,
+        attempt: 1, // ungoverned dispatches are single-attempt by construction
+      });
+
+      const result = await executeOp(job, (name) => registry.get(name));
+
+      if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
+      await emit({
+        type: 'job-finished',
+        runId,
+        at: now(),
+        jobId: job.id,
+        opId: job.op,
+        inputsHash: job.inputsHash,
+        result,
+      });
+      entries.set(job.id, { result, state: stateFromResult(result), origin: 'executed' });
+    };
+
+    // The GOVERNED dispatch (ADR-0003 §2): admission (job.id-keyed) →
+    // in-flight slot → escalation ladder inside the job context → evidence
+    // folds → honest verdict. Replaces the old governRegistry-composed path
+    // inside the runner so the journal carries real attempt ordinals and the
+    // per-job spend rollups.
+    const governedRunOne = async (job: ManifestJob): Promise<void> => {
+      if (governor === undefined) return; // unreachable behind governedDispatch
+      // p-limit start re-check (same rule as the plain path).
+      if (stop.requested) return;
+
+      const admission = governor.admit(job.id);
+      if (admission.decision === 'reject') {
+        // A refusal is a real terminal verdict for this run: recorded and
+        // journalled (finish-only — no job-started, no dispatch happened).
+        governor.record({
+          kind: 'short-circuited',
+          op: job.op,
+          jobKey: job.id,
+          reason: admission.reason,
+          atMs: governor.now(),
+        });
+        const refused: OpResult<unknown> = { status: 'budget-exhausted' };
+        if (opts.stopOnError) stop.requested = true;
         await emit({
           type: 'job-finished',
           runId,
           at: now(),
           jobId: job.id,
-          opId: prior.opId,
-          inputsHash: prior.inputsHash,
-          result: prior.result,
-          ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+          opId: job.op,
+          inputsHash: job.inputsHash,
+          result: refused,
         });
-        entries.set(job.id, {
-          result: prior.result,
-          state: 'done',
-          ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
-          origin: 'replayed',
-        });
-        continue;
+        entries.set(job.id, { result: refused, state: 'budget-exhausted', origin: 'executed' });
+        return;
       }
-      submissions.push(limit(() => runOne(job)));
-    }
-    await Promise.all(submissions);
-  }
+      governor.record({
+        kind: 'admitted',
+        op: job.op,
+        jobKey: job.id,
+        attempt: admission.attempt,
+        atMs: governor.now(),
+      });
+      admittedJobIds.add(job.id);
+      await emit({
+        type: 'job-started',
+        runId,
+        at: now(),
+        jobId: job.id,
+        op: job.op,
+        attempt: admission.attempt,
+      });
 
-  // --- Stop sweep: classify jobs this run never started --------------------
-  // Wave order guarantees a job's dependencies are classified first. The
-  // classification precedence: any dependency that definitively did not
-  // succeed (failed/blocked/budget-exhausted, transitively) → blocked — the
-  // job can never run THIS run, even when a sibling dependency is merely
-  // queued; only all-done-or-queued dependencies → queued (dispatch never
-  // happened). Budget attribution composes downstream: withBudgetStop
-  // re-marks only rows whose non-execution is transitively budget-caused,
-  // so a blocked row whose failed dep was a genuine failure stays failed.
-  for (const wave of waveJobs) {
-    for (const job of wave) {
-      if (entries.has(job.id)) continue;
-      const depStates = job.dependsOn.map((dep) => entries.get(dep)?.state);
-      // undefined (no entry) counts as not-ok — honest.
-      const anyNotOk = depStates.some((state) => state !== 'done' && state !== 'queued');
-      if (anyNotOk) {
-        entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
+      // Per-job ledger sums: everything this invocation's evidence folds
+      // actually charged — streamed (reportResult) plus the returned
+      // WorkerResult fold, each exactly once (the flags mirror the
+      // governor's own once-only guards).
+      let jobUsage: Usage | undefined;
+      let jobCostUSD: number | undefined;
+      let reportedUsage = false;
+      let reportedCost = false;
+      const foldIntoJobSums = (
+        evidence: { usage?: Usage; costUSD?: number },
+        counts?: { usageAlreadyCounted?: boolean; costAlreadyCounted?: boolean },
+      ): void => {
+        if (
+          evidence.usage !== undefined &&
+          counts?.usageAlreadyCounted !== true &&
+          usageTokens(evidence.usage) > 0
+        ) {
+          jobUsage =
+            jobUsage === undefined ? { ...evidence.usage } : addUsage(jobUsage, evidence.usage);
+        }
+        if (evidence.costUSD !== undefined && counts?.costAlreadyCounted !== true) {
+          jobCostUSD = (jobCostUSD ?? 0) + evidence.costUSD;
+        }
+      };
+
+      await governor.acquireSlot();
+      let result: OpResult<unknown>;
+      try {
+        // The budget can trip while this dispatch waited for a slot; a queued
+        // dispatch that can no longer be paid for does not run (I9: honest).
+        if (governor.tripped) {
+          governor.record({
+            kind: 'short-circuited',
+            op: job.op,
+            jobKey: job.id,
+            reason: 'budget-while-queued',
+            atMs: governor.now(),
+          });
+          result = { status: 'budget-exhausted' };
+        } else {
+          const attempt = admission.attempt;
+          const ladderSignal = gov?.signal;
+          try {
+            const outcome = await runLadder(
+              () => executeOp(job, (name) => registry.get(name)),
+              governor.ladderSpec,
+              { op: job.op, jobKey: job.id, attempt },
+              {
+                // One time source for the ladder and the governor's event
+                // stream: the handle's clock wins, else the governor's own.
+                clock: gov?.clock ?? governor.clock,
+                // The external run-level signal composes INTO the ladder's
+                // controller (governor.runLadder): ops see the abort through
+                // currentJobContext().signal.
+                ...(ladderSignal !== undefined ? { signal: ladderSignal } : {}),
+                onRung: (marker) => {
+                  // Keep the marker identity: async delivery failures arrive
+                  // after onRung and must remain visible in the recorded event.
+                  governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
+                },
+                onResult: (evidence) => {
+                  // The transitional reportResult channel: sanitize (a lying
+                  // measurement is ZERO evidence, never a throw), mark the
+                  // once-only flags for the completion fold below, apply
+                  // DD-9, and accumulate the per-job sums.
+                  const sanitized = validSpendEvidence(evidence);
+                  if (sanitized.usage !== undefined && usageTokens(sanitized.usage) > 0) {
+                    reportedUsage = true;
+                  }
+                  if (sanitized.costUSD !== undefined) reportedCost = true;
+                  governor.observeResult(job.id, sanitized);
+                  foldIntoJobSums(sanitized);
+                },
+              },
+            );
+            if (outcome.outcome === 'completed') {
+              const opResult = outcome.value;
+              governor.record({
+                kind: 'completed',
+                op: job.op,
+                jobKey: job.id,
+                attempt,
+                status: opResult.status,
+                elapsedMs: outcome.elapsedMs,
+                atMs: governor.now(),
+              });
+              // DD-9 evidence fold: a completed 'ok' OpResult whose value is
+              // WorkerResult-shaped carries this invocation's budget
+              // evidence — fold it ONCE, skipping whatever the op already
+              // streamed (the flags above).
+              if (opResult.status === 'ok') {
+                const worker = workerResultOfValue(opResult.value);
+                if (worker !== undefined) {
+                  const counts = {
+                    usageAlreadyCounted: reportedUsage,
+                    costAlreadyCounted: reportedCost,
+                  };
+                  governor.observeResult(job.id, worker, counts);
+                  foldIntoJobSums(worker, counts);
+                }
+              }
+              result = opResult;
+            } else if (outcome.outcome === 'threw') {
+              governor.record({
+                kind: 'completed',
+                op: job.op,
+                jobKey: job.id,
+                attempt,
+                status: 'threw',
+                elapsedMs: outcome.elapsedMs,
+                atMs: governor.now(),
+              });
+              // The runner's failure semantics stay in charge: convert the
+              // unexpected throw (executeOp itself never throws) into the
+              // honest per-job failure so the run continues.
+              throw outcome.error;
+            } else {
+              // Rung 3 fired: the op was killed — detached in-process with
+              // its rejections suppressed — and the honest known-cause
+              // verdict is recorded in its place (I9).
+              governor.record({
+                kind: 'completed',
+                op: job.op,
+                jobKey: job.id,
+                attempt,
+                status: 'budget-exhausted',
+                elapsedMs: outcome.elapsedMs,
+                atMs: governor.now(),
+              });
+              result = { status: 'budget-exhausted' };
+            }
+          } catch (err) {
+            result = { status: 'failed', error: messageOf(err) };
+          }
+        }
+      } finally {
+        governor.releaseSlot();
+      }
+
+      if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
+      await emit({
+        type: 'job-finished',
+        runId,
+        at: now(),
+        jobId: job.id,
+        opId: job.op,
+        inputsHash: job.inputsHash,
+        result,
+        ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
+        ...(jobCostUSD !== undefined ? { costUSD: jobCostUSD } : {}),
+      });
+      entries.set(job.id, {
+        result,
+        state: stateFromResult(result),
+        origin: 'executed',
+        ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
+        ...(jobCostUSD !== undefined ? { costUSD: jobCostUSD } : {}),
+      });
+    };
+
+    const runOne = governedDispatch ? governedRunOne : plainRunOne;
+
+    for (const wave of waveJobs) {
+      if (stop.requested) break;
+      const submissions: Array<Promise<void>> = [];
+      for (const job of wave) {
+        // Ready iff every dependency ended ok (skipped-replayed jobs count as
+        // done — they carry a verified prior ok).
+        const ready = job.dependsOn.every((dep) => entries.get(dep)?.state === 'done');
+        if (!ready) {
+          entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
+          continue;
+        }
+        // Replay skip: terminal ok + same op + same input hash → zero
+        // invocation, outcome reconstructed from the journal event. Re-attested
+        // with a finish-only event so THIS run's journal stays self-contained
+        // for the next resume.
+        const prior = replay.get(job.id);
+        if (
+          prior !== undefined &&
+          prior.opId === job.op &&
+          prior.inputsHash === job.inputsHash &&
+          prior.result.status === 'ok'
+        ) {
+          await emit({
+            type: 'job-finished',
+            runId,
+            at: now(),
+            jobId: job.id,
+            opId: prior.opId,
+            inputsHash: prior.inputsHash,
+            result: prior.result,
+            ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+          });
+          entries.set(job.id, {
+            result: prior.result,
+            state: 'done',
+            ...(prior.usage !== undefined ? { usage: prior.usage } : {}),
+            origin: 'replayed',
+          });
+          continue;
+        }
+        // Governed: a tripped budget stops dispatch (I9) — 'signal' trips
+        // flow through the same gate. The job is left unclassified; the stop
+        // sweep marks it queued (or blocked) and the honest-stop pass below
+        // owns the budget attribution.
+        if (governedDispatch && governor !== undefined && governor.tripped) {
+          break;
+        }
+        submissions.push(limit(() => runOne(job)));
+      }
+      await Promise.all(submissions);
+    }
+
+    // --- Stop sweep: classify jobs this run never started --------------------
+    // Wave order guarantees a job's dependencies are classified first. The
+    // classification precedence: any dependency that definitively did not
+    // succeed (failed/blocked/budget-exhausted, transitively) → blocked — the
+    // job can never run THIS run, even when a sibling dependency is merely
+    // queued; only all-done-or-queued dependencies → queued (dispatch never
+    // happened). Budget attribution composes downstream: the honest-stop pass
+    // below re-marks only rows whose non-execution is transitively
+    // budget-caused, so a blocked row whose failed dep was a genuine failure
+    // stays failed.
+    for (const wave of waveJobs) {
+      for (const job of wave) {
+        if (entries.has(job.id)) continue;
+        const depStates = job.dependsOn.map((dep) => entries.get(dep)?.state);
+        // undefined (no entry) counts as not-ok — honest.
+        const anyNotOk = depStates.some((state) => state !== 'done' && state !== 'queued');
+        if (anyNotOk) {
+          entries.set(job.id, { result: blockedResult(job), state: 'blocked', origin: 'blocked' });
+        } else {
+          entries.set(job.id, {
+            result: { status: 'indeterminate', detail: 'queued: run stopped before dispatch' },
+            state: 'queued',
+            origin: 'queued',
+          });
+        }
+      }
+    }
+
+    // --- Governed honest stop + re-marking (I9) ------------------------------
+    // The runner knows the truth (which jobs it admitted: admittedJobIds;
+    // which rows are its own never-dispatch fabrications: entry.origin), so
+    // attribution needs no marker strings. A budget-family stop re-marks
+    // queued/blocked rows whose non-execution is transitively budget-caused;
+    // a signal stop re-marks NOTHING (a cancel is not a budget verdict).
+    let stoppedEarly = false;
+    let earlyStopReason: RunEarlyStopReason | undefined;
+    if (governedDispatch && governor !== undefined) {
+      if (governor.tripped && governor.tripKind === 'signal') {
+        // Rows keep their states; the run claims the stop only when
+        // undispatched work actually remains.
+        if ([...entries.values()].some((entry) => entry.state === 'queued')) {
+          stoppedEarly = true;
+          earlyStopReason = 'signal';
+        }
       } else {
-        entries.set(job.id, {
-          result: { status: 'indeterminate', detail: 'queued: run stopped before dispatch' },
-          state: 'queued',
-          origin: 'queued',
-        });
+        // Budget-family stop: the governor tripped (USD/token/unpriced), or
+        // the per-run dispatch quota refused a dispatch. An 'attempt-cap' is
+        // PER-JOB and deliberately absent — it gates only that job's
+        // re-dispatch, never the run.
+        const dispatchQuotaRefused = governor.events.some(
+          (event) => event.kind === 'short-circuited' && event.reason === 'dispatch-quota',
+        );
+        const budgetFamilyStop =
+          (governor.tripped && governor.tripKind !== 'signal') || dispatchQuotaRefused;
+        if (budgetFamilyStop) {
+          // Is this job's non-execution attributable to the budget
+          // (transitively)? Memoized per jobId: a diamond dependency must
+          // reuse a branch's verdict when the second branch reaches it
+          // (the old withBudgetStop walk, marker-free). inProgress is a
+          // cycle guard only (runPlan forbids cycles) and is never
+          // memoized, so a partial walk cannot poison results.
+          const depsOf = new Map<string, readonly string[]>(
+            manifest.jobs.map((job) => [job.id, job.dependsOn ?? []]),
+          );
+          const memo = new Map<string, boolean>();
+          const inProgress = new Set<string>();
+          const budgetCaused = (jobId: string): boolean => {
+            const memoed = memo.get(jobId);
+            if (memoed !== undefined) return memoed;
+            if (inProgress.has(jobId)) return false; // defensive: runPlan forbids cycles
+            inProgress.add(jobId);
+            const entry = entries.get(jobId);
+            let caused = false;
+            if (entry !== undefined) {
+              if (entry.result.status === 'budget-exhausted') {
+                caused = true;
+              } else if (entry.origin === 'queued' && !admittedJobIds.has(jobId)) {
+                // A queued-origin row without admission is the runner's own
+                // never-dispatched fabrication (an op's fabricated
+                // `queued: …` verdict carries origin 'executed' and never
+                // re-marks).
+                caused = true;
+              } else if (entry.origin === 'blocked') {
+                caused = (depsOf.get(jobId) ?? []).every((dep) => budgetCaused(dep));
+              }
+            }
+            inProgress.delete(jobId);
+            memo.set(jobId, caused);
+            return caused;
+          };
+          let reMarked = false;
+          for (const job of manifest.jobs) {
+            const entry = entries.get(job.id);
+            if (entry === undefined) continue;
+            const caused =
+              (entry.origin === 'queued' && !admittedJobIds.has(job.id)) ||
+              (entry.origin === 'blocked' && budgetCaused(job.id));
+            if (caused) {
+              entries.set(job.id, {
+                result: { status: 'budget-exhausted' },
+                state: 'budget-exhausted',
+                origin: entry.origin,
+              });
+              reMarked = true;
+            }
+          }
+          // Honesty rule: the stop must have actually GATED undispatched
+          // work — every row kept its real verdict (a refusal row is itself
+          // terminal evidence), so there is no early stop to claim (I9).
+          if (reMarked) {
+            stoppedEarly = true;
+            earlyStopReason = 'budget';
+          }
+        }
       }
     }
-  }
 
-  await emit({ type: 'run-finished', runId, at: now(), stoppedEarly: false });
+    await emit({
+      type: 'run-finished',
+      runId,
+      at: now(),
+      stoppedEarly,
+      ...(earlyStopReason !== undefined ? { earlyStopReason } : {}),
+    });
 
-  // --- Report ---------------------------------------------------------------
-  // Deterministic row order: dispatch order over schedulable jobs, then
-  // unschedulable (missing-dep) jobs in manifest order. One row per job in
-  // the plan (frozen JobOutcome contract).
-  const ordered: ManifestJob[] = [
-    ...waveJobs.flat(),
-    ...manifest.jobs.filter((job) => unschedulable.has(job.id)),
-  ];
-  const rows: JobOutcome[] = ordered.map((job) => {
-    const entry = entries.get(job.id) as OutcomeEntry;
-    return {
-      jobId: job.id,
-      op: job.op,
-      result: entry.result,
-      ...(entry.usage !== undefined ? { usage: entry.usage } : {}),
-    };
-  });
+    // --- Report ---------------------------------------------------------------
+    // Deterministic row order: dispatch order over schedulable jobs, then
+    // unschedulable (missing-dep) jobs in manifest order. One row per job in
+    // the plan (frozen JobOutcome contract).
+    const ordered: ManifestJob[] = [
+      ...waveJobs.flat(),
+      ...manifest.jobs.filter((job) => unschedulable.has(job.id)),
+    ];
+    const rows: JobOutcome[] = ordered.map((job) => {
+      const entry = entries.get(job.id) as OutcomeEntry;
+      return {
+        jobId: job.id,
+        op: job.op,
+        result: entry.result,
+        ...(entry.usage !== undefined ? { usage: entry.usage } : {}),
+        ...(entry.costUSD !== undefined ? { costUSD: entry.costUSD } : {}),
+      };
+    });
 
-  const counts = emptyCounts();
-  for (const entry of entries.values()) counts[entry.state] += 1;
+    const counts = emptyCounts();
+    for (const entry of entries.values()) counts[entry.state] += 1;
 
-  // Rollups: only over jobs that reported usage, keys omitted otherwise.
-  // Per-job/run costUSD is NOT computed here: cost is derived by the
-  // price-map layer (T1.4) from usage — runPlan never fabricates cost
-  // (frozen journal events carry usage only). RunReport keeps its optional
-  // costUSD field for that layer.
-  let usage: Usage | undefined;
-  const usageRows = rows.filter((row) => row.usage !== undefined);
-  if (usageRows.length > 0) {
-    let reasoning: number | undefined;
-    let input = 0;
-    let output = 0;
-    let cacheRead = 0;
-    let cacheWrite = 0;
-    for (const row of usageRows) {
-      const u = row.usage as Usage;
-      input += u.input;
-      output += u.output;
-      cacheRead += u.cacheRead;
-      cacheWrite += u.cacheWrite;
-      if (u.reasoning !== undefined) reasoning = (reasoning ?? 0) + u.reasoning;
+    // Rollups: only over jobs that reported usage, keys omitted otherwise.
+    // Run-level costUSD is NOT summed from rows: the governed ledger (the
+    // governor's USD rollup) is the run's cost authority and fills it below;
+    // an ungoverned run never fabricates cost.
+    let usage: Usage | undefined;
+    const usageRows = rows.filter((row) => row.usage !== undefined);
+    if (usageRows.length > 0) {
+      let reasoning: number | undefined;
+      let input = 0;
+      let output = 0;
+      let cacheRead = 0;
+      let cacheWrite = 0;
+      for (const row of usageRows) {
+        const u = row.usage as Usage;
+        input += u.input;
+        output += u.output;
+        cacheRead += u.cacheRead;
+        cacheWrite += u.cacheWrite;
+        if (u.reasoning !== undefined) reasoning = (reasoning ?? 0) + u.reasoning;
+      }
+      usage = {
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        ...(reasoning !== undefined ? { reasoning } : {}),
+      };
     }
-    usage = {
-      input,
-      output,
-      cacheRead,
-      cacheWrite,
-      ...(reasoning !== undefined ? { reasoning } : {}),
-    };
-  }
 
-  return {
-    runId,
-    stoppedEarly: false, // honest-stop is T1.3's; this goal never claims it
-    counts,
-    jobs: rows,
-    ...(usage !== undefined ? { usage } : {}),
-  };
+    return {
+      runId,
+      stoppedEarly,
+      ...(earlyStopReason !== undefined ? { earlyStopReason } : {}),
+      counts,
+      jobs: rows,
+      ...(usage !== undefined ? { usage } : {}),
+      // The governed run's cost rollup is the LEDGER the governor observed
+      // (streamed + folded, once-only) — absent when nothing was spent (a
+      // fabricated 0 would claim "spent nothing"). The ungoverned-marked
+      // run has no ledger and stays absent.
+      ...(governedDispatch && governor !== undefined && governor.usdSpent > 0
+        ? { costUSD: governor.usdSpent }
+        : {}),
+    };
+  } finally {
+    removeSignalListener?.();
+  }
 }

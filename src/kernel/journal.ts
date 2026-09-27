@@ -312,12 +312,14 @@ export function foldOrderRuns(runs: readonly FoldRun[]): FoldRun[] {
   }
   v1.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.run.runId < b.run.runId ? -1 : 1));
   v2.sort((a, b) => a.seq - b.seq);
-  for (let i = 1; i < v2.length; i++) {
-    if (v2[i].seq === v2[i - 1].seq) {
+  let previous: { run: FoldRun; seq: number } | undefined;
+  for (const entry of v2) {
+    if (previous !== undefined && entry.seq === previous.seq) {
       throw new Error(
-        `journal: corrupt — duplicate seq ${v2[i].seq} across runs '${v2[i - 1].run.runId}' and '${v2[i].run.runId}'`,
+        `journal: corrupt — duplicate seq ${entry.seq} across runs '${previous.run.runId}' and '${entry.run.runId}'`,
       );
     }
+    previous = entry;
   }
   return [...v1.map((entry) => entry.run), ...v2.map((entry) => entry.run)];
 }

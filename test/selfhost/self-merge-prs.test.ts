@@ -360,7 +360,7 @@ describe('runSelfMergePrs — real run', () => {
     // 1 USD cap trips the governor mid-job — and returns the frozen
     // taxonomy's honest worker verdict for a budget bound hit.
     const trippedOp = async (): Promise<OpResult<unknown>> => {
-      currentJobContext()?.reportCost(2);
+      currentJobContext()?.reportResult({ costUSD: 2 });
       return { status: 'budget-exhausted' };
     };
     const view: OpRegistryView = {

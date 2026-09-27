@@ -5,14 +5,14 @@
 // SEAM — governed-registry decorator (recorded decision, README "Budget
 // governor"): `governRegistry` wraps an OpRegistryView so every op
 // invocation runs under admission caps, the in-flight ceiling, and the
-// escalation ladder. runPlan (T1.2) is untouched — T1.2 call-sites and tests
-// compile and pass unchanged — and composition with resume falls out of the
-// runner's own journal logic. The `runPlan(plan, opts, registry, gov?)`
-// parameter alternative is the recorded T1.4 runner-integration path, where
-// retries must raise the frozen JobStartedJournalEvent.attempt field (only
-// the runner journals dispatches — so this module NEVER retries: an
-// in-wrapper retry would hide attempts from the journal, which is recorded
-// as journal-dishonest and rejected).
+// escalation ladder. The T1.4 runner integration has since LANDED (W2.2,
+// ADR-0003 §2): `runPlan(plan, opts, registry, gov?)` takes the `Governance`
+// handle below and performs admission (on the real plan job id), the ladder,
+// the DD-9 evidence folds, the v2 journal, and the honest stop ITSELF — the
+// governed-registry decorator remains the composition seam for callers that
+// run the plain (ungoverned) runner. Either way this module NEVER retries:
+// an in-wrapper retry would hide attempts from the journal, which is
+// recorded as journal-dishonest and rejected.
 //
 // Invariants honored here:
 //   - I8: the governor decides WHEN to abort (this module) and the kernel
@@ -38,9 +38,9 @@ import type { Usage, WorkerResult } from '../driver/types.js';
 import { DEFAULT_ABORT_GRACE_MS } from './governor.config.js';
 import { prepareProcessSignalCleanup } from './process-signals.js';
 import { candidateRunsForPlan, type RunLog } from './journal.js';
-import { attemptsFromJournal } from './rescue.js';
 import type { OpRegistryView } from './runner.js';
 import type {
+  GovernanceOptIn,
   JobOutcome,
   JobState,
   JournalEvent,
@@ -77,6 +77,41 @@ export const realClock: Clock = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as NodeJS.Timeout),
 };
+
+// ---------------------------------------------------------------------------
+// Run governance — the per-run handle `runPlan` consumes (ADR-0003 §2.1)
+// ---------------------------------------------------------------------------
+
+/** The per-run governor, behind its interface-neutral alias. */
+export type Governor = BudgetGovernor;
+
+/** Construct a per-run governor (the factory form callers compose `Governance` with). */
+export function createGovernor(config: GovernorConfig, clock?: Clock): BudgetGovernor {
+  return new BudgetGovernor(config, clock);
+}
+
+/**
+ * Per-run governance for `runPlan(plan, opts, registry, gov?)` (ADR-0003
+ * §2.1): the governor that owns admission/caps, an optional injected clock
+ * (defaulting to the governor's own — the ladder and the event stream must
+ * share one time source), an optional run-level cancel signal (tripping the
+ * governor with trip kind `signal` stops dispatch — W2.5 wires process
+ * signals to one), and the operator-declared attendance flag. Per-call
+ * opt-ins ride `optIn` by explicit key only (P7).
+ *
+ * Recorded arrivals: `approvals` comes with the approval-token slice (W4.3);
+ * `releaseQuarantine`/`allowAdvisory` come with the reservation slice (W2.3).
+ */
+export interface Governance {
+  governor: Governor;
+  clock?: Clock;
+  /** Run-level cancel signal; an abort trips the governor (trip kind `signal`). */
+  signal?: AbortSignal;
+  /** Operator-declared attendance (journalled on run-started; P8 default false). */
+  attended?: boolean;
+  /** Per-call opt-ins (ADR-0003 §2.5), e.g. `budget.legacyJournal=reset`. */
+  optIn?: readonly GovernanceOptIn[];
+}
 
 /**
  * Opt in at executable entrypoints, never at library import time. The signal
@@ -218,25 +253,16 @@ export interface JobGovernance {
   readonly signal: AbortSignal;
   /** Register hard-cancel primitives (rungs 2–3) for subprocess-hosting ops. */
   setCancelPort(port: JobCancelPort): void;
-  /** Report token usage for this invocation into the governor's rollup. */
-  reportUsage(usage: Usage): void;
   /**
-   * Report observed USD cost into the governor's rollup — the USD cap's
-   * input. The kernel never derives cost itself; until the T1.4 price-map
-   * layer lands, tests inject cost here.
-   */
-  reportCost(usd: number): void;
-  /**
-   * Report the driver's budget evidence for this invocation in ONE fold
-   * (usage + derived-only cost), applying the SAME DD-9 rules as the
-   * completion-time WorkerResult fold: real usage rolls the token cap, a
-   * present costUSD rolls the USD cap, and real usage with NO costUSD under
-   * a configured maxUsd TRIPS the budget (fail loud, never fail open).
-   * Ops that map a driver WorkerResult into their OWN value shape
-   * (review.fixItem, merge.resolveConflict) call this so the governor still
-   * observes the spend instead of silently pricing the worker at zero.
-   * Exactly one of reportUsage/reportCost/reportResult may carry a given
-   * measurement — the caller must not stream the same evidence twice.
+   * Report this invocation's budget evidence in ONE fold (usage + costUSD) —
+   * the TRANSITIONAL spend channel for ops that map a driver WorkerResult
+   * into their OWN value shape (review.fixItem, merge.resolveConflict) and
+   * so are invisible to the completion-time WorkerResult fold. Real usage
+   * rolls the token cap, a present costUSD rolls the USD cap, and real
+   * usage with NO costUSD under a configured maxUsd TRIPS the budget (DD-9,
+   * fail loud, never fail open — the same rules as the completion fold).
+   * A given measurement must reach the governor exactly once: stream it
+   * here XOR return it in the WorkerResult-shaped value.
    */
   reportResult(result: { usage?: Usage; costUSD?: number }): void;
   readonly info: Readonly<LadderContextInfo & { wallClockMs?: number }>;
@@ -308,13 +334,19 @@ export function runLadder<T>(
   opts?: {
     clock?: Clock;
     /**
+     * An EXTERNAL run-level signal composed INTO this ladder's controller
+     * (ADR-0003 §2.3): already-aborted ⇒ the controller is aborted before
+     * the task runs (the task still runs; ops observe an aborted context
+     * signal); otherwise an external abort aborts the controller. The
+     * listener is removed when the ladder settles.
+     */
+    signal?: AbortSignal;
+    /**
      * Rung observer — invoked AFTER the marker lands. A THROW here is
      * swallowed: observer failure must never break the ladder (same contract
      * as the cancel port).
      */
     onRung?: (marker: LadderRungMarker) => void;
-    onUsage?: (usage: Usage) => void;
-    onCost?: (usd: number) => void;
     onResult?: (result: { usage?: Usage; costUSD?: number }) => void;
   },
 ): Promise<LadderOutcome<T>> {
@@ -329,13 +361,30 @@ export function runLadder<T>(
   let port: JobCancelPort = {};
   const timers: unknown[] = [];
 
+  // External-signal composition (see opts.signal): arm BEFORE the task so an
+  // abort that lands mid-task reaches ops through the context signal; the
+  // disarm hook runs when the ladder settles (no listener outlives the job).
+  const externalSignal = opts?.signal;
+  let disarmExternalSignal: (() => void) | undefined;
+  if (externalSignal !== undefined) {
+    if (externalSignal.aborted) {
+      controller.abort();
+    } else {
+      const onExternalAbort = (): void => {
+        controller.abort();
+      };
+      externalSignal.addEventListener('abort', onExternalAbort, { once: true });
+      disarmExternalSignal = (): void => {
+        externalSignal.removeEventListener('abort', onExternalAbort);
+      };
+    }
+  }
+
   const ctx: JobGovernance = {
     signal: controller.signal,
     setCancelPort: (p) => {
       port = p;
     },
-    reportUsage: (usage) => opts?.onUsage?.(usage),
-    reportCost: (usd) => opts?.onCost?.(usd),
     reportResult: (result) => opts?.onResult?.(result),
     info: {
       ...info,
@@ -354,6 +403,7 @@ export function runLadder<T>(
     ): void => {
       if (settled) return; // a detached task's late settlement changes nothing
       settled = true;
+      disarmExternalSignal?.();
       for (const handle of timers.splice(0)) clock.clearTimeout(handle);
       if (outcome.outcome === 'completed') {
         resolve({
@@ -517,9 +567,9 @@ export interface GovernorConfig {
    * or input.jobId. Runtime-only: never persisted.
    *
    * RESUME LIMITATION (recorded): a custom jobKey is NOT seeded on resume —
-   * `seedFromJournal` seeds per journal jobId (max-of-ordinals) and per op
-   * name (sum), so a custom jobKey must align with those conventions or
-   * per-job caps reset across resume.
+   * `seedFromJournal` seeds per journal jobId, so a custom jobKey must
+   * align with those ids or per-job caps reset across resume. (The governed
+   * runner admits on the plan job id and is unaffected.)
    */
   jobKey?: (op: string, input: unknown) => string;
 }
@@ -596,6 +646,15 @@ export type ShortCircuitReason =
   | 'budget-while-queued';
 
 /**
+ * WHICH bound tripped (ADR-0003 §2.3 honest-stop taxonomy): `exhausted` — a
+ * USD rollup crossed maxUsd (or the unpriced fail-loud rule fired under one);
+ * `token-cap` — the DD-9 token rollup crossed maxTokens; `signal` — a
+ * run-level cancel (not a budget event; the runner reports it as
+ * earlyStopReason 'signal', never re-marking rows budget-exhausted).
+ */
+export type TripKind = 'exhausted' | 'token-cap' | 'signal';
+
+/**
  * The governor's event stream (BudgetGovernor.events): every admission,
  * refusal, ladder rung (with delays), completion, usage observation, the
  * budget trip, and journal seeding. Plain data; appended in fire order.
@@ -631,7 +690,7 @@ export type GovernorEvent =
       atMs: number;
     }
   | { kind: 'usage'; jobKey: string; usd?: number; atMs: number }
-  | { kind: 'budget-tripped'; reason: string; atMs: number }
+  | { kind: 'budget-tripped'; tripKind: TripKind; reason: string; atMs: number }
   | { kind: 'seeded'; jobs: number; attempts: number; atMs: number };
 
 /** The admission gate's verdict for one dispatch. */
@@ -711,7 +770,7 @@ function totalTokensOf(usage: Usage): number {
  * USD observations must be a finite number >= 0, validated BEFORE any
  * rollup mutation — a NaN/negative fold would poison the rollup and
  * silently disable the USD cap (I9). Seeding goes through the same check:
- * a bad `usdOf` derivation fails loud at construction time.
+ * a bad journaled costUSD fails loud at construction time.
  */
 function assertValidUsd(field: string, usd: number): void {
   if (!Number.isFinite(usd) || usd < 0) {
@@ -789,6 +848,7 @@ export class BudgetGovernor {
   private usageN?: Usage;
   private trippedFlag = false;
   private tripReasonN?: string;
+  private tripKindN?: TripKind;
   private readonly slots: SlotPool | undefined;
 
   constructor(config: GovernorConfig, clock: Clock = realClock) {
@@ -809,6 +869,11 @@ export class BudgetGovernor {
   /** Why the budget tripped, when it did. */
   get tripReason(): string | undefined {
     return this.tripReasonN;
+  }
+
+  /** WHICH bound tripped (USD/token/signal), when one did. */
+  get tripKind(): TripKind | undefined {
+    return this.tripKindN;
   }
 
   /** USD rollup observed so far (reported via the job context; never derived). */
@@ -859,6 +924,12 @@ export class BudgetGovernor {
    * dispatch of an op counts as another attempt of that op — the per-job
    * (here: per-op) attempt cap always EXISTS instead of silently never
    * tripping; stable per-job identity needs config.jobKey or input.jobId.
+   *
+   * GOVERNED-RUNNER NOTE (W2.2): `runPlan`'s governed path admits on the
+   * real plan job id directly (it does not go through jobKeyFor), and
+   * `seedFromJournal` seeds per journal jobId — the no-identity op-name
+   * fallback stays a governRegistry-seam concern only and is deliberately
+   * NOT seeded (admission on the governed path is keyed on job.id).
    */
   jobKeyFor(op: string, input: unknown): string {
     if (this.config.jobKey !== undefined) {
@@ -935,7 +1006,7 @@ export class BudgetGovernor {
       this.usageN !== undefined &&
       totalTokensOf(this.usageN) > tokenCap
     ) {
-      this.trip(`token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
+      this.trip('token-cap', `token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
     }
   }
 
@@ -952,7 +1023,7 @@ export class BudgetGovernor {
     this.record({ kind: 'usage', jobKey, usd, atMs: this.now() });
     const cap = this.config.maxUsd;
     if (cap !== undefined && this.usdSpentN > cap) {
-      this.trip(`usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
+      this.trip('exhausted', `usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
   }
 
@@ -967,7 +1038,7 @@ export class BudgetGovernor {
    *
    * `counts` keeps the fold ONCE-ONLY for an invocation whose evidence was
    * already streamed through the job context: usage or cost already counted
-   * via reportUsage/reportCost is skipped here, and the unpriced trip fires
+   * via reportResult is skipped here, and the unpriced trip fires
    * only when THIS invocation's usage has no cost evidence either way — a
    * `costAlreadyCounted` flag means cost evidence existed and was counted,
    * so there is nothing left to fail loud about.
@@ -998,6 +1069,7 @@ export class BudgetGovernor {
       counts?.costAlreadyCounted !== true
     ) {
       this.trip(
+        'exhausted',
         'unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)',
       );
     }
@@ -1006,128 +1078,123 @@ export class BudgetGovernor {
   /**
    * Trip the budget cap (idempotent — the first reason is kept). Tripping
    * gates ADMISSION ONLY: in-flight jobs were admitted before the trip and
-   * their outcomes stay real evidence (documented decision, README).
+   * their outcomes stay real evidence (documented decision, README). The
+   * kind records WHICH bound fired (`exhausted` for USD-rollup and the
+   * unpriced fail-loud rule, `token-cap` for the DD-9 rollup, `signal` via
+   * `tripSignal`).
    */
-  trip(reason: string): void {
+  trip(tripKind: TripKind, reason: string): void {
     if (this.trippedFlag) {
       return;
     }
     this.trippedFlag = true;
     this.tripReasonN = reason;
-    this.record({ kind: 'budget-tripped', reason, atMs: this.now() });
+    this.tripKindN = tripKind;
+    this.record({ kind: 'budget-tripped', tripKind, reason, atMs: this.now() });
   }
 
   /**
-   * Seed caps state from a prior run's journal so a resumed run continues
-   * the SAME budget: per-job attempt ordinals (folded from the frozen
-   * JobStartedJournalEvent.attempt field via rescue.attemptsFromJournal),
-   * the token-usage rollup, and the DISPATCH COUNT (runDispatchQuota carries
-   * across resume). USD seeding needs prices the kernel does not own — pass
-   * `usdOf` to derive cost from journaled usage (the T1.4 price-map layer
-   * will own that mapping).
+   * Trip from a run-level cancel signal (ADR-0003 §2.3): trip kind `signal`
+   * is NOT a budget event — the governed runner reports `earlyStopReason:
+   * 'signal'` and keeps undispatched rows queued (never re-marks them
+   * budget-exhausted); it only stops further dispatch.
+   */
+  tripSignal(detail?: string): void {
+    this.trip('signal', detail ?? 'run-level cancel signal received');
+  }
+
+  /**
+   * Seed caps state from a plan's journal history so a resumed run continues
+   * the SAME budget. Admission is keyed on REAL plan job ids (the governed
+   * runner admits on `job.id`), so the per-job seed is the annex rule
+   * (ADR-0003 annex §2): attempt = 1 + count of PRIOR STARTS — the seed
+   * value per jobId is the COUNT of its `job-started` events. The total
+   * dispatch count seeds the same way (runDispatchQuota carries across
+   * resume instead of restarting at 0), and the token-usage rollup seeds
+   * from job-finished `usage`.
    *
    * CONTRACT on `events`: the ORDERED CONCATENATION of ALL the plan's run
-   * journals, oldest-first — exactly what `seedFromRunLog` builds. The
-   * latest run's journal alone UNDERCOUNTS: a re-attested job appears as a
-   * finish-only event (no open start to close, so its usage is skipped and
-   * it contributes no attempt ordinal) and chained dispatches from earlier
-   * runs vanish — silently resetting the budget this method promises to
-   * continue.
+   * journals, oldest-first — exactly what the governed runner's fold
+   * (journal `foldOrderRuns`) and `seedFromRunLog` build. The latest run's
+   * journal alone UNDERCOUNTS: a re-attested job appears as a finish-only
+   * event (no open start to close, so its usage/cost is skipped) and
+   * chained dispatches from earlier runs vanish — silently resetting the
+   * budget this method promises to continue.
    *
-   * Keys are seeded TWICE so every jobKeyFor fallback resolves, with
-   * different aggregation per key: per journal jobId (aligns with the
-   * `input.jobId` convention) as MAX-of-ordinals — a job's highest dispatch —
-   * and per op name (aligns with the no-identity fallback, where a
-   * dispatch's key IS its op name) as the SUM of the op's dispatches across
-   * all journal jobs — the fallback's ordinal IS the op's dispatch count, so
-   * a max would understate it (2 jobs × 2 attempts = 4 dispatches) and let a
-   * resumed run exceed the cap. Usage is counted only for finishes that
-   * CLOSE an open start: an orphan finish in a multi-run journal is a replay
-   * re-attestation of an already-counted dispatch, and counting it again
-   * would double the rollup.
+   * costUSD seeding (journal v2): a CLOSING job-finished that carries
+   * `costUSD` folds into the USD rollup, validated like every seeded
+   * measurement (finite >= 0, fail loud at construction time). v1 journals
+   * carry no costUSD — the governed runner refuses them when they have
+   * dispatches unless `budget.legacyJournal=reset` was honoured.
    */
-  seedFromJournal(
-    events: readonly JournalEvent[],
-    opts?: { usdOf?: (usage: Usage) => number },
-  ): void {
+  seedFromJournal(events: readonly JournalEvent[]): void {
     const jobIds = new Set<string>();
-    const opByJob = new Map<string, string>();
-    for (const event of events) {
-      if (event.type === 'job-started') {
-        jobIds.add(event.jobId);
-        opByJob.set(event.jobId, event.op);
-      } else if (event.type === 'job-finished') {
-        jobIds.add(event.jobId);
-      }
-    }
-    let totalAttempts = 0;
-    const dispatchesByOp = new Map<string, number>(); // SUM across journal jobs sharing the op
-    for (const jobId of jobIds) {
-      const attempts = attemptsFromJournal(events, jobId);
-      totalAttempts += attempts.length;
-      const op = opByJob.get(jobId);
-      if (op !== undefined) {
-        dispatchesByOp.set(op, (dispatchesByOp.get(op) ?? 0) + attempts.length);
-      }
-      for (const attempt of attempts) {
-        // jobId keys keep max-of-ordinals: the job's highest dispatch.
-        if (attempt.attempt > this.attemptsFor(jobId)) {
-          this.attemptsByJob.set(jobId, attempt.attempt);
-        }
-      }
-    }
-    for (const [op, dispatches] of dispatchesByOp) {
-      if (dispatches > this.attemptsFor(op)) {
-        this.attemptsByJob.set(op, dispatches);
-      }
-    }
+    const startsByJob = new Map<string, number>();
+    let totalStarts = 0;
+    let foldedCostSeen = false;
     // Usage/USD dedupe: only a finish that closes an open start represents a
-    // dispatch's own usage; an orphan finish (re-attestation) restates an
+    // dispatch's own spend; an orphan finish (re-attestation) restates an
     // already-counted dispatch and is skipped.
     const openStarts = new Set<string>();
     for (const event of events) {
       if (event.type === 'job-started') {
+        jobIds.add(event.jobId);
+        startsByJob.set(event.jobId, (startsByJob.get(event.jobId) ?? 0) + 1);
+        totalStarts += 1;
         openStarts.add(event.jobId);
         continue;
       }
       if (event.type !== 'job-finished') {
         continue;
       }
+      jobIds.add(event.jobId);
       const closed = openStarts.delete(event.jobId); // any finish closes its start
-      if (event.usage === undefined || !closed) {
+      if (event.costUSD !== undefined) foldedCostSeen = true;
+      if (!closed) {
         continue;
       }
-      // Same fail-loud rule as the live fold (review round 2): a seeded
-      // NaN/negative usage would disable the token cap for the whole
-      // resumed run — and seeding is construction time, the earliest loud
-      // failure there is.
-      assertValidUsage('seeded usage', event.usage);
-      this.usageN =
-        this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
-      if (opts?.usdOf !== undefined) {
-        const usd = opts.usdOf(event.usage);
-        // Seeding happens at construction: a derived cost that is not a
-        // finite number >= 0 fails loud and EARLY, never poisons the rollup.
-        assertValidUsd('derived cost', usd);
-        this.usdSpentN += usd;
+      if (event.usage !== undefined) {
+        // Same fail-loud rule as the live fold (review round 2): a seeded
+        // NaN/negative usage would disable the token cap for the whole
+        // resumed run — and seeding is construction time, the earliest loud
+        // failure there is.
+        assertValidUsage('seeded usage', event.usage);
+        this.usageN =
+          this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
+      }
+      if (event.costUSD !== undefined) {
+        // A seeded NaN/negative cost would poison the USD rollup the same
+        // way — fail loud and EARLY, never silently disable maxUsd.
+        assertValidUsd('seeded costUSD', event.costUSD);
+        this.usdSpentN += event.costUSD;
+      }
+    }
+    // Per-job attempt seed: the COUNT of prior starts (annex rule) — the
+    // next admission of the job is attempt count + 1.
+    for (const [jobId, starts] of startsByJob) {
+      if (starts > this.attemptsFor(jobId)) {
+        this.attemptsByJob.set(jobId, starts);
       }
     }
     // The dispatch quota is part of the SAME budget: seeding replays the
     // journaled dispatch count so runDispatchQuota carries across resume
     // instead of restarting at 0.
-    this.dispatchedCount += totalAttempts;
-    // DD-9 fail-loud at seed time: real journaled usage with NO price
-    // mapping under a configured maxUsd means the resumed run's PRIOR
-    // usage cannot be priced, so maxUsd cannot bind it — trip BEFORE the
-    // resumed run admits anything (fail loud, never fail open).
+    this.dispatchedCount += totalStarts;
+    // DD-9 fail-loud at seed time: real journaled usage with NO costUSD
+    // anywhere in the fold under a configured maxUsd means the resumed
+    // run's PRIOR usage cannot be priced, so maxUsd cannot bind it — trip
+    // BEFORE the resumed run admits anything (fail loud, never fail open).
+    // v2 governed journals carry costUSD on priced finishes; a v1 journal
+    // with dispatches never reaches this seed (the runner refuses it first).
     if (
-      opts?.usdOf === undefined &&
       this.config.maxUsd !== undefined &&
       this.usageN !== undefined &&
-      totalTokensOf(this.usageN) > 0
+      totalTokensOf(this.usageN) > 0 &&
+      !foldedCostSeen
     ) {
       this.trip(
-        `seeded prior usage (${totalTokensOf(this.usageN)} tokens) cannot be priced — no usdOf mapping, so maxUsd ${this.config.maxUsd} cannot bind the resumed run's prior usage; refusing to continue past an unenforceable budget (DD-9)`,
+        'exhausted',
+        `seeded prior usage (${totalTokensOf(this.usageN)} tokens) cannot be priced — the folded journals carry no costUSD, so maxUsd ${this.config.maxUsd} cannot bind the resumed run's prior usage; refusing to continue past an unenforceable budget (DD-9)`,
       );
     }
     // A seed that already overruns a cap trips the governor BEFORE the
@@ -1139,7 +1206,7 @@ export class BudgetGovernor {
     // further usage-reporting op ran (DD-9).
     const cap = this.config.maxUsd;
     if (cap !== undefined && this.usdSpentN > cap) {
-      this.trip(`seeded usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
+      this.trip('exhausted', `seeded usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
     const tokenCap = this.config.maxTokens;
     if (
@@ -1147,9 +1214,12 @@ export class BudgetGovernor {
       this.usageN !== undefined &&
       totalTokensOf(this.usageN) > tokenCap
     ) {
-      this.trip(`seeded token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`);
+      this.trip(
+        'token-cap',
+        `seeded token rollup ${totalTokensOf(this.usageN)} exceeded cap ${tokenCap}`,
+      );
     }
-    this.record({ kind: 'seeded', jobs: jobIds.size, attempts: totalAttempts, atMs: this.now() });
+    this.record({ kind: 'seeded', jobs: jobIds.size, attempts: totalStarts, atMs: this.now() });
   }
 
   /** Append to the observation stream (called by the governed registry). */
@@ -1173,7 +1243,6 @@ export async function seedFromRunLog(
   opts?: {
     config?: GovernorConfig;
     clock?: Clock;
-    usdOf?: (usage: Usage) => number;
   },
 ): Promise<BudgetGovernor> {
   const governor = new BudgetGovernor(opts?.config ?? {}, opts?.clock);
@@ -1193,7 +1262,7 @@ export async function seedFromRunLog(
     }
     events.push(...runEvents);
   }
-  governor.seedFromJournal(events, opts?.usdOf === undefined ? {} : { usdOf: opts.usdOf });
+  governor.seedFromJournal(events);
   return governor;
 }
 
@@ -1230,8 +1299,14 @@ function statusOfValue(value: unknown): GovernedOutcomeStatus {
  * WorkerResult folds NOTHING — the guard rejects it so the completion-time
  * fold never trips assertValidUsage/assertValidUsd post-record (the
  * verdict stays real evidence; the usage stays zero-evidence).
+ *
+ * EXPORTED for the governed runner (W2.2): runPlan's governed dispatch runs
+ * the completion-time evidence fold itself (the ladder task returns the
+ * checked OpResult, and the fold reads its `value`).
  */
-function workerResultOfValue(value: unknown): Pick<WorkerResult, 'usage' | 'costUSD'> | undefined {
+export function workerResultOfValue(
+  value: unknown,
+): Pick<WorkerResult, 'usage' | 'costUSD'> | undefined {
   if (typeof value !== 'object' || value === null) {
     return undefined;
   }
@@ -1291,6 +1366,26 @@ function workerResultOfValue(value: unknown): Pick<WorkerResult, 'usage' | 'cost
 }
 
 /**
+ * Non-throwing sanitization of one spend-evidence fold, EXPORTED for the
+ * governed runner: only the VALID measurements survive (a NaN/Infinity/
+ * negative usage or costUSD is dropped), so a runner-side fold can apply
+ * the same once-only flags as `observeResult` without importing the private
+ * predicates. Mirrors observeResult's defensive-fold rule exactly — a lying
+ * measurement is ZERO evidence, never a throw.
+ */
+export function validSpendEvidence(result: { usage?: Usage; costUSD?: number }): {
+  usage?: Usage;
+  costUSD?: number;
+} {
+  const usage = isValidUsage(result.usage) ? result.usage : undefined;
+  const costUSD = isValidUsd(result.costUSD) ? result.costUSD : undefined;
+  return {
+    ...(usage !== undefined ? { usage } : {}),
+    ...(costUSD !== undefined ? { costUSD } : {}),
+  };
+}
+
+/**
  * Wrap one op with the governor: admission caps → in-flight slot → wall-clock
  * ladder (inside the job context, so ops reach the signal/port via
  * currentJobContext()) → honest verdict. Refusals and kills return
@@ -1338,10 +1433,11 @@ function governOp(
         return { status: 'budget-exhausted' };
       }
       const attempt = admission.attempt;
-      // The once-only guard: usage/cost the op STREAMED through the job
-      // context is folded by the callbacks below — the flags tell the
-      // completion-time WorkerResult fold to skip that evidence instead of
-      // counting it twice.
+      // The once-only guard: evidence the op STREAMED through the job
+      // context (reportResult) is folded by the callback below — the flags
+      // tell the completion-time WorkerResult fold to skip that evidence
+      // instead of counting it twice. (reportUsage/reportCost are gone:
+      // reportResult is the one streaming channel.)
       let reportedUsage = false;
       let reportedCost = false;
       const outcome = await runLadder(
@@ -1354,14 +1450,6 @@ function governOp(
             // Keep the marker identity: async delivery failures arrive after
             // onRung and must remain visible in the recorded event.
             governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
-          },
-          onUsage: (usage) => {
-            reportedUsage = true;
-            governor.observeUsage(jobKey, usage);
-          },
-          onCost: (usd) => {
-            reportedCost = true;
-            governor.observeCost(jobKey, usd);
           },
           onResult: (result) => {
             // The op streamed its driver's evidence in ONE fold: mark only the
@@ -1510,8 +1598,9 @@ const BLOCKED_MARKER = 'blocked:';
  * executed code, not the runner's never-dispatched marker, and keeps its
  * real verdict. Counts are recomputed over the marked rows
  * (needs-human→blocked and indeterminate→failed per the documented T1.2
- * freeze workaround). The T1.4 runner integration folds this into runPlan;
- * today the caller composes:
+ * freeze workaround). W2.2: the GOVERNED runner now performs this
+ * re-marking itself (it knows which jobs it admitted — no marker sniffing);
+ * this helper remains for the governRegistry composition seam:
  * `withBudgetStop(await runPlan(...), plan, governor)`.
  *
  * COST ANNOTATION (review-debt #185): on EVERY return path this helper also
@@ -1523,7 +1612,7 @@ const BLOCKED_MARKER = 'blocked:';
  * here rather than leaving every caller to re-derive it.
  */
 export function withBudgetStop(report: RunReport, plan: Plan, governor: BudgetGovernor): RunReport {
-  // The run-level USD rollup the governor OBSERVED (reportResult/reportCost/
+  // The run-level USD rollup the governor OBSERVED (reportResult /
   // the WorkerResult fold) — annotated onto the report on EVERY return path
   // so the caller (ReviewLoopOutcome.fixReport, SelfMergePrsResult.report)
   // can carry spend forward without re-deriving it. Derived-only (DD-9):

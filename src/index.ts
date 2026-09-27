@@ -25,6 +25,8 @@ export type {
   JobState,
   JobStatus,
   JournalEvent,
+  GovernanceOptIn,
+  GovernanceRecord,
   Limits,
   Op,
   OpRegistryEntry,
@@ -41,6 +43,7 @@ export type {
 export {
   BudgetSchema,
   DriverStopReasonSchema,
+  GovernanceRecordSchema,
   JobFinishedJournalEventSchema,
   JobOutcomeSchema,
   JobSchema,
@@ -85,6 +88,8 @@ export { emitReport, narrate, renderHuman } from './kernel/output.js';
 export type {
   AdmissionDecision,
   Clock,
+  Governance,
+  Governor,
   GovernorConfig,
   GovernorEvent,
   JobCancelPort,
@@ -93,9 +98,11 @@ export type {
   LadderRung,
   LadderRungMarker,
   LadderSpec,
+  TripKind,
 } from './kernel/governor.js';
 export {
   BudgetGovernor,
+  createGovernor,
   currentJobContext,
   DEFAULT_ABORT_GRACE_MS,
   DEFAULT_KILL_GRACE_MS,
@@ -104,6 +111,7 @@ export {
   realClock,
   runLadder,
   seedFromRunLog,
+  validSpendEvidence,
   withBudgetStop,
 } from './kernel/governor.js';
 export type {
