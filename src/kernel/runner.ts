@@ -1254,44 +1254,44 @@ export async function runPlan(
       // ladder removes its listener when it settles (governor.runLadder).
       const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
         const ladderOutcome = await runLadder(
-            () => executeOp(job, (name) => registry.get(name)),
-            governor.ladderSpec,
-            { op: job.op, jobKey: job.id, attempt },
-            {
-              // ONE time source: the governor's own clock timestamps the
-              // ladder AND every recorded event — an override here would
-              // run the ladder in a different time domain from the event
-              // stream (review thread). Virtualize at createGovernor.
-              clock: governor.clock,
-              signal: governor.tripAbortSignal,
-              onRung: (marker) => {
-                // Keep the marker identity: async delivery failures arrive
-                // after onRung and must remain visible in the recorded event.
-                governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
-              },
-              onResult: (evidence) => {
-                if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
-                // The transitional reportResult channel: sanitize (a lying
-                // measurement is ZERO evidence, never a throw), mark the
-                // once-only flags for the completion fold below, apply
-                // DD-9, and accumulate the per-job sums.
-                const sanitized = validSpendEvidence(evidence);
-                if (sanitized.usage !== undefined && usageTokens(sanitized.usage) > 0) {
-                  reportedUsage = true;
-                }
-                if (sanitized.costUSD !== undefined) reportedCost = true;
-                governor.observeResult(job.id, sanitized);
-                foldIntoJobSums(sanitized);
-              },
+          () => executeOp(job, (name) => registry.get(name)),
+          governor.ladderSpec,
+          { op: job.op, jobKey: job.id, attempt },
+          {
+            // ONE time source: the governor's own clock timestamps the
+            // ladder AND every recorded event — an override here would
+            // run the ladder in a different time domain from the event
+            // stream (review thread). Virtualize at createGovernor.
+            clock: governor.clock,
+            signal: governor.tripAbortSignal,
+            onRung: (marker) => {
+              // Keep the marker identity: async delivery failures arrive
+              // after onRung and must remain visible in the recorded event.
+              governor.record(Object.assign(marker, { kind: 'ladder-rung' as const }));
             },
-          );
-          // Captured for the settle's basis: the dispatch's ENDING decides
-          // whether the charge is 'observed' (definitive verdict) or 'full'
-          // (killed / indeterminate / threw — unknown status).
-          outcome = ladderOutcome;
-          const interpreted = interpretOutcome(ladderOutcome, attempt);
-          dispatchClosed = true; // close the evidence window BEFORE the settle reads it
-          return interpreted;
+            onResult: (evidence) => {
+              if (dispatchClosed) return; // late detached-promise evidence: dropped (see dispatchClosed)
+              // The transitional reportResult channel: sanitize (a lying
+              // measurement is ZERO evidence, never a throw), mark the
+              // once-only flags for the completion fold below, apply
+              // DD-9, and accumulate the per-job sums.
+              const sanitized = validSpendEvidence(evidence);
+              if (sanitized.usage !== undefined && usageTokens(sanitized.usage) > 0) {
+                reportedUsage = true;
+              }
+              if (sanitized.costUSD !== undefined) reportedCost = true;
+              governor.observeResult(job.id, sanitized);
+              foldIntoJobSums(sanitized);
+            },
+          },
+        );
+        // Captured for the settle's basis: the dispatch's ENDING decides
+        // whether the charge is 'observed' (definitive verdict) or 'full'
+        // (killed / indeterminate / threw — unknown status).
+        outcome = ladderOutcome;
+        const interpreted = interpretOutcome(ladderOutcome, attempt);
+        dispatchClosed = true; // close the evidence window BEFORE the settle reads it
+        return interpreted;
       };
 
       try {
@@ -1315,12 +1315,16 @@ export async function runPlan(
             // shape as the slot-wait refusal, decided by the trip kind.
             result = queuedRefusal(governor.tripKind === 'signal');
           } else {
-            reservation = reserved.reservation;
+            const granted = reserved.reservation;
             // WRITE-AHEAD (A12b): the reservation is DURABLE before the op
             // runs. A hard crash after this line and before the settle is
             // exactly the spend-behind-a-crash window W2.2 could not see —
             // the next fold charges the reservation in full and quarantines
-            // the job.
+            // the job. If the write FAILS, the write-ahead fact never
+            // landed: the dispatch never starts, the governor-side hold is
+            // abandoned (no charge, no settle journal entry — nothing ran),
+            // and the journal failure propagates (a hole in the write-ahead
+            // sequence is a loud run stop, never a silent dispatch).
             await emitDurable({
               type: 'reservation-opened',
               runId,
@@ -1328,13 +1332,15 @@ export async function runPlan(
               jobId: job.id,
               op: job.op,
               attempt: admission.attempt,
-              reservationId: `${runId}:${reservation.id}`,
-              usd: reservation.usd,
-              class: reservation.class,
-              ...(reservation.proposedUsd !== undefined
-                ? { proposedUsd: reservation.proposedUsd }
-                : {}),
+              reservationId: `${runId}:${granted.id}`,
+              usd: granted.usd,
+              class: granted.class,
+              ...(granted.proposedUsd !== undefined ? { proposedUsd: granted.proposedUsd } : {}),
+            }).catch((err: unknown) => {
+              governor.abandonReservation(granted);
+              throw err;
             });
+            reservation = granted;
             try {
               result = await runDispatchLadder(admission.attempt);
             } catch (err) {
@@ -1362,7 +1368,10 @@ export async function runPlan(
           // is at least the full reservation. Definitive verdicts settle
           // 'observed' — the charge is exactly what the evidence folds saw
           // (a pre-dispatch failure like an unknown op folds nothing and
-          // settles 0). The slot is held until the settle lands.
+          // settles 0). The slot is held until the settle LANDS — and a
+          // failed settle or durable write must still release it (a leaked
+          // slot would hang every waiter forever on a run that is already
+          // stopping loudly).
           const basis: 'observed' | 'full' =
             outcome === undefined ||
             outcome.outcome === 'killed' ||
@@ -1370,23 +1379,28 @@ export async function runPlan(
             (outcome.outcome === 'completed' && outcome.value.status === 'indeterminate')
               ? 'full'
               : 'observed';
-          settledCharge = governor.settle(reservation, {
-            basis,
-            ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
-          });
-          await emitDurable({
-            type: 'reservation-settled',
-            runId,
-            at: now(),
-            jobId: job.id,
-            reservationId: `${runId}:${reservation.id}`,
-            charged: settledCharge.charged,
-            basis,
-            ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
-          });
-          reservation = undefined;
+          try {
+            settledCharge = governor.settle(reservation, {
+              basis,
+              ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
+            });
+            await emitDurable({
+              type: 'reservation-settled',
+              runId,
+              at: now(),
+              jobId: job.id,
+              reservationId: `${runId}:${reservation.id}`,
+              charged: settledCharge.charged,
+              basis,
+              ...(jobUsage !== undefined ? { usage: jobUsage } : {}),
+            });
+          } finally {
+            reservation = undefined;
+            governor.releaseSlot();
+          }
+        } else {
+          governor.releaseSlot();
         }
-        governor.releaseSlot();
       }
 
       if (opts.stopOnError && result.status !== 'ok') stop.requested = true;
