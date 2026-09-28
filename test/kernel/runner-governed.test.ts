@@ -1828,6 +1828,55 @@ describe('W2.3 reserve-then-settle', () => {
     expect(finished).toMatchObject({ charged: 0.1, costUSD: 0.1 });
   });
 
+  test('an op that REJECTS settles basis full (the failed verdict cannot say the dispatch never started)', async () => {
+    // executeOp never rejects: a throwing op becomes a `failed` OpResult, so
+    // the ladder reports 'completed' and the settle basis alone would read
+    // 'observed' and charge zero for a dispatch that had already started
+    // billable work. The dispatch signals the body throw out of band.
+    const throwAfterDispatch = async (): Promise<OpResult<unknown>> => {
+      // Billable work started, then the op died before reporting anything.
+      throw new Error('op died mid-dispatch');
+    };
+    const governor = createGovernor({ maxUsd: 1 });
+    const report = await runPlan(
+      independentPlan('w23-threw', 1),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', throwAfterDispatch)),
+      { governor, allowAdvisory: true },
+    );
+    expect(report.jobs[0]?.result.status).toBe('failed');
+    const events = await openRunLog(w3dir).read(report.runId);
+    const settled = events.find(
+      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+        event.type === 'reservation-settled',
+    );
+    // charged = the whole reservation (fair share C/concurrency = 1/1), not
+    // the zero the definitive-verdict reading would have produced.
+    expect(settled).toMatchObject({ charged: 1, basis: 'full' });
+    expect(governor.usdSpent).toBeCloseTo(1);
+  });
+
+  test('a PRE-dispatch failure still settles observed zero (the full basis is not over-wide)', async () => {
+    // The other side of the same boundary: nothing was dispatched, so the
+    // reservation must settle at zero. An unknown op never reaches the op
+    // body — the pre-dispatch reading must survive the new signal.
+    const governor = createGovernor({ maxUsd: 1 });
+    const report = await runPlan(
+      independentPlan('w23-pre-dispatch', 1, 'nosuchop'),
+      { concurrency: 1, stopOnError: false, journalDir: w3dir },
+      viewWith(entry('fake', okOp)),
+      { governor, allowAdvisory: true },
+    );
+    expect(report.jobs[0]?.result.status).toBe('failed');
+    const events = await openRunLog(w3dir).read(report.runId);
+    const settled = events.find(
+      (event): event is Extract<JournalEvent, { type: 'reservation-settled' }> =>
+        event.type === 'reservation-settled',
+    );
+    expect(settled).toMatchObject({ charged: 0, basis: 'observed' });
+    expect(governor.usdSpent).toBeCloseTo(0);
+  });
+
   test('capacity waits FIFO behind outstanding reservations, then admits (settled + outstanding + proposed ≤ cap)', async () => {
     const calls: string[] = [];
     // cap 1.0, concurrency 4 → share 0.25 each; three jobs reserve 0.75,

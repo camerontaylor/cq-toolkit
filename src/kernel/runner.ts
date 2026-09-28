@@ -389,10 +389,18 @@ function stateFromResult(result: OpResult<unknown>): JobState {
  * importer, a contract-violating return, a non-serializable return — becomes
  * an honest `failed` OpResult. This function never throws, so a bad op (or a
  * bad registry) can never corrupt the journal or kill the run.
+ *
+ * `onDispatchThrew` marks the one failure the returned verdict cannot carry:
+ * the op BODY rejecting (not the importer, not a contract violation — those
+ * are pre-dispatch and provably spent nothing). executeOp turns a rejecting
+ * op into a `failed` result, so without this signal the caller settles the
+ * reservation `observed` and charges zero for a dispatch that had already
+ * started billable work.
  */
 async function executeOp(
   job: Pick<ManifestJob, 'op' | 'input'>,
   lookup: (op: string) => OpRegistryEntry<never, never> | undefined,
+  onDispatchThrew?: () => void,
 ): Promise<OpResult<unknown>> {
   // The lookup itself is guarded: a registry.get that throws must fail THIS
   // job, not reject the whole run.
@@ -416,7 +424,16 @@ async function executeOp(
   }
   try {
     const op = await entry.importer();
-    const raw: OpResult<unknown> = await op(parsed as never);
+    let raw: OpResult<unknown>;
+    try {
+      raw = await op(parsed as never);
+    } catch (err) {
+      // The op BODY rejected: the dispatch was entered, so spend may exist
+      // that no evidence fold will ever see. Signal it, then fall into the
+      // shared handler below (the never-throws contract is unchanged).
+      onDispatchThrew?.();
+      throw err;
+    }
     // Validate before journaling: the journal only accepts real OpResults, so
     // a contract-violating return must be caught HERE, not blow up the append.
     const checked = OpResultSchema.safeParse(raw);
@@ -1194,6 +1211,11 @@ export async function runPlan(
         | { charged: number; basis: 'observed' | 'full'; priced: boolean }
         | undefined;
       let outcome: LadderOutcome<OpResult<unknown>> | undefined;
+      // The op body's own rejection — the one UNKNOWN-status ending
+      // executeOp's contract flattens into a `failed` verdict. The settle's
+      // basis reads it; the ladder's 'threw' outcome cannot, because
+      // executeOp never rejects.
+      let dispatchThrew = false;
       // The dispatch-closed guard: once the ladder settles, the dispatch's
       // evidence window is CLOSED — a detached (killed) op promise's late
       // reportResult calls are DROPPED, so the live ledger and the journal's
@@ -1304,7 +1326,16 @@ export async function runPlan(
       // ladder removes its listener when it settles (governor.runLadder).
       const runDispatchLadder = async (attempt: number): Promise<OpResult<unknown>> => {
         const ladderOutcome = await runLadder(
-          () => executeOp(job, (name) => registry.get(name)),
+          () => {
+            dispatchThrew = false;
+            return executeOp(
+              job,
+              (name) => registry.get(name),
+              () => {
+                dispatchThrew = true;
+              },
+            );
+          },
           governor.ladderSpec,
           { op: job.op, jobKey: job.id, attempt },
           {
@@ -1418,7 +1449,11 @@ export async function runPlan(
           // is at least the full reservation. Definitive verdicts settle
           // 'observed' — the charge is exactly what the evidence folds saw
           // (a pre-dispatch failure like an unknown op folds nothing and
-          // settles 0). The slot is held until the settle LANDS — and a
+          // settles 0). A pre-dispatch failure and an op BODY that
+          // rejected read identically from the verdict alone — executeOp
+          // flattens both into `failed` — so dispatchThrew is what keeps
+          // the second out of this branch. The slot is held until the
+          // settle LANDS — and a
           // failed settle or durable write must still release it (a leaked
           // slot would hang every waiter forever on a run that is already
           // stopping loudly).
@@ -1426,6 +1461,7 @@ export async function runPlan(
             outcome === undefined ||
             outcome.outcome === 'killed' ||
             outcome.outcome === 'threw' ||
+            dispatchThrew ||
             (outcome.outcome === 'completed' && outcome.value.status === 'indeterminate')
               ? 'full'
               : 'observed';

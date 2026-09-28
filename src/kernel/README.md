@@ -343,8 +343,15 @@ from `reserve` to `settle`.
   Definitive verdicts settle basis `observed` — the charge is exactly what
   the folds saw (a pre-dispatch failure like an unknown op settles 0). A
   dispatch ending in UNKNOWN status — ladder kill, `indeterminate` verdict,
-  a defensive throw — settles basis `full`: charged = max(r, folded), at
-  least the whole reservation (spend may exist that no fold saw). The
+  a defensive throw, or the op BODY rejecting — settles basis `full`:
+  charged = max(r, folded), at
+  least the whole reservation (spend may exist that no fold saw). The op-body
+  case is INVISIBLE in the verdict — `executeOp` never rejects (a throwing op
+  becomes a `failed` result, by the frozen contract), so the dispatch signals
+  it out of band and the settle reads that signal: a pre-dispatch failure
+  (unknown op, schema violation, throwing importer) still settles `observed`
+  zero, while an op that threw after its dispatch started charges the whole
+  reservation. The
   journal's `reservation-settled.charged` and the live ledger agree exactly
   (the settle adds only the un-counted remainder), and the event carries
   `priced` — whether a `costUSD`, ZERO included, was observed on the

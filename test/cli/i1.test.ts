@@ -1057,12 +1057,20 @@ describe('run-plan through the governed kernel', () => {
     // reserve trips `exhausted` before any dispatch, the row is
     // budget-exhausted, and the run exits 3 — a zero budget that dispatches
     // anyway is exactly the lie the cap exists to prevent.
-    const { planPath } = await writePlanFile(singleJobPlan('echo'));
+    // --allow-advisory-budget is REQUIRED for this to be the ZERO-CAP test:
+    // without the A12c escape the advisory gate (v1.1: every dispatch
+    // advisory, unattended) refuses first with `reservation-refused
+    // {reason:'advisory-lane'}`, the same observable verdict — exit 3, one
+    // budget-exhausted row — so the report assertions alone cannot tell the
+    // two paths apart. The journal assertions below do.
+    const { planPath, journalDir } = await writePlanFile(singleJobPlan('echo'));
     const { code, out, err } = await capture([
       'run-plan',
       `--plan=${planPath}`,
       `--ops-root=${opsRoot}`,
       '--max-usd=0',
+      `--journal-dir=${journalDir}`,
+      '--allow-advisory-budget',
     ]);
     expect(code).toBe(3);
     const report = RunReportSchema.parse(JSON.parse(out));
@@ -1070,6 +1078,15 @@ describe('run-plan through the governed kernel', () => {
     expect(report.counts['budget-exhausted']).toBe(1);
     expect(report.stoppedEarly).toBe(false); // the refusal row IS the verdict; nothing was gated
     expect(err).not.toContain('cq: done 1');
+    // The zero-cap TRIP is what refused: a durable budget-tripped fact, and
+    // no reservation ever opened (the seed at C=0 does not trip — `0 > 0` is
+    // false — so the first `reserve` is the trip).
+    const events = await openRunLog(journalDir).read(report.runId);
+    expect(events.some((event) => event.type === 'reservation-refused')).toBe(false);
+    expect(events.some((event) => event.type === 'reservation-opened')).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'budget-tripped', tripKind: 'exhausted' }),
+    );
   });
 
   test('annex §3 rule-7 notice: the governed run after an ungoverned-marked run narrates the excluded runs', async () => {
