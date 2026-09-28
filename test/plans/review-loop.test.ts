@@ -35,7 +35,7 @@
 // every argv (no network, no spawned processes, no real clocks); the fix
 // workers run through the REAL makeFixReviewItem op over a scripted Driver;
 // the only filesystem writes are the test's own mkdtemp scratch dirs.
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -44,7 +44,7 @@ import { currentJobContext } from '../../src/kernel/governor.js';
 import { exitCodeForOpResult } from '../../src/cli/exit.js';
 import { PlanSchema } from '../../src/kernel/schema.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
-import type { OpRegistryEntry } from '../../src/kernel/types.js';
+import type { GovernanceOptIn, OpRegistryEntry } from '../../src/kernel/types.js';
 import type { Plan } from '../../src/kernel/types.js';
 import type { ClassifiedItem } from '../../src/ops/review/classifyThreads.js';
 import type { FetchedReviewState } from '../../src/ops/review/fetchReviewState.js';
@@ -529,6 +529,10 @@ const runLoop = async (
     promptOverride?: string;
     /** Governor LIMITS half riding the loop opts (the review-path #137 arming). */
     limits?: { perJobWallClockMs?: number };
+    /** RunOptions overlay for the fix run (journalDir is the ledger dir). */
+    runOptions?: { journalDir?: string; maxUsd?: number; maxTokens?: number };
+    /** Governance opt-ins for the fix run (the ledger-refusal resolutions). */
+    governanceOptIn?: GovernanceOptIn[];
     /** Full driver.run override (the wall-clock test's cooperating wedge). */
     driverRun?: Driver['run'];
     /** Propagated-spend observer (review-debt #186). */
@@ -586,6 +590,8 @@ const runLoop = async (
     worktreeRoot: scratch,
     ...(o.promptOverride !== undefined ? { promptOverride: o.promptOverride } : {}),
     ...(o.limits !== undefined ? { limits: o.limits } : {}),
+    ...(o.runOptions !== undefined ? { runOptions: o.runOptions } : {}),
+    ...(o.governanceOptIn !== undefined ? { governanceOptIn: o.governanceOptIn } : {}),
     ...(o.onSpend !== undefined ? { onSpend: o.onSpend } : {}),
   });
   return { outcome, ghLog, gitLog, worktreePath };
@@ -696,6 +702,62 @@ describe('review-loop happy path', () => {
     // And the worker actually received that payload.
     expect(invocations[0]?.prompt).toContain('Fix src/a.ts at 3.');
     expect(invocations[0]?.prompt).toContain('See the timeout path too.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The fix run over an existing v1 journal — the governed ledger gate (W2.2)
+// ---------------------------------------------------------------------------
+
+describe('the fix run over an existing v1 journal (W2.2)', () => {
+  test('v1 dispatch history refuses the always-governed fix run; governanceOptIn legacyJournal=reset upgrades it', async () => {
+    // A pre-existing v1 journal for the loop's plan id with a dispatch: v1
+    // carries no spend, so the ALWAYS-governed fix run refuses without the
+    // opt-in and the loop surfaces the kernel refusal verbatim (the kernel
+    // throw propagates out of runReviewLoop).
+    const scratch = await mkdtemp(join(tmpdir(), 'cq-review-loop-v1-'));
+    scratchDirs.push(scratch);
+    const journalDir = join(scratch, 'ledger');
+    await mkdir(journalDir, { recursive: true });
+    const v1RunId = 'review-loop--legacy--dd';
+    await writeFile(
+      join(journalDir, `${v1RunId}.ndjson`),
+      [
+        {
+          type: 'run-started',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:00.000Z',
+          planId: 'review-loop',
+        },
+        {
+          type: 'job-started',
+          runId: v1RunId,
+          at: '2026-01-01T00:00:00.000Z',
+          jobId: 'fix-1',
+          op: 'review.fixItem',
+          attempt: 1,
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n') + '\n',
+    );
+
+    await expect(
+      runLoop(defaultWorld(), {
+        driverResults: [completeWorker(fixLine(true, 'Done.', [NEW_SHA]))],
+        runOptions: { journalDir },
+      }),
+    ).rejects.toThrow(/unaccounted dispatches/);
+
+    // With the reset opt-in the SAME history is "charged 0" (annex §4): the
+    // fix run proceeds and the loop completes its happy path.
+    const { outcome } = await runLoop(defaultWorld(), {
+      driverResults: [completeWorker(fixLine(true, 'Done.', [NEW_SHA]))],
+      runOptions: { journalDir },
+      governanceOptIn: ['budget.legacyJournal=reset'],
+    });
+    expect(outcome.status).toBe('ok');
+    expect(outcome.fixReport?.counts.done).toBe(1);
   });
 });
 
@@ -2158,7 +2220,7 @@ describe('review-loop propagated spend (onSpend)', () => {
     });
     expect(outcome.status).toBe('ok');
     // The fix op streams the driver's costUSD through the job context, so the
-    // governor's USD rollup (which withBudgetStop also annotates onto
+    // governor's USD rollup (which the governed runner annotates onto
     // fixReport.costUSD) is what the sweep receives — no dispatch-log proxy.
     expect(spent.length).toBeGreaterThan(0);
     expect(spent[spent.length - 1]).toBeCloseTo(0.07);

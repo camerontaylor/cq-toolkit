@@ -7,10 +7,11 @@
 //     fetchMergeCandidates (fork/draft exclusions ride through in the result
 //     for the workflow log — the #142 contract is visible, never silent);
 //   - the real run executes makeMergePrsPlan's ONE job (op 'merge.runPrs')
-//     through the recorded governed pipeline, mirroring src/cli/run-plan.ts
-//     exactly: BudgetGovernor over governorConfig(runOptions, limits) →
-//     runPlan(plan, runOptions, governRegistry(view, governor)) →
-//     withBudgetStop. The caps are the frozen SelfhostDefaults (maxUsd
+//     through the governed kernel (ADR-0003 §2), mirroring src/cli/run-plan.ts
+//     exactly: a per-run createGovernor over governorConfig(runOptions,
+//     limits) rides runPlan's Governance handle — the runner itself performs
+//     admission, the wall-clock ladder, spend observation, the honest stop,
+//     and the v2 journal. The caps are the frozen SelfhostDefaults (maxUsd
 //     default, perJobWallClockMs arming the wall-clock ladder, #137) — this
 //     module invents no number;
 //   - the registry view is the central registry built exactly the way
@@ -65,12 +66,7 @@
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import {
-  BudgetGovernor,
-  governRegistry,
-  governorConfig,
-  withBudgetStop,
-} from '../kernel/governor.js';
+import { createGovernor, governorConfig } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import type { OpRegistryEntry, RunOptions, RunReport } from '../kernel/types.js';
 import { defaultClassifyPrConfig } from '../ops/merge/classify.config.js';
@@ -417,11 +413,13 @@ export async function runSelfMergePrs(
   // a first run / cache miss `<journalRoot>` does not exist, and this run's
   // effects under it — the merge sessions dir (`buildRunInput`'s
   // sessionsDir) and the kernel journal (`merge-<stamp>`) — need their
-  // parent before any writer touches them. Create it recursively before the
-  // plan is built. Real runs only: the dry run classifies and returns above,
-  // never touching the journal.
+  // parent before any writer touches them. Real runs only: the dry run
+  // classifies and returns above, never touching the journal.
   const journalRoot = cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot);
   mkdirSync(journalRoot, { recursive: true });
+  // The GOVERNED run's own journal dir (`merge-<stamp>`) is created by the
+  // kernel — the v2 seq claim (journal.claimSeq) and the append path both
+  // mkdir it recursively on first write.
   // AUTOMATION IDENTITY (module doc): resolved once, before any merge can
   // be attempted; an unresolved identity (other than an integration token)
   // refuses every recheck rather than throwing the run.
@@ -444,23 +442,24 @@ export async function runSelfMergePrs(
     { ...cfg, classifyConfig, allowSameAccountAgentReview },
     nowMs,
   );
-  // The governed composition — the recorded seam, not optional (I9),
-  // mirroring src/cli/run-plan.ts: the caps ride BOTH the RunOptions (the
-  // kernel's advisory surface) and the governor construction; the wall
-  // clock arms the ladder through Limits (#137). The merge plan is ONE job
-  // and its pipeline is internally sequential — concurrency 1.
+  // The governed run (ADR-0003 §2), mirroring src/cli/run-plan.ts: the caps
+  // ride BOTH the RunOptions (the kernel's advisory surface) and the governor
+  // construction; the wall clock arms the ladder through Limits (#137) —
+  // runPlan's governed dispatch reads governor.ladderSpec. The merge plan is
+  // ONE job and its pipeline is internally sequential — concurrency 1.
   const runOptions: RunOptions = {
     concurrency: 1,
     stopOnError: false,
     maxUsd: cfg.maxUsd ?? SelfhostDefaults.maxUsd,
     // The governed run's durable kernel journal (the RunReport's evidence
     // trail), namespaced `merge-<stamp>` under the journal root — stamp =
-    // the same once-read clock the loop entry stamps its per-PR dirs with.
-    // The CLI's optional --journal-dir is a human-run choice; a scheduled
-    // run has no human to copy stdout, so the entry always persists it.
-    journalDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), `merge-${String(nowMs)}`),
+    // the same once-read clock the loop entry stamps its per-PR dirs with;
+    // the kernel creates it on first write. The CLI's optional --journal-dir
+    // is a human-run choice; a scheduled run has no human to copy stdout, so
+    // the entry always persists it.
+    journalDir: join(journalRoot, `merge-${String(nowMs)}`),
   };
-  const governor = new BudgetGovernor(
+  const governor = createGovernor(
     governorConfig(runOptions, { perJobWallClockMs: SelfhostDefaults.perJobWallClockMs }),
   );
   const plan = makeMergePrsPlan(input);
@@ -518,11 +517,9 @@ export async function runSelfMergePrs(
               base,
             ),
     });
-  const report = withBudgetStop(
-    await runPlan(plan, runOptions, governRegistry(view, governor)),
-    plan,
-    governor,
-  );
+  // The governed run's return IS the honest report (admission, the ladder,
+  // spend observation, and the stop are the runner's; no post-pass).
+  const report = await runPlan(plan, runOptions, view, { governor });
   const jobRow = report.jobs.find((row) => row.jobId === MERGE_PRS_PLAN_RUN_JOB_ID);
   const outcome =
     jobRow !== undefined && jobRow.result.status === 'ok'

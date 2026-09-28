@@ -420,11 +420,21 @@ describe('the built CLI still drives the subprocess driver + fake agent', () => 
         'utf8',
       );
       const env = hermeticEnv();
-      // The fixture route's key VALUE (fake — the URL is a black hole and the
-      // fake agent CLI is the model).
+      // The fixture route's key VALUE (fake — the URL is a black hole and
+      // the fake agent CLI is the model).
       env.SMOKE_API_KEY = 'plans-smoke-fake-key';
       const res = runCli(
-        ['run-plan', `--plan=${planPath}`, `--ops-root=${SMOKE_OPS}`, '--json'],
+        [
+          'run-plan',
+          `--plan=${planPath}`,
+          `--ops-root=${SMOKE_OPS}`,
+          '--json',
+          // A generous token cap governs the run (the CLI governs exactly
+          // when the operator sets a cap): the fixture op refuses an
+          // ungoverned job context, and its unpriced usage forbids a USD
+          // cap (the DD-9 unpriced rule) — a token cap is the honest arm.
+          '--max-tokens=10000',
+        ],
         env,
         scratchRepo,
       );

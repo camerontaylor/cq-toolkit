@@ -20,7 +20,7 @@
 // line, and a line whose event.runId does not match the file's run: a hole
 // or misattribution in complete evidence is corruption, not a torn write,
 // and silently accepting it would poison the fold.
-import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises';
+import { appendFile, mkdir, open, readFile, readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { JournalEventSchema } from './schema.js';
 import type { JobState, JobStatus, JournalEvent } from './types.js';
@@ -53,8 +53,8 @@ const RUN_ID_TAIL = /^[0-9a-z]+--[0-9a-f]+$/i;
 
 /**
  * The resume/seed candidate filter shared by EVERY consumer that picks a
- * plan's runs out of a journal dir (the runner's replay fold, governor
- * `seedFromRunLog`). A candidate must carry the `<planId>--` prefix AND the
+ * plan's runs out of a journal dir (the runner's replay fold, which also
+ * seeds the governor). A candidate must carry the `<planId>--` prefix AND the
  * two-segment tail, so a planId that itself ends in `--<segment>` ('a' vs
  * 'a--b') cannot match the other plan's files and a corrupt journal of
  * ANOTHER plan cannot block this plan's reads.
@@ -80,9 +80,15 @@ export interface RunLog {
    * JournalEventSchema (throws on invalid events) and requires
    * `event.runId === runId`. Appends are serialized through an internal
    * write chain, so lines from concurrent jobs never interleave and land in
-   * append-call order.
+   * append-call order. With `{ durable: true }` the line is written through
+   * an append-mode file handle and `fdatasync`ed before the promise settles
+   * (ADR-0003 annex §2 durability: `reservation-*`-class facts), and the
+   * journal DIRECTORY is fsync'd once per run file this process created, so
+   * a crash cannot lose the directory entry of a file whose lines are
+   * already durable. macOS `F_FULLFSYNC` remains a recorded power-loss
+   * residual; process-crash durability does not depend on it.
    */
-  append(runId: string, event: JournalEvent): Promise<void>;
+  append(runId: string, event: JournalEvent, opts?: { durable?: boolean }): Promise<void>;
   /**
    * Parse every line of `<runId>.ndjson` in order. A missing file means "no
    * facts yet" and yields `[]`; an unparsable last line is ignored ONLY when
@@ -105,9 +111,13 @@ export function openRunLog(journalDir: string): RunLog {
   // completions produce ordered, non-interleaved lines. A failed write does
   // not poison the chain (later appends still run).
   let tail: Promise<void> = Promise.resolve();
+  // Run files this process has already dir-fsynced: the directory entry is
+  // durable once, at creation; later appends to a known file skip the dir
+  // fsync entirely.
+  const dirSynced = new Set<string>();
 
   return {
-    async append(runId: string, event: JournalEvent): Promise<void> {
+    async append(runId, event, opts): Promise<void> {
       assertSafeRunId(runId);
       // Validate BEFORE writing: the journal only ever contains facts that
       // parse. The parsed value is what lands on disk.
@@ -118,9 +128,25 @@ export function openRunLog(journalDir: string): RunLog {
         );
       }
       const line = `${JSON.stringify(parsed)}\n`;
+      const durable = opts?.durable === true;
       const write = async (): Promise<void> => {
         await mkdir(journalDir, { recursive: true });
-        await appendFile(pathFor(runId), line, 'utf8');
+        const isNew = !dirSynced.has(runId);
+        if (durable) {
+          const handle = await open(pathFor(runId), 'a');
+          try {
+            await handle.writeFile(line, 'utf8');
+            await handle.datasync();
+          } finally {
+            await handle.close();
+          }
+        } else {
+          await appendFile(pathFor(runId), line, 'utf8');
+        }
+        if (isNew) {
+          dirSynced.add(runId);
+          await syncDir(journalDir);
+        }
       };
       const next = tail.then(write, write);
       tail = next.catch(() => undefined);
@@ -154,6 +180,199 @@ function isEnoent(err: unknown): boolean {
     'code' in err &&
     (err as { code?: unknown }).code === 'ENOENT'
   );
+}
+
+/**
+ * fsync the DIRECTORY so a freshly created file's directory entry is durable
+ * (annex §2: "the journal directory is fsync'd when a run file is created").
+ * A read-mode directory fd + fsync is the POSIX idiom. Some exotic mounts
+ * (network FS, certain container overlays) refuse it with EPERM/EACCES/
+ * EINVAL/ENOSYS — on those the call is a recorded best-effort no-op: the
+ * supported local-filesystem case (the only one the plan lock and resume
+ * fold make claims about) gets real dirent durability, and a refusal never
+ * blocks an otherwise-successful journal write. macOS F_FULLFSYNC remains a
+ * power-loss residual (ADR-0003 §2.5); process-crash durability does not
+ * depend on it.
+ */
+async function syncDir(dir: string): Promise<void> {
+  const SOFT_ERRORS = new Set(['EPERM', 'EACCES', 'EINVAL', 'ENOSYS']);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(dir, 'r');
+  } catch (err) {
+    if (
+      typeof err === 'object' &&
+      err !== null &&
+      'code' in err &&
+      SOFT_ERRORS.has((err as { code?: unknown }).code as string)
+    ) {
+      return;
+    }
+    throw err;
+  }
+  try {
+    await handle.sync();
+  } catch (err) {
+    if (
+      typeof err === 'object' &&
+      err !== null &&
+      'code' in err &&
+      SOFT_ERRORS.has((err as { code?: unknown }).code as string)
+    ) {
+      return;
+    }
+    throw err;
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * Claim the next fold-order ordinal for a plan (ADR-0003 annex §2/§3): `seq`
+ * is ASSIGNED by exclusive create of `<journalDir>/<planId>.seq.<n>`
+ * (`'wx'`), retrying `n + 1` on `EEXIST`, so two contenders can never both
+ * write `n` — uniqueness holds by construction, not by lock discipline
+ * (critic r2 m-b; the lock is W2.4's and this claim does not wait for it).
+ * The claim file is a tombstone: it is never read back, only its existence
+ * is the claim. `startAt` is the first ordinal to try — the caller passes
+ * 1 + the highest seq folded from the plan's existing journals. The journal
+ * dir is created recursively first (the append path's lazy-create contract:
+ * a FIRST governed run over a not-yet-existing `--journal-dir` claims its
+ * seq instead of failing on the missing dir).
+ *
+ * Bounded: 10_000 consecutive EEXISTs mean something else is writing these
+ * tombstones — corruption, not contention — and throws.
+ */
+export async function claimSeq(
+  journalDir: string,
+  planId: string,
+  startAt: number,
+): Promise<number> {
+  if (!Number.isInteger(startAt) || startAt < 1) {
+    throw new Error(`journal: claimSeq startAt must be an integer >= 1, got ${startAt}`);
+  }
+  await mkdir(journalDir, { recursive: true });
+  for (let n = startAt; n < startAt + 10_000; n++) {
+    try {
+      // The exclusive open IS the claim — the tombstone's existence, never
+      // its content (it is not read back). Closed immediately so a claimed
+      // seq does not pin the descriptor for the process lifetime.
+      const handle = await open(join(journalDir, `${planId}.seq.${n}`), 'wx');
+      await handle.close();
+      return n;
+    } catch (err) {
+      if (
+        typeof err === 'object' &&
+        err !== null &&
+        'code' in err &&
+        (err as { code?: unknown }).code === 'EEXIST'
+      ) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error(
+    `journal: claimSeq could not claim a seq for plan '${planId}' after 10000 attempts starting at ${startAt}`,
+  );
+}
+
+/** One parsed run of a plan, for fold ordering. */
+export interface FoldRun {
+  runId: string;
+  events: readonly JournalEvent[];
+}
+
+/**
+ * THE HIGHEST-CLAIM CHECK — the reader-side check for {@link claimSeq}.
+ * Called with the highest `seq` folded from run-started events: a claim
+ * tombstone (`<planId>.seq.<n>`) beyond it means a seq was claimed but its
+ * run is gone. Refuse that trailing gap instead of silently lowering the
+ * seeded spend. This max-only comparison does NOT detect deletion of an
+ * interior run when a higher-seq run remains; it is not a contiguity check.
+ *
+ * Fail-closed trade, named: a crash between `claimSeq` and the first append
+ * leaves an ORPHAN tombstone that also trips this check — the next run
+ * refuses with this error until the operator deletes the named tombstone
+ * (nothing was dispatched under a claimed-but-unstarted seq, so deleting it
+ * is safe and the claim retries at that ordinal). That is the honest
+ * direction: a one-file operator fix beats a ledger that silently forgets
+ * spend.
+ */
+export async function assertNoSeqGap(
+  journalDir: string,
+  planId: string,
+  maxFoldedSeq: number,
+): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(journalDir);
+  } catch (err) {
+    if (isEnoent(err)) return; // no dir yet — no tombstones exist
+    throw err;
+  }
+  const prefix = `${planId}.seq.`;
+  let maxTombstone = 0;
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const ordinal = Number(name.slice(prefix.length));
+    if (Number.isInteger(ordinal) && ordinal > maxTombstone) maxTombstone = ordinal;
+  }
+  if (maxTombstone > maxFoldedSeq) {
+    throw new Error(
+      `journal: corrupt — seq gap for plan '${planId}': claim tombstone '${prefix}${maxTombstone}' exists ` +
+        `but the highest folded run-started seq is ${maxFoldedSeq} — a claimed run's file is missing, so its ` +
+        `spend cannot seed the ledger. If the tombstone is an orphaned claim (a crash between claimSeq and ` +
+        `the first append), delete '${prefix}${maxTombstone}' and re-run.`,
+    );
+  }
+}
+
+/**
+ * THE FOLD ORDER (ADR-0003 annex §3, r1 m4): v1 runs (run-started without
+ * `journalVersion`) ordered by `at` then runId, ALL before every v2 run; v2
+ * runs ordered by `seq`. The injected clock can no longer reorder the fold —
+ * `at` is display-only for v2 runs. Corruption is loud: a v2 run without
+ * `seq`, or two v2 runs of the plan sharing one `seq`, throws (annex §2 —
+ * uniqueness holds by construction for writers; a violation on READ is a
+ * corrupted dir, never silently folded).
+ */
+export function foldOrderRuns(runs: readonly FoldRun[]): FoldRun[] {
+  const v1: Array<{ run: FoldRun; at: string }> = [];
+  const v2: Array<{ run: FoldRun; seq: number }> = [];
+  for (const run of runs) {
+    const started = run.events.find(
+      (event): event is Extract<JournalEvent, { type: 'run-started' }> =>
+        event.type === 'run-started',
+    );
+    if (started === undefined) {
+      throw new Error(
+        `journal: fold order requires a run-started event; run '${run.runId}' has none`,
+      );
+    }
+    if (started.journalVersion === undefined) {
+      v1.push({ run, at: started.at });
+    } else {
+      if (started.seq === undefined) {
+        throw new Error(
+          `journal: corrupt — v2 run '${run.runId}' (plan '${started.planId}') has no seq`,
+        );
+      }
+      v2.push({ run, seq: started.seq });
+    }
+  }
+  v1.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : a.run.runId < b.run.runId ? -1 : 1));
+  v2.sort((a, b) => a.seq - b.seq);
+  let previous: { run: FoldRun; seq: number } | undefined;
+  for (const entry of v2) {
+    if (previous !== undefined && entry.seq === previous.seq) {
+      throw new Error(
+        `journal: corrupt — duplicate seq ${entry.seq} across runs '${previous.run.runId}' and '${entry.run.runId}'`,
+      );
+    }
+    previous = entry;
+  }
+  return [...v1.map((entry) => entry.run), ...v2.map((entry) => entry.run)];
 }
 
 /** Parse one journal line: JSON.parse then JournalEventSchema; null when either fails. */

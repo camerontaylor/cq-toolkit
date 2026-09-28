@@ -113,18 +113,22 @@ escalation ladder, per-job and per-run attempt caps, the USD rollup cap, and
 the dual in-flight/dispatch caps. Source: `src/kernel/governor.ts` (enforcer)
 and `src/kernel/rescue.ts` (policy table + decision engine).
 
-- **Seam — governed-registry decorator (recorded decision).**
-  `governRegistry(view, governor)` wraps an `OpRegistryView`; every op
-  invocation then runs under admission caps, the in-flight ceiling, and the
-  escalation ladder. Chosen over a `runPlan(plan, opts, registry, gov?)`
-  parameter because it is purely additive — T1.2 call-sites and tests compile
-  and pass unchanged, and the runner stays frozen. The `gov` parameter is the
-  recorded T1.4 runner-integration path (retries must raise the frozen
-  `JobStartedJournalEvent.attempt` field, and only the runner journals
-  dispatches). Consequence, also recorded: the governor NEVER retries inside
-  the wrapper — an in-wrapper retry would hide attempts from the journal
-  (one job-started, two real dispatches), which is journal-dishonest and
-  rejected. Re-dispatch happens at the runPlan level via the rescue lane.
+- **Seam — the governed runner (W2.2, ADR-0003 §2).**
+  `runPlan(plan, opts, registry, gov?)` takes the `Governance` handle
+  (`{ governor, signal?, attended?, optIn? }`; `createGovernor(config, clock?)`
+  builds the enforcer and accepts the injected clock) and performs admission,
+  the ladder, the DD-9 evidence
+  folds, the v2 journal, and the honest stop ITSELF. Caps in `opts` without
+  `gov` throw (`runPlan: caps require governance`) — a cap without admission
+  and spend observation is silently unenforceable. The earlier
+  governed-registry decorator (`governRegistry`/`withBudgetStop`/
+  `seedFromRunLog`) is DELETED with no shim: the runner is the one governed
+  composition, which is also what lets admission key on the real plan
+  `job.id` and lets the journal carry real attempt numbers. Consequence,
+  still recorded: the governor NEVER retries — an in-wrapper retry would
+  hide attempts from the journal (one job-started, two real dispatches),
+  which is journal-dishonest and rejected. Re-dispatch happens at the
+  runPlan level via the rescue lane.
 - **Escalation ladder (per job).** Rungs fire in order, each after its grace,
   each appending a marker (kind `ladder-rung`: `rung`, `delayMs` since the
   previous rung, `sinceStartMs`, `delivered`) to `BudgetGovernor.events`:
@@ -168,71 +172,112 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   decision: quota/attempt counters advance at admit, before in-flight
   queueing; a dispatch queued when the budget trips is refused
   (`budget-while-queued`) rather than run.
-- **USD accounting.** Ops report usage and cost through the job context
-  (`reportUsage` / `reportCost`); an op that maps a driver `WorkerResult`
-  into its OWN value shape (so the completion-time fold cannot see it)
-  reports BOTH in one call via `reportResult({ usage, costUSD })`, which
-  folds through the same DD-9 rules — real usage rolls the token cap, a
-  present `costUSD` rolls the USD cap, and real usage with no `costUSD`
-  under a configured `maxUsd` trips loudly (an unpriced model makes the cap
-  unenforceable). A lying (NaN/Infinity/negative) measurement is sanitized
-  to zero evidence, never a post-record throw. The governor rolls up and
-  trips at the
-  EFFECTIVE cap = min(`RunOptions.maxUsd`, `Limits.maxUsd`) (frozen
-  precedence; the cap is inclusive — the trip fires when the rollup EXCEEDS
-  it). The kernel never derives cost itself: until the T1.4 price-map layer
-  lands, tests inject cost via `reportCost`. Tripping gates admission only —
-  in-flight jobs were admitted before the trip and their outcomes stay real
-  evidence (aborting them mid-flight would complicate honest attribution;
-  recorded decision).
-- **Honest stop (I9).** `withBudgetStop(report, plan, governor)` annotates a
-  returned report ONLY when the governor actually tripped:
-  `stoppedEarly: true`, `earlyStopReason: 'budget'` (the frozen
-  `RunEarlyStopReason`'s only value — this is its purpose), and
-  never-dispatched rows re-marked `OpResult {status:'budget-exhausted'}`:
-  `queued: …` marker rows always; `blocked: …` marker rows only when their
-  whole dependency obstruction is transitively budget-caused — a blocked row
+- **USD accounting.** Ops report spend through the job context in ONE fold
+  via `reportResult({ usage, costUSD })` — the transitional streaming
+  channel for an op that maps a driver `WorkerResult` into its OWN value
+  shape (so the completion-time fold cannot see it); it applies the DD-9
+  rules exactly as the completion-time fold does — real usage rolls the
+  token cap, a present `costUSD` rolls the USD cap, and real usage with no
+  `costUSD` under a configured `maxUsd` trips loudly (an unpriced model
+  makes the cap unenforceable). A lying (NaN/Infinity/negative) measurement
+  is sanitized to zero evidence, never a post-record throw. The governor
+  rolls up and trips at the EFFECTIVE cap = min(`RunOptions.maxUsd`,
+  `Limits.maxUsd`) (frozen precedence; the cap is inclusive — the trip fires
+  when the rollup EXCEEDS it). The kernel never derives cost itself. Trips
+  carry a kind (`TripKind`: `exhausted` / `token-cap` / `signal`) — a
+  `signal` trip is a run-level CANCEL (`Governance.signal`), not a budget
+  verdict. Tripping gates admission only — in-flight jobs were admitted
+  before the trip and their outcomes stay real evidence (abort-on-trip is
+  the reservation slice's, W2.3).
+- **Honest stop (I9).** The runner claims the stop itself — no post-pass:
+  a budget-family trip (or a per-run dispatch-quota refusal) re-marks the
+  never-dispatched rows whose non-execution is transitively budget-caused
+  `OpResult {status:'budget-exhausted'}`, sets `stoppedEarly: true` and
+  `earlyStopReason: 'budget'`, and only when something was actually gated
+  (a refusal row that is itself terminal evidence claims nothing). The
+  attribution walks the runner's OWN admission records — which jobs were
+  admitted, which refused — never marker strings in row text; a blocked row
   with a definitively-failed dependency keeps its real verdict. Executed
-  rows are never rewritten. Counts are recomputed over the marked rows
-  (mirroring the runner's private state mapping — keep-in-sync note in the
-  source). Today the caller composes
-  `withBudgetStop(await runPlan(...), plan, governor)`; the T1.4 runner
-  integration folds it into runPlan.
-- **Composable with resume.** A run the governor stopped still leaves
-  journal evidence: an in-process kill produces a terminal
-  budget-exhausted record; a hard-crashed job has `job-started` with no
-  terminal event. Both re-enter correctly on `resume: true` (T1.2 replay
-  re-runs every non-ok row). `seedFromRunLog(log, planId, {config?, usdOf?})`
-  is the composition path: it reads ALL of the plan's run journals (the same
-  `<planId>--` prefix + run-started `planId` matchers as resume,
-  oldest-first) and seeds a constructed governor from their ordered
-  concatenation. The raw `BudgetGovernor.seedFromJournal(events, {usdOf?})`
-  requires exactly that concatenation — the latest run's journal alone
-  undercounts re-attested jobs (finish-only events) and chained dispatches.
-  The fold carries per-job attempt ordinals from the frozen attempt field
-  (via `rescue.attemptsFromJournal`), the usage
-  rollup (USD needs the optional `usdOf` price mapping), and the dispatch
-  count (`runDispatchQuota` carries across resume instead of restarting at 0) — so a resumed run continues the SAME budget. Under the op-name
-  fallback the op key seeds the SUM of the op's journaled dispatches (the
-  fallback's ordinal IS the op's dispatch count; a max would understate it
-  and let a resumed run exceed the cap). A custom `config.jobKey` extractor
-  is runtime-only and is NOT seeded on resume — the seed keys on journal
-  jobIds and op names, so a custom key must align with those conventions or
-  per-job caps reset across resume. Consequence: budget-exhausted rows
-  are
-  terminal and are NOT auto-retried by resume in any effective sense — a
-  seeded, still-tripped governor re-marks them without op invocation; only
-  an input change (new `inputsHash`, which defeats even ok-skip in T1.2
-  replay) puts them back under the caps as genuinely new work. Without a
-  seed, T1.2 replay re-runs them as fresh dispatches — still under the
-  same caps.
+  rows are never rewritten. A `signal` trip re-marks nothing: undispatched
+  rows stay `queued`, and the report claims `earlyStopReason: 'signal'`
+  when queued rows remain. The cancel rule holds MID-RUN and TRANSITIVELY:
+  the trip is evaluated at each classification point (not snapshotted at
+  run start), and a dependency cancelled while it waited for its slot
+  (`result: 'indeterminate'`) is UNRESOLVED, not failed; an operation's own
+  indeterminate verdict is unresolved too. Their dependents stay `queued`,
+  never fabricated `blocked` (a cancel is not a verdict; everything
+  undispatched re-runs on resume). Counts move only the
+  re-marked rows.
+- **Composable with resume (ledger continuity).** A run the governor
+  stopped still leaves journal evidence: an in-process kill produces a
+  terminal budget-exhausted record; a hard-crashed job has `job-started`
+  with no terminal event. Governed runs fold the dir's ENTIRE history —
+  v1 runs by `at`, then v2 runs by their claimed `seq` (journal v2,
+  ADR-0003 annex) — with or without `resume: true` (only the replay-skip
+  map is resume-gated): attempts seed as `1 + |prior job-started(jobId)|`,
+  the dispatch count and the usage/`costUSD` rollups seed from
+  job-finished events (a finish counts only when it CLOSES an open start),
+  so a run continues the SAME budget. The seed's open-start dedupe is
+  keyed PER (run, job): a finish closes only its own run's start, so a
+  finish-only re-attestation in a later run can never close (and
+  double-charge) the start of a run that died first. Identity residual
+  (recorded, unreachable from the CLI today): the attempt seed keys on
+  `job.id`, which the PLAN controls — a plan that renames its job ids
+  between runs presents as fresh jobs and resets its per-job attempt
+  lineage (rename evasion); stable identity needs a plan-external job
+  identity, which is not in v1.1.
+  The fold's corruption checks are loud on DUPLICATES (two v2 runs sharing
+  one `seq`) and on GAPS: a `claimSeq` tombstone (`<planId>.seq.<n>`)
+  beyond the highest folded run-started `seq` throws
+  `journal: corrupt — seq gap` — a claimed run whose FILE is gone (deleted;
+  its spend would silently vanish from the seed), or an orphaned claim (a
+  crash between claimSeq and the first append — safe to resolve by deleting
+  the named tombstone, which the error says). This maximum-sequence check
+  catches claims trailing the folded history; it does not detect a deleted
+  interior run when a higher sequence still folds. The refusals guard the
+  ledger: governed history refuses an ungoverned run (opt-in
+  `budget.ungovernedOverGoverned` marks the run ungoverned on its v2
+  record instead — and the marker is honoured ONLY over actual governed
+  history: on a plan with none it is refused, since honouring it would
+  strand that run's spend outside every future ledger); v1 journals with
+  unaccounted dispatches refuse a governed run (opt-in
+  `budget.legacyJournal=reset` charges them zero and records exactly which
+  runs the bound excludes — sticky); a cap RAISE over the last governed
+  run's `capUsd` refuses (opt-in `budget.raiseCap` — the predecessor check
+  gates the USD bound only, because token caps are ADVISORY in v1.1
+  (ADR-0003 §2.3) and a token-cap raise has no spend-integrity consequence
+  to gate). When a governed run's seed excludes ungoverned-marked runs,
+  the runner records the fact on the governor's event stream and the CLI
+  narrates `cq: bound excludes ungoverned runs <runIds>` (annex §3 rule 7).
+  Consequence: budget-exhausted rows are terminal and
+  are NOT auto-retried by resume in any effective sense — a seeded,
+  still-tripped governor re-marks them without op invocation; only an
+  input change (new `inputsHash`, which defeats even ok-skip in replay)
+  puts them back under the caps as genuinely new work.
+  Cost scope, named (do not double-count): the RUN-level `costUSD` on a
+  report is the cumulative seeded LEDGER (prior runs' finishes plus this
+  run's evidence), while each per-row `costUSD` is THIS run's evidence
+  only (a replay-skipped row restates the copied prior cost) — summing
+  rows across runs double-counts; the run-level figure is the ledger.
+  Recorded ledger-integrity residuals (W2.2 scope ends here):
+  - **The journal is trusted by possession.** Anyone with write access to
+    `--journal-dir` can edit a `job-finished.costUSD` undetected — the
+    fold validates shape, not provenance. The future fix is a per-run
+    chained hash over the journal lines, verified at fold time.
+  - **No plan lock yet (deferred to W2.4).** Concurrent governed runs over
+    one journal dir are ≈2C: two processes can both fold and both dispatch
+    before either's spend lands. The W2.4 lock (ADR-0003 §2.5 — a
+    kernel-held socket, not an mtime) closes it; a naive `open('wx')` lock
+    was rejected for W2.2 because a crashed holder would wedge the plan
+    (fail-closed with no stale-lock recovery), which is a worse operational
+    failure than the documented race.
 
 ## Governor config
 
-`GovernorConfig` is plain serializable data for now (the one runtime-only
-field is `jobKey`, a function — like the registry's importer, never
-persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
-`RunOptions`/`Limits` surfaces with the min-precedence applied.
+`GovernorConfig` is plain serializable data (W2.2 removed its one
+runtime-only field, the `jobKey` extractor — admission keys on the real
+plan job id). `governorConfig(opts, limits, extra?)` builds it from the
+frozen `RunOptions`/`Limits` surfaces with the min-precedence applied.
 
 | field               | meaning                                                                                                                                                          | default                                                                        |
 | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
@@ -244,7 +289,6 @@ persisted). `governorConfig(opts, limits, extra?)` builds it from the frozen
 | `maxAttemptsPerJob` | per-job attempt cap (effective min)                                                                                                                              | none                                                                           |
 | `runDispatchQuota`  | per-run dispatch/attempt cap (`Limits.runDispatchQuota`)                                                                                                         | none                                                                           |
 | `inFlightCeiling`   | in-flight ceiling — enforced by queueing                                                                                                                         | none                                                                           |
-| `jobKey`            | job-key extractor (runtime-only)                                                                                                                                 | `input.jobId` convention, else the **op name**                                 |
 
 **DD-1 result: CLOSED (T1.6 spike)** — the abort spike ran LIVE on both
 governed lanes (method + numbers: `docs/dd-1-abort-spike.md`): a governed
@@ -272,12 +316,12 @@ Folding real usage that carries no `costUSD` under a configured `maxUsd`
 trips the budget loud — never fail open (the escapes: price the model, or
 cap with `maxTokens`), and the seed-time trip covers BOTH caps, so a resumed
 run whose journaled rollup already overruns either cap stops before
-admitting anything. WIRED (the driver→governor bridge, review-debt #14): `governOp` folds a
-completed `ok` value that carries a WorkerResult shape through
-`observeResult` once (streaming `reportUsage`/`reportCost` suppressed via
-once-only flags), `RunOptionsSchema` accepts `maxTokens`, and seeded
-journaled usage with no `usdOf` under a configured `maxUsd` trips at seed
-time. Full disposition:
+admitting anything. WIRED (the driver→governor bridge, review-debt #14): the
+governed runner folds a completed `ok` value that carries a WorkerResult
+shape through `observeResult` once (the transitional `reportResult`
+streaming channel suppressed via once-only flags), `RunOptionsSchema`
+accepts `maxTokens`, and seeded journaled usage with no costUSD evidence
+under a configured `maxUsd` trips at seed time. Full disposition:
 `docs/dd-9-api-equivalent-budget.md`.
 **DD-9 result: CLOSED (T1.6b)** — the api-equivalent budget shipped. Every
 usage-bearing driver result carries `costUSD` labeled
@@ -387,8 +431,9 @@ composition harness for that arrives with the op families (T1.4+).
   double the rollup.
 - **Trip gates admission only**: in-flight jobs complete; their evidence
   stays real.
-- **USD is observed, never derived**: cost arrives via `reportCost` (tests
-  inject until the T1.4 price-map layer); the kernel computes no cost.
+- **USD is observed, never derived**: cost arrives from the op's evidence
+  folds (a priced driver result carries `costUSD` labeled
+  `costBasis: 'modeled'`); the kernel computes no cost.
 - **Grace defaults are spike-derived where measurement exists**:
   `DEFAULT_ABORT_GRACE_MS` = 5000 from the DD-1 spike
   (docs/dd-1-abort-spike.md; single source of truth

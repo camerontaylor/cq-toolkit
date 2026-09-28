@@ -12,45 +12,62 @@
 // FLAG SPELLING: the schema keys below are camelCase; the CLI flags are
 // their kebab-case aliases, normalized BEFORE the schema parse (--ops-root →
 // opsRoot, --journal-dir → journalDir, --max-usd → maxUsd, --max-tokens →
-// maxTokens, --stop-on-error → stopOnError); --plan, --concurrency and
-// --resume map 1:1. This kebab convenience is run-plan-ONLY: op subcommands
-// map flags by EXACT schema key (the asymmetry is documented in main.ts).
+// maxTokens, --stop-on-error → stopOnError, --opt-in → optIn); --plan,
+// --concurrency and --resume map 1:1. This kebab convenience is run-plan-ONLY:
+// op subcommands map flags by EXACT schema key (the asymmetry is documented
+// in main.ts).
 //
 // ERROR SHAPES (the 1-vs-2 line): all INPUT defects are exit 2 —
 // schema-invalid flags; a --plan path that is missing or not a regular file;
 // corrupted plan FILE CONTENT (unparseable JSON or a PlanSchema failure); and
 // the kernel's own input-validation class — a thrown error whose message
 // starts with 'runPlan: ' (duplicate job ids, the concurrency bound,
-// resume:true without journalDir) or 'journal: ' (the runId filename-safety
-// assert: a PlanSchema-valid plan whose id cannot become a journal file name,
-// e.g. 'bad/id', thrown by assertSafeRunId inside runPlan when --journal-dir
+// resume:true without journalDir, caps without governance, governance
+// without a governor, and the LEDGER refusals: a run over governed history
+// without governance, the ungoverned marker on a plan with no governed
+// history, a governed run over v1 journals with unaccounted dispatches, a
+// cap raise over the last governed cap) or 'journal: runId must match ' (the filename-safety assert: a
+// PlanSchema-valid plan whose id cannot become a journal file name, e.g.
+// 'bad/id', thrown by assertSafeRunId inside runPlan when --journal-dir
 // is set — the plan id is still the defective input). RUNTIME throws are
 // exit 1 — anything else (a journal open/write failure, a file read that
 // raced the stat gate) propagates to main.ts's catch, which narrates and
 // returns 1 'thrown'. No result ever existed on a throw, so stdout stays
 // empty.
 //
-// GOVERNED COMPOSITION (kernel README, "Budget governor") — I9 is not
-// optional; every run goes through the recorded pipeline:
-//   new BudgetGovernor(governorConfig(runOptions, {})) — or, when --resume
-//   names a journal dir, seedFromRunLog(openRunLog(journalDir), plan.id,
-//   { config }) so the resumed run continues the SAME budget (construction
-//   site below)
-//   withBudgetStop(await runPlan(plan, runOptions, governRegistry(view, governor)), plan, governor)
+// GOVERNED COMPOSITION (ADR-0003 §2, kernel README "Budget governor"): the
+// CLI opts into governance exactly when the operator sets a cap
+// (--max-usd/--max-tokens). A capped run carries a per-run governor
+// (createGovernor over governorConfig(runOptions, {})) and runPlan ITSELF
+// performs admission, spend observation, the honest stop (I9 — its return is
+// the final report; no post-pass), and the v2 journal; resume/ledger
+// seeding is the runner's fold over the journal dir, not a CLI step. An
+// UNCAPPED run stays v1-identical: no governor, no ledger, no v2 journal.
 import { readFile, stat } from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { z } from 'zod';
-import {
-  BudgetGovernor,
-  governRegistry,
-  governorConfig,
-  seedFromRunLog,
-  withBudgetStop,
-} from '../kernel/governor.js';
-import { openRunLog } from '../kernel/journal.js';
+import { createGovernor, governorConfig, type Governance } from '../kernel/governor.js';
 import { runPlan, type OpRegistryView } from '../kernel/runner.js';
 import { PlanSchema } from '../kernel/schema.js';
-import type { OpRegistryEntry, Plan, RunOptions, RunReport } from '../kernel/types.js';
+import type {
+  GovernanceOptIn,
+  OpRegistryEntry,
+  Plan,
+  RunOptions,
+  RunReport,
+} from '../kernel/types.js';
+
+/**
+ * The governance opt-in keys the CLI accepts (ADR-0003 §2.5) — the exact
+ * GovernanceOptIn union, checked against it by `satisfies` so a key cannot
+ * drift from the kernel surface. Comma-separated on the flag (parseFlags
+ * rejects repeated flags): `--opt-in budget.raiseCap,budget.legacyJournal=reset`.
+ */
+const GOVERNANCE_OPT_IN_KEYS = [
+  'budget.legacyJournal=reset',
+  'budget.raiseCap',
+  'budget.ungovernedOverGoverned',
+] as const satisfies readonly GovernanceOptIn[];
 import { list } from '../registry/index.js';
 import { EXIT_CODES, exitCodeForRunReport } from './exit.js';
 import {
@@ -87,6 +104,24 @@ export const RunPlanInputSchema = z
     maxTokens: z.number().int().positive().optional(),
     /** Resume an interrupted run from its journal; requires journalDir (flag: --resume, maps 1:1). */
     resume: z.boolean().default(false),
+    /**
+     * Governance opt-ins (ADR-0003 §2.5), comma-separated (flag: --opt-in) —
+     * the ledger refusals' named resolutions. An opt-in alone constructs a
+     * governance handle (uncapped): `budget.ungovernedOverGoverned` marks
+     * the run ungoverned; the others resolve governed-history refusals.
+     */
+    optIn: z
+      .preprocess(
+        (value) =>
+          typeof value === 'string'
+            ? value
+                .split(',')
+                .map((key) => key.trim())
+                .filter((key) => key !== '')
+            : value,
+        z.array(z.enum(GOVERNANCE_OPT_IN_KEYS)),
+      )
+      .default([]),
   })
   .strict();
 
@@ -201,14 +236,15 @@ export function parseRunPlanInput<T>(
 /**
  * The governed composition for ONE already-resolved Plan: the registry view
  * over the resolved ops root (the explicit --ops-root flag wins over the
- * runCli-level DI override), the recorded governor construction (fresh, or
- * resume-seeded from the journal dir), runPlan + withBudgetStop (I9 is not
- * optional), then the I1 output triple — the ONE stdout artifact, then
- * failures-only narration (silent in 'json' mode), then the mechanical exit
- * code. Shared by run-plan (a plan FILE) and the plan subcommands (a registry
- * floor plan); see run-plan.ts's header for the shared error taxonomy.
+ * runCli-level DI override), the cap-keyed governance handle (the CLI governs
+ * exactly when the operator set a cap — see the header), runPlan with the
+ * handle (the runner owns the honest stop; its return IS the report), then
+ * the I1 output triple — the ONE stdout artifact, then failures-only
+ * narration (silent in 'json' mode), then the mechanical exit code. Shared
+ * by run-plan (a plan FILE) and the plan subcommands (a registry floor plan);
+ * see run-plan.ts's header for the shared error taxonomy.
  *
- * Kernel-input-class throws (`runPlan: `/`journal: `/`topoOrder: `) are
+ * Kernel-input-class throws (`runPlan: `/`journal: runId must match `/`topoOrder: `) are
  * narrated exits 2; any other throw propagates to the caller's catch → 1.
  */
 export async function runPlanThroughKernel(
@@ -234,8 +270,15 @@ export async function runPlanThroughKernel(
     get: (name) => entryByName.get(name) as OpRegistryEntry<never, never> | undefined,
   };
 
-  // Governed composition — the recorded seam, not optional (I9). The
-  // construction is ordered AFTER the plan parse: seeding keys on plan.id.
+  // The CLI opts into governance exactly when the operator sets a cap OR
+  // passes a governance opt-in: the cap is what needs a governor (without
+  // admission + spend observation it would be silently unenforceable —
+  // runPlan refuses that shape outright), and the opt-ins are the ledger
+  // refusals' named resolutions (--opt-in budget.legacyJournal=reset /
+  // budget.raiseCap / budget.ungovernedOverGoverned), so they need a handle
+  // to ride. An uncapped, opt-in-free run stays v1-identical: no governor,
+  // no ledger, no v2 journal (the recorded policy choice — governance is not
+  // free paperwork, it exists to bind the caps the operator named).
   const runOptions: RunOptions = {
     concurrency: input.concurrency,
     stopOnError: input.stopOnError,
@@ -244,47 +287,47 @@ export async function runPlanThroughKernel(
     ...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
     ...(input.resume ? { resume: true } : {}),
   };
-  const config = governorConfig(runOptions, {});
-  let governor: BudgetGovernor;
-  if (input.resume === true && input.journalDir !== undefined) {
-    // Resume continues the SAME budget, not a fresh one (kernel README,
-    // "Composable with resume"): a plain `new BudgetGovernor(...)` here would
-    // make a cumulative --max-tokens/--max-usd cap bind only to the resumed
-    // process, discarding the prior runs' usage rollup and dispatch count.
-    // seedFromRunLog seeds from ALL `<planId>--` journals in the dir,
-    // oldest-first (the ordered concatenation seedFromJournal requires), so
-    // the seeded cap can trip before the resumed run admits anything.
-    // No `usdOf` is passed: USD seeding needs a price map the CLI does not
-    // own (cost stays derived-only) — the token/rollup and dispatch-count
-    // seeds, the caps this CLI exposes, work without it. (The kernel's DD-9
-    // fail-loud applies on its own: a resumed run under --max-usd with
-    // unpriced prior usage trips rather than fail open.)
-    governor = await seedFromRunLog(openRunLog(input.journalDir), plan.id, { config });
-  } else {
-    // Fresh runs start at zero — unchanged.
-    governor = new BudgetGovernor(config);
-  }
-  let rawReport: RunReport;
+  const governance: Governance | undefined =
+    input.maxUsd !== undefined || input.maxTokens !== undefined || input.optIn.length > 0
+      ? // A capped run governs with a FRESH per-run governor: the runner's
+        // fold over the journal dir seeds it (resume or not), so a cumulative
+        // cap continues its ledger — construction order is irrelevant here,
+        // seeding happens inside runPlan, before anything is admitted.
+        {
+          governor: createGovernor(governorConfig(runOptions, {})),
+          ...(input.optIn.length > 0 ? { optIn: input.optIn } : {}),
+        }
+      : undefined;
+  let report: RunReport;
   try {
-    rawReport = await runPlan(plan, runOptions, governRegistry(view, governor));
+    // runPlan owns the honest stop and the ledger — its return is the FINAL
+    // report (no post-run annotation pass to compose).
+    report = await runPlan(plan, runOptions, view, governance);
   } catch (err) {
     // Kernel-input-class throws are INPUT defects → exit 2, consistent with
     // the schema/content defects above: messages starting 'runPlan: '
     // (duplicate job ids, the concurrency bound, resume:true without
-    // journalDir), messages starting 'journal: ' — the runId
-    // filename-safety assert (assertSafeRunId, via makeRunId inside runPlan)
-    // fires on a PlanSchema-valid plan whose id is journal-unsafe ('bad/id'):
-    // the id would become `<runId>.ndjson`, so the defect is still the plan
-    // INPUT, not a runtime failure — and messages starting 'topoOrder: '
-    // (the kernel manifest's dependency-cycle throw, review-debt #84): a
-    // CYCLIC PLAN FILE is an invalid plan, not a runtime crash, so it maps
-    // to the documented usage path (exit 2) instead of a narrated exit 1.
-    // Any other throw (a journal open/write failure, …) stays a RUNTIME
-    // throw → propagates to the caller's catch → narrated exit 1.
+    // journalDir, caps without governance, governance without a governor,
+    // AND the ledger refusals — a run over governed history without
+    // governance, the ungoverned marker on a plan with no governed history,
+    // a governed run over v1 journals with unaccounted dispatches, a cap
+    // raise over the last governed cap: each names the operator's
+    // resolution, an opt-in or a flag change, so the invocation is the
+    // defective input), messages
+    // starting 'journal: runId must match ' — the filename-safety assert
+    // (assertSafeRunId, via makeRunId inside runPlan) fires on a
+    // PlanSchema-valid plan whose id is journal-unsafe ('bad/id'): the id
+    // would become `<runId>.ndjson`, so the defect is still the plan INPUT,
+    // not a runtime failure — and messages starting 'topoOrder: ' (the
+    // kernel manifest's dependency-cycle throw, review-debt #84): a CYCLIC
+    // PLAN FILE is an invalid plan, not a runtime crash, so it maps to the
+    // documented usage path (exit 2) instead of a narrated exit 1. Any other
+    // throw (a journal open/write failure, …) stays a RUNTIME throw →
+    // propagates to the caller's catch → narrated exit 1.
     const message = messageOf(err);
     if (
       message.startsWith('runPlan: ') ||
-      message.startsWith('journal: ') ||
+      message.startsWith('journal: runId must match ') ||
       message.startsWith('topoOrder: ')
     ) {
       narrateIfHuman(io, mode, `invalid input for '${commandName}': ${message}`);
@@ -292,7 +335,24 @@ export async function runPlanThroughKernel(
     }
     throw err;
   }
-  const report = withBudgetStop(rawReport, plan, governor);
+
+  // ADR-0003 annex §3 rule 7: when this governed run's ledger bound excluded
+  // the plan's ungoverned-marked runs from the spend seed, the operator must
+  // see it — the runner records the fact on the governor's event stream and
+  // the CLI narrates it (human mode only, like all narration; json stays
+  // machine-only). Fold-ordered runIds, deduped defensively.
+  if (governance !== undefined) {
+    const excludedRunIds = governance.governor.events.flatMap((event) =>
+      event.kind === 'bound-excluded-ungoverned' ? event.runIds : [],
+    );
+    if (excludedRunIds.length > 0) {
+      narrateIfHuman(
+        io,
+        mode,
+        `bound excludes ungoverned runs ${[...new Set(excludedRunIds)].join(' ')}`,
+      );
+    }
+  }
 
   // Output: the ONE stdout artifact first, then failures-only narration
   // (silent in 'json' mode), then the mechanical exit code.
