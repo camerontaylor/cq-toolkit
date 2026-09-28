@@ -6,6 +6,7 @@
     "^src/ops/merge/classify",
     "^src/selfhost/(?:merge-recheck|settle-state|state-branch|candidates|acceptance|promote-gate)\\.ts$",
     "^src/ops/review/(?:gh|threads)\\.ts$",
+    "^src/shared/independent-review\\.ts$",
     "^scripts/ratchet-[^/]+\\.mjs$",
     "^scripts/(?:github-settings-drift|render-templates)\\.mjs$",
     "^scripts/lib/(?:github-settings|render-templates)\\.mjs$",

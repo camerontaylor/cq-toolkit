@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   validate:
-    name: stage-1-before-cycle-1
+    name: stage-2-after-cycle-1-before-cycle-2
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -20,7 +20,7 @@ jobs:
     env:
       VALIDATION_SUBJECT: 1cf93b6840f2d82cf16e65438f0930e5f6311e4d
       VALIDATION_BASE: 130f77d2a6abf13b41f92e91c0e8abb3c3ef3c19
-      VALIDATION_STAGE: stage-1-before-cycle-1
+      VALIDATION_STAGE: stage-2-after-cycle-1-before-cycle-2
     steps:
       - name: Check out source subject
         id: source-checkout

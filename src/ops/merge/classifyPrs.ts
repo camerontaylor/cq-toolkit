@@ -302,6 +302,7 @@ const STRUCTURAL_EXCLUDED = new Set([
   'cq-verdict[bot]',
   'cq-promoter[bot]',
 ]);
+const attestationLogin = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
 
 /** Latest marked PR-author review supersedes earlier markers before validation. */
 const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
@@ -349,8 +350,14 @@ const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContex
     return false;
   if (latest.authorLogin == null) return false;
   const login = latest.authorLogin.toLowerCase();
-  if (STRUCTURAL_EXCLUDED.has(login)) return false;
-  if (ctx.config.excludedLogins?.some((excluded) => excluded.toLowerCase() === login) === true)
+  const normalizedLogin = attestationLogin(login);
+  if ([...STRUCTURAL_EXCLUDED].some((excluded) => attestationLogin(excluded) === normalizedLogin))
+    return false;
+  if (
+    ctx.config.excludedLogins?.some(
+      (excluded) => attestationLogin(excluded) === normalizedLogin,
+    ) === true
+  )
     return false;
   return true;
 };
