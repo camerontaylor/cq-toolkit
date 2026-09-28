@@ -115,8 +115,9 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
 
 - **Seam — the governed runner (W2.2, ADR-0003 §2).**
   `runPlan(plan, opts, registry, gov?)` takes the `Governance` handle
-  (`{ governor, clock?, signal?, attended?, optIn? }`; `createGovernor`
-  builds the enforcer) and performs admission, the ladder, the DD-9 evidence
+  (`{ governor, signal?, attended?, optIn? }`; `createGovernor(config, clock?)`
+  builds the enforcer and accepts the injected clock) and performs admission,
+  the ladder, the DD-9 evidence
   folds, the v2 journal, and the honest stop ITSELF. Caps in `opts` without
   `gov` throw (`runPlan: caps require governance`) — a cap without admission
   and spend observation is silently unenforceable. The earlier
@@ -202,9 +203,10 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   when queued rows remain. The cancel rule holds MID-RUN and TRANSITIVELY:
   the trip is evaluated at each classification point (not snapshotted at
   run start), and a dependency cancelled while it waited for its slot
-  (`result: 'indeterminate'`) is UNRESOLVED, not failed — its dependents
-  stay `queued` too, never fabricated `blocked` (a cancel is not a verdict;
-  everything undispatched re-runs on resume). Counts move only the
+  (`result: 'indeterminate'`) is UNRESOLVED, not failed; an operation's own
+  indeterminate verdict is unresolved too. Their dependents stay `queued`,
+  never fabricated `blocked` (a cancel is not a verdict; everything
+  undispatched re-runs on resume). Counts move only the
   re-marked rows.
 - **Composable with resume (ledger continuity).** A run the governor
   stopped still leaves journal evidence: an in-process kill produces a
@@ -230,7 +232,9 @@ and `src/kernel/rescue.ts` (policy table + decision engine).
   `journal: corrupt — seq gap` — a claimed run whose FILE is gone (deleted;
   its spend would silently vanish from the seed), or an orphaned claim (a
   crash between claimSeq and the first append — safe to resolve by deleting
-  the named tombstone, which the error says). The refusals guard the
+  the named tombstone, which the error says). This maximum-sequence check
+  catches claims trailing the folded history; it does not detect a deleted
+  interior run when a higher sequence still folds. The refusals guard the
   ledger: governed history refuses an ungoverned run (opt-in
   `budget.ungovernedOverGoverned` marks the run ungoverned on its v2
   record instead — and the marker is honoured ONLY over actual governed

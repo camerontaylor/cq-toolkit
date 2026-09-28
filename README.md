@@ -40,8 +40,9 @@ const result = await op({ sets: [] }); // OpResult — a status-tagged union
 The runner is exported too: `runPlan(plan, opts, registry, gov?)` returns a
 serializable `RunReport` (per-job outcomes, usage rollup, honest-stop counts);
 its third argument is an `OpRegistryView`, and budget governance rides the
-optional fourth — a `Governance` handle (`{ governor, clock?, signal?,
-attended?, optIn? }`); caps in `opts` without a handle throw. See
+optional fourth — a `Governance` handle (`{ governor, signal?, attended?,
+optIn? }`); inject a clock through `createGovernor(config, clock?)` when
+constructing its governor. Caps in `opts` without a handle throw. See
 [`src/kernel/README.md`](src/kernel/README.md)
 for the composition contract and `scripts/smoke-run-plan.mjs` for a worked
 governed run.

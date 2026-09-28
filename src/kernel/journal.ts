@@ -284,15 +284,12 @@ export interface FoldRun {
 }
 
 /**
- * THE SEQ-GAP CHECK — the reader-side twin of {@link claimSeq}. The claim
- * tombstones (`<planId>.seq.<n>`) are written on every v2 run but were never
- * read back; `foldOrderRuns` throws on duplicate seqs yet is silent on GAPS,
- * so a deleted run FILE would silently lower the seeded spend while its
- * tombstone kept proving the run existed. Called by the runner's fold with
- * the highest `seq` actually folded from run-started events: a tombstone
- * beyond it means a seq was claimed but its run is gone — corruption, never
- * silently folded (annex §2 uniqueness is by construction for writers; a
- * violation on READ is a corrupted dir).
+ * THE HIGHEST-CLAIM CHECK — the reader-side check for {@link claimSeq}.
+ * Called with the highest `seq` folded from run-started events: a claim
+ * tombstone (`<planId>.seq.<n>`) beyond it means a seq was claimed but its
+ * run is gone. Refuse that trailing gap instead of silently lowering the
+ * seeded spend. This max-only comparison does NOT detect deletion of an
+ * interior run when a higher-seq run remains; it is not a contiguity check.
  *
  * Fail-closed trade, named: a crash between `claimSeq` and the first append
  * leaves an ORPHAN tombstone that also trips this check — the next run
