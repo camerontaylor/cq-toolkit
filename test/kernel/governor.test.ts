@@ -61,6 +61,7 @@ import { decideRescue, rescueInputFromJournal } from '../../src/kernel/rescue.js
 import { runPlan } from '../../src/kernel/runner.js';
 import type { OpRegistryView } from '../../src/kernel/runner.js';
 import type { GovernorEvent, JobGovernance, LadderRungMarker } from '../../src/kernel/governor.js';
+import type { Usage } from '../../src/driver/types.js';
 import type {
   JournalEvent,
   Op,
@@ -68,7 +69,6 @@ import type {
   OpResult,
   Plan,
   RunReport,
-  Usage,
 } from '../../src/kernel/types.js';
 
 /** Narrowed governor-event views for filter predicates. */
