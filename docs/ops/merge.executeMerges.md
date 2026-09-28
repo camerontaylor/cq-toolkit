@@ -45,6 +45,7 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
                   "not_eligible",
                   "unresolved_base",
                   "stack_cycle",
+                  "stack_base_merging_this_pass",
                   "stack_base_needs_human"
                 ],
                 "type": "string"

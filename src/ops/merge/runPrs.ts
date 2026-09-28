@@ -145,9 +145,11 @@ export type RunMergePrsConfig = {
   trustedAssociations?: readonly string[] | undefined;
   automationLogin?: string | null | undefined;
   excludedLogins?: readonly string[] | undefined;
-  acceptReviewStates?:
-    | readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED' | 'DISMISSED')[]
-    | undefined;
+  // Twin of ClassifyPrConfig.acceptReviewStates: DISMISSED is not
+  // admissible (a dismissed review is retracted; the dispatch schema
+  // rejects it — review r3, PR #222).
+  acceptReviewStates?: readonly ('APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED')[] | undefined;
+  allowSameAccountAgentReview?: boolean | undefined;
 };
 
 /** The composition's input: the fetched candidates plus the run's

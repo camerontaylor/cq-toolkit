@@ -90,6 +90,10 @@ import {
   type RecheckResult,
   type TrustPolicy,
 } from './merge-recheck.js';
+import {
+  ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
+  parseSameAccountReviewFlag,
+} from '../shared/independent-review.js';
 
 /** Production self-host policy: conflict resolution is always withheld. */
 export const SELFHOST_DISABLES_CONFLICT_RESOLUTION = true;
@@ -153,6 +157,8 @@ export interface SelfMergePrsCfg {
   trustPolicy?: TrustPolicy;
   /** Resolved reviewer trust policy for the shipped merge classifier. */
   classifyConfig?: ClassifyPrConfig;
+  /** Explicit opt-in for independent-agent markers under the PR author's login. */
+  allowSameAccountAgentReview?: boolean;
 }
 
 /**
@@ -262,9 +268,13 @@ export function buildRunInput(
     journalRoot?: string;
     disableConflictResolution?: boolean;
     classifyConfig?: ClassifyPrConfig;
+    allowSameAccountAgentReview?: boolean;
   },
   nowMs: number,
 ): RunMergePrsInput {
+  const classifyConfig = cfg.classifyConfig;
+  const allowSameAccountAgentReview =
+    cfg.allowSameAccountAgentReview ?? classifyConfig?.allowSameAccountAgentReview;
   return {
     baseBranch: SelfhostDefaults.baseBranch,
     repoRoot: cfg.repoRoot,
@@ -276,28 +286,29 @@ export function buildRunInput(
       : { modelSpec: SelfhostDefaults.driver }),
     sessionsDir: join(cfg.journalRoot ?? defaultJournalRoot(cfg.repoRoot), 'sessions'),
     nowMs,
-    ...(cfg.classifyConfig === undefined
+    ...(classifyConfig === undefined && allowSameAccountAgentReview === undefined
       ? {}
       : {
           config: {
-            ...(cfg.classifyConfig.settleWindowMs === undefined
+            ...(classifyConfig?.settleWindowMs === undefined
               ? {}
-              : { settleWindowMs: cfg.classifyConfig.settleWindowMs }),
-            ...(cfg.classifyConfig.trustedBots === undefined
+              : { settleWindowMs: classifyConfig.settleWindowMs }),
+            ...(classifyConfig?.trustedBots === undefined
               ? {}
-              : { trustedBots: cfg.classifyConfig.trustedBots }),
-            ...(cfg.classifyConfig.trustedAssociations === undefined
+              : { trustedBots: classifyConfig.trustedBots }),
+            ...(classifyConfig?.trustedAssociations === undefined
               ? {}
-              : { trustedAssociations: cfg.classifyConfig.trustedAssociations }),
-            ...(cfg.classifyConfig.automationLogin === undefined
+              : { trustedAssociations: classifyConfig.trustedAssociations }),
+            ...(classifyConfig?.automationLogin === undefined
               ? {}
-              : { automationLogin: cfg.classifyConfig.automationLogin }),
-            ...(cfg.classifyConfig.excludedLogins === undefined
+              : { automationLogin: classifyConfig.automationLogin }),
+            ...(classifyConfig?.excludedLogins === undefined
               ? {}
-              : { excludedLogins: cfg.classifyConfig.excludedLogins }),
-            ...(cfg.classifyConfig.acceptReviewStates === undefined
+              : { excludedLogins: classifyConfig.excludedLogins }),
+            ...(classifyConfig?.acceptReviewStates === undefined
               ? {}
-              : { acceptReviewStates: cfg.classifyConfig.acceptReviewStates }),
+              : { acceptReviewStates: classifyConfig.acceptReviewStates }),
+            ...(allowSameAccountAgentReview === undefined ? {} : { allowSameAccountAgentReview }),
           },
         }),
   };
@@ -367,6 +378,15 @@ export async function runSelfMergePrs(
   // below is taken ONCE.
   const clock = deps.nowMs ?? ((): number => Date.now());
   const nowMs = clock();
+  const allowSameAccountAgentReview =
+    cfg.allowSameAccountAgentReview ??
+    cfg.classifyConfig?.allowSameAccountAgentReview ??
+    cfg.trustPolicy?.allowSameAccountAgentReview ??
+    false;
+  const classifyConfig: ClassifyPrConfig = {
+    ...(cfg.classifyConfig ?? defaultClassifyPrConfig),
+    allowSameAccountAgentReview,
+  };
   // The ONE clock reading rides into the fetch too: the closed-ancestor
   // sweep's freshness window is judged from the same instant the
   // classification will be (same fetch + same reading → same verdicts).
@@ -384,7 +404,7 @@ export async function runSelfMergePrs(
       candidateCount: fetched.candidates.length,
       classification: fetched.candidates.map((candidate) => ({
         pr: candidate.pr,
-        ...classifyPr(candidate, nowMs, cfg.classifyConfig),
+        ...classifyPr(candidate, nowMs, classifyConfig),
       })),
     };
   }
@@ -417,7 +437,11 @@ export async function runSelfMergePrs(
       .filter((candidate) => candidate.state === 'open')
       .map((candidate) => candidate.pr),
   );
-  const input = buildRunInput(fetched.candidates, cfg, nowMs);
+  const input = buildRunInput(
+    fetched.candidates,
+    { ...cfg, classifyConfig, allowSameAccountAgentReview },
+    nowMs,
+  );
   // The governed run (ADR-0003 §2), mirroring src/cli/run-plan.ts: the caps
   // ride BOTH the RunOptions (the kernel's advisory surface) and the governor
   // construction; the wall clock arms the ladder through Limits (#137) —
@@ -444,16 +468,23 @@ export async function runSelfMergePrs(
   // injected driverRegistryView is used verbatim (its scripted op owns its
   // merge path).
   const basePolicy = cfg.trustPolicy ?? CONSERVATIVE_TRUST_POLICY;
-  const policy: TrustPolicy =
-    automationIdentity.login === undefined
-      ? basePolicy
+  const policy: TrustPolicy = {
+    ...basePolicy,
+    allowSameAccountAgentReview:
+      cfg.allowSameAccountAgentReview ??
+      cfg.classifyConfig?.allowSameAccountAgentReview ??
+      basePolicy.allowSameAccountAgentReview ??
+      false,
+    ...(automationIdentity.login === undefined
+      ? {}
       : {
-          ...basePolicy,
+          automationLogin: automationIdentity.login.toLowerCase(),
           excludedLogins: new Set([
             ...basePolicy.excludedLogins,
             automationIdentity.login.toLowerCase(),
           ]),
-        };
+        }),
+  };
   const settleMs = defaultClassifyPrConfig.settleWindowMs; // the I2 settle constant
   const view =
     deps.driverRegistryView ??
@@ -531,6 +562,10 @@ async function main(): Promise<void> {
       ...(parsed.maxUsd !== undefined ? { maxUsd: parsed.maxUsd } : {}),
       ...(parsed.journalRoot !== undefined ? { journalRoot: parsed.journalRoot } : {}),
       ...(parsed.dryRun ? { dryRun: true } : {}),
+      allowSameAccountAgentReview: parseSameAccountReviewFlag(
+        process.env[ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV],
+        ALLOW_SAME_ACCOUNT_AGENT_REVIEW_ENV,
+      ),
       disableConflictResolution: SELFHOST_DISABLES_CONFLICT_RESOLUTION,
     },
   );

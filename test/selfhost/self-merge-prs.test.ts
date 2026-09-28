@@ -257,6 +257,7 @@ describe('runSelfMergePrs — real run', () => {
       settleWindowMs: defaultClassifyPrConfig.settleWindowMs,
       trustedAssociations: [],
       automationLogin: 'cq-automation[bot]',
+      allowSameAccountAgentReview: false,
     });
   });
 

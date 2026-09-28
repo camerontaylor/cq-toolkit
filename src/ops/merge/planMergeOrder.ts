@@ -38,12 +38,27 @@
 //   6. a stack cycle (X on Y, Y on X —
 //      possible via misconfigured bases;
 //      a PR stacked on itself counts)   → `stack_cycle`
-//   7. base PR held by any rule above   → `stack_base_needs_human`
+//   7. base PR merges earlier in this same pass →
+//      `stack_base_merging_this_pass`
+//      (review-debt #153, generalized per PR #234's r1 review: the
+//      executor merges parents before children with no post-merge
+//      liveness check — merging a forge PR closes it and strands its
+//      branch, so a child merging into that branch strands its content
+//      off the trunk while the forge reports it merged; the base REF
+//      never changes, so the executor's base re-read cannot catch it.
+//      The gate withholds any child whose base merges earlier in the
+//      order, which covers a merge root's children AND the deeper strand
+//      under a retarget-self root: that root does not merge this pass
+//      (its PR stays open), so its depth-1 child still merges — and that
+//      child's own children defer again. Withheld here, the child
+//      re-enters the NEXT plan stacked on a closed rung, where the
+//      retarget-self rule hands it back as an ordinary root)
+//   8. base PR held by any rule above   → `stack_base_needs_human`
 //      (fail-closed CASCADE: merging a stacked PR merges its base's
 //      commits with it — ordering the child while the parent is held
 //      would merge the parent UNINVITED, so the child is held too,
 //      transitively)
-// Rules 1–7 are FIRST MATCH WINS and strictly ordered: the gates (1–4)
+// Rules 1–8 are FIRST MATCH WINS and strictly ordered: the gates (1–4)
 // all run before base resolution (5) and cycle detection (6), so a PR's
 // gate reason is never overwritten by a later rule — a truncated PR with
 // a ghost base stays `review_data_truncated`, and a truncated cycle
@@ -131,6 +146,9 @@ export type PlanBlockReason =
   | 'not_eligible'
   | 'unresolved_base'
   | 'stack_cycle'
+  // Recorded deviation (review-debt #153): the same-pass merge-root
+  // deferral's addition to this frozen vocabulary.
+  | 'stack_base_merging_this_pass'
   | 'stack_base_needs_human';
 
 /** One merge action in the plan. `merge`: merge this PR now (its base is
@@ -327,6 +345,58 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     if (cyclic) withhold(pr, 'stack_cycle');
   }
 
+  // Gate 7 — same-pass merge deferral (review-debt #153, generalized per
+  // PR #234's r1 review): a child whose base MERGES EARLIER IN THIS SAME
+  // PASS must not merge in this pass. The executor merges parents before
+  // children and never re-checks branch liveness: merging a forge PR
+  // closes it and strands its branch, so a child merged into that branch
+  // lands its content off the trunk while the forge reports it merged
+  // (found live by the F5 drill). The base REF never changes — only the
+  // branch's PR status flips — so the executor's base re-read cannot
+  // catch the strand; only the planner can. Which bases merge this pass:
+  // every merge root does; a retarget-self root does NOT (it is
+  // retargeted, its PR stays open); and a stacked child merges exactly
+  // when it is ordered at all (an ordered child is an ordinary merge) —
+  // it is ordered only when its base is ordered and does not merge this
+  // pass. The statuses therefore alternate down each chain: under a
+  // merge root the depth-1 child defers at THIS gate (everything below
+  // the deferral is then held by the gate-8 cascade); under a
+  // retarget-self root the depth-1 child still merges (the rung stays
+  // live under it — the documented I2-safe reading, which is the
+  // executor's tested behavior), that child's children defer at THIS
+  // gate too, and everything below a deferral is held by the gate-8
+  // cascade. The strand is caught at every depth, not just under merge
+  // roots. Withheld children
+  // re-enter the NEXT plan stacked on a closed rung: base resolution
+  // reads the closed owner as history and plans the child `retarget-self`
+  // onto the base branch, so its content reaches the trunk through its
+  // own future root merge. The gate-8 cascade below then holds each
+  // deferral's whole subtree.
+  const mergeRootSet = new Set(mergeRoots);
+  const retargetSet = new Set(retargetRoots);
+  // `inOrder`: does `pr` appear in the order at all? `mergesNow`: with
+  // `action: 'merge'`? Computed UP the child→base edges (acyclic — the
+  // cycle gate already withheld every cycle member, and an excluded pr
+  // short-circuits before the walk). For a stacked child the two answers
+  // coincide: ordered means merging. An excluded pr is in neither bucket
+  // — its children are the gate-8 cascade's business, never a walk-
+  // through (a held base does not merge, so walking through it would
+  // misreport the grandchild's reason).
+  const statusOf = (pr: number): { inOrder: boolean; mergesNow: boolean } => {
+    if (excluded.has(pr)) return { inOrder: false, mergesNow: false };
+    if (mergeRootSet.has(pr)) return { inOrder: true, mergesNow: true };
+    if (retargetSet.has(pr)) return { inOrder: true, mergesNow: false };
+    const base = baseOf.get(pr);
+    if (base === undefined) return { inOrder: false, mergesNow: false };
+    const parent = statusOf(base);
+    const rides = parent.inOrder && !parent.mergesNow;
+    return { inOrder: rides, mergesNow: rides };
+  };
+  for (const [child, base] of baseOf) {
+    if (excluded.has(child)) continue;
+    if (statusOf(base).mergesNow) withhold(child, 'stack_base_merging_this_pass');
+  }
+
   // Children of each base, in PR-number order (baseOf was filled from the
   // PR-number-sorted `open`, so buckets inherit that order).
   const childrenOf = new Map<number, number[]>();
@@ -340,7 +410,7 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
     }
   }
 
-  // Gate 7 — the fail-closed cascade: a child of any withheld PR is
+  // Gate 8 — the fail-closed cascade: a child of any withheld PR is
   // withheld too (merging it would merge its parent's commits
   // UNINVITED), transitively down the stack.
   const cascade = (pr: number): void => {
@@ -357,13 +427,14 @@ export function planMergeOrder(input: PlanMergeInput): PlanMergeResult {
   // The order: ALL roots first (merge and retarget-self together) in
   // PR-number order — the roots are the plan's PREFIX — then each root's
   // descendants depth-first, children in PR-number order, a PR never
-  // before its base. Roots merge or retarget-self; every deeper entry is
-  // an ordinary merge (a child of a retarget-self root merges normally
-  // once the root's base is retargeted — its commits land only on the
-  // root's branch, never on the base branch; the I2-safe reading, which is
-  // the executor's tested behavior).
+  // before its base. Roots merge or retarget-self; the deeper entries
+  // gate 7 left standing are ordinary merges (a depth-1 child of a
+  // retarget-self root merges normally once the root's base is
+  // retargeted — its commits land only on the root's branch, never on
+  // the base branch; the I2-safe reading, which is the executor's tested
+  // behavior. Deeper rungs under that child deferred at gate 7, so no
+  // ordered entry ever merges into a branch this pass strands).
   const order: PlannedMergeEntry[] = [];
-  const retargetSet = new Set(retargetRoots);
   const roots = [...mergeRoots, ...retargetRoots].sort((a, b) => a - b);
   // PR-number → candidate (review-debt #186): the plan threads the observed
   // head SHA onto every entry so executeMerges can pin the

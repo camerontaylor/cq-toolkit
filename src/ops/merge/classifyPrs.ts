@@ -73,6 +73,7 @@ import { countUnresolvedThreads } from '../review/threads.js';
 import type { RestComment, ReviewSummary, ReviewThread } from '../review/threads.js';
 import type { ClassifyPrConfig } from './classify.config.js';
 import { defaultClassifyPrConfig } from './classify.config.js';
+import { parseIndependentReview } from '../../shared/independent-review.js';
 
 /**
  * The frozen I2 vocabulary — the ONLY five things that can be said about a
@@ -272,10 +273,19 @@ const isReviewableEvidence = (review: ReviewSummary, ctx: ReviewContext): boolea
  * CHANGES_REQUESTED verdict is handled by its own row (isObjection — an
  * objection, not acceptance; the cross-family reading agrees:
  * classifyThreads treats it as actionable feedback to answer). DISMISSED
- * is void; a null/unknown state never counts (fail toward awaiting).
+ * is void; a null/unknown state never counts (fail toward awaiting). The
+ * config knob cannot admit DISMISSED: the dispatch boundary rejects it
+ * (review r3, PR #222), so the doctrine holds on every surface.
  */
-const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): boolean =>
-  state !== null && (config.acceptReviewStates ?? ['APPROVED', 'COMMENTED']).includes(state);
+const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): boolean => {
+  // DISMISSED is refused twice over: the dispatch boundary rejects it in
+  // the configured set, and the doctrine holds DISMISSED void outright —
+  // an explicit guard keeps a non-typechecked caller that hands the pure
+  // function a hostile set from resurrecting a retracted review.
+  if (state === null || state === 'DISMISSED') return false;
+  const accepted = config.acceptReviewStates ?? ['APPROVED', 'COMMENTED'];
+  return accepted.some((candidate) => candidate === state);
+};
 
 /**
  * An ACCEPTABLE review for row 7: reviewable evidence whose verdict
@@ -286,10 +296,78 @@ const stateCounts = (state: ReviewSummary['state'], config: ClassifyPrConfig): b
 const isAcceptableReview = (review: ReviewSummary, ctx: ReviewContext): boolean =>
   isReviewableEvidence(review, ctx) && stateCounts(review.state, ctx.config);
 
+const STRUCTURAL_EXCLUDED = new Set([
+  'github-actions[bot]',
+  'cq-automation[bot]',
+  'cq-verdict[bot]',
+  'cq-promoter[bot]',
+]);
+const attestationLogin = (login: string): string => login.toLowerCase().replace(/\[bot\]$/, '');
+
+/** Latest marked PR-author review supersedes earlier markers before validation. */
+const hasSameAccountAgentAcceptance = (candidate: PrCandidate, ctx: ReviewContext): boolean => {
+  if (ctx.config.allowSameAccountAgentReview !== true) return false;
+  const author = candidate.authorLogin?.toLowerCase();
+  const head = candidate.headRefOid?.toLowerCase();
+  if (author === undefined || author === '' || head === undefined || !/^[0-9a-f]{40}$/.test(head))
+    return false;
+  const marked = candidate.reviews.filter((review) => {
+    if (review.authorLogin?.toLowerCase() !== author) return false;
+    if (review.state === null && review.submittedAt === null) return false;
+    return parseIndependentReview(review.body).kind !== 'absent';
+  });
+  if (marked.length === 0) return false;
+  let latest: ReviewSummary | undefined;
+  let latestMs = -Infinity;
+  for (const review of marked) {
+    const submittedMs = parseMs(review.submittedAt);
+    if (submittedMs === null) return false;
+    if (latest === undefined || submittedMs >= latestMs) {
+      latest = review;
+      latestMs = submittedMs;
+    }
+  }
+  if (latest === undefined || latest.state !== 'COMMENTED' || latest.authorType !== 'User')
+    return false;
+  const parsed = parseIndependentReview(latest.body);
+  const attestation = parsed.kind === 'valid' ? parsed.attestation : null;
+  if (
+    attestation === null ||
+    attestation.verdict !== 'PASS' ||
+    attestation.headSha.toLowerCase() !== head ||
+    latest.commitOid?.toLowerCase() !== head ||
+    latestMs <= (ctx.lastCommitMs ?? Infinity)
+  )
+    return false;
+  const associations = ctx.config.trustedAssociations ?? ['OWNER', 'MEMBER', 'COLLABORATOR'];
+  if (
+    latest.authorAssociation === null ||
+    latest.authorAssociation === undefined ||
+    !associations.some(
+      (association) => association.toUpperCase() === latest.authorAssociation?.toUpperCase(),
+    )
+  )
+    return false;
+  if (latest.authorLogin == null) return false;
+  const login = latest.authorLogin.toLowerCase();
+  const normalizedLogin = attestationLogin(login);
+  if ([...STRUCTURAL_EXCLUDED].some((excluded) => attestationLogin(excluded) === normalizedLogin))
+    return false;
+  if (
+    ctx.config.excludedLogins?.some(
+      (excluded) => attestationLogin(excluded) === normalizedLogin,
+    ) === true
+  )
+    return false;
+  return true;
+};
+
 /**
- * An OUTSTANDING OBJECTION for row 6: reviewable evidence (non-author,
- * non-skip-notice body, postdating the last commit) whose verdict is
- * CHANGES_REQUESTED — an open objection to the head state. An objection
+ * An OUTSTANDING OBJECTION for row 6: reviewable evidence — a trusted
+ * non-author whose body is screened as a skip notice only when
+ * automation-authored under resolved policy, head-SHA-bound when a head
+ * was supplied, and postdating the last commit — whose verdict is
+ * CHANGES_REQUESTED, an open objection to the head state. An objection
  * is not silence: under NOTHING MERGES UNINVITED it must be resolved or
  * withdrawn (the verdict moves off CHANGES_REQUESTED) before the quiet
  * window can carry the PR, no matter how long the settle.
@@ -438,7 +516,9 @@ export function classifyPr(
   // acceptance until someone qualified has spoken about the head state at
   // least once — and no amount of settle time cures evidence that predates
   // the commit.
-  const hasAcceptableReview = foldedReviews.some((review) => isAcceptableReview(review, ctx));
+  const hasAcceptableReview =
+    foldedReviews.some((review) => isAcceptableReview(review, ctx)) ||
+    hasSameAccountAgentAcceptance(candidate, ctx);
   if (!hasAcceptableReview) {
     return { verdict: 'awaiting', reason: 'no_acceptable_review', unresolvedExternalThreads };
   }

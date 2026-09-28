@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "instances": [
+    {
+      "workflow": "cq-accept.yml",
+      "template": "cq-accept.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "cq-measure.yml",
+      "template": "cq-measure.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "cq-policy.yml",
+      "template": "cq-policy.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "cq-signal.yml",
+      "template": "cq-signal.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "cq-verify.yml",
+      "template": "cq-verify.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "gate.yml",
+      "template": "gate.yml",
+      "tokens": {
+        "GATE_WORKFLOWS": "ci.yml,denylist.yml",
+        "GATE_TIMEOUT_MIN": "20"
+      }
+    },
+    {
+      "workflow": "init-merge-queue.yml",
+      "template": "init-merge-queue.yml",
+      "tokens": {
+        "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
+        "INTERIM_SECRET": "PROMOTE_TOKEN",
+        "INTERIM_FALLBACK": "CQ_AUTOMATION_INTERIM_FALLBACK"
+      }
+    },
+    {
+      "workflow": "live-merge.yml",
+      "template": "live-merge.yml",
+      "tokens": {
+        "DRILL_SECRET": "CQ_DRILL_MERGE_TOKEN"
+      }
+    },
+    {
+      "workflow": "merge-queue-gate.yml",
+      "template": "merge-queue-gate.yml",
+      "tokens": {
+        "PROMOTE_SECRET": "PROMOTE_TOKEN",
+        "GATE_CHECKS": "static,denylist,ratchet",
+        "GATE_TIMEOUT_MIN": "20"
+      }
+    },
+    {
+      "workflow": "ratchet-propose-measure.yml",
+      "template": "ratchet-propose-measure.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "ratchet-propose.yml",
+      "template": "ratchet-propose.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "ratchet.yml",
+      "template": "ratchet.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "self-merge-prs.yml",
+      "template": "self-host/self-merge-prs.yml",
+      "tokens": {
+        "SELFHOST_TOKEN": "GH_TOKEN"
+      }
+    },
+    {
+      "workflow": "self-review-loop.yml",
+      "template": "self-host/self-review-loop.yml",
+      "tokens": {
+        "SELFHOST_TOKEN": "GH_TOKEN",
+        "SELFHOST_DRIVER_KEY": "Z_AI_API_KEY"
+      }
+    },
+    {
+      "workflow": "settings-drift.yml",
+      "template": "settings-drift.yml",
+      "tokens": {}
+    },
+    {
+      "workflow": "sync-merge-queue.yml",
+      "template": "sync-merge-queue.yml",
+      "tokens": {
+        "AUTOMATION_SECRET": "CQ_AUTOMATION_TOKEN",
+        "INTERIM_SECRET": "PROMOTE_TOKEN",
+        "INTERIM_FALLBACK": "CQ_AUTOMATION_INTERIM_FALLBACK"
+      }
+    }
+  ],
+  "nonTemplated": [
+    {
+      "workflow": "ci.yml",
+      "reason": "Hand-carried from policy/templates/required-check.md (a documentation template, not a renderable .yml): the static job's run steps are the HAND-REPLACED {COMMANDS...} slot — see README \"The bootstrap rule\"."
+    },
+    {
+      "workflow": "denylist.yml",
+      "reason": "Hand-carried from policy/templates/required-check.md: predates the templates; carries the required-check trigger shape with the denylist job body — see README \"The bootstrap rule\"."
+    },
+    {
+      "workflow": "install-matrix.yml",
+      "reason": "Repo-owned CI with no template today: proves this package's optional agent-SDK peer dependency (with and without the peer) — specific to this package, not an adoptable pattern."
+    },
+    {
+      "workflow": "live-drivers.yml",
+      "reason": "Repo-owned CI with no template today: the manual-dispatch live provider legs for this toolkit's drivers — specific to this package, not an adoptable pattern."
+    },
+    {
+      "workflow": "live-review.yml",
+      "reason": "Repo-owned CI with no template today: the manual-dispatch E5 live review-loop drill against a scratch repo (unlike live-merge.yml, it was never templated)."
+    },
+    {
+      "workflow": "pack-audit.yml",
+      "reason": "Repo-owned CI with no template today: audits this package's npm tarball (files allowlist + denylist scan) — specific to this package, not an adoptable pattern."
+    }
+  ],
+  "adopterOnly": []
+}

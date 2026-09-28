@@ -155,9 +155,14 @@ const ClassifyPrConfigDataSchema = z
     trustedAssociations: z.array(z.string()).optional(),
     automationLogin: z.string().nullable().optional(),
     excludedLogins: z.array(z.string()).optional(),
-    acceptReviewStates: z
-      .array(z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED', 'DISMISSED']))
-      .optional(),
+    // DISMISSED is refused here (review r3 finding, PR #222): a dismissed
+    // review is a RETRACTED one — the doctrine holds DISMISSED void, and
+    // the fold's pre-filter drops it under an active policy, so admitting
+    // it at this boundary could only ever fire on the legacy surface and
+    // diverge from the governed one (the selfhost recheck's trust mapping
+    // refuses it the same way).
+    acceptReviewStates: z.array(z.enum(['APPROVED', 'CHANGES_REQUESTED', 'COMMENTED'])).optional(),
+    allowSameAccountAgentReview: z.boolean().optional(),
   })
   .strict();
 
@@ -257,6 +262,7 @@ export const PlanBlockReasonSchema: z.ZodType<PlanBlockReason> = z.enum([
   'not_eligible',
   'unresolved_base',
   'stack_cycle',
+  'stack_base_merging_this_pass',
   'stack_base_needs_human',
 ]);
 

@@ -326,12 +326,14 @@ The registry entry's zod `inputSchema`, rendered as canonical JSON Schema
             "enum": [
               "APPROVED",
               "CHANGES_REQUESTED",
-              "COMMENTED",
-              "DISMISSED"
+              "COMMENTED"
             ],
             "type": "string"
           },
           "type": "array"
+        },
+        "allowSameAccountAgentReview": {
+          "type": "boolean"
         },
         "automationLogin": {
           "type": [

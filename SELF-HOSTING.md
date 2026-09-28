@@ -123,3 +123,118 @@ resolution.
 
 Empty for T4.1 itself: it is leader-authored and merged through the normal
 protocol (two CodeRabbit cycles plus the gates), not by the automation.
+
+## W1.10 cutover (C1 → owner setup → C2 → C3)
+
+W1.10 lands cutover step **C1** (ADR-0004 D-H.3.1; `docs/methods-w1-10.md`).
+Every App path is built but switches on only when its repository variable
+is set; until then the interim credentials below stay in use. The target
+state is `policy/templates/github-settings.json`, and `settings-drift`
+reports the distance to it.
+
+Environments (each: custom branch policy, exactly `main`):
+
+| environment  | jobs                                                                                                         | secrets (interim in brackets)                                               |
+| ------------ | ------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- |
+| `cq-verdict` | `cq-policy` judge, `cq-verify` judge, `cq-accept` judge, `settings-drift`                                    | `CQ_VERDICT_APP_KEY` [`CQ_SETTINGS_TOKEN`]                                  |
+| `promote`    | `cq-gate` decide                                                                                             | `CQ_PROMOTER_APP_KEY` [`PROMOTE_TOKEN`]                                     |
+| `automation` | `self-merge-prs`, `self-review-loop` (privileged), `sync-merge-queue`, `init-merge-queue`, `ratchet-propose` | `CQ_AUTOMATION_APP_KEY`, `Z_AI_API_KEY` [`CQ_AUTOMATION_TOKEN`, `GH_TOKEN`] |
+| `drill`      | `live-review`, `live-merge`, `live-drivers`                                                                  | `CQ_DRILL_MERGE_TOKEN`, `GH_TOKEN`, `Z_AI_API_KEY`, `DEEPSEEK_API_KEY`      |
+
+Only `drill` may have the owner as a required reviewer. The target state has
+no repository-level secrets. The two `drill` GitHub tokens have different
+scopes: `CQ_DRILL_MERGE_TOKEN` (`live-merge`) is a classic token with `repo`
+plus `read:org`; `GH_TOKEN` (`live-review`) is a fine-grained PAT scoped to
+its scratch repositories.
+
+Repository variables: `CQ_VERDICT_APP_ID` and `CQ_VERDICT_APP_CLIENT_ID`
+(verdict App: the client id mints the posting token, the numeric id drives
+the gate's verdict selection, cq-accept's sweep dedupe and the drift
+check); `CQ_PROMOTER_APP_ID` and `CQ_PROMOTER_APP_CLIENT_ID` (promoter App:
+the client id mints the gate's push token, the numeric id is R1's bypass
+actor). Each pair is set together or not at all: every verdict poster,
+`cq-gate` and `settings-drift` refuse when exactly one of a pair is set.
+Then the trust set `CQ_MERGE_TRUSTED_BOTS`,
+`CQ_MERGE_ACCEPT_REVIEW_STATES`, `CQ_MERGE_TRUSTED_ASSOCIATIONS` and the
+posture `CQ_MERGE_PROTECTED_PATHS` (blank = the conservative default).
+
+Interim credentials (reported by the drift check until C3):
+
+- `PROMOTE_TOKEN` — the promotion PAT. Read by the legacy
+  `merge-queue-gate` (repository-level during C1) and by `cq-gate` only at
+  its push. While `CQ_AUTOMATION_TOKEN` is absent it is also the sync/init
+  fallback, but only with the explicit opt-in
+  (`CQ_AUTOMATION_INTERIM_FALLBACK` non-empty) — the fallback is never
+  silent — and opening the sync PR then needs Pull requests read/write.
+  Re-scope it to a fine-grained PAT with only Contents read/write, Workflows
+  write and Metadata read once `CQ_AUTOMATION_TOKEN` exists (owner step 2),
+  never before.
+- `CQ_AUTOMATION_TOKEN` — the sync PR, the init bootstrap and the baseline
+  proposals (Pull requests read/write, Contents write).
+- `CQ_SETTINGS_TOKEN` — read-only fine-grained PAT (Administration,
+  Environments, Secrets, Actions: read) for the drift check.
+
+The scheduled drift check does not cover the Actions event policy: GitHub
+serves `actions/policies` only to Administration: **write**, and the drift
+credentials stay read-only by design (a verdict identity that could rewrite
+the rulesets pinning its own checks would collapse the ADR-0004 identity
+split). It reports the policy as unchecked (a `notice:` line). The owner
+covers it by running the check locally with an owner/admin credential in
+`GH_TOKEN`:
+
+```sh
+node scripts/github-settings-drift.mjs --repository=<owner>/<name> \
+  --verdict-app-id=<n> --promoter-app-id=<n> --require-event-policy
+```
+
+`--require-event-policy` makes a refused event-policy read an error
+(exit 2) instead of a notice.
+
+Owner steps, in order (the RS-11 wizard outline):
+
+1. Register the three Apps (`cq-verdict`, `cq-promoter`, `cq-automation`),
+   install them on this repository only, and set the four App variables
+   (each id together with its client id).
+2. Create the four environments with the `main`-only branch policy; put
+   each App key and interim secret into its environment above. In
+   particular, provision `CQ_AUTOMATION_TOKEN` in `automation` now, before
+   step 3: `sync-merge-queue` and `init-merge-queue` fall back to
+   `PROMOTE_TOKEN` only while it is a repository-level secret AND the
+   explicit opt-in variable `CQ_AUTOMATION_INTERIM_FALLBACK` is non-empty
+   (an `automation` job cannot read a secret held in `promote`). Skip this
+   and step 3 disarms sync (the behind/diverged sync PR fails with "sync
+   not armed"), and init fails with no checkout credential.
+   **Hazard in this step's window (before step 3 arms the trust set): do
+   not break-glass push to `main`.** A break-glass push leaves `main` with
+   commits `merge-queue` lacks (un-ancestored), so every promotion refuses
+   with `diverged` until the sync PR heals the queue — and the sync PR
+   itself cannot merge before step 3, because acceptance needs the armed
+   trust set. A push in this window wedges the queue until step 3 is done;
+   do step 3 first instead.
+3. **Prerequisite: arm the trust set.** With the blank conservative default
+   (no bots, `APPROVED` only, human `OWNER`/`MEMBER`/`COLLABORATOR`) no PR in
+   this solo-identity repository reaches acceptance, because the owner
+   authors every PR. Set `CQ_MERGE_TRUSTED_BOTS` (the solo-maintainer
+   profile: `coderabbitai[bot]`) and `CQ_MERGE_ACCEPT_REVIEW_STATES` as
+   needed. Then confirm that a `cq-gate` run reported `would-promote` or
+   `promoted`, or at least that its per-PR `acceptance PR #<n>` lines
+   pass. Only then move `PROMOTE_TOKEN` from the repository into `promote`.
+   From there the legacy gate fails closed and `cq-gate` carries every
+   promotion. Skip the prerequisite and every promotion except break-glass
+   stops.
+4. Delete the remaining repository-level secrets; run `settings-drift` until
+   the only drift left is the rulesets.
+5. **C2:** apply the rulesets from `github-settings.json` (R2 requires
+   `cq/policy`, `cq/ratchet`, `cq/acceptance` from the verdict App), remove
+   classic branch protection, delete `merge-queue-gate.yml`.
+6. **C3:** land the D11 attestation, then retire the interim PATs.
+
+Fails closed, and when: the legacy gate once `PROMOTE_TOKEN` leaves the
+repository level (step 3); `cq-gate` whenever neither the promoter App nor
+`PROMOTE_TOKEN` is reachable; `settings-drift` until armed (the verdict App
+or `CQ_SETTINGS_TOKEN`) and while the App variables are unset; the sync PR
+path without an automation credential.
+
+Break-glass (ADR-0004 D-H.4): an admin push to `main` under R0/R1's admin
+bypass, recorded in the ruleset audit log. Until C3 it is also the only
+path for a protected-path change that the gate refuses as needs-human.
