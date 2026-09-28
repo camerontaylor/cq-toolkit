@@ -159,6 +159,16 @@ export interface SelfMergePrsCfg {
   classifyConfig?: ClassifyPrConfig;
   /** Explicit opt-in for independent-agent markers under the PR author's login. */
   allowSameAccountAgentReview?: boolean;
+  /**
+   * The A12c ADVISORY escape for the governed merge run (r1 M4), defaulting
+   * OFF at the kernel's Governance surface and EXPLICIT here: the shipped
+   * entry passes true when absent — the recorded unattended-by-design
+   * posture (comp 8: a scheduled merge run that refused its one job would
+   * silently stop merging) — and the journal stamps
+   * `allowAdvisoryProvenance: 'product'`. `false` withholds the escape:
+   * the run refuses its dispatch and reports the refusal rows.
+   */
+  allowAdvisoryBudget?: boolean;
 }
 
 /**
@@ -519,11 +529,19 @@ export async function runSelfMergePrs(
     });
   // The governed run's return IS the honest report (admission, the ladder,
   // spend observation, and the stop are the runner's; no post-pass).
-  // allowAdvisory is the recorded W2.3 escape (A12c): a scheduled merge run
-  // is unattended by design and every lane is ADVISORY at v1.1 — without the
-  // escape it would refuse its one job; the cap stays enforced through the
-  // evidence folds and (W2.3) reservation capacity.
-  const report = await runPlan(plan, runOptions, view, { governor, allowAdvisory: true });
+  // The ADVISORY escape (A12c) rides cfg.allowAdvisoryBudget — EXPLICIT and
+  // option-routed (r1 M4; no longer a hardcoded `allowAdvisory: true`):
+  // absent keeps the shipped unattended-by-design posture (comp 8), and the
+  // journal records `allowAdvisoryProvenance: 'product'` so the escape is
+  // attributable; `false` withholds it (the merge job refuses, its row is
+  // the terminal budget evidence). The cap stays enforced through the
+  // evidence folds and (W2.3) reservation capacity either way.
+  const allowAdvisoryBudget = cfg.allowAdvisoryBudget ?? true;
+  const report = await runPlan(plan, runOptions, view, {
+    governor,
+    allowAdvisory: allowAdvisoryBudget,
+    ...(allowAdvisoryBudget ? { allowAdvisoryProvenance: 'product' as const } : {}),
+  });
   const jobRow = report.jobs.find((row) => row.jobId === MERGE_PRS_PLAN_RUN_JOB_ID);
   const outcome =
     jobRow !== undefined && jobRow.result.status === 'ok'

@@ -57,4 +57,25 @@ describe('classifyDispatch (ADR-0003 §2.4 lane classification)', () => {
       /corrupt classification table/,
     );
   });
+
+  test('a NON-EMPTY table with no dispatch key throws — a HARD row must never silently not bind (comp 3)', () => {
+    // Every row's constraints are vacuously satisfied by an absent key, so
+    // the winner is unresolvable: a future HARD row would be permanently
+    // inert (dispatches refused as ADVISORY while the table promises HARD
+    // enforcement) — that fails loud instead.
+    const hardTable: LaneClassificationRow[] = [
+      { lane: 'subprocess', class: 'hard', evidence: 'proxy-leg-2026-10' },
+    ];
+    expect(() => classifyDispatch(undefined, hardTable)).toThrow(/no dispatch key/);
+    // Even a fully-unconstrained row cannot rescue the ambiguous state.
+    expect(() =>
+      classifyDispatch(undefined, [{ class: 'hard', evidence: 'proxy-leg-2026-10' }]),
+    ).toThrow(/no dispatch key/);
+    // An advisory-only table is just as inert for HARD purposes — same throw.
+    expect(() => classifyDispatch(undefined, [{ lane: 'subprocess', class: 'advisory' }])).toThrow(
+      /no dispatch key/,
+    );
+    // The shipped EMPTY table keeps the lane-less ADVISORY default.
+    expect(classifyDispatch()).toBe('advisory');
+  });
 });

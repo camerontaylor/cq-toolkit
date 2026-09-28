@@ -200,6 +200,16 @@ export interface GovernanceRecord {
    */
   allowAdvisory?: boolean;
   /**
+   * WHO set `allowAdvisory` (W2.3 fix round): 'operator' for the CLI's
+   * `--allow-advisory-budget`, 'product' for an unattended-by-design
+   * product path (review-loop, self-merge-prs). Present only alongside
+   * `allowAdvisory: true` — the journal distinguishes an operator's escape
+   * from the product's own posture, so a future HARD row's C_max breach is
+   * attributable (ADR-0003 §2.3 puts allowAdvisory admissions OUTSIDE the
+   * bound).
+   */
+  allowAdvisoryProvenance?: 'operator' | 'product';
+  /**
    * Present when a CAPLESS governed run inherited the previous governed
    * run's `capUsd` (W2.3): the ledger's C never silently disappears between
    * runs — the uncapped run reserves against the inherited cap and journals
@@ -339,6 +349,15 @@ export interface ReservationSettledJournalEvent {
   charged: number;
   /** How `charged` was determined. */
   basis: ReservationChargeBasis;
+  /**
+   * PRICE PRESENCE (H2/DD-9): true when the dispatch's channel observed a
+   * `costUSD` — a legitimate ZERO included (a zero-priced/subscription
+   * lane). The resume fold needs this to tell "priced at zero" from
+   * "unpriced": the `charged` sum alone would reclassify the former as the
+   * latter and hard-stop every resume over it. Absent (an older in-flight
+   * journal) folds as unpriced — fail loud, never fail open.
+   */
+  priced?: boolean;
   /** The invocation's observed usage rollup, when any evidence folded. */
   usage?: Usage;
 }
@@ -399,6 +418,17 @@ export interface RunFinishedJournalEvent {
   at: string;
   stoppedEarly: boolean;
   earlyStopReason?: RunEarlyStopReason;
+  /**
+   * The run file's total event count, INCLUDING this line and the
+   * run-started — written by the runner so the resume fold can detect a
+   * line DELETED from a surviving run file (the corruption the paired-line
+   * checks cannot see: deleting a `reservation-opened` of a crashed
+   * dispatch would silently drop its full charge and quarantine). Absent on
+   * v1 runs and when no journal dir was configured; a torn tail loses
+   * `run-finished` itself, so the check is skipped exactly where the crash
+   * windows live.
+   */
+  eventCount?: number;
 }
 
 /**

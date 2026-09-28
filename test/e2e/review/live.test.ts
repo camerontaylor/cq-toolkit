@@ -196,6 +196,9 @@ describe.skipIf(!process.env.LIVE_GH)('live review loop e2e (opt-in: LIVE_GH=1)'
       // is planned (the recorded deviation, module doc).
       classifyConfig: { ...defaultLoopClassifyConfig, skipResponderAuthoredThreads: false },
       driverRegistryView,
+      // The A12c escape is EXPLICIT and defaults OFF (r1 M4): the live drill
+      // dispatches fixers unattended, so it opts in like the shipped sweep.
+      allowAdvisoryBudget: true,
       nowMs: overrides.nowMs ?? Date.now(),
       dispatchLogPath,
       worktreeRoot: `${f.root}/worktrees`,

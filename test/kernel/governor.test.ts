@@ -68,6 +68,7 @@ import type {
   OpResult,
   Plan,
   RunReport,
+  Usage,
 } from '../../src/kernel/types.js';
 
 /** Narrowed governor-event views for filter predicates. */
@@ -1365,7 +1366,7 @@ describe('seedFromJournal USD pricing — fail loud at seed time (#14-5/#15-1)',
     expect(governor.tripped).toBe(true); // the seed alone trips — never fail open
     expect(governor.tripReason).toMatch(/prior usage/);
     expect(governor.tripReason).toMatch(/cannot be fully priced/);
-    expect(governor.tripReason).toMatch(/maxUsd 1 cannot bind/);
+    expect(governor.tripReason).toMatch(/USD cap 1 cannot bind/);
     expect(governor.tripReason).toMatch(/DD-9/);
     expect(governor.admit('c1')).toEqual({ decision: 'reject', reason: 'budget' });
   });
@@ -2373,6 +2374,16 @@ describe('src/index.ts barrel', () => {
     expect(typeof toolkit.attemptsFromJournal).toBe('function');
     expect(typeof toolkit.rescueInputFromJournal).toBe('function');
     expect(toolkit.CONSERVATIVE_RESCUE_POLICY).toEqual({ rows: [] });
+    // The W2.3 journal-event schemas ride the barrel next to every
+    // preexisting journal event schema — consumers name and validate the
+    // new variants through the supported API, never unpublished internals
+    // (Codex P2, the fix round).
+    expect(toolkit.ReservationOpenedJournalEventSchema).toBeDefined();
+    expect(toolkit.ReservationSettledJournalEventSchema).toBeDefined();
+    expect(toolkit.ReservationRefusedJournalEventSchema).toBeDefined();
+    expect(toolkit.JobQuarantinedJournalEventSchema).toBeDefined();
+    expect(toolkit.QuarantineReleasedJournalEventSchema).toBeDefined();
+    expect(toolkit.BudgetTrippedJournalEventSchema).toBeDefined();
   });
 
   test('public consumers can CONSTRUCT a governor from the barrel (review VB1B)', () => {
@@ -2394,7 +2405,7 @@ describe('src/index.ts barrel', () => {
 // ---------------------------------------------------------------------------
 
 describe('W2.3 reserve-then-settle', () => {
-  test('reserve grants min(proposal, capacity) and the invariant S+O+r ≤ C holds synchronously', async () => {
+  test('reserve WAITS FIFO while outstanding exist and shrinks only when nothing is (ADR §2.2 step 3, r1 H1)', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     const first = await governor.reserve('j1', 1, 0.25, 'advisory');
     expect(first.outcome).toBe('reserved');
@@ -2402,15 +2413,47 @@ describe('W2.3 reserve-then-settle', () => {
     expect(first.reservation.usd).toBe(0.25);
     expect(first.reservation.proposedUsd).toBeUndefined();
     expect(governor.outstandingUsd).toBe(0.25);
-    // Capacity is 0.75; a 1.0 proposal shrinks to what is left.
-    const second = await governor.reserve('j2', 1, 1.0, 'advisory');
+    // Outstanding 0.25 → capacity 0.75; a 1.0 proposal with O > 0 must WAIT
+    // FIFO (ADR §2.2 step 3), not shrink: a bookkeeping shrink to 0.75
+    // would undersize `r` against the proposal, and the dispatch's real
+    // charge would then breach `charged > r` — aborting healthy in-flight
+    // work for a bookkeeping artifact.
+    let second: Awaited<ReturnType<BudgetGovernor['reserve']>> | undefined;
+    const pending = governor.reserve('j2', 1, 1.0, 'advisory').then((r) => {
+      second = r;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(second).toBeUndefined();
+    expect(governor.tripped).toBe(false);
+    // Settling j1 at its full observed charge leaves O = 0: NOW the gate
+    // shrinks (no settle can free capacity anymore) and grants the head at
+    // `C − S = 0.75`, journalling the ask as proposedUsd. The invariant
+    // S + O + r = 0.25 + 0.75 ≤ 1.0 holds, and a real charge of up to 0.75
+    // can never breach.
+    governor.observeCost('j1', 0.25);
+    governor.settle(first.reservation, { basis: 'observed' });
+    await pending;
+    expect(second?.outcome).toBe('reserved');
+    if (second?.outcome !== 'reserved') return;
+    expect(second.reservation.usd).toBe(0.75);
+    expect(second.reservation.proposedUsd).toBe(1.0);
+    expect(governor.usdSpent).toBe(0.25);
+    expect(governor.outstandingUsd).toBe(0.75);
+  });
+
+  test('a proposal within capacity grants in full; zero capacity with outstanding parks FIFO', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') return;
+    // Capacity 0.75 covers the proposal: full grant, no shrink, no park.
+    const second = await governor.reserve('j2', 1, 0.75, 'advisory');
     expect(second.outcome).toBe('reserved');
     if (second.outcome !== 'reserved') return;
     expect(second.reservation.usd).toBe(0.75);
-    expect(second.reservation.proposedUsd).toBe(1.0);
+    expect(second.reservation.proposedUsd).toBeUndefined();
     expect(governor.outstandingUsd).toBe(1.0);
-    // No capacity left, outstanding exists → the next reserve parks FIFO;
-    // it does NOT trip and does not grant while capacity is zero.
+    // Capacity zero with an outstanding holder → the next reserve parks
+    // FIFO; it does NOT trip and does not grant while capacity is zero.
     let third: Awaited<ReturnType<BudgetGovernor['reserve']>> | undefined;
     const pending = governor.reserve('j3', 1, 0.25, 'advisory').then((r) => {
       third = r;
@@ -2420,7 +2463,8 @@ describe('W2.3 reserve-then-settle', () => {
     expect(governor.tripped).toBe(false);
     // Folding 0.3 of observed evidence against the second reservation, then
     // settling it, frees capacity → the FIFO head is woken and reserves what
-    // is left. The fold moves the ledger; the settle's remainder is 0.
+    // is left (its 0.25 proposal fits under the freed 0.3). The fold moves
+    // the ledger; the settle's remainder is 0.
     governor.observeCost('j2', 0.3);
     governor.settle(second.reservation, { basis: 'observed' });
     await pending;
@@ -2432,6 +2476,47 @@ describe('W2.3 reserve-then-settle', () => {
     governor.settle(first.reservation, { basis: 'observed' });
     expect(governor.usdSpent).toBeCloseTo(0.4);
     expect(governor.outstandingUsd).toBeCloseTo(0.25);
+  });
+
+  test('a second grant for a job that already holds an open reservation throws (r1 L2)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') return;
+    // Unreachable from the runner (one dispatch per job per run; settle or
+    // abandon deletes the openByJob entry before the job can be admitted
+    // again) — if it ever fires, the state machine is corrupt and the throw
+    // keeps the first reservation's fold attribution from being orphaned.
+    await expect(governor.reserve('j1', 2, 0.1, 'advisory')).rejects.toThrow(
+      /already holds an open reservation/,
+    );
+    // The first reservation is untouched by the refused overwrite.
+    expect(governor.outstandingUsd).toBe(0.25);
+  });
+
+  test('settle carries the PRICE-PRESENCE fact: an observed costUSD — zero included — prices the dispatch (r1 H2)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.25, 'advisory');
+    if (first.outcome !== 'reserved') return;
+    // No cost evidence ever observed on the channel: priced false — the
+    // journal will fold this settle as unpriced if it settles zero with
+    // usage.
+    let settled = governor.settle(first.reservation, { basis: 'observed' });
+    expect(settled.priced).toBe(false);
+    expect(settled.charged).toBe(0);
+    // A legitimate ZERO price is still price evidence: the folded 0 rides
+    // observeCost, the settle journals `priced: true`, and the resume fold's
+    // DD-9 check (`charged === 0 && usage > 0 && !priced`) leaves it alone.
+    const second = await governor.reserve('j2', 1, 0.25, 'advisory');
+    if (second.outcome !== 'reserved') return;
+    governor.observeCost('j2', 0);
+    settled = governor.settle(second.reservation, { basis: 'observed' });
+    expect(settled.charged).toBe(0);
+    expect(settled.priced).toBe(true);
+    // The governor's own observation stream carries the same fact.
+    const events = governor.events.filter((event) => event.kind === 'reservation-settled');
+    expect(
+      events.map((event) => (event.kind === 'reservation-settled' ? event.priced : null)),
+    ).toEqual([false, true]);
   });
 
   test('a full-charge settle frees nothing and the FIFO head then trips exhausted — no waiter hangs', async () => {
@@ -2458,7 +2543,7 @@ describe('W2.3 reserve-then-settle', () => {
     expect(governor.tripKind).toBe('exhausted');
   });
 
-  test('FIFO holds: a re-parked head stays ahead of newer waiters, and a newcomer never jumps the queue', async () => {
+  test('FIFO holds: the head is granted first, a later waiter waits for a settle, and a newcomer never jumps the queue', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     // Two outstanding reservations consume the cap; two dispatches park.
     const first = await governor.reserve('j1', 1, 0.5, 'advisory');
@@ -2469,24 +2554,37 @@ describe('W2.3 reserve-then-settle', () => {
     const w2 = governor.reserve('w2', 1, 0.25, 'advisory');
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // Settle j1 at FULL charge: frees nothing, so the head (w1) wakes,
-    // cannot proceed, and must RE-PARK AT THE HEAD — ahead of w2.
+    // Settle j1 at FULL charge: frees nothing, so the head (w1) is never
+    // even woken — grant-from-head means a waiter is woken only WITH its
+    // grant or with a trip (the cycle-1 "wake and re-park" design is
+    // gone).
     governor.settle(first.reservation, { basis: 'full' });
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(governor.tripped).toBe(false);
 
-    // Settle j2 UNDER its r: capacity frees. The head must be w1 (not w2).
+    // Settle j2 UNDER its r: capacity frees. The head w1 is granted first
+    // (0.25 fits the freed 0.3). w2 now faces capacity 0.05 with a 0.25
+    // proposal and an outstanding holder — it WAITS FIFO for a settle (ADR
+    // §2.2 step 3); it never shrinks below its proposal while O > 0.
     governor.observeCost('j2', 0.2);
     governor.settle(second.reservation, { basis: 'observed' });
-    await w1;
-    await w2;
+    const w1r = await w1;
+    if (w1r.outcome !== 'reserved') throw new Error('expected w1 reservation');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(governor.events.filter((event) => event.kind === 'reserved').length).toBe(3); // w2 still parked
+    // Settling w1 under its own r frees the rest of the cap → w2 is
+    // granted, still in FIFO order.
+    governor.observeCost('w1', 0.05);
+    governor.settle(w1r.reservation, { basis: 'observed' });
+    const w2r = await w2;
+    if (w2r.outcome !== 'reserved') throw new Error('expected w2 reservation');
     const order = governor.events
       .filter((event) => event.kind === 'reserved')
       .map((event) => (event.kind === 'reserved' ? event.jobKey : ''));
     expect(order).toEqual(['j1', 'j2', 'w1', 'w2']);
   });
 
-  test('a newcomer parks behind parked waiters even when capacity looks free (no queue jumping)', async () => {
+  test('a newcomer parks behind parked waiters and waits for a settle when capacity cannot cover its proposal (no queue jumping)', async () => {
     const governor = createGovernor({ maxUsd: 1.0 });
     const first = await governor.reserve('j1', 1, 0.5, 'advisory');
     if (first.outcome !== 'reserved') throw new Error('expected reservation');
@@ -2495,14 +2593,23 @@ describe('W2.3 reserve-then-settle', () => {
     const w1 = governor.reserve('w1', 1, 0.25, 'advisory');
     await new Promise<void>((resolve) => setImmediate(resolve));
 
-    // j2 settles UNDER r: capacity frees and w1 is woken (its continuation
-    // is now queued as a microtask — still parked from the queue's view
-    // until it runs). A NEWCOMER arriving in this window must park BEHIND
-    // w1, not take the free capacity first.
+    // j2 settles UNDER r: capacity frees and w1 (the head) is granted —
+    // its continuation is now queued as a microtask. A NEWCOMER arriving
+    // in this window must never take the room ahead of w1 (it cannot:
+    // drainWaiters granted the head synchronously) and — its 0.1 proposal
+    // exceeding the 0.05 left with O > 0 — must WAIT FIFO for a settle
+    // rather than shrink (ADR §2.2 step 3).
     governor.observeCost('j2', 0.2);
     governor.settle(second.reservation, { basis: 'observed' });
+    const w1r = await w1;
+    if (w1r.outcome !== 'reserved') throw new Error('expected w1 reservation');
     const newcomer = governor.reserve('newcomer', 1, 0.1, 'advisory');
-    await w1;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(governor.events.filter((event) => event.kind === 'reserved').length).toBe(3); // the newcomer is still parked — no shrink-while-outstanding
+    // Settling w1 under its r frees room; the newcomer is admitted IN
+    // ORDER, behind the head that was granted first.
+    governor.observeCost('w1', 0.05);
+    governor.settle(w1r.reservation, { basis: 'observed' });
     await newcomer;
     const order = governor.events
       .filter((event) => event.kind === 'reserved')
@@ -2694,6 +2801,7 @@ describe('W2.3 seed fold — reservation-era spend, A12b quarantine', () => {
     jobId: string,
     reservationId: string,
     charged: number,
+    opts?: { priced?: boolean; usage?: Usage },
   ): JournalEvent => ({
     type: 'reservation-settled',
     runId,
@@ -2702,6 +2810,8 @@ describe('W2.3 seed fold — reservation-era spend, A12b quarantine', () => {
     reservationId,
     charged,
     basis: 'observed',
+    ...(opts?.priced !== undefined ? { priced: opts.priced } : {}),
+    ...(opts?.usage !== undefined ? { usage: opts.usage } : {}),
   });
 
   test('reservation-era spend folds from settles (charges), not finish costUSD — no double-count', () => {
@@ -2727,6 +2837,34 @@ describe('W2.3 seed fold — reservation-era spend, A12b quarantine', () => {
     expect(governor.usdSpent).toBe(0.3);
     expect(governor.quarantinedJobs.size).toBe(0);
     expect(governor.tripped).toBe(false);
+  });
+
+  test('a zero-priced lane (costUSD 0 OBSERVED) never trips the seed DD-9 — a settle without observed price does (r1 H2)', () => {
+    const USAGE: Usage = { input: 7, output: 3, cacheRead: 1, cacheWrite: 2 };
+    // The zero-priced/subscription lane: the dispatch observed a real
+    // `costUSD: 0` (priced: true rides the settle), so `charged: 0` is a
+    // LEGITIMATE zero price — the resumed run must dispatch, not hard-stop.
+    const pricedFree = createGovernor({ maxUsd: 10 });
+    pricedFree.seedFromJournal([
+      STARTED('p--a--1', 1, 10),
+      JOB_STARTED('p--a--1', 'j1', 1),
+      OPENED('p--a--1', 'j1', 1, 'p--a--1:j1:1:1', 0.5),
+      SETTLED('p--a--1', 'j1', 'p--a--1:j1:1:1', 0, { priced: true, usage: USAGE }),
+    ]);
+    expect(pricedFree.usdSpent).toBe(0);
+    expect(pricedFree.tripped).toBe(false); // W2.2's rule would not have tripped this either
+    // The SAME fold with NO observed price (priced absent/falsy) is
+    // unpriced spend: the seed trips `exhausted` BEFORE the resumed run
+    // admits anything (DD-9, fail loud).
+    const unpriced = createGovernor({ maxUsd: 10 });
+    unpriced.seedFromJournal([
+      STARTED('p--a--2', 1, 10),
+      JOB_STARTED('p--a--2', 'j1', 1),
+      OPENED('p--a--2', 'j1', 1, 'p--a--2:j1:1:1', 0.5),
+      SETTLED('p--a--2', 'j1', 'p--a--2:j1:1:1', 0, { usage: USAGE }),
+    ]);
+    expect(unpriced.tripped).toBe(true);
+    expect(unpriced.tripKind).toBe('exhausted');
   });
 
   test('A12b: an unresolved reservation charges IN FULL and quarantines the job', () => {

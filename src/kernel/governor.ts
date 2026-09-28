@@ -109,6 +109,15 @@ export interface Governance {
    */
   allowAdvisory?: boolean;
   /**
+   * WHO set `allowAdvisory` (W2.3 fix round, r1 M4): 'operator' when the
+   * CLI flag passed it, 'product' when an unattended-by-design product path
+   * (review-loop, self-merge-prs) set it through its own explicit option.
+   * Journalled alongside `allowAdvisory` so the durable record attributes
+   * the escape — ADR-0003 §2.3 puts allowAdvisory admissions OUTSIDE the
+   * C_max bound, so a future HARD row's breach must be attributable.
+   */
+  allowAdvisoryProvenance?: 'operator' | 'product';
+  /**
    * Job ids to release from reservation quarantine (W2.3, A12b), journalled
    * with provenance 'call' (P7 — per-call by explicit key only). A release
    * re-enables dispatch; the full charge the quarantine took is NEVER
@@ -724,6 +733,8 @@ export type GovernorEvent =
       reservationId: string;
       charged: number;
       basis: ReservationChargeBasis;
+      /** A `costUSD` (zero included) was observed on the channel (H2/DD-9). */
+      priced: boolean;
       atMs: number;
     }
   /**
@@ -957,7 +968,7 @@ export class BudgetGovernor {
   /** The outstanding (open) reservations by id — the O in `S + O + r ≤ C` — with the evidence folds attributed to each. */
   private readonly outstanding = new Map<
     string,
-    { reservation: BudgetReservation; foldedUsd: number }
+    { reservation: BudgetReservation; foldedUsd: number; priced: boolean }
   >();
   /** jobKey → open reservation id (a job holds at most one open reservation: one dispatch at a time). */
   private readonly openByJob = new Map<string, string>();
@@ -1162,15 +1173,15 @@ export class BudgetGovernor {
    *
    *   capacity = C − S − O;  r = min(proposedUsd, capacity)
    *
-   * When capacity covers less than the proposal, the reservation SHRINKS to
-   * what is left (`proposedUsd` records the ask). When capacity is zero or
-   * less and outstanding reservations exist, the dispatch waits FIFO for a
-   * settle ("wait FIFO for a settle", ADR §2.2 step 3); with NO outstanding
-   * reservations nothing can free capacity anymore and the run trips
-   * `exhausted`. Any trip wakes and refuses every waiter. The caller opens
-   * the write-ahead journal event after this resolves and dispatches only
-   * then — `settled` completes the cycle and frees capacity for the next
-   * waiter.
+   * When the proposal exceeds capacity, ADR-0003 §2.2 step 3 decides: with
+   * any reservation OUTSTANDING (`O > 0`) the dispatch WAITS FIFO for a
+   * settle — the full proposal is admitted once room frees; with NOTHING
+   * outstanding (`O = 0`) the reservation SHRINKS to what is left
+   * (`r = C − S`; `proposedUsd` records the ask), because no settle can
+   * ever free capacity again. Any trip wakes and refuses every waiter. The
+   * caller opens the write-ahead journal event after this resolves and
+   * dispatches only then — `settled` completes the cycle and frees capacity
+   * for the next waiter.
    *
    * The invariant holds synchronously: reserve/settle mutate S and O in one
    * synchronous critical section, so two dispatches can never interleave a
@@ -1267,7 +1278,27 @@ export class BudgetGovernor {
     if (cap === undefined) return undefined;
     const capacity = cap - this.usdSpentN - this.outstandingUsdN;
     if (capacity <= 0) return undefined;
+    // ADR-0003 §2.2 step 3, both branches (`r > C − S − O`): with any
+    // reservation OUTSTANDING the dispatch WAITS FIFO for a settle — a
+    // bookkeeping shrink here would undersize `r` against the proposal and
+    // the dispatch's real charge would then breach `charged > r`, aborting
+    // healthy in-flight work. The gate shrinks to `C − S` only when NOTHING
+    // is outstanding (no settle can free capacity anymore).
+    if (waiter.proposedUsd > capacity && this.outstanding.size > 0) {
+      return undefined;
+    }
     const usd = Math.min(waiter.proposedUsd, capacity);
+    // One live reservation per job (the W2.4 pre-dispatch fence will lean
+    // on this): a second grant for the same jobKey would orphan the first
+    // reservation's fold attribution. Unreachable from the runner (one
+    // dispatch per job per run; settle/abandon deletes the entry before
+    // the job can be admitted again) — if it ever fires, the state machine
+    // is corrupt and the run must stop loudly BEFORE any state moves.
+    if (this.openByJob.has(waiter.jobKey)) {
+      throw new Error(
+        `governor: job '${waiter.jobKey}' already holds an open reservation — refusing to overwrite fold attribution`,
+      );
+    }
     const id = `${waiter.jobKey}:${waiter.attempt}:${++this.reservationSeqN}`;
     const reservation: BudgetReservation = {
       id,
@@ -1277,7 +1308,7 @@ export class BudgetGovernor {
       class: waiter.class_,
       ...(usd < waiter.proposedUsd ? { proposedUsd: waiter.proposedUsd } : {}),
     };
-    this.outstanding.set(id, { reservation, foldedUsd: 0 });
+    this.outstanding.set(id, { reservation, foldedUsd: 0, priced: false });
     this.openByJob.set(waiter.jobKey, id);
     this.outstandingUsdN += usd;
     this.record({
@@ -1330,12 +1361,15 @@ export class BudgetGovernor {
    * (`observeCost`), so live ledger and the journaled `charged` sum each
    * dispatch exactly once. `charged > r` is a BREACH — the reservation
    * undersold the work — and trips the run. Returns the charge for the
-   * runner's `reservation-settled` journal event.
+   * runner's `reservation-settled` journal event, plus the PRICE-PRESENCE
+   * fact (`priced`: a `costUSD`, zero included, was observed on the
+   * channel) the journal carries so the resume fold never mistakes a
+   * legitimate zero-priced lane for unpriced spend (H2/DD-9).
    */
   settle(
     reservation: BudgetReservation,
     charge: { basis: ReservationChargeBasis; usage?: Usage },
-  ): { charged: number; basis: ReservationChargeBasis } {
+  ): { charged: number; basis: ReservationChargeBasis; priced: boolean } {
     if (charge.usage !== undefined) {
       assertValidUsage('settled usage', charge.usage);
     }
@@ -1344,6 +1378,7 @@ export class BudgetGovernor {
       throw new Error(`governor: settle for unknown reservation '${reservation.id}'`);
     }
     const folded = held.foldedUsd;
+    const priced = held.priced;
     const charged = charge.basis === 'observed' ? folded : Math.max(held.reservation.usd, folded);
     this.outstanding.delete(reservation.id);
     this.openByJob.delete(held.reservation.jobKey);
@@ -1356,6 +1391,7 @@ export class BudgetGovernor {
       reservationId: held.reservation.id,
       charged,
       basis: charge.basis,
+      priced,
       atMs: this.now(),
     });
     if (charged > held.reservation.usd) {
@@ -1373,7 +1409,7 @@ export class BudgetGovernor {
     // tripped above, or capacity is gone for good, drainWaiters refuses or
     // trips it instead of leaving it parked forever).
     this.drainWaiters();
-    return { charged, basis: charge.basis };
+    return { charged, basis: charge.basis, priced };
   }
 
   /**
@@ -1441,6 +1477,12 @@ export class BudgetGovernor {
       const open = this.outstanding.get(openId);
       if (open !== undefined) {
         open.foldedUsd += usd;
+        // PRICE EVIDENCE (H2): a present costUSD — INCLUDING a legitimate
+        // zero — is pricing proof for the job's open reservation. The settle
+        // journals this fact, so the resume fold can tell "priced at zero"
+        // (a zero-priced/subscription lane, bound trivially at 0) from
+        // "unpriced" (DD-9's fail-loud case).
+        open.priced = true;
       }
     }
     this.record({ kind: 'usage', jobKey, usd, atMs: this.now() });
@@ -1489,7 +1531,7 @@ export class BudgetGovernor {
     } else if (hasRealUsage && this.capUsd !== undefined && counts?.costAlreadyCounted !== true) {
       this.trip(
         'exhausted',
-        'unpriced usage under a USD cap — maxUsd cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)',
+        'unpriced usage under a USD cap — the effective USD cap cannot bind an unpriced model; refusing to run past an unenforceable budget (DD-9)',
       );
     }
   }
@@ -1640,11 +1682,15 @@ export class BudgetGovernor {
           assertValidUsage('seeded reservation usage', event.usage);
           this.usageN =
             this.usageN === undefined ? { ...event.usage } : addUsage(this.usageN, event.usage);
-          if (event.charged === 0 && totalTokensOf(event.usage) > 0) {
-            // A settled dispatch with real usage and ZERO charge is UNPRICED
-            // spend (an unpriced model) — the reservation-era twin of the
-            // W2.2-era usage-without-costUSD rule below: maxUsd cannot bind
-            // it, so the seed trips before the resumed run admits anything.
+          if (event.charged === 0 && totalTokensOf(event.usage) > 0 && event.priced !== true) {
+            // A settled dispatch with real usage and ZERO charge and NO
+            // observed price is UNPRICED spend (an unpriced model) — the
+            // reservation-era twin of the W2.2-era usage-without-costUSD
+            // rule below. A settle that OBSERVED a `costUSD: 0` (a
+            // zero-priced/subscription lane; `priced: true` on the event)
+            // is legitimately priced at zero — the bound holds trivially —
+            // and must never trip this (H2: the charged sum alone cannot
+            // carry the distinction, so the journal does).
             unpricedClosingUsage = true;
           }
         }
@@ -1729,17 +1775,25 @@ export class BudgetGovernor {
     this.dispatchedCount += totalStarts;
     // DD-9 fail-loud at seed time: spend whose evidence carries real usage
     // with NO price — a W2.2-era closing finish with usage and no costUSD,
-    // or a reservation-era settle with usage and a zero charge — cannot be
-    // bound by maxUsd, so trip BEFORE the resumed run admits anything (fail
-    // loud, never fail open). Other events' prices do not price this one
-    // (the mixed priced/unpriced fold trips too). v2 governed journals carry
-    // costUSD on priced finishes and ABSENT usage when a reservation
+    // or a reservation-era settle with usage, a zero charge, and no observed
+    // price (`priced: false`; a settled `costUSD: 0` IS a price) — cannot
+    // be bound by maxUsd, so trip BEFORE the resumed run admits anything
+    // (fail loud, never fail open). Other events' prices do not price this
+    // one (the mixed priced/unpriced fold trips too). v2 governed journals
+    // carry costUSD on priced finishes and ABSENT usage when a reservation
     // settled unknown; a v1 journal with dispatches never reaches this seed
     // (the runner refuses it first).
     if (this.capUsd !== undefined && unpricedClosingUsage) {
+      // Name the cap's PROVENANCE: an inherited cap binds a run that set no
+      // maxUsd of its own, and a message naming "maxUsd" there would lie
+      // about the run's configuration (composition review, comp 5).
+      const capProvenance =
+        this.config.maxUsd === undefined && this.inheritedCapUsdN !== undefined
+          ? ` (inherited from the previous capped run — this run set no maxUsd)`
+          : '';
       this.trip(
         'exhausted',
-        `seeded prior usage cannot be fully priced — spend with real usage carries no price in the folded history, so maxUsd ${this.capUsd} cannot bind the resumed run's prior spend; refusing to continue past an unenforceable budget (DD-9)`,
+        `seeded prior usage cannot be fully priced — spend with real usage carries no price in the folded history, so the USD cap ${this.capUsd}${capProvenance} cannot bind the resumed run's prior spend; refusing to continue past an unenforceable budget (DD-9)`,
       );
     }
     // A seed that already overruns a cap trips the governor BEFORE the

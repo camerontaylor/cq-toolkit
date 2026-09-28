@@ -333,9 +333,10 @@ export async function assertNoSeqGap(
  * `journalVersion`) ordered by `at` then runId, ALL before every v2 run; v2
  * runs ordered by `seq`. The injected clock can no longer reorder the fold —
  * `at` is display-only for v2 runs. Corruption is loud: a v2 run without
- * `seq`, or two v2 runs of the plan sharing one `seq`, throws (annex §2 —
- * uniqueness holds by construction for writers; a violation on READ is a
- * corrupted dir, never silently folded).
+ * `seq`, two v2 runs of the plan sharing one `seq`, or a SURVIVING run file
+ * whose line count disagrees with its `run-finished.eventCount` all throw
+ * (annex §2 — uniqueness holds by construction for writers; a violation on
+ * READ is a corrupted dir, never silently folded).
  */
 export function foldOrderRuns(runs: readonly FoldRun[]): FoldRun[] {
   const v1: Array<{ run: FoldRun; at: string }> = [];
@@ -348,6 +349,24 @@ export function foldOrderRuns(runs: readonly FoldRun[]): FoldRun[] {
     if (started === undefined) {
       throw new Error(
         `journal: fold order requires a run-started event; run '${run.runId}' has none`,
+      );
+    }
+    // THE LINE-COUNT CHECK (W2.3 fix round, comp 2): a line DELETED from a
+    // surviving run file is the one corruption the paired-line throws cannot
+    // see — deleting a crashed dispatch's `reservation-opened` would drop
+    // the run out of the reservation era entirely (its full charge vanishes
+    // and the quarantine never fires). A run-finished that survived carries
+    // the file's total line count; a mismatch is loud. A torn TAIL loses
+    // run-finished itself, so the check is skipped exactly where the crash
+    // windows live; v1 runs and journal-less shapes carry no count.
+    const finished = run.events.find((event) => event.type === 'run-finished');
+    const eventCount =
+      finished !== undefined && finished.type === 'run-finished' ? finished.eventCount : undefined;
+    if (eventCount !== undefined && eventCount !== run.events.length) {
+      throw new Error(
+        `journal: corrupt — run '${run.runId}' journalled ${eventCount} events but folds ${run.events.length}: ` +
+          `a line was deleted from (or inserted into) a surviving run file — its spend evidence is untrustworthy, ` +
+          `never silently folded`,
       );
     }
     if (started.journalVersion === undefined) {
