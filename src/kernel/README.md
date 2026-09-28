@@ -294,7 +294,12 @@ from `reserve` to `settle`.
   started — that ordering IS the undercount fix).
 - **Sizing.** The proposal is the fair share `C / concurrency`; the gate
   shrinks it to the remaining capacity (`proposedUsd` journalled when
-  shrunk) or parks the dispatch FIFO behind outstanding settles. No `W_max`
+  shrunk) or parks the dispatch FIFO behind outstanding settles — parked
+  waiters keep their queue position (a waiter woken by a settle that freed
+  nothing re-parks at the head), a newcomer never jumps the queue, and a
+  tripped waiter short-circuits at its wake with the budget verdict
+  (`budget-exhausted`; `cancelled` under a signal trip) rather than being
+  refused at trip time. No `W_max`
   floor exists at the kernel seam — sizing is honest-share, not
   demonstrated-worst-case; the floor machinery is W2.1/W3.5's (HARD rows).
   A zero cap admits nothing: the first reserve trips `exhausted` before any
@@ -334,7 +339,7 @@ from `reserve` to `settle`.
   v1.1 — and a 'hard' row without `evidence` throws (HARD is demonstrated,
   never declared). ADVISORY + unattended (`attended` defaults false, P8) +
   no escape → refused per dispatch: `reservation-refused
-  {reason:'advisory-lane'}` journalled, the row budget-exhausted ON ITSELF,
+{reason:'advisory-lane'}` journalled, the row budget-exhausted ON ITSELF,
   dependents re-marked transitively, nothing dispatched. The escapes:
   `Governance.allowAdvisory` (CLI `--allow-advisory-budget`, journalled on
   `run-started.governance.allowAdvisory`) or `attended: true`. Recorded
@@ -520,8 +525,8 @@ composition harness for that arrives with the op families (T1.4+).
   open start — an orphan finish in a multi-run journal is a replay
   re-attestation of an already-counted dispatch, and counting it again would
   double the rollup.
-- **Trip gates admission only** *(T1.3's decision — superseded by W2.3's
-  abort-on-trip, see "Reserve-then-settle" above)*: in-flight jobs complete; their evidence
+- **Trip gates admission only** _(T1.3's decision — superseded by W2.3's
+  abort-on-trip, see "Reserve-then-settle" above)_: in-flight jobs complete; their evidence
   stays real.
 - **USD is observed, never derived**: cost arrives from the op's evidence
   folds (a priced driver result carries `costUSD` labeled

@@ -2458,6 +2458,80 @@ describe('W2.3 reserve-then-settle', () => {
     expect(governor.tripKind).toBe('exhausted');
   });
 
+  test('FIFO holds: a re-parked head stays ahead of newer waiters, and a newcomer never jumps the queue', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    // Two outstanding reservations consume the cap; two dispatches park.
+    const first = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    const second = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    const w1 = governor.reserve('w1', 1, 0.25, 'advisory');
+    const w2 = governor.reserve('w2', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // Settle j1 at FULL charge: frees nothing, so the head (w1) wakes,
+    // cannot proceed, and must RE-PARK AT THE HEAD — ahead of w2.
+    governor.settle(first.reservation, { basis: 'full' });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(governor.tripped).toBe(false);
+
+    // Settle j2 UNDER its r: capacity frees. The head must be w1 (not w2).
+    governor.observeCost('j2', 0.2);
+    governor.settle(second.reservation, { basis: 'observed' });
+    await w1;
+    await w2;
+    const order = governor.events
+      .filter((event) => event.kind === 'reserved')
+      .map((event) => (event.kind === 'reserved' ? event.jobKey : ''));
+    expect(order).toEqual(['j1', 'j2', 'w1', 'w2']);
+  });
+
+  test('a newcomer parks behind parked waiters even when capacity looks free (no queue jumping)', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    const second = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    const w1 = governor.reserve('w1', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // j2 settles UNDER r: capacity frees and w1 is woken (its continuation
+    // is now queued as a microtask — still parked from the queue's view
+    // until it runs). A NEWCOMER arriving in this window must park BEHIND
+    // w1, not take the free capacity first.
+    governor.observeCost('j2', 0.2);
+    governor.settle(second.reservation, { basis: 'observed' });
+    const newcomer = governor.reserve('newcomer', 1, 0.1, 'advisory');
+    await w1;
+    await newcomer;
+    const order = governor.events
+      .filter((event) => event.kind === 'reserved')
+      .map((event) => (event.kind === 'reserved' ? event.jobKey : ''));
+    expect(order).toEqual(['j1', 'j2', 'w1', 'newcomer']);
+  });
+
+  test('abandonReservation releases the hold with no charge and no settle — capacity returns to waiters', async () => {
+    const governor = createGovernor({ maxUsd: 1.0 });
+    const first = await governor.reserve('j1', 1, 0.5, 'advisory');
+    if (first.outcome !== 'reserved') throw new Error('expected reservation');
+    const second = await governor.reserve('j2', 1, 0.5, 'advisory');
+    if (second.outcome !== 'reserved') throw new Error('expected reservation');
+    const parked = governor.reserve('w1', 1, 0.25, 'advisory');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // The write-ahead journal write failed: abandon the grant, no charge.
+    // The returned capacity is granted to the FIFO head SYNCHRONOUSLY
+    // inside the abandon (grant-from-head — no microtask window).
+    governor.abandonReservation(second.reservation);
+    expect(governor.usdSpent).toBe(0);
+    expect(governor.outstandingUsd).toBe(0.75); // j1 0.5 + w1's fresh 0.25 grant
+    // The parked waiter got the returned capacity.
+    await parked;
+    const last = governor.events.at(-1);
+    expect(last).toMatchObject({ kind: 'reserved', jobKey: 'w1', usd: 0.25 });
+    // Abandoning an unknown/settled reservation is a no-op.
+    expect(() => governor.abandonReservation(second.reservation)).not.toThrow();
+  });
+
   test('a zero cap admits nothing: the first reserve trips exhausted before any dispatch', async () => {
     const governor = createGovernor({ maxUsd: 0 });
     await expect(governor.reserve('j1', 1, 0, 'advisory')).resolves.toEqual({ outcome: 'tripped' });

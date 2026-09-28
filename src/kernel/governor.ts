@@ -963,8 +963,21 @@ export class BudgetGovernor {
   private readonly openByJob = new Map<string, string>();
   private outstandingUsdN = 0;
   private reservationSeqN = 0;
-  /** FIFO waiters for reservation capacity; woken by a settle, or by a trip. */
-  private readonly reserveWaiters: Array<() => void> = [];
+  /**
+   * FIFO waiters for reservation capacity, each carrying its grant request.
+   * Capacity is GRANTED FROM THE HEAD synchronously inside settle /
+   * abandonReservation (drainWaiters — consuming capacity at grant time), so
+   * a waiter is never woken without its grant or a trip: it can never lose
+   * its queue position, and a newcomer can never jump the queue during a
+   * microtask window.
+   */
+  private readonly reserveWaiters: Array<{
+    jobKey: string;
+    attempt: number;
+    proposedUsd: number;
+    class_: ReservationClass;
+    resolve: (outcome: ReserveOutcome) => void;
+  }> = [];
   /** A capless governed run's conservative inheritance of the previous governed run's cap. */
   private inheritedCapUsdN: number | undefined;
   /** Jobs quarantined at the resume fold over unresolved reservations (A12b). */
@@ -1181,60 +1194,120 @@ export class BudgetGovernor {
       );
     }
     assertValidUsd('proposed reservation', proposedUsd);
-    while (true) {
-      if (this.trippedFlag) {
-        return { outcome: 'tripped' };
-      }
-      const capacity = cap - this.usdSpentN - this.outstandingUsdN;
-      if (capacity > 0) {
-        const usd = Math.min(proposedUsd, capacity);
-        const id = `${jobKey}:${attempt}:${++this.reservationSeqN}`;
-        const reservation: BudgetReservation = {
-          id,
-          jobKey,
-          attempt,
-          usd,
-          class: class_,
-          ...(usd < proposedUsd ? { proposedUsd } : {}),
-        };
-        this.outstanding.set(id, { reservation, foldedUsd: 0 });
-        this.openByJob.set(jobKey, id);
-        this.outstandingUsdN += usd;
-        this.record({
-          kind: 'reserved',
-          jobKey,
-          reservationId: id,
-          usd,
-          class: class_,
-          atMs: this.now(),
-        });
-        // Wake chain: when this reservation left further capacity free and
-        // waiters are still parked, hand the next one its turn immediately —
-        // otherwise idle capacity would sit behind a parked FIFO head until
-        // the next settle.
-        const left = cap - this.usdSpentN - this.outstandingUsdN;
-        if (left > 0 && this.reserveWaiters.length > 0) {
-          const wake = this.reserveWaiters.shift();
-          wake?.();
-        }
-        return { outcome: 'reserved', reservation };
-      }
-      if (this.outstanding.size === 0) {
-        // Capacity gone with nothing outstanding to settle: the cap is
-        // spent. Tripping wakes every waiter — each refuses (budget family).
-        this.trip(
-          'exhausted',
-          `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
-        );
-        return { outcome: 'tripped' };
-      }
-      // FIFO: park until a settle frees capacity or a trip wakes everyone.
-      // `settle` wakes the head only when capacity is actually free, so a
-      // parked waiter is never spuriously re-queued behind its juniors.
-      await new Promise<void>((resolve) => {
-        this.reserveWaiters.push(resolve);
-      });
+    if (this.trippedFlag) {
+      return { outcome: 'tripped' };
     }
+    if (this.reserveWaiters.length === 0) {
+      const granted = this.tryGrant({ jobKey, attempt, proposedUsd, class_ });
+      if (granted !== undefined) {
+        return { outcome: 'reserved', reservation: granted };
+      }
+    }
+    if (this.trippedFlag) {
+      return { outcome: 'tripped' };
+    }
+    if (this.outstanding.size === 0 && this.reserveWaiters.length === 0) {
+      // Capacity gone with nothing outstanding to settle and nobody parked
+      // ahead: the cap is spent. Tripping wakes every waiter — each refuses
+      // (budget family).
+      this.trip(
+        'exhausted',
+        `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
+      );
+      return { outcome: 'tripped' };
+    }
+    // Park (behind any waiters already queued — FIFO admission, never a
+    // queue jump). The grant arrives synchronously from a settle or an
+    // abandon (drainWaiters): a waiter is never woken without its grant or
+    // a trip, so it can never lose its queue position.
+    return new Promise<ReserveOutcome>((resolve) => {
+      this.reserveWaiters.push({ jobKey, attempt, proposedUsd, class_, resolve });
+    });
+  }
+
+  /** Grant the head waiter when capacity allows; chain while capacity and waiters remain. */
+  private drainWaiters(): void {
+    while (this.reserveWaiters.length > 0) {
+      if (this.trippedFlag) {
+        const waiters = this.reserveWaiters.splice(0);
+        for (const waiter of waiters) waiter.resolve({ outcome: 'tripped' });
+        return;
+      }
+      const cap = this.capUsd;
+      const capacity = cap === undefined ? 0 : cap - this.usdSpentN - this.outstandingUsdN;
+      if (capacity <= 0) {
+        if (this.outstanding.size === 0) {
+          // Capacity gone for good with nothing left to settle: trip (which
+          // wakes every waiter via the tripped branch on re-entry).
+          this.trip(
+            'exhausted',
+            `reservation capacity exhausted: settled ${this.usdSpentN} + outstanding ${this.outstandingUsdN} leave nothing of cap ${cap}`,
+          );
+          return;
+        }
+        break; // outstanding reservations may still settle under r — wait
+      }
+      const head = this.reserveWaiters[0];
+      if (head === undefined) break;
+      const granted = this.tryGrant(head);
+      if (granted === undefined) break;
+      this.reserveWaiters.shift();
+      head.resolve({ outcome: 'reserved', reservation: granted });
+    }
+  }
+
+  /** The synchronous grant for one waiter (capacity is consumed HERE). */
+  private tryGrant(waiter: {
+    jobKey: string;
+    attempt: number;
+    proposedUsd: number;
+    class_: ReservationClass;
+  }): BudgetReservation | undefined {
+    const cap = this.capUsd;
+    if (cap === undefined) return undefined;
+    const capacity = cap - this.usdSpentN - this.outstandingUsdN;
+    if (capacity <= 0) return undefined;
+    const usd = Math.min(waiter.proposedUsd, capacity);
+    const id = `${waiter.jobKey}:${waiter.attempt}:${++this.reservationSeqN}`;
+    const reservation: BudgetReservation = {
+      id,
+      jobKey: waiter.jobKey,
+      attempt: waiter.attempt,
+      usd,
+      class: waiter.class_,
+      ...(usd < waiter.proposedUsd ? { proposedUsd: waiter.proposedUsd } : {}),
+    };
+    this.outstanding.set(id, { reservation, foldedUsd: 0 });
+    this.openByJob.set(waiter.jobKey, id);
+    this.outstandingUsdN += usd;
+    this.record({
+      kind: 'reserved',
+      jobKey: waiter.jobKey,
+      reservationId: id,
+      usd,
+      class: waiter.class_,
+      atMs: this.now(),
+    });
+    return reservation;
+  }
+
+  /**
+   * ABANDON a granted reservation whose write-ahead journal event never
+   * landed (the `reservation-opened` append failed): the dispatch never
+   * started, so nothing is charged and NO settle is journalled — the
+   * governor-side hold simply releases, returning capacity to the waiters.
+   * The journal failure itself propagates at the call site: a hole in the
+   * write-ahead sequence is a loud run stop, never a silent dispatch.
+   */
+  abandonReservation(reservation: BudgetReservation): void {
+    const held = this.outstanding.get(reservation.id);
+    if (held === undefined || held.reservation !== reservation) {
+      return; // never granted, or already settled — nothing to abandon
+    }
+    this.outstanding.delete(reservation.id);
+    this.openByJob.delete(reservation.jobKey);
+    this.outstandingUsdN -= held.reservation.usd;
+    this.drainWaiters();
   }
 
   /**
@@ -1295,13 +1368,11 @@ export class BudgetGovernor {
       // settle-side remainder can never silently push the ledger past the cap.
       this.trip('exhausted', `usd rollup ${this.usdSpentN} exceeded cap ${this.capUsd}`);
     }
-    // Wake the FIFO head on EVERY settle (unless the trip above already
-    // woke everyone): a full-charge settle frees nothing, so a
-    // wake-only-when-free rule would park the head forever once every
-    // outstanding reservation settles at `r` — the re-evaluation is what
-    // lets the head trip `exhausted` when capacity is gone for good.
-    const wake = this.reserveWaiters.shift();
-    wake?.();
+    // Hand freed capacity to the FIFO head (grant-from-head: a full-charge
+    // settle frees nothing, so the head stays parked — but if the settle
+    // tripped above, or capacity is gone for good, drainWaiters refuses or
+    // trips it instead of leaving it parked forever).
+    this.drainWaiters();
     return { charged, basis: charge.basis };
   }
 
@@ -1441,11 +1512,10 @@ export class BudgetGovernor {
     this.tripReasonN = reason;
     this.tripKindN = tripKind;
     this.record({ kind: 'budget-tripped', tripKind, reason, atMs: this.now() });
-    // Any trip wakes and refuses every capacity waiter (ADR §2.2 step 3).
-    const waiters = this.reserveWaiters.splice(0);
-    for (const wake of waiters) wake();
-    // Abort-on-trip: the run's in-flight ladders compose `tripAbortSignal`,
-    // so this abort reaches every current op.
+    // Any trip refuses every capacity waiter (ADR §2.2 step 3)...
+    this.drainWaiters();
+    // ...and aborts the in-flight ladders composing `tripAbortSignal`, so
+    // the abort reaches every current op.
     this.tripAbort.abort();
   }
 
