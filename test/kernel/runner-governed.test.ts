@@ -2228,6 +2228,126 @@ describe('W2.3 reserve-then-settle', () => {
     expect(governor.usdSpent).toBeCloseTo(1.35);
   });
 
+  test('A12b: a release run with NO replacement finish still re-runs the job on the next resume', async () => {
+    // Verifier repro (fix r2): run 0 completes j1 ok; run 1 crashes in the
+    // A12b window (reservation opened, no settle); run 2 resumes WITH the
+    // release but a sibling's stopOnError halts the run BEFORE j1
+    // re-dispatches — the journal carries quarantine-released and NO j1
+    // finish. Run 3 must re-dispatch j1: the journalled release lifts the
+    // quarantine, and run 0's PRE-release ok must not replay-skip it —
+    // otherwise --release-quarantine is a silent permanent no-op across
+    // runs and the report asserts an ok the run never produced.
+    const log = openRunLog(w3dir);
+    const plan: Plan = {
+      id: 'w23-release-nofinish',
+      // j2 first: with concurrency 1 its failure stops the run before j1.
+      jobs: [
+        { id: 'j2', op: 'fake', input: { jobId: 'j2' } },
+        { id: 'j1', op: 'fake', input: { jobId: 'j1' } },
+      ],
+    };
+    const hash = makeManifest(plan).jobs.find((job) => job.id === 'j1')?.inputsHash ?? '';
+    // Run 0: j1 completes ok (priced).
+    const okRunId = 'w23-release-nofinish--r0--aa';
+    await log.append(okRunId, {
+      type: 'run-started',
+      runId: okRunId,
+      at: '2026-01-01T00:00:00.000Z',
+      planId: 'w23-release-nofinish',
+      journalVersion: 2,
+      seq: 1,
+      governance: { capUsd: 5, attended: false },
+    });
+    await log.append(okRunId, {
+      type: 'job-started',
+      runId: okRunId,
+      at: '2026-01-01T00:00:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 1,
+    });
+    await log.append(okRunId, {
+      type: 'job-finished',
+      runId: okRunId,
+      at: '2026-01-01T00:00:02.000Z',
+      jobId: 'j1',
+      opId: 'fake',
+      inputsHash: hash,
+      result: { status: 'ok', value: 'r0' },
+      costUSD: 0.1,
+    });
+    // Run 1: re-dispatch crashes after opening its reservation (no settle,
+    // no finish) — the A12b window over j1's OLDER verified ok.
+    const crashRunId = 'w23-release-nofinish--r1--bb';
+    await log.append(crashRunId, {
+      type: 'run-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:01:00.000Z',
+      planId: 'w23-release-nofinish',
+      journalVersion: 2,
+      seq: 2,
+      governance: { capUsd: 5, attended: false },
+    });
+    await log.append(crashRunId, {
+      type: 'job-started',
+      runId: crashRunId,
+      at: '2026-01-01T00:01:01.000Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 2,
+    });
+    await log.append(crashRunId, {
+      type: 'reservation-opened',
+      runId: crashRunId,
+      at: '2026-01-01T00:01:01.500Z',
+      jobId: 'j1',
+      op: 'fake',
+      attempt: 2,
+      reservationId: `${crashRunId}:j1:2:1`,
+      usd: 1,
+      class: 'advisory',
+    });
+
+    // Run 2: resume WITH the release; sibling j2 fails first and
+    // stopOnError halts the run before j1 re-dispatches.
+    const calls2: string[] = [];
+    const governor2 = createGovernor({ maxUsd: 5 });
+    const report2 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: true, journalDir: w3dir, resume: true },
+      viewWith(
+        entry('fake', async (raw) => {
+          const jobId = (raw as { jobId: string }).jobId;
+          calls2.push(jobId);
+          return jobId === 'j2'
+            ? { status: 'failed' as const, error: 'sibling failure' }
+            : okOp(raw);
+        }),
+      ),
+      { governor: governor2, allowAdvisory: true, releaseQuarantine: ['j1'] },
+    );
+    const events2 = await openRunLog(w3dir).read(report2.runId);
+    expect(events2.some((event) => event.type === 'quarantine-released')).toBe(true);
+    // The release run produced NO replacement finish for j1.
+    expect(jobFinishes(events2).some((event) => event.jobId === 'j1')).toBe(false);
+    expect(calls2).toEqual(['j2']); // j1 was never re-dispatched this run
+
+    // Run 3: resume WITHOUT the release flag — the journalled release lifts
+    // the quarantine, and the job must RE-DISPATCH, not replay-skip run 0's
+    // stale pre-release ok.
+    const calls3: string[] = [];
+    const governor3 = createGovernor({ maxUsd: 5 });
+    const report3 = await runPlan(
+      plan,
+      { concurrency: 1, stopOnError: false, journalDir: w3dir, resume: true },
+      viewWith(entry('fake', countingOp(calls3, 0.25))),
+      { governor: governor3, allowAdvisory: true },
+    );
+    expect(governor3.quarantinedJobs.size).toBe(0); // lifted, not re-attested
+    expect(calls3).toEqual(['j2', 'j1']); // j1 RE-DISPATCHED — bypass closed
+    expect(report3.jobs.find((row) => row.jobId === 'j1')?.result.status).toBe('ok');
+  });
+
   test('A12b: a full-charge crash window over the cap trips the resumed run at seed — before any dispatch', async () => {
     const log = openRunLog(w3dir);
     const plan: Plan = {

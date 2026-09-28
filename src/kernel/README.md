@@ -319,7 +319,11 @@ from `reserve` to `settle`.
   shrink there would undersize `r` and the dispatch's real charge would trip
   `breach`, aborting healthy in-flight work); with NOTHING outstanding the
   gate shrinks to `C − S` (`proposedUsd` journalled when shrunk), because no
-  settle can free capacity anymore. Parked waiters keep their queue
+  settle can free capacity anymore. That shrink carries the SAME
+  under-sizing exposure as the park it contrasts with — the dispatch's real
+  charge is still unknown at the gate, and one that outruns `C − S` trips
+  `breach`: the recorded post-hoc detector, not prevention. Parked waiters
+  keep their queue
   position (grant-from-head: a settle that frees nothing never wakes the
   head at all — a waiter is woken only WITH its grant or with a trip), a
   newcomer never jumps the queue, and a
@@ -385,7 +389,14 @@ from `reserve` to `settle`.
   dependents re-marked transitively, nothing dispatched. The gate sits
   behind the trip check: on an already-tripped run the refusal names the
   TRIP as the cause (`governor.admit`), never a mis-attributed
-  `advisory-lane`. The escapes:
+  `advisory-lane`. One refusal yields two honest-stop shapes, split on the
+  runner's `advisoryRefused && !stop.requested` gate: with stopOnError false
+  the refusal counts as a budget-family stop (`earlyStopReason: 'budget'`
+  claimed, dependents re-marked transitively), while under stopOnError the
+  rows stay re-runnable `queued` and NO `earlyStopReason: 'budget'` is
+  claimed — the journal holds a per-row refusal, not a budget-tripped fact,
+  so claiming a budget stop would assert a $0-spent bound the run never
+  fired. The escapes:
   `Governance.allowAdvisory` (CLI `--allow-advisory-budget`) or
   `attended: true`, and the escape is ROUTED, never hardcoded: product
   paths turn it on through their own explicit options (default OFF at the
