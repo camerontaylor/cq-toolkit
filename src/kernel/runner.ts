@@ -680,6 +680,15 @@ export async function runPlan(
       if (opts.resume === true) {
         for (const event of prior.events) {
           if (event.type === 'job-finished') replay.set(event.jobId, event);
+          // A journalled release invalidates every replay record for that
+          // job from BEFORE it (runs fold in order, events in journal
+          // order): the release contract is a re-run, so only a
+          // post-release finish is fresh evidence. When the release run
+          // produces no replacement finish (a sibling's stopOnError halts
+          // it first), the next resume would otherwise rebuild this map
+          // with the pre-crash ok and replay-skip the released job forever
+          // — --release-quarantine a silent permanent no-op across runs.
+          else if (event.type === 'quarantine-released') replay.delete(event.jobId);
         }
       }
     }
