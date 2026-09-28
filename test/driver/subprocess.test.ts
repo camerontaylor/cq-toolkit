@@ -471,62 +471,45 @@ describe('subprocess driver specifics (fake agent CLI)', () => {
     ]);
   });
 
-  test('THE REMAP TEST: unknown model on the default routing table throws BEFORE any spawn', async () => {
+  test('THE REMAP DEFENCE IS POST-DISPATCH (§2.6): unknown provider still refuses pre-dispatch; an unknown MODEL now dispatches and the served id is observed', async () => {
     await withScratch(async (scratchDir) => {
       const calls: SpawnCall[] = [];
-      // DEFAULT table — the shipped deepseek endpoint config, no overrides.
-      const driver = new SubprocessDriver({
-        sessionsDir: join(scratchDir, SESSIONS_DIR),
-        harnessConfig: { ...defaultHarnessConfig, workspaceRoot: join(scratchDir, 'workspaces') },
-        spawn: recordingSpawn(calls),
-      });
-      // DeepSeek-style gateways silently serve their default model for ANY
-      // model name; the driver refuses to dispatch an unknown name instead.
-      const allowlistErr = await thrownBy(
-        driver.run(invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } })),
+      // The deepseek endpoint reads its key value at run() time.
+      process.env.DEEPSEEK_API_KEY ??= 'offline-remap-key';
+      const driver = new SubprocessDriver(
+        baseOptions(
+          scratchDir,
+          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'deepseek-default-served' },
+          calls,
+        ),
       );
-      expect(allowlistErr).toBeInstanceOf(DispatchError);
-      expect(errorClassOf(allowlistErr)).toBe('config'); // seam v2: pre-dispatch class
-      expect((allowlistErr as Error).message).toMatch(
-        /not on the deepseek allowlist .* silently remap unknown model names; refusing to dispatch/,
-      );
-      // The same rule is table-wide: unknown names on ANY endpoint refuse.
-      const zaiErr = await thrownBy(
-        driver.run(invocation({ modelSpec: { provider: 'zai', model: 'gpt-9-imaginary' } })),
-      );
-      expect(errorClassOf(zaiErr)).toBe('config');
-      expect((zaiErr as Error).message).toMatch(
-        /silently remap unknown model names; refusing to dispatch/,
-      );
+      // UNKNOWN PROVIDER — still a pre-dispatch config throw (routing is
+      // config, not a model outcome). Zero spawns, no sessions dir.
       const providerErr = await thrownBy(
         driver.run(invocation({ modelSpec: { provider: 'nope', model: 'whatever' } })),
       );
-      expect(errorClassOf(providerErr)).toBe('config');
+      expect(providerErr).toBeInstanceOf(DispatchError);
+      expect(errorClassOf(providerErr)).toBe('config'); // seam v2: pre-dispatch class
       expect((providerErr as Error).message).toMatch(/unknown provider 'nope'/);
-      // Pre-dispatch means PRE-dispatch: zero spawns — the sessions dir is
-      // never even created (store.create would have mkdir'd it).
       expect(calls).toEqual([]);
       await expect(readdir(join(scratchDir, SESSIONS_DIR))).rejects.toMatchObject({
         code: 'ENOENT',
       });
 
-      // The routeFor throw is only the OUTER guard; a gateway can still remap
-      // an ALLOWED name server-side. The driver therefore surfaces the model
-      // the endpoint actually served — the fact the shared conformance suite's
-      // observed-model check (leg m) keys on — and a remapped run fails that
-      // check loudly.
-      const remapping = new SubprocessDriver(
-        baseOptions(
-          scratchDir,
-          { FAKE_AGENT_MODE: 'ok', FAKE_AGENT_SERVED_MODEL: 'actually-served-model' },
-          [],
-        ),
+      // UNKNOWN MODEL — the pre-dispatch model allowlist is RETIRED
+      // (ADR-0002 §2.6): the name routes through and the run DISPATCHES (a
+      // DeepSeek-style gateway would silently serve its default here). The
+      // defence is the observable fact: WorkerResult.model carries the id
+      // the endpoint actually served, and the shared served-model assertion
+      // (ADR-0002 §2.6 — the factory applies it to every resolved driver;
+      // see served-model.test.ts / factory.test.ts) fails the mismatch
+      // post-hoc with errorClass 'served-model-mismatch'.
+      const remapped = await driver.run(
+        invocation({ modelSpec: { provider: 'deepseek', model: 'gpt-9-imaginary' } }),
       );
-      const remapped = await remapping.run(
-        invocation({ modelSpec: { provider: CONFORMANCE_PROVIDER, model: CONFORMANCE_MODEL } }),
-      );
-      expect(remapped.model).toBe('actually-served-model'); // the honest observation
-      expect(remapped.model).not.toBe(CONFORMANCE_MODEL); // the suite's leg m fails this run loudly
+      expect(calls).toHaveLength(1); // dispatched — the pre-dispatch model throw is gone
+      expect(remapped.model).toBe('deepseek-default-served'); // the honest observation
+      expect(remapped.model).not.toBe('gpt-9-imaginary'); // the wrapper fails this run loudly
     });
   });
 

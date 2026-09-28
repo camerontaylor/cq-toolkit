@@ -498,9 +498,11 @@ export function makeResolveConflictOp(
         const record = await new SessionStore(sessionsDir).create(workspace);
         return record.sessionId;
       });
+    // S4b: this wrap (and the per-provider defaultDriver switch below) is
+    // deleted by the driver-factory migration (ADR-0002 §2.5).
     const driver = withServedModelAssertion(
       deps.driver ?? defaultDriver(callerSessionsDir, deps.harnessConfig, modelSpec),
-      'default',
+      { lane: modelSpec.provider === 'ai-sdk' ? 'ai-sdk' : 'subprocess' },
     );
 
     // (b) Truth first: fetch the PR head ref. A nonzero exit means the

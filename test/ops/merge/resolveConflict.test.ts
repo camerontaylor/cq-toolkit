@@ -314,7 +314,7 @@ describe('S3 resolveConflict served-model construction', () => {
         expect(result.status).toBe('ok');
       } else {
         expect(result.status).toBe('failed');
-        expect(failedError(result)).toContain('served model assertion');
+        expect(failedError(result)).toContain('served unobserved');
       }
     },
   );
@@ -360,7 +360,7 @@ describe('S3 resolveConflict served-model construction', () => {
           expect(result.status).toBe('ok');
         } else {
           expect(result.status).toBe('failed');
-          expect(failedError(result)).toContain('served model assertion');
+          expect(failedError(result)).toContain("requested 'claude-haiku-4-5', served 'remapped'");
         }
       } finally {
         vi.unstubAllEnvs();

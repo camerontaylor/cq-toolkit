@@ -67,7 +67,7 @@ describe('S4 worktreeFixDriver construction', () => {
       });
     } else {
       expect(result.stopReason).toBe('error');
-      expect(result.error).toContain('served model assertion');
+      expect(result.error).toContain('served unobserved');
       expect(result.structuredOutput).toBeUndefined();
     }
   });
@@ -96,7 +96,7 @@ describe('S4 worktreeFixDriver construction', () => {
       } else {
         expect(result.status).toBe('failed');
         if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
-        expect(result.error).toContain('served model assertion');
+        expect(result.error).toContain('served unobserved');
       }
     });
   });
@@ -113,7 +113,7 @@ describe('S5 makeFixReviewItem plain Driver construction', () => {
     } else {
       expect(result.status).toBe('failed');
       if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
-      expect(result.error).toContain('served model assertion');
+      expect(result.error).toContain('served unobserved');
     }
   });
 });
@@ -146,7 +146,9 @@ describe('makeFixReviewItem caller-supplied perHarness construction', () => {
     } else {
       expect(result.status).toBe('failed');
       if (result.status !== 'failed') throw new Error(`unexpected ${result.status}`);
-      expect(result.error).toContain('served model assertion');
+      expect(result.error).toMatch(
+        /requested 'requested-model', served (unobserved|'different-model')/,
+      );
       expect(result).not.toHaveProperty('value');
       expect(JSON.stringify(result)).not.toContain('Already addressed.');
     }

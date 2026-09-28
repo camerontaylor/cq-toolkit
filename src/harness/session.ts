@@ -43,7 +43,7 @@
 // then-append is one step and can never interleave with an in-flight
 // append.
 import { randomBytes } from 'node:crypto';
-import { appendFile, mkdir, mkdtemp, readFile, truncate } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, readFile, rm, truncate } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -332,6 +332,20 @@ export class SessionStore {
       workspace: header.workspace,
       messages,
     };
+  }
+
+  /**
+   * Delete one session record — the `<sessionId>.jsonl` file ONLY (the
+   * reap-on-settle retention of ADR-0002 §2.5): sidecars (`.cq-cli-session`
+   * and friends) and the workspace directory are NOT touched. A missing
+   * record is a no-op (`rm` force); real fs errors throw — the CALLER
+   * decides the error policy (the factory's reap wrapper swallows: the
+   * verdict outranks the cleanup). Unknown sessions are rejected by the
+   * same id rule as every other method, never silently tolerated.
+   */
+  async remove(sessionId: string): Promise<void> {
+    assertSafeSessionId(sessionId);
+    await rm(this.pathFor(sessionId), { force: true });
   }
 }
 

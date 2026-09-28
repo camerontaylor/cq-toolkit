@@ -32,13 +32,13 @@
 // ROUTING (./routing.ts): ModelSpec → env-based route over a serializable
 // RoutingTable (default: zai / deepseek / anthropic anthropic-compat
 // endpoints, as-of 2026-09). The endpoint is injected purely through env
-// (ANTHROPIC_BASE_URL + auth-token vars); the model rides `--model`. The
-// DEEPSEEK SILENT-REMAP FOOTGUN is enforced in routeFor: a model name not
-// on the endpoint allowlist THROWS before dispatch (gateways silently serve
-// their default model for unknown names — a poisoned fact we refuse to
-// create). Key VALUES are read from the environment at run() time; a
-// missing one throws pre-dispatch. Routes carry var NAMES only, never
-// secrets.
+// (ANTHROPIC_BASE_URL + auth-token vars); the model rides `--model` UNCHECKED
+// — the DEEPSEEK SILENT-REMAP FOOTGUN is defended POST-DISPATCH since the
+// §2.6 allowlist retirement: the driver surfaces the model id the CLI
+// reports as served, and the shared served-model assertion (applied by the
+// factory, ADR-0002 §2.6) fails a mismatching run. Key VALUES are read from
+// the environment at run() time; a missing one throws pre-dispatch. Routes
+// carry var NAMES only, never secrets.
 //
 // ARGV (the reference headless surface, built by `buildArgs`):
 //   -p                          headless print mode; the PROMPT rides stdin
@@ -79,7 +79,8 @@
 //                               mode CANNOT PROMPT: a call outside the list
 //                               is DENIED (never prompted, never hung). NO
 //                               UNDOCUMENTED FLAGS (issue #19).
-//   --model <route.model>       the routed, allowlist-verified model id
+//   --model <route.model>       the routed model id (routed verbatim — the
+//                               pre-dispatch model allowlist is retired, §2.6)
 //   --resume <cli-session-id>   only on sessionRef resume, when the record
 //                               carries a CLI session marker (below)
 //
@@ -208,7 +209,8 @@
 // the retained stderr tail — so a 0-token failure is diagnosable from the
 // journal instead of an unexplained "driver reported no cause".
 // Only PRE-DISPATCH validation throws
-// (unknown model / allowlist miss — the routing footgun — and missing key
+// (unknown provider — the routing config error; the model-allowlist miss is
+// RETIRED, §2.6 — and missing key
 // env, each a DispatchError('config'); unknown sessionRef; a workspace
 // binding that is not an absolute existing directory or disagrees with the
 // resumed record's realpath — a DispatchError('config'); a non-positive
@@ -523,7 +525,7 @@ export class SubprocessDriver implements Driver {
 
     // --- Pre-dispatch validation: everything here throws BEFORE the CLI is
     // spawned and (except routing/key checks) before any session exists.
-    const route = routeFor(modelSpec, this.routingTable); // unknown provider/model → the footgun throw
+    const route = routeFor(modelSpec, this.routingTable); // unknown provider → the config throw
     const childEnv = this.resolveChildEnv(route); // missing key env → throw
     if (
       budget.maxTokens !== undefined &&

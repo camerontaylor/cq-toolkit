@@ -424,9 +424,11 @@ export const registry: OpRegistryEntry[] = [
       ]).then(
         ([m, d, s]) =>
           m.makeAgenticRemediation(
+            // S4b: this wrap is deleted by the driver-factory migration
+            // (ADR-0002 §2.5); this entry constructs the subprocess lane.
             s.withServedModelAssertion(
               new d.SubprocessDriver({ outputSchema: m.AGENTIC_PROPOSAL_SCHEMA }),
-              'default',
+              { lane: 'subprocess' },
             ),
           ) as Op<unknown, unknown>,
       ),

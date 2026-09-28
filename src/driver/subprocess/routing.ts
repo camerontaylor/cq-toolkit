@@ -20,16 +20,22 @@
 // `anthropic` endpoint is the CLI's own default. Values are CONFIG
 // as-of 2026-09: re-verify against the provider pages on any model change.
 //
-// THE DEEPSEEK SILENT-REMAP FOOTGUN (asserted loudly, before any spawn):
-// an anthropic-compat gateway does not validate the model name you send —
+// THE DEEPSEEK SILENT-REMAP FOOTGUN (ADR-0002 §2.6 "Retired"): an
+// anthropic-compat gateway does not validate the model name you send —
 // DeepSeek-style endpoints accept ANY model string and SILENTLY SERVE THEIR
 // DEFAULT MODEL instead (a typo'd 'deepseek-chat-v2' still bills you, it
-// just bills you for a model you did not ask for). A silent remap poisons
-// every downstream fact (pricing attribution, capability assumptions,
-// eval comparability), so `routeFor` REFUSES to route a model name that is
-// not on the endpoint's allowlist: the error names the footgun and the run
-// never dispatches. Fail loudly, never guess — the same posture as the
-// ai-sdk driver's unknown-provider throw.
+// just bills you for a model you did not ask for). The PRE-DISPATCH model
+// allowlist this module once enforced is RETIRED (ADR-0002 §2.6): a
+// pre-dispatch name check cannot see server-side remaps of a known name
+// either, and it made new model ids a deployment change. The defence moved
+// to the RESPONSE side, where the fact is observable: the driver surfaces
+// the model id the CLI reports as served into `WorkerResult.model` (the
+// observed, never the requested id), and the shared served-model assertion
+// (src/driver/served-model.ts, applied to every factory-resolved driver)
+// rewrites a mismatching completed run to error /
+// 'served-model-mismatch'. What still throws here BEFORE dispatch is an
+// unknown PROVIDER — routing to a provider the deployment has no endpoint
+// config for is a configuration error, not a model outcome.
 //
 // SECRETS STAY NAME-ONLY: a `Route` carries WHICH env var holds the key
 // (`env: { CHILD_VAR: HOST_VAR_NAME }`), never the value. Routes are plain
@@ -48,8 +54,10 @@ import type { ModelSpec } from '../types.js';
  * One endpoint entry: which host env var overrides its base URL
  * (`baseUrlEnv`), the provider-documented default URL when that var is
  * unset (`baseUrlDefault`), which env var holds its API key (`keyEnv`),
- * the model names the endpoint is KNOWN to serve (`models` — the allowlist
- * the footgun rule enforces), and human notes (`notes`).
+ * and human notes (`notes`). The historical `models` allowlist field is
+ * still ACCEPTED table data (plan configs and routing tables carry it) but
+ * is NO LONGER ENFORCED — the model-allowlist check is retired
+ * (ADR-0002 §2.6); the post-dispatch served-model assertion is the defence.
  */
 export const RoutingEndpointSchema = z
   .object({
@@ -78,9 +86,10 @@ export type RoutingTable = z.infer<typeof RoutingTableSchema>;
  * The documented default routing table — CONFIG as-of 2026-09, transcribed
  * from the providers' anthropic-compat docs (see header). Treat as
  * immutable: `routeFor` re-validates whatever table it is handed, but
- * callers should not mutate the exported value. Model allowlists align
- * with the vendored price table (src/driver/pricing/data.ts) plus the
- * other current documented names.
+ * callers should not mutate the exported value. The per-endpoint `models`
+ * rows are RETIRED table data (accepted, unenforced — ADR-0002 §2.6); the
+ * names align with the vendored price table
+ * (src/driver/pricing/data.ts) plus the other current documented names.
  */
 export function defaultRoutingTable(): RoutingTable {
   return RoutingTableSchema.parse({
@@ -105,7 +114,8 @@ export function defaultRoutingTable(): RoutingTable {
         models: ['deepseek-chat', 'deepseek-reasoner'],
         notes:
           'DeepSeek anthropic-compat endpoint (docs as-of 2026-09). Unknown model names are ' +
-          'silently remapped to the endpoint default — the footgun routeFor refuses to dispatch on.',
+          'silently remapped to the endpoint default — the served-model assertion (ADR-0002 ' +
+          '§2.6) fails the remap post-hoc; WorkerResult.model carries the observed id.',
       },
       // The CLI's native endpoint — no compat layer.
       anthropic: {
@@ -128,7 +138,9 @@ export function defaultRoutingTable(): RoutingTable {
 /**
  * One resolved dispatch route (plain data): the endpoint name, the resolved
  * base URL (host env override wins over the documented default), the child
- * env injection plan, and the (allowlist-verified) model id.
+ * env injection plan, and the model id routed verbatim (no name check —
+ * the allowlist is retired, ADR-0002 §2.6; the observed served id is the
+ * fact the post-dispatch assertion judges).
  *
  * `env` is NAME-ONLY: each entry maps a child env var name to the NAME of
  * the host env var whose value it takes — never the value itself, so a
@@ -143,7 +155,7 @@ export interface Route {
   baseUrl: string;
   /** Auth injection plan: child env var name → HOST env var NAME (name-only). */
   env: Readonly<Record<string, string>>;
-  /** The model id, verified against the endpoint allowlist. */
+  /** The model id, routed verbatim (the allowlist check is retired). */
   model: string;
 }
 
@@ -165,8 +177,10 @@ function authEnvPlan(keyEnv: string): Record<string, string> {
 /**
  * Resolve a frozen ModelSpec onto a concrete Route. THROWS before dispatch:
  *   - an unknown provider (no such endpoint in the table);
- *   - a model not on the endpoint's allowlist — THE FOOTGUN RULE (header);
  *   - a table that fails `RoutingTableSchema` (corrupt config is loud).
+ * The model id is NOT inspected — the model-allowlist check is RETIRED
+ * (ADR-0002 §2.6): any name routes, the endpoint reports what it actually
+ * served, and the shared served-model assertion fails a remap post-hoc.
  *
  * `env` is the environment the base URL is resolved against (defaults to
  * `process.env`; tests inject a literal record). A set-but-EMPTY override
@@ -193,16 +207,6 @@ export function routeFor(
     throw new DispatchError(
       'config',
       `routing: unknown provider '${endpointName}' (known endpoints: ${Object.keys(parsed.endpoints).join(', ')})`,
-    );
-  }
-  if (!endpoint.models.includes(modelSpec.model)) {
-    // The footgun throw is a pre-dispatch route-resolution failure — its
-    // class rides as structured data (ADR-0002 §2.2): errorClassOf →
-    // 'config'. The allowlist itself stays until its S4 retirement.
-    throw new DispatchError(
-      'config',
-      `routing: model '${modelSpec.model}' is not on the ${endpointName} allowlist — ` +
-        'DeepSeek-style endpoints silently remap unknown model names; refusing to dispatch',
     );
   }
   const override = env[endpoint.baseUrlEnv];

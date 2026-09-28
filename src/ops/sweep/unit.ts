@@ -1545,6 +1545,7 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
           branch: `${input.runPrefix}/${input.kind}/${input.slug}`,
         }
       : derived;
+  // S4b: this wrap is deleted by the driver-factory migration (ADR-0002 §2.5).
   const driver = withServedModelAssertion(
     new SubprocessDriver({
       binary:
@@ -1552,7 +1553,7 @@ export function bindingsFromDispatch(input: SweepUnitDispatchInput): SweepUnitBi
       routingTable: input.driver.routingTable ?? defaultRoutingTable(),
       ...(input.driver.sessionsDir !== undefined ? { sessionsDir: input.driver.sessionsDir } : {}),
     }),
-    'default',
+    { lane: 'subprocess' },
   );
   return {
     repoRoot: input.repoRoot,

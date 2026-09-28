@@ -92,7 +92,8 @@ describe('served-model real construction paths', () => {
       } else {
         expect(outcome.status).toBe('failed');
         expect(verdicts).toHaveLength(1);
-        expect(verdicts[0]?.error).toContain('served model assertion');
+        expect(verdicts[0]?.errorClass).toBe('served-model-mismatch');
+        expect(verdicts[0]?.error).toContain("requested 'claude-haiku-4-5', served 'remapped'");
       }
     },
   );
@@ -148,7 +149,8 @@ describe('served-model real construction paths', () => {
         expect(outcome).toMatchObject({ stopReason: 'complete', model: 'construction-model' });
       } else {
         expect(outcome.stopReason).toBe('error');
-        expect(outcome.error).toContain('served model assertion');
+        expect(outcome.errorClass).toBe('served-model-mismatch');
+        expect(outcome.error).toContain("requested 'construction-model', served 'remapped'");
       }
     },
   );

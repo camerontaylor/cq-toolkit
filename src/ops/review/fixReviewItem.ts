@@ -562,7 +562,10 @@ export function worktreeFixDriver(
         sessionsDir,
         outputSchema: FixReviewItemOutputSchema,
       });
-  const inner = withServedModelAssertion(rawInner, 'default');
+  // S4b: this wrap is deleted by the driver-factory migration (ADR-0002
+  // §2.5). Lane matches the DEFAULT inner construction (SubprocessDriver);
+  // an injected makeInner binding another lane is the factory's business.
+  const inner = withServedModelAssertion(rawInner, { lane: 'subprocess' });
   const driver: Driver = {
     run: async (invocation) => {
       const store = new SessionStore(sessionsDir);
@@ -592,14 +595,18 @@ export function makeFixReviewItem(deps: {
   // worktreeFixDriver). Assert both forms here: caller-supplied factories
   // need the same guarantee as plain drivers and the registry binding.
   const driverFor = (input: FixReviewItemInput): Driver => {
+    // S4b: this wrap is deleted by the driver-factory migration (ADR-0002
+    // §2.5). Lane per the provider switch the perHarness binding constructs
+    // ('ai-sdk' handle → the in-process lane; anything else → host CLI).
+    const lane = input.driver.provider === 'ai-sdk' ? 'ai-sdk' : 'subprocess';
     const source = deps.driver;
     if ('perHarness' in source) {
       return withServedModelAssertion(
         source.perHarness(input.harness ?? defaultHarnessConfig, input.worktree, input.driver),
-        'default',
+        { lane },
       );
     }
-    return withServedModelAssertion(source, 'default');
+    return withServedModelAssertion(source, { lane });
   };
   return async (input: FixReviewItemInput) => {
     const driver = driverFor(input);
