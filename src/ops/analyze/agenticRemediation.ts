@@ -27,15 +27,21 @@
 //     which rejected model-driven CLUSTERING on the same determinism
 //     grounds; remediation PROPOSALS are the deliberate, human-gated
 //     exception the seam exists for).
-//   - Honest result taxonomy over the driver's stop reasons (I9/I8): a
-//     driver-level `error` is `failed`; a `budget` stop is
-//     `budget-exhausted` (an honest stop, never fabricated as passed); an
-//     `aborted` run is `indeterminate` (no verdict on partial work — the
-//     frozen taxonomy's crash class); `complete` is `ok` with the
-//     WorkerResult verbatim. A driver whose run() REJECTS never produced a
-//     WorkerResult — `indeterminate`. And a factory built with NO driver
-//     is `failed` naming the missing wiring — the missing driver surfaces
-//     honestly, never as a fabricated run.
+//   - Honest result taxonomy over the driver's outcomes (I9/I8): a
+//     driver-level `error` is `failed` (post-S3 that INCLUDES the schema
+//     miss — a missing/invalid proposal arrives as `error`/'output-invalid'
+//     from the lane); a `budget` stop is `budget-exhausted` (an honest
+//     stop, never fabricated as passed); an `aborted` run is
+//     `indeterminate` (no verdict on partial work — the frozen taxonomy's
+//     crash class); `complete` is `ok` with the WorkerResult verbatim. A
+//     run() that THROWS maps by the governed signal first, then the seam's
+//     structured class (seam v2 §2.2): under an already-aborted governed
+//     signal the dispatch died mid-flight — `indeterminate`; anything else
+//     (a 'config'/'auth' misconfiguration, or an UNCLASSIFIED throw — a
+//     lane bug the driver conformance suite exists to catch) is
+//     `needs-human`. And a factory built with NO driver is `failed` naming
+//     the missing wiring — the missing driver surfaces honestly, never as
+//     a fabricated run.
 //   - I8 (rescue/escalation live in the runner): the driver executes ONE
 //     invocation; this op adds no retries, no rescue, no session policy
 //     beyond the caller-supplied sessionRef passthrough.
@@ -48,8 +54,10 @@ import type {
   ToolPolicy,
   WorkerResult,
 } from '../../driver/types.js';
+import { errorClassOf } from '../../driver/errors.js';
 import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
+import { currentJobContext } from '../../kernel/governor.js';
 import type { Cluster } from './clusterErrors.js';
 
 /**
@@ -67,14 +75,16 @@ export interface AgenticProposal {
 
 /**
  * The zod form of {@link AgenticProposal}, bound into the registry's driver
- * construction (`new SubprocessDriver({ outputSchema: AGENTIC_PROPOSAL_SCHEMA })`):
- * the subprocess lane serializes it to `--json-schema` and validates the
- * settle-time structured_output against it before it lands in
- * `WorkerResult.structuredOutput` — so a dispatched run's ok result carries
- * the proposal. It is a REQUEST the DRIVER enforces, not something the op
- * can guarantee across lanes: a driver that cannot enforce schemas returns
- * a WorkerResult WITHOUT structuredOutput, and the ok result passes that
- * through verbatim (honest absence, never a fabricated proposal).
+ * construction (`new SubprocessDriver({ outputSchema: AGENTIC_PROPOSAL_SCHEMA })`).
+ * Post-S3 (seam v2 §2.3) EVERY lane enforces the bound schema — constructor or
+ * invocation ride alike — so the enforcement is the LANE's, not the op's: a
+ * dispatched run's `complete` verdict carries a schema-valid proposal in
+ * `WorkerResult.structuredOutput`, and a missing or invalid proposal arrives
+ * as `error` with `errorClass` 'output-invalid' (mapped to `failed` below).
+ * The ok path's value shape is unchanged — the whole WorkerResult passes
+ * through verbatim, with no op-side strict re-parse of the proposal: an op
+ * that re-judged what the lane already judged would be a second, divergent
+ * enforcer (the struck checklist item).
  */
 export const AGENTIC_PROPOSAL_SCHEMA: z.ZodType<AgenticProposal> = z
   .object({
@@ -230,9 +240,30 @@ export function makeAgenticRemediation(
     try {
       result = await driver.run(invocation);
     } catch (err) {
+      const cause = err instanceof Error ? err.message : String(err);
+      // A THROWN run() with the governor's signal already aborted is the
+      // governed cancellation (I8): the dispatch died mid-flight, so no
+      // verdict on partial work — `indeterminate`, whatever the driver then
+      // threw. Detected from the governed job context, never from message
+      // text.
+      if (currentJobContext()?.signal?.aborted === true) {
+        return {
+          status: 'indeterminate',
+          detail: `agentic remediation: the run was aborted before a WorkerResult existed — ${cause}`,
+        };
+      }
+      // Otherwise the throw is a PRE-DISPATCH failure the seam classes as
+      // structured data (seam v2 §2.2): a 'config'/'auth' class is a
+      // caller/lane misconfiguration, and an UNCLASSIFIED throw is a lane
+      // bug the driver conformance suite exists to catch — both are for a
+      // human to fix, so `needs-human`, never `failed` (which would claim a
+      // definitive worker outcome the op never observed) and never
+      // `indeterminate` (nothing was dispatched, so no work is partially
+      // done).
+      const dispatched = errorClassOf(err);
       return {
-        status: 'indeterminate',
-        detail: `agentic remediation: the driver crashed before a WorkerResult existed — ${err instanceof Error ? err.message : String(err)}`,
+        status: 'needs-human',
+        reason: `agentic remediation: the driver could not dispatch the worker (dispatch class: ${dispatched ?? 'unclassified'}) — ${cause}`,
       };
     }
     switch (result.stopReason) {

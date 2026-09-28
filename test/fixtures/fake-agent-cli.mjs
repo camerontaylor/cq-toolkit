@@ -863,7 +863,12 @@ async function main() {
     return;
   }
   if (MODE === 'fail') {
-    err('fake-agent-cli: simulated hard failure before any result');
+    // The vendor's OWN quota-with-reset shape (the claude CLI's usage-limit
+    // failure on stderr, before any result event): the script behind the
+    // conformance suite's leg s quota producer rule — the mock's fail emits
+    // the vendor quota signals where the vendor supports them. The driver
+    // must still RETURN an error verdict, never throw past the seam.
+    err("You've hit your use limit · resets 1h30m");
     process.exitCode = 1;
     return;
   }

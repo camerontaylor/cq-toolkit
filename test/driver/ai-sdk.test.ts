@@ -220,11 +220,15 @@ function modelFor(
       });
     }
     case 'fail':
-      // A plain non-abort failure: the driver must return stopReason 'error'.
+      // The lane's OWN vendor quota-with-reset shape: a funded-allowance 429
+      // whose response headers carry the claude unified window — the script
+      // behind the conformance suite's leg s (the mock's fail emits the
+      // vendor quota signals where the vendor supports them). The driver
+      // must still RETURN stopReason 'error', never throw past the seam.
       return new MockLanguageModelV4({
         ...(servedModel === undefined ? {} : { modelId: servedModel }),
         doGenerate: async () => {
-          throw new Error('scripted model failure');
+          throw quota429Error();
         },
       });
     case 'tool-then-reply':
@@ -944,8 +948,19 @@ describe('ai-sdk driver failure classes (#210)', () => {
   test('an unstructured scripted failure classifies unknown (no structured signal — never guessed)', async () => {
     const scratchDir = await mkdtemp(join(tmpdir(), 'aidrv-'));
     try {
+      // An inline PLAIN Error (the conformance mock's fail now scripts the
+      // vendor quota shape — this row pins the UNCLASSIFIED path): a plain
+      // Error has no status/code/class, so the verdict stays 'unknown'.
       const driver = new AiSdkDriver({
-        providers: { mock: () => modelFor({ kind: 'fail' }) },
+        providers: {
+          mock: () =>
+            new MockLanguageModelV4({
+              modelId: 'mock-1',
+              doGenerate: async () => {
+                throw new Error('scripted model failure');
+              },
+            }),
+        },
         sessionsDir: join(scratchDir, 'sessions'),
       });
       const result = await driver.run(invocation());

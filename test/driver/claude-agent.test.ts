@@ -250,7 +250,12 @@ async function* runScriptedQuery(
   const signal = (options['abortController'] as { signal?: AbortSignal } | undefined)?.signal;
   const directive = script.directive;
   if (directive?.kind === 'fail') {
-    throw new Error('scripted model failure');
+    // The vendor's OWN quota-with-reset shape (the claude CLI's usage-limit
+    // failure): the script behind the conformance suite's leg s quota
+    // producer rule — the mock's fail emits the vendor quota signals where
+    // the vendor supports them. The driver must still RETURN an error
+    // verdict, never throw past the seam.
+    throw new Error("You've hit your use limit · resets 1h30m");
   }
   if (directive?.kind === 'block-until-abort') {
     if (signal?.aborted) throw abortError();
@@ -301,7 +306,12 @@ async function* runScriptedQuery(
       ? directive.reply
       : directive?.kind === 'reply'
         ? directive.text
-        : 'ok';
+        : // The output-invalid legs' script: prose that is NOT the JSON
+          // object a structured-output schema demands (the other lanes'
+          // mocks answer this directive with the same shape).
+          directive?.kind === 'reply-invalid-json'
+          ? 'this reply is prose, not the required JSON object'
+          : 'ok';
   const usage = script.usage ?? AGENT_USAGE;
   yield {
     type: 'assistant',

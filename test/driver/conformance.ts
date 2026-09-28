@@ -14,13 +14,12 @@
 //     session store MUST live at `<scratchDir>/sessions` (SESSIONS_DIR) and
 //     its scratch workspaces SHOULD live under `<scratchDir>`, so the suite
 //     can inspect records with harness SessionStore and clean everything up.
-//   - `spec.outputSchema` — when present, the driver is CONSTRUCTED with
-//     this structured-output schema; a run then carries the parsed value in
-//     `WorkerResult.structuredOutput`. (SEAM-V2 NOTE: `outputSchema` moves
-//     to the `OpInvocation` in a LATER goal of this same effort — until
-//     then the suite's schema legs keep the constructor option, and the
-//     seam-v2 legs below exercise ONLY `RunOptions.signal` +
-//     `OpInvocation.workspace`.)
+//   - `spec.outputSchema` — the MIGRATION-ONLY constructor hint (seam v2
+//     note below): post-S3 the structured-output schema rides
+//     `invocation.outputSchema` (legs a/a-ii/a-iii/a-iv build it with
+//     `toOutputSchema`), so the suite's schema legs no longer pass it here;
+//     the field stays in the type until the later conformance-v2 goal
+//     removes the constructor path.
 //   - `spec.directive` — scripts the MODEL's behavior for this driver's
 //     runs, in OUR vocabulary (never vendor shapes):
 //       { kind: 'reply', text }                    — the model replies with
@@ -82,6 +81,7 @@ import { WorkerResultSchema } from '../../src/kernel/schema.js';
 import { SessionStore } from '../../src/harness/session.js';
 import { runLadder } from '../../src/kernel/governor.js';
 import { errorClassOf } from '../../src/driver/errors.js';
+import { toOutputSchema } from '../../src/driver/common/structured.js';
 
 // ---------------------------------------------------------------------------
 // The make-driver contract (public so driver implementations can type against it)
@@ -203,21 +203,129 @@ export function runDriverConformance(
   }
 
   describe(`driver conformance: ${label}`, () => {
-    test('a. structured-output round-trip: parsed, plain JSON, schema-valid, stable under re-parse', async () => {
+    test('a. structured-output round-trip: the schema rides the INVOCATION; parsed, plain JSON, schema-valid, stable under re-parse', async () => {
       await withScratch(async (scratchDir) => {
         const schema = z.object({ answer: z.string() }).strict();
         const driver = makeDriver({
-          outputSchema: schema,
           directive: { kind: 'reply', text: '{"answer":"ok"}' },
           scratchDir,
         });
-        const result = await driver.run(invocation({ prompt: 'produce structured output' }));
+        // Post-S3 (seam v2 §2.3): the structured-output contract is a
+        // PER-INVOCATION request built through the shared seam — never a
+        // driver-construction option.
+        const result = await driver.run(
+          invocation({
+            prompt: 'produce structured output',
+            outputSchema: toOutputSchema('conformance/structured/v1', schema),
+          }),
+        );
+        expect(result.stopReason).toBe('complete');
         expect(result.structuredOutput).toBeDefined();
         const once = JSON.parse(JSON.stringify(result.structuredOutput)) as unknown;
         // stringify → parse → revalidate → deep-equal: plain JSON in, schema-valid, no drift.
         const reparsed = schema.parse(JSON.parse(JSON.stringify(once)));
         expect(reparsed).toEqual({ answer: 'ok' });
         expect(once).toEqual(reparsed);
+      });
+    });
+
+    test('a-ii. invocation schema + a non-JSON reply: error/output-invalid, no structuredOutput, usage kept, mirror parses', async () => {
+      await withScratch(async (scratchDir) => {
+        const schema = z.object({ answer: z.string() }).strict();
+        const driver = makeDriver({
+          directive: { kind: 'reply-invalid-json' },
+          scratchDir,
+        });
+        const result = await driver.run(
+          invocation({
+            prompt: 'produce structured output',
+            outputSchema: toOutputSchema('conformance/invalid-reply/v1', schema),
+          }),
+        );
+        // The §2.3 miss verdict is uniform: the requested object did not
+        // arrive, so the run is an ERROR (never a complete with the payload
+        // dropped), classed 'output-invalid'.
+        expect(result.stopReason).toBe('error');
+        expect(result.errorClass).toBe('output-invalid');
+        expect(result.structuredOutput).toBeUndefined();
+        // A real measurement keeps its evidence on the miss verdict: numbers,
+        // with the model actually consulted.
+        expect(typeof result.usage.input).toBe('number');
+        expect(typeof result.usage.output).toBe('number');
+        expect(result.usage.input).toBeGreaterThan(0);
+        // The rejection is visible: the verdict carries a non-empty cause.
+        expect(typeof result.error).toBe('string');
+        expect((result.error as string).length).toBeGreaterThan(0);
+        // The one-directional errorClass wire rule: the serialized error
+        // verdict still parses through the strict mirror.
+        const reparsed: WorkerResult = WorkerResultSchema.parse(JSON.parse(JSON.stringify(result)));
+        expect(reparsed.stopReason).toBe('error');
+        expect(reparsed.errorClass).toBe('output-invalid');
+      });
+    });
+
+    test('a-iii. NO invocation schema: a JSON-shaped reply completes with structuredOutput ABSENT', async () => {
+      await withScratch(async (scratchDir) => {
+        // The reply LOOKS like a structured payload, but nothing requested
+        // one: a lane that fabricates a structuredOutput (or parses the reply
+        // unprompted) fails here — honest absence (§2.3).
+        const driver = makeDriver({
+          directive: { kind: 'reply', text: '{"answer":"ok"}' },
+          scratchDir,
+        });
+        const result = await driver.run(invocation({ prompt: 'plain reply run' }));
+        expect(result.stopReason).toBe('complete');
+        expect(result.structuredOutput).toBeUndefined();
+        expect(result.errorClass).toBeUndefined();
+      });
+    });
+
+    test('a-iv. ONE driver, TWO runs with DIFFERENT invocation schemas: each result validates against its OWN schema', async () => {
+      await withScratch(async (scratchDir) => {
+        // ONE reply (a driver's directive is static), TWO invocation
+        // documents: each requiring a DIFFERENT key, both tolerant of the
+        // key they do not name — so the shared reply satisfies each run's
+        // OWN schema and the payloads stay plain data on every lane.
+        const schemaA = z.object({ answer: z.string() });
+        const schemaB = z.object({ otherAnswer: z.string() });
+        const driver = makeDriver({
+          directive: { kind: 'reply', text: '{"answer":"ok","otherAnswer":"also-ok"}' },
+          scratchDir,
+        });
+        const runA = await driver.run(
+          invocation({
+            prompt: 'schema A run',
+            outputSchema: toOutputSchema('conformance/schema-a/v1', schemaA),
+          }),
+        );
+        const runB = await driver.run(
+          invocation({
+            prompt: 'schema B run',
+            outputSchema: toOutputSchema('conformance/schema-b/v1', schemaB),
+          }),
+        );
+        expect(runA.stopReason).toBe('complete');
+        expect(runB.stopReason).toBe('complete');
+        // Each result is valid against ITS OWN invocation schema…
+        expect(schemaA.safeParse(runA.structuredOutput).success).toBe(true);
+        expect(schemaB.safeParse(runB.structuredOutput).success).toBe(true);
+        // …and the binding is REAL (not a rubber stamp): a THIRD run on the
+        // same driver, same reply, asking for a type the reply does not
+        // carry, settles the §2.3 miss — only a driver that judges every run
+        // by ITS OWN invocation document produces complete/complete/error
+        // from one static reply (a driver bound to one construction-level
+        // schema cannot).
+        const runC = await driver.run(
+          invocation({
+            prompt: 'schema C run',
+            outputSchema: toOutputSchema(
+              'conformance/schema-c/v1',
+              z.object({ answer: z.number() }),
+            ),
+          }),
+        );
+        expect(runC.stopReason).toBe('error');
+        expect(runC.errorClass).toBe('output-invalid');
       });
     });
 
@@ -292,6 +400,10 @@ export function runDriverConformance(
         expect(typeof result.usage.cacheWrite).toBe('number');
         expect(Number.isNaN(result.usage.input)).toBe(false);
         expect(Number.isNaN(result.usage.output)).toBe(false);
+        // The producer rule's other half (seam v2): a complete run carries
+        // NO errorClass — a class on a non-error verdict would forge a
+        // failure the vendor never reported.
+        expect(result.errorClass).toBeUndefined();
       });
     });
 
@@ -498,6 +610,82 @@ export function runDriverConformance(
         expect(result.usage).toBeDefined();
         expect(Array.isArray(result.denials)).toBe(true);
         expect(typeof result.sessionId).toBe('string');
+        // The PRODUCER RULE (seam v2 §2.2): every error verdict carries a
+        // defined class — classified from structured signals, `unknown` at
+        // worst, never absent and never guessed.
+        expect(result.errorClass).toBeDefined();
+      });
+    });
+
+    test('i-ii. pre-dispatch misconfiguration THROWS with errorClass config — never an error verdict', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({
+          directive: { kind: 'reply', text: 'must never run' },
+          scratchDir,
+        });
+        // A workspace binding naming a directory that does not exist is a
+        // CALLER bug: the seam refuses PRE-dispatch with a structured
+        // DispatchError('config') (§2.2) — the one throw seam v2 allows.
+        let thrown: unknown;
+        try {
+          await driver.run(invocation({ workspace: { path: join(scratchDir, 'never-created') } }));
+        } catch (err) {
+          thrown = err;
+        }
+        expect(thrown).toBeDefined();
+        expect(errorClassOf(thrown)).toBe('config');
+      });
+    });
+
+    test('s. providerSignals: plain data through the mirror; a quota verdict carries the reset its source exposed', async () => {
+      await withScratch(async (scratchDir) => {
+        const driver = makeDriver({ directive: { kind: 'fail' }, scratchDir });
+        const result = await driver.run(invocation());
+        expect(result.stopReason).toBe('error');
+        // CONDITIONAL on presence — the suite is lane-agnostic (ACP, for
+        // one, never emits signals: its wire exposes no limit structure).
+        // Whenever a lane DOES report provider limits, the report is PLAIN
+        // DATA in the frozen field set, and the serialized result still
+        // parses through the strict mirror.
+        if (result.providerSignals !== undefined) {
+          const signals = result.providerSignals;
+          if (signals.retryAfterMs !== undefined) {
+            expect(typeof signals.retryAfterMs).toBe('number');
+            expect(Number.isFinite(signals.retryAfterMs)).toBe(true);
+          }
+          for (const window of signals.windows ?? []) {
+            expect(typeof window.id).toBe('string');
+            expect(window.id.length).toBeGreaterThan(0);
+            if (window.utilization !== undefined) {
+              expect(typeof window.utilization).toBe('number');
+              expect(window.utilization).toBeGreaterThanOrEqual(0);
+              expect(window.utilization).toBeLessThanOrEqual(1);
+            }
+            if (window.remaining !== undefined) {
+              expect(typeof window.remaining).toBe('object');
+            }
+            if (window.resetAt !== undefined) {
+              expect(typeof window.resetAt).toBe('string');
+              expect(Number.isNaN(Date.parse(window.resetAt))).toBe(false);
+            }
+          }
+          const reparsed: WorkerResult = WorkerResultSchema.parse(
+            JSON.parse(JSON.stringify(result)),
+          );
+          expect(reparsed.stopReason).toBe('error');
+        }
+        // THE QUOTA PRODUCER RULE (RS-14 §4): a verdict classed 'quota'
+        // whose source exposes a reset carries it — windows[*].resetAt — so
+        // the caller can defer-until-reset instead of retrying blind. A lane
+        // whose scripted vendor failure exposes no reset shape never
+        // classifies quota here, so the assertion binds exactly where the
+        // mock's fail emits the vendor's quota-with-reset shape.
+        if (result.errorClass === 'quota') {
+          const resets = (result.providerSignals?.windows ?? [])
+            .map((window) => window.resetAt)
+            .filter((resetAt) => resetAt !== undefined);
+          expect(resets.length).toBeGreaterThan(0);
+        }
       });
     });
 

@@ -511,8 +511,12 @@ describe('the agentic importer resolves (the subprocess floor lane, composed at 
     });
     // The real driver runs (no binary/spawn succeeds in the sandbox) — the
     // op must surface that honestly, never as an ok with a fabricated
-    // WorkerResult and never as a throw across the seam.
-    expect(['failed', 'indeterminate']).toContain(result.status);
+    // WorkerResult and never as a throw across the seam. The unroutable
+    // model is a PRE-DISPATCH DispatchError('config'), which the §2.9 throw
+    // mapping settles as `needs-human` (a misconfiguration is the human's
+    // to fix — `failed` would claim a definitive worker outcome the op
+    // never observed, and a bare `indeterminate` would hide the class).
+    expect(['failed', 'indeterminate', 'needs-human']).toContain(result.status);
   }, 20_000);
 });
 

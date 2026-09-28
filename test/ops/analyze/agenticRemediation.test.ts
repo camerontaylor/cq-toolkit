@@ -2,11 +2,17 @@
 // prompt's determinism (a pure function of the cluster, no clocks), the
 // invocation defaults that keep the worker from touching the workspace
 // (tool mode 'none', sandbox 'read-only'), the stop-reason → frozen-taxonomy
-// mapping (complete→ok, error→failed, budget→budget-exhausted,
-// aborted→indeterminate), the honest refusals (no driver wired; a driver
-// that rejects), and that the op returns the WorkerResult verbatim WITHOUT
-// applying anything. A fake Driver (a scripted run() over the frozen seam)
-// is the whole harness — no model, no network.
+// mapping (complete→ok, error→failed — post-S3 including the lane-settled
+// output-invalid schema miss, budget→budget-exhausted, aborted→
+// indeterminate), the throw mapping (a governed-signal abort is
+// indeterminate; a config/auth DispatchError — and an UNCLASSIFIED throw —
+// is needs-human), the honest refusals (no driver wired; a write-capable
+// policy without approval), and that the op returns the WorkerResult
+// verbatim WITHOUT applying anything. The fakes mimic POST-S3 LANES: every
+// lane enforces the invocation's schema, so a scripted `complete` carries a
+// schema-valid proposal and a schema miss arrives as
+// error/errorClass:'output-invalid'. A fake Driver (a scripted run() over
+// the frozen seam) is the whole harness — no model, no network.
 import { describe, expect, test } from 'vitest';
 import type { Driver, OpInvocation, WorkerResult } from '../../../src/driver/types.js';
 import {
@@ -17,6 +23,8 @@ import {
 import { clusterErrors } from '../../../src/ops/analyze/clusterErrors.js';
 import type { AgenticRemediationInput } from '../../../src/ops/analyze/agenticRemediation.js';
 import type { CheckFailure } from '../../../src/ops/gates/index.js';
+import { DispatchError } from '../../../src/driver/errors.js';
+import { currentJobContext, runLadder } from '../../../src/kernel/governor.js';
 
 function failureOf(overrides: Partial<CheckFailure>): CheckFailure {
   return {
@@ -64,7 +72,14 @@ function baseInput(): AgenticRemediationInput {
   };
 }
 
+/**
+ * A POST-S3 lane's `complete`: the schema rode the invocation/constructor,
+ * the lane validated the settle-time payload, and the proposal landed. (A
+ * proposal-less or invalid proposal never settles `complete` on a real lane
+ * — it is error/'output-invalid'.)
+ */
 const COMPLETE: WorkerResult = {
+  structuredOutput: { summary: 'rename foo_bar to fooBar' },
   usage: { input: 120, output: 40, cacheRead: 0, cacheWrite: 0 },
   denials: [],
   stopReason: 'complete',
@@ -122,7 +137,26 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     expect(invocation.sessionRef).toBe('session-1');
   });
 
-  test('the stop-reason mapping: error→failed, budget→budget-exhausted, aborted→indeterminate', async () => {
+  test('the stop-reason mapping: error→failed (incl. the post-S3 output-invalid miss), budget→budget-exhausted, aborted→indeterminate', async () => {
+    // The schema miss a post-S3 lane settles: error/'output-invalid' — the
+    // missing proposal is a definitive failed result, never an ok.
+    const missOp = makeAgenticRemediation(
+      fakeDriver({
+        usage: { input: 120, output: 12, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason: 'error',
+        error:
+          "subprocess driver: structured output invalid — the result does not validate against schema 'analyze.remediation-proposal/v1'",
+        errorClass: 'output-invalid',
+      }),
+    );
+    const missed = await missOp(baseInput());
+    expect(missed.status).toBe('failed');
+    if (missed.status === 'failed') {
+      expect(missed.error).toContain('run error');
+    }
+
+    // A classless error verdict (a v1 record) maps the same way.
     const op = makeAgenticRemediation(
       fakeDriver({
         usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 },
@@ -157,16 +191,80 @@ describe('makeAgenticRemediation (the driver seam)', () => {
     }
   });
 
-  test('a driver whose run() REJECTS is indeterminate (no WorkerResult ever existed)', async () => {
+  test('a DispatchError(config) throw is needs-human — a caller/lane misconfiguration, not a coin-flip', async () => {
+    const broken: Driver = {
+      run: async () => {
+        throw new DispatchError('config', "workspace 'nope' does not name an existing directory");
+      },
+    };
+    const result = await makeAgenticRemediation(broken)(baseInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('could not dispatch');
+      expect(result.reason).toContain('config');
+      expect(result.reason).toContain('does not name an existing directory');
+    }
+  });
+
+  test('a DispatchError(auth) throw is needs-human too', async () => {
+    const broken: Driver = {
+      run: async () => {
+        throw new DispatchError('auth', 'the provider rejected the configured key');
+      },
+    };
+    const result = await makeAgenticRemediation(broken)(baseInput());
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('auth');
+      expect(result.reason).toContain('rejected the configured key');
+    }
+  });
+
+  test('an UNCLASSIFIED throw is needs-human as well (a lane bug the conformance suite catches)', async () => {
     const broken: Driver = {
       run: async () => {
         throw new Error('connection reset');
       },
     };
     const result = await makeAgenticRemediation(broken)(baseInput());
-    expect(result.status).toBe('indeterminate');
-    if (result.status === 'indeterminate') {
-      expect(result.detail).toContain('connection reset');
+    expect(result.status).toBe('needs-human');
+    if (result.status === 'needs-human') {
+      expect(result.reason).toContain('unclassified');
+      expect(result.reason).toContain('connection reset');
+    }
+  });
+
+  test('a throw under an ALREADY-ABORTED governed signal is indeterminate (the ladder cancellation, I8)', async () => {
+    const broken: Driver = {
+      run: async () => {
+        throw new Error('cancelled mid-run');
+      },
+    };
+    const op = makeAgenticRemediation(broken);
+    const outcome = await runLadder(
+      async () => {
+        const signal = currentJobContext()?.signal;
+        await new Promise<void>((resolve) => {
+          if (signal?.aborted === true) {
+            resolve();
+            return;
+          }
+          signal?.addEventListener('abort', () => resolve(), { once: true });
+        });
+        return op(baseInput());
+      },
+      { wallClockMs: 5, abortGraceMs: 60_000, killGraceMs: 60_000 },
+      { op: 'analyze.agenticRemediation', jobKey: 'agentic-abort', attempt: 1 },
+    );
+    expect(outcome.outcome).toBe('completed');
+    if (outcome.outcome === 'completed') {
+      // The throw happened AFTER the rung-1 signal aborted, so it is the
+      // governed cancellation (I8) → indeterminate, NOT needs-human.
+      expect(outcome.value.status).toBe('indeterminate');
+      if (outcome.value.status === 'indeterminate') {
+        expect(outcome.value.detail).toContain('aborted');
+        expect(outcome.value.detail).toContain('cancelled mid-run');
+      }
     }
   });
 
