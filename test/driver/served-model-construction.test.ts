@@ -1,11 +1,12 @@
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import * as servedModel from '../../src/driver/served-model.js';
+import { createDriverFactory } from '../../src/driver/factory.js';
 import type { OpInvocation, WorkerResult } from '../../src/driver/types.js';
-import { registry } from '../../src/ops/analyze/registry.js';
+import { makeAgenticRemediation } from '../../src/ops/analyze/agenticRemediation.js';
 import { bindingsFromDispatch } from '../../src/ops/sweep/unit.js';
 
 const FAKE_CLI = fileURLToPath(new URL('../fixtures/fake-agent-cli.mjs', import.meta.url));
@@ -24,22 +25,24 @@ afterEach(async () => {
   await Promise.all(temporary.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-const quote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`;
-
 describe('served-model real construction paths', () => {
   test.each(['CONTROL', 'TREATMENT'] as const)(
-    'S1 analyze registry importer %s: dispatch preserves success only for the requested model',
+    'S1 agenticRemediation through a factory-resolved driver %s: dispatch preserves success only for the requested model',
     async (variant) => {
       const root = await fixture();
-      const bin = join(root, 'bin');
-      await mkdir(bin);
-      await writeFile(
-        join(bin, 'claude'),
-        `#!/bin/sh\nexec env FAKE_AGENT_MODE=structured-ok FAKE_AGENT_STRUCTURED_RAW=${quote(JSON.stringify(proposal))} ${variant === 'TREATMENT' ? 'FAKE_AGENT_SERVED_MODEL=remapped ' : ''}${quote(process.execPath)} ${quote(FAKE_CLI)} "$@"\n`,
-        { mode: 0o755 },
-      );
-      vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
-      vi.stubEnv('ANTHROPIC_API_KEY', 'offline-fixture-key');
+      // The FACTORY is the served-model hook (ADR-0002 §2.6), so the real
+      // construction path under test is factory → subprocess lane over the
+      // fake CLI. The lane binding is explicit factory config (the
+      // conservative defaults never resolve to a host-CLI lane).
+      const binary = [
+        'env',
+        'FAKE_AGENT_MODE=structured-ok',
+        `FAKE_AGENT_STRUCTURED_RAW=${JSON.stringify(proposal)}`,
+        ...(variant === 'TREATMENT' ? ['FAKE_AGENT_SERVED_MODEL=remapped'] : []),
+        process.execPath,
+        FAKE_CLI,
+      ];
+      vi.stubEnv('CQ_CONSTRUCTION_KEY', 'offline-fixture-key');
 
       // The op intentionally summarizes driver failures without their error
       // text. Observe the REAL wrapper verdict without replacing construction,
@@ -57,43 +60,64 @@ describe('served-model real construction paths', () => {
         });
         return driver;
       });
-      const entry = registry.find((candidate) => candidate.name === 'analyze.agenticRemediation');
-      if (entry === undefined) throw new Error('analyze.agenticRemediation is missing');
-      const dispatch = await entry.importer();
-      const outcome = await dispatch(
-        entry.inputSchema.parse({
-          clusterId: '0deadbe0',
-          cluster: {
-            id: '0deadbe0',
-            signature: '["oxlint","r","boom"]',
-            tool: 'oxlint',
-            ruleId: 'r',
-            confidence: 'low',
-            failures: [
-              {
-                file: 'src/a.ts',
-                line: 1,
-                column: 1,
-                ruleId: 'r',
-                message: 'boom',
-                severity: 'error',
+      const op = makeAgenticRemediation(
+        createDriverFactory({
+          bindings: { remediator: { construction: 'subprocess' } },
+          lanes: {
+            subprocess: {
+              binary,
+              sessionsDir: join(root, 'sessions'),
+              routingTable: {
+                endpoints: {
+                  construction: {
+                    baseUrlEnv: 'CQ_CONSTRUCTION_URL',
+                    baseUrlDefault: 'https://unused.invalid',
+                    keyEnv: 'CQ_CONSTRUCTION_KEY',
+                    models: ['construction-model'],
+                    notes: 'Offline fake CLI; no network calls',
+                  },
+                },
               },
-            ],
-            size: 1,
+            },
           },
-          modelSpec: { provider: 'anthropic', model: 'claude-haiku-4-5' },
         }),
       );
+      const outcome = await op({
+        clusterId: '0deadbe0',
+        cluster: {
+          id: '0deadbe0',
+          signature: '["oxlint","r","boom"]',
+          tool: 'oxlint',
+          ruleId: 'r',
+          confidence: 'low',
+          failures: [
+            {
+              file: 'src/a.ts',
+              line: 1,
+              column: 1,
+              ruleId: 'r',
+              message: 'boom',
+              severity: 'error',
+            },
+          ],
+          size: 1,
+        },
+        modelSpec: { provider: 'construction', model: 'construction-model' },
+      });
       if (variant === 'CONTROL') {
         expect(outcome).toMatchObject({
           status: 'ok',
-          value: { stopReason: 'complete', structuredOutput: proposal, model: 'claude-haiku-4-5' },
+          value: {
+            stopReason: 'complete',
+            structuredOutput: proposal,
+            model: 'construction-model',
+          },
         });
       } else {
         expect(outcome.status).toBe('failed');
         expect(verdicts).toHaveLength(1);
         expect(verdicts[0]?.errorClass).toBe('served-model-mismatch');
-        expect(verdicts[0]?.error).toContain("requested 'claude-haiku-4-5', served 'remapped'");
+        expect(verdicts[0]?.error).toContain("requested 'construction-model', served 'remapped'");
       }
     },
   );

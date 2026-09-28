@@ -81,7 +81,9 @@
 // allowed — tests inject `nowMs`). Same input + same nowMs → deep-equal
 // outcome, always.
 import pLimit from 'p-limit';
-import type { Driver, ModelSpec } from '../../driver/types.js';
+import { createDriverFactory } from '../../driver/factory.js';
+import type { DriverFactory } from '../../driver/factory.js';
+import type { ModelSpec } from '../../driver/types.js';
 import type { HarnessConfig } from '../../harness/config.js';
 import type { Op, OpResult } from '../../kernel/types.js';
 import { classifyPr } from './classifyPrs.js';
@@ -185,7 +187,13 @@ export interface RunMergePrsInput {
   modelSpec?: ModelSpec;
   /** Self-host policy: withhold conflict resolution for a human. */
   conflictResolutionDisabled?: boolean;
-  /** resolveConflict passthrough — the SessionStore dir. */
+  /**
+   * The sessions dir for the DEFAULT driver factory (the session records
+   * the conflict agent's workspace-bound run creates). Reachable only
+   * through makeRunMergePrsOp's default factory binding — the resolve op
+   * input carries no sessionsDir (ADR-0002 §2.5: the binding is factory
+   * config, not plan data). Inert when `deps.drivers` is supplied.
+   */
   sessionsDir?: string;
   /** The classify clock; default Date.now() read once at call time (the
    * composition is the one place the ambient clock is allowed; tests
@@ -223,8 +231,8 @@ export interface MergePrsOutcome {
 }
 
 /** The injected seams. `resolve` is the conflict agent op (slice 1's
- * makeResolveConflictOp bound to the effects/driver/sessionsDir by the
- * caller or by makeRunMergePrsOp); tests inject a recording fake — the
+ * makeResolveConflictOp bound to the effects/driver-factory by the caller
+ * or by makeRunMergePrsOp); tests inject a recording fake — the
  * whole pipeline then runs with zero real I/O. */
 export interface RunMergePrsDeps {
   /** Every git/gh mutation — the SAME seam instance both passes execute
@@ -430,7 +438,6 @@ export async function runMergePrs(
                   ? { protectedBranch: input.protectedBranch }
                   : {}),
                 ...(input.wallClockMs !== undefined ? { wallClockMs: input.wallClockMs } : {}),
-                ...(input.sessionsDir !== undefined ? { sessionsDir: input.sessionsDir } : {}),
               });
               return { candidate, result };
             },
@@ -599,16 +606,25 @@ export interface MakeRunMergePrsOpDeps {
   /** Default: realMergeEffects built lazily per call from
    * input.repoRoot (+ input.protectedBranch). */
   effects?: MergeEffects;
-  /** Default: the resolve op builds its own default SubprocessDriver. */
-  driver?: Driver;
   /**
-   * resolveConflict passthrough — threads into the resolve binding and
-   * reaches the resolve op's DEFAULT SubprocessDriver construction (inert
-   * when `driver` is supplied: an explicit driver IS the harness surface).
-   * Default: the resolve op's own `defaultHarnessConfig`.
+   * The conflict agent's worker seam (ADR-0002 §2.5): the factory the
+   * resolve op resolves its 'conflict-resolver' request through. Default:
+   * createDriverFactory() over the sessionsDir below (the resolve op
+   * constructs no lane itself).
+   */
+  drivers?: DriverFactory;
+  /**
+   * resolveConflict passthrough — carried on the DriverRequest the resolve
+   * op resolves (the harness surface). Default: the resolve op's own
+   * shipped default (`defaultHarnessConfig`).
    */
   harnessConfig?: HarnessConfig;
-  /** Default: input.sessionsDir, else the resolve op's own default. */
+  /**
+   * The sessions dir for the DEFAULT factory binding — the session
+   * records the conflict agent's workspace-bound run creates. Inert when
+   * `drivers` is supplied (an explicit factory IS the sessions surface).
+   * Default: input.sessionsDir, else the factory's own default.
+   */
   sessionsDir?: string;
 }
 
@@ -618,13 +634,15 @@ export interface MakeRunMergePrsOpDeps {
  * conflict-agent op are built LAZILY PER CALL — the effects target THIS
  * run's repoRoot, and the resolve op binds the SAME effects instance (the
  * executor's mutations and the agent's worktree lifecycle share one seam),
- * plus the caller's driver/sessionsDir seams. Absent optionals are OMITTED
- * (exactOptionalPropertyTypes); an absent driver means the resolve op's
- * own default SubprocessDriver. The wrapper passes NO refetch seam — the
- * frozen MergeEffects has no candidate re-fetch capability — so the
- * default op's pass 2 classifies the in-memory candidates (guarded by the
- * pass-1 exclusion; see the module doc); SDK callers wanting a live second
- * pass call runMergePrs with a refetch of their own.
+ * plus the caller's driver-factory/harness/sessionsDir seams. Absent
+ * optionals are OMITTED (exactOptionalPropertyTypes); an absent factory
+ * means createDriverFactory() over `sessionsDir` (deps first, then the
+ * input's) — the sessions binding is factory config, never plan data
+ * (ADR-0002 §2.5). The wrapper passes NO refetch seam — the frozen
+ * MergeEffects has no candidate re-fetch capability — so the default op's
+ * pass 2 classifies the in-memory candidates (guarded by the pass-1
+ * exclusion; see the module doc); SDK callers wanting a live second pass
+ * call runMergePrs with a refetch of their own.
  *
  * DEFERRED (review-debt #137 —
  * https://github.com/camerontaylor/cq-toolkit/issues/137, owned by T4.2
@@ -646,9 +664,10 @@ export function makeRunMergePrsOp(
     const sessionsDir = deps?.sessionsDir ?? input.sessionsDir;
     const resolve = makeResolveConflictOp({
       effects,
-      ...(deps?.driver !== undefined ? { driver: deps.driver } : {}),
+      ...(deps?.drivers !== undefined
+        ? { drivers: deps.drivers }
+        : { drivers: createDriverFactory(sessionsDir !== undefined ? { sessionsDir } : {}) }),
       ...(deps?.harnessConfig !== undefined ? { harnessConfig: deps.harnessConfig } : {}),
-      ...(sessionsDir !== undefined ? { sessionsDir } : {}),
     });
     const outcome = await runMergePrs(input, {
       effects,

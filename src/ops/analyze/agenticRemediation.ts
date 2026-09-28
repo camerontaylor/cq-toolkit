@@ -3,8 +3,12 @@
 // path, analyze.astGrepCodemod / analyze.applyRemediation, owns the
 // mechanical ones). Minimal v1 — this is the seam proof, not a product:
 // the op derives a PROMPT deterministically from the cluster evidence,
-// builds one frozen OpInvocation (src/driver/types.ts), runs it through
-// the injected Driver, and returns the WorkerResult. That is ALL it does.
+// resolves ONE DriverRequest through the injected DriverFactory
+// (ADR-0002 §2.5 — the op never constructs a lane class; the factory
+// binds role + provider → lane and owns the served-model assertion),
+// builds one frozen OpInvocation (src/driver/types.ts), dispatches it
+// through the resolved driver, and returns the WorkerResult. That is ALL
+// it does.
 //
 // Invariants honored here:
 //   - The op NEVER applies anything itself: it carries no file seam, no
@@ -18,7 +22,10 @@
 //     a write-capable policy (tool mode ≠ 'none' OR sandbox level ≠
 //     'read-only') is refused as `needs-human` unless the input carries
 //     approved: true — "the caller widened it" is the decision, and the
-//     decision carries a human flag.
+//     decision carries a human flag. The op binds NO workspace (§2.4):
+//     the read-only defaults propose freely with nothing to edit, and a
+//     write-capable remediation that needs a target root is a widening
+//     this input does not yet express.
 //   - Determinism where the op owns it: the prompt is a pure function of
 //     the cluster (members in report order, the canonical signature, the
 //     confidence), with no clocks and no randomness. The MODEL's answer is
@@ -30,32 +37,35 @@
 //   - Honest result taxonomy over the driver's outcomes (I9/I8): a
 //     driver-level `error` is `failed` (post-S3 that INCLUDES the schema
 //     miss — a missing/invalid proposal arrives as `error`/'output-invalid'
-//     from the lane); a `budget` stop is `budget-exhausted` (an honest
+//     from the lane), with the structured class named in the text
+//     (errorClass=<x>) for humans only — the class itself is forwarded
+//     nowhere; a `budget` stop is `budget-exhausted` (an honest
 //     stop, never fabricated as passed); an `aborted` run is
 //     `indeterminate` (no verdict on partial work — the frozen taxonomy's
 //     crash class); `complete` is `ok` with the WorkerResult verbatim. A
-//     run() that THROWS maps by the governed signal first, then the seam's
-//     structured class (seam v2 §2.2): under an already-aborted governed
-//     signal the dispatch died mid-flight — `indeterminate`; anything else
-//     (a 'config'/'auth' misconfiguration, or an UNCLASSIFIED throw — a
-//     lane bug the driver conformance suite exists to catch) is
-//     `needs-human`. And a factory built with NO driver is `failed` naming
-//     the missing wiring — the missing driver surfaces honestly, never as
-//     a fabricated run.
+//     factory.resolve() or driver.run() that THROWS maps by the governed
+//     signal first, then the seam's structured class (seam v2 §2.2): under
+//     an already-aborted governed signal the dispatch died mid-flight —
+//     `indeterminate`; anything else (a 'config'/'auth' misconfiguration,
+//     or an UNCLASSIFIED throw — a lane bug the driver conformance suite
+//     exists to catch) is `needs-human`. And a NO-factory binding is
+//     `failed` naming the missing wiring — the missing factory surfaces
+//     honestly, never as a fabricated run.
 //   - I8 (rescue/escalation live in the runner): the driver executes ONE
 //     invocation; this op adds no retries, no rescue, no session policy
 //     beyond the caller-supplied sessionRef passthrough.
+import { z } from 'zod';
+import { toOutputSchema } from '../../driver/common/structured.js';
+import { errorClassOf } from '../../driver/errors.js';
+import type { DriverFactory } from '../../driver/factory.js';
 import type {
   Budget,
-  Driver,
   ModelSpec,
   OpInvocation,
   SandboxPolicy,
   ToolPolicy,
   WorkerResult,
 } from '../../driver/types.js';
-import { errorClassOf } from '../../driver/errors.js';
-import { z } from 'zod';
 import type { Op } from '../../kernel/types.js';
 import { currentJobContext } from '../../kernel/governor.js';
 import type { Cluster } from './clusterErrors.js';
@@ -74,17 +84,17 @@ export interface AgenticProposal {
 }
 
 /**
- * The zod form of {@link AgenticProposal}, bound into the registry's driver
- * construction (`new SubprocessDriver({ outputSchema: AGENTIC_PROPOSAL_SCHEMA })`).
- * Post-S3 (seam v2 §2.3) EVERY lane enforces the bound schema — constructor or
- * invocation ride alike — so the enforcement is the LANE's, not the op's: a
- * dispatched run's `complete` verdict carries a schema-valid proposal in
- * `WorkerResult.structuredOutput`, and a missing or invalid proposal arrives
- * as `error` with `errorClass` 'output-invalid' (mapped to `failed` below).
- * The ok path's value shape is unchanged — the whole WorkerResult passes
- * through verbatim, with no op-side strict re-parse of the proposal: an op
- * that re-judged what the lane already judged would be a second, divergent
- * enforcer (the struck checklist item).
+ * The zod form of {@link AgenticProposal}, carried on the invocation as
+ * its outputSchema (`AGENTIC_PROPOSAL_OUTPUT_SCHEMA` below — the plain-data
+ * request the resolved lane enforces). Post-S3 (seam v2 §2.3) EVERY lane
+ * enforces the invocation's schema, so the enforcement is the LANE's, not
+ * the op's: a dispatched run's `complete` verdict carries a schema-valid
+ * proposal in `WorkerResult.structuredOutput`, and a missing or invalid
+ * proposal arrives as `error` with `errorClass` 'output-invalid' (mapped
+ * to `failed` below). The ok path's value shape is unchanged — the whole
+ * WorkerResult passes through verbatim, with no op-side strict re-parse of
+ * the proposal: an op that re-judged what the lane already judged would be
+ * a second, divergent enforcer (the struck checklist item).
  */
 export const AGENTIC_PROPOSAL_SCHEMA: z.ZodType<AgenticProposal> = z
   .object({
@@ -92,6 +102,13 @@ export const AGENTIC_PROPOSAL_SCHEMA: z.ZodType<AgenticProposal> = z
     patch: z.string().min(1).exactOptional(),
   })
   .strict();
+
+/** The invocation's structured-output contract (ADR-0002 §2.3), rendered
+ * once from the proposal schema. */
+const AGENTIC_PROPOSAL_OUTPUT_SCHEMA = toOutputSchema(
+  'analyze.agenticRemediation/v1',
+  AGENTIC_PROPOSAL_SCHEMA,
+);
 
 /** JSON-serializable input of the `analyze.agenticRemediation` op. */
 export interface AgenticRemediationInput {
@@ -170,14 +187,16 @@ export function agenticRemediationPrompt(input: AgenticRemediationInput): string
 }
 
 /**
- * Build the `analyze.agenticRemediation` op over ONE injected driver. Per
- * call: assemble the frozen OpInvocation from the cluster context and the
- * input's plain-data policies, run it to completion, and map the outcome
- * onto the frozen taxonomy (see the module header). No state is kept
+ * Build the `analyze.agenticRemediation` op over ONE injected driver
+ * factory. Per call: assemble the frozen OpInvocation from the cluster
+ * context and the input's plain-data policies, resolve the
+ * 'remediator' request through the factory at the point of dispatch
+ * (ADR-0002 §2.5), run it to completion, and map the outcome onto the
+ * frozen taxonomy (see the module header). No state is kept
  * between calls; every invocation is fresh (I6).
  */
 export function makeAgenticRemediation(
-  driver: Driver | undefined,
+  drivers: DriverFactory | undefined,
 ): Op<AgenticRemediationInput, WorkerResult> {
   return async (input) => {
     // The id must name THE cluster it travels with — a mismatch would put
@@ -221,24 +240,35 @@ export function makeAgenticRemediation(
         reason: `agentic remediation with a write-capable policy (tool mode '${toolPolicy.mode}', sandbox '${sandboxPolicy.level}') is an approval-gated decision — pass approved: true, or keep the read-only defaults (tool mode 'none', sandbox 'read-only')`,
       };
     }
-    if (driver === undefined) {
+    if (drivers === undefined) {
       return {
         status: 'failed',
         error:
-          'agentic remediation: no driver is wired — the op refuses to fabricate a run; wire a Driver through makeAgenticRemediation',
+          'agentic remediation: no driver factory is wired — the op refuses to fabricate a run; wire a DriverFactory through makeAgenticRemediation',
       };
     }
-    const invocation: OpInvocation = {
-      prompt: agenticRemediationPrompt(input),
-      modelSpec: input.modelSpec,
-      toolPolicy,
-      sandboxPolicy,
-      ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
-      budget: input.budget ?? {},
-    };
     let result: WorkerResult;
     try {
-      result = await driver.run(invocation);
+      // RESOLVE AT THE POINT OF DISPATCH (ADR-0002 §2.5), AFTER the
+      // approval gate above: a refusal never touches the factory. A
+      // resolve throw is a pre-dispatch failure with a structured class —
+      // the catch below maps it by the same §2.9 rows as a thrown run().
+      const resolved = drivers.resolve({ role: 'remediator', modelSpec: input.modelSpec });
+      // The invocation carries the FACTORY-NORMALISED spec — a deprecated
+      // provider alias never reaches a lane or a journal — plus the
+      // proposal schema (§2.3) and the governed signal on RunOptions
+      // (§2.1). No workspace: the read-only defaults propose freely (see
+      // the module header).
+      const invocation: OpInvocation = {
+        prompt: agenticRemediationPrompt(input),
+        modelSpec: resolved.modelSpec,
+        toolPolicy,
+        sandboxPolicy,
+        ...(input.sessionRef === undefined ? {} : { sessionRef: input.sessionRef }),
+        budget: input.budget ?? {},
+        outputSchema: AGENTIC_PROPOSAL_OUTPUT_SCHEMA,
+      };
+      result = await resolved.driver.run(invocation, { signal: currentJobContext()?.signal });
     } catch (err) {
       const cause = err instanceof Error ? err.message : String(err);
       // A THROWN run() with the governor's signal already aborted is the
@@ -270,9 +300,15 @@ export function makeAgenticRemediation(
       case 'complete':
         return { status: 'ok', value: result };
       case 'error':
+        // ADR-0002 §2.9: EVERY error verdict → 'failed', with the
+        // structured class named in the text (errorClass=<x>) for humans
+        // only — the class itself is forwarded nowhere (the invocation
+        // gate records it on reservation-settled).
         return {
           status: 'failed',
-          error: `agentic remediation: the driver reported a run error (model ${input.modelSpec.model})`,
+          error: `agentic remediation: the driver reported a run error (model ${input.modelSpec.model})${
+            result.errorClass === undefined ? '' : ` (errorClass=${result.errorClass})`
+          }`,
         };
       case 'budget':
         // The honest stop: the invocation halted on a locally-enforced cap.

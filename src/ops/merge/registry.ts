@@ -355,7 +355,6 @@ export const ResolveConflictInputSchema: z.ZodType<ResolveConflictInput> = z
     modelSpec: ModelSpecSchema.exactOptional(),
     wallClockMs: z.number().int().positive().exactOptional(),
     protectedBranch: z.string().min(1).exactOptional(),
-    sessionsDir: z.string().min(1).exactOptional(),
   })
   .strict();
 
