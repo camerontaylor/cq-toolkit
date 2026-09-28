@@ -105,7 +105,12 @@
 // I6 ISOLATION via the harness session store (src/harness/session.ts) —
 // EXACTLY the other two lanes:
 //   - NO sessionRef → `tempWorkspace()` + `SessionStore.create()` — fresh
-//     record + a workspace nothing has ever touched.
+//     record + a workspace nothing has ever touched. When the invocation
+//     carries a `workspace` binding (ADR-0002 §2.4), the fresh record is
+//     instead created IN realpath(workspace.path) and the manifest/tools
+//     bind there; a workspace set alongside a sessionRef must record the
+//     SAME realpath (else a pre-dispatch config throw). Session sidecars
+//     and records stay in the lane's sessionsDir — never in the workspace.
 //   - sessionRef → `SessionStore.load(sessionRef)`; the record's workspace
 //     AND message history continue. Unknown sessionRef → PRE-DISPATCH
 //     throw (a fake resume is worse than a loud one).
@@ -131,12 +136,15 @@
 //     errors after dispatch are swallowed: the honest verdict outranks the
 //     record.
 //
-// I8 SEAM — the driver owns NO wall clock. The governed context arrives
-// via `currentJobContext()` (the one driver→kernel import, same as the
-// other two lanes) and is forwarded EXACTLY ONE place: the SDK query's
+// I8 SEAM — the driver owns NO wall clock. The run's cancellation SOURCE is
+// `RunOptions.signal` (seam v2, ADR-0002 §2.1) with the MIGRATION FALLBACK
+// to the governed ambient context (`options?.signal ?? currentJobContext()`
+// — the one driver→kernel import, same as the other lanes; a later slice
+// removes the fallback), forwarded EXACTLY ONE place: the SDK query's
 // cancellation root (Options.abortController), wired by ./process.ts (the
 // hygiene scan's exempt file — construction of the root is machinery; the
-// WHEN stays the governor's). An already-fired signal never dispatches.
+// WHEN stays the signal's sender). An already-fired signal never dispatches
+// and creates no session state.
 // Consequences, documented:
 //   - Budget.wallClockMs is IGNORED — the governor's ladder owns wall
 //     clock. Whether an aborted query stops endpoint spend mid-flight is
@@ -188,7 +196,9 @@
 // Once dispatched, run() NEVER throws: every failure lands in an honest
 // verdict carrying the sessionId + denials gathered so far. Only
 // PRE-DISPATCH validation throws (peer absent/misshaped, unknown provider,
-// missing key env, unknown sessionRef, a non-positive Budget.maxTokens;
+// missing key env, unknown sessionRef, a workspace binding that is not an
+// absolute existing directory or disagrees with the resumed record's
+// realpath — a DispatchError('config'); a non-positive Budget.maxTokens;
 // the outputSchema conversion throws at construction).
 //
 // COST (DD-2, derived-only): costUSD via the `pricing` constructor lookup
@@ -206,7 +216,8 @@
 // reports trusted USD — the SDK's own total_cost_usd is deliberately NOT
 // surfaced: a vendor-side cost estimate would bypass the derived-only rule.
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
+import { realpathSync, statSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
@@ -226,6 +237,7 @@ import type { ExpectedInitSurface, HarnessSurface } from '../../harness/surface.
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError, redactSensitiveText } from '../error-text.js';
+import { DispatchError } from '../errors.js';
 import { buildChildEnv } from '../subprocess/process.js';
 import { stripMetaSchema } from '../json-schema.js';
 import { computeCostUSD } from '../pricing/index.js';
@@ -234,11 +246,13 @@ import type {
   Driver,
   ModelSpec,
   OpInvocation,
+  RunOptions,
   SandboxLevel,
   ToolDenial,
   ToolPolicy,
   Usage,
   WorkerResult,
+  WorkspaceBinding,
 } from '../types.js';
 import { defaultEndpointTable, resolveEndpoint } from './routing.js';
 import type { EndpointTable, ResolvedEndpoint } from './routing.js';
@@ -403,13 +417,14 @@ export class ClaudeAgentDriver implements Driver {
     this.pricingOverride = options.pricing;
   }
 
-  /** The frozen seam: run one invocation to completion. */
-  async run(opInvocation: OpInvocation): Promise<WorkerResult> {
+  /** The frozen seam (v2): run one invocation to completion. */
+  async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
     // --- Pre-dispatch validation: everything here throws BEFORE the agent
     // is contacted and BEFORE any session/workspace exists (fail loudly, no
-    // partial state). Provider first (pure), then the peer, then budget.
+    // partial state). Provider first (pure), then the peer, then budget,
+    // then the workspace binding.
     const endpoint = resolveEndpoint(modelSpec, this.endpointTable); // unknown provider → the throw
     const keyValue = readKeyEnvOrThrow(endpoint); // missing key env → throw
     const sdk = await this.loadSdk(); // peer absent / misshaped → throw
@@ -421,14 +436,36 @@ export class ClaudeAgentDriver implements Driver {
         `claude-agent driver: budget.maxTokens must be a finite number > 0, got ${String(budget.maxTokens)}`,
       );
     }
+    // Workspace binding (ADR-0002 §2.4): validated + realpathed BEFORE any
+    // session state exists — a bad binding is a pre-dispatch config throw.
+    const boundWorkspace =
+      opInvocation.workspace === undefined
+        ? undefined
+        : boundWorkspacePath(opInvocation.workspace, 'claude-agent driver');
 
-    // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
+    // --- Governed cancellation (I8): the run's signal is RunOptions.signal
+    // (migration fallback: the ambient governed context — a later slice
+    // removes the fallback). Checked BEFORE the dispatch (an
+    // already-cancelled invocation never dispatches — and never creates a
+    // session record), then wired to the SDK's cancellation root — the
+    // driver decides nothing about WHEN.
+    const signal = options?.signal ?? currentJobContext()?.signal;
+    if (signal?.aborted === true) {
+      return { usage: zeroUsage(), denials: [], stopReason: 'aborted' };
+    }
+
+    // --- I6 isolation / §2.4 workspace table: a fresh record — created in
+    // the bound workspace when one is set, else in a fresh temp workspace —
+    // or a real resume, which must record the SAME realpath when a workspace
+    // is bound (else a pre-dispatch config throw).
     const sessionsDir = this.sessionsDir ?? defaultSessionsDir();
     const store = new SessionStore(sessionsDir);
     const record =
       sessionRef === undefined
-        ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
-        : await loadSessionOrThrow(store, sessionRef);
+        ? await store.create(
+            boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
+          )
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
     const workspace = record.workspace;
 
     await store.appendMessage(record.sessionId, { role: 'user', content: prompt, at: nowIso() });
@@ -454,20 +491,6 @@ export class ClaudeAgentDriver implements Driver {
     // SESSIONS STORE sidecar by a prior run (absent → workspace-only
     // continuation).
     const resumeAgentSessionId = await readAgentSessionId(sessionsDir, record.sessionId);
-
-    // --- Governed cancellation (I8): checked before the dispatch (an
-    // already-cancelled invocation never dispatches), then wired to the
-    // SDK's cancellation root — the driver decides nothing about WHEN.
-    const governed = currentJobContext();
-    const signal = governed?.signal;
-    if (signal?.aborted === true) {
-      return {
-        usage: zeroUsage(),
-        sessionId: record.sessionId,
-        denials: [],
-        stopReason: 'aborted',
-      };
-    }
 
     // The per-run observation — created before the options assembly because
     // the harness-tool closures accumulate denials into it directly.
@@ -508,7 +531,10 @@ export class ClaudeAgentDriver implements Driver {
           ),
       ),
     );
-    const options: Record<string, unknown> = {
+    // The SDK query's option object — named apart from the seam's
+    // `RunOptions` parameter (the cancellation SIGNAL lives there; this is
+    // the assembled query surface).
+    const queryOptions: Record<string, unknown> = {
       // The model rides UNCHECKED (owner override 2026-09-14, header): any
       // id the endpoint can reach is permitted; the OBSERVED id is the
       // defence (WorkerResult.model).
@@ -561,13 +587,13 @@ export class ClaudeAgentDriver implements Driver {
     };
     const abortRoot = abortRootFollowing(signal); // ./process.ts — the wiring only
     if (abortRoot !== undefined) {
-      options['abortController'] = abortRoot.controller;
+      queryOptions['abortController'] = abortRoot.controller;
     }
 
     // --- Dispatch. From here on, run() NEVER throws past the seam. --------
     let aborted = false;
     try {
-      for await (const message of sdk.query({ prompt, options })) {
+      for await (const message of sdk.query({ prompt, options: queryOptions })) {
         foldMessage(observation, message);
         // A surface mismatch ends the run: leaving the loop returns the
         // query's generator, which closes the SDK session.
@@ -860,6 +886,54 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
     );
   }
   return record;
+}
+
+/**
+ * The §2.4 set×set cell: the resumed record must record the SAME workspace
+ * realpath the invocation binds — a divergence means the caller pointed one
+ * session at two different trees, a caller bug that throws PRE-DISPATCH
+ * (before any message lands in the record).
+ */
+async function resumedRecordOrThrow(
+  store: SessionStore,
+  sessionRef: string,
+  boundWorkspace: string | undefined,
+): Promise<SessionRecord> {
+  const record = await loadSessionOrThrow(store, sessionRef);
+  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
+    throw new DispatchError(
+      'config',
+      `claude-agent driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
+    );
+  }
+  return record;
+}
+
+/**
+ * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
+ * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
+ * record or compared against one). A relative path, or a path that does not
+ * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
+ */
+function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
+  if (!isAbsolute(workspace.path)) {
+    throw new DispatchError(
+      'config',
+      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
+    );
+  }
+  try {
+    const real = realpathSync(workspace.path);
+    if (!statSync(real).isDirectory()) {
+      throw new Error('not a directory');
+    }
+    return real;
+  } catch (err) {
+    throw new DispatchError(
+      'config',
+      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
+    );
+  }
 }
 
 /**

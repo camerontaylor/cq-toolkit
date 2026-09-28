@@ -8,13 +8,17 @@
 //
 // I8 SEAM — the driver owns NO wall clock. The driver-hygiene scan bans
 // driver-owned scheduling primitives under src/driver/**: WHEN to abort is
-// the governor's decision (T1.3), and this driver only OBEYS. It reads the
-// governed context via `currentJobContext()` (imported from
-// ../../kernel/governor.js — the one deliberate driver→kernel import: the
-// governor's cooperative-cancel channel is the process-wide job context)
-// and passes `context?.signal` into the SDK call's `abortSignal` option.
-// Outside a governed run the signal is undefined and the SDK call is simply
-// not wired to a cancellation source. Consequences, documented:
+// the governor's decision (T1.3), and this driver only OBEYS. The run's
+// cancellation SOURCE is `RunOptions.signal` (seam v2, ADR-0002 §2.1) with
+// the MIGRATION FALLBACK to the governed ambient context
+// (`options?.signal ?? currentJobContext()` — imported from
+// ../../kernel/governor.js, the one deliberate driver→kernel import: the
+// governor's cooperative-cancel channel is the process-wide job context; a
+// later slice removes the fallback). The resolved signal rides the SDK
+// call's `abortSignal` option; an already-aborted signal never dispatches
+// (stopReason 'aborted', zero usage, no session state created). Outside a
+// governed run without a signal the SDK call is simply not wired to a
+// cancellation source. Consequences, documented:
 //   - Budget.wallClockMs is IGNORED here — the governor's escalation ladder
 //     is the wall-clock owner; a driver-owned deadline would duplicate and
 //     races it. The SDK call's per-request `timeout.stepMs`
@@ -49,7 +53,12 @@
 //   - NO sessionRef → `tempWorkspace()` (fresh scratch dir) +
 //     `SessionStore.create()` — a fresh record with zero messages in a
 //     workspace nothing has ever touched: the invocation shares NOTHING
-//     with a previous one.
+//     with a previous one. When the invocation carries a `workspace`
+//     binding (ADR-0002 §2.4), the fresh record is instead created IN
+//     realpath(workspace.path) and the tools bind there; a workspace set
+//     alongside a sessionRef must record the SAME realpath (else a
+//     pre-dispatch config throw). Session records stay in the lane's
+//     sessionsDir — never inside the workspace.
 //   - sessionRef → `SessionStore.load(sessionRef)`; the record's workspace
 //     AND message history continue. A missing/unknown session throws a
 //     clear error (a fake resume is worse than a loud one).
@@ -96,8 +105,8 @@
 // the requested model (the silent-remap defence).
 //
 // STOP REASON (frozen DriverStopReason) — mapping table, checked in order:
-//   1. governed signal fired (context.signal.aborted) or the SDK call threw
-//      an abort-shaped error          → 'aborted'
+//   1. the run signal fired (already-aborted at entry, mid-run through the
+//      SDK's abortSignal, or an abort-shaped throw) → 'aborted'
 //   2. token budget tripped (the Usage token fold — input+output+cache+
 //      cacheWrite, reasoning counted once via output — >= Budget.maxTokens)
 //      or SDK finishReason 'length'   → 'budget'
@@ -164,8 +173,9 @@ import type {
   ToolSet,
 } from 'ai';
 import type { ZodType } from 'zod';
+import { realpathSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createZai } from '@ai-sdk/zai';
@@ -180,10 +190,11 @@ import type { ToolkitTool } from '../../harness/tools.js';
 import { SessionStore, tempWorkspace } from '../../harness/session.js';
 import type { SessionMessage, SessionRecord } from '../../harness/session.js';
 import { boundedErrorText, describeError } from '../error-text.js';
+import { DispatchError } from '../errors.js';
 import { priceOf } from '../pricing/index.js';
 import type { PerMillionRates } from '../pricing/index.js';
-import type { Driver, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
-import type { ModelSpec, OpInvocation } from '../types.js';
+import type { Driver, RunOptions, ToolDenial, ToolPolicy, Usage, WorkerResult } from '../types.js';
+import type { ModelSpec, OpInvocation, WorkspaceBinding } from '../types.js';
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -280,8 +291,8 @@ export class AiSdkDriver implements Driver {
     this.pricing = options.pricing ?? priceOf;
   }
 
-  /** The frozen seam: run one invocation to completion. */
-  async run(opInvocation: OpInvocation): Promise<WorkerResult> {
+  /** The frozen seam (v2): run one invocation to completion. */
+  async run(opInvocation: OpInvocation, options?: RunOptions): Promise<WorkerResult> {
     const { prompt, modelSpec, toolPolicy, sandboxPolicy, sessionRef, budget } = opInvocation;
 
     // --- Pre-dispatch validation: everything here throws BEFORE the model
@@ -294,13 +305,39 @@ export class AiSdkDriver implements Driver {
     const runGate = harnessRunGate(
       this.sandboxConfig === undefined ? {} : { sandboxConfig: this.sandboxConfig },
     );
+    // Workspace binding (ADR-0002 §2.4): validated + realpathed BEFORE any
+    // session state exists — a bad binding is a pre-dispatch config throw.
+    const boundWorkspace =
+      opInvocation.workspace === undefined
+        ? undefined
+        : boundWorkspacePath(opInvocation.workspace, 'ai-sdk driver');
 
-    // --- I6 isolation: fresh record + fresh workspace, or a real resume. --
+    // --- Governed cancellation (I8): the governor decides WHEN to abort; ---
+    // the driver only forwards its signal. No driver-owned wall clock. The
+    // SOURCE is the seam-v2 RunOptions.signal with the migration fallback to
+    // the ambient governed context (a later slice removes the fallback). An
+    // already-aborted signal never dispatches and creates NO session state:
+    // zero usage, no denials, no sessionId (no record was created).
+    const abortSignal = options?.signal ?? currentJobContext()?.signal;
+    if (signalAborted(abortSignal)) {
+      return {
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        denials: [],
+        stopReason: 'aborted',
+      };
+    }
+
+    // --- I6 isolation / §2.4 workspace table: a fresh record — created in
+    // the bound workspace when one is set, else in a fresh temp workspace —
+    // or a real resume, which must record the SAME realpath when a workspace
+    // is bound (else a pre-dispatch config throw).
     const store = new SessionStore(this.sessionsDir ?? defaultSessionsDir());
     const record =
       sessionRef === undefined
-        ? await store.create(await tempWorkspace(this.harnessConfig.workspaceRoot))
-        : await loadSessionOrThrow(store, sessionRef);
+        ? await store.create(
+            boundWorkspace ?? (await tempWorkspace(this.harnessConfig.workspaceRoot)),
+          )
+        : await resumedRecordOrThrow(store, sessionRef, boundWorkspace);
     // A FAILED prior attempt persists its prompt with no verdict after it:
     // when the resumed record's LAST message is already this exact user
     // prompt, re-appending would compose two CONSECUTIVE identical user
@@ -348,11 +385,6 @@ export class AiSdkDriver implements Driver {
           runTool(harnessTool, input, store, record, denials),
       });
     }
-
-    // --- Governed cancellation (I8): the governor decides WHEN to abort; ---
-    // the driver only forwards its signal. No driver-owned wall clock.
-    const governed = currentJobContext();
-    const abortSignal = governed?.signal;
 
     // --- Timer-free budget + the tool-loop bound: stopWhen is ALWAYS ------
     // passed. With Budget.maxTokens the token fold trips the cap; without
@@ -458,7 +490,7 @@ export class AiSdkDriver implements Driver {
           }
           const mapped = stopReasonOf({
             finishReason,
-            aborted: abortSignal?.aborted === true,
+            aborted: signalAborted(abortSignal),
             tokenBudget: budget.maxTokens,
             totalTokens: totalTokensOf(usage),
           });
@@ -517,7 +549,7 @@ export class AiSdkDriver implements Driver {
         denials,
         stopReason: stopReasonOf({
           finishReason,
-          aborted: abortSignal?.aborted === true,
+          aborted: signalAborted(abortSignal),
           tokenBudget: budget.maxTokens,
           totalTokens: totalTokensOf(usage),
         }),
@@ -536,7 +568,7 @@ export class AiSdkDriver implements Driver {
       // (the success and structured-output-miss paths); this partial fold
       // understates the run, so no figure is claimed.
       const aborted =
-        abortSignal?.aborted === true || (err instanceof Error && err.name === 'AbortError');
+        signalAborted(abortSignal) || (err instanceof Error && err.name === 'AbortError');
       return {
         usage: stepUsage,
         sessionId: record.sessionId,
@@ -616,6 +648,17 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * The LIVE aborted state of the run signal. Deliberately a function, never
+ * an inline `signal?.aborted === true` at use sites: the pre-dispatch guard
+ * narrows a variable's flow type, but the SIGNAL OBJECT is live — it can
+ * fire at any moment — and a read after the guard must observe that, not
+ * the entry-time snapshot.
+ */
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 /** Default sessions dir (sibling of the harness temp-workspace root). */
 function defaultSessionsDir(): string {
   return join(tmpdir(), 'cq-harness', 'sessions');
@@ -684,6 +727,54 @@ async function loadSessionOrThrow(store: SessionStore, sessionRef: string): Prom
     );
   }
   return record;
+}
+
+/**
+ * The §2.4 set×set cell: the resumed record must record the SAME workspace
+ * realpath the invocation binds — a divergence means the caller pointed one
+ * session at two different trees, a caller bug that throws PRE-DISPATCH
+ * (before any message lands in the record).
+ */
+async function resumedRecordOrThrow(
+  store: SessionStore,
+  sessionRef: string,
+  boundWorkspace: string | undefined,
+): Promise<SessionRecord> {
+  const record = await loadSessionOrThrow(store, sessionRef);
+  if (boundWorkspace !== undefined && record.workspace !== boundWorkspace) {
+    throw new DispatchError(
+      'config',
+      `ai-sdk driver: workspace '${boundWorkspace}' does not match session '${sessionRef}' (recorded workspace '${record.workspace}')`,
+    );
+  }
+  return record;
+}
+
+/**
+ * Workspace binding (ADR-0002 §2.4) → the directory this run binds to: the
+ * REALPATH of `path` (symlinks resolved BEFORE it is stored on a session
+ * record or compared against one). A relative path, or a path that does not
+ * name an existing DIRECTORY, throws PRE-DISPATCH (`DispatchError('config')`).
+ */
+function boundWorkspacePath(workspace: WorkspaceBinding, lane: string): string {
+  if (!isAbsolute(workspace.path)) {
+    throw new DispatchError(
+      'config',
+      `${lane}: workspace.path must be absolute, got '${workspace.path}'`,
+    );
+  }
+  try {
+    const real = realpathSync(workspace.path);
+    if (!statSync(real).isDirectory()) {
+      throw new Error('not a directory');
+    }
+    return real;
+  } catch (err) {
+    throw new DispatchError(
+      'config',
+      `${lane}: workspace.path '${workspace.path}' does not name an existing directory — ${describeError(err)}`,
+    );
+  }
 }
 
 /**

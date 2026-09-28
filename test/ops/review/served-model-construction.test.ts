@@ -81,7 +81,10 @@ describe('S4 worktreeFixDriver construction', () => {
       const prototype = provider === 'ai-sdk' ? AiSdkDriver.prototype : SubprocessDriver.prototype;
       const run = vi
         .spyOn(prototype, 'run')
-        .mockImplementation(async (invocation) => success(invocation, observed));
+        // The annotation is load-bearing: with the seam-v2 signature
+        // run(invocation, options?) the mock callback's parameter no longer
+        // receives a contextual type from vitest's mockImplementation.
+        .mockImplementation(async (invocation: OpInvocation) => success(invocation, observed));
       const entry = registry.find((candidate) => candidate.name === 'review.fixItem');
       expect(entry).toBeDefined();
       const op = await entry!.importer();
