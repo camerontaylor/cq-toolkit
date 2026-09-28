@@ -854,6 +854,18 @@ function totalTokensOf(usage: Usage): number {
 }
 
 /**
+ * Absolute USD tolerance for every money comparison that turns a verdict
+ * (admission, parking, breach, rollup-exceeded): IEEE-754 accumulation
+ * drifts — ten 0.1 folds sum to 0.9999999999999999, leaving ~1.1e-16 of
+ * phantom capacity that a raw `capacity <= 0` admits as a real dispatch,
+ * and dust-order overages trip spurious breach/cap verdicts. 1e-9 is the
+ * repo's absolute money tolerance (DD-2's fold-agreement threshold; the
+ * ratchet's half-up rounding rescue). Real overspend at or above it still
+ * trips; sub-nanodollar dust never decides a verdict.
+ */
+const USD_EPSILON = 1e-9;
+
+/**
  * USD observations must be a finite number >= 0, validated BEFORE any
  * rollup mutation — a NaN/negative fold would poison the rollup and
  * silently disable the USD cap (I9). Seeding goes through the same check:
@@ -1186,7 +1198,10 @@ export class BudgetGovernor {
    * The invariant holds synchronously: reserve/settle mutate S and O in one
    * synchronous critical section, so two dispatches can never interleave a
    * capacity check. `charged ≤ r` at settle keeps the sum from ever growing
-   * past C (a `charged > r` settle trips `breach`).
+   * past C (a `charged > r` settle trips `breach`). Every money verdict on
+   * this gate compares through USD_EPSILON: IEEE-754 accumulation drift (ten
+   * 0.1 folds sum to 0.9999999999999999) must never buy an extra dispatch
+   * from ~1e-16 of phantom capacity, nor trip a spurious breach on dust.
    *
    * Call only when `capUsd` is defined — an uncapped run is reservation-less
    * (its ledger folds observed evidence directly; there is no bound to hold
@@ -1246,7 +1261,7 @@ export class BudgetGovernor {
       }
       const cap = this.capUsd;
       const capacity = cap === undefined ? 0 : cap - this.usdSpentN - this.outstandingUsdN;
-      if (capacity <= 0) {
+      if (capacity <= USD_EPSILON) {
         if (this.outstanding.size === 0) {
           // Capacity gone for good with nothing left to settle: trip (which
           // wakes every waiter via the tripped branch on re-entry).
@@ -1277,14 +1292,17 @@ export class BudgetGovernor {
     const cap = this.capUsd;
     if (cap === undefined) return undefined;
     const capacity = cap - this.usdSpentN - this.outstandingUsdN;
-    if (capacity <= 0) return undefined;
+    if (capacity <= USD_EPSILON) return undefined;
     // ADR-0003 §2.2 step 3, both branches (`r > C − S − O`): with any
     // reservation OUTSTANDING the dispatch WAITS FIFO for a settle — a
     // bookkeeping shrink here would undersize `r` against the proposal and
     // the dispatch's real charge would then breach `charged > r`, aborting
     // healthy in-flight work. The gate shrinks to `C − S` only when NOTHING
-    // is outstanding (no settle can free capacity anymore).
-    if (waiter.proposedUsd > capacity && this.outstanding.size > 0) {
+    // is outstanding (no settle can free capacity anymore). The comparison
+    // tolerates USD_EPSILON: a proposal within drift dust of capacity GRANTS
+    // (parking on ~1e-16 of phantom shortfall just delays the dispatch for a
+    // settle that changes nothing).
+    if (waiter.proposedUsd > capacity + USD_EPSILON && this.outstanding.size > 0) {
       return undefined;
     }
     const usd = Math.min(waiter.proposedUsd, capacity);
@@ -1394,12 +1412,12 @@ export class BudgetGovernor {
       priced,
       atMs: this.now(),
     });
-    if (charged > held.reservation.usd) {
+    if (charged > held.reservation.usd + USD_EPSILON) {
       this.trip(
         'breach',
         `charged ${charged} exceeds reservation ${held.reservation.usd} (${charge.basis} basis) — the reservation undersold the work`,
       );
-    } else if (this.capUsd !== undefined && this.usdSpentN > this.capUsd) {
+    } else if (this.capUsd !== undefined && this.usdSpentN > this.capUsd + USD_EPSILON) {
       // Belt-and-braces: the fold-time trip usually lands first; kept so a
       // settle-side remainder can never silently push the ledger past the cap.
       this.trip('exhausted', `usd rollup ${this.usdSpentN} exceeded cap ${this.capUsd}`);
@@ -1487,7 +1505,7 @@ export class BudgetGovernor {
     }
     this.record({ kind: 'usage', jobKey, usd, atMs: this.now() });
     const cap = this.capUsd;
-    if (cap !== undefined && this.usdSpentN > cap) {
+    if (cap !== undefined && this.usdSpentN > cap + USD_EPSILON) {
       this.trip('exhausted', `usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
   }
@@ -1806,7 +1824,7 @@ export class BudgetGovernor {
     // EFFECTIVE cap (an inherited predecessor cap binds a capless resume
     // too), and includes the unresolved reservations' full charges.
     const cap = this.capUsd;
-    if (cap !== undefined && this.usdSpentN > cap) {
+    if (cap !== undefined && this.usdSpentN > cap + USD_EPSILON) {
       this.trip('exhausted', `seeded usd rollup ${this.usdSpentN} exceeded cap ${cap}`);
     }
     const tokenCap = this.config.maxTokens;
